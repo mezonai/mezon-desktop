@@ -1,0 +1,24 @@
+[package]
+name = "collections"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+description = "Standard collection types used by Zed and GPUI"
+
+[lib]
+path = "src/collections.rs"
+doctest = false
+
+[features]
+test-support = []
+
+[dependencies]
+indexmap.workspace = true
+rustc-hash.workspace = true
+
+[lints.rust]
+warnings = "allow"
+
+[lints.clippy]
+all = "allow"

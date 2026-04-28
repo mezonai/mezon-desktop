@@ -1,0 +1,23 @@
+[package]
+name = "mezon-app"
+version.workspace = true
+edition = "2024"
+default-run = "mezon"
+
+[[bin]]
+name = "mezon"
+path = "src/main.rs"
+
+[dependencies]
+gpui.workspace = true
+gpui_platform = { workspace = true, features = ["font-kit"] }
+mezon-ui.workspace = true
+mezon-store.workspace = true
+mezon-native.workspace = true
+mezon-updater.workspace = true
+mezon-client.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true

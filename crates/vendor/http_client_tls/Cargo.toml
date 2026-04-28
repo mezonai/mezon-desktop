@@ -1,0 +1,23 @@
+[package]
+name = "http_client_tls"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[features]
+test-support = []
+
+[lib]
+path = "src/http_client_tls.rs"
+doctest = true
+
+[dependencies]
+rustls.workspace = true
+rustls-platform-verifier.workspace = true
+
+[lints.rust]
+warnings = "allow"
+
+[lints.clippy]
+all = "allow"

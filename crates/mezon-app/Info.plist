@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>ai.mezon.Mezon</string>
+
+    <key>CFBundleName</key>
+    <string>Mezon</string>
+
+    <key>CFBundleDisplayName</key>
+    <string>Mezon</string>
+
+    <key>CFBundleExecutable</key>
+    <string>mezon</string>
+
+    <key>CFBundleIconFile</key>
+    <string>app.icns</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+
+    <!-- Register mezonapp:// as a URL scheme handled by this app -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>Mezon Deep Link</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>mezonapp</string>
+            </array>
+        </dict>
+    </array>
+
+    <!-- Allow the app to be a login item -->
+    <key>LSUIElement</key>
+    <false/>
+
+    <!-- Required for UNUserNotificationCenter -->
+    <key>NSUserNotificationAlertStyle</key>
+    <string>alert</string>
+
+    <!-- Required for screen recording (Stage 13) -->
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Mezon uses screen capture for screen sharing in meetings.</string>
+
+    <!-- Required for microphone (Stage 12) -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Mezon uses your microphone for voice channels and meetings.</string>
+
+    <!-- Required for camera (Stage 13) -->
+    <key>NSCameraUsageDescription</key>
+    <string>Mezon uses your camera for video meetings.</string>
+</dict>
+</plist>

@@ -1,0 +1,27 @@
+[package]
+name = "zlog"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+
+[lib]
+path = "src/zlog.rs"
+
+[features]
+default = []
+
+[dependencies]
+collections = { path = "../collections" }
+chrono.workspace = true
+log.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints.rust]
+warnings = "allow"
+
+[lints.clippy]
+all = "allow"

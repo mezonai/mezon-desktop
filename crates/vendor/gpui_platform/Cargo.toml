@@ -1,0 +1,28 @@
+[package]
+name = "gpui_platform"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+path = "src/gpui_platform.rs"
+
+[features]
+default = []
+font-kit = ["gpui_macos/font-kit"]
+test-support = ["gpui/test-support", "gpui_macos/test-support"]
+screen-capture = ["gpui/screen-capture", "gpui_macos/screen-capture"]
+runtime_shaders = ["gpui_macos/runtime_shaders"]
+
+[dependencies]
+gpui = { path = "../gpui" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui_macos = { path = "../gpui_macos" }
+
+[lints.rust]
+warnings = "allow"
+
+[lints.clippy]
+all = "allow"

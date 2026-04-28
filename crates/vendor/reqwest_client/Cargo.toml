@@ -1,0 +1,36 @@
+[package]
+name = "reqwest_client"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[features]
+test-support = []
+
+[lib]
+path = "src/reqwest_client.rs"
+doctest = true
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+futures.workspace = true
+http_client = { path = "../http_client" }
+serde.workspace = true
+log.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
+regex.workspace = true
+reqwest.workspace = true
+gpui_util = { path = "../gpui_util" }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+http_client_tls.workspace = true
+
+[dev-dependencies]
+
+[lints.rust]
+warnings = "allow"
+
+[lints.clippy]
+all = "allow"

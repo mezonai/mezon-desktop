@@ -1,0 +1,9 @@
+[package]
+name = "mezon-proto"
+version.workspace = true
+edition = "2024"
+
+[dependencies]
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true

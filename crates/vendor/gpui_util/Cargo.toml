@@ -1,0 +1,16 @@
+[package]
+name = "gpui_util"
+version = "0.1.0"
+publish = false
+edition = "2024"
+
+[dependencies]
+log.workspace = true
+anyhow.workspace = true
+
+
+[lints.rust]
+warnings = "allow"
+
+[lints.clippy]
+all = "allow"
