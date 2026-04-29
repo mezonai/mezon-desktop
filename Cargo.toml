@@ -49,11 +49,7 @@ todo = "deny"
 [workspace.dependencies]
 # ---------- Vendored GPUI internal crates ----------
 gpui               = { path = "crates/vendor/gpui", default-features = false }
-gpui_macros        = { path = "crates/vendor/gpui_macros" }
-gpui_shared_string = { path = "crates/vendor/gpui_shared_string" }
-gpui_util          = { path = "crates/vendor/gpui_util" }
 gpui_platform      = { path = "crates/vendor/gpui_platform", default-features = false }
-gpui_macos         = { path = "crates/vendor/gpui_macos", default-features = false }
 collections        = { path = "crates/vendor/collections" }
 refineable         = { path = "crates/vendor/refineable" }
 derive_refineable  = { path = "crates/vendor/derive_refineable" }
