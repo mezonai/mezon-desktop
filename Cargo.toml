@@ -15,6 +15,9 @@ members = [
     "crates/vendor/gpui_util",
     "crates/vendor/gpui_platform",
     "crates/vendor/gpui_macos",
+    "crates/vendor/gpui_linux",
+    "crates/vendor/gpui_windows",
+    "crates/vendor/gpui_wgpu",
     "crates/vendor/collections",
     "crates/vendor/refineable",
     "crates/vendor/derive_refineable",
@@ -50,6 +53,10 @@ todo = "deny"
 # ---------- Vendored GPUI internal crates ----------
 gpui               = { path = "crates/vendor/gpui", default-features = false }
 gpui_platform      = { path = "crates/vendor/gpui_platform", default-features = false }
+gpui_linux         = { path = "crates/vendor/gpui_linux", default-features = false }
+gpui_windows       = { path = "crates/vendor/gpui_windows", default-features = false }
+gpui_wgpu          = { path = "crates/vendor/gpui_wgpu", default-features = false }
+gpui_util          = { path = "crates/vendor/gpui_util" }
 collections        = { path = "crates/vendor/collections" }
 refineable         = { path = "crates/vendor/refineable" }
 derive_refineable  = { path = "crates/vendor/derive_refineable" }
@@ -82,6 +89,7 @@ async-compression    = { version = "0.4", features = ["bzip2", "gzip", "futures-
 async-fs             = "2.1"
 async-tar            = "0.5.1"
 async_zip            = { version = "0.0.18", features = ["deflate", "deflate64"] }
+ashpd                = { version = "0.13", default-features = false, features = ["async-io", "notification", "open_uri", "file_chooser", "settings", "trash"] }
 futures              = "0.3"
 futures-concurrency  = "7.7.1"
 futures-lite         = "1.13"
@@ -123,10 +131,12 @@ objc                 = "0.2"
 objc2-app-kit        = { version = "0.3", default-features = false, features = ["NSGraphics"] }
 mach2                = "0.5"
 libc                 = "0.2"
+windows              = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging", "Win32_Media"] }
+windows-core         = "0.61"
 
 # ---------- Graphics ----------
 image                = "0.25.1"
-wgpu                 = { version = "24", features = ["wgsl"] }
+wgpu                 = { git = "https://github.com/zed-industries/wgpu.git", branch = "v29", features = ["wgsl"] }
 naga                 = { version = "29.0", features = ["wgsl-in"] }
 resvg                = { version = "0.45.0", default-features = false }
 usvg                 = { version = "0.45.0", default-features = false }
@@ -144,6 +154,7 @@ strum                = { version = "0.27.2", features = ["derive"] }
 uuid                 = { version = "1.1.2", features = ["v4", "v5", "v7", "serde"] }
 bitflags             = "2.6.0"
 backtrace            = "0.3"
+bytemuck             = "1"
 ctor                 = "0.4.0"
 inventory             = "0.3.19"
 slotmap              = "1.0.6"
@@ -203,6 +214,7 @@ num-cpus              = "1.13"
 parking               = "2.0.0"
 spin                  = "0.10.0"
 raw-window-handle     = "0.6"
+wasm-bindgen          = "0.2.113"
 
 # ---------- Dev/test deps ----------
 proptest              = { git = "https://github.com/proptest-rs/proptest", rev = "3dca198a8fef1b32e3a66f1e1897c955b4dc5b5b", features = ["attr-macro"] }

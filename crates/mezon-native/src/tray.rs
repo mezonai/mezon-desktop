@@ -117,12 +117,12 @@ fn build_tray_icon() -> tray_icon::Icon {
 
 fn icon_search_paths() -> Vec<std::path::PathBuf> {
     let mut paths = vec![];
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            paths.push(parent.join("assets/icons/trayicon.png"));
-            paths.push(parent.join("../../../assets/icons/trayicon.png"));
-            paths.push(parent.join("../../../../assets/icons/trayicon.png"));
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent()
+    {
+        paths.push(parent.join("assets/icons/trayicon.png"));
+        paths.push(parent.join("../../../assets/icons/trayicon.png"));
+        paths.push(parent.join("../../../../assets/icons/trayicon.png"));
     }
     paths.push(std::path::PathBuf::from("assets/icons/trayicon.png"));
     paths

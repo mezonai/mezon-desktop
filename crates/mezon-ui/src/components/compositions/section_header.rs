@@ -1,8 +1,6 @@
-/// SectionHeader — collapsible sidebar category header.
-use std::sync::Arc;
-
 use gpui::{div, prelude::*, App, Context, FontWeight, MouseButton, Window};
 
+use crate::components::{ToggleHandler, WindowAction};
 use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
 
@@ -11,8 +9,8 @@ pub struct SectionHeader {
     collapsible: bool,
     collapsed: bool,
     trailing_icon: Option<IconName>,
-    on_toggle: Option<Arc<dyn Fn(bool, &mut Window, &mut App) + Send + Sync>>,
-    on_action: Option<Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>>,
+    on_toggle: Option<ToggleHandler>,
+    on_action: Option<WindowAction>,
 }
 
 impl SectionHeader {
@@ -46,7 +44,7 @@ impl SectionHeader {
         mut self,
         handler: impl Fn(bool, &mut Window, &mut App) + Send + Sync + 'static,
     ) -> Self {
-        self.on_toggle = Some(Arc::new(handler));
+        self.on_toggle = Some(std::sync::Arc::new(handler));
         self
     }
 
@@ -54,7 +52,7 @@ impl SectionHeader {
         mut self,
         handler: impl Fn(&mut Window, &mut App) + Send + Sync + 'static,
     ) -> Self {
-        self.on_action = Some(Arc::new(handler));
+        self.on_action = Some(std::sync::Arc::new(handler));
         self
     }
 }

@@ -64,6 +64,7 @@ gpui = { path = "../gpui", features = ["test-support"] }
 
 [lints.rust]
 warnings = "allow"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
 
 [lints.clippy]
 all = "allow"

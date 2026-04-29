@@ -1,8 +1,6 @@
-/// Button — stateless builder with Primary / Secondary / Ghost / Danger variants.
-use std::sync::Arc;
-
 use gpui::{App, FontWeight, MouseButton, Window, div, prelude::*};
 
+use crate::components::WindowAction;
 use super::icon::{Icon, IconName};
 use super::spinner::Spinner;
 use crate::theme::Theme;
@@ -31,7 +29,7 @@ pub struct Button {
     loading: bool,
     full_width: bool,
     icon: Option<IconName>,
-    on_click: Option<Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>>,
+    on_click: Option<WindowAction>,
 }
 
 impl Button {
@@ -82,7 +80,7 @@ impl Button {
         mut self,
         handler: impl Fn(&mut Window, &mut App) + Send + Sync + 'static,
     ) -> Self {
-        self.on_click = Some(Arc::new(handler));
+        self.on_click = Some(std::sync::Arc::new(handler));
         self
     }
 

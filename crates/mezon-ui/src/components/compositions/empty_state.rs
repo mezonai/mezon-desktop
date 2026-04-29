@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use gpui::{div, prelude::*, App, Context, FontWeight, Window};
 
+use crate::components::WindowAction;
 use crate::components::primitives::{Button, ButtonSize, ButtonVariant, Icon, IconName};
 use crate::theme::Theme;
 
@@ -11,7 +12,7 @@ pub struct EmptyState {
     title: String,
     subtitle: Option<String>,
     action_label: Option<String>,
-    on_action: Option<Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>>,
+    on_action: Option<WindowAction>,
 }
 
 impl EmptyState {

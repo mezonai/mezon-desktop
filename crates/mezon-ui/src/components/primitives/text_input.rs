@@ -7,7 +7,6 @@
 ///   2. `on_key_down` on the container div — handles Backspace, Delete, and a fallback
 ///      for `key_char` in case the OS skips the input-handler path.
 use std::ops::Range;
-use std::sync::Arc;
 
 use gpui::{
     div, prelude::*, AnyElement, App, Bounds, Context, Element, ElementId, ElementInputHandler,
@@ -15,6 +14,7 @@ use gpui::{
     LayoutId, MouseButton, Pixels, SharedString, UTF16Selection, Window,
 };
 
+use crate::components::TextChangeHandler;
 use crate::theme::Theme;
 
 // ─── TextInput view ───────────────────────────────────────────────────────────
@@ -27,7 +27,7 @@ pub struct TextInput {
     error: Option<SharedString>,
     pub(crate) masked: bool,
     disabled: bool,
-    pub(crate) on_change: Option<Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync>>,
+    pub(crate) on_change: Option<TextChangeHandler>,
 }
 
 impl TextInput {
@@ -70,7 +70,7 @@ impl TextInput {
         self
     }
 
-    pub fn on_change(mut self, cb: Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync>) -> Self {
+    pub fn on_change(mut self, cb: TextChangeHandler) -> Self {
         self.on_change = Some(cb);
         self
     }

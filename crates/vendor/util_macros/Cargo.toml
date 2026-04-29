@@ -21,6 +21,7 @@ perf-enabled = []
 
 [lints.rust]
 warnings = "allow"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(perf_enabled)'] }
 
 [lints.clippy]
 all = "allow"

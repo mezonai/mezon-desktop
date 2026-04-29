@@ -12,9 +12,6 @@ readme = "README.md"
 keywords = ["desktop", "gui", "immediate"]
 categories = ["gui"]
 
-[lints]
-workspace = true
-
 [features]
 default = ["font-kit"]
 test-support = [
@@ -26,6 +23,8 @@ test-support = [
 inspector = ["gpui_macros/inspector"]
 leak-detection = ["backtrace"]
 screen-capture = ["scap"]
+wayland = ["bitflags"]
+x11 = ["scap?/x11"]
 windows-manifest = ["dep:embed-resource"]
 
 [lib]
@@ -145,3 +144,10 @@ embed-resource = { version = "3.0", optional = true }
 bindgen = "0.71"
 cbindgen = { version = "0.28.0", default-features = false }
 naga.workspace = true
+
+[lints.rust]
+warnings = "allow"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(rust_analyzer)'] }
+
+[lints.clippy]
+all = "allow"

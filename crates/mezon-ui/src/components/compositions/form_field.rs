@@ -1,8 +1,6 @@
-/// FormField — label + TextInput + error as a stateful GPUI View.
-use std::sync::Arc;
+use gpui::{div, prelude::*, Context, Entity, FontWeight, Window};
 
-use gpui::{div, prelude::*, App, Context, Entity, FontWeight, Window};
-
+use crate::components::TextChangeHandler;
 use crate::components::primitives::TextInput;
 use crate::theme::Theme;
 
@@ -31,7 +29,7 @@ impl FormField {
 
     pub fn set_on_change(
         &self,
-        cb: Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync>,
+        cb: TextChangeHandler,
         cx: &mut Context<Self>,
     ) {
         self.input.update(cx, |input, _cx| {

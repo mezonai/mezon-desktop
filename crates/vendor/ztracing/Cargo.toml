@@ -20,6 +20,7 @@ ztracing_macro = { path = "../ztracing_macro" }
 
 [lints.rust]
 warnings = "allow"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(ztracing)', 'cfg(ztracing_with_memory)'] }
 
 [lints.clippy]
 all = "allow"

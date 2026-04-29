@@ -1,8 +1,6 @@
-/// IconButton — compact square button with an icon + optional tooltip label.
-use std::sync::Arc;
-
 use gpui::{App, Context, MouseButton, Window, div, prelude::*};
 
+use crate::components::WindowAction;
 use crate::components::primitives::{ButtonSize, ButtonVariant, Icon, IconName};
 use crate::theme::Theme;
 
@@ -12,7 +10,7 @@ pub struct IconButton {
     variant: ButtonVariant,
     tooltip: Option<String>,
     disabled: bool,
-    on_click: Option<Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>>,
+    on_click: Option<WindowAction>,
 }
 
 impl IconButton {
@@ -51,7 +49,7 @@ impl IconButton {
         mut self,
         handler: impl Fn(&mut Window, &mut App) + Send + Sync + 'static,
     ) -> Self {
-        self.on_click = Some(Arc::new(handler));
+        self.on_click = Some(std::sync::Arc::new(handler));
         self
     }
 }

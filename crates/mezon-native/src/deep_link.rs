@@ -1,14 +1,14 @@
-/// Deep link scheme registration for `mezonapp://`.
-///
-/// macOS  : Handled automatically by the `Info.plist` `CFBundleURLTypes` entry
-///          embedded in the `.app` bundle.  No runtime code required.
-///
-/// Windows: Self-registers `HKCU\Software\Classes\mezonapp` on first run.
-///          This is the standard approach for apps distributed outside the
-///          Microsoft Store (Store apps use the manifest instead).
-///
-/// Linux  : Writes `~/.local/share/applications/mezon.desktop` and calls
-///          `xdg-mime default mezon.desktop x-scheme-handler/mezonapp`.
+//! Deep link scheme registration for `mezonapp://`.
+//!
+//! macOS  : Handled automatically by the `Info.plist` `CFBundleURLTypes` entry
+//!          embedded in the `.app` bundle.  No runtime code required.
+//!
+//! Windows: Self-registers `HKCU\Software\Classes\mezonapp` on first run.
+//!          This is the standard approach for apps distributed outside the
+//!          Microsoft Store (Store apps use the manifest instead).
+//!
+//! Linux  : Writes `~/.local/share/applications/mezon.desktop` and calls
+//!          `xdg-mime default mezon.desktop x-scheme-handler/mezonapp`.
 
 /// Register the `mezonapp://` URL scheme for the current platform.
 /// Safe to call multiple times — each platform is idempotent.

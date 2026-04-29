@@ -1,8 +1,8 @@
-/// Set the app badge count on the dock icon (macOS) or taskbar overlay (Windows).
-///
-/// macOS  : `NSDockTile.setBadgeLabel` via the `objc` runtime.
-/// Windows: `ITaskbarList3::SetOverlayIcon` — renders a small count bitmap
-///          as an overlay on the taskbar button.
+//! Set the app badge count on the dock icon (macOS) or taskbar overlay (Windows).
+//!
+//! macOS  : `NSDockTile.setBadgeLabel` via the `objc` runtime.
+//! Windows: `ITaskbarList3::SetOverlayIcon` — renders a small count bitmap
+//!          as an overlay on the taskbar button.
 
 pub fn set_badge_count(count: u32) {
     tracing::debug!("set_badge_count({})", count);

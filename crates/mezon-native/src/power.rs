@@ -1,10 +1,10 @@
-/// Screen lock/unlock event detection.
-///
-/// macOS  : subscribes to `com.apple.screenIsLocked` / `com.apple.screenIsUnlocked`
-///          via `CFNotificationCenter` (the distributed notification centre).
-/// Windows: registers a hidden message-only `HWND` and listens for
-///          `WM_WTSSESSION_CHANGE` via `WTSRegisterSessionNotification`.
-/// Linux  : stub (D-Bus `org.freedesktop.login1` integration deferred).
+//! Screen lock/unlock event detection.
+//!
+//! macOS  : subscribes to `com.apple.screenIsLocked` / `com.apple.screenIsUnlocked`
+//!          via `CFNotificationCenter` (the distributed notification centre).
+//! Windows: registers a hidden message-only `HWND` and listens for
+//!          `WM_WTSSESSION_CHANGE` via `WTSRegisterSessionNotification`.
+//! Linux  : stub (D-Bus `org.freedesktop.login1` integration deferred).
 
 pub enum PowerEvent {
     ScreenLocked,
