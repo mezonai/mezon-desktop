@@ -1,8 +1,8 @@
-use gpui::{App, FontWeight, MouseButton, Window, div, prelude::*};
+use gpui::{AnyElement, App, ElementId, FontWeight, Window, div, prelude::*};
 
-use crate::components::WindowAction;
 use super::icon::{Icon, IconName};
 use super::spinner::Spinner;
+use crate::components::WindowAction;
 use crate::theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +22,7 @@ pub enum ButtonSize {
 }
 
 pub struct Button {
+    id: ElementId,
     label: String,
     variant: ButtonVariant,
     size: ButtonSize,
@@ -33,8 +34,10 @@ pub struct Button {
 }
 
 impl Button {
+    #[track_caller]
     pub fn new(label: impl Into<String>) -> Self {
         Self {
+            id: std::panic::Location::caller().into(),
             label: label.into(),
             variant: ButtonVariant::Primary,
             size: ButtonSize::Md,
@@ -44,6 +47,11 @@ impl Button {
             icon: None,
             on_click: None,
         }
+    }
+
+    pub fn id(mut self, id: impl Into<ElementId>) -> Self {
+        self.id = id.into();
+        self
     }
 
     pub fn variant(mut self, v: ButtonVariant) -> Self {
@@ -84,7 +92,7 @@ impl Button {
         self
     }
 
-    pub fn render(self, theme: &Theme) -> impl IntoElement {
+    pub fn render(self, theme: &Theme) -> AnyElement {
         let white = gpui::Rgba {
             r: 1.0,
             g: 1.0,
@@ -166,11 +174,6 @@ impl Button {
         if is_interactive {
             let bg_h = bg_hover;
             el = el.cursor_pointer().hover(move |s| s.bg(bg_h));
-            if let Some(handler) = on_click {
-                el = el.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                    handler(window, cx);
-                });
-            }
         } else {
             el = el.opacity(if self.disabled { 0.5 } else { 0.8 });
         }
@@ -198,6 +201,18 @@ impl Button {
             el = el.child(div().child(label));
         }
 
-        el
+        if is_interactive {
+            let mut el = el.id(self.id).focusable();
+            if let Some(handler) = on_click {
+                el = el.on_click(move |event, window, cx| {
+                    if event.standard_click() {
+                        handler(window, cx);
+                    }
+                });
+            }
+            el.into_any_element()
+        } else {
+            el.into_any_element()
+        }
     }
 }

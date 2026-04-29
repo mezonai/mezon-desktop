@@ -4,14 +4,13 @@
 ///   1. `EntityInputHandler` + `ElementInputHandler` — registered during the **paint** phase
 ///      via the `TextInputElement` wrapper so the OS delivers typed characters (including IME,
 ///      dead keys, non-ASCII) via `replace_text_in_range`.
-///   2. `on_key_down` on the container div — handles Backspace, Delete, and a fallback
-///      for `key_char` in case the OS skips the input-handler path.
+///   2. `on_key_down` on the container div — handles editing keys such as Backspace.
 use std::ops::Range;
 
 use gpui::{
-    div, prelude::*, AnyElement, App, Bounds, Context, Element, ElementId, ElementInputHandler,
-    Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId, InspectorElementId,
-    LayoutId, MouseButton, Pixels, SharedString, UTF16Selection, Window,
+    AnyElement, App, Bounds, Context, Element, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, InspectorElementId, LayoutId,
+    MouseButton, Pixels, SharedString, UTF16Selection, Window, div, prelude::*,
 };
 
 use crate::components::TextChangeHandler;
@@ -34,7 +33,7 @@ impl TextInput {
     pub fn new(cx: &mut Context<Self>, id: impl Into<SharedString>) -> Self {
         let _ = id;
         Self {
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             value: String::new(),
             placeholder: SharedString::default(),
             label: None,
@@ -67,6 +66,7 @@ impl TextInput {
 
     pub fn disabled(mut self, d: bool) -> Self {
         self.disabled = d;
+        self.focus_handle = self.focus_handle.tab_stop(!d);
         self
     }
 
@@ -92,6 +92,37 @@ impl TextInput {
     fn fire_change(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(cb) = &self.on_change {
             cb(&self.value, window, cx);
+        }
+    }
+
+    fn byte_range_for_utf16_range(&self, range: Range<usize>) -> Range<usize> {
+        fn byte_index_for_utf16_offset(text: &str, offset: usize) -> usize {
+            if offset == 0 {
+                return 0;
+            }
+
+            let mut utf16_len = 0;
+            for (byte_idx, ch) in text.char_indices() {
+                if utf16_len >= offset {
+                    return byte_idx;
+                }
+                utf16_len += ch.len_utf16();
+            }
+
+            text.len()
+        }
+
+        let start = byte_index_for_utf16_offset(&self.value, range.start);
+        let end = byte_index_for_utf16_offset(&self.value, range.end);
+        start.min(end)..end.max(start)
+    }
+
+    fn replace_utf16_range(&mut self, range: Option<Range<usize>>, text: &str) {
+        if let Some(range) = range {
+            let byte_range = self.byte_range_for_utf16_range(range);
+            self.value.replace_range(byte_range, text);
+        } else {
+            self.value.push_str(text);
         }
     }
 }
@@ -145,7 +176,7 @@ impl EntityInputHandler for TextInput {
     /// printable keystroke including IME composition commits.
     fn replace_text_in_range(
         &mut self,
-        _range: Option<Range<usize>>,
+        range: Option<Range<usize>>,
         text: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -153,14 +184,14 @@ impl EntityInputHandler for TextInput {
         if self.disabled {
             return;
         }
-        self.value.push_str(text);
+        self.replace_utf16_range(range, text);
         self.fire_change(window, cx);
         cx.notify();
     }
 
     fn replace_and_mark_text_in_range(
         &mut self,
-        _range: Option<Range<usize>>,
+        range: Option<Range<usize>>,
         new_text: &str,
         _new_selected_range: Option<Range<usize>>,
         window: &mut Window,
@@ -169,7 +200,7 @@ impl EntityInputHandler for TextInput {
         if self.disabled {
             return;
         }
-        self.value.push_str(new_text);
+        self.replace_utf16_range(range, new_text);
         self.fire_change(window, cx);
         cx.notify();
     }
@@ -223,7 +254,7 @@ impl Render for TextInput {
         let placeholder = self.placeholder.clone();
         let focus_handle = self.focus_handle.clone();
 
-        let input_box = div()
+        let mut input_box = div()
             .track_focus(&focus_handle)
             .flex()
             .flex_row()
@@ -235,15 +266,19 @@ impl Render for TextInput {
             .rounded_md()
             .border_1()
             .border_color(border_color)
-            .cursor_text()
+            .when(!self.disabled, |el| el.cursor_text())
+            .when(self.disabled, |el| el.opacity(0.5))
             // Click → grab focus.
             .on_mouse_down(MouseButton::Left, {
                 let focus_handle = focus_handle.clone();
+                let disabled = self.disabled;
                 move |_event, window, cx| {
-                    window.focus(&focus_handle, cx);
+                    if !disabled {
+                        window.focus(&focus_handle, cx);
+                    }
                 }
             })
-            // Keyboard: Backspace + fallback for key_char (in case the OS skips handle_input).
+            // Keyboard editing that is not delivered through the platform text input path.
             .on_key_down({
                 let entity = entity.clone();
                 move |event, window, cx| {
@@ -280,16 +315,17 @@ impl Render for TextInput {
                     .text_sm()
                     .text_color(theme.text_primary)
                     .child(display_value)
-            })
-            .when(is_focused, |el| {
-                el.child(
-                    div()
-                        .w(gpui::px(1.5))
-                        .h(gpui::px(18.0))
-                        .ml_1()
-                        .bg(theme.brand),
-                )
             });
+
+        if is_focused && !self.disabled {
+            input_box = input_box.child(
+                div()
+                    .w(gpui::px(1.5))
+                    .h(gpui::px(18.0))
+                    .ml_1()
+                    .bg(theme.brand),
+            );
+        }
 
         let mut container = div().flex().flex_col().gap_1().w_full();
 

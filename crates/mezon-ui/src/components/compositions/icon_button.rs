@@ -1,10 +1,11 @@
-use gpui::{App, Context, MouseButton, Window, div, prelude::*};
+use gpui::{App, Context, ElementId, Window, div, prelude::*};
 
 use crate::components::WindowAction;
 use crate::components::primitives::{ButtonSize, ButtonVariant, Icon, IconName};
 use crate::theme::Theme;
 
 pub struct IconButton {
+    id: ElementId,
     icon: IconName,
     size: ButtonSize,
     variant: ButtonVariant,
@@ -14,8 +15,10 @@ pub struct IconButton {
 }
 
 impl IconButton {
+    #[track_caller]
     pub fn new(icon: IconName) -> Self {
         Self {
+            id: std::panic::Location::caller().into(),
             icon,
             size: ButtonSize::Sm,
             variant: ButtonVariant::Ghost,
@@ -23,6 +26,11 @@ impl IconButton {
             disabled: false,
             on_click: None,
         }
+    }
+
+    pub fn id(mut self, id: impl Into<ElementId>) -> Self {
+        self.id = id.into();
+        self
     }
 
     pub fn size(mut self, size: ButtonSize) -> Self {
@@ -104,16 +112,22 @@ impl Render for IconButton {
 
         if is_interactive {
             el = el.cursor_pointer().hover(move |s| s.bg(bg_hover));
-
-            if let Some(handler) = on_click {
-                el = el.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                    handler(window, cx);
-                });
-            }
         } else {
             el = el.opacity(0.5);
         }
 
-        el
+        if is_interactive {
+            let mut el = el.id(self.id.clone()).focusable();
+            if let Some(handler) = on_click {
+                el = el.on_click(move |event, window, cx| {
+                    if event.standard_click() {
+                        handler(window, cx);
+                    }
+                });
+            }
+            el.into_any_element()
+        } else {
+            el.into_any_element()
+        }
     }
 }
