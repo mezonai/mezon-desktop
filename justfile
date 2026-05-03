@@ -1,3 +1,6 @@
+set shell := ["bash", "-c"]
+set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
+
 # ------------------------------------------------------------------------------
 # GENERAL
 # ------------------------------------------------------------------------------
@@ -14,7 +17,7 @@ help:
     @echo ""
     @echo "  Development"
     @echo "  ---------------------------------------------"
-    @echo "  install           Install development tools (via cargo-binstall)"
+    @echo "  install         Install development tools (via cargo-binstall)"
     @echo "  run             Build (debug) and run the app"
     @echo "  watch           Hot-reload development (requires cargo-watch)"
     @echo "  check           Fast clippy checks"
@@ -48,7 +51,7 @@ help:
 # Install all necessary CLI tools via cargo-binstall
 install:
     @echo "Installing development tools..."
-    cargo install cargo-binstall || true
+    cargo install cargo-binstall
     cargo binstall -y cargo-watch cargo-nextest cargo-deny cargo-outdated cargo-llvm-cov
 
 # Run the project with optional arguments
@@ -79,7 +82,7 @@ fix:
 
 # Run all tests in the workspace, or pass args straight to cargo-nextest
 test *args:
-    sh -c 'if [ "$#" -eq 0 ]; then exec cargo nextest run --workspace --all-targets; fi; exec cargo nextest run "$@"' sh {{args}}
+    {{ if args == "" { "cargo nextest run --workspace --all-targets" } else { "cargo nextest run " + args } }}
 
 # ------------------------------------------------------------------------------
 # CODE COVERAGE (llvm-cov)
