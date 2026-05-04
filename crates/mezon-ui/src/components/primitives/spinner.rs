@@ -1,4 +1,4 @@
-use gpui::{prelude::*, radians, svg, Animation, AnimationExt, Rgba, Transformation};
+use gpui::{Animation, AnimationExt, Rgba, Transformation, prelude::*, radians, svg};
 /// Spinner — animated loading ring using GPUI's animation element.
 use std::time::Duration;
 

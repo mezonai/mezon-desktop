@@ -1,6 +1,6 @@
 use gpui::SharedString;
 /// Label — stateless text element with size / weight / colour variants.
-use gpui::{div, prelude::*, FontWeight, Rgba};
+use gpui::{FontWeight, Rgba, div, prelude::*};
 
 use crate::theme::Theme;
 

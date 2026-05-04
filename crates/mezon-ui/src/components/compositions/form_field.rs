@@ -1,4 +1,4 @@
-use gpui::{div, prelude::*, Context, Entity, FontWeight, Window};
+use gpui::{Context, Entity, FontWeight, Window, div, prelude::*};
 
 use crate::components::TextChangeHandler;
 use crate::components::primitives::TextInput;
@@ -27,11 +27,7 @@ impl FormField {
         });
     }
 
-    pub fn set_on_change(
-        &self,
-        cb: TextChangeHandler,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_on_change(&self, cb: TextChangeHandler, cx: &mut Context<Self>) {
         self.input.update(cx, |input, _cx| {
             input.on_change = Some(cb);
         });

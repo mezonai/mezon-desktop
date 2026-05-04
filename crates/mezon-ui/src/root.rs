@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use gpui::{div, prelude::*, Context, Entity, FontWeight, Window};
+use gpui::{Context, Entity, FontWeight, Window, div, prelude::*};
 use mezon_client::MezonClient;
 use mezon_store::AuthState;
 

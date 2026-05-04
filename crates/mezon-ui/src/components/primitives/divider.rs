@@ -1,5 +1,5 @@
 /// Divider — horizontal rule with optional centred label.
-use gpui::{div, prelude::*, Rgba};
+use gpui::{Rgba, div, prelude::*};
 
 use crate::theme::Theme;
 

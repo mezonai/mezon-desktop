@@ -1,5 +1,5 @@
 /// StatusDot — small presence indicator dot.
-use gpui::{div, prelude::*, Context, Window};
+use gpui::{Context, Window, div, prelude::*};
 
 use crate::components::primitives::PresenceStatus;
 use crate::theme::Theme;

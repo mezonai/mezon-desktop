@@ -67,14 +67,16 @@ fn set_badge_windows(count: u32) {
 
 #[cfg(target_os = "windows")]
 fn try_set_overlay_icon(count: u32) -> windows::core::Result<()> {
-    use windows::core::Interface as _;
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Gdi::{
-        CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, ReleaseDC,
-        SelectObject, SetBkColor, SetTextColor, TextOutW, HBITMAP,
+        CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush, DeleteDC, DeleteObject,
+        FillRect, GetDC, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
     };
     use windows::Win32::UI::Shell::{ITaskbarList3, TaskbarList};
-    use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, DestroyIcon, ICONINFO};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateIconIndirect, DestroyIcon, HICON, ICONINFO,
+    };
+    use windows::core::Interface as _;
 
     // Instantiate ITaskbarList3 via CoCreate.
     let taskbar: ITaskbarList3 = unsafe {
@@ -87,8 +89,14 @@ fn try_set_overlay_icon(count: u32) -> windows::core::Result<()> {
     unsafe { taskbar.HrInit()? };
 
     if count == 0 {
-        // Pass NULL icon to clear the overlay.
-        unsafe { taskbar.SetOverlayIcon(HWND(0), None, &windows::core::HSTRING::new())? };
+        // Pass null icon to clear the overlay.
+        unsafe {
+            taskbar.SetOverlayIcon(
+                HWND(std::ptr::null_mut()),
+                HICON(std::ptr::null_mut()),
+                &windows::core::HSTRING::new(),
+            )?
+        };
         return Ok(());
     }
 
@@ -99,7 +107,7 @@ fn try_set_overlay_icon(count: u32) -> windows::core::Result<()> {
     // HWND(0) — the OS uses the foreground window of the calling process.
     // Stage 2 will pass the real HWND from the stored WindowHandle.
     unsafe {
-        taskbar.SetOverlayIcon(HWND(0), hicon, &description)?;
+        taskbar.SetOverlayIcon(HWND(std::ptr::null_mut()), hicon, &description)?;
         DestroyIcon(hicon);
     }
     Ok(())
@@ -113,7 +121,7 @@ fn build_count_icon(
     use windows::Win32::Foundation::{COLORREF, RECT};
     use windows::Win32::Graphics::Gdi::{
         CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush, DeleteDC, DeleteObject,
-        FillRect, GetDC, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TextOutW, TRANSPARENT,
+        FillRect, GetDC, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO};
 
@@ -123,13 +131,13 @@ fn build_count_icon(
     const TEXT_COLOR: u32 = 0x00FFFFFF;
 
     let hdc_screen = unsafe { GetDC(None) };
-    let hdc = unsafe { CreateCompatibleDC(hdc_screen) };
+    let hdc = unsafe { CreateCompatibleDC(Some(hdc_screen)) };
     let hbmp_color = unsafe { CreateCompatibleBitmap(hdc_screen, SIZE, SIZE) };
     let hbmp_mask = unsafe { CreateCompatibleBitmap(hdc_screen, SIZE, SIZE) };
     unsafe { ReleaseDC(None, hdc_screen) };
 
     unsafe {
-        SelectObject(hdc, hbmp_color);
+        SelectObject(hdc, hbmp_color.into());
 
         // Fill background circle.
         let brush = CreateSolidBrush(COLORREF(BG_COLOR));
@@ -140,7 +148,7 @@ fn build_count_icon(
             bottom: SIZE,
         };
         FillRect(hdc, &rc, brush);
-        DeleteObject(brush);
+        let _ = DeleteObject(brush.into());
 
         // Draw count text.
         let label = if count > 99 {
@@ -160,15 +168,15 @@ fn build_count_icon(
         fIcon: true.into(),
         xHotspot: 0,
         yHotspot: 0,
-        hbmMask: hbmp_mask,
-        hbmColor: hbmp_color,
+        hbmMask: hbmp_mask.into(),
+        hbmColor: hbmp_color.into(),
     };
 
     let hicon = unsafe { CreateIconIndirect(&icon_info)? };
 
     unsafe {
-        DeleteObject(hbmp_color);
-        DeleteObject(hbmp_mask);
+        DeleteObject(hbmp_color.into());
+        DeleteObject(hbmp_mask.into());
     }
 
     Ok(hicon)

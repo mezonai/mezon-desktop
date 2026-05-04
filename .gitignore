@@ -10,3 +10,4 @@ Cargo.lock
 .vscode/
 *.swp
 *.swo
+.opencode/

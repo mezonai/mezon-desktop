@@ -49,14 +49,17 @@ impl Settings {
     pub async fn load() -> Result<Self> {
         let path = Self::path();
         if !path.exists() {
-            tracing::debug!("Settings file not found, using defaults: {}", path.display());
+            tracing::debug!(
+                "Settings file not found, using defaults: {}",
+                path.display()
+            );
             return Ok(Self::default());
         }
         let data = fs::read_to_string(&path)
             .await
             .with_context(|| format!("Failed to read settings from {}", path.display()))?;
-        let settings: Self = serde_json::from_str(&data)
-            .with_context(|| "Failed to parse settings.json")?;
+        let settings: Self =
+            serde_json::from_str(&data).with_context(|| "Failed to parse settings.json")?;
         tracing::debug!("Loaded settings from {}", path.display());
         Ok(settings)
     }

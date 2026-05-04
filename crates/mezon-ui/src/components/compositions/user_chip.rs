@@ -1,5 +1,5 @@
 /// UserChip — Avatar + username label inline.
-use gpui::{div, prelude::*, Context, Window};
+use gpui::{Context, Window, div, prelude::*};
 
 use crate::components::primitives::{Avatar, AvatarSize, Label, LabelSize, PresenceStatus};
 use crate::theme::Theme;

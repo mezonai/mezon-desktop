@@ -195,16 +195,16 @@ fn subscribe_windows(callback: PowerEventCallback) {
 
 #[cfg(target_os = "windows")]
 unsafe fn windows_message_loop() {
-    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::RemoteDesktop::{
-        WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
+        NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostQuitMessage,
-        RegisterClassExW, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HWND_MESSAGE, MSG,
-        WINDOW_EX_STYLE, WM_DESTROY, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+        CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW,
+        HWND_MESSAGE, MSG, PostQuitMessage, RegisterClassExW, TranslateMessage, WINDOW_EX_STYLE,
+        WM_DESTROY, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
     };
+    use windows::core::PCWSTR;
 
     const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
     const WTS_SESSION_LOCK: usize = 7;
@@ -254,7 +254,7 @@ unsafe fn windows_message_loop() {
             0,
             0,
             0,
-            HWND_MESSAGE,
+            Some(HWND_MESSAGE),
             None,
             None,
             None,

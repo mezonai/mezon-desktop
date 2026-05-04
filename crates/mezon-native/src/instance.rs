@@ -138,11 +138,11 @@ impl SingleInstance {
     fn create_pipe_server() -> anyhow::Result<()> {
         use windows::Win32::Foundation::INVALID_HANDLE_VALUE;
         use windows::Win32::Storage::FileSystem::{
-            FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
+            FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_INBOUND,
         };
         use windows::Win32::System::Pipes::{
-            CreateNamedPipeW, PIPE_ACCESS_INBOUND, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
-            PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+            CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
+            PIPE_WAIT,
         };
 
         let pipe_name: Vec<u16> = Self::PIPE_NAME
@@ -172,15 +172,17 @@ impl SingleInstance {
             ));
         }
 
+        // Extract raw pointer value; HANDLE is Copy so just store the value
+        let raw = unsafe { handle.0 as usize };
+
         // Transfer ownership into the listener thread.
         // The thread keeps the handle alive and continuously accepts + reads connections.
         std::thread::Builder::new()
             .name("mezon-single-instance".into())
             .spawn(move || {
-                // Store handle as a raw value; the thread owns it for the process lifetime.
-                let raw = handle.0 as usize; // Send-safe: we own it exclusively
+                // Reconstruct HANDLE from raw value (thread owns it now)
+                let h = windows::Win32::Foundation::HANDLE(raw as *mut std::ffi::c_void);
                 loop {
-                    let h = windows::Win32::Foundation::HANDLE(raw as isize);
                     let connected =
                         unsafe { windows::Win32::System::Pipes::ConnectNamedPipe(h, None).is_ok() };
                     if connected {
@@ -279,10 +281,16 @@ impl SingleInstance {
             .name("mezon-pipe-url-listener".into())
             .spawn(move || {
                 use windows::Win32::Foundation::INVALID_HANDLE_VALUE;
-                use windows::Win32::Storage::FileSystem::{ReadFile, FILE_FLAG_OVERLAPPED};
-                use windows::Win32::System::Pipes::{
-                    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_ACCESS_INBOUND,
-                    PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+                use windows::Win32::{
+                    Foundation::HANDLE,
+                    Storage::FileSystem::{
+                        FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_INBOUND,
+                        ReadFile,
+                    },
+                    System::Pipes::{
+                        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe,
+                        PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+                    },
                 };
 
                 let handle = unsafe {

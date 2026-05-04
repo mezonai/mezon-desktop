@@ -1,5 +1,5 @@
 /// Badge — small count pill for unread/mention indicators.
-use gpui::{div, prelude::*, Rgba};
+use gpui::{Rgba, div, prelude::*};
 
 use crate::theme::Theme;
 

@@ -1,7 +1,7 @@
-use gpui::{div, prelude::*, App, Context, FontWeight, MouseButton, Window};
+use gpui::{App, Context, FontWeight, MouseButton, Window, div, prelude::*};
 
-use crate::components::{ToggleHandler, WindowAction};
 use crate::components::primitives::{Icon, IconName};
+use crate::components::{ToggleHandler, WindowAction};
 use crate::theme::Theme;
 
 pub struct SectionHeader {

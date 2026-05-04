@@ -72,8 +72,7 @@ unsafe fn build_classes() {
             if let Some(existing) = Class::get("GPUIApplication") {
                 existing as *const Class
             } else {
-                let mut decl =
-                    ClassDecl::new("GPUIApplication", class!(NSApplication)).unwrap();
+                let mut decl = ClassDecl::new("GPUIApplication", class!(NSApplication)).unwrap();
                 decl.add_ivar::<*mut c_void>(MAC_PLATFORM_IVAR);
                 decl.register()
             }
@@ -84,81 +83,82 @@ unsafe fn build_classes() {
             if let Some(existing) = Class::get("GPUIApplicationDelegate") {
                 existing as *const Class
             } else {
-            let mut decl = ClassDecl::new("GPUIApplicationDelegate", class!(NSResponder)).unwrap();
-            decl.add_ivar::<*mut c_void>(MAC_PLATFORM_IVAR);
-            decl.add_method(
-                sel!(applicationWillFinishLaunching:),
-                will_finish_launching as extern "C" fn(&mut Object, Sel, id),
-            );
-            decl.add_method(
-                sel!(applicationDidFinishLaunching:),
-                did_finish_launching as extern "C" fn(&mut Object, Sel, id),
-            );
-            decl.add_method(
-                sel!(applicationShouldHandleReopen:hasVisibleWindows:),
-                should_handle_reopen as extern "C" fn(&mut Object, Sel, id, bool),
-            );
-            decl.add_method(
-                sel!(applicationWillTerminate:),
-                will_terminate as extern "C" fn(&mut Object, Sel, id),
-            );
-            decl.add_method(
-                sel!(handleGPUIMenuItem:),
-                handle_menu_item as extern "C" fn(&mut Object, Sel, id),
-            );
-            // Add menu item handlers so that OS save panels have the correct key commands
-            decl.add_method(
-                sel!(cut:),
-                handle_menu_item as extern "C" fn(&mut Object, Sel, id),
-            );
-            decl.add_method(
-                sel!(copy:),
-                handle_menu_item as extern "C" fn(&mut Object, Sel, id),
-            );
-            decl.add_method(
-                sel!(paste:),
-                handle_menu_item as extern "C" fn(&mut Object, Sel, id),
-            );
-            decl.add_method(
-                sel!(selectAll:),
-                handle_menu_item as extern "C" fn(&mut Object, Sel, id),
-            );
-            decl.add_method(
-                sel!(undo:),
-                handle_menu_item as extern "C" fn(&mut Object, Sel, id),
-            );
-            decl.add_method(
-                sel!(redo:),
-                handle_menu_item as extern "C" fn(&mut Object, Sel, id),
-            );
-            decl.add_method(
-                sel!(validateMenuItem:),
-                validate_menu_item as extern "C" fn(&mut Object, Sel, id) -> bool,
-            );
-            decl.add_method(
-                sel!(menuWillOpen:),
-                menu_will_open as extern "C" fn(&mut Object, Sel, id),
-            );
-            decl.add_method(
-                sel!(applicationDockMenu:),
-                handle_dock_menu as extern "C" fn(&mut Object, Sel, id) -> id,
-            );
-            decl.add_method(
-                sel!(application:openURLs:),
-                open_urls as extern "C" fn(&mut Object, Sel, id, id),
-            );
+                let mut decl =
+                    ClassDecl::new("GPUIApplicationDelegate", class!(NSResponder)).unwrap();
+                decl.add_ivar::<*mut c_void>(MAC_PLATFORM_IVAR);
+                decl.add_method(
+                    sel!(applicationWillFinishLaunching:),
+                    will_finish_launching as extern "C" fn(&mut Object, Sel, id),
+                );
+                decl.add_method(
+                    sel!(applicationDidFinishLaunching:),
+                    did_finish_launching as extern "C" fn(&mut Object, Sel, id),
+                );
+                decl.add_method(
+                    sel!(applicationShouldHandleReopen:hasVisibleWindows:),
+                    should_handle_reopen as extern "C" fn(&mut Object, Sel, id, bool),
+                );
+                decl.add_method(
+                    sel!(applicationWillTerminate:),
+                    will_terminate as extern "C" fn(&mut Object, Sel, id),
+                );
+                decl.add_method(
+                    sel!(handleGPUIMenuItem:),
+                    handle_menu_item as extern "C" fn(&mut Object, Sel, id),
+                );
+                // Add menu item handlers so that OS save panels have the correct key commands
+                decl.add_method(
+                    sel!(cut:),
+                    handle_menu_item as extern "C" fn(&mut Object, Sel, id),
+                );
+                decl.add_method(
+                    sel!(copy:),
+                    handle_menu_item as extern "C" fn(&mut Object, Sel, id),
+                );
+                decl.add_method(
+                    sel!(paste:),
+                    handle_menu_item as extern "C" fn(&mut Object, Sel, id),
+                );
+                decl.add_method(
+                    sel!(selectAll:),
+                    handle_menu_item as extern "C" fn(&mut Object, Sel, id),
+                );
+                decl.add_method(
+                    sel!(undo:),
+                    handle_menu_item as extern "C" fn(&mut Object, Sel, id),
+                );
+                decl.add_method(
+                    sel!(redo:),
+                    handle_menu_item as extern "C" fn(&mut Object, Sel, id),
+                );
+                decl.add_method(
+                    sel!(validateMenuItem:),
+                    validate_menu_item as extern "C" fn(&mut Object, Sel, id) -> bool,
+                );
+                decl.add_method(
+                    sel!(menuWillOpen:),
+                    menu_will_open as extern "C" fn(&mut Object, Sel, id),
+                );
+                decl.add_method(
+                    sel!(applicationDockMenu:),
+                    handle_dock_menu as extern "C" fn(&mut Object, Sel, id) -> id,
+                );
+                decl.add_method(
+                    sel!(application:openURLs:),
+                    open_urls as extern "C" fn(&mut Object, Sel, id, id),
+                );
 
-            decl.add_method(
-                sel!(onKeyboardLayoutChange:),
-                on_keyboard_layout_change as extern "C" fn(&mut Object, Sel, id),
-            );
+                decl.add_method(
+                    sel!(onKeyboardLayoutChange:),
+                    on_keyboard_layout_change as extern "C" fn(&mut Object, Sel, id),
+                );
 
-            decl.add_method(
-                sel!(onThermalStateChange:),
-                on_thermal_state_change as extern "C" fn(&mut Object, Sel, id),
-            );
+                decl.add_method(
+                    sel!(onThermalStateChange:),
+                    on_thermal_state_change as extern "C" fn(&mut Object, Sel, id),
+                );
 
-            decl.register()
+                decl.register()
             } // else: class not yet registered
         }
     }

@@ -1,5 +1,5 @@
 /// Avatar — round image or initials fallback with optional presence dot.
-use gpui::{div, img, prelude::*, Rgba};
+use gpui::{Rgba, div, img, prelude::*};
 
 use crate::theme::Theme;
 

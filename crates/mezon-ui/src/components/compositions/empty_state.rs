@@ -1,7 +1,7 @@
 /// EmptyState — icon + title + subtitle + optional action button.
 use std::sync::Arc;
 
-use gpui::{div, prelude::*, App, Context, FontWeight, Window};
+use gpui::{App, Context, FontWeight, Window, div, prelude::*};
 
 use crate::components::WindowAction;
 use crate::components::primitives::{Button, ButtonSize, ButtonVariant, Icon, IconName};

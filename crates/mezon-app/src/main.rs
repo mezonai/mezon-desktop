@@ -1,12 +1,12 @@
 use anyhow::Result;
-use gpui::{px, size, App, AppContext, AsyncApp, Bounds, Entity, WindowBounds, WindowOptions};
+use gpui::{App, AppContext, AsyncApp, Bounds, Entity, WindowBounds, WindowOptions, px, size};
 use gpui_platform::application;
-use mezon_client::{keychain, MezonClient};
+use mezon_client::{MezonClient, keychain};
 use mezon_native::instance::SingleInstance;
 use mezon_store::{AuthState, Settings};
-use mezon_ui::{title_bar::TitleBar, RootView};
+use mezon_ui::{RootView, title_bar::TitleBar};
 use std::sync::Arc;
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 
 fn main() -> Result<()> {
     fmt()
@@ -142,27 +142,24 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 /// - Valid + not expired → `Authenticated`
 /// - Valid + expired     → try silent refresh → `Authenticated` on success, else `NotAuthenticated`
 /// - Nothing stored      → `NotAuthenticated`
-fn resolve_initial_auth_state(
-    rt: &tokio::runtime::Runtime,
-    client: &MezonClient,
-) -> AuthState {
+fn resolve_initial_auth_state(rt: &tokio::runtime::Runtime, client: &MezonClient) -> AuthState {
     match keychain::load_session() {
         None => {
             tracing::info!("No stored session — showing login");
             AuthState::NotAuthenticated
         }
         Some(session) if !mezon_client::Session::is_expired(&session) => {
-            tracing::info!(
-                "Restored valid session for user_id={}",
-                session.user_id
-            );
+            tracing::info!("Restored valid session for user_id={}", session.user_id);
             AuthState::Authenticated(session)
         }
         Some(session) => {
             tracing::info!("Stored session expired — attempting silent refresh");
             match rt.block_on(client.refresh_session(&session.refresh_token, false)) {
                 Ok(new_session) => {
-                    tracing::info!("Silent refresh succeeded for user_id={}", new_session.user_id);
+                    tracing::info!(
+                        "Silent refresh succeeded for user_id={}",
+                        new_session.user_id
+                    );
                     if let Err(e) = keychain::save_session(&new_session) {
                         tracing::warn!("Failed to update keychain after refresh: {e}");
                     }
@@ -203,8 +200,8 @@ fn spawn_refresh_task(cx: &mut App, auth_state: Entity<AuthState>, client: Arc<M
                 .unwrap_or_default()
                 .as_secs();
 
-            let should_refresh = session.expires_at > 0
-                && session.expires_at.saturating_sub(now) < 300;
+            let should_refresh =
+                session.expires_at > 0 && session.expires_at.saturating_sub(now) < 300;
 
             if !should_refresh {
                 continue;
