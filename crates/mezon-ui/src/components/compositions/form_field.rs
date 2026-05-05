@@ -1,7 +1,7 @@
 use gpui::{Context, Entity, FontWeight, Window, div, prelude::*};
 
-use crate::components::TextChangeHandler;
 use crate::components::primitives::TextInput;
+use crate::components::{KeyHandler, TextChangeHandler};
 use crate::theme::Theme;
 
 pub struct FormField {
@@ -30,6 +30,12 @@ impl FormField {
     pub fn set_on_change(&self, cb: TextChangeHandler, cx: &mut Context<Self>) {
         self.input.update(cx, |input, _cx| {
             input.on_change = Some(cb);
+        });
+    }
+
+    pub fn set_on_key(&self, cb: KeyHandler, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, _cx| {
+            input.set_on_key(cb, _cx);
         });
     }
 

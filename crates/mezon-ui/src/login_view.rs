@@ -13,7 +13,10 @@ use gpui::{App, Context, Entity, FontWeight, MouseButton, Window, div, prelude::
 use mezon_client::{MezonClient, Session, keychain};
 use mezon_store::{AuthState, LoginMethod};
 
-use crate::components::{compositions::FormField, primitives::Button};
+use crate::components::{
+    compositions::{FormField, OtpInput},
+    primitives::Button,
+};
 use crate::theme::Theme;
 
 // ─── LoginView state ──────────────────────────────────────────────────────────
@@ -38,8 +41,8 @@ pub struct LoginView {
     email_field: Entity<FormField>,
     /// Password field (password mode only).
     password_field: Entity<FormField>,
-    /// Individual OTP digit inputs (6 boxes).
-    otp_fields: Vec<Entity<FormField>>,
+    /// OTP input widget (6 boxes with auto-advance, paste, backspace).
+    otp_input: Entity<OtpInput>,
 
     /// `true` while an async API call is in-flight.
     loading: bool,
@@ -62,10 +65,21 @@ impl LoginView {
             f
         });
 
-        // 6 OTP digit boxes.
-        let otp_fields = (0..6)
-            .map(|i| cx.new(move |cx| FormField::new(cx, format!("{}", i))))
-            .collect();
+        let otp_input = cx.new(|cx| OtpInput::new(cx));
+
+        let entity = cx.entity().clone();
+        otp_input.update(cx, |input, _cx| {
+            input.set_on_complete(Arc::new(
+                move |code: String, _window: &mut Window, cx: &mut App| {
+                    entity.update(cx, |this: &mut LoginView, cx| {
+                        if this.otp_req_id.is_empty() {
+                            return;
+                        }
+                        Self::handle_confirm_otp_with_code(&entity, &code, cx);
+                    });
+                },
+            ));
+        });
 
         Self {
             client,
@@ -76,7 +90,7 @@ impl LoginView {
             otp_email: String::new(),
             email_field,
             password_field,
-            otp_fields,
+            otp_input,
             loading: false,
             error: None,
             countdown: 0,
@@ -143,19 +157,20 @@ impl LoginView {
 
     /// Called when the user has filled all 6 OTP digits.
     fn handle_confirm_otp(entity: &Entity<LoginView>, cx: &mut App) {
-        let (req_id, otp_code) = {
+        let otp_code = {
             let this = entity.read(cx);
-            let code: String = this
-                .otp_fields
-                .iter()
-                .map(|f| f.read(cx).value(cx))
-                .collect();
-            (this.otp_req_id.clone(), code)
+            this.otp_input.read(cx).code(cx)
         };
+        Self::handle_confirm_otp_with_code(entity, &otp_code, cx);
+    }
 
+    /// Confirm OTP with a given code (used by both manual and auto-submit).
+    fn handle_confirm_otp_with_code(entity: &Entity<LoginView>, otp_code: &str, cx: &mut App) {
         if otp_code.len() != 6 {
             return;
         }
+
+        let req_id = entity.read(cx).otp_req_id.clone();
 
         entity.update(cx, |this, cx| {
             this.loading = true;
@@ -166,6 +181,7 @@ impl LoginView {
         let client = entity.read(cx).client.clone();
         let auth_state = entity.read(cx).auth_state.clone();
         let entity_clone = entity.clone();
+        let otp_code = otp_code.to_string();
 
         cx.spawn(async move |cx: &mut gpui::AsyncApp| {
             let result = client.confirm_otp(&req_id, &otp_code).await;
@@ -179,11 +195,9 @@ impl LoginView {
                         Err(e) => {
                             this.error = Some(format!("{e}"));
                             // Clear OTP fields on failure.
-                            for field in &this.otp_fields {
-                                field.update(cx, |f, cx| {
-                                    f.set_error(Some(String::new()), cx);
-                                });
-                            }
+                            this.otp_input.update(cx, |input, cx| {
+                                input.clear(cx);
+                            });
                         }
                     }
                     cx.notify();
@@ -367,12 +381,8 @@ impl Render for LoginView {
                                 )),
                         );
 
-                    // 6 OTP digit boxes in a row.
-                    let mut otp_row = div().flex().flex_row().gap_2().justify_center();
-                    for field in &self.otp_fields {
-                        otp_row = otp_row.child(div().w(gpui::px(44.0)).child(field.clone()));
-                    }
-                    card = card.child(otp_row);
+                    // OTP input widget.
+                    card = card.child(self.otp_input.clone());
 
                     // Confirm button / auto-submit hint.
                     let loading = self.loading;

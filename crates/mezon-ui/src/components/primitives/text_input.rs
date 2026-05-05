@@ -13,7 +13,7 @@ use gpui::{
     MouseButton, Pixels, SharedString, UTF16Selection, Window, div, prelude::*,
 };
 
-use crate::components::TextChangeHandler;
+use crate::components::{KeyHandler, TextChangeHandler};
 use crate::theme::Theme;
 
 // ─── TextInput view ───────────────────────────────────────────────────────────
@@ -27,6 +27,7 @@ pub struct TextInput {
     pub(crate) masked: bool,
     disabled: bool,
     pub(crate) on_change: Option<TextChangeHandler>,
+    pub(crate) on_key: Option<KeyHandler>,
 }
 
 impl TextInput {
@@ -41,6 +42,7 @@ impl TextInput {
             masked: false,
             disabled: false,
             on_change: None,
+            on_key: None,
         }
     }
 
@@ -75,6 +77,15 @@ impl TextInput {
         self
     }
 
+    pub fn on_key(mut self, cb: KeyHandler) -> Self {
+        self.on_key = Some(cb);
+        self
+    }
+
+    pub fn set_on_key(&mut self, cb: KeyHandler, _cx: &mut Context<Self>) {
+        self.on_key = Some(cb);
+    }
+
     pub fn value(&self) -> &str {
         &self.value
     }
@@ -90,8 +101,15 @@ impl TextInput {
     }
 
     fn fire_change(&self, window: &mut Window, cx: &mut Context<Self>) {
+        eprintln!(
+            "[DEBUG] fire_change: value='{}', on_change_is_some={}",
+            self.value,
+            self.on_change.is_some()
+        );
         if let Some(cb) = &self.on_change {
+            eprintln!("[DEBUG] Calling on_change callback...");
             cb(&self.value, window, cx);
+            eprintln!("[DEBUG] on_change callback returned.");
         }
     }
 
@@ -281,7 +299,12 @@ impl Render for TextInput {
             // Keyboard editing that is not delivered through the platform text input path.
             .on_key_down({
                 let entity = entity.clone();
+                let on_key = self.on_key.clone();
                 move |event, window, cx| {
+                    // Call on_key callback FIRST (before internal handling)
+                    if let Some(ref cb) = on_key {
+                        cb(&event.keystroke, window, cx);
+                    }
                     match event.keystroke.key.as_str() {
                         "backspace" => {
                             entity.update(cx, |this, cx| {
