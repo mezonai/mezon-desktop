@@ -17,31 +17,11 @@ dirs = { workspace = true }
 tray-icon = { version = "0.19", features = ["common-controls-v6"] }
 image = { workspace = true }
 auto-launch = "0.5"
+windows.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc.workspace = true
 
-[target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.58", features = [
-    # Shell / taskbar
-    "Win32_UI_Shell",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_Foundation",
-    "Win32_System_Threading",
-    # Screen lock detection
-    "Win32_System_RemoteDesktop",
-    # Named pipe (single instance)
-    "Win32_Storage_FileSystem",
-    "Win32_System_Pipes",
-    # Badge / overlay icon
-    "Win32_Graphics_Gdi",
-    "Win32_System_Com",
-    # Deep link scheme registration
-    "Win32_System_Registry",
-    # Toast notifications (Windows Runtime)
-    "Data_Xml_Dom",
-    "UI_Notifications",
-] }
 
 [target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
 notify-rust = "4"
