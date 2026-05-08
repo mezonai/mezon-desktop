@@ -203,6 +203,13 @@ impl ChannelsModel {
             cat.collapsed = !cat.collapsed;
         }
     }
+
+    pub fn find_channel(&self, channel_id: &str) -> Option<&Channel> {
+        self.categories
+            .iter()
+            .flat_map(|category| &category.channels)
+            .find(|channel| channel.id == channel_id)
+    }
 }
 
 /// Persistent application settings — written to ~/.config/mezon/settings.json

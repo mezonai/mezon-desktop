@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gpui::{Context, Entity, FontWeight, Window, div, prelude::*};
 use mezon_client::MezonClient;
-use mezon_store::AuthState;
+use mezon_store::{AuthState, ChannelsModel};
 
 use crate::login_view::LoginView;
 use crate::main_layout::MainLayout;
@@ -55,7 +55,11 @@ impl Render for RootView {
             AuthState::Authenticated(_) => {
                 // Lazy init: create MainLayout on first render when authenticated
                 if self.main_layout.is_none() {
-                    self.main_layout = Some(cx.new(|cx| MainLayout::new(cx)));
+                    let channels_entity = cx.new(|_cx| ChannelsModel::with_dummy_data());
+                    self.main_layout =
+                        Some(cx.new(|cx| {
+                            MainLayout::new(self.auth_state.clone(), channels_entity, cx)
+                        }));
                 }
                 if let Some(main_layout) = &self.main_layout {
                     main_layout.clone().into_any_element()
