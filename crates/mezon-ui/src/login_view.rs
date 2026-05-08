@@ -9,16 +9,11 @@
 
 use std::sync::Arc;
 
-use gpui::{
-    div, prelude::*, App, Context, Entity, FontWeight, MouseButton, Window,
-};
+use gpui::{App, Context, Entity, FontWeight, MouseButton, Window, div, prelude::*};
 use mezon_client::{MezonClient, Session, keychain};
 use mezon_store::{AuthState, LoginMethod};
 
-use crate::components::{
-    compositions::FormField,
-    primitives::Button,
-};
+use crate::components::{compositions::FormField, primitives::Button};
 use crate::theme::Theme;
 
 // ─── LoginView state ──────────────────────────────────────────────────────────
@@ -307,23 +302,22 @@ impl Render for LoginView {
             .bg(theme.bg_secondary);
 
         // Logo + wordmark.
-        card = card
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_3()
-                    .mb_2()
-                    .child(div().size_16().bg(theme.brand).rounded_lg())
-                    .child(
-                        div()
-                            .text_xl()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(theme.text_primary)
-                            .child("Mezon"),
-                    ),
-            );
+        card = card.child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_3()
+                .mb_2()
+                .child(div().size_16().bg(theme.brand).rounded_lg())
+                .child(
+                    div()
+                        .text_xl()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(theme.text_primary)
+                        .child("Mezon"),
+                ),
+        );
 
         match self.method {
             LoginMethod::Otp => {
@@ -355,8 +349,8 @@ impl Render for LoginView {
                     );
                 } else {
                     // Step 1: OTP code entry.
-                    card = card
-                        .child(
+                    card =
+                        card.child(
                             div()
                                 .flex()
                                 .flex_col()
@@ -368,25 +362,15 @@ impl Render for LoginView {
                                         .text_color(theme.text_primary)
                                         .child("Enter verification code"),
                                 )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.text_secondary)
-                                        .child(format!(
-                                            "We sent a 6-digit code to {}",
-                                            self.otp_email
-                                        )),
-                                ),
+                                .child(div().text_xs().text_color(theme.text_secondary).child(
+                                    format!("We sent a 6-digit code to {}", self.otp_email),
+                                )),
                         );
 
                     // 6 OTP digit boxes in a row.
                     let mut otp_row = div().flex().flex_row().gap_2().justify_center();
                     for field in &self.otp_fields {
-                        otp_row = otp_row.child(
-                            div()
-                                .w(gpui::px(44.0))
-                                .child(field.clone()),
-                        );
+                        otp_row = otp_row.child(div().w(gpui::px(44.0)).child(field.clone()));
                     }
                     card = card.child(otp_row);
 
@@ -523,12 +507,7 @@ impl Render for LoginView {
                 .items_center()
                 .gap_2()
                 .child(div().flex_1().h(gpui::px(1.0)).bg(theme.border))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.text_muted)
-                        .child("or"),
-                )
+                .child(div().text_xs().text_color(theme.text_muted).child("or"))
                 .child(div().flex_1().h(gpui::px(1.0)).bg(theme.border)),
         );
 
