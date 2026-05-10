@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
-use gpui::{div, prelude::*, Context, Entity, FontWeight, Window};
+use gpui::{Context, Entity, FontWeight, Window, div, prelude::*};
 use mezon_client::MezonClient;
-use mezon_store::AuthState;
+use mezon_store::{AuthState, ChannelsModel};
 
 use crate::login_view::LoginView;
+use crate::main_layout::MainLayout;
 use crate::theme::Theme;
 use crate::title_bar::TitleBar;
 
@@ -12,11 +13,12 @@ use crate::title_bar::TitleBar;
 ///
 /// Owns the TitleBar and switches content area based on [`AuthState`]:
 ///   - `NotAuthenticated` / `OtpRequested` → `LoginView`
-///   - `Authenticated`                     → (Stage 2: `MainLayout`)
+///   - `Authenticated`                     → `MainLayout`
 pub struct RootView {
     title_bar: Entity<TitleBar>,
     auth_state: Entity<AuthState>,
     login_view: Entity<LoginView>,
+    main_layout: Option<Entity<MainLayout>>,
 }
 
 impl RootView {
@@ -35,6 +37,7 @@ impl RootView {
             title_bar,
             auth_state,
             login_view,
+            main_layout: None,
         }
     }
 }
@@ -49,7 +52,21 @@ impl Render for RootView {
                 self.login_view.clone().into_any_element()
             }
             AuthState::AwaitingCallback => render_awaiting_callback(&theme),
-            AuthState::Authenticated(_) => render_authenticated_placeholder(&theme),
+            AuthState::Authenticated(_) => {
+                // Lazy init: create MainLayout on first render when authenticated
+                if self.main_layout.is_none() {
+                    let channels_entity = cx.new(|_cx| ChannelsModel::with_dummy_data());
+                    self.main_layout =
+                        Some(cx.new(|cx| {
+                            MainLayout::new(self.auth_state.clone(), channels_entity, cx)
+                        }));
+                }
+                if let Some(main_layout) = &self.main_layout {
+                    main_layout.clone().into_any_element()
+                } else {
+                    render_authenticated_placeholder(&theme)
+                }
+            }
         };
 
         div()

@@ -5,6 +5,213 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::fs;
 
+// ─── Clan domain model ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct Clan {
+    pub id: String,
+    pub name: String,
+    pub initials: String,
+    pub avatar_url: Option<String>,
+    pub unread_count: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClansModel {
+    pub clans: Vec<Clan>,
+    pub active_clan_id: Option<String>,
+}
+
+impl ClansModel {
+    pub fn with_dummy_data() -> Self {
+        Self {
+            clans: vec![
+                Clan {
+                    id: "1".into(),
+                    name: "Gaming".into(),
+                    initials: "GM".into(),
+                    avatar_url: None,
+                    unread_count: 3,
+                },
+                Clan {
+                    id: "2".into(),
+                    name: "Work".into(),
+                    initials: "WK".into(),
+                    avatar_url: None,
+                    unread_count: 0,
+                },
+                Clan {
+                    id: "3".into(),
+                    name: "Friends".into(),
+                    initials: "FR".into(),
+                    avatar_url: None,
+                    unread_count: 12,
+                },
+                Clan {
+                    id: "4".into(),
+                    name: "Dev".into(),
+                    initials: "DV".into(),
+                    avatar_url: None,
+                    unread_count: 0,
+                },
+                Clan {
+                    id: "5".into(),
+                    name: "Music".into(),
+                    initials: "MU".into(),
+                    avatar_url: None,
+                    unread_count: 1,
+                },
+            ],
+            active_clan_id: Some("1".into()),
+        }
+    }
+
+    pub fn select_clan(&mut self, id: &str) {
+        self.active_clan_id = Some(id.to_string());
+    }
+}
+
+// ─── Channel domain model ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelType {
+    Text,
+    Voice,
+}
+
+#[derive(Debug, Clone)]
+pub struct Channel {
+    pub id: String,
+    pub name: String,
+    pub channel_type: ChannelType,
+    pub unread: bool,
+    pub private: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct Category {
+    pub clan_id: String,
+    pub name: String,
+    pub collapsed: bool,
+    pub channels: Vec<Channel>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelsModel {
+    pub categories: Vec<Category>,
+    pub active_channel_id: Option<String>,
+}
+
+impl ChannelsModel {
+    pub fn with_dummy_data() -> Self {
+        fn channel(
+            id: &str,
+            name: &str,
+            ch_type: ChannelType,
+            unread: bool,
+            private: bool,
+        ) -> Channel {
+            Channel {
+                id: id.into(),
+                name: name.into(),
+                channel_type: ch_type,
+                unread,
+                private,
+            }
+        }
+
+        fn category(
+            clan_id: &str,
+            name: &str,
+            collapsed: bool,
+            channels: Vec<Channel>,
+        ) -> Category {
+            Category {
+                clan_id: clan_id.into(),
+                name: name.into(),
+                collapsed,
+                channels,
+            }
+        }
+
+        Self {
+            categories: vec![
+                category(
+                    "1",
+                    "GENERAL",
+                    false,
+                    vec![
+                        channel("c1", "announcements", ChannelType::Text, false, false),
+                        channel("c2", "general", ChannelType::Text, true, false),
+                        channel("c3", "voice-chat", ChannelType::Voice, false, false),
+                    ],
+                ),
+                category(
+                    "1",
+                    "GAMING",
+                    true,
+                    vec![
+                        channel("c4", "lol", ChannelType::Text, false, false),
+                        channel("c5", "csgo", ChannelType::Voice, false, true),
+                    ],
+                ),
+                category(
+                    "2",
+                    "WORK",
+                    false,
+                    vec![
+                        channel("c6", "meetings", ChannelType::Text, false, false),
+                        channel("c7", "standup", ChannelType::Text, true, false),
+                        channel("c8", "conf-room", ChannelType::Voice, false, false),
+                    ],
+                ),
+                category(
+                    "2",
+                    "PROJECTS",
+                    false,
+                    vec![
+                        channel("c9", "backend", ChannelType::Text, false, false),
+                        channel("c10", "frontend", ChannelType::Text, true, false),
+                    ],
+                ),
+            ],
+            active_channel_id: None,
+        }
+    }
+
+    pub fn categories_for_clan(&self, clan_id: &str) -> Vec<&Category> {
+        self.categories
+            .iter()
+            .filter(|c| c.clan_id == clan_id)
+            .collect()
+    }
+
+    pub fn select_channel(&mut self, id: &str) {
+        self.active_channel_id = Some(id.to_string());
+        if let Some(ch) = self
+            .categories
+            .iter_mut()
+            .flat_map(|c| &mut c.channels)
+            .find(|ch| ch.id == id)
+        {
+            ch.unread = false;
+        }
+    }
+
+    pub fn toggle_category(&mut self, name: &str) {
+        if let Some(cat) = self.categories.iter_mut().find(|c| c.name == name) {
+            cat.collapsed = !cat.collapsed;
+        }
+    }
+
+    pub fn find_channel(&self, channel_id: &str) -> Option<&Channel> {
+        self.categories
+            .iter()
+            .flat_map(|category| &category.channels)
+            .find(|channel| channel.id == channel_id)
+    }
+}
+
 /// Persistent application settings — written to ~/.config/mezon/settings.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -49,14 +256,17 @@ impl Settings {
     pub async fn load() -> Result<Self> {
         let path = Self::path();
         if !path.exists() {
-            tracing::debug!("Settings file not found, using defaults: {}", path.display());
+            tracing::debug!(
+                "Settings file not found, using defaults: {}",
+                path.display()
+            );
             return Ok(Self::default());
         }
         let data = fs::read_to_string(&path)
             .await
             .with_context(|| format!("Failed to read settings from {}", path.display()))?;
-        let settings: Self = serde_json::from_str(&data)
-            .with_context(|| "Failed to parse settings.json")?;
+        let settings: Self =
+            serde_json::from_str(&data).with_context(|| "Failed to parse settings.json")?;
         tracing::debug!("Loaded settings from {}", path.display());
         Ok(settings)
     }
