@@ -39,12 +39,11 @@ fn register_windows() {
 
 #[cfg(target_os = "windows")]
 fn try_register_windows() -> anyhow::Result<()> {
-    use windows::core::PCWSTR;
     use windows::Win32::System::Registry::{
-        RegCreateKeyExW, RegSetValueExW, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE,
-        REG_SZ,
+        HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCreateKeyExW,
+        RegSetValueExW,
     };
-
+    use windows::core::PCWSTR;
     let exe_path = std::env::current_exe()?.to_string_lossy().to_string();
     let open_cmd = format!("\"{}\" \"%1\"", exe_path);
 
@@ -79,25 +78,31 @@ fn try_register_windows() -> anyhow::Result<()> {
 
         let mut hkey = windows::Win32::System::Registry::HKEY::default();
         unsafe {
-            RegCreateKeyExW(
+            let result = RegCreateKeyExW(
                 HKEY_CURRENT_USER,
                 PCWSTR(subkey_wide.as_ptr()),
-                0,
+                Some(0),
                 None,
                 REG_OPTION_NON_VOLATILE,
                 KEY_WRITE,
                 None,
                 &mut hkey,
                 None,
-            )?;
+            );
+            if result != windows::Win32::Foundation::NO_ERROR {
+                return Err(anyhow::anyhow!("RegCreateKeyExW failed"));
+            }
 
-            RegSetValueExW(
+            let result = RegSetValueExW(
                 hkey,
                 PCWSTR(value_name_wide.as_ptr()),
-                0,
+                Some(0),
                 REG_SZ,
                 Some(&data_bytes),
-            )?;
+            );
+            if result != windows::Win32::Foundation::NO_ERROR {
+                return Err(anyhow::anyhow!("Failed to set registry value"));
+            }
         }
     }
 

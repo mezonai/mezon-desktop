@@ -141,11 +141,9 @@ unsafe fn objc_block_noop() -> *mut objc::runtime::Object {
 
 #[cfg(target_os = "windows")]
 fn show_windows(n: &Notification) {
-    use windows::{
-        core::{Result as WinResult, HSTRING},
-        Data::Xml::Dom::XmlDocument,
-        UI::Notifications::{ToastNotification, ToastNotificationManager},
-    };
+    use windows::Data::Xml::Dom::XmlDocument;
+    use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+    use windows::core::HSTRING;
 
     let title = n.title.clone();
     let body = n.body.clone();
@@ -159,11 +157,9 @@ fn show_windows(n: &Notification) {
 
 #[cfg(target_os = "windows")]
 fn try_show_toast(title: &str, body: &str) -> windows::core::Result<()> {
-    use windows::{
-        core::HSTRING,
-        Data::Xml::Dom::XmlDocument,
-        UI::Notifications::{ToastNotification, ToastNotificationManager},
-    };
+    use windows::Data::Xml::Dom::XmlDocument;
+    use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+    use windows::core::HSTRING;
 
     // The XML template for a simple text toast.
     let xml_str = format!(
