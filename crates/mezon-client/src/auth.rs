@@ -305,8 +305,13 @@ fn parse_endpoint(endpoint: Option<&str>) -> (Option<String>, Option<u16>, Optio
         return (None, None, None);
     };
 
-    let parsed =
-        url::Url::parse(endpoint).or_else(|_| url::Url::parse(&format!("tcp://{endpoint}")));
+    let endpoint = if endpoint.contains("://") {
+        endpoint.to_owned()
+    } else {
+        format!("tcp://{endpoint}")
+    };
+
+    let parsed = url::Url::parse(&endpoint);
     let Ok(parsed) = parsed else {
         return (None, None, None);
     };

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use gpui::{
     div, prelude::*, App, Context, Entity, FontWeight, MouseButton, Window,
 };
-use mezon_client::{MezonClient, Session, TransportClient};
+use mezon_client::{MezonClient, Session, keychain};
 use mezon_store::{AuthState, LoginMethod};
 
 use crate::components::{
@@ -248,7 +248,10 @@ impl LoginView {
 
     /// Shared post-auth success handler: save to keychain and transition state.
     fn on_auth_success(session: Session, auth_state: &Entity<AuthState>, cx: &mut App) {
-        
+        if let Err(e) = keychain::save_session(&session) {
+            tracing::warn!("Failed to save session to keychain: {e}");
+        }
+
         tracing::info!("✓ Authentication successful");
         tracing::info!("  User ID: {}", session.user_id);
         tracing::info!("  Username: {}", session.username);
@@ -256,126 +259,8 @@ impl LoginView {
         tracing::info!("  API URL: {:?}", session.api_url);
         tracing::info!("  TCP URL: {:?}", session.tcp_url);
 
-        // Test transport connection
-        let session_clone = session.clone();
-        
-        // Spawn using GPUI executor - TransportClient handles tokio internally
-        cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-            tracing::info!("🔌 Testing transport connection...");
-            
-            // Parse TCP URL to extract host and port
-            let tcp_url = session_clone.tcp_url.as_ref();
-            if tcp_url.is_none() {
-                tracing::warn!("⚠️  No TCP URL in session, skipping transport test");
-                return;
-            }
-
-            let tcp_url_str = tcp_url.unwrap();
-            tracing::info!("  Connecting to: {}", tcp_url_str);
-
-            // Parse URL (format: "tcp://host:port" or just "host:port")
-            let url_parts: Vec<&str> = tcp_url_str
-                .trim_start_matches("tcp://")
-                .trim_start_matches("https://")
-                .trim_start_matches("http://")
-                .split(':')
-                .collect();
-
-            if url_parts.len() != 2 {
-                tracing::error!("⚠️  Invalid TCP URL format: {}", tcp_url_str);
-                return;
-            }
-
-            let host = url_parts[0];
-            // let port: u16 = match url_parts[1].parse() {
-            //     Ok(p) => p,
-            //     Err(e) => {
-            //         tracing::error!("⚠️  Invalid port in TCP URL: {} - {}", url_parts[1], e);
-            //         return;
-            //     }
-            // };
-            let port = 7349;
-
-            tracing::info!("  Host: {}", host);
-            tracing::info!("  Port: {}", port);
-            tracing::info!("  Token: {}...", &session_clone.token[..session_clone.token.len().min(20)]);
-
-            // Create transport client with dedicated tokio runtime
-            let transport = TransportClient::new(
-                session_clone.api_url.clone().unwrap_or_else(|| "https://api.mezon.ai".to_string())
-            );
-
-            // Connect
-            let token = session_clone.token.clone();
-            match transport
-                .connect(
-                    host,
-                    port,
-                    &token,
-                    move |cid, code, message| {
-                        tracing::info!("📨 Server message: cid={}, code={}, len={}", cid, code, message.len());
-                    },
-                    move |was_clean| {
-                        if was_clean {
-                            tracing::info!("🔌 Connection closed cleanly");
-                        } else {
-                            tracing::warn!("⚠️  Connection closed with error");
-                        }
-                    },
-                )
-                .await
-            {
-                Ok(_) => {
-                    tracing::info!("✓ Connected successfully!");
-
-                    // Test protocol-level ping before API requests.
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(250))
-                        .await;
-                    tracing::info!("🏓 Calling ping_roundtrip()...");
-                    match transport.ping_roundtrip().await {
-                        Ok(()) => {
-                            tracing::info!("✓ Ping round-trip successful");
-                        }
-                        Err(e) => {
-                            tracing::error!("✗ ping_roundtrip() failed: {}", e);
-                        }
-                    }
-
-                    // Test API call: get account
-                    tracing::info!("📡 Calling get_account()...");
-                    match transport.get_account().await {
-                        Ok(account) => {
-                            tracing::info!("✓ Got account data:");
-                            tracing::info!("  User ID: {}", account.user_id);
-                            tracing::info!("  Username: {}", account.username);
-                            tracing::info!("  Email: {:?}", account.email);
-                            tracing::info!("  Display name: {:?}", account.display_name);
-                        }
-                        Err(e) => {
-                            tracing::error!("✗ get_account() failed: {}", e);
-                        }
-                    }
-
-                    // Close connection
-                    tracing::info!("🔌 Closing transport connection...");
-                    if let Err(e) = transport.close().await {
-                        tracing::warn!("⚠️  Error closing transport: {}", e);
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("✗ Connection failed: {}", e);
-                }
-            }
-
-            // if let Err(e) = keychain::save_session(&session) {
-            //     tracing::warn!("Failed to save session to keychain: {e}");
-            // }
-        })
-        .detach();
-
         auth_state.update(cx, |state, cx| {
-            *state = AuthState::Authenticated(session.clone());
+            *state = AuthState::Authenticated(session);
             tracing::debug!("User authenticated, transitioning to main app view.");
             cx.notify();
         });

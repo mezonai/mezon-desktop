@@ -120,7 +120,7 @@ impl MezonTransport {
         adapter
             .connect(host, port, token)
             .await
-            .context("Failed to connect adapter")?;
+            .with_context(|| format!("Failed to connect adapter to {host}:{port}"))?;
 
         tracing::info!("✅ MezonTransport::connect() completed successfully");
         Ok(())
@@ -595,11 +595,15 @@ impl MezonTransport {
     }
 
     /// List channels in a clan.
-    pub async fn list_channel_descs(&self, _clan_id: &str) -> Result<Vec<ApiChannelDesc>> {
+    pub async fn list_channel_descs(&self, clan_id: &str) -> Result<Vec<ApiChannelDesc>> {
         let cid = self.generate_cid();
 
         let api_name = "ListChannelDescs";
-        let body = api::ListChannelDescsRequest::default().encode_to_vec();
+        let body = api::ListChannelDescsRequest {
+            clan_id: clan_id.parse().unwrap_or_default(),
+            ..Default::default()
+        }
+        .encode_to_vec();
 
         let (code, response) = self.send_api_request(cid, api_name, body).await?;
 

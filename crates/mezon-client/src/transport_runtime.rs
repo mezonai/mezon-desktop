@@ -28,6 +28,7 @@ fn runtime() -> &'static Runtime {
 /// This allows transport operations (TCP connections, async I/O) to work correctly
 /// when called from GPUI's smol-based executor, without requiring a tokio context
 /// at the call site.
+#[derive(Clone)]
 pub struct TransportClient {
     inner: std::sync::Arc<MezonTransport>,
 }
@@ -100,6 +101,31 @@ impl TransportClient {
             
         tracing::debug!("  Transport runtime task completed");
         result
+    }
+
+    /// List channel descriptions over the shared transport.
+    pub async fn list_channel_descs(&self, clan_id: &str) -> Result<Vec<crate::transport::ApiChannelDesc>> {
+        tracing::info!("📞 TransportClient::list_channel_descs() called");
+
+        let transport = self.inner.clone();
+        let clan_id = clan_id.to_string();
+
+        runtime()
+            .spawn(async move { transport.list_channel_descs(&clan_id).await })
+            .await
+            .expect("Transport task panicked")
+    }
+
+    /// List clan descriptions over the shared transport.
+    pub async fn list_clan_descs(&self) -> Result<Vec<crate::transport::ApiClanDesc>> {
+        tracing::info!("📞 TransportClient::list_clan_descs() called");
+
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.list_clan_descs().await })
+            .await
+            .expect("Transport task panicked")
     }
 
     /// Ping server and wait for pong.
