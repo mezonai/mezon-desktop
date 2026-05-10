@@ -7,3 +7,6 @@ edition = "2024"
 prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[build-dependencies]
+prost-build = "0.13"

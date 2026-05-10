@@ -1,0 +1,1441 @@
+// Copyright 2019 The Mezon Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/**
+ * The realtime protocol for Mezon server.
+ */
+syntax = "proto3";
+
+package mezon.realtime;
+
+import "google/protobuf/wrappers.proto";
+import "Api/api.proto";
+
+option go_package = "github.com/mezonai/mezon-protocol/v2/rtapi";
+
+option java_multiple_files = true;
+option java_outer_classname = "MezonRealtime";
+option java_package = "com.mezon.mezon.rtapi";
+
+option csharp_namespace = "Mezon.Net.Internal.Realtime";
+
+// An envelope for a realtime message.
+message Envelope {
+  int32 cid = 1;
+  oneof message {
+    // A response from a channel join operation.
+    Channel channel = 2;
+    // Join a realtime chat clan
+    ClanJoin clan_join = 3;
+    // Join a realtime chat channel.
+    ChannelJoin channel_join = 4;
+    // Leave a realtime chat channel.
+    ChannelLeave channel_leave = 5;
+    // An incoming message on a realtime chat channel.
+    api.ChannelMessage channel_message = 6;
+    // An acknowledgement received in response to sending a message on a chat channel.
+    ChannelMessageAck channel_message_ack = 7;
+    // Send a message to a realtime chat channel.
+    ChannelMessageSend channel_message_send = 8;
+    // Update a message previously sent to a realtime chat channel.
+    ChannelMessageUpdate channel_message_update = 9;
+    // Remove a message previously sent to a realtime chat channel.
+    ChannelMessageRemove channel_message_remove = 10;
+    // Presence update for a particular realtime chat channel.
+    ChannelPresenceEvent channel_presence_event = 11;
+    // Describes an error which occurred on the server.
+    Error error = 12;
+    // Notifications send by the server.
+    Notifications notifications = 13;
+    // RPC call or response.
+    api.Rpc rpc = 14;
+    // An incoming status snapshot for some set of users.
+    Status status = 15;
+    // Start following some set of users to receive their status updates.
+    StatusFollow status_follow = 16;
+    // An incoming status update.
+    StatusPresenceEvent status_presence_event = 17;
+    // Stop following some set of users to no longer receive their status updates.
+    StatusUnfollow status_unfollow = 18;
+    // Set the user's own status.
+    StatusUpdate status_update = 19;
+    // A data message delivered over a stream.
+    StreamData stream_data = 20;
+    // Presence update for a particular stream.
+    StreamPresenceEvent stream_presence_event = 21;
+    // Application-level heartbeat and connection check.
+    Ping ping = 22;
+    // Application-level heartbeat and connection check response.
+    Pong pong = 23;
+    // User typing event
+    MessageTypingEvent message_typing_event = 24;
+    // Last seen message event
+    LastSeenMessageEvent last_seen_message_event = 25;
+    // User send reactoin event
+    api.MessageReaction message_reaction_event = 26;
+    // user join voice channel
+    VoiceJoinedEvent voice_joined_event = 27;
+    // user leave voice channel
+    VoiceLeavedEvent voice_leaved_event = 28;
+    // voice channel start
+    VoiceStartedEvent voice_started_event = 29;
+    // voice channel end
+    VoiceEndedEvent voice_ended_event = 30;
+    // channel created event
+    ChannelCreatedEvent channel_created_event = 31;
+    // channel deleted event
+    ChannelDeletedEvent channel_deleted_event = 32;
+    // channel deleted event
+    ChannelUpdatedEvent channel_updated_event = 33;
+    // Last pin message event
+    LastPinMessageEvent last_pin_message_event = 34;
+    // Update custom status
+    CustomStatusEvent custom_status_event = 35;
+    // User is added to channel event
+    UserChannelAdded user_channel_added_event = 36;
+    // User is removed to channel event
+    UserChannelRemoved user_channel_removed_event = 37;
+    // User is removed to clan event
+    UserClanRemoved user_clan_removed_event = 38;
+    // Clan updated event
+    ClanUpdatedEvent clan_updated_event = 39;
+    // Clan profile updated event
+    ClanProfileUpdatedEvent clan_profile_updated_event = 40;
+    // Check duplicate clan name event
+    CheckNameExistedEvent check_name_existed_event = 41;
+    // User profile update event
+    UserProfileUpdatedEvent user_profile_updated_event = 42;
+    // user join clan
+    AddClanUserEvent add_clan_user_event = 43;
+    // clan event created
+    api.CreateEventRequest clan_event_created = 44;
+    // role assigned event
+    RoleAssignedEvent role_assign_event = 45;
+    // clan deleted event
+    ClanDeletedEvent clan_deleted_event = 46;
+    // Give a coffe event
+    api.GiveCoffeeEvent give_coffee_event = 47;
+    // sticker created event
+    StickerCreateEvent sticker_create_event = 48;
+    // sticker updated event
+    StickerUpdateEvent sticker_update_event = 49;
+    // sticker deleted event
+    StickerDeleteEvent sticker_delete_event = 50;
+    // role created event
+    RoleEvent role_event = 51;
+    // Event emoji
+    EventEmoji event_emoji = 52;
+    // user join streaming channel
+    StreamingJoinedEvent streaming_joined_event = 53;
+    // user leave streaming channel
+    StreamingLeavedEvent streaming_leaved_event = 54;
+    // streaming channel start
+    StreamingStartedEvent streaming_started_event = 55;
+    // streaming channel end
+    StreamingEndedEvent streaming_ended_event = 56;
+    // set permission of role/user in channel
+    PermissionSetEvent permission_set_event = 57;
+    // permission changed event
+    PermissionChangedEvent permission_changed_event = 58;
+    // token is sent event
+    api.TokenSentEvent token_sent_event = 59;
+    MessageButtonClicked message_button_clicked = 60;
+    // unmute channel event
+    UnmuteEvent unmute_event = 61;
+    // voice call
+    WebrtcSignalingFwd webrtc_signaling_fwd = 62;
+    // List activity event for each user
+    ListActivity list_activity = 63;
+    // dropdown box selected
+    DropdownBoxSelected dropdown_box_selected = 64;
+    // IncomingCallPush
+    IncomingCallPush incoming_call_push = 65;
+    // Sd topic event
+    SdTopicEvent sd_topic_event = 66;
+    // follower list
+    FollowEvent follow_event = 67;
+    // channel app event
+    ChannelAppEvent channel_app_event = 68;
+    // User custom status event
+    UserStatusEvent user_status_event = 69;
+    // remove friend
+    RemoveFriend remove_friend = 70;
+    // webhook event
+    api.Webhook webhook_event = 71;
+    // notification
+    api.NotificationUserChannel noti_user_channel = 72;
+    // join channel app
+    JoinChannelAppData join_channel_app_data = 73;
+    // channel canvas
+    ChannelCanvas canvas_event = 74;
+    // unpin message
+    UnpinMessageEvent unpin_message_event = 75;
+    // category event
+    CategoryEvent category_event = 76;
+    // handle join/leave channel voice
+    HandleParticipantMeetStateEvent handle_participant_meet_state_event = 77;
+    // delete acc
+    DeleteAccountEvent delete_account_event = 78;
+    // ephemeral message send
+    EphemeralMessageSend ephemeral_message_send = 79;
+    // block friend
+    BlockFriend block_friend = 80;
+    // voice reaction message
+    VoiceReactionSend voice_reaction_send = 81;
+    // Mark As Read
+    MarkAsRead mark_as_read = 82;
+    // list socket data
+    ListDataSocket list_data_socket = 83;
+    // quick menu event
+    QuickMenuDataEvent quick_menu_event = 84;
+    // unblock friend
+    UnblockFriend un_block_friend = 85;
+    // mezon meet participant event
+    MeetParticipantEvent meet_participant_event = 86;
+    // tranfer ownership event
+    TransferOwnershipEvent transfer_ownership_event = 87;
+    // Add friend event
+    AddFriend add_friend = 88;
+    // Ban channel user
+    BannedUserEvent ban_user_event = 89;
+    // Active archive thread
+    ActiveArchivedThread active_archived_thread = 90;
+    // Config Allow Anonymous
+    AllowAnonymousEvent allow_anonymous_event = 91;
+    // Message sending to another server for update localcache
+    ApiRequestEvent api_request_event = 92;
+    // Clan Created Event
+    ClanCreatedEvent clan_created_event = 93;
+    // Voice Agent Event
+    AIAgentEnabledEvent aiagent_enabled_event = 94;
+    // Ban Channel User Event
+    ListChannelUsersBannedEvent list_channel_users_banned_event = 95;
+    // Refresh session event
+    api.Session refresh_session_event = 96;
+  }
+}
+
+message ApiRequestEvent {
+  int32 api_index = 1;
+  string api_name = 2;
+  bytes body = 3;
+}
+
+message FollowEvent {
+}
+
+message BannedUserEvent {
+  repeated int64 user_ids = 1;
+  int32 action = 2;
+  int64 banner_id = 3;
+  int64 channel_id = 4;
+  int64 clan_id = 5;
+  int32 ban_time = 6;
+}
+
+message ListChannelUsersBannedEvent {
+  repeated int64 banned_user_ids = 1;
+}
+
+message ChannelCanvas {
+  // id
+  int64 id = 1;
+  // title
+  string title = 2;
+  // content
+  string content = 3;
+  // creator
+  int64 creator_id = 4;
+  // editor
+  int64 editor_id = 5;
+  // is default
+  bool is_default = 6;
+  // channel_id
+  int64 channel_id = 7;
+  // status
+  int32 status = 8;
+}
+
+message IncomingCallPush {
+  int64 receiver_id = 1;
+	string json_data = 3;
+  int64 channel_id = 4;
+  int64 caller_id = 5;
+}
+
+message WebrtcSignalingFwd {
+  int64 receiver_id = 1;
+	int32 data_type = 2;
+	string json_data = 3;
+  int64 channel_id = 4;
+  int64 caller_id = 5;
+}
+
+message SFUSignalingFwd {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  int32 data_type = 3;
+  string json_data = 4;
+  int64 user_id = 5;
+}
+
+message AddClanUserEvent {
+  //the clan id
+  int64 clan_id = 1;
+  // the user
+  UserProfileRedis user = 2;
+  // inviter
+  string invitor = 3;
+}
+
+// On role assign
+message RoleAssignedEvent {
+  // The clan of this role
+  string ClanId = 1;
+  // Role ID
+  int64 role_id = 2;
+  // UserIds Assigned
+  repeated int64 user_ids_assigned = 3;
+  // UserIds Removed
+  repeated int64 user_ids_removed = 4;
+}
+
+// Permission role channel
+message PermissionRoleChannel {
+  // Permission id
+  int64 permission_id = 1;
+  // active
+  bool active = 2;
+}
+
+// hashtagDM
+message HashtagDm {
+  // The channel id.
+  int64 channel_id = 1;
+  // The channel lable
+  string channel_label = 2;
+  // The clan of this channel
+  int64 clan_id = 3;
+  // The clan name
+  string clan_name = 4;
+  //
+  string meeting_code = 5;
+  //
+  int32 type = 6;
+  //
+  int32 channel_private = 7;
+  //
+  int64 parent_id = 8;
+}
+
+// Channel description record
+message ChannelDescription {
+  // The clan of this channel
+  int64 clan_id = 1;
+  // The channel this message belongs to.
+  int64 channel_id = 2;
+  // The channel type.
+  google.protobuf.Int32Value type = 3;
+  // The channel lable
+  string channel_label = 4;
+  // The channel private
+  int32 channel_private = 5;
+  // meeting code
+  string meeting_code = 6;
+  //
+  string clan_name = 7;
+  //
+  int64 parent_id = 8;
+  //
+  api.ChannelMessageHeader last_sent_message = 12;
+}
+
+message ClanEmoji {
+  int64 id  = 1;
+  // src url
+  string src = 2;
+  // shortname
+  string shortname = 3;
+  // category
+  string category = 4;
+  // creator id
+  int64 creator_id = 5;
+  // clan_id
+  int64 clan_id = 6;
+  // clan logo
+  string logo = 7;
+  // clan name
+  string clan_name = 8;
+}
+
+// A realtime chat channel.
+message Channel {
+  // The ID of the channel.
+  int64 id = 1;
+  // The users currently in the channel.
+  repeated UserPresence presences = 2;
+  // A reference to the current user's presence in the channel.
+  UserPresence self = 3;
+  // The name of the chat room, or an empty string if this message was not sent through a chat room.
+  string chanel_label = 4;
+  // The clan logo
+  string clan_logo = 5;
+  // The category name
+  string category_name = 6;
+}
+
+// Join operation for a realtime chat channel.
+message ClanJoin {
+  // The id of channel or group
+  int64 clan_id = 1;
+}
+
+// Join operation for a realtime chat channel.
+message ChannelJoin {
+  // The clan id
+  int64 clan_id = 1;
+  // The id of channel or group
+  int64 channel_id = 2;
+  // channel type
+  int32 channel_type = 3;
+  // is public
+  bool is_public = 4;
+}
+
+// Leave a realtime channel.
+message ChannelLeave {
+  // The clan id
+  int64 clan_id = 1;
+  // The ID of the channel to leave.
+  int64 channel_id = 2;
+  // channel type
+  int32 channel_type = 3;
+  // is public channel
+  bool is_public = 4;
+}
+
+// A receipt reply from a channel message send operation.
+message ChannelMessageAck {
+  // The channel the message was sent to.
+  int64 channel_id = 1;
+  // The unique ID assigned to the message.
+  int64 message_id = 2;
+  // The code representing a message type or category.
+  int32 code = 3;
+  // Username of the message sender.
+  string username = 4;
+  // The UNIX time (for gRPC clients) or ISO string (for REST clients) when the message was created.
+  uint32 create_time_seconds = 5;
+  // The UNIX time (for gRPC clients) or ISO string (for REST clients) when the message was last updated.
+  uint32 update_time_seconds = 6;
+  // True if the message was persisted to the channel's history, false otherwise.
+  google.protobuf.BoolValue persistent = 7;
+  // The clan logo
+  string clan_logo = 8;
+  // The category name
+  string category_name = 9;
+}
+
+message EphemeralMessageSend {
+  ChannelMessageSend message = 1;
+  repeated int64 receiver_ids = 2;
+}
+
+message QuickMenuDataEvent {
+  string menu_name = 1;
+  ChannelMessageSend message = 2;
+}
+
+message VoiceReactionSend {
+  // list emoji
+  repeated string emojis = 1;
+  // channel_id
+  int64 channel_id = 2;
+  // sender id
+  int64 sender_id = 3;
+  // type
+  int32 media_type = 4;
+}
+
+message MarkAsRead {
+  // channel id
+  int64 channel_id = 1;
+  // category_id
+  int64 category_id = 2;
+  // clan id
+  int64 clan_id = 3;
+}
+
+// Send a message to a realtime channel.
+message ChannelMessageSend {
+  // The clan that channel belong to.
+  int64 clan_id = 1;
+  // The channel to sent to.
+  int64 channel_id = 2;
+  // Message content.
+  string content = 3;
+  // Message mention
+  repeated api.MessageMention mentions = 4;
+  // Message attachment
+  repeated api.MessageAttachment attachments = 5;
+  // Message reference
+  repeated api.MessageRef references = 6;
+  // Mode
+  int32 mode = 7;
+  // anonymous message
+  bool anonymous_message = 8;
+  // mention everyone
+  bool mention_everyone = 9;
+  // clan avatar
+  string avatar = 10;
+  // is public
+  bool is_public = 11;
+  // code
+  int32 code = 12;
+  // topic id
+  int64 topic_id = 13;
+  // message id
+  int64 id = 14;
+}
+
+// Update a message previously sent to a realtime channel.
+message ChannelMessageUpdate {
+  // The clan that channel belong to.
+  int64 clan_id = 1;
+  // The channel the message was sent to.
+  int64 channel_id = 2;
+  // The ID assigned to the message to update.
+  int64 message_id = 3;
+  // New message content.
+  string content = 4;
+  // The mentions
+  repeated api.MessageMention mentions = 5;
+  // Message attachment
+  repeated api.MessageAttachment attachments = 6;
+  // The mode
+  int32 mode = 7;
+  // is public
+  bool is_public = 8;
+  // hide editted
+  bool hide_editted = 9;
+  // topic id
+  int64 topic_id = 10;
+  // update message topic
+  bool is_update_msg_topic = 11;
+}
+
+// Remove a message previously sent to a realtime channel.
+message ChannelMessageRemove {
+  // The clan that channel belong to.
+  int64 clan_id = 1;
+  // The channel the message was sent to.
+  int64 channel_id = 2;
+  // The ID assigned to the message to update.
+  int64 message_id = 3;
+  // The mode
+  int32 mode = 4;
+  // is public
+  bool is_public = 5;
+  // has_attachments.
+  bool has_attachment = 6;
+  //
+  int64 topic_id = 7;
+  // Message mention
+  bytes mentions = 8;
+  // Message reference
+  bytes references = 9;
+}
+
+// A set of joins and leaves on a particular channel.
+message ChannelPresenceEvent {
+  // The channel identifier this event is for.
+  int64 channel_id = 1;
+  // Presences joining the channel as part of this event, if any.
+  repeated UserPresence joins = 2;
+  // Presences leaving the channel as part of this event, if any.
+  repeated UserPresence leaves = 3;
+  // The clan logo
+  string clan_logo = 4;
+  // The category name
+  string category_name = 5;
+  // The mode
+  int32 mode = 6;
+}
+
+// A logical error which may occur on the server.
+message Error {
+  // The selection of possible error codes.
+  enum Code {
+    // An unexpected result from the server.
+    RUNTIME_EXCEPTION = 0;
+    // The server received a message which is not recognised.
+    UNRECOGNIZED_PAYLOAD = 1;
+    // A message was expected but contains no content.
+    MISSING_PAYLOAD = 2;
+    // Fields in the message have an invalid format.
+    BAD_INPUT = 3;
+    // The match id was not found.
+    MATCH_NOT_FOUND = 4;
+    // The match join was rejected.
+    MATCH_JOIN_REJECTED = 5;
+    // The runtime function does not exist on the server.
+    RUNTIME_FUNCTION_NOT_FOUND = 6;
+    // The runtime function executed with an error.
+    RUNTIME_FUNCTION_EXCEPTION = 7;
+  }
+
+  // The error code which should be one of "Error.Code" enums.
+  int32 code = 1;
+  // A message in English to help developers debug the response.
+  string message = 2;
+  // Additional error details which may be different for each response.
+  map<string, string> context = 3;
+}
+
+// A collection of zero or more notifications.
+message Notifications {
+  // Collection of notifications.
+  repeated api.Notification notifications = 1;
+}
+
+message AddFriend {
+  // user id
+  int64 user_id = 1;
+  // username
+  string username = 2;
+  // display name
+  string display_name = 3;
+  // avatar
+  string avatar = 4;
+}
+
+message RemoveFriend {
+  //
+  int64 user_id = 1;
+}
+
+message BlockFriend {
+  //
+  int64 user_id = 1;
+}
+
+message UnblockFriend {
+  //
+  int64 user_id = 1;
+  //
+  string username = 2;
+  //
+  string avatar = 3;
+  //
+  string display_name = 4;
+  //
+  string status = 5;
+  //
+  string user_status = 6;
+}
+
+// Application-level heartbeat and connection check.
+message Ping {}
+
+// Application-level heartbeat and connection check response.
+message Pong {}
+
+// A snapshot of statuses for some set of users.
+message Status {
+  // User statuses.
+  repeated UserPresence presences = 1;
+}
+
+// Start receiving status updates for some set of users.
+message StatusFollow {
+  // User IDs to follow.
+  repeated int64 user_ids = 1;
+  // Usernames to follow.
+  repeated string usernames = 2;
+}
+
+// A batch of status updates for a given user.
+message StatusPresenceEvent {
+  // New statuses for the user.
+  repeated UserPresence joins = 2;
+  // Previous statuses for the user.
+  repeated UserPresence leaves = 3;
+}
+
+// Last pin message by user
+message LastPinMessageEvent {
+  // The clan id
+  int64 clan_id = 1;
+  // The unique ID of this channel.
+  int64 channel_id = 2;
+  // The unique ID of this message.
+  int64 message_id = 3;
+  // The stream mode
+  int32 mode = 4;
+  // The UserID
+  int64 user_id = 5;
+  // The timestamp
+  uint32 timestamp_seconds = 6;
+  // operation
+  int32 operation = 7;
+  // is public
+  bool is_public = 8;
+  // avatar
+  string message_sender_avatar = 9;
+  // message sender id
+  string message_sender_id = 10;
+  // message sender username
+  string message_sender_username = 11;
+  // message content
+  string message_content = 12;
+  // attachment
+  string message_attachment = 13;
+  // create time
+  string message_created_time = 14;
+}
+
+// Last seen message by user
+message LastSeenMessageEvent {
+  // The clan id
+  int64 clan_id = 1;
+  // The unique ID of this channel.
+  int64 channel_id = 2;
+  // The unique ID of this message.
+  int64 message_id = 3;
+  // The stream mode
+  int32 mode = 4;
+  // The timestamp
+  uint32 timestamp_seconds = 5;
+  //
+  int32 badge_count = 6;
+}
+
+// Message typing event data
+message MessageTypingEvent {
+  // The clan id
+  int64 clan_id = 1;
+  /** The channel this message belongs to. */
+  int64 channel_id = 2;
+  /** Message sender, usually a user ID. */
+  int64 sender_id = 3;
+  // mode
+  int32 mode = 4;
+  // is public
+  bool is_public = 5;
+  // sender username
+  string sender_username = 6;
+  // sender display name
+  string sender_display_name = 7;
+  // topic id
+  int64 topic_id = 8;
+}
+
+// Voice Joined event
+message VoiceLeavedEvent {
+  // id voice
+  string id = 1;
+  // The unique identifier of the chat clan.
+  int64 clan_id = 2;
+  // voice channel name
+  int64 voice_channel_id = 3;
+  // voice user_id
+  int64 voice_user_id = 4;
+}
+
+// Voice Joined event
+message VoiceJoinedEvent {
+  /** The unique identifier of the chat clan. */
+  int64 clan_id = 1;
+  // The channel name
+  string clan_name = 2;
+  // id voice
+  string id = 3;
+  // voice participant
+  string participant = 4;
+  // user id
+  int64 user_id = 5;
+  // voice channel label
+  string voice_channel_label = 6;
+  // voice channel id
+  int64 voice_channel_id = 7;
+  // last screenshot
+  string last_screenshot = 8;
+}
+
+// Voice start event
+message VoiceStartedEvent {
+  // id voice
+  string id = 1;
+  // The unique identifier of the chat clan.
+  int64 clan_id = 2;
+  // voice channel name
+  int64 voice_channel_id = 3;
+}
+
+// Voice start event
+message VoiceEndedEvent {
+  // id voice
+  int64 id = 1;
+  // The unique identifier of the chat clan.
+  int64 clan_id = 2;
+  // voice channel name
+  string voice_channel_id = 3;
+}
+
+
+// Streaming Joined event
+message StreamingLeavedEvent {
+  // id
+  int64 id = 1;
+  // The unique identifier of the chat clan.
+  int64 clan_id = 2;
+  // streaming channel name
+  string streaming_channel_id = 3;
+  // streaming user_id
+  string streaming_user_id = 4;
+}
+
+// Streaming Joined event
+message StreamingJoinedEvent {
+  /** The unique identifier of the chat clan. */
+  int64 clan_id = 1;
+  // The channel name
+  string clan_name = 2;
+  // id streaming
+  int64 id = 3;
+  // streaming participant
+  string participant = 4;
+  // user id
+  int64 user_id = 5;
+  // streaming channel label
+  string streaming_channel_label = 6;
+  // streaming channel id
+  int64 streaming_channel_id = 7;
+}
+
+// Streaming start event
+message StreamingStartedEvent {
+  // clan id
+  int64 clan_id = 1;
+  // channel id
+  int64 channel_id = 2;
+  // stream url
+  string streaming_url = 3;
+  // status
+  bool is_streaming = 4;
+}
+
+// Streaming start event
+message StreamingEndedEvent {
+  // clan id
+  int64 clan_id = 1;
+  // channel id
+  int64 channel_id = 2;
+}
+
+message ChannelCreatedEvent {
+  // clan id
+  int64 clan_id = 1;
+  // category
+  int64 category_id = 2;
+  // creator
+  int64 creator_id = 3;
+  // parent id
+  int64 parent_id = 4;
+  // channel id
+  int64 channel_id = 5;
+  // channel label
+  string channel_label = 6;
+  // channel private
+  int32 channel_private = 7;
+  // channel type
+  int32 channel_type = 8;
+  // status
+  int32 status = 9;
+  // app id
+  int64 app_id = 10;
+  // clan_name
+  string clan_name = 11;
+  // channel avatar
+  string channel_avatar = 12;
+}
+
+message CategoryEvent {
+  // Category creator
+  int64 creator_id  = 1;
+  // the Clan that category belong to
+  int64 clan_id = 2;
+  // Category name
+  string category_name = 3;
+  //
+  int64 id = 4;
+  //
+  int32 status = 5;
+}
+
+message RoleEvent {
+  api.Role role = 1;
+  int32 status = 2;
+  int64 user_id = 3;
+  repeated int64 user_add_ids = 4;
+  repeated int64 user_remove_ids = 5;
+  repeated int64 active_permission_ids = 6;
+  repeated int64 remove_permission_ids = 7;
+}
+
+message ChannelDeletedEvent {
+  // clan id
+  int64 clan_id = 1;
+  // category
+  int64 category_id = 2;
+  // parent id
+  int64 parent_id = 3;
+  // channel id
+  int64 channel_id = 4;
+  // deletor
+  string deletor = 5;
+}
+
+message ClanDeletedEvent {
+  // clan id
+  int64 clan_id = 1;
+  // deletor
+  int64 deletor = 2;
+}
+
+message StickerCreateEvent {
+  // clan id
+  int64 clan_id = 1;
+  // source
+  string source = 2;
+  // shortname
+  string shortname = 3;
+  // category
+  string category = 4;
+  // creator_id
+  int64 creator_id = 5;
+  // sticker id
+  int64 sticker_id = 6;
+  // logo
+  string logo = 7;
+  // clan name
+  string clan_name = 8;
+}
+
+message StickerUpdateEvent {
+  // shortname
+  string shortname = 1;
+  // sticker id
+  int64 sticker_id = 2;
+  // user id update
+  int64 user_id = 3;
+}
+
+message StickerDeleteEvent {
+  // sticker id
+  int64 sticker_id = 2;
+  // user id delete
+  int64 user_id = 3;
+}
+
+message ChannelUpdatedEvent {
+  // clan id
+  int64 clan_id = 1;
+  // category
+  int64 category_id = 2;
+  // creator
+  int64 creator_id = 3;
+  // parent id
+  int64 parent_id = 4;
+  // channel id
+  int64 channel_id = 5;
+  // channel label
+  string channel_label = 6;
+  // channel type
+  int32 channel_type = 7;
+  // status
+  int32 status = 8;
+  // meeting code
+  string meeting_code = 9;
+  // error
+  bool is_error = 10;
+  // channel private
+  bool channel_private = 11;
+  // app url
+  int64 app_id = 12;
+  // e2ee
+  int32 e2ee = 13;
+  // topic
+  string topic = 14;
+  //
+  int32 age_restricted = 15;
+  //
+  int32 active = 16;
+   // count message unread
+  int32 count_mess_unread = 17;
+  // The users to add.
+  repeated int64 user_ids = 18;
+  // This is the role that needs to be added to the channel
+  repeated int64 role_ids = 19;
+  //
+  string channel_avatar = 20;
+}
+
+// Stop receiving status updates for some set of users.
+message StatusUnfollow {
+  // Users to unfollow.
+  repeated int64 user_ids = 1;
+}
+
+// Set the user's own status.
+message StatusUpdate {
+  // Status string to set, if not present the user will appear offline.
+  google.protobuf.StringValue status = 1;
+}
+
+// Represents identifying information for a stream.
+message Stream {
+  // Mode identifies the type of stream.
+  int32 mode = 1;
+  // Subject is the primary identifier, if any.
+  int64 channel_id = 2;
+  // Subcontext is a secondary identifier, if any.
+  int64 clan_id = 3;
+  // The label is an arbitrary identifying string, if the stream has one.
+  string label = 4;
+}
+
+// A data message delivered over a stream.
+message StreamData {
+  // The stream this data message relates to.
+  Stream stream = 1;
+  // The sender, if any.
+  UserPresence sender = 2;
+  // Arbitrary contents of the data message.
+  string data = 3;
+  // True if this data was delivered reliably, false otherwise.
+  bool reliable = 4;
+}
+
+// A set of joins and leaves on a particular stream.
+message StreamPresenceEvent {
+  // The stream this event relates to.
+  Stream stream = 1;
+  // Presences joining the stream as part of this event, if any.
+  repeated UserPresence joins = 2;
+  // Presences leaving the stream as part of this event, if any.
+  repeated UserPresence leaves = 3;
+}
+
+// A user session associated to a stream, usually through a list operation or a join/leave event.
+message UserPresence {
+  // The user this presence belongs to.
+  int64 user_id = 1;
+  // A unique session ID identifying the particular connection, because the user may have many.
+  int32 session_id = 2;
+  // The username for display purposes.
+  string username = 3;
+  // A user-set status message for this stream, if applicable.
+  google.protobuf.StringValue status = 4;
+  //
+  bool is_mobile = 5;
+  // user_status
+  string user_status = 6;
+}
+
+// A custom status presence
+message CustomStatusEvent {
+  // the clan id
+  int64 clan_id = 1;
+  // the user id
+  int64 user_id = 2;
+  // username
+  string username = 3;
+  // the status
+  string status = 4;
+  // time reset
+  int32 time_reset = 5;
+  // no clear
+  bool no_clear = 6;
+}
+
+// A event when user is added to channel
+message UserChannelAdded {
+  // the channel id
+  api.ChannelDescription channel_desc = 1;
+  // the user
+  repeated UserProfileRedis users = 2;
+  // the custom status
+  string status = 3;
+  // the clan id
+  int64 clan_id = 4;
+  //
+  UserProfileRedis caller = 5;
+  //
+  uint32 create_time_seconds = 6;
+  //
+  int32 active = 7;
+}
+
+//
+message UserChannelRemoved {
+  // the channel id
+  int64 channel_id = 1;
+  // the user
+  repeated int64 user_ids = 2;
+  // the channel type
+  int32 channel_type = 3;
+  // the clan_id
+  int64 clan_id = 4;
+  repeated int32 badge_counts = 6;
+}
+
+//
+message UserClanRemoved {
+  // the clan id
+  int64 clan_id = 1;
+  // the user
+  repeated int64 user_ids = 2;
+}
+
+message ClanCreatedEvent {
+  // clan id
+  int64 clan_id = 1;
+  // clan name
+  string clan_name = 2;
+  // logo
+  string logo = 3;
+  // creator id
+  int64 creator_id = 4;
+  // general channel id
+  int64 welcome_channel_id = 5;
+}
+
+// clan updated event
+message ClanUpdatedEvent {
+  // clan id
+  int64 clan_id = 1;
+  // clan name
+  string clan_name = 2;
+  // logo
+  string logo = 3;
+  // banner
+  string banner = 4;
+  // status
+  int32 status =5;
+  // is onboarding
+  bool is_onboarding = 6;
+  // welcome channel id
+  int64 welcome_channel_id = 7;
+  // onboarding_banner.
+  string onboarding_banner = 8;
+  // community banner
+  string community_banner = 9;
+	// is community
+  bool is_community = 10;
+	// about
+  string about = 11;
+	// description
+  string description = 12;
+  // prevent anonymous
+  bool prevent_anonymous = 13;
+}
+
+// clan profile updated event
+message ClanProfileUpdatedEvent {
+  // the user id
+  int64 user_id = 1;
+  // the clan_nick
+  string clan_nick = 2;
+  // the avatar
+  string clan_avatar = 3;
+  // the clan_id
+  int64 clan_id = 4;
+}
+
+// user profile updated event
+message UserProfileUpdatedEvent {
+  // the user id
+  int64 user_id = 1;
+  // the display_name
+  string display_name = 2;
+  // the avatar
+  string avatar = 3;
+  // the about_me
+  string about_me = 4;
+  // the channel_id
+  int64 channel_id = 5;
+  // the clan_id
+  int64 clan_id = 6;
+  // the encrypt_private_key
+  string encrypt_private_key = 7;
+}
+
+message ConfirmLinkMezonOTPData {
+	int32 type = 1;
+	string value = 2;
+}
+
+// A event when user is added to channel
+message UserProfileRedis {
+  // User IDs to follow.
+  int64 user_id = 1;
+  // Username to follow.
+  string username = 2;
+  // Avatar to follow.
+  string avatar = 3;
+  // Display name
+  string display_name = 4;
+  // user status
+  string user_status = 5;
+  // status online, offline, invisible, idle, do not disturb
+  string status = 6;
+  // isOnline
+  bool online = 7;
+  // FCM token
+  repeated FCMTokens fcm_tokens = 8;
+  // clans
+  repeated int64 joined_clans = 9;
+  // app token
+  string app_token = 10;
+  // create time
+  uint32 create_time_second = 11;
+  // app url
+  string app_url = 12;
+  // is bot
+  bool is_bot = 13;
+  // for call DM iOS
+  string voip_token = 14;
+}
+
+message FCMTokens {
+  // deviceID to follow.
+  string device_id = 1;
+  // tokenID to follow.
+  string token_id = 2;
+  // platform to follow.
+  string platform = 3;
+}
+
+message CheckNameExistedEvent {
+  // name
+  string name = 1;
+  // condition_id
+  int64 condition_id = 2;
+  // is exist
+  bool exist = 3;
+  // type check
+  int32 type = 4;
+  // clan id
+  int64 clan_id = 5;
+}
+
+// Notification setting record
+message NotificationChannelCategorySetting {
+  // Notification id
+  int64 id = 1;
+  //
+  string channel_category_label = 2;
+  // Notification title
+  int32 notification_setting_type = 3;
+  //
+  string channel_category_title = 4;
+  //
+  int32 action = 5;
+}
+
+message EventEmoji {
+  int64 id = 1;
+  int64 clan_id = 2;
+  string short_name = 3;
+  string source = 4;
+  string category = 5;
+  int32 action = 6;
+  int64 user_id = 7;
+  string logo = 8;
+  string clan_name = 9;
+  bool is_for_sale = 10;
+}
+
+message PermissionSetEvent {
+  string caller = 1;
+  int64 role_id = 2;
+  int64 user_id = 3;
+  int64 channel_id = 4;
+  repeated api.PermissionUpdate permission_updates = 5;
+}
+
+message PermissionChangedEvent {
+  int64 user_id = 1;
+  int64 channel_id = 2;
+  repeated api.PermissionUpdate add_permissions = 3;
+  repeated api.PermissionUpdate remove_permissions = 4;
+  repeated api.PermissionUpdate default_permissions = 5;
+}
+
+message MessageButtonClicked {
+  int64 message_id = 1;
+  int64 channel_id = 2;
+  string button_id = 3;
+  int64 sender_id = 4;
+  int64 user_id = 5;
+  string extra_data = 6;
+}
+
+message UnmuteEvent {
+  // channel id
+  int64 channel_id = 1;
+  // category id
+  int64 category_id = 2;
+  // clan id
+  int64 clan_id = 3;
+}
+
+message ListActivity {
+  repeated api.UserActivity acts = 1;
+}
+
+message DropdownBoxSelected {
+  int64 message_id = 1;
+  int64 channel_id = 2;
+  string selectbox_id = 3;
+  int64 sender_id = 4;
+  int64 user_id = 5;
+  repeated string values = 6;
+}
+
+message SdTopicEvent {
+  int64 id = 1;
+  int64 clan_id = 2;
+  int64 channel_id = 3;
+  int64 message_id = 4;
+  int64 user_id = 5;
+  api.ChannelMessageHeader last_sent_message = 6;
+  api.ChannelMessage message = 7;
+}
+
+message ChannelAppEvent {
+  int64 user_id = 1;
+  string username = 2;
+  int64 clan_id = 3;
+  int64 channel_id = 4;
+  int32 action = 5;
+}
+
+message UserStatusEvent {
+  int64 user_id = 1;
+  string custom_status = 2;
+}
+
+message JoinChannelAppData {
+  int64 user_id = 1;
+  string username = 2;
+  string hash = 3;
+}
+
+message UnpinMessageEvent {
+  int64 id = 1;
+  int64 message_id = 2;
+  int64 channel_id = 3;
+  int64 clan_id = 4;
+}
+
+message HandleParticipantMeetStateEvent {
+  // clan id
+  int64 clan_id = 1;
+  // channel id
+  int64 channel_id = 2;
+  // display name
+  string display_name = 3;
+  // state (0: join, 1: leave)
+  int32 state = 4;
+  // room name
+  string room_name = 5;
+}
+
+message DeleteAccountEvent {
+  // user id
+  int64 user_id = 1;
+}
+
+message ListDataSocket {
+  string api_name = 1;
+  api.ListChannelBadgeCountRequest list_channel_badge_count_req = 2;
+  api.ListChannelBadgeCountResponse channel_badge_count = 3;
+  api.ListClanBadgeCountResponse clan_badge_count = 4;
+  api.LogedDeviceList list_loged_device = 5;
+  api.ListUserOnlineRequest list_user_online_req = 6;
+  api.ListUserOnlineResponse user_online_list = 7;
+}
+
+message MeetParticipantEvent {
+  string username = 1;
+  string room_name = 2;
+  int64 channel_id = 3;
+  int64 clan_id = 4;
+  int32 action = 5;
+}
+
+message TransferOwnershipEvent {
+  int64 clan_id = 1;
+  int64 prev_owner = 2;
+  int64 curr_owner = 3;
+}
+
+message ActiveArchivedThread {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+}
+
+message AllowAnonymousEvent {
+  int64 clan_id = 1;
+  bool allow = 2;
+}
+
+message FcmDataPayload {
+	int32 command_type = 1;
+	int64 receiver_id = 2;
+	string title = 3;
+	bytes body = 4;
+	repeated int64 user_role_ids = 5;
+	repeated int64 user_sent_ids = 6;
+	int32 priority = 7;
+	api.ChannelMessage message = 8;
+	bool is_e2ee = 9;
+	bool is_dm = 10;
+  bool mention_here = 11;
+  repeated api.MessageMention mentions = 12;
+  repeated api.MessageRef references = 13;
+  repeated api.MessageAttachment attachments = 14;
+}
+
+message AIAgentEnabledEvent {
+  int64 clan_id = 1;
+	int64 channel_id = 2;
+	string room_name = 3;
+  bool enabled = 4;
+}
+
+message GotifyMessage {
+  uint32 id = 1;
+	int64 channel_id = 2;
+	string message = 3;
+	string title = 4;
+	string image = 5;
+	int32 priority = 6;
+	repeated string users = 7;
+	map<string, string> extras = 8;
+	uint32 app_id = 9;
+	int64 sender_id = 10;
+}
