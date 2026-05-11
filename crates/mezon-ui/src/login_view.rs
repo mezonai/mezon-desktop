@@ -251,8 +251,17 @@ impl LoginView {
         if let Err(e) = keychain::save_session(&session) {
             tracing::warn!("Failed to save session to keychain: {e}");
         }
+
+        tracing::info!("✓ Authentication successful");
+        tracing::info!("  User ID: {}", session.user_id);
+        tracing::info!("  Username: {}", session.username);
+        tracing::info!("  WS URL: {:?}", session.ws_url);
+        tracing::info!("  API URL: {:?}", session.api_url);
+        tracing::info!("  TCP URL: {:?}", session.tcp_url);
+
         auth_state.update(cx, |state, cx| {
             *state = AuthState::Authenticated(session);
+            tracing::debug!("User authenticated, transitioning to main app view.");
             cx.notify();
         });
     }

@@ -17,10 +17,12 @@ dirs = { workspace = true }
 tray-icon = { version = "0.19", features = ["common-controls-v6"] }
 image = { workspace = true }
 auto-launch = "0.5"
-windows.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows.workspace = true
 
 
 [target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
