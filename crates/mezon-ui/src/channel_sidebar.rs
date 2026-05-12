@@ -1,30 +1,30 @@
 use std::sync::Arc;
 
 use gpui::{App, ClickEvent, Context, Entity, SharedString, Window, div, prelude::*, px};
-use mezon_store::{ChannelsModel, ClansModel};
+use mezon_store::{ChannelList, ClanList};
 
 use crate::components::compositions::channel_row::ChannelRow;
 use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
 
 pub struct ChannelSidebar {
-    clans_model: Entity<ClansModel>,
-    channels_model: Entity<ChannelsModel>,
+    clan_list: Entity<ClanList>,
+    channel_list: Entity<ChannelList>,
     on_navigate: Option<Arc<dyn Fn(&str, &mut App) + Send + Sync>>,
 }
 
 impl ChannelSidebar {
     pub fn new(
-        clans_model: Entity<ClansModel>,
-        channels_model: Entity<ChannelsModel>,
+        clan_list: Entity<ClanList>,
+        channel_list: Entity<ChannelList>,
         on_navigate: Option<Arc<dyn Fn(&str, &mut App) + Send + Sync>>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let _ = cx.observe(&clans_model, |_, _, cx| cx.notify());
-        let _ = cx.observe(&channels_model, |_, _, cx| cx.notify());
+        let _ = cx.observe(&clan_list, |_, _, cx| cx.notify());
+        let _ = cx.observe(&channel_list, |_, _, cx| cx.notify());
         Self {
-            clans_model,
-            channels_model,
+            clan_list,
+            channel_list,
             on_navigate,
         }
     }
@@ -33,8 +33,8 @@ impl ChannelSidebar {
 impl Render for ChannelSidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::dark();
-        let clans = self.clans_model.read(cx);
-        let channels = self.channels_model.read(cx);
+        let clans = self.clan_list.read(cx);
+        let channels = self.channel_list.read(cx);
 
         let active_clan_name = clans
             .active_clan_id
@@ -53,7 +53,7 @@ impl Render for ChannelSidebar {
             .collect();
 
         let active_channel_id = channels.active_channel_id.clone();
-        let channels_handle = self.channels_model.clone();
+        let list_handle = self.channel_list.clone();
         let theme_clone = theme.clone();
         let on_navigate = self.on_navigate.clone();
         let active_clan_id_for_nav = clans.active_clan_id.clone();
@@ -87,7 +87,7 @@ impl Render for ChannelSidebar {
                     .flex_1()
                     .children(categories.into_iter().map(
                         move |(cat_name, is_collapsed, cat_channels)| {
-                            let handle = channels_handle.clone();
+                            let handle = list_handle.clone();
                             let cat_name2 = cat_name.clone();
                             let nav = on_navigate.clone();
                             let clan_id_for_nav = active_clan_id_for_nav.clone();
@@ -135,7 +135,7 @@ impl Render for ChannelSidebar {
                                         .iter()
                                         .map(|ch| {
                                             let ch_id = ch.id.clone();
-                                            let row_handle = channels_handle.clone();
+                                            let row_handle = list_handle.clone();
                                             let nav_inner = nav.clone();
                                             let clan_id_inner = clan_id_for_nav.clone();
 

@@ -1,29 +1,25 @@
 use gpui::{Context, Entity, FontWeight, Window, div, prelude::*, px};
-use mezon_store::{AuthState, ChannelsModel, ClansModel};
+use mezon_store::{AuthState, ChannelList};
 
 use crate::theme::Theme;
 
 pub struct MainLayout {
     auth_state: Entity<AuthState>,
-    channels_model: Entity<ChannelsModel>,
+    channel_list: Entity<ChannelList>,
 }
 
 impl MainLayout {
     pub fn new(
         auth_state: Entity<AuthState>,
-        channels_model: Entity<ChannelsModel>,
+        channel_list: Entity<ChannelList>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let _clans = cx.new(|_cx| ClansModel::with_dummy_data());
-        // let clan_sidebar = cx.new(|cx| ClanSidebar::new(clans.clone(), cx));
-        // let channel_sidebar = cx.new(|cx| ChannelSidebar::new(clans, channels_model.clone(), cx));
-
-        // Observe the channels model so we re-render when channel selection changes
-        let _ = cx.observe(&channels_model, |_, _, cx| cx.notify());
+        // Observe the channel list so we re-render when channel selection changes
+        let _ = cx.observe(&channel_list, |_, _, cx| cx.notify());
 
         Self {
             auth_state,
-            channels_model,
+            channel_list,
         }
     }
 }
@@ -73,7 +69,7 @@ impl Render for MainLayout {
                             .child(
                                 // Get channel info
                                 {
-                                    let channels = self.channels_model.read(cx);
+                                    let channels = self.channel_list.read(cx);
                                     channels
                                         .active_channel_id
                                         .as_ref()

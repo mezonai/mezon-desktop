@@ -1,5 +1,5 @@
 use gpui::{App, ClickEvent, Context, Entity, SharedString, Window, div, prelude::*, px};
-use mezon_store::ClansModel;
+use mezon_store::ClanList;
 
 use gpui_component::Sizable;
 
@@ -7,21 +7,21 @@ use crate::components::primitives::{Avatar, Badge, Icon, IconName, Size};
 use crate::theme::Theme;
 
 pub struct ClanSidebar {
-    model: Entity<ClansModel>,
+    list: Entity<ClanList>,
 }
 
 impl ClanSidebar {
-    pub fn new(model: Entity<ClansModel>, cx: &mut Context<Self>) -> Self {
-        let _ = cx.observe(&model, |_, _, cx| cx.notify());
-        Self { model }
+    pub fn new(list: Entity<ClanList>, cx: &mut Context<Self>) -> Self {
+        let _ = cx.observe(&list, |_, _, cx| cx.notify());
+        Self { list }
     }
 }
 
 impl Render for ClanSidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::dark();
-        let model_handle = self.model.clone();
-        let active_id = self.model.read(cx).active_clan_id.clone();
+        let list_handle = self.list.clone();
+        let active_id = self.list.read(cx).active_clan_id.clone();
 
         div()
             .flex()
@@ -44,11 +44,11 @@ impl Render for ClanSidebar {
             )
             .child(div().w_full().h_1().bg(theme.border).my_1())
             .child(div().flex().flex_col().gap_3().flex_1().children(
-                self.model.read(cx).clans.iter().map(|clan| {
+                self.list.read(cx).clans.iter().map(|clan| {
                     let is_active = Some(&clan.id) == active_id.as_ref();
                     let unread = clan.unread_count;
                     let clan_id = clan.id.clone();
-                    let model = model_handle.clone();
+                    let list = list_handle.clone();
 
                     let mut clan_div = div()
                         .id(SharedString::from(format!("clan-{}", clan.id)))
@@ -69,7 +69,7 @@ impl Render for ClanSidebar {
 
                     clan_div.interactivity().on_click(
                         move |_event: &ClickEvent, _window: &mut Window, cx: &mut App| {
-                            model.update(cx, |m, cx| {
+                            list.update(cx, |m, cx| {
                                 m.select_clan(&clan_id);
                                 cx.notify();
                             });

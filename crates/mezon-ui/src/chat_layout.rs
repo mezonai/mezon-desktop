@@ -2,23 +2,19 @@ use std::sync::Arc;
 
 use gpui::{App, Context, Entity, FontWeight, Window, div, prelude::*, px};
 use mezon_client::AppApi;
-use mezon_store::{AuthState, ChannelsModel, Clan, ClansModel};
+use mezon_store::{AuthState, ChannelList, Clan, ClanList};
 
 use crate::components::compositions::user_info_bar::UserInfoBar;
 use crate::router::{Route, Router};
 use crate::theme::Theme;
 use crate::{ChannelSidebar, ClanSidebar};
 
-#[allow(dead_code)]
 pub struct ChatLayout {
     router: Router,
-    auth_state: Entity<AuthState>,
-    clans_model: Entity<ClansModel>,
-    channels_model: Entity<ChannelsModel>,
+    channel_list: Entity<ChannelList>,
     clan_sidebar: Entity<ClanSidebar>,
     channel_sidebar: Entity<ChannelSidebar>,
     user_info_bar: UserInfoBar,
-    api: Arc<AppApi>,
 }
 
 impl ChatLayout {
@@ -29,8 +25,8 @@ impl ChatLayout {
         navigate: Arc<dyn Fn(&str, &mut App) + Send + Sync>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let clans_model = cx.new(|_| ClansModel::with_dummy_data());
-        let channels_model = cx.new(|_| ChannelsModel::with_dummy_data());
+        let clan_list = cx.new(|_| ClanList::new());
+        let channel_list = cx.new(|_| ChannelList::new());
 
         let on_navigate: Option<Arc<dyn Fn(&str, &mut App) + Send + Sync>> = {
             let nav = navigate.clone();
@@ -42,9 +38,9 @@ impl ChatLayout {
             Some(Arc::new(move |path, cx| nav(path, cx)))
         };
 
-        let clan_sidebar = cx.new(|cx| ClanSidebar::new(clans_model.clone(), cx));
+        let clan_sidebar = cx.new(|cx| ClanSidebar::new(clan_list.clone(), cx));
         let channel_sidebar = cx.new(|cx| {
-            ChannelSidebar::new(clans_model.clone(), channels_model.clone(), on_navigate, cx)
+            ChannelSidebar::new(clan_list.clone(), channel_list.clone(), on_navigate, cx)
         });
 
         let user_info_bar = UserInfoBar::new(
@@ -56,12 +52,12 @@ impl ChatLayout {
         );
 
         let _ = cx.observe(&auth_state, |_, _, cx| cx.notify());
-        let _ = cx.observe(&channels_model, |_, _, cx| cx.notify());
-        let _ = cx.observe(&clans_model, |_, _, cx| cx.notify());
+        let _ = cx.observe(&channel_list, |_, _, cx| cx.notify());
+        let _ = cx.observe(&clan_list, |_, _, cx| cx.notify());
 
         // Investigation: fetch real clan list and log it
         let api_clone = api.clone();
-        let clans_model_clone = clans_model.clone();
+        let clan_list_clone = clan_list.clone();
         cx.spawn(async move |_, cx| {
             // Wait for connection to be fully ready (TCP open + handshake)
             loop {
@@ -104,11 +100,11 @@ impl ChatLayout {
                             })
                             .collect();
 
-                        let _ = clans_model_clone.update(cx, |model, cx| {
+                        let _ = clan_list_clone.update(cx, |model, cx| {
                             model.update_clans(store_clans);
                             cx.notify();
                         });
-                        tracing::info!("✅ Updated ClansModel with real data");
+                        tracing::info!("✅ Updated ClanList with real data");
                     }
                 }
                 Err(e) => {
@@ -120,13 +116,10 @@ impl ChatLayout {
 
         Self {
             router,
-            auth_state,
-            clans_model,
-            channels_model,
+            channel_list,
             clan_sidebar,
             channel_sidebar,
             user_info_bar,
-            api,
         }
     }
 }
@@ -134,7 +127,7 @@ impl ChatLayout {
 impl Render for ChatLayout {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::dark();
-        let channels = self.channels_model.read(cx);
+        let channels = self.channel_list.read(cx);
 
         let active_channel_name = channels
             .active_channel_id
