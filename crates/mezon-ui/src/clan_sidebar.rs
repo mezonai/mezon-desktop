@@ -101,10 +101,6 @@ impl Render for ClanSidebar {
                     clan_div
                 }),
             ))
-            .child(
-                Icon::new(IconName::Plus)
-                    .size(px(24.0))
-                    .text_color(theme.text_secondary),
-            )
+            .child(Icon::new(IconName::Plus))
     }
 }

@@ -79,7 +79,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
         }
     }));
 
-    application().run(move |cx: &mut App| {
+    application().with_assets(gpui_component_assets::Assets).run(move |cx: &mut App| {
         tracing::debug!("App started");
         init_ui(cx);
 
