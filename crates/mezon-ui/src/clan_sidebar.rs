@@ -1,7 +1,9 @@
 use gpui::{App, ClickEvent, Context, Entity, SharedString, Window, div, prelude::*, px};
 use mezon_store::ClansModel;
 
-use crate::components::primitives::{Avatar, AvatarSize, Badge, Icon, IconName};
+use gpui_component::Sizable;
+
+use crate::components::primitives::{Avatar, Badge, Icon, IconName, Size};
 use crate::theme::Theme;
 
 pub struct ClanSidebar {
@@ -34,11 +36,11 @@ impl Render for ClanSidebar {
             .gap_1()
             .flex_1()
             .child(
-                div().flex().items_center().justify_center().child(
-                    Avatar::new("U".to_string())
-                        .size(AvatarSize::Sm)
-                        .render(&theme),
-                ),
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(Avatar::new().name("U").with_size(Size::Small)),
             )
             .child(div().w_full().h_1().bg(theme.border).my_1())
             .child(div().flex().flex_col().gap_3().flex_1().children(
@@ -74,33 +76,35 @@ impl Render for ClanSidebar {
                         },
                     );
 
-                    let clan_div =
-                        clan_div.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .relative()
-                                .child(
-                                    Avatar::new(clan.initials.clone())
-                                        .size(AvatarSize::Sm)
-                                        .render(&theme),
+                    let clan_div = clan_div.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .relative()
+                            .child(
+                                Avatar::new()
+                                    .name(clan.initials.clone())
+                                    .with_size(Size::Small),
+                            )
+                            .when(unread > 0, |el| {
+                                el.child(
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .right_0()
+                                        .child(Badge::new().count(unread as usize)),
                                 )
-                                .when(unread > 0, |el| {
-                                    el.child(div().absolute().top_0().right_0().child(
-                                        Badge::new(unread).render(&theme).into_any_element(),
-                                    ))
-                                }),
-                        );
+                            }),
+                    );
 
                     clan_div
                 }),
             ))
             .child(
-                Icon::new(IconName::Add)
-                    .size(24.0)
-                    .color(theme.text_secondary)
-                    .render(&theme),
+                Icon::new(IconName::Plus)
+                    .size(px(24.0))
+                    .text_color(theme.text_secondary),
             )
     }
 }

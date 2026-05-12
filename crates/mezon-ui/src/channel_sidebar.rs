@@ -1,4 +1,6 @@
-use gpui::{App, ClickEvent, Context, Entity, SharedString, Window, div, prelude::*};
+use std::sync::Arc;
+
+use gpui::{App, ClickEvent, Context, Entity, SharedString, Window, div, prelude::*, px};
 use mezon_store::{ChannelsModel, ClansModel};
 
 use crate::components::compositions::channel_row::ChannelRow;
@@ -8,12 +10,14 @@ use crate::theme::Theme;
 pub struct ChannelSidebar {
     clans_model: Entity<ClansModel>,
     channels_model: Entity<ChannelsModel>,
+    on_navigate: Option<Arc<dyn Fn(&str, &mut App) + Send + Sync>>,
 }
 
 impl ChannelSidebar {
     pub fn new(
         clans_model: Entity<ClansModel>,
         channels_model: Entity<ChannelsModel>,
+        on_navigate: Option<Arc<dyn Fn(&str, &mut App) + Send + Sync>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let _ = cx.observe(&clans_model, |_, _, cx| cx.notify());
@@ -21,6 +25,7 @@ impl ChannelSidebar {
         Self {
             clans_model,
             channels_model,
+            on_navigate,
         }
     }
 }
@@ -50,6 +55,8 @@ impl Render for ChannelSidebar {
         let active_channel_id = channels.active_channel_id.clone();
         let channels_handle = self.channels_model.clone();
         let theme_clone = theme.clone();
+        let on_navigate = self.on_navigate.clone();
+        let active_clan_id_for_nav = clans.active_clan_id.clone();
 
         div()
             .flex()
@@ -82,6 +89,8 @@ impl Render for ChannelSidebar {
                         move |(cat_name, is_collapsed, cat_channels)| {
                             let handle = channels_handle.clone();
                             let cat_name2 = cat_name.clone();
+                            let nav = on_navigate.clone();
+                            let clan_id_for_nav = active_clan_id_for_nav.clone();
 
                             let mut header = div()
                                 .id(SharedString::from(format!("cat-{}", cat_name)))
@@ -101,9 +110,8 @@ impl Render for ChannelSidebar {
                                     } else {
                                         IconName::ArrowDown
                                     })
-                                    .size(12.0)
-                                    .color(theme_clone.text_muted)
-                                    .render(&theme_clone),
+                                    .size(px(12.0))
+                                    .text_color(theme_clone.text_muted),
                                 )
                                 .child(div().ml_1().child(cat_name.clone()));
 
@@ -128,6 +136,8 @@ impl Render for ChannelSidebar {
                                         .map(|ch| {
                                             let ch_id = ch.id.clone();
                                             let row_handle = channels_handle.clone();
+                                            let nav_inner = nav.clone();
+                                            let clan_id_inner = clan_id_for_nav.clone();
 
                                             let mut row = div()
                                                 .id(SharedString::from(format!("ch-{}", ch.id)))
@@ -152,6 +162,15 @@ impl Render for ChannelSidebar {
                                                         m.select_channel(&ch_id);
                                                         cx.notify();
                                                     });
+                                                    if let Some(ref cb) = nav_inner {
+                                                        if let Some(ref cid) = clan_id_inner {
+                                                            let path = format!(
+                                                                "/chat/clans/{}/channels/{}",
+                                                                cid, ch_id
+                                                            );
+                                                            cb(&path, cx);
+                                                        }
+                                                    }
                                                 },
                                             );
 

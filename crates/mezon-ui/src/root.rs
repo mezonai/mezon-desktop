@@ -1,25 +1,25 @@
 use std::sync::Arc;
 
-use gpui::{Context, Entity, FontWeight, Window, div, prelude::*};
+use gpui::{App, ClickEvent, Context, Entity, FontWeight, Window, div, prelude::*};
 use mezon_client::{AppApi, MezonClient};
 use mezon_store::AuthState;
 
-use crate::base_view::BaseView;
+use crate::chat_layout::ChatLayout;
+use crate::components::primitives::{Button, Icon, IconName};
 use crate::login_view::LoginView;
-use crate::main_layout::MainLayout;
+use crate::router::{Route, Router};
+use crate::settings_screen::SettingsScreen;
 use crate::theme::Theme;
 use crate::title_bar::TitleBar;
 
-/// RootView is the top-level GPUI view inside `gpui_component::Root`.
-///
-/// Owns the TitleBar and switches content area based on [`AuthState`]:
-///   - `NotAuthenticated` / `OtpRequested` -> `LoginView`
-///   - `Authenticated`                     -> `BaseView`
 pub struct RootView {
     title_bar: Entity<TitleBar>,
     auth_state: Entity<AuthState>,
     login_view: Entity<LoginView>,
-    base_view: Entity<BaseView>,
+    router: Router,
+    chat_layout: Entity<ChatLayout>,
+    settings_screen: SettingsScreen,
+    navigate: Arc<dyn Fn(&str, &mut App) + Send + Sync>,
 }
 
 impl RootView {
@@ -34,13 +34,32 @@ impl RootView {
             let auth_state = auth_state.clone();
             move |cx| LoginView::new(client, auth_state, cx)
         });
-        let base_view = cx.new(BaseView::new);
+
+        let router = Router::new();
+        let root_entity = cx.entity().clone();
+
+        let navigate: Arc<dyn Fn(&str, &mut App) + Send + Sync> =
+            Arc::new(move |path: &str, cx: &mut App| {
+                root_entity.update(cx, |this, cx| {
+                    this.router.navigate(path);
+                    cx.notify();
+                });
+            });
+
+        let router_for_chat = router.clone();
+        let chat_layout =
+            cx.new(|cx| ChatLayout::new(router_for_chat, auth_state.clone(), navigate.clone(), cx));
+
+        let settings_screen = SettingsScreen::new(navigate.clone());
 
         Self {
             title_bar,
             auth_state,
             login_view,
-            base_view,
+            router,
+            chat_layout,
+            settings_screen,
+            navigate,
         }
     }
 }
@@ -55,7 +74,14 @@ impl Render for RootView {
                 self.login_view.clone().into_any_element()
             }
             AuthState::AwaitingCallback => render_awaiting_callback(&theme),
-            AuthState::Authenticated(_) => self.base_view.clone().into_any_element(),
+            AuthState::Authenticated(_) => {
+                let route = self.router.route();
+                match route {
+                    Route::Settings => self.settings_screen.render(&theme).into_any_element(),
+                    Route::NotFound { .. } => render_not_found(&theme, &self.navigate),
+                    _ => self.chat_layout.clone().into_any_element(),
+                }
+            }
         };
 
         div()
@@ -91,5 +117,46 @@ fn render_awaiting_callback(theme: &Theme) -> gpui::AnyElement {
                 .text_color(theme.text_secondary)
                 .child("Connecting - complete sign-in in your browser..."),
         )
+        .into_any_element()
+}
+
+fn render_not_found(
+    theme: &Theme,
+    navigate: &Arc<dyn Fn(&str, &mut App) + Send + Sync>,
+) -> gpui::AnyElement {
+    let navigate = navigate.clone();
+    let mut back_btn = Button::new("back-to-chat").label("Back to Chat");
+    back_btn
+        .interactivity()
+        .on_click(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            navigate("/chat", cx);
+        });
+
+    div()
+        .flex()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .flex_col()
+        .gap_4()
+        .child(
+            Icon::new(IconName::TriangleAlert)
+                .size_8()
+                .text_color(theme.text_muted),
+        )
+        .child(
+            div()
+                .text_xl()
+                .font_weight(FontWeight::BOLD)
+                .text_color(theme.text_primary)
+                .child("Page Not Found"),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme.text_secondary)
+                .child("This path is not registered in the local Mezon router."),
+        )
+        .child(back_btn)
         .into_any_element()
 }

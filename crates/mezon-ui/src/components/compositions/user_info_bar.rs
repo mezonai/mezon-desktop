@@ -1,24 +1,32 @@
-use gpui::div;
-use gpui::prelude::*;
+use std::sync::Arc;
 
-use crate::components::primitives::{Avatar, AvatarSize, Icon, IconName, PresenceStatus};
+use gpui::{App, ClickEvent, Window, div, prelude::*, px};
+
+use gpui_component::Sizable;
+
+use crate::components::primitives::{Avatar, Icon, IconName, Size};
 use crate::theme::Theme;
 
 pub struct UserInfoBar {
     username: String,
-    presence: PresenceStatus,
+    presence: String,
+    on_settings: Option<Arc<dyn Fn(&str, &mut App) + Send + Sync>>,
 }
 
 impl UserInfoBar {
-    pub fn new(username: impl Into<String>) -> Self {
+    pub fn new(
+        username: impl Into<String>,
+        on_settings: Option<Arc<dyn Fn(&str, &mut App) + Send + Sync>>,
+    ) -> Self {
         Self {
             username: username.into(),
-            presence: PresenceStatus::Online,
+            presence: "Online".to_string(),
+            on_settings,
         }
     }
 
-    pub fn presence(mut self, status: PresenceStatus) -> Self {
-        self.presence = status;
+    pub fn presence(mut self, status: impl Into<String>) -> Self {
+        self.presence = status.into();
         self
     }
 
@@ -31,12 +39,26 @@ impl UserInfoBar {
             .to_string()
             .to_uppercase();
 
-        let presence_label = match self.presence {
-            PresenceStatus::Online => "Online",
-            PresenceStatus::Idle => "Idle",
-            PresenceStatus::Dnd => "Do Not Disturb",
-            PresenceStatus::Offline => "Offline",
+        let presence_color = match self.presence.as_str() {
+            "Online" => theme.status_online,
+            "Idle" => theme.status_idle,
+            "Dnd" => theme.status_dnd,
+            _ => theme.status_offline,
         };
+
+        let on_settings = self.on_settings.clone();
+        let mut settings_btn = div().cursor_pointer().child(
+            Icon::new(IconName::Settings)
+                .size(px(16.0))
+                .text_color(theme.text_muted),
+        );
+        settings_btn.interactivity().on_click(
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                if let Some(ref cb) = on_settings {
+                    cb("/settings", cx);
+                }
+            },
+        );
 
         div()
             .flex()
@@ -48,10 +70,18 @@ impl UserInfoBar {
             .gap_2()
             .bg(theme.bg_primary)
             .child(
-                Avatar::new(initials)
-                    .size(AvatarSize::Sm)
-                    .presence(self.presence)
-                    .render(theme),
+                div()
+                    .relative()
+                    .child(Avatar::new().name(initials).with_size(Size::Small))
+                    .child(
+                        div()
+                            .absolute()
+                            .bottom_0()
+                            .right_0()
+                            .size_2()
+                            .rounded_full()
+                            .bg(presence_color),
+                    ),
             )
             .child(
                 div()
@@ -67,27 +97,20 @@ impl UserInfoBar {
                         div()
                             .text_xs()
                             .text_color(theme.text_muted)
-                            .child(presence_label),
+                            .child(self.presence.clone()),
                     ),
             )
             .child(div().flex_1())
             .child(
                 Icon::new(IconName::Mic)
-                    .size(16.0)
-                    .color(theme.text_muted)
-                    .render(theme),
+                    .size(px(16.0))
+                    .text_color(theme.text_muted),
             )
             .child(
                 Icon::new(IconName::Deafen)
-                    .size(16.0)
-                    .color(theme.text_muted)
-                    .render(theme),
+                    .size(px(16.0))
+                    .text_color(theme.text_muted),
             )
-            .child(
-                Icon::new(IconName::Settings)
-                    .size(16.0)
-                    .color(theme.text_muted)
-                    .render(theme),
-            )
+            .child(settings_btn)
     }
 }

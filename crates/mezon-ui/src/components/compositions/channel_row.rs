@@ -1,4 +1,4 @@
-use gpui::{div, prelude::*};
+use gpui::{div, prelude::*, px};
 use mezon_store::ChannelType;
 
 use crate::components::primitives::Icon;
@@ -55,9 +55,8 @@ impl ChannelRow {
             .child(match self.channel_type {
                 ChannelType::Text => div().size_4().child("#").into_any_element(),
                 ChannelType::Voice => Icon::new(IconName::Speaker)
-                    .size(16.0)
-                    .color(theme.text_secondary)
-                    .render(theme)
+                    .size(px(16.0))
+                    .text_color(theme.text_secondary)
                     .into_any_element(),
             })
             .child(div().flex_1().mx_1().text_sm().child(self.name.clone()))

@@ -1,17 +1,11 @@
 use gpui::{Context, Entity, FontWeight, Window, div, prelude::*, px};
-use mezon_store::{AuthState, ChannelType, ChannelsModel, ClansModel};
+use mezon_store::{AuthState, ChannelsModel, ClansModel};
 
-use crate::channel_sidebar::ChannelSidebar;
-use crate::clan_sidebar::ClanSidebar;
-use crate::components::compositions::user_info_bar::UserInfoBar;
-use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
 
 pub struct MainLayout {
     auth_state: Entity<AuthState>,
     channels_model: Entity<ChannelsModel>,
-    clan_sidebar: Entity<ClanSidebar>,
-    channel_sidebar: Entity<ChannelSidebar>,
 }
 
 impl MainLayout {
@@ -20,9 +14,9 @@ impl MainLayout {
         channels_model: Entity<ChannelsModel>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let clans = cx.new(|_cx| ClansModel::with_dummy_data());
-        let clan_sidebar = cx.new(|cx| ClanSidebar::new(clans.clone(), cx));
-        let channel_sidebar = cx.new(|cx| ChannelSidebar::new(clans, channels_model.clone(), cx));
+        let _clans = cx.new(|_cx| ClansModel::with_dummy_data());
+        // let clan_sidebar = cx.new(|cx| ClanSidebar::new(clans.clone(), cx));
+        // let channel_sidebar = cx.new(|cx| ChannelSidebar::new(clans, channels_model.clone(), cx));
 
         // Observe the channels model so we re-render when channel selection changes
         let _ = cx.observe(&channels_model, |_, _, cx| cx.notify());
@@ -30,8 +24,6 @@ impl MainLayout {
         Self {
             auth_state,
             channels_model,
-            clan_sidebar,
-            channel_sidebar,
         }
     }
 }
@@ -39,7 +31,7 @@ impl MainLayout {
 impl Render for MainLayout {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::dark();
-        let username = match self.auth_state.read(cx) {
+        let _username = match self.auth_state.read(cx) {
             AuthState::Authenticated(session) => session.username.clone(),
             _ => "Unknown".to_string(),
         };
@@ -50,25 +42,14 @@ impl Render for MainLayout {
             .flex_1()
             .bg(theme.bg_primary)
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .w(px(312.0))
-                    .h_full()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .flex_1()
-                            .child(div().w(px(72.0)).h_full().child(self.clan_sidebar.clone()))
-                            .child(
-                                div()
-                                    .w(px(240.0))
-                                    .h_full()
-                                    .child(self.channel_sidebar.clone()),
-                            ),
-                    )
-                    .child(UserInfoBar::new(&username).render(&theme)),
+                div().flex().flex_col().w(px(312.0)).h_full().child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_1()
+                        // .child(div().w(px(72.0)).h_full().child(self.clan_sidebar.clone()))
+                        .child(div().w(px(240.0)).h_full()),
+                ),
             )
             .child(
                 div()
@@ -106,14 +87,6 @@ impl Render for MainLayout {
                                             .flex()
                                             .items_center()
                                             .gap_2()
-                                            .child(if channel.channel_type == ChannelType::Text {
-                                                div().child("#")
-                                            } else {
-                                                // Voice channel - use Speaker icon
-                                                div().child(
-                                                    Icon::new(IconName::Speaker).render(&theme),
-                                                )
-                                            })
                                             .child(
                                                 div()
                                                     .font_weight(FontWeight::BOLD)

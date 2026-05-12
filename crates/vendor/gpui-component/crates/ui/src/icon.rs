@@ -1,8 +1,8 @@
 use crate::{ActiveTheme, Sizable, Size};
 use gpui::{
-    prelude::FluentBuilder as _, svg, AnyElement, App, AppContext, Context, Entity, Hsla,
-    IntoElement, Radians, Render, RenderOnce, SharedString, StyleRefinement, Styled, Svg,
-    Transformation, Window,
+    AnyElement, App, AppContext, Context, Entity, Hsla, IntoElement, Radians, Render, RenderOnce,
+    SharedString, StyleRefinement, Styled, Svg, Transformation, Window,
+    prelude::FluentBuilder as _, svg,
 };
 
 /// Types implementing this trait can automatically be converted to [`Icon`].
@@ -48,6 +48,7 @@ pub enum IconName {
     Close,
     Copy,
     Dash,
+    Deafen,
     Delete,
     Ellipsis,
     EllipsisVertical,
@@ -73,6 +74,7 @@ pub enum IconName {
     Map,
     Maximize,
     Menu,
+    Mic,
     Minimize,
     Minus,
     Moon,
@@ -95,6 +97,7 @@ pub enum IconName {
     Settings2,
     SortAscending,
     SortDescending,
+    Speaker,
     SquareTerminal,
     Star,
     StarOff,
@@ -146,6 +149,7 @@ impl IconNamed for IconName {
             Self::Close => "icons/close.svg",
             Self::Copy => "icons/copy.svg",
             Self::Dash => "icons/dash.svg",
+            Self::Deafen => "icons/deafen.svg",
             Self::Delete => "icons/delete.svg",
             Self::Ellipsis => "icons/ellipsis.svg",
             Self::EllipsisVertical => "icons/ellipsis-vertical.svg",
@@ -171,6 +175,7 @@ impl IconNamed for IconName {
             Self::Map => "icons/map.svg",
             Self::Maximize => "icons/maximize.svg",
             Self::Menu => "icons/menu.svg",
+            Self::Mic => "icons/mic.svg",
             Self::Minimize => "icons/minimize.svg",
             Self::Minus => "icons/minus.svg",
             Self::Moon => "icons/moon.svg",
@@ -193,6 +198,7 @@ impl IconNamed for IconName {
             Self::Settings2 => "icons/settings-2.svg",
             Self::SortAscending => "icons/sort-ascending.svg",
             Self::SortDescending => "icons/sort-descending.svg",
+            Self::Speaker => "icons/speaker.svg",
             Self::SquareTerminal => "icons/square-terminal.svg",
             Self::Star => "icons/star.svg",
             Self::StarOff => "icons/star-off.svg",
