@@ -1,5 +1,5 @@
 use crate::theme::Theme;
-use gpui::{div, prelude::*, rgb, Context, MouseButton, Window};
+use gpui::{Context, MouseButton, Window, div, prelude::*, rgb};
 
 /// Custom frameless title bar.
 pub struct TitleBar {

@@ -9,16 +9,15 @@
 
 use std::sync::Arc;
 
-use gpui::{
-    div, prelude::*, App, Context, Entity, FontWeight, MouseButton, Window,
+use gpui::{App, Context, Entity, FontWeight, MouseButton, Window, div, prelude::*};
+use gpui_component::{
+    Disableable as _,
+    button::{Button, ButtonVariants as _},
 };
 use mezon_client::{MezonClient, Session, keychain};
 use mezon_store::{AuthState, LoginMethod};
 
-use crate::components::{
-    compositions::FormField,
-    primitives::Button,
-};
+use crate::components::compositions::FormField;
 use crate::theme::Theme;
 
 // ─── LoginView state ──────────────────────────────────────────────────────────
@@ -40,9 +39,9 @@ pub struct LoginView {
     otp_email: String,
 
     /// Shared email field (used by both modes on step 0).
-    email_field: Entity<FormField>,
+    email_field: Option<Entity<FormField>>,
     /// Password field (password mode only).
-    password_field: Entity<FormField>,
+    password_field: Option<Entity<FormField>>,
     /// Individual OTP digit inputs (6 boxes).
     otp_fields: Vec<Entity<FormField>>,
 
@@ -58,20 +57,8 @@ impl LoginView {
     pub fn new(
         client: Arc<MezonClient>,
         auth_state: Entity<AuthState>,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> Self {
-        let email_field = cx.new(|cx| FormField::new(cx, "Email"));
-        let password_field = cx.new(|cx| {
-            let f = FormField::new(cx, "Password");
-            f.set_masked(cx);
-            f
-        });
-
-        // 6 OTP digit boxes.
-        let otp_fields = (0..6)
-            .map(|i| cx.new(move |cx| FormField::new(cx, format!("{}", i))))
-            .collect();
-
         Self {
             client,
             auth_state,
@@ -79,12 +66,33 @@ impl LoginView {
             otp_step: 0,
             otp_req_id: String::new(),
             otp_email: String::new(),
-            email_field,
-            password_field,
-            otp_fields,
+            email_field: None,
+            password_field: None,
+            otp_fields: Vec::new(),
             loading: false,
             error: None,
             countdown: 0,
+        }
+    }
+
+    fn ensure_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.email_field.is_none() {
+            self.email_field = Some(cx.new(|cx| FormField::new(window, cx, "Email")));
+        }
+
+        if self.password_field.is_none() {
+            self.password_field = Some(cx.new(|cx| {
+                let field = FormField::new(window, cx, "Password");
+                field.set_masked(window, cx);
+                field
+            }));
+        }
+
+        if self.otp_fields.is_empty() {
+            for i in 0..6 {
+                self.otp_fields
+                    .push(cx.new(|cx| FormField::new(window, cx, format!("{}", i))));
+            }
         }
     }
 
@@ -92,7 +100,12 @@ impl LoginView {
 
     /// Called when "Send OTP" is pressed.
     fn handle_send_otp(entity: &Entity<LoginView>, _window: &mut Window, cx: &mut App) {
-        let email = entity.read(cx).email_field.read(cx).value(cx);
+        let email = entity
+            .read(cx)
+            .email_field
+            .as_ref()
+            .map(|field| field.read(cx).value(cx))
+            .unwrap_or_default();
         if email.trim().is_empty() {
             entity.update(cx, |this, cx| {
                 this.error = Some("Please enter your email address.".to_owned());
@@ -203,8 +216,14 @@ impl LoginView {
         let (email, password) = {
             let this = entity.read(cx);
             (
-                this.email_field.read(cx).value(cx),
-                this.password_field.read(cx).value(cx),
+                this.email_field
+                    .as_ref()
+                    .map(|field| field.read(cx).value(cx))
+                    .unwrap_or_default(),
+                this.password_field
+                    .as_ref()
+                    .map(|field| field.read(cx).value(cx))
+                    .unwrap_or_default(),
             )
         };
 
@@ -294,7 +313,8 @@ impl LoginView {
 // ─── Render ──────────────────────────────────────────────────────────────────
 
 impl Render for LoginView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_fields(window, cx);
         let theme = Theme::dark();
 
         // Outer centered column.
@@ -316,23 +336,22 @@ impl Render for LoginView {
             .bg(theme.bg_secondary);
 
         // Logo + wordmark.
-        card = card
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_3()
-                    .mb_2()
-                    .child(div().size_16().bg(theme.brand).rounded_lg())
-                    .child(
-                        div()
-                            .text_xl()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(theme.text_primary)
-                            .child("Mezon"),
-                    ),
-            );
+        card = card.child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_3()
+                .mb_2()
+                .child(div().size_16().bg(theme.brand).rounded_lg())
+                .child(
+                    div()
+                        .text_xl()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(theme.text_primary)
+                        .child("Mezon"),
+                ),
+        );
 
         match self.method {
             LoginMethod::Otp => {
@@ -346,26 +365,28 @@ impl Render for LoginView {
                                 .text_color(theme.text_primary)
                                 .child("Sign in with OTP"),
                         )
-                        .child(self.email_field.clone());
+                        .child(self.email_field.as_ref().expect("email field").clone());
 
                     let loading = self.loading;
                     let entity = cx.entity().clone();
                     card = card.child(
                         div().w_full().child(
-                            Button::new("Send OTP")
-                                .full_width()
+                            Button::new("send-otp")
+                                .label("Send OTP")
+                                .primary()
+                                .w_full()
                                 .loading(loading)
                                 .disabled(loading)
-                                .on_click(move |window, cx| {
+                                .on_click(move |_, window, cx| {
                                     Self::handle_send_otp(&entity, window, cx);
                                 })
-                                .render(&theme),
+                                .into_any_element(),
                         ),
                     );
                 } else {
                     // Step 1: OTP code entry.
-                    card = card
-                        .child(
+                    card =
+                        card.child(
                             div()
                                 .flex()
                                 .flex_col()
@@ -377,25 +398,15 @@ impl Render for LoginView {
                                         .text_color(theme.text_primary)
                                         .child("Enter verification code"),
                                 )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.text_secondary)
-                                        .child(format!(
-                                            "We sent a 6-digit code to {}",
-                                            self.otp_email
-                                        )),
-                                ),
+                                .child(div().text_xs().text_color(theme.text_secondary).child(
+                                    format!("We sent a 6-digit code to {}", self.otp_email),
+                                )),
                         );
 
                     // 6 OTP digit boxes in a row.
                     let mut otp_row = div().flex().flex_row().gap_2().justify_center();
                     for field in &self.otp_fields {
-                        otp_row = otp_row.child(
-                            div()
-                                .w(gpui::px(44.0))
-                                .child(field.clone()),
-                        );
+                        otp_row = otp_row.child(div().w(gpui::px(44.0)).child(field.clone()));
                     }
                     card = card.child(otp_row);
 
@@ -404,14 +415,16 @@ impl Render for LoginView {
                     let entity = cx.entity().clone();
                     card = card.child(
                         div().w_full().child(
-                            Button::new("Verify Code")
-                                .full_width()
+                            Button::new("verify-otp")
+                                .label("Verify Code")
+                                .primary()
+                                .w_full()
                                 .loading(loading)
                                 .disabled(loading)
-                                .on_click(move |_window, cx| {
+                                .on_click(move |_, _window, cx| {
                                     Self::handle_confirm_otp(&entity, cx);
                                 })
-                                .render(&theme),
+                                .into_any_element(),
                         ),
                     );
 
@@ -480,8 +493,13 @@ impl Render for LoginView {
                             .text_color(theme.text_primary)
                             .child("Sign in with password"),
                     )
-                    .child(self.email_field.clone())
-                    .child(self.password_field.clone());
+                    .child(self.email_field.as_ref().expect("email field").clone())
+                    .child(
+                        self.password_field
+                            .as_ref()
+                            .expect("password field")
+                            .clone(),
+                    );
 
                 // Forgot password link.
                 card = card.child(
@@ -502,14 +520,16 @@ impl Render for LoginView {
                 let entity = cx.entity().clone();
                 card = card.child(
                     div().w_full().child(
-                        Button::new("Sign In")
-                            .full_width()
+                        Button::new("sign-in")
+                            .label("Sign In")
+                            .primary()
+                            .w_full()
                             .loading(loading)
                             .disabled(loading)
-                            .on_click(move |_window, cx| {
+                            .on_click(move |_, _window, cx| {
                                 Self::handle_sign_in(&entity, cx);
                             })
-                            .render(&theme),
+                            .into_any_element(),
                     ),
                 );
             }
@@ -532,12 +552,7 @@ impl Render for LoginView {
                 .items_center()
                 .gap_2()
                 .child(div().flex_1().h(gpui::px(1.0)).bg(theme.border))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.text_muted)
-                        .child("or"),
-                )
+                .child(div().text_xs().text_color(theme.text_muted).child("or"))
                 .child(div().flex_1().h(gpui::px(1.0)).bg(theme.border)),
         );
 

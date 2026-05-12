@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use gpui::{div, prelude::*, Context, Entity, FontWeight, Window};
+use gpui::{Context, Entity, FontWeight, Window, div, prelude::*};
 use mezon_client::{
-    transport::{ApiAccount, ApiChannelDesc, ApiClanDesc},
     AppApi,
+    transport::{ApiAccount, ApiChannelDesc, ApiClanDesc},
 };
 
 use crate::theme::Theme;

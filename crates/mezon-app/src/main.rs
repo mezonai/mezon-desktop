@@ -1,12 +1,12 @@
 use anyhow::Result;
-use gpui::{px, size, App, AppContext, AsyncApp, Bounds, Entity, WindowBounds, WindowOptions};
+use gpui::{App, AppContext, AsyncApp, Bounds, Entity, WindowBounds, WindowOptions, px, size};
 use gpui_platform::application;
-use mezon_client::{keychain, AppApi, MezonClient, TransportClient};
+use mezon_client::{AppApi, MezonClient, TransportClient, keychain};
 use mezon_native::instance::SingleInstance;
 use mezon_store::{AuthState, Settings};
-use mezon_ui::{title_bar::TitleBar, RootView};
+use mezon_ui::{RootView, init as init_ui, title_bar::TitleBar};
 use std::sync::Arc;
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 
 fn main() -> Result<()> {
     fmt()
@@ -81,6 +81,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 
     application().run(move |cx: &mut App| {
         tracing::debug!("App started");
+        init_ui(cx);
 
         // Shared channel so background threads can send deep link URLs to the GPUI main thread.
         let (url_tx, url_rx) = std::sync::mpsc::channel::<String>();
@@ -137,7 +138,12 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 
         // Background refresh task: wake every 60s, refresh if session is near expiry.
         spawn_refresh_task(cx, auth_state_handle.clone(), client.clone());
-        spawn_transport_task(cx, auth_state_handle.clone(), transport.clone(), api.clone());
+        spawn_transport_task(
+            cx,
+            auth_state_handle.clone(),
+            transport.clone(),
+            api.clone(),
+        );
 
         // System tray.
         let _tray = setup_tray(cx, rt_handle.clone());
@@ -174,7 +180,8 @@ fn spawn_transport_task(
                 continue;
             };
 
-            if connected_token.as_deref() == Some(session.token.as_str()) && transport.is_open().await
+            if connected_token.as_deref() == Some(session.token.as_str())
+                && transport.is_open().await
             {
                 continue;
             }
@@ -254,27 +261,24 @@ fn spawn_transport_task(
 /// - Valid + not expired → `Authenticated`
 /// - Valid + expired     → try silent refresh → `Authenticated` on success, else `NotAuthenticated`
 /// - Nothing stored      → `NotAuthenticated`
-fn resolve_initial_auth_state(
-    rt: &tokio::runtime::Runtime,
-    client: &MezonClient,
-) -> AuthState {
+fn resolve_initial_auth_state(rt: &tokio::runtime::Runtime, client: &MezonClient) -> AuthState {
     match keychain::load_session() {
         None => {
             tracing::info!("No stored session — showing login");
             AuthState::NotAuthenticated
         }
         Some(session) if !mezon_client::Session::is_expired(&session) => {
-            tracing::info!(
-                "Restored valid session for user_id={}",
-                session.user_id
-            );
+            tracing::info!("Restored valid session for user_id={}", session.user_id);
             AuthState::Authenticated(session)
         }
         Some(session) => {
             tracing::info!("Stored session expired — attempting silent refresh");
             match rt.block_on(client.refresh_session(&session.refresh_token, false)) {
                 Ok(new_session) => {
-                    tracing::info!("Silent refresh succeeded for user_id={}", new_session.user_id);
+                    tracing::info!(
+                        "Silent refresh succeeded for user_id={}",
+                        new_session.user_id
+                    );
                     if let Err(e) = keychain::save_session(&new_session) {
                         tracing::warn!("Failed to update keychain after refresh: {e}");
                     }
@@ -315,8 +319,8 @@ fn spawn_refresh_task(cx: &mut App, auth_state: Entity<AuthState>, client: Arc<M
                 .unwrap_or_default()
                 .as_secs();
 
-            let should_refresh = session.expires_at > 0
-                && session.expires_at.saturating_sub(now) < 300;
+            let should_refresh =
+                session.expires_at > 0 && session.expires_at.saturating_sub(now) < 300;
 
             if !should_refresh {
                 continue;
@@ -387,12 +391,13 @@ fn open_main_window(
     let auth_out = Arc::new(std::sync::Mutex::new(None::<Entity<AuthState>>));
     let auth_out_clone = auth_out.clone();
 
-    cx.open_window(options, move |_window, cx| {
+    cx.open_window(options, move |window, cx| {
         let auth_state = cx.new(|_cx| initial_auth);
         *auth_out_clone.lock().unwrap() = Some(auth_state.clone());
 
         let title_bar = cx.new(|_cx| TitleBar::new("Mezon"));
-        cx.new(|cx| RootView::new(title_bar, auth_state, client, api, cx))
+        let view = cx.new(|cx| RootView::new(title_bar, auth_state, client, api, cx));
+        cx.new(|cx| gpui_component::Root::new(view, window, cx))
     })
     .unwrap_or_else(|e| {
         tracing::error!("Failed to open main window: {e}");
