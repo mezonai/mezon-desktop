@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use gpui::{App, Context, Entity, FontWeight, Window, div, prelude::*, px};
-use mezon_store::{AuthState, ChannelsModel, ClansModel};
+use mezon_client::AppApi;
+use mezon_store::{AuthState, ChannelsModel, Clan, ClansModel};
 
 use crate::components::compositions::user_info_bar::UserInfoBar;
 use crate::router::{Route, Router};
@@ -17,12 +18,14 @@ pub struct ChatLayout {
     clan_sidebar: Entity<ClanSidebar>,
     channel_sidebar: Entity<ChannelSidebar>,
     user_info_bar: UserInfoBar,
+    api: Arc<AppApi>,
 }
 
 impl ChatLayout {
     pub fn new(
         router: Router,
         auth_state: Entity<AuthState>,
+        api: Arc<AppApi>,
         navigate: Arc<dyn Fn(&str, &mut App) + Send + Sync>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -56,6 +59,64 @@ impl ChatLayout {
         let _ = cx.observe(&channels_model, |_, _, cx| cx.notify());
         let _ = cx.observe(&clans_model, |_, _, cx| cx.notify());
 
+        // Investigation: fetch real clan list and log it
+        let api_clone = api.clone();
+        cx.spawn(async move |_, cx| {
+            // Wait for connection to be fully ready (TCP open + handshake)
+            loop {
+                if api_clone.is_open().await {
+                    if api_clone.ping_roundtrip().await.is_ok() {
+                        break;
+                    }
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(1000))
+                    .await;
+            }
+
+            tracing::info!("🔍 Investigation: Fetching real clan list...");
+            match api_clone.list_clan_descs().await {
+                Ok(clans) => {
+                    tracing::info!("✅ Investigation: Fetched {} clans", clans.len());
+                    if !clans.is_empty() {
+                        let store_clans: Vec<Clan> = clans
+                            .into_iter()
+                            .map(|c| {
+                                let initials = c
+                                    .clan_name
+                                    .split_whitespace()
+                                    .take(2)
+                                    .map(|s| s.chars().next().unwrap_or_default())
+                                    .collect::<String>()
+                                    .to_uppercase();
+                                Clan {
+                                    id: c.clan_id,
+                                    name: c.clan_name,
+                                    initials: if initials.is_empty() {
+                                        "?".to_string()
+                                    } else {
+                                        initials
+                                    },
+                                    avatar_url: None,
+                                    unread_count: 0,
+                                }
+                            })
+                            .collect();
+
+                        let _ = clans_model.update(&mut cx, |model, cx| {
+                            model.update_clans(store_clans);
+                            cx.notify();
+                        });
+                        tracing::info!("✅ Updated ClansModel with real data");
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("❌ Investigation: Failed to fetch clan list: {}", e);
+                }
+            }
+        })
+        .detach();
+
         Self {
             router,
             auth_state,
@@ -64,6 +125,7 @@ impl ChatLayout {
             clan_sidebar,
             channel_sidebar,
             user_info_bar,
+            api,
         }
     }
 }

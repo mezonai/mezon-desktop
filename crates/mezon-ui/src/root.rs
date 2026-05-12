@@ -27,7 +27,7 @@ impl RootView {
         title_bar: Entity<TitleBar>,
         auth_state: Entity<AuthState>,
         client: Arc<MezonClient>,
-        _api: Arc<AppApi>,
+        api: Arc<AppApi>,
         cx: &mut Context<Self>,
     ) -> Self {
         let login_view = cx.new({
@@ -47,8 +47,15 @@ impl RootView {
             });
 
         let router_for_chat = router.clone();
-        let chat_layout =
-            cx.new(|cx| ChatLayout::new(router_for_chat, auth_state.clone(), navigate.clone(), cx));
+        let chat_layout = cx.new(|cx| {
+            ChatLayout::new(
+                router_for_chat,
+                auth_state.clone(),
+                api.clone(),
+                navigate.clone(),
+                cx,
+            )
+        });
 
         let settings_screen = SettingsScreen::new(navigate.clone());
 

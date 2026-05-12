@@ -69,6 +69,19 @@ impl ClansModel {
     pub fn select_clan(&mut self, id: &str) {
         self.active_clan_id = Some(id.to_string());
     }
+
+    pub fn update_clans(&mut self, clans: Vec<Clan>) {
+        self.clans = clans;
+        if !self.clans.is_empty() {
+            if let Some(active_id) = &self.active_clan_id {
+                if !self.clans.iter().any(|c| &c.id == active_id) {
+                    self.active_clan_id = Some(self.clans[0].id.clone());
+                }
+            } else {
+                self.active_clan_id = Some(self.clans[0].id.clone());
+            }
+        }
+    }
 }
 
 // ─── Channel domain model ─────────────────────────────────────────────────

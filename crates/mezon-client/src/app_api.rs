@@ -3,8 +3,8 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::{
-    transport::{ApiAccount, ApiChannelDesc, ApiClanDesc},
     TransportClient,
+    transport::{ApiAccount, ApiChannelDesc, ApiClanDesc},
 };
 
 #[derive(Clone)]
@@ -27,5 +27,13 @@ impl AppApi {
 
     pub async fn list_clan_descs(&self) -> Result<Vec<ApiClanDesc>> {
         self.transport.list_clan_descs().await
+    }
+
+    pub async fn is_open(&self) -> bool {
+        self.transport.is_open().await
+    }
+
+    pub async fn ping_roundtrip(&self) -> Result<()> {
+        self.transport.ping_roundtrip().await
     }
 }
