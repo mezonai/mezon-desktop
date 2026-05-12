@@ -1,0 +1,3784 @@
+// Copyright 2019 The Mezon Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/**
+ * The Mezon server RPC protocol for games and apps.
+ */
+syntax = "proto3";
+
+package mezon.api;
+
+import "google/protobuf/wrappers.proto";
+
+option go_package = "github.com/mezonai/mezon-protocol/v2/api";
+
+option java_multiple_files = true;
+option java_outer_classname = "MezonApi";
+option java_package = "com.mezon.mezon.api";
+
+option csharp_namespace = "Mezon.Net.Internal.Api";
+
+// A user with additional account details. Always the current user.
+message Account {
+  // The user object.
+  User user = 1;
+  // The email address of the user.
+  string email = 2;
+  // The qr code in the user's account.
+  string qr_code = 3;
+  // The UNIX time (for gRPC clients) or ISO string (for REST clients) when the user's email was verified.
+  uint32 verify_time_seconds = 4;
+  // The UNIX time (for gRPC clients) or ISO string (for REST clients) when the user's account was disabled/banned.
+  uint32 disable_time_seconds = 5;
+  // Logo url
+  string logo = 6;
+  // Splash screen url
+  string splash_screen = 7;
+  // E2ee encrypt private key
+  string encrypt_private_key = 8;
+  // password is setted
+  bool password_setted = 9;
+}
+
+// Obtain a new authentication token using a refresh token.
+message AccountRefresh {
+  // Refresh token.
+  string token = 1;
+  // Extra information that will be bundled in the session token.
+  map<string, string> vars = 2;
+}
+
+// Add one or more friends to the current user.
+message AddFriendsRequest {
+  // The account id of a user.
+  repeated int64 ids = 1;
+  // The account username of a user.
+  repeated string usernames = 2;
+}
+
+// Add one or more friends to the current user.
+message AddFriendsResponse {
+  // The account id of a user.
+  repeated int64 ids = 1;
+  // The account username of a user.
+  repeated string usernames = 2;
+}
+
+// Add users to a group.
+message AddGroupUsersRequest {
+  // The group to add users to.
+  int64 group_id = 1;
+  // The users to add.
+  repeated int64 user_ids = 2;
+}
+
+// Authenticate against the server with a refresh token.
+message SessionRefreshRequest {
+  // Refresh token.
+  string token = 1;
+  // Extra information that will be bundled in the session token.
+  map<string, string> vars = 2;
+  // Whether to enable "Remember Me" for extended session duration.
+  bool is_remember = 3;
+}
+
+// Log out a session, invalidate a refresh token, or log out all sessions/refresh tokens for a user.
+message SessionLogoutRequest {
+  // Session token to log out.
+  string token = 1;
+  // Refresh token to invalidate.
+  string refresh_token = 2;
+  // Device Id
+  string device_id = 3;
+  // FCM token from firebase
+  string fcm_token = 4;
+  // platform
+  string platform = 5;
+}
+
+message IsBannedResponse {
+  bool is_banned = 1;
+  int32 expired_ban_time = 2;
+}
+
+message IsBannedRequest {
+  int64 channel_id = 1;
+}
+
+// Ban users from a group.
+message BanGroupUsersRequest {
+  // The group to ban users from.
+  int64 group_id = 1;
+  // The users to ban.
+  repeated int64 user_ids = 2;
+}
+
+// Block one or more friends for the current user.
+message BlockFriendsRequest {
+  // The account id of a user.
+  repeated int64 ids = 1;
+  // The account username of a user.
+  repeated string usernames = 2;
+}
+
+// A message sent on a channel.
+message ChannelMessage {
+  // The clan this message belong to.
+  int64 clan_id = 1;
+  // The channel this message belongs to.
+  int64 channel_id = 2;
+  // The unique ID of this message.
+  int64  message_id = 3;
+  // The code representing a message type or category.
+  int32 code = 4;
+  // Message sender, usually a user ID.
+  int64 sender_id = 5;
+  // The username of the message sender, if any.
+  string username = 6;
+  // The avatar of user who send message
+  string avatar = 7;
+  // The content payload.
+  string content = 8;
+  // The name of the chat room, or an empty string if this message was not sent through a chat room.
+  string channel_label = 9;
+  // The clan logo
+  string clan_logo = 10;
+  // The category name
+  string category_name = 11;
+  // The clan nick name
+  string display_name = 12;
+  // The clan nick name
+  string clan_nick = 13;
+  // The clan avatar
+  string clan_avatar = 14;
+  // Emoji reaction
+	bytes reactions = 15;
+  // Message mention
+  bytes mentions = 16;
+  // Message attachment
+  bytes attachments = 17;
+  // Message reference
+  bytes references = 18;
+  // referenced message
+  bytes referenced_message = 19;
+  // create time in ms
+  uint32 create_time_seconds = 20;
+  // update time in ms
+  uint32 update_time_seconds = 21;
+  // channel mode
+  int32 mode = 22;
+  // hide editted
+  bool hide_editted = 23;
+  // is public
+  bool is_public = 24;
+  // topic
+  int64 topic_id = 25;
+}
+
+// Mention to message
+message MessageMention {
+  // Mention id
+  int64 id = 1;
+  // mention user id
+  int64 user_id = 2;
+  // mention username
+  string username = 3;
+  // role id
+  int64 role_id = 4;
+  // role name
+  string rolename = 5;
+  // The UNIX time (for gRPC clients) or ISO string (for REST clients) when the message was created.
+  uint32 create_time_seconds = 6;
+  // start position from text
+  int32 s = 7;
+  // end position from text
+  int32 e = 8;
+}
+
+// Mention to message
+message NotificationInfo {
+  // username
+  string username = 1;
+  // avatar
+  string avatar = 2;
+  // clan nick name
+  string clan_nick = 3;
+  // clan avatar
+  string clan_avatar = 4;
+  // display name
+  string display_name = 5;
+  // channel label
+  string channel_label = 6;
+  // channel type
+  int32 channel_type = 7;
+  // category name
+  string category_name = 8;
+  // clan name
+  string clan_name = 9;
+  // clan logo
+  string clan_logo = 10;
+  //
+  ChannelDescription channel = 11;
+}
+
+// Emoji reaction by user
+message MessageReaction {
+  // Reaction id
+  int64 id = 1;
+  // An emoji id
+  int64 emoji_id = 2;
+  // An emoji shortname
+  string emoji = 3;
+  // User react to message
+  int64 sender_id = 4;
+  // Sender name
+  string sender_name = 5;
+  // avatar
+  string sender_avatar = 6;
+  // Action reaction delete or add
+  bool action = 7;
+  // count of emoji
+  int32 count = 8;
+  // channel id
+  int64 channel_id = 9;
+  // message id
+  int64  message_id = 10;
+  // clan id
+  int64 clan_id = 11;
+  // mode
+  int32 mode = 12;
+  // message sender id
+  int64 message_sender_id = 13;
+  // is public
+  bool is_public = 14;
+  // topic id
+  int64 topic_id = 15;
+  // emoji_recent_id
+  int64 emoji_recent_id = 16;
+}
+
+// Message attachment
+message MessageAttachment {
+  // Attachment file name
+  string filename = 1;
+  // Attachment file size
+  int32 size = 2;
+  // Attachment url
+  string url = 3;
+  // Attachment file type
+  string filetype = 4;
+  // Attachment width
+  int32 width = 5;
+  // Attachment width
+  int32 height = 6;
+  // thumbnail
+  string thumbnail = 7;
+  // duration for video
+  int32 duration = 8;
+}
+
+// Message reference
+message MessageRef {
+  // A message source
+  int64  message_id = 1;
+  // A message reference to
+  int64 message_ref_id = 2;
+  // content reference
+  string content = 3;
+  // has attachment
+  bool has_attachment = 4;
+  // Reference type. 0: reply
+  int32 ref_type = 5;
+  // original message sender
+  int64 message_sender_id = 6;
+  // original message sendre username
+  string message_sender_username = 7;
+  // original message sender avatar
+  string message_sender_avatar = 8;
+  // original sender clan nick name
+  string message_sender_clan_nick = 9;
+  // original sender display name
+  string message_sender_display_name = 10;
+}
+
+// Message reference
+message MessageDeleted {
+  // A deleted message source
+  int64  message_id = 1;
+  // Who delete it
+  string deletor = 2;
+}
+
+// A list of channel messages, usually a result of a list operation.
+message ChannelMessageList {
+  // A list of messages.
+  repeated ChannelMessage messages = 1;
+  // last seen message id by user
+  ChannelMessageHeader last_seen_message = 2;
+  // last sent message id
+  ChannelMessageHeader last_sent_message = 3;
+}
+
+// Create a group with the current user as owner.
+message CreateGroupRequest {
+  // A unique name for the group.
+  string name = 1;
+  // A description for the group.
+  string description = 2;
+  // The language expected to be a tag which follows the BCP-47 spec.
+  string lang_tag = 3;
+  // A URL for an avatar image.
+  string avatar_url = 4;
+  // Mark a group as open or not where only admins can accept members.
+  bool open = 5;
+  // Maximum number of group members.
+  int32 max_count = 6;
+}
+
+// Delete one or more friends for the current user.
+message DeleteFriendsRequest {
+  // The account id of a user.
+  repeated int64 ids = 1;
+  // The account username of a user.
+  repeated string usernames = 2;
+}
+
+// Delete a group the user has access to.
+message DeleteGroupRequest {
+  // The id of a group.
+  int64 group_id = 1;
+}
+
+// Delete one or more notifications for the current user.
+message DeleteNotificationsRequest {
+  // The id of notifications.
+  repeated int64 ids = 1;
+  // The category of notifications.
+  int32 category = 2;
+}
+
+// Represents an event to be passed through the server to registered event handlers.
+message Event {
+  // An event name, type, category, or identifier.
+  string name = 1;
+  // Arbitrary event property values.
+  map<string, string> properties = 2;
+  // The time when the event was triggered.
+  uint32 timestamp_seconds = 3;
+  // True if the event came directly from a client call, false otherwise.
+  bool external = 4;
+}
+
+// A friend of a user.
+message Friend {
+  // The friendship status.
+  enum State {
+    // The user is a friend of the current user.
+    FRIEND = 0;
+    // The current user has sent an invite to the user.
+    INVITE_SENT = 1;
+    // The current user has received an invite from this user.
+    INVITE_RECEIVED = 2;
+    // The current user has blocked this user.
+    BLOCKED = 3;
+  }
+
+  // The user object.
+  User user = 1;
+  // The friend status.
+  int32 state = 2; // one of "Friend.State".
+  // Time of the latest relationship update.
+  uint32 update_time_seconds = 3;
+  // source id
+  int64 source_id = 4;
+}
+
+// A collection of zero or more friends of the user.
+message FriendList {
+  // The Friend objects.
+  repeated Friend friends = 1;
+  // Cursor for the next page of results, if any.
+  string cursor = 2;
+}
+
+// Fetch a batch of zero or more users from the server.
+message UpdateUsersRequest {
+  // The account username of a user.
+  string display_name = 2;
+  // The avarar_url of a user.
+  string avatar_url = 3;
+}
+
+// A list of users belonging to a channel, along with their role.
+message ChannelUserList {
+  // A single user-role pair.
+  message ChannelUser {
+    // User.
+    int64 user_id = 1;
+    // Their relationship to the role.
+    repeated int64 role_id = 2;
+    // Id
+    int64 id = 3;
+    // thread id
+    int64 thread_id = 4;
+    // clan nick name
+    string clan_nick = 5;
+    // clan avatar
+    string clan_avatar = 6;
+    // clan Id
+    int64 clan_id = 7;
+    // added by
+    int64 added_by = 8;
+    // is banned
+    bool is_banned = 9;
+    // expired time
+    int32 expired_ban_time = 10;
+  }
+
+  // User-role pairs for a channel.
+  repeated ChannelUser channel_users = 1;
+  // Cursor for the next page of results, if any.
+  string cursor = 2;
+  // channel id
+  int64 channel_id = 3;
+}
+
+// A list of users belonging to a channel, along with their role.
+message VoiceChannelUser {
+  // User for a channel.
+  repeated string user_ids = 1;
+  // channel id
+  int64 channel_id = 2;
+  // room name
+  string room_name = 3;
+}
+
+// A list of users belonging to a channel, along with their role.
+message VoiceChannelUserList {
+  // list of voice channel user
+  repeated VoiceChannelUser voice_channel_users = 1;
+}
+
+// channel attachment
+message ChannelAttachment {
+  // url attachment
+  int64 id = 1;
+  // file name
+  string filename = 2;
+  // filetype
+  string filetype = 3;
+  // size
+  string filesize = 4;
+  // url
+  string url = 5;
+  // uploader
+  int64 uploader = 6;
+  // timestamp
+  uint32 create_time_seconds = 7;
+  // message id.
+  int64  message_id = 8;
+  // width
+  int32 width = 9;
+  // height
+  int32 height = 10;
+}
+
+// channel attachment list
+message ChannelAttachmentList {
+  // list attachment
+  repeated ChannelAttachment attachments = 1;
+}
+
+// A list of users belonging to a clan, along with their role.
+message ClanUserList {
+  // A single user-role pair.
+  message ClanUser {
+    // User.
+    User user = 1;
+    // Their relationship to the role.
+    repeated int64 role_id = 2;
+    // from the `nick_name` field in the `clan_desc_profile` table.
+    string clan_nick = 3;
+    // from the `avatar_url` field in the `clan_desc_profile` table.
+    string clan_avatar = 4;
+    //
+    int64 clan_id = 5;
+  }
+
+  // User-role pairs for a clan.
+  repeated ClanUser clan_users = 1;
+  // Cursor for the next page of results, if any.
+  string cursor = 2;
+  // clan id
+  int64 clan_id = 3;
+}
+
+message RegistFcmDeviceTokenRequest {
+  // The token
+  string token = 1;
+  //
+  string device_id = 2;
+  //
+  string platform = 3;
+  // voip token for IOS
+  string voip_token = 4;
+}
+
+message RegistFcmDeviceTokenResponse {
+  // The token
+  string token = 1;
+  //
+  string device_id = 2;
+  //
+  string platform = 3;
+}
+
+// List a channel's message history.
+message ListChannelMessagesRequest {
+  // the clan id
+  int64 clan_id = 1;
+  // The channel ID to list from.
+  int64 channel_id = 2;
+  // The current message ID.
+  int64  message_id = 3;
+  // Max number of records to return. Between 1 and 100.
+  int32 limit = 4;
+  // True if listing should be older messages to newer, false if reverse.
+  int32 direction = 5;
+  //
+  int64 topic_id = 6;
+}
+
+// List friends for a user.
+message ListFriendsRequest {
+  // Max number of records to return. Between 1 and 100.
+  int32 limit = 1;
+  // The friend state to list.
+  int32 state = 2;
+  // An optional next page cursor.
+  string cursor = 3;
+}
+
+// List groups based on given filters.
+message ListGroupsRequest {
+  // List groups that contain this value in their names.
+  string name = 1;
+  // Optional pagination cursor.
+  string cursor = 2;
+  // Max number of groups to return. Between 1 and 100.
+  int32 limit = 3;
+  // Language tag filter
+  string lang_tag = 4;
+  // Number of group members
+  int32 members = 5;
+  // Optional Open/Closed filter.
+  bool open = 6;
+}
+
+// List all users that are part of a group.
+message ListGroupUsersRequest {
+  // The group ID to list from.
+  int64 group_id = 1;
+  // Max number of records to return. Between 1 and 100.
+  int32 limit = 2;
+  // The group user state to list.
+  int32 state = 3;
+  // An optional next page cursor.
+  string cursor = 4;
+}
+
+// List all users that are part of a channel.
+message ListChannelUsersRequest {
+  // The clan id
+  int64 clan_id = 1;
+  // The channel ID to list from.
+  int64 channel_id = 2;
+  // The channel type
+  int32 channel_type = 3;
+  // Max number of records to return. Between 1 and 100.
+  int32 limit = 4;
+  // The group user state to list.
+  int32 state = 5;
+  // An optional next page cursor.
+  string cursor = 6;
+}
+
+// List all attachments that are part of a channel.
+message ListChannelAttachmentRequest {
+  // The clan id
+  int64 clan_id = 1;
+  // The channel ID to list from.
+  int64 channel_id = 2;
+  // The channel type
+  string file_type = 3;
+  // Max number of records to return. Between 1 and 100.
+  int32 limit = 4;
+  // The group user state to list.
+  int32 state = 5;
+  // An optional previous id for page.
+  uint32 before = 6;
+  // An optional next id for page.
+  uint32 after = 7;
+  // An optional around id for page.
+  uint32 around = 8;
+}
+
+// List all users that are part of a clan.
+message ListClanUsersRequest {
+  // The clan ID to list from.
+  int64 clan_id = 1;
+}
+
+// List clan members' custom status strings (user_status) by clan.
+message ListClanUsersStatusRequest {
+  // The clan ID to list from.
+  int64 clan_id = 1;
+}
+
+message ClanUserStatusEntry {
+  int64 user_id = 1;
+  string user_status = 2;
+}
+
+// User id and custom status text for members of a clan.
+message ClanUserStatusList {
+  repeated ClanUserStatusEntry clan_user_statuses = 1;
+}
+
+// Get a list of unexpired notifications.
+message ListNotificationsRequest {
+  // The number of notifications to get. Between 1 and 100.
+  int32 limit = 1;
+  // The clan id
+  int64 clan_id = 2;
+  //The current notification Id.
+  int64 notification_id = 3;
+  // The category (1: mentions, 2: mesages, 3: for you).
+  int32 category = 4;
+  // True if listing should be older notifications to newer, false if reverse.
+  int32 direction = 5;
+}
+
+// List the groups a user is part of, and their relationship to each.
+message ListUserGroupsRequest {
+  // ID of the user.
+  int64 user_id = 1;
+  // Max number of records to return. Between 1 and 100.
+  int32 limit = 2;
+  // The user group state to list.
+  int32 state = 3;
+  // An optional next page cursor.
+  string cursor = 4;
+}
+
+// A notification in the server.
+message Notification {
+  // ID of the Notification.
+  int64 id = 1;
+  // Subject of the notification.
+  string subject = 2;
+  // Content of the notification in JSON.
+  bytes content = 3;
+  // Category code for this notification.
+  int32 code = 4;
+  // ID of the sender, if a user. Otherwise 'null'.
+  int64 sender_id = 5;
+  // The UNIX time (for gRPC clients) or ISO string (for REST clients) when the notification was created.
+  uint32 create_time_seconds = 6;
+  // True if this notification was persisted to the database.
+  bool persistent = 7;
+  // ID of clan
+  int64 clan_id = 8;
+  // ID of channel
+  int64 channel_id = 9;
+  // mode of
+  int32 channel_type = 10;
+  //
+  string avatar_url = 11;
+  //
+  ChannelDescription channel = 12;
+  //
+  int64 topic_id = 13;
+  // category.
+  int32 category = 14;
+}
+
+//
+message EmojiRecent {
+  // ID of the emoji.
+  int64 emoji_recents_id = 1;
+  //
+  int64 emoji_id = 2;
+  // The UNIX time (for gRPC clients) or ISO string (for REST clients) when the emoji was created.
+  uint32 update_time_seconds = 3;
+}
+
+// A collection of zero or more notifications.
+message EmojiRecentList {
+  // Collection of emojiRecents.
+  repeated EmojiRecent emoji_recents = 1;
+}
+
+// A collection of zero or more notifications.
+message NotificationList {
+  // Collection of notifications.
+  repeated Notification notifications = 1;
+  // Use this cursor to paginate notifications. Cache this to catch up to new notifications.
+  string cacheable_cursor = 2;
+}
+
+// Promote a set of users in a group to the next role up.
+message PromoteGroupUsersRequest {
+  // The group ID to promote in.
+  int64 group_id = 1;
+  // The users to promote.
+  repeated int64 user_ids = 2;
+}
+
+// Demote a set of users in a group to the next role down.
+message DemoteGroupUsersRequest {
+  // The group ID to demote in.
+  int64 group_id = 1;
+  // The users to demote.
+  repeated int64 user_ids = 2;
+}
+
+// Execute an Lua function on the server.
+message Rpc {
+  // The identifier of the function.
+  string id = 1;
+  // The payload of the function which must be a JSON object.
+  string payload = 2;
+  // The authentication key used when executed as a non-client HTTP request.
+  string http_key = 3;
+}
+
+// A user's session used to authenticate messages.
+message Session {
+  // True if the corresponding account was just created, false otherwise.
+  bool created = 1;
+  // Authentication credentials.
+  string token = 2;
+  // Refresh token that can be used for session token renewal.
+  string refresh_token = 3;
+  // User id
+  int64 user_id = 4;
+  // Whether to enable "Remember Me" for extended session duration.
+  bool is_remember = 5;
+  // api url
+  string api_url = 6;
+  // id token for zklogin
+  string id_token = 7;
+  // ws_url
+  string ws_url = 8;
+  // session id
+  string session_id = 9;
+}
+
+// Update username
+message UpdateUsernameRequest {
+  string username = 1;
+  string display_name = 2;
+}
+
+// Update a user's account details.
+message UpdateAccountRequest {
+  // The display name of the user.
+  google.protobuf.StringValue display_name = 1;
+  // A URL for an avatar image.
+  google.protobuf.StringValue avatar_url = 2;
+  // The language expected to be a tag which follows the BCP-47 spec.
+  google.protobuf.StringValue lang_tag = 3;
+  // The location set by the user.
+  google.protobuf.StringValue location = 4;
+  // The timezone set by the user.
+  google.protobuf.StringValue timezone = 5;
+  // update about me
+  google.protobuf.StringValue about_me = 6;
+  // date of birth
+  uint32 dob_seconds = 7;
+  // logo url
+  google.protobuf.StringValue logo = 8;
+  // splash screen
+  google.protobuf.StringValue splash_screen = 9;
+  // e2ee encrypt private key
+  string encrypt_private_key = 10;
+  // The email of the user's account.
+  google.protobuf.StringValue email = 11;
+}
+
+// Update fields in a given group.
+message UpdateGroupRequest {
+  // The ID of the group to update.
+  int64 group_id = 1;
+  // Name.
+  google.protobuf.StringValue name = 2;
+  // Description string.
+  google.protobuf.StringValue description = 3;
+  // Lang tag.
+  google.protobuf.StringValue lang_tag = 4;
+  // Avatar URL.
+  google.protobuf.StringValue avatar_url = 5;
+  // Open is true if anyone should be allowed to join, or false if joins must be approved by a group admin.
+  bool open = 6;
+}
+
+message UpdateCategoryDescRequest {
+  // The ID of the group to update.
+  int64 category_id = 1;
+  string category_name = 2;
+  int64 clan_id = 3;
+}
+
+// A user in the server.
+message User {
+  // The id of the user's account.
+  int64 id = 1;
+  // The username of the user's account.
+  string username = 2;
+  // The display name of the user.
+  string display_name = 3;
+  // A URL for an avatar image.
+  string avatar_url = 4;
+  // The language expected to be a tag which follows the BCP-47 spec.
+  string lang_tag = 5;
+  // The location set by the user.
+  string location = 6;
+  // The timezone set by the user.
+  string timezone = 7;
+  // custom status
+  string user_status = 8;
+  // Indicates whether the user is currently online.
+  bool online = 9;
+  // The phone number
+  string phone_number = 10;
+  // Number of related edges to this user.
+  int32 edge_count = 11;
+  // The UNIX time (for gRPC clients) or ISO string (for REST clients) when the user was created.
+  uint32 create_time_seconds = 12;
+  // The UNIX time (for gRPC clients) or ISO string (for REST clients) when the user was last updated.
+  uint32 update_time_seconds = 13;
+  // About me
+  string about_me = 14;
+  // Join time
+  uint32 join_time_seconds = 15;
+  // Platform
+  bool is_mobile = 16;
+  // dob
+  uint32 dob_seconds = 17;
+  // Mezone id
+  string mezon_id = 18;
+  // list clan nick name
+  repeated string list_nick_names = 19;
+  // online, offline, invisible, idle, do not disturb
+  string status = 20;
+}
+
+// A collection of zero or more users.
+message Users {
+  // The User objects.
+  repeated User users = 1;
+}
+
+// Validation Provider,
+enum StoreProvider {
+  // Apple App Store
+  APPLE_APP_STORE = 0;
+  // Google Play Store
+  GOOGLE_PLAY_STORE = 1;
+  // Huawei App Gallery
+  HUAWEI_APP_GALLERY = 2;
+  // Facebook Instant Store
+  FACEBOOK_INSTANT_STORE = 3;
+}
+
+// Environment where a purchase/subscription took place,
+enum StoreEnvironment {
+  // Unknown environment.
+  UNKNOWN = 0;
+  // Sandbox/test environment.
+  SANDBOX = 1;
+  // Production environment.
+  PRODUCTION = 2;
+}
+
+// Clan profile information
+message ClanDescProfile {
+  // Clan id
+  int64 clan_id =1;
+  // Clan creator
+  int64 creator_id  = 2;
+  // Clan nick name
+  string nick_name = 3;
+  // Clan profile banner
+  string profile_banner = 4;
+  // Clan profile theme
+  string profile_theme = 5;
+  // Clan profile avatar
+  string avatar_url = 6;
+}
+
+// Update Clan profile information
+message UpdateClanDescProfileRequest {
+  // Clan id
+  int64 clan_id =1;
+  // Clan nick name
+  string nick_name = 2;
+  // Clan profile banner
+  string profile_banner = 3;
+  // Clan profile theme
+  string profile_theme = 4;
+  // Clan profile avatar
+  string avatar_url = 5;
+}
+
+// Clan profile information
+message ClanDescProfileRequest {
+  // Clan id
+  int64 clan_id =1;
+}
+
+// Clan information
+message ClanDesc {
+  // Clan creator
+  int64 creator_id  = 1;
+  // Clan name
+  string clan_name = 2;
+  // Clan logo
+  string logo = 3;
+  // Clan banner
+  string banner = 4;
+  // Clan id
+  int64 clan_id = 5;
+  // Clan status
+  int32 status = 6;
+  // Badge count
+  int32 badge_count = 7;
+  // Is onboarding.
+  bool is_onboarding = 8;
+  // Welcome channel id.
+  int64 welcome_channel_id = 9;
+  // Onboarding_banner.
+  string onboarding_banner = 10;
+  // clan order
+  int32 clan_order = 11;
+  // is community
+  bool is_community = 12;
+  // community banner
+  string community_banner = 13;
+  // description
+  string description = 14;
+  // about
+  string about = 15;
+  // short_url
+  string short_url = 16;
+  // prevent anonymous
+  bool prevent_anonymous = 17;
+  // has unread message
+  bool has_unread_message = 18;
+}
+
+// Clan information
+message CreateClanDescRequest {
+  // Clan name
+  string clan_name = 1;
+  // Clan logo
+  string logo = 2;
+  // Clan banner
+  string banner = 3;
+}
+
+// Update Clan information
+message UpdateClanDescRequest {
+  int64 clan_id =1;
+  // Clan name
+  string clan_name = 2;
+  // Clan logo
+  google.protobuf.StringValue logo = 3;
+  // Clan banner
+  google.protobuf.StringValue banner = 4;
+  // Clan status
+  int32 status = 5;
+  // Is onboarding.
+  google.protobuf.BoolValue is_onboarding = 6;
+  // Welcome channel id.
+  int64 welcome_channel_id = 7;
+  // Onboarding_banner.
+  google.protobuf.StringValue onboarding_banner = 8;
+  // Enable community.
+  google.protobuf.BoolValue is_community = 9;
+  // Community banner.
+  google.protobuf.StringValue community_banner = 10;
+  // string description
+  google.protobuf.StringValue description = 11;
+  // About
+  google.protobuf.StringValue about = 12;
+  // Short url for community
+  google.protobuf.StringValue short_url = 13;
+  // Prevent anonymous
+  bool prevent_anonymous = 14;
+}
+
+// Delete a clan the user has access to.
+message DeleteClanDescRequest {
+  // The id of a group.
+  int64 clan_desc_id = 1;
+}
+
+// List (and optionally filter) channels.
+message ListClanDescRequest {
+  // Max number of records to return. Between 1 and 100.
+  int32 limit = 1;
+  // The friend state to list.
+  int32 state = 2;
+  // Cursor to start from
+  string cursor = 3;
+}
+
+message ListClanUnreadMsgIndicatorRequest {
+  int64 clan_id = 1;
+}
+
+message ListClanUnreadMsgIndicatorResponse {
+  bool has_unread_message = 1;
+}
+
+// A list of clan
+message ClanDescList {
+  // A list of channel.
+  repeated ClanDesc clandesc = 1;
+}
+
+// Add link invite users to.
+message LinkInviteUserRequest {
+  // id clan to add link to .
+  int64 clan_id = 1;
+  // id channel to add link to.
+  int64 channel_id = 2;
+  // expiry time
+  int32 expiry_time = 3;
+}
+
+// Add link invite users to.
+message InviteUserRequest {
+  // id clan to add link to .
+  int64 invite_id = 1;
+}
+
+// Add link invite users to.
+message InviteUserRes {
+  // id clan to add link to .
+  int64 clan_id = 1;
+  // id channel to add link to.
+  int64 channel_id = 2;
+  // clan name
+  string clan_name = 3;
+  // channel name
+  string channel_label = 4;
+  // check user exist
+  bool user_joined = 5;
+  // expiry_time
+  uint32 expiry_time_seconds = 6;
+  string clan_logo = 7;
+  int32 member_count = 8;
+  string banner = 9;
+  string community_banner = 10;
+  bool is_community = 11;
+}
+
+// Add link invite users to.
+message JoinClanChannelRequest {
+  // id clan to add link to .
+  int64 clan_id = 1;
+  // id channel to add link to.
+  int64 channel_id = 2;
+}
+
+// Add link invite users to.
+message LinkInviteUser {
+  // id clan
+  int64 clan_id = 1;
+  // The user to add.
+  int64 creator_id = 2;
+  // is clan invite
+  int64 channel_id = 3;
+  // link invite
+  string invite_link = 4;
+  // create time
+  uint32 create_time_seconds = 5;
+  // expiry time
+  uint32 expiry_time_seconds = 6;
+  int64 id = 7;
+}
+
+// Get clan profile.
+message ClanProfile {
+  // id user to find user
+  int64 user_id = 1;
+  // name user
+  string nick_name = 2;
+  // id avatar
+  string avatar = 3;
+  // id clan
+  int64 clan_id = 4;
+  // about clan
+  string about = 5;
+}
+
+// information user by clan requset
+message ClanProfileRequest {
+  // id clanc
+  int64 clan_id = 1;
+}
+
+// update nickname user by clan requset
+message UpdateClanProfileRequest {
+  // id clanc
+  int64 clan_id = 1;
+  // nick_name new
+  google.protobuf.StringValue nick_name = 2;
+  // avatar
+  google.protobuf.StringValue avatar = 3;
+}
+
+// Update Clan Order Request
+message UpdateClanOrderRequest {
+  message ClanOrder {
+    int32 order = 1;
+    int64 clan_id = 2;
+  }
+  repeated ClanOrder clans_order = 1;
+}
+
+// Category to group the channel
+message CategoryDesc {
+  // Category creator
+  int64 creator_id  = 1;
+  // the Clan that category belong to
+  int64 clan_id = 2;
+  // Category name
+  string category_name = 3;
+  int64 category_id = 4;
+  int32 category_order = 5;
+}
+
+message UpdateCategoryOrderRequest {
+  int64 clan_id = 1;
+  repeated CategoryOrderUpdate categories = 2;
+}
+
+message UpdateRoleOrderRequest {
+  int64 clan_id = 1;
+  repeated RoleOrderUpdate roles = 2;
+}
+
+message RoleOrderUpdate {
+  int64 role_id = 1;
+  int32 order = 2;
+}
+
+message CategoryOrderUpdate {
+  int64 category_id = 1;
+  int32 order = 2;
+}
+
+message CreateCategoryDescRequest {
+  string category_name = 1;
+  int64 clan_id = 2;
+}
+
+message DeleteCategoryDescRequest {
+  int64 category_id = 1;
+  int64 clan_id = 2;
+  string category_label = 3;
+}
+// A list of clan
+message CategoryDescList {
+  // A list of channel.
+  repeated CategoryDesc categorydesc = 1;
+}
+
+// List (and optionally filter) channels.
+message ListCategoryDescsRequest {
+  // Max number of records to return. Between 1 and 100.
+  int32 limit = 1;
+  // The friend state to list.
+  int32 state = 2;
+  // Cursor to start from
+  string cursor = 3;
+}
+
+message ChannelMessageHeader {
+  // the message id
+  int64 id = 1;
+  // the time stamp
+  uint32 timestamp_seconds = 2;
+  // the sender id
+  int64 sender_id = 3;
+  // the content
+  string content = 4;
+}
+
+// Channel description record
+message ChannelDescription {
+  // The clan of this channel
+  int64 clan_id = 1;
+  // The parent channel this message belongs to.
+  int64 parent_id = 2;
+  // The channel this message belongs to.
+  int64 channel_id = 3;
+  // The category of channel
+  int64 category_id = 4;
+  // The category name
+  string category_name = 5;
+  // The channel type.
+  int32 type = 6; //int32 type = 6;
+  // creator ID.
+  int64 creator_id = 7;
+  // The channel lable
+  string channel_label = 8;
+  // The channel private
+  int32 channel_private = 9;
+  // DM avatars
+  repeated string avatars = 10;
+  // List DM user ids
+  repeated int64 user_ids = 11;
+  // last message id
+  ChannelMessageHeader last_sent_message = 12;
+  // last seen message id
+  ChannelMessageHeader last_seen_message = 13;
+  // DM status
+  repeated bool onlines = 14 [packed=true];
+  // meeting code
+  string meeting_code = 15;
+  // count message unread
+  int32 count_mess_unread = 16;
+  // active channel
+  int32 active = 17;
+  // last pin message
+  string last_pin_message = 18;
+  // List DM usernames
+  repeated string usernames = 19;
+  // creator name
+  string creator_name = 20;
+  // create time ms
+  uint32 create_time_seconds = 21;
+  // update time ms
+  uint32 update_time_seconds = 22;
+  // List DM diplay names
+  repeated string display_names = 23;
+  // channel avatar
+  string channel_avatar = 24;
+  // clan_name
+  string clan_name = 25;
+  // app id
+  int64 app_id = 26;
+  // channel all message
+  bool is_mute = 27;
+  // age restricted
+  int32 age_restricted = 28;
+  // channel description topic
+  string topic = 29;
+  // e2ee
+  int32 e2ee = 30;
+  // channel member count
+  int32 member_count = 31;
+}
+
+// A list of channel description, usually a result of a list operation.
+message ChannelDescList {
+  // A list of channel.
+  repeated ChannelDescription channeldesc = 1;
+}
+
+// A list of channel description, usually a result of a list operation.
+message ChannelDescListNoPool {
+  // A list of channel.
+  repeated ChannelDescription channeldesc = 1;
+  // Page thread
+  int32 page = 2;
+}
+
+message ListThreadRequest {
+  // Max number of records to return. Between 1 and 100.
+  int32 limit = 1;
+  // The channel state to list.
+  int32 state = 2;
+  // The clan of this channel
+  int64 clan_id = 3;
+  // channel id
+  int64 channel_id = 4;
+  // thread id
+  int64 thread_id = 5;
+  // Number of page
+  int32 page = 6;
+}
+
+// List (and optionally filter) channels.
+message ListChannelDescsRequest {
+  // Max number of records to return. Between 1 and 100.
+  int32 limit = 1;
+  // The channel state to list.
+  int32 state = 2;
+  // Cursor to start from
+  string cursor = 3;
+  // The clan of this channel
+  int64 clan_id = 4;
+  // channel type
+  int32 channel_type = 5;
+  // is mobile
+  bool is_mobile = 6;
+  // page
+  int32 page = 7;
+}
+
+// List channel description detail
+message ListChannelDetailRequest {
+  // channel id
+  int64 channel_id = 1;
+}
+
+// Add a role for channel.
+message AddRoleChannelDescRequest {
+  // This is the role that needs to be added to the channel
+  repeated int64 role_ids = 1;
+  // This is a channel that needs more roles
+  int64 channel_id = 2;
+}
+
+// Create a channel within clan.
+message CreateChannelDescRequest {
+  // The clan of this channel
+  int64 clan_id = 1;
+  // The parent channel this message belongs to.
+  int64 parent_id = 2;
+  // The channel this message belongs to.
+  int64 channel_id = 3;
+  // The category of channel
+  int64 category_id = 4;
+  // The channel type.
+  int32 type = 5;
+  // The channel lable
+  string channel_label = 6;
+  // The channel private
+  int32 channel_private = 7;
+  // The users to add.
+  repeated int64 user_ids = 8;
+  // app url for channel type app
+  int64 app_id = 9;
+}
+
+
+// Delete a channel the user has access to.
+message DeleteChannelDescRequest {
+  // The clan id
+  int64 clan_id = 1;
+  // The id of a channel.
+  int64 channel_id = 2;
+}
+
+// Update fields in a given channel.
+message UpdateChannelDescRequest {
+  // The clan ID
+  int64 clan_id = 1;
+  // The ID of the channel to update.
+  int64 channel_id = 2;
+  // The channel lable
+  google.protobuf.StringValue channel_label = 3;
+  // The category of channel
+  int64 category_id = 4;
+    // app url for channel type app
+  int64 app_id = 5;
+  // topic
+  string topic = 6;
+  //
+  int32 age_restricted = 7;
+  //
+  int32 e2ee = 8;
+  // channel avatar
+  google.protobuf.StringValue channel_avatar = 9;
+}
+
+// Update fields in a given channel.
+message ChangeChannelPrivateRequest {
+  // The clan ID
+  int64 clan_id = 1;
+  // The ID of the channel to update.
+  int64 channel_id = 2;
+  // The channel private
+  int32 channel_private = 3;
+  // The users to add.
+  repeated int64 user_ids = 4;
+  // This is the role that needs to be added to the channel
+  repeated int64 role_ids = 5;
+}
+
+// Add users to a channel.
+message AddChannelUsersRequest {
+  // The channel to add users to.
+  int64 channel_id = 1;
+  // The users to add.
+  repeated int64 user_ids = 2;
+}
+
+// Kick a set of users from a channel.
+message RemoveChannelUsersRequest {
+  // The channel ID to kick from.
+  int64 channel_id = 1;
+  // The users to kick.
+  repeated int64 user_ids = 2;
+}
+
+// Kick a set of users from a clan.
+message RemoveClanUsersRequest {
+  // The clan ID to kick from.
+  int64 clan_id = 1;
+  // The users to kick.
+  repeated int64 user_ids = 2;
+}
+
+// Ban a set of users from a channel.
+message BanClanUsersRequest {
+  // The clan ID to kick from.
+  int64 clan_id = 1;
+  // The channel ID to ban
+  int64 channel_id = 2;
+  // The users to kick.
+  repeated int64 user_ids = 3;
+  // ban time
+  int32 ban_time = 4;
+  // The reason
+  string reason = 5;
+}
+
+// list banned user
+message BannedUser {
+  // The channel ID to ban
+  int64 channel_id = 1;
+  // The banned user.
+  int64 banned_id = 2;
+  // The avatar
+  int64 banner_id = 3;
+  // ban time
+  int32 ban_time = 4;
+  // The reason
+  string reason = 5;
+}
+
+message BannedUserListRequest {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+}
+
+message BannedUserList {
+  repeated BannedUser banned_users = 1;
+}
+
+// Leave a channel.
+message LeaveThreadRequest {
+  int64 clan_id = 1;
+  // The channel ID to leave.
+  int64 channel_id = 2;
+}
+
+// Archive channel/thread inactive (archived).
+message ArchiveChannelRequest {
+  int64 clan_id = 1;
+  // Channel (thread) ID to inactive.
+  int64 channel_id = 2;
+}
+
+message ListArchivedChannelDescsRequest {
+  // The clan of this list archived channels
+  int64 clan_id = 1;
+}
+
+message ListArchivedChannelDescsResponse {
+  // A list of channel.
+  repeated ChannelDescription channeldesc = 1;
+}
+
+// Role record
+message Role {
+  // Role id
+  int64 id = 1;
+  string title = 2;
+  string color = 3;
+  string role_icon = 4;
+  string slug = 5;
+  string description = 6;
+  int64 creator_id = 7;
+  int64 clan_id = 8;
+  int32 active = 9;
+  int32 display_online = 10;
+  int32 allow_mention = 11;
+  RoleUserList role_user_list = 12;
+  PermissionList permission_list = 13;
+  int32 role_channel_active = 14;
+  repeated int64 channel_ids = 15;
+  int32 max_level_permission = 16;
+  int32 order_role = 17;
+}
+
+// Event clan
+message EventManagement {
+  int64 id = 1;
+  string title = 2;
+  string logo = 3;
+  string description = 4;
+  int32 active = 5;
+  int32 start_event = 6;
+  int64 creator_id = 7;
+  int64 clan_id = 8;
+  int64 channel_voice_id = 9;
+  string address = 10;
+  uint32 start_time_seconds = 11;
+  uint32 end_time_seconds = 12;
+  repeated int64 user_ids = 13;
+  uint32 create_time_seconds = 14;
+  int32 max_permission = 15;
+  int64 channel_id = 16;
+  int32 event_status = 17;
+  int32 repeat_type = 18;
+  bool is_private = 19;
+  GenerateMezonMeetResponse meet_room = 20;
+}
+
+// Permission record
+message Permission {
+  // Permission id
+  int64 id = 1;
+  string title = 2;
+  string slug = 3;
+  string description = 4;
+  int32 active = 5;
+  int32 scope = 6;
+  int32 level = 7;
+}
+
+// Notification setting record
+message NotificationSetting {
+  // Notification id
+  int64 id = 1;
+  // Notification title
+  int32 notification_setting_type = 2;
+}
+
+//
+message DeletePinMessage {
+  //
+  int64 id = 1;
+  //
+  int64  message_id = 2;
+  //
+  int64 channel_id = 3;
+  //
+  int64 clan_id = 4;
+}
+
+//
+message PinMessage {
+  //
+  int64 id = 1;
+  //
+  int64  message_id = 2;
+  //
+  int64 channel_id = 3;
+  //
+  int64 sender_id = 4;
+  //
+  string content = 5;
+  //
+  string username = 6;
+  //
+  string avatar = 7;
+  // The UNIX time (for gRPC clients) or ISO string (for REST clients) when the message was created.
+  uint32 create_time_seconds = 8;
+  // attachment
+  bytes attachment = 9;
+}
+
+message PinMessagesList {
+  repeated PinMessage pin_messages_list = 1;
+}
+
+// Notification channel
+message NotificationUserChannel {
+  // Notification id
+  int64 id = 1;
+  //
+  int32 notification_setting_type = 2;
+  //
+  int32 time_mute_seconds = 3;
+  //
+  int32 active = 4;
+  //
+  int64 channel_id = 5;
+}
+
+// Notification channel
+message NotifiReactMessage {
+  // Notification id
+  int64 id = 1;
+  //
+  int64 user_id = 2;
+  //
+  int64 channel_id = 3;
+}
+
+//
+message DefaultNotificationClan {
+  //
+  int64 clan_id = 1;
+}
+
+//
+message DefaultNotificationCategory {
+  //
+  int64 category_id = 1;
+}
+
+//
+message NotificationChannel {
+  //
+  int64 channel_id = 1;
+}
+
+//
+message NotificationClan {
+  //
+  int64 clan_id = 1;
+}
+
+//
+message NotificationSettingList {
+  // A list of notification setting.
+  repeated NotificationSetting notification_setting = 1;
+}
+
+// set notification
+message SetNotificationRequest {
+  // channelId or categoryId
+  int64 channel_category_id = 1;
+  // notification_type
+  int32 notification_type = 2;
+  //
+  int64 clan_id = 3;
+}
+
+//
+message PinMessageRequest {
+  int64  message_id = 1;
+  int64 channel_id = 2;
+  int64 clan_id = 3;
+}
+
+// set notification
+message SetMuteRequest {
+  // channel_id and category_id
+  int64 id = 1;
+  int32 mute_time = 2;
+  int32 active = 3;
+  int64 clan_id = 4;
+}
+
+message NotificationChannelCategorySettingList {
+  repeated NotificationChannelCategorySetting notification_channel_category_settings_list = 1;
+}
+
+message NotificationChannelCategorySetting {
+  // Notification id
+  int64 id = 1;
+  //
+  string channel_category_label = 2;
+  // Notification title
+  int32 notification_setting_type = 3;
+  //
+  string channel_category_title = 4;
+  //
+  int32 action = 5;
+}
+
+// set default notification
+message SetDefaultNotificationRequest {
+  int64 clan_id = 1;
+  int32 notification_type = 2;
+  int64 category_id = 3;
+}
+
+// A list of role description, usually a result of a list operation.
+message RoleList {
+  // A list of role.
+  repeated Role roles = 1;
+  // level permission max
+  int32 max_level_permission = 2;
+}
+
+message EventList {
+  // A list of event.
+  repeated EventManagement events = 1;
+}
+
+// A list of permission description, usually a result of a list operation.
+message PermissionList {
+  // A list of permission.
+  repeated Permission permissions = 1;
+  // level permission max
+  int32 max_level_permission = 2;
+}
+
+// List (and optionally filter) permissions.
+message ListPermissionsRequest {
+  int64 role_id = 1;
+}
+
+// List (and optionally filter) role-users.
+message ListRoleUsersRequest {
+  int64 role_id = 1;
+  // Max number of records to return. Between 1 and 100.
+  int32 limit = 2;
+  // An optional next page cursor.
+  string cursor = 3;
+}
+
+// List Permission Of User In The Clan.
+message ListPermissionOfUsersRequest {
+  //clan_id.
+  int64 clan_id = 1;
+  //channel_id
+  int64 channel_id = 2;
+}
+
+message RoleUserList {
+  // A single user-role pair.
+  message RoleUser {
+    // The id of the user's account.
+    int64 id = 1;
+    // The username of the user's account.
+    string username = 2;
+    // The display name of the user.
+    string display_name = 3;
+    // A URL for an avatar image.
+    string avatar_url = 4;
+    // The language expected to be a tag which follows the BCP-47 spec.
+    string lang_tag = 5;
+    // The location set by the user.
+    string location = 6;
+    // The timezone set by the user.
+    bool online = 7;
+  }
+
+  // role_users pairs for a clan.
+  repeated RoleUser role_users = 1;
+  // Cursor for the next page of results, if any.
+  string cursor = 2;
+}
+
+message UserEventRequest {
+  // The ID of the clan to be updated.
+  int64 clan_id = 1;
+  // The ID of the event to be updated.
+  int64 event_id = 2;
+}
+
+message ListEventsRequest {
+  // The clan of this event
+  int64 clan_id = 1;
+}
+
+// Create a role within clan.
+message CreateRoleRequest {
+  string title = 1;
+  string color = 2;
+  string role_icon = 3;
+  string description = 4;
+  int64 clan_id = 5;
+  int32 display_online = 6;
+  int32 allow_mention = 7;
+  //id of permission which has max level permission
+  int64 max_permission_id = 8;
+  // The users to add.
+  repeated int64 add_user_ids = 9;
+  // The permissions to add.
+  repeated int64 active_permission_ids = 10;
+  // order role
+  int32 order_role = 11;
+}
+
+// Create a event within clan.
+message CreateEventRequest {
+  string title = 1;
+  string logo = 2;
+  string description = 3;
+  int64 clan_id = 4;
+  int64 channel_voice_id = 5;
+  string address = 6;
+  uint32 start_time_seconds = 7;
+  uint32 end_time_seconds = 8;
+  int64 event_id = 9;
+  int32 event_status = 10;
+  int64 channel_id = 11;
+  int32 action = 12;
+  int32 repeat_type = 13;
+  int64 creator_id = 14;
+  int64 user_id = 15;
+  bool is_private = 16;
+  GenerateMezonMeetResponse meet_room = 17;
+}
+
+// update a event within clan.
+message UpdateEventRequest {
+  string title = 1;
+  string logo = 2;
+  string description = 3;
+  int64 event_id = 4;
+  int64 channel_id = 5;
+  string address = 6;
+  uint32 start_time_seconds = 7;
+  uint32 end_time_seconds = 8;
+  int64 clan_id = 9;
+  int64 creator_id = 10;
+  int64 channel_voice_id = 11;
+  int64 channel_id_old = 12;
+  int32 repeat_type = 13;
+}
+
+// Delete a role the user has access to.
+message DeleteRoleRequest {
+  // The id of a role.
+  int64 role_id = 1;
+  // The id of a channel
+  int64 channel_id = 2;
+  // clan_id
+  int64 clan_id = 3;
+  // role label
+  string role_label = 4;
+}
+
+message DeleteEventRequest {
+  // The id of a event.
+  int64 event_id = 1;
+  // clan id
+  int64 clan_id = 2;
+  // creator id
+  int64 creator_id = 3;
+  // event label
+  string event_label = 4;
+  // channel id
+  int64 channel_id = 5;
+}
+
+// Update fields in a given role.
+message UpdateRoleRequest {
+  // The ID of the role to update.
+  int64 role_id = 1;
+  google.protobuf.StringValue title = 2;
+  google.protobuf.StringValue color = 3;
+  google.protobuf.StringValue role_icon = 4;
+  google.protobuf.StringValue description = 5;
+  int32 display_online = 6;
+  int32 allow_mention = 7;
+  // The users to add.
+  repeated int64 add_user_ids = 8;
+  // The permissions to add.
+  repeated int64 active_permission_ids = 9;
+  // The users to remove.
+  repeated int64 remove_user_ids = 10;
+  // The permissions to remove.
+  repeated int64 remove_permission_ids = 11;
+  // the clan id
+  int64 clan_id = 12;
+  // id of permission which has max level permission
+  int64 max_permission_id = 13;
+}
+
+message UpdateRoleChannelRequest {
+  // The ID of the role to update.
+  int64 role_id = 1;
+  // The permissions to add.
+  repeated PermissionUpdate permission_update = 2;
+  // id of permission which has max level permission
+  int64 max_permission_id = 3;
+  // The channel_id
+  int64 channel_id = 4;
+  // The ID of the role to update.
+  int64 user_id = 5;
+  // Role label
+  string role_label = 6;
+}
+
+message PermissionUpdate {
+  // permission_id
+  int64 permission_id = 1;
+  // permission slug
+  string slug = 2;
+  // type set permission
+  int32 type = 3;
+}
+
+message UploadAttachmentRequest {
+  // The name of file that need to upload
+  string filename = 1;
+  // The type of file that need to upload
+  string filetype = 2;
+  // The size of file that need to upload
+  int32 size = 3;
+  // width
+  int32 width = 4;
+  // Height
+  int32 height = 5;
+}
+
+message ListMessageMentionRequest {
+  // Max number of records to return. Between 1 and 100.
+  int32 limit = 1;
+  // True if listing should be older messages to newer, false if reverse.
+  bool forward = 2;
+  // A pagination cursor, if any.
+  string cursor = 3;
+}
+
+message UploadAttachment {
+  // The name of file that need to upload
+  string filename = 1;
+  // The url
+  string url = 2;
+}
+
+message MultipartUploadAttachment {
+  // The name of file that need to upload
+  string filename = 1;
+  // The url
+  repeated string urls = 2;
+  // the upload id
+  string upload_id = 3;
+}
+
+message MultipartUploadAttachmentPart {
+	int32 part_number = 1;
+	string e_tag = 2;       
+}
+
+message MultipartUploadAttachmentFinishRequest {
+	string upload_id = 1;
+	repeated MultipartUploadAttachmentPart parts = 2;
+}
+
+// Operator that can be used to override the one set in the leaderboard.
+enum Operator {
+  // Do not override the leaderboard operator.
+  NO_OVERRIDE = 0;
+  // Override the leaderboard operator with BEST.
+  BEST = 1;
+  // Override the leaderboard operator with SET.
+  SET = 2;
+  // Override the leaderboard operator with INCREMENT.
+  INCREMENT = 3;
+  // Override the leaderboard operator with DECREMENT.
+  DECREMENT = 4;
+}
+
+message SearchMessageRequest {
+  repeated FilterParam filters = 1;
+  // Offset value
+  int32 from = 3;
+  // Page size
+  int32 size = 4;
+  // Sort information
+  repeated SortParam sorts = 5;
+}
+
+message SortParam {
+  // Field name to sort by
+  string field_name = 1;
+  // Sort order
+  string order = 2;
+}
+
+message FilterParam {
+  // Field name to filter by
+  string field_name = 1;
+  // Filter value
+  string field_value = 2;
+}
+
+message SearchMessageDocument {
+  // The message ID.
+  string  message_id = 1;
+  // The channel ID.
+  string channel_id = 2;
+  // The clan ID.
+  string clan_id = 3;
+  // The user ID of sender.
+  string sender_id = 4;
+  // Message content
+  string content = 5;
+  // Mention users
+  string mentions = 6;
+  // Reactions
+  string reactions = 7;
+  // Attachment
+  string attachments = 8;
+  // Reference users
+  string references = 9;
+  // Message create time
+  string create_time = 10;
+  // Message update time
+  string update_time = 11;
+  // Channel name
+  string channel_label = 12;
+  // Channel type
+  int32 channel_type = 13;
+  // Clan name
+  string clan_name = 14;
+  // Sender's username
+  string username = 15;
+  // Sender's display name
+  string display_name = 16;
+  // Sender's avatar URL
+  string avatar_url = 17;
+}
+
+message SearchMessageResponse {
+  // List of paged messages.
+  repeated SearchMessageDocument messages = 1;
+  // The total number of messages.
+  int32 total = 2;
+}
+
+message RegistrationEmailRequest {
+  // A valid RFC-5322 email address.
+  string email = 1;
+  // A password for the user account.
+  string password = 2;
+  // A old password for the user account.
+  string old_password = 3;
+  // Set the username on the account at register. Must be unique.
+  string username = 4;
+  // Display name
+  string display_name = 5;
+  // Avatar url
+  string avatar_url = 6;
+  // DOB
+  string dob = 7;
+  // Extra information that will be bundled in the session token.
+  map<string, string> vars = 8;
+}
+
+message ClanEmoji {
+  int64 id  = 1;
+  // src url
+  string src = 2;
+  // shortname
+  string shortname = 3;
+  // category
+  string category = 4;
+  // creator id
+  int64 creator_id = 5;
+  // clan_id
+  int64 clan_id = 6;
+  // clan logo
+  string logo = 7;
+  // clan name
+  string clan_name = 8;
+  // is for sale
+  bool is_for_sale = 9;
+}
+
+message EmojiListedResponse {
+  repeated ClanEmoji emoji_list = 1;
+}
+
+message StickerListedResponse {
+  repeated ClanSticker stickers = 1;
+}
+
+message ClanSticker {
+  int64 id = 1;
+  string source = 2;
+  string shortname = 3;
+  string category = 4;
+  int64 creator_id = 5;
+  uint32 create_time_seconds = 6;
+  int64 clan_id = 7;
+  string logo = 8;
+  string clan_name = 9;
+  int32 media_type = 10;
+  // is for sale
+  bool is_for_sale = 11;
+}
+
+message AllUsersAddChannelRequest {
+  int64 channel_id = 1;
+  int32 limit = 2;
+}
+
+message AllUsersAddChannelResponse {
+  int64 channel_id = 1;
+  repeated int64 user_ids = 2;
+  int32 limit = 3;
+  repeated string usernames = 4;
+  repeated string display_names = 5;
+  repeated string avatars = 6;
+  repeated bool onlines = 7 [packed=true];
+}
+
+message ClanEmojiCreateRequest {
+  int64 clan_id = 1;
+  string source = 2;
+  string shortname = 3;
+  string category = 4;
+  int64 id = 5;
+  bool is_for_sale = 6;
+}
+
+message ClanEmojiGetByClanIdRequest {
+  int64 clan_id = 1;
+}
+
+message ClanEmojiDeleteRequest {
+  int64 id = 1;
+  int64 clan_id = 2;
+  string emoji_label = 3;
+}
+
+message ClanEmojiUpdateRequest {
+  int64 id  = 1;
+  string shortname = 2;
+  int64 clan_id = 3;
+}
+
+message Webhook {
+  int64 id = 1;
+  string webhook_name = 2;
+  int64 channel_id = 3;
+  int32 active = 4;
+  // URL of the webhook, which is automatically generated and different from the avatar
+  string url = 5;
+  int64 creator_id = 6;
+  string create_time = 7;
+  string update_time = 8;
+  string avatar = 9;
+  int32 status = 10;
+  int64 clan_id = 11;
+}
+
+message WebhookCreateRequest {
+  string webhook_name = 1;
+  int64 channel_id = 2;
+  string avatar = 3;
+  int64 clan_id = 4;
+}
+
+message WebhookListRequestById {
+  int64 id = 1;
+}
+
+message WebhookUpdateRequestById {
+  // webhook Id
+  int64 id = 1;
+  // webhook name
+  string webhook_name = 2;
+  // change channel_id of webhook
+  int64 channel_id_update = 3;
+  // webhook avatar
+  string avatar = 4;
+  // channel id
+  int64 channel_id = 5;
+  // clan id
+  int64 clan_id = 6;
+}
+
+message WebhookDeleteRequestById {
+  int64 id = 1;
+  int64 clan_id = 2;
+  int64 channel_id =3;
+}
+
+message WebhookListRequest {
+  int64 channel_id = 1;
+  int64 clan_id = 2;
+}
+
+message WebhookListResponse {
+  repeated Webhook webhooks = 1;
+}
+
+message WebhookGenerateResponse {
+  string url = 1;
+  string hook_name = 2;
+  int64 channel_id = 3;
+  string avatar = 4;
+}
+
+message CheckDuplicateClanNameRequest {
+  string clan_name = 1;
+}
+
+message CheckDuplicateClanNameResponse {
+  bool is_duplicate = 1;
+}
+
+message CheckDuplicateNameRequest {
+  string name = 1;
+  int32 type = 2;
+  int64 condition_id = 3;
+}
+
+message CheckDuplicateNameResponse {
+  bool is_duplicate = 1;
+}
+
+message ClanStickerAddRequest {
+  string source = 1;
+  string shortname = 2;
+  string category = 3;
+  int64 clan_id = 4;
+  //UNIQUE include type number
+  int64 id = 5;
+  // media type for image or audio
+  int32 media_type = 6;
+  // is for sale
+  bool is_for_sale = 7;
+}
+
+message ClanStickerListByClanIdRequest {
+  int64 clan_id = 1;
+}
+
+message ClanStickerUpdateByIdRequest {
+  int64 id = 1;
+  string source = 2;
+  string shortname = 3;
+  string category = 4;
+  int64 clan_id = 5;
+}
+
+message ClanStickerDeleteRequest {
+  int64 id = 1;
+  int64 clan_id = 2;
+  string sticker_label = 3;
+}
+
+message ChangeChannelCategoryRequest {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  int64 new_category_id = 3;
+}
+
+
+// App information.
+message App {
+  // app id
+  int64 id = 1;
+  // appname
+  string appname = 2;
+  // creator_id
+  int64 creator_id = 3;
+  // logo
+  string applogo = 4;
+  // status online
+  bool is_shadow = 5;
+  // The UNIX time when the app was disabled.
+  uint32 disable_time_seconds = 6;
+  // The UNIX time when the app was created
+  uint32 create_time_seconds = 7;
+  // string token
+  string token = 8;
+  // role
+  int32 role = 9;
+  // about
+  string about = 10;
+  // app url
+  string app_url = 11;
+}
+
+// Delete a app.
+message AppDeleteRequest {
+  // The unique identifier of the app.
+  int64 id = 1;
+  // Record the app deletion - used for GDPR compliance.
+  bool record_deletion = 2;
+}
+
+// A list of apps.
+message AppList {
+  // A list of apps.
+  repeated App apps = 1;
+  // Approximate total number of apps.
+  int32 total_count = 2;
+  // Next cursor.
+  string next_cursor = 3;
+}
+
+// Add a new app
+message AddAppRequest {
+  // The appname.
+  string appname = 1;
+  // The password.
+  string token = 2;
+  // Creator of the app.
+  int64 creator_id = 3;
+  // Role of this app.
+  int32 role = 4;
+  // Is shadow.
+  bool is_shadow = 5;
+  // App url.
+  string app_url = 6;
+  // app logo
+  string app_logo = 7;
+  // about me
+  string about_me = 8;
+}
+
+// List (and optionally filter) users.
+message ListAppsRequest {
+  // User ID or username filter.
+  string filter = 1;
+  // Search only recorded deletes.
+  bool tombstones = 2;
+  // Cursor to start from
+  string cursor = 3;
+}
+
+// Update app information.
+message UpdateAppRequest {
+  // User ID to update.
+  int64 id = 1;
+  // Username.
+  google.protobuf.StringValue appname = 2;
+  // Metadata.
+  google.protobuf.StringValue metadata = 3;
+  // Avatar URL.
+  google.protobuf.StringValue applogo = 4;
+  // Token.
+  google.protobuf.StringValue token = 5;
+  // about the app.
+  string about = 6;
+  // App url.
+  string app_url = 7;
+  // need update or not
+  string is_shadow = 9;
+}
+
+// The identifier for an app.
+message AppId {
+  // The unique identifier of the app.
+  int64 id = 1;
+}
+
+// The identifier for an app.
+message AppClan {
+  // The unique identifier of the app.
+  int64 app_id = 1;
+  int64 clan_id = 2;
+}
+
+// Delete channel messages by timestamp or/and ids.
+message DeleteChannelMessagesRequest {
+  // Timestamp before which messages will be deleted.
+  uint32 before_seconds = 1;
+  // IDs of the messages to delete.
+  repeated int64 ids = 2;
+}
+
+message DeleteChannelMessagesResponse {
+  // Total number of messages deleted.
+  int64 total = 1;
+}
+
+// System message details.
+message SystemMessage {
+  // ID
+  int64 id = 1;
+  // Clan ID
+  int64 clan_id = 2;
+  // Channel ID
+  int64 channel_id = 3;
+  // Welcome random
+  string welcome_random = 4;
+  // Welcome sticker
+  string welcome_sticker = 5;
+  // Boost message
+  string boost_message = 6;
+  // Setup tips
+  string setup_tips = 7;
+  // Hide audit log
+  bool hide_audit_log = 8;
+}
+
+// List of system message.
+message SystemMessagesList {
+  repeated SystemMessage system_messages_list = 1;
+}
+
+// Request to get system message by clan and channel IDs.
+message SystemMessageRequest {
+  // Clan ID
+  int64 clan_id = 1;
+  // Channel ID
+  int64 channel_id = 2;
+  // Welcome random
+  string welcome_random = 3;
+  // Welcome sticker
+  string welcome_sticker = 4;
+  // Boost message
+  string boost_message = 5;
+  // Setup tips
+  string setup_tips = 6;
+  // Hide audit log
+  bool hide_audit_log = 7;
+}
+
+// Request to delete a system message by clan ID.
+message DeleteSystemMessage {
+  // Clan ID
+  int64 clan_id = 1;
+}
+
+// Request to get system message by clan ID.
+message GetSystemMessage {
+  // Clan ID
+  int64 clan_id = 1;
+}
+
+message DeleteCategoryOrderRequest{
+  int64 clan_id = 1;
+}
+
+message StreamHttpCallbackRequest {
+  // id
+  int64 id = 1;
+  // client_id
+  int64 client_id = 2;
+  // clan_id
+	int64 clan_id = 3;
+  // channel_id
+	int64 channel_id = 4;
+  // user_id
+  int64 user_id = 5;
+  // action
+	int32 action = 6;
+  // is_publisher
+  bool is_publisher = 7;
+  // token
+  string token = 8;
+}
+
+message StreamHttpCallbackResponse {
+  int32 code = 1;
+  string msg = 2;
+}
+
+// A list of users belonging to a channel, along with their role.
+message StreamingChannelUser {
+  // user join id
+  int64 id = 1;
+  // user for a channel.
+  int64 user_id = 2;
+  // channel id
+  int64 channel_id = 3;
+  // participant
+  string participant = 4;
+}
+
+// A list of users belonging to a channel, along with their role.
+message StreamingChannelUserList {
+  // list of voice channel user
+  repeated StreamingChannelUser streaming_channel_users = 1;
+}
+
+message RegisterStreamingChannelRequest {
+  // clan id
+  int64 clan_id = 1;
+  // channel id
+  int64 channel_id = 2;
+}
+
+message RegisterStreamingChannelResponse {
+  // clan id
+  int64 clan_id = 1;
+  // channel id
+  int64 channel_id = 2;
+  // streaming url
+  string streaming_url = 3;
+}
+
+message GiveCoffeeEvent {
+  // sender id
+  int64 sender_id = 1;
+  // receiver id
+  int64 receiver_id = 2;
+  // token count
+  int32 token_count = 3;
+  // message_ref
+  int64 message_ref_id = 4;
+  // chanel id
+  int64 channel_id = 5;
+  // clan id
+  int64 clan_id = 6;
+}
+
+message ListChannelAppsRequest {
+  // clan id
+  int64 clan_id = 1;
+}
+
+message ListChannelAppsResponse {
+  // list of channel apps
+  repeated ChannelAppResponse channel_apps = 1;
+}
+
+message ChannelAppResponse {
+  // id
+  int64 id = 1;
+  // clan id
+  int64 clan_id = 2;
+  // channel id
+  int64 channel_id = 3;
+  // app id
+  int64 app_id = 4;
+  // app url
+  string app_url = 5;
+  // app name
+  string app_name = 6;
+  // app logo
+  string app_logo = 7;
+}
+
+message AllUserClans {
+  repeated User users = 1;
+}
+
+message RoleListEventRequest {
+  // clan id
+  int64 clan_id = 1;
+  // limit
+  int32 limit = 2;
+  // state
+  int32 state = 3;
+  // cursor
+  string cursor = 4;
+}
+
+message RoleListEventResponse {
+  // limit
+  int32 limit = 1;
+  // state
+  int32 state = 2;
+  // cursor
+  string cursor = 3;
+  // clan_id
+  int64 clanId = 4;
+  // list of roles
+  RoleList roles = 5;
+}
+
+message UserPermissionInChannelListRequest {
+  // clan id
+  int64 clan_id = 1;
+  // channel id
+  int64 channel_id = 2;
+}
+
+message UserPermissionInChannelListResponse {
+  // clan id
+  int64 clan_id = 1;
+  // channel id
+  int64 channel_id = 2;
+  // A list of permission.
+  PermissionList permissions = 3;
+}
+
+// Permission role channel
+message PermissionRoleChannel {
+  // permission id
+  int64 permission_id = 1;
+  // active
+  bool active = 2;
+}
+
+message PermissionRoleChannelListEventRequest {
+  // role id
+  int64 role_id = 1;
+  // channel id
+  int64 channel_id = 2;
+  // user id
+  int64 user_id = 4;
+}
+
+// List of permission role channel
+message PermissionRoleChannelListEventResponse {
+  // role id
+  int64 role_id = 1;
+  // channel id
+  int64 channel_id = 2;
+  // user id
+  int64 user_id = 3;
+  // list of permission role channel
+  repeated PermissionRoleChannel permission_role_channel = 4;
+}
+
+message ChannelSettingListRequest{
+  // clan id
+  int64 clan_id = 1;
+  // parent id of thread
+  int64 parent_id = 2;
+  // category id
+  int64 category_id = 3;
+  // is private channel
+  int32 private_channel = 4;
+  // is active
+  int32 active = 5;
+  // status
+  int32 status = 6;
+  // type
+  int32 type = 7;
+  // limit
+  int32 limit = 8;
+  // page
+  int32 page = 9;
+  // channel label
+  string channel_label = 10;
+}
+
+message ChannelSettingItem {
+  // channel id
+  int64 id = 1;
+  // creator id
+	int64 creator_id = 2;
+  // parentId
+	int64 parent_id = 3;
+  //label of channel
+	string channel_label = 4;
+  // category id
+	int64 category_id = 5;
+  // meeting code
+	string meeting_code = 6;
+  // channel private
+  int32 channel_private = 7;
+  // channel type
+  int32 channel_type = 8;
+  // is active
+	int32 active = 9;
+  // list user in channel
+  repeated int64 user_ids = 10;
+  // message count
+  int64 message_count = 11;
+  // last sent message
+  ChannelMessageHeader last_sent_message = 12;
+}
+
+message ChannelSettingListResponse{
+  // clan id
+  int64 clan_id = 1;
+  // channel count
+  int32 channel_count = 2;
+  // thread count
+  int32 thread_count = 3;
+  // channel setting list
+  repeated ChannelSettingItem channel_setting_list = 4;
+}
+
+message MarkAsReadRequest {
+  // channel id
+  int64 channel_id = 1;
+  // category_id
+  int64 category_id = 2;
+  // clan id
+  int64 clan_id = 3;
+}
+
+message EditChannelCanvasRequest {
+  // id
+  int64 id = 1;
+  // channel id
+  int64 channel_id = 2;
+  // clan id
+  int64 clan_id = 3;
+  // title
+  string title = 4;
+  // content
+  string content = 5;
+  // is default
+  bool is_default = 6;
+  // status
+  int32 status = 7;
+}
+
+message EditChannelCanvasResponse {
+  // id
+  int64 id = 1;
+}
+
+message DeleteChannelCanvasRequest {
+  // clan id
+  int64 clan_id = 1;
+  // channel id
+  int64 channel_id = 2;
+  // canvas id
+  int64 canvas_id = 3;
+}
+
+message ChannelCanvasListRequest {
+  // clan id
+  int64 clan_id = 1;
+  // channel id
+  int64 channel_id = 2;
+  // limit
+  int32 limit = 3;
+  // page
+  int32 page = 4;
+  //
+  string cursor = 5;
+}
+
+message ChannelCanvasItem {
+  // id
+  int64 id = 1;
+  // title
+  string title = 2;
+  // is default
+  bool is_default = 3;
+  // content
+  string content = 4;
+  // creator
+  int64 creator_id = 5;
+  //
+  uint32 update_time_seconds = 6;
+  uint32 create_time_seconds = 7;
+}
+
+message ChannelCanvasListResponse {
+  // clan id
+  int64 clan_id = 1;
+  // channel id
+  int64 channel_id = 2;
+  // channel doc item
+  repeated ChannelCanvasItem channel_canvases = 3;
+  //
+  int32 count = 4;
+}
+
+message ChannelCanvasDetailRequest {
+  // id
+  int64 id = 1;
+  // clan id
+  int64 clan_id = 2;
+  // channel id
+  int64 channel_id = 3;
+}
+
+message ChannelCanvasDetailResponse {
+  // id
+  int64 id = 1;
+  // title
+  string title = 2;
+  // content
+  string content = 3;
+  // creator
+  int64 creator_id = 4;
+  // editor
+  int64 editor_id = 5;
+  // is default
+  bool is_default = 6;
+}
+
+message AddFavoriteChannelRequest {
+  int64 channel_id = 1;
+  int64 clan_id = 2;
+}
+
+message RemoveFavoriteChannelRequest {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+}
+
+message AddFavoriteChannelResponse {
+  int64 channel_id = 1;
+}
+
+message ListFavoriteChannelRequest {
+  int64 clan_id = 1;
+}
+
+message ListFavoriteChannelResponse {
+  repeated int64 channel_ids = 1;
+}
+
+message UserActivity {
+  int64 user_id = 1;
+  string activity_name = 2;
+  int32 activity_type = 3;
+  string activity_description = 4;
+  uint32 start_time_seconds = 5;
+  uint32 end_time_seconds = 6;
+  int64 application_id = 7;
+  int32 status = 8;
+}
+
+message ListUserActivity {
+  repeated UserActivity activities = 1;
+}
+
+message CreateActivityRequest {
+  string activity_name = 1;
+  int32 activity_type = 2;
+  string activity_description = 3;
+  uint32 start_time_seconds = 4;
+  int64 application_id = 5;
+  int32 status = 6;
+}
+
+message LoginIDResponse {
+  // loginId
+  int64 login_id = 1;
+  // status login
+  int32 status = 2;
+  // create time
+  int64 create_time_seconds = 3;
+  // platform
+  string platform = 4;
+  // user_id
+  int64 user_id = 5;
+  // username
+  string username = 6;
+  // address
+  string address = 7;
+}
+
+message LoginRequest {
+  // platform
+  string platform = 1;
+  // address
+  string address = 2;
+}
+
+message ConfirmLoginRequest {
+  // loginId
+  int64 login_id = 1;
+  // Whether to enable "Remember Me" for extended session duration.
+  bool is_remember = 2;
+}
+
+message PubKey {
+  bytes encr = 1;
+  bytes sign = 2;
+}
+
+message PushPubKeyRequest {
+  PubKey PK = 1;
+}
+
+message GetPubKeysRequest {
+  repeated int64 user_ids = 1;
+}
+
+message GetPubKeysResponse {
+  message UserPubKey {
+    int64 user_id = 1;
+    PubKey PK = 2;
+  }
+  repeated UserPubKey pub_keys = 1;
+}
+
+message ChanEncryptionMethod {
+	string method = 1;
+  int64 channel_id = 2;
+}
+
+message GetKeyServerResp {
+	string url = 1;
+}
+message AuditLog{
+  int64 id = 1;
+  int64 user_id = 2;
+  int64 clan_id = 3;
+  string action_log = 4;
+  string entity_name = 5;
+  int64 entity_id = 6;
+  string details = 7;
+  uint32 time_log_seconds = 8;
+  int64 channel_id = 9;
+  string channel_label = 10;
+}
+
+message ListAuditLog{
+  int32 total_count = 1;
+  string date_log = 2;
+  repeated AuditLog logs = 3;
+}
+
+message ListAuditLogRequest{
+  string action_log = 1;
+  int64 user_id = 2;
+  int64 clan_id = 3;
+  string date_log = 4;
+}
+
+message TokenSentEvent {
+  // sender id
+  int64 sender_id = 1;
+  // sender name
+  string sender_name = 2;
+  // receiver
+  int64 receiver_id = 3;
+  // amount of token
+  int32 amount = 4;
+  // note
+  string note = 5;
+  // extra attribute
+  string extra_attribute = 6;
+  // transaction id
+  string transaction_id = 7;
+}
+
+message UnlockItemRequest {
+  // item id
+  int64 item_id = 1;
+  // item type
+  int32 item_type = 2;
+}
+
+message UnlockedItemResponse {
+  string source = 1;
+}
+
+message ListOnboardingRequest{
+  // clan id
+  int64 clan_id = 1;
+  // guide_type: 0 = greeting, 1 = rule, 2 = task, 3 = question
+  int32 guide_type = 2;
+  // limit
+  int32 limit = 3;
+  // page
+  int32 page = 4;
+}
+
+message ListOnboardingResponse {
+  repeated OnboardingItem list_onboarding = 1;
+}
+
+message OnboardingItem {
+  // id
+  int64 id = 1;
+  // clan id
+  int64 clan_id = 2;
+  // guide_type: 0 = greeting, 1 = rule, 2 = task, 3 = question
+  int32 guide_type = 3;
+  // task type
+  int32 task_type = 4;
+  // channel id
+  int64 channel_id = 5;
+  // title
+  string title = 6;
+  // content
+  string content = 7;
+  // image
+  string image_url = 8;
+  // answers
+  repeated OnboardingAnswer answers = 9;
+  // The UNIX time (for gRPC clients) or ISO string (for REST clients) when the message was created.
+  uint32 create_time_seconds = 10;
+  // The UNIX time (for gRPC clients) or ISO string (for REST clients) when the message was last updated.
+  uint32 update_time_seconds = 11;
+}
+
+
+message OnboardingAnswer {
+  // title
+  string title = 1;
+  // description
+  string description = 2;
+  // emoji
+  string emoji = 3;
+  // image
+  string image_url = 4;
+}
+
+message OnboardingContent {
+  // guide type
+  int32 guide_type = 1;
+  // task type
+  int32 task_type = 2;
+  // channel id
+  int64 channel_id = 3;
+  // title
+  string title = 4;
+  // content
+  string content = 5;
+  // image
+  string image_url = 6;
+  // answers
+  repeated OnboardingAnswer answers = 7;
+}
+
+message CreateOnboardingRequest {
+  // clan id
+  int64 clan_id = 1;
+  // contents
+  repeated OnboardingContent contents = 2;
+}
+
+message UpdateOnboardingRequest {
+  // id
+  int64 id = 1;
+  // clan id
+  int64 clan_id = 2;
+  // task type
+  int32 task_type = 3;
+  // channel id
+  int64 channel_id = 4;
+  // title
+  string title = 5;
+  // content
+  string content = 6;
+  //image
+  string image_url = 7;
+  // answers
+  repeated OnboardingAnswer answers = 8;
+}
+
+message OnboardingRequest {
+  // id
+  int64 id = 1;
+  // clan id
+  int64 clan_id = 2;
+}
+
+message ClanWebhook {
+  // id.
+  int64 id = 1;
+  // webhook name.
+  string webhook_name = 2;
+  // clan id.
+  int64 clan_id = 3;
+  // active.
+  int32 active = 4;
+  // URL of the webhook, which is automatically generated and different from the avatar.
+  string url = 5;
+  // creator id.
+  int64 creator_id = 6;
+  // avatar
+  string avatar = 7;
+  // create time.
+  string create_time = 8;
+  // update time.
+  string update_time = 9;
+}
+
+message GenerateClanWebhookRequest {
+  // clan id.
+  int64 clan_id = 1;
+  // webhook name.
+  string webhook_name = 2;
+  // avatar.
+  string avatar = 3;
+}
+
+message GenerateClanWebhookResponse {
+  // clan id.
+  int64 clan_id = 1;
+  // url.
+  string url = 2;
+  // webhook name.
+  string webhook_name = 3;
+  // avatar.
+  string avatar = 4;
+}
+
+message ClanWebhookRequest {
+  // id.
+  int64 id = 1;
+  // clan id.
+  int64 clan_id = 2;
+}
+
+message UpdateClanWebhookRequest {
+  // webhook id.
+  int64 id = 1;
+  // clan id.
+  int64 clan_id = 2;
+  // webhook name.
+  string webhook_name = 3;
+  // avatar.
+  string avatar = 4;
+  // reset token.
+  bool reset_token = 5;
+}
+
+message ListClanWebhookRequest {
+  // clan_id.
+  int64 clan_id = 1;
+}
+
+message ListClanWebhookResponse {
+  // list clan webhook.
+  repeated ClanWebhook list_clan_webhooks = 1;
+}
+
+message ClanWebhookHandlerBody {
+  // content
+  string content = 1;
+  // list clan webhook.
+  repeated MessageAttachment attachments = 2;
+}
+
+message ClanWebhookHandlerRequest {
+  // body.
+  ClanWebhookHandlerBody body = 1;
+  // token.
+  string token = 2;
+  // username.
+  string username = 3;
+}
+
+message UserStatus{
+  int64 user_id = 1;
+  string status = 2;
+}
+
+message UserStatusUpdate{
+  string status = 1;
+  int32 minutes = 2;
+  bool until_turn_on = 3;
+}
+
+message OnboardingSteps {
+  // id.
+  int64 id = 1;
+  // user id.
+  int64 user_id = 2;
+  // clan id.
+  int64 clan_id = 3;
+  // onboarding step.
+  int32 onboarding_step = 4;
+}
+
+message ListOnboardingStepResponse {
+  // list onboarding steps.
+  repeated OnboardingSteps list_onboarding_step = 1;
+}
+
+message ListOnboardingStepRequest {
+  // clan id.
+  int64 clan_id = 1;
+  // limit
+  int32 limit = 2;
+  // page
+  int32 page = 3;
+}
+
+message UpdateOnboardingStepRequest {
+  // clan id.
+  int64 clan_id = 1;
+  // onboarding step.
+  int32 onboarding_step = 2;
+}
+
+message SdTopic {
+  int64 id = 1;
+  int64 creator_id = 2;
+  int64  message_id = 3;
+  int64 clan_id = 4;
+  int64 channel_id = 5;
+  int32 status = 6;
+  uint32 create_time_seconds = 7;
+  uint32 update_time_seconds = 8;
+  string content = 9;
+  ChannelMessageHeader last_sent_message = 10;
+}
+
+message SdTopicRequest {
+  int64  message_id = 1;
+  int64 clan_id = 2;
+  int64 channel_id = 3;
+}
+
+message SdTopicList {
+  int32 count = 1;
+  repeated SdTopic topics = 2;
+}
+
+message ListSdTopicRequest {
+  int64 clan_id = 1;
+  int32 limit = 2;
+}
+
+message SdTopicDetailRequest {
+  int64 topic_id = 1;
+}
+
+message DeleteSdTopicRequest {
+  int64 channel_id = 1;
+  int64 id = 2;
+  int64 clan_id = 3;
+}
+
+message GenerateMeetTokenRequest  {
+  int64 channel_id = 1;
+  string room_name = 2;
+}
+
+message MeetParticipantRequest {
+  string username = 1;
+  string room_name = 2;
+  int64 channel_id = 3;
+  int64 clan_id = 4;
+}
+
+message GenerateMeetTokenResponse {
+  string token = 1;
+}
+
+message GenerateMezonMeetResponse {
+  int64 meet_id = 1;
+  string room_name = 2;
+  string external_link = 3;
+  int64 creator_id = 4;
+  int64 event_id = 5;
+}
+
+message CreateRoomChannelApps {
+  int64 channel_id = 1;
+  string room_name = 2;
+}
+
+message MezonOauthClient {
+  string access_token_strategy = 1;
+  repeated string allowed_cors_origins = 2;
+  repeated string audience = 3;
+  string authorization_code_grant_access_token_lifespan = 4;
+  string authorization_code_grant_id_token_lifespan = 5;
+  string authorization_code_grant_refresh_token_lifespan = 6;
+  bool backchannel_logout_session_required = 7;
+  string backchannel_logout_uri = 8;
+  string client_credentials_grant_access_token_lifespan = 9;
+  string client_id = 10;
+  string client_name = 11;
+  string client_secret = 12;
+  int32 client_secret_expires_at = 13;
+  string client_uri = 14;
+  repeated string contacts = 15;
+  uint32 created_at_seconds = 16;
+  bool frontchannel_logout_session_required = 17;
+  string frontchannel_logout_uri = 18;
+  repeated string grant_types = 19;
+  string implicit_grant_access_token_lifespan = 20;
+  string implicit_grant_id_token_lifespan = 21;
+  repeated string jwks = 22;
+  string jwks_uri = 23;
+  string jwt_bearer_grant_access_token_lifespan = 24;
+  string logo_uri = 25;
+  string owner = 26;
+  string policy_uri = 27;
+  repeated string post_logout_redirect_uris = 28;
+  repeated string redirect_uris = 29;
+  string refresh_token_grant_access_token_lifespan = 30;
+  string refresh_token_grant_id_token_lifespan = 31;
+  string refresh_token_grant_refresh_token_lifespan = 32;
+  string registration_access_token = 33;
+  string registration_client_uri = 34;
+  string request_object_signing_alg = 35;
+  repeated string request_uris = 36;
+  repeated string response_types = 37;
+  string scope = 38;
+  string sector_identifier_uri = 39;
+  bool skip_consent = 40;
+  bool skip_logout_consent = 41;
+  string subject_type = 42;
+  string token_endpoint_auth_method = 43;
+  string token_endpoint_auth_signing_alg = 44;
+  string tos_uri = 45;
+  uint32 updated_at_seconds = 46;
+  string userinfo_signed_response_alg = 47;
+}
+
+message MezonOauthClientList {
+  repeated MezonOauthClient list_mezon_oauth_client = 1;
+}
+
+message GetMezonOauthClientRequest {
+  string client_id = 1;
+  string client_name = 2;
+}
+
+message SearchThreadRequest {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  string label = 3;
+}
+
+message GenerateHashChannelAppsRequest {
+  int64 app_id = 1;
+}
+
+message GenerateHashChannelAppsResponse {
+  string web_app_data = 1;
+}
+
+message Message2InboxRequest {
+  int64  message_id = 1;
+  int64 channel_id = 2;
+  int64 clan_id = 3;
+  string avatar = 4;
+  string content = 5;
+  repeated MessageMention mentions = 6;
+  repeated MessageAttachment attachments = 7;
+  repeated MessageReaction reactions = 8;
+  repeated MessageRef references = 9;
+}
+
+// Send an email with password to the server. Used with authenticate/link/unlink.
+message AccountEmail {
+  // A valid RFC-5322 email address.
+  string email = 1;
+  // A password for the user account.
+  string password = 2; // Ignored with unlink operations.
+  // Prev email
+  string prev_email = 3;
+  // Extra information that will be bundled in the session token.
+  map<string, string> vars = 4;
+}
+
+// Send a Mezon token to the server. Used with authenticate/link/unlink.
+message AccountMezon {
+  // The phone number.
+  string phone_number = 1;
+  // Extra information that will be bundled in the session token.
+  map<string, string> vars = 2;
+}
+
+message LinkAccountConfirmRequest {
+  // The request id
+  string req_id = 1;
+  // Status
+  int32 status = 2;
+  // The confirm code
+  string otp_code = 3;
+}
+
+message QuickMenuAccess {
+  int64 id = 1;
+  int64 bot_id = 2;
+  int64 clan_id = 3;
+  int64 channel_id = 4;
+  string menu_name = 5;
+  string background = 6;
+  string action_msg = 7;
+  int32 menu_type = 8;
+}
+
+message ListQuickMenuAccessRequest {
+  int64 bot_id = 1;
+  int64 channel_id = 2;
+  int32 menu_type = 3;
+}
+
+message QuickMenuAccessList {
+  repeated QuickMenuAccess list_menus = 1;
+}
+
+message ListForSaleItemsRequest {
+  int32 page = 1;
+}
+
+message ForSaleItem {
+  int32 type = 1;
+  string preview_url = 2;
+}
+
+message ForSaleItemList {
+  repeated ForSaleItem for_sale_items = 1;
+}
+
+message IsFollowerRequest {
+  int64 follow_id = 1;
+}
+
+message IsFollowerResponse {
+  int64 follow_id = 1;
+  bool is_follower = 2;
+}
+
+message TransferOwnershipRequest {
+  int64 clan_id = 1;
+  int64 new_owner_id = 2;
+}
+
+message UserIds {
+  repeated int64 user_ids = 1;
+}
+
+message ReportMessageAbuseReqest {
+  int64  message_id = 1;
+  string abuse_type = 2;
+}
+
+message LogedDeviceList {
+  repeated LogedDevice devices = 1;
+}
+
+message LogedDevice {
+  string device_id = 1;
+  string device_name = 2;
+  uint32 login_at_seconds = 3;
+  int32 status = 4;
+  string platform = 5;
+  string ip = 6;
+  uint32 last_active_seconds = 7;
+  string location = 8;
+  bool is_current = 9;
+}
+
+message DirectFcmProto {
+  string title = 1;
+  string link = 2;
+  string content = 3;
+  int64 channel_id = 4;
+  int64 sender_id = 5;
+  string avatar = 6;
+  int64 clan_id = 7;
+  string attachment_link = 8;
+  string display_name = 9;
+  int32 create_time_seconds = 10;
+  int32 update_time_seconds = 11;
+  string username = 12;
+  repeated int64 mention_ids = 13;
+  repeated int32 position_s = 14;
+  repeated int32 position_e = 15;
+  string attachment_type = 16;
+  bool has_more_attachment = 17;
+  repeated bool is_mention_role = 18 [packed=true];
+  int64  message_id = 19;
+}
+
+message MessageMentionList {
+  repeated MessageMention mentions = 1;
+}
+
+message MessageAttachmentList {
+  repeated MessageAttachment attachments = 1;
+}
+
+message MessageRefList {
+  repeated MessageRef refs = 1;
+}
+
+message MessageReactionList {
+  repeated MessageReaction reactions = 1;
+}
+
+message ListChannelBadgeCountRequest {
+  int64 clan_id = 1;
+  int32 limit = 2;
+  int32 page = 3;
+}
+
+message ListChannelBadgeCountResponse {
+  repeated ChannelDescription channeldesc = 1;
+  int32 total_count = 2;
+}
+
+message ClanBadgeCount {
+  int64 clan_id = 1;
+  int32 badge = 2;
+  bool has_unread = 3;
+}
+
+message ListClanBadgeCountResponse {
+  repeated ClanBadgeCount list_badge = 1;
+}
+
+message ClanDiscover {
+  int64 clan_id = 1;
+  string clan_name = 2;
+  int64 invite_id = 3;
+  string clan_logo = 4;
+  int32 online_members = 5;
+  int32 total_members = 6;
+  bool verified = 7;
+  string description = 8;
+  string banner = 9;
+  string about = 10;
+  string short_url = 11;
+  uint32 create_time_seconds = 12;
+}
+
+message ListClanDiscover {
+  repeated ClanDiscover clan_discover = 1;
+  int32 page_number = 2;
+  int32 page_count = 3;
+}
+
+message GenerateMeetTokenExternalResponse {
+  string token = 1;
+  int64 guest_user_id = 2;
+  string guest_access_token = 3;
+}
+
+message KafkaActionMsg {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  repeated int64 friend_ids = 3;
+  repeated int64 user_ids = 4;
+  int32 mode = 5;
+  bytes stream = 6;
+}
+
+message UpdateAIAgentRequest {
+  int64 channel_id = 1;
+  string room_name = 2;
+}
+
+message ParticipantInfo {
+  enum State {
+    // websocket' connected, but not offered yet
+    JOINING = 0;
+    // server received client offer
+    JOINED = 1;
+    // ICE connectivity established
+    ACTIVE = 2;
+    // WS disconnected
+    DISCONNECTED = 3;
+  }
+  enum Kind {
+    // standard participants, e.g. web clients
+    STANDARD = 0;
+    // only ingests streams
+    INGRESS = 1;
+    // only consumes streams
+    EGRESS = 2;
+    // SIP participants
+    SIP = 3;
+    // LiveKit agents
+    AGENT = 4;
+    // Connectors participants
+    CONNECTOR = 7;
+    // Bridge participants
+    BRIDGE = 8;
+    // NEXT_ID: 9
+  }
+  enum KindDetail {
+    CLOUD_AGENT = 0;
+    FORWARDED = 1;
+    CONNECTOR_WHATSAPP = 2;
+    CONNECTOR_TWILIO = 3;
+    BRIDGE_RTSP = 4;
+    // NEXT_ID: 5
+  }
+  string sid = 1;
+  string identity = 2;
+  State state = 3;
+  bool is_publisher = 13;
+  Kind kind = 14;
+}
+
+// Channel Timeline Attachment
+message ChannelTimelineAttachment {
+  int64 id = 1;
+  string file_name = 2;
+  string file_url = 3;
+  string file_type = 4;
+  int64 file_size = 5;
+  int32 width = 6;
+  int32 height = 7;
+  string thumbnail = 8;
+  int32 duration = 9;
+  int64 message_id = 10;
+}
+
+// Channel Timeline Attachment List
+message ListChannelTimelineAttachment {
+  repeated ChannelTimelineAttachment attachments = 1;
+}
+
+// Channel Timeline
+message ChannelTimeline {
+  int64 id = 1;
+  int64 clan_id = 2;
+  int64 channel_id = 3;
+  uint32 start_time_seconds = 4;
+  string title = 5;
+  string description = 6;
+  uint32 end_time_seconds = 7;
+  string location = 8;
+  int32 status = 9;
+  int64 creator_id = 10;
+  uint32 create_time_seconds = 11;
+  uint32 update_time_seconds = 12;
+  int32 type = 13;
+  bytes attachments = 14;
+  bytes preview_imgs = 15;
+}
+
+// List Channel Timeline Request
+message ListChannelTimelineRequest {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  int32 year = 3;
+  uint32 start_time = 4;
+  uint32 end_time = 5;
+  int32 limit = 6;
+}
+
+// List Channel Timeline Response
+message ListChannelTimelineResponse {
+  repeated ChannelTimeline events = 1;
+}
+
+// Create Channel Timeline Request
+message CreateChannelTimelineRequest {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  uint32 start_time_seconds = 3;
+  string title = 4;
+  string description = 5;
+  uint32 end_time_seconds = 6;
+  string location = 7;
+  int32 type = 8;
+  repeated ChannelTimelineAttachment attachments = 9;
+}
+
+message CreateChannelTimelineResponse {
+  ChannelTimeline event = 1;
+}
+
+// Update Channel Timeline Request
+message UpdateChannelTimelineRequest {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  int64 id = 3;
+  uint32 start_time_seconds = 4;
+  string title = 5;
+  string description = 6;
+  string location = 7;
+  int32 type = 8;
+  repeated ChannelTimelineAttachment attachments = 9;
+}
+
+message UpdateChannelTimelineResponse {
+  ChannelTimeline event = 1;
+}
+
+message ChannelTimelineDetailRequest {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  int64 id = 3;
+  uint32 start_time_seconds = 4;
+}
+
+message ChannelTimelineDetailResponse {
+  ChannelTimeline event = 1;
+}
+
+message ListMutedChannelRequest {
+  int64 clan_id = 1;
+}
+
+message MutedChannelList {
+  repeated int64 muted_list = 1;
+}
+
+message NotificationBatchRequest {
+  map<int64, NotificationList> notifications = 1;
+}
+
+// Poll type: SINGLE = one choice, MULTIPLE = multiple choices.
+enum PollType {
+  SINGLE = 0;
+  MULTIPLE = 1;
+}
+
+message CreatePollRequest {
+  int64 channel_id = 1;
+  int64 clan_id = 2;
+  string question = 3;
+  repeated string answers = 4;
+  int32 expire_hours = 5;
+  PollType type = 6;
+}
+
+message CreatePollResponse {
+  int64 poll_id = 1;
+  int64 message_id = 2;
+  string question = 3;
+  repeated PollAnswer answers = 4;
+  repeated int32 answer_counts = 5;
+  int64 exp = 6;
+  bool is_closed = 7;
+  int64 creator_id = 8;
+  PollType type = 9;
+  int32 total_votes = 10;
+}
+
+message VotePollRequest {
+  int64 poll_id = 1;
+  int64 message_id = 2;
+  int64 channel_id = 3;
+  repeated int32 answer_indices = 4;
+}
+
+message VotePollResponse {
+  repeated int32 my_answer_indices = 1;
+}
+
+message ClosePollRequest {
+  int64 poll_id = 1;
+  int64 message_id = 2;
+  int64 channel_id = 3;
+}
+
+message GetPollRequest {
+  int64 poll_id = 1;
+  int64 message_id = 2;
+  int64 channel_id = 3;
+}
+
+message PollAnswer {
+  int32 index = 1;
+  string label = 2;
+}
+
+message PollVoterDetail {
+  int32 answer_index = 1;
+  repeated int64 user_ids = 2;
+}
+
+message GetPollResponse {
+  int64 poll_id = 1;
+  int64 message_id = 2;
+  string question = 3;
+  repeated PollAnswer answers = 4;
+  repeated int32 answer_counts = 5;
+  int64 exp = 6;
+  bool is_closed = 7;
+  int64 creator_id = 8;
+  PollType type = 9;
+  int32 total_votes = 10;
+  repeated PollVoterDetail voter_details = 11;
+}
+
+message ListUserOnlineRequest {
+  int64 clan_id = 1;
+  int32 limit = 2;
+  int32 page = 3;
+}
+
+message ListUserOnlineResponse {
+  repeated User users = 1;
+  int32 total_count = 2;
+}
+
+message NoParams {}

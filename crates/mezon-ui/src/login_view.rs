@@ -10,10 +10,14 @@
 use std::sync::Arc;
 
 use gpui::{App, Context, Entity, FontWeight, MouseButton, Window, div, prelude::*};
+use gpui_component::{
+    Disableable as _,
+    button::{Button, ButtonVariants as _},
+};
 use mezon_client::{MezonClient, Session, keychain};
 use mezon_store::{AuthState, LoginMethod};
 
-use crate::components::{compositions::FormField, primitives::Button};
+use crate::components::compositions::FormField;
 use crate::theme::Theme;
 
 // ─── LoginView state ──────────────────────────────────────────────────────────
@@ -35,9 +39,9 @@ pub struct LoginView {
     otp_email: String,
 
     /// Shared email field (used by both modes on step 0).
-    email_field: Entity<FormField>,
+    email_field: Option<Entity<FormField>>,
     /// Password field (password mode only).
-    password_field: Entity<FormField>,
+    password_field: Option<Entity<FormField>>,
     /// Individual OTP digit inputs (6 boxes).
     otp_fields: Vec<Entity<FormField>>,
 
@@ -53,20 +57,8 @@ impl LoginView {
     pub fn new(
         client: Arc<MezonClient>,
         auth_state: Entity<AuthState>,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> Self {
-        let email_field = cx.new(|cx| FormField::new(cx, "Email"));
-        let password_field = cx.new(|cx| {
-            let f = FormField::new(cx, "Password");
-            f.set_masked(cx);
-            f
-        });
-
-        // 6 OTP digit boxes.
-        let otp_fields = (0..6)
-            .map(|i| cx.new(move |cx| FormField::new(cx, format!("{}", i))))
-            .collect();
-
         Self {
             client,
             auth_state,
@@ -74,12 +66,33 @@ impl LoginView {
             otp_step: 0,
             otp_req_id: String::new(),
             otp_email: String::new(),
-            email_field,
-            password_field,
-            otp_fields,
+            email_field: None,
+            password_field: None,
+            otp_fields: Vec::new(),
             loading: false,
             error: None,
             countdown: 0,
+        }
+    }
+
+    fn ensure_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.email_field.is_none() {
+            self.email_field = Some(cx.new(|cx| FormField::new(window, cx, "Email")));
+        }
+
+        if self.password_field.is_none() {
+            self.password_field = Some(cx.new(|cx| {
+                let field = FormField::new(window, cx, "Password");
+                field.set_masked(window, cx);
+                field
+            }));
+        }
+
+        if self.otp_fields.is_empty() {
+            for i in 0..6 {
+                self.otp_fields
+                    .push(cx.new(|cx| FormField::new(window, cx, format!("{}", i))));
+            }
         }
     }
 
@@ -87,7 +100,12 @@ impl LoginView {
 
     /// Called when "Send OTP" is pressed.
     fn handle_send_otp(entity: &Entity<LoginView>, _window: &mut Window, cx: &mut App) {
-        let email = entity.read(cx).email_field.read(cx).value(cx);
+        let email = entity
+            .read(cx)
+            .email_field
+            .as_ref()
+            .map(|field| field.read(cx).value(cx))
+            .unwrap_or_default();
         if email.trim().is_empty() {
             entity.update(cx, |this, cx| {
                 this.error = Some("Please enter your email address.".to_owned());
@@ -198,8 +216,14 @@ impl LoginView {
         let (email, password) = {
             let this = entity.read(cx);
             (
-                this.email_field.read(cx).value(cx),
-                this.password_field.read(cx).value(cx),
+                this.email_field
+                    .as_ref()
+                    .map(|field| field.read(cx).value(cx))
+                    .unwrap_or_default(),
+                this.password_field
+                    .as_ref()
+                    .map(|field| field.read(cx).value(cx))
+                    .unwrap_or_default(),
             )
         };
 
@@ -246,8 +270,17 @@ impl LoginView {
         if let Err(e) = keychain::save_session(&session) {
             tracing::warn!("Failed to save session to keychain: {e}");
         }
+
+        tracing::info!("✓ Authentication successful");
+        tracing::info!("  User ID: {}", session.user_id);
+        tracing::info!("  Username: {}", session.username);
+        tracing::info!("  WS URL: {:?}", session.ws_url);
+        tracing::info!("  API URL: {:?}", session.api_url);
+        tracing::info!("  TCP URL: {:?}", session.tcp_url);
+
         auth_state.update(cx, |state, cx| {
             *state = AuthState::Authenticated(session);
+            tracing::debug!("User authenticated, transitioning to main app view.");
             cx.notify();
         });
     }
@@ -280,7 +313,8 @@ impl LoginView {
 // ─── Render ──────────────────────────────────────────────────────────────────
 
 impl Render for LoginView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_fields(window, cx);
         let theme = Theme::dark();
 
         // Outer centered column.
@@ -331,20 +365,22 @@ impl Render for LoginView {
                                 .text_color(theme.text_primary)
                                 .child("Sign in with OTP"),
                         )
-                        .child(self.email_field.clone());
+                        .child(self.email_field.as_ref().expect("email field").clone());
 
                     let loading = self.loading;
                     let entity = cx.entity().clone();
                     card = card.child(
                         div().w_full().child(
-                            Button::new("Send OTP")
-                                .full_width()
+                            Button::new("send-otp")
+                                .label("Send OTP")
+                                .primary()
+                                .w_full()
                                 .loading(loading)
                                 .disabled(loading)
-                                .on_click(move |window, cx| {
+                                .on_click(move |_, window, cx| {
                                     Self::handle_send_otp(&entity, window, cx);
                                 })
-                                .render(&theme),
+                                .into_any_element(),
                         ),
                     );
                 } else {
@@ -379,14 +415,16 @@ impl Render for LoginView {
                     let entity = cx.entity().clone();
                     card = card.child(
                         div().w_full().child(
-                            Button::new("Verify Code")
-                                .full_width()
+                            Button::new("verify-otp")
+                                .label("Verify Code")
+                                .primary()
+                                .w_full()
                                 .loading(loading)
                                 .disabled(loading)
-                                .on_click(move |_window, cx| {
+                                .on_click(move |_, _window, cx| {
                                     Self::handle_confirm_otp(&entity, cx);
                                 })
-                                .render(&theme),
+                                .into_any_element(),
                         ),
                     );
 
@@ -455,8 +493,13 @@ impl Render for LoginView {
                             .text_color(theme.text_primary)
                             .child("Sign in with password"),
                     )
-                    .child(self.email_field.clone())
-                    .child(self.password_field.clone());
+                    .child(self.email_field.as_ref().expect("email field").clone())
+                    .child(
+                        self.password_field
+                            .as_ref()
+                            .expect("password field")
+                            .clone(),
+                    );
 
                 // Forgot password link.
                 card = card.child(
@@ -477,14 +520,16 @@ impl Render for LoginView {
                 let entity = cx.entity().clone();
                 card = card.child(
                     div().w_full().child(
-                        Button::new("Sign In")
-                            .full_width()
+                        Button::new("sign-in")
+                            .label("Sign In")
+                            .primary()
+                            .w_full()
                             .loading(loading)
                             .disabled(loading)
-                            .on_click(move |_window, cx| {
+                            .on_click(move |_, _window, cx| {
                                 Self::handle_sign_in(&entity, cx);
                             })
-                            .render(&theme),
+                            .into_any_element(),
                     ),
                 );
             }

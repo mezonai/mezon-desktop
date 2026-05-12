@@ -29,6 +29,7 @@ impl ReqwestClient {
     fn builder() -> reqwest::ClientBuilder {
         reqwest::Client::builder()
             .use_rustls_tls()
+            .no_proxy()
             .connect_timeout(Duration::from_secs(10))
     }
 

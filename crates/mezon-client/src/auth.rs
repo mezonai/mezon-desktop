@@ -46,6 +46,10 @@ struct ApiSession {
     is_remember: bool,
     /// The REST API endpoint this client should use for subsequent calls.
     api_url: Option<String>,
+    /// The WebSocket endpoint URL returned by the server after auth.
+    ws_url: Option<String>,
+    /// The TCP endpoint URL returned by the server after auth.
+    tcp_url: Option<String>,
 }
 
 /// Response from the OTP request endpoint.
@@ -215,12 +219,24 @@ impl MezonClient {
     /// Convert an `ApiSession` wire response into our internal `Session`.
     fn parse_session(&self, api: ApiSession) -> Session {
         let (user_id, username, expires_at) = decode_jwt_claims(&api.token);
+        let (api_host, api_port, api_secure) = parse_endpoint(api.api_url.as_deref());
+        let (ws_host, ws_port, ws_secure) = parse_endpoint(api.ws_url.as_deref());
+        let (tcp_host, tcp_port, _) = parse_endpoint(api.tcp_url.as_deref());
         Session {
             token: api.token,
             refresh_token: api.refresh_token,
             expires_at,
             api_url: api.api_url,
-            ws_url: None,
+            api_host,
+            api_port,
+            api_secure,
+            tcp_url: api.tcp_url,
+            tcp_host,
+            tcp_port,
+            ws_url: api.ws_url,
+            ws_host,
+            ws_port,
+            ws_secure,
             user_id,
             username,
         }
@@ -282,6 +298,31 @@ impl MezonClient {
             .await?;
         Ok(self.parse_session(api))
     }
+}
+
+fn parse_endpoint(endpoint: Option<&str>) -> (Option<String>, Option<u16>, Option<bool>) {
+    let Some(endpoint) = endpoint else {
+        return (None, None, None);
+    };
+
+    let endpoint = if endpoint.contains("://") {
+        endpoint.to_owned()
+    } else {
+        format!("tcp://{endpoint}")
+    };
+
+    let parsed = url::Url::parse(&endpoint);
+    let Ok(parsed) = parsed else {
+        return (None, None, None);
+    };
+
+    let secure = match parsed.scheme() {
+        "https" | "wss" => Some(true),
+        "http" | "ws" | "tcp" => Some(false),
+        _ => None,
+    };
+
+    (parsed.host_str().map(str::to_owned), parsed.port(), secure)
 }
 
 // ─── JWT helpers ─────────────────────────────────────────────────────────────

@@ -9,9 +9,9 @@ use std::path::PathBuf;
 /// socket / pipe before exiting (used for deep link handling).
 pub struct SingleInstance {
     #[cfg(unix)]
-    socket_path: PathBuf,
+    socket_path: Option<PathBuf>,
     #[cfg(unix)]
-    _listener: std::os::unix::net::UnixListener,
+    _listener: Option<std::os::unix::net::UnixListener>,
 
     /// Windows: the server pipe handle kept alive so the listener thread can
     /// keep accepting connections.  Wrapped in an Arc so it can be cloned into
@@ -58,38 +58,82 @@ impl SingleInstance {
     fn try_acquire_unix(forward_url: Option<&str>) -> anyhow::Result<Option<Self>> {
         use std::io::Write as _;
 
-        let socket_path = Self::socket_path();
-
-        if socket_path.exists() {
-            match std::os::unix::net::UnixStream::connect(&socket_path) {
-                Ok(mut stream) => {
-                    tracing::info!("Another instance is already running");
-                    if let Some(url) = forward_url {
-                        let _ = stream.write_all(url.as_bytes());
-                        tracing::debug!("Forwarded URL to running instance: {url}");
-                    }
-                    return Ok(None);
+        let mut last_bind_error = None;
+        for socket_path in Self::socket_paths() {
+            if let Some(parent) = socket_path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    last_bind_error = Some(e);
+                    continue;
                 }
-                Err(_) => {
-                    // Stale socket — clean up
-                    let _ = std::fs::remove_file(&socket_path);
+            }
+
+            if socket_path.exists() {
+                match std::os::unix::net::UnixStream::connect(&socket_path) {
+                    Ok(mut stream) => {
+                        tracing::info!("Another instance is already running");
+                        if let Some(url) = forward_url {
+                            let _ = stream.write_all(url.as_bytes());
+                            tracing::debug!("Forwarded URL to running instance: {url}");
+                        }
+                        return Ok(None);
+                    }
+                    Err(_) => {
+                        // Stale socket — clean up
+                        let _ = std::fs::remove_file(&socket_path);
+                    }
+                }
+            }
+
+            match std::os::unix::net::UnixListener::bind(&socket_path) {
+                Ok(listener) => {
+                    tracing::debug!("Single instance lock acquired at {}", socket_path.display());
+                    return Ok(Some(Self {
+                        socket_path: Some(socket_path),
+                        _listener: Some(listener),
+                    }));
+                }
+                Err(e) => {
+                    last_bind_error = Some(e);
                 }
             }
         }
 
-        let listener = std::os::unix::net::UnixListener::bind(&socket_path)?;
-        tracing::debug!("Single instance lock acquired at {}", socket_path.display());
-        Ok(Some(Self {
-            socket_path,
-            _listener: listener,
-        }))
+        let error = last_bind_error
+            .unwrap_or_else(|| std::io::Error::other("no Unix socket path candidates available"));
+
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            tracing::warn!(
+                "Single instance lock disabled because Unix socket binding is not permitted: {error}"
+            );
+            return Ok(Some(Self {
+                socket_path: None,
+                _listener: None,
+            }));
+        }
+
+        Err(error.into())
     }
 
     #[cfg(unix)]
-    fn socket_path() -> PathBuf {
-        dirs::runtime_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("mezon.sock")
+    fn socket_paths() -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+
+        if let Some(runtime_dir) = dirs::runtime_dir() {
+            paths.push(runtime_dir.join("mezon.sock"));
+        }
+
+        let user = std::env::var("USER")
+            .ok()
+            .filter(|user| !user.is_empty())
+            .unwrap_or_else(|| "user".to_owned());
+
+        paths.push(
+            std::env::temp_dir()
+                .join(format!("mezon-desktop-{user}"))
+                .join("mezon.sock"),
+        );
+
+        paths
     }
 
     // ── Windows ───────────────────────────────────────────────────────────────
@@ -237,7 +281,15 @@ impl SingleInstance {
 
     #[cfg(unix)]
     fn listen_for_urls_unix(&self, callback: impl Fn(String) + Send + 'static) {
-        let listener = match self._listener.try_clone() {
+        let Some(listener) = &self._listener else {
+            tracing::debug!(
+                "Unix URL forwarding disabled because single-instance lock is disabled"
+            );
+            let _ = callback;
+            return;
+        };
+
+        let listener = match listener.try_clone() {
             Ok(l) => l,
             Err(e) => {
                 tracing::warn!("Could not clone UnixListener for URL forwarding: {e}");
@@ -344,6 +396,8 @@ impl SingleInstance {
 #[cfg(unix)]
 impl Drop for SingleInstance {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.socket_path);
+        if let Some(socket_path) = &self.socket_path {
+            let _ = std::fs::remove_file(socket_path);
+        }
     }
 }

@@ -1,12 +1,12 @@
 use anyhow::Result;
-use gpui::{px, size, App, AppContext, AsyncApp, Bounds, Entity, WindowBounds, WindowOptions};
+use gpui::{App, AppContext, AsyncApp, Bounds, Entity, WindowBounds, WindowOptions, px, size};
 use gpui_platform::application;
-use mezon_client::{keychain, MezonClient};
+use mezon_client::{AppApi, MezonClient, TransportClient, keychain};
 use mezon_native::instance::SingleInstance;
 use mezon_store::{AuthState, Settings};
-use mezon_ui::{title_bar::TitleBar, RootView};
+use mezon_ui::{RootView, init as init_ui, title_bar::TitleBar};
 use std::sync::Arc;
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 
 fn main() -> Result<()> {
     fmt()
@@ -59,6 +59,8 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 
     // ── Determine initial auth state from keychain ────────────────────────────
     let client = Arc::new(MezonClient::default());
+    let transport = Arc::new(TransportClient::new(String::new()));
+    let api = Arc::new(AppApi::new(transport.clone()));
     let initial_auth_state = resolve_initial_auth_state(&rt, &client);
 
     // Sync login-item with settings.
@@ -79,6 +81,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 
     application().run(move |cx: &mut App| {
         tracing::debug!("App started");
+        init_ui(cx);
 
         // Shared channel so background threads can send deep link URLs to the GPUI main thread.
         let (url_tx, url_rx) = std::sync::mpsc::channel::<String>();
@@ -97,7 +100,13 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
         }
 
         // Open the main window and obtain the auth_state entity handle.
-        let auth_state_handle = open_main_window(cx, &settings, client.clone(), initial_auth_state);
+        let auth_state_handle = open_main_window(
+            cx,
+            &settings,
+            client.clone(),
+            api.clone(),
+            initial_auth_state,
+        );
 
         // Background task: poll `url_rx` and update auth state on the main thread.
         {
@@ -129,6 +138,12 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 
         // Background refresh task: wake every 60s, refresh if session is near expiry.
         spawn_refresh_task(cx, auth_state_handle.clone(), client.clone());
+        spawn_transport_task(
+            cx,
+            auth_state_handle.clone(),
+            transport.clone(),
+            api.clone(),
+        );
 
         // System tray.
         let _tray = setup_tray(cx, rt_handle.clone());
@@ -137,32 +152,133 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     });
 }
 
+/// Keep the shared TCP transport connected for authenticated UI API calls.
+fn spawn_transport_task(
+    cx: &mut App,
+    auth_state: Entity<AuthState>,
+    transport: Arc<TransportClient>,
+    api: Arc<AppApi>,
+) {
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let exec = cx.background_executor().clone();
+        let mut connected_token: Option<String> = None;
+
+        loop {
+            exec.timer(std::time::Duration::from_millis(500)).await;
+
+            let session = match cx.update(|cx| auth_state.read(cx).clone()) {
+                AuthState::Authenticated(session) => Some(session),
+                _ => None,
+            };
+
+            let Some(session) = session else {
+                if connected_token.take().is_some() {
+                    if let Err(e) = transport.close().await {
+                        tracing::warn!("Failed to close TCP transport after logout: {e}");
+                    }
+                }
+                continue;
+            };
+
+            if connected_token.as_deref() == Some(session.token.as_str())
+                && transport.is_open().await
+            {
+                continue;
+            }
+
+            let Some(host) = session.tcp_host.clone() else {
+                tracing::warn!("Authenticated session missing tcp_host; TCP APIs unavailable");
+                continue;
+            };
+            // let Some(port) = session.tcp_port else {
+            //     tracing::warn!("Authenticated session missing tcp_port; TCP APIs unavailable");
+            //     continue;
+            // };
+            let port = 7349;
+
+            if transport.is_open().await {
+                if let Err(e) = transport.close().await {
+                    tracing::warn!("Failed to close stale TCP transport: {e}");
+                }
+            }
+
+            tracing::info!("Connecting shared TCP transport to {host}:{port}");
+            let token = session.token.clone();
+            match transport
+                .connect(
+                    &host,
+                    port,
+                    &token,
+                    move |cid, code, message| {
+                        tracing::debug!(
+                            "TCP server message: cid={}, code={}, len={}",
+                            cid,
+                            code,
+                            message.len()
+                        );
+                    },
+                    move |was_clean| {
+                        if was_clean {
+                            tracing::info!("TCP transport closed cleanly");
+                        } else {
+                            tracing::warn!("TCP transport closed with error");
+                        }
+                    },
+                )
+                .await
+            {
+                Ok(()) => {
+                    connected_token = Some(token);
+                    tracing::info!("Shared TCP transport connected");
+
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(250))
+                        .await;
+                    match api.get_account().await {
+                        Ok(account) => {
+                            tracing::info!("get_account over shared TCP succeeded");
+                            tracing::info!("  User ID: {}", account.user_id);
+                            tracing::info!("  Username: {}", account.username);
+                            tracing::info!("  Email: {:?}", account.email);
+                            tracing::info!("  Display name: {:?}", account.display_name);
+                        }
+                        Err(e) => tracing::error!("get_account over shared TCP failed: {e}"),
+                    }
+                }
+                Err(e) => {
+                    connected_token = None;
+                    tracing::error!("Shared TCP transport connect failed: {e}");
+                    exec.timer(std::time::Duration::from_secs(3)).await;
+                }
+            }
+        }
+    })
+    .detach();
+}
+
 /// Attempt to restore a valid session from the OS keychain.
 ///
 /// - Valid + not expired → `Authenticated`
 /// - Valid + expired     → try silent refresh → `Authenticated` on success, else `NotAuthenticated`
 /// - Nothing stored      → `NotAuthenticated`
-fn resolve_initial_auth_state(
-    rt: &tokio::runtime::Runtime,
-    client: &MezonClient,
-) -> AuthState {
+fn resolve_initial_auth_state(rt: &tokio::runtime::Runtime, client: &MezonClient) -> AuthState {
     match keychain::load_session() {
         None => {
             tracing::info!("No stored session — showing login");
             AuthState::NotAuthenticated
         }
         Some(session) if !mezon_client::Session::is_expired(&session) => {
-            tracing::info!(
-                "Restored valid session for user_id={}",
-                session.user_id
-            );
+            tracing::info!("Restored valid session for user_id={}", session.user_id);
             AuthState::Authenticated(session)
         }
         Some(session) => {
             tracing::info!("Stored session expired — attempting silent refresh");
             match rt.block_on(client.refresh_session(&session.refresh_token, false)) {
                 Ok(new_session) => {
-                    tracing::info!("Silent refresh succeeded for user_id={}", new_session.user_id);
+                    tracing::info!(
+                        "Silent refresh succeeded for user_id={}",
+                        new_session.user_id
+                    );
                     if let Err(e) = keychain::save_session(&new_session) {
                         tracing::warn!("Failed to update keychain after refresh: {e}");
                     }
@@ -203,8 +319,8 @@ fn spawn_refresh_task(cx: &mut App, auth_state: Entity<AuthState>, client: Arc<M
                 .unwrap_or_default()
                 .as_secs();
 
-            let should_refresh = session.expires_at > 0
-                && session.expires_at.saturating_sub(now) < 300;
+            let should_refresh =
+                session.expires_at > 0 && session.expires_at.saturating_sub(now) < 300;
 
             if !should_refresh {
                 continue;
@@ -245,6 +361,7 @@ fn open_main_window(
     cx: &mut App,
     settings: &Settings,
     client: Arc<MezonClient>,
+    api: Arc<AppApi>,
     initial_auth: AuthState,
 ) -> Entity<AuthState> {
     let window_bounds = if let Some([x, y, w, h]) = settings.window_bounds {
@@ -274,12 +391,13 @@ fn open_main_window(
     let auth_out = Arc::new(std::sync::Mutex::new(None::<Entity<AuthState>>));
     let auth_out_clone = auth_out.clone();
 
-    cx.open_window(options, move |_window, cx| {
+    cx.open_window(options, move |window, cx| {
         let auth_state = cx.new(|_cx| initial_auth);
         *auth_out_clone.lock().unwrap() = Some(auth_state.clone());
 
         let title_bar = cx.new(|_cx| TitleBar::new("Mezon"));
-        cx.new(|cx| RootView::new(title_bar, auth_state, client, cx))
+        let view = cx.new(|cx| RootView::new(title_bar, auth_state, client, api, cx));
+        cx.new(|cx| gpui_component::Root::new(view, window, cx))
     })
     .unwrap_or_else(|e| {
         tracing::error!("Failed to open main window: {e}");
