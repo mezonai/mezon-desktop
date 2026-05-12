@@ -61,6 +61,7 @@ impl ChatLayout {
 
         // Investigation: fetch real clan list and log it
         let api_clone = api.clone();
+        let clans_model_clone = clans_model.clone();
         cx.spawn(async move |_, cx| {
             // Wait for connection to be fully ready (TCP open + handshake)
             loop {
@@ -103,7 +104,7 @@ impl ChatLayout {
                             })
                             .collect();
 
-                        let _ = clans_model.update(&mut cx, |model, cx| {
+                        let _ = clans_model_clone.update(cx, |model, cx| {
                             model.update_clans(store_clans);
                             cx.notify();
                         });
