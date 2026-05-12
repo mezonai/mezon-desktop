@@ -1856,12 +1856,13 @@ impl MezonTransport {
     }
 
     /// Create clan.
-    pub async fn create_clan_desc(&self, clan_name: &str, logo: &str, banner: &str) -> Result<api::ClanDesc> {
+    pub async fn create_clan_desc(&self, clan_name: &str, logo: &str, banner: &str) -> Result<ApiClanDesc> {
         let cid = self.generate_cid();
         let body = api::CreateClanDescRequest { clan_name: clan_name.to_string(), logo: logo.to_string(), banner: banner.to_string() }.encode_to_vec();
         let (code, response) = self.send_api_request(cid, "CreateClanDesc", body).await?;
         if code != 0 { return Err(anyhow::anyhow!("API error: code={}", code)); }
-        Ok(api::ClanDesc::decode(response.as_slice())?)
+        let clan = api::ClanDesc::decode(response.as_slice())?;
+        Ok(Self::clan_desc_from_proto(clan))
     }
 
     /// Update clan.
