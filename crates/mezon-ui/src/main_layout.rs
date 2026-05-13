@@ -27,11 +27,6 @@ impl MainLayout {
 impl Render for MainLayout {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::dark();
-        let _username = match self.auth_state.read(cx) {
-            AuthState::Authenticated(session) => session.username.clone(),
-            _ => "Unknown".to_string(),
-        };
-
         div()
             .flex()
             .flex_row()
@@ -68,14 +63,10 @@ impl Render for MainLayout {
                             .text_color(theme.text_primary)
                             .child(
                                 // Get channel info
-                                {
-                                    let channels = self.channel_list.read(cx);
-                                    channels
-                                        .active_channel_id
-                                        .as_ref()
-                                        .and_then(|id| channels.find_channel(id))
-                                        .cloned()
-                                }
+                                self.channel_list
+                                    .read(cx)
+                                    .active_channel()
+                                    .cloned()
                                 .map_or_else(
                                     || div().child("Select a channel").into_any_element(),
                                     |channel| {

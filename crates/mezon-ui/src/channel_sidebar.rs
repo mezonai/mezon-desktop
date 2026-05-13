@@ -7,6 +7,26 @@ use crate::components::compositions::channel_row::ChannelRow;
 use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
 
+fn on_channel_click(
+    channel_list: Entity<ChannelList>,
+    channel_id: String,
+    on_navigate: Option<Arc<dyn Fn(&str, &mut App) + Send + Sync>>,
+    clan_id: Option<String>,
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) {
+    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+        channel_list.update(cx, |m, cx| {
+            m.select_channel(&channel_id);
+            cx.notify();
+        });
+        if let Some(ref cb) = on_navigate {
+            if let Some(ref cid) = clan_id {
+                let path = format!("/chat/clans/{}/channels/{}", cid, channel_id);
+                cb(&path, cx);
+            }
+        }
+    }
+}
+
 pub struct ChannelSidebar {
     clan_list: Entity<ClanList>,
     channel_list: Entity<ChannelList>,
@@ -36,12 +56,7 @@ impl Render for ChannelSidebar {
         let clans = self.clan_list.read(cx);
         let channels = self.channel_list.read(cx);
 
-        let active_clan_name = clans
-            .active_clan_id
-            .as_ref()
-            .and_then(|id| clans.clans.iter().find(|c| &c.id == id))
-            .map(|c| c.name.clone())
-            .unwrap_or_else(|| "Select a clan".to_string());
+        let active_clan_name = clans.active_clan_name().to_string();
 
         let categories: Vec<_> = clans
             .active_clan_id
@@ -53,7 +68,7 @@ impl Render for ChannelSidebar {
             .collect();
 
         let active_channel_id = channels.active_channel_id.clone();
-        let list_handle = self.channel_list.clone();
+        let channel_list_handle = self.channel_list.clone();
         let theme_clone = theme.clone();
         let on_navigate = self.on_navigate.clone();
         let active_clan_id_for_nav = clans.active_clan_id.clone();
@@ -87,7 +102,7 @@ impl Render for ChannelSidebar {
                     .flex_1()
                     .children(categories.into_iter().map(
                         move |(cat_name, is_collapsed, cat_channels)| {
-                            let handle = list_handle.clone();
+                            let channel_handle = channel_list_handle.clone();
                             let cat_name2 = cat_name.clone();
                             let nav = on_navigate.clone();
                             let clan_id_for_nav = active_clan_id_for_nav.clone();
@@ -117,7 +132,7 @@ impl Render for ChannelSidebar {
 
                             header.interactivity().on_click(
                                 move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                                    handle.update(cx, |m, cx| {
+                                    channel_handle.update(cx, |m, cx| {
                                         m.toggle_category(&cat_name2);
                                         cx.notify();
                                     });
@@ -135,7 +150,7 @@ impl Render for ChannelSidebar {
                                         .iter()
                                         .map(|ch| {
                                             let ch_id = ch.id.clone();
-                                            let row_handle = list_handle.clone();
+                                            let row_handle = channel_list_handle.clone();
                                             let nav_inner = nav.clone();
                                             let clan_id_inner = clan_id_for_nav.clone();
 
@@ -155,23 +170,12 @@ impl Render for ChannelSidebar {
                                                 );
 
                                             row.interactivity().on_click(
-                                                move |_: &ClickEvent,
-                                                      _: &mut Window,
-                                                      cx: &mut App| {
-                                                    row_handle.update(cx, |m, cx| {
-                                                        m.select_channel(&ch_id);
-                                                        cx.notify();
-                                                    });
-                                                    if let Some(ref cb) = nav_inner {
-                                                        if let Some(ref cid) = clan_id_inner {
-                                                            let path = format!(
-                                                                "/chat/clans/{}/channels/{}",
-                                                                cid, ch_id
-                                                            );
-                                                            cb(&path, cx);
-                                                        }
-                                                    }
-                                                },
+                                                on_channel_click(
+                                                    row_handle,
+                                                    ch_id,
+                                                    nav_inner,
+                                                    clan_id_inner,
+                                                ),
                                             );
 
                                             row

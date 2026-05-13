@@ -43,19 +43,13 @@ impl ChatLayout {
             ChannelSidebar::new(clan_list.clone(), channel_list.clone(), on_navigate, cx)
         });
 
-        let user_info_bar = UserInfoBar::new(
-            match auth_state.read(cx) {
-                AuthState::Authenticated(session) => session.username.clone(),
-                _ => "Unknown".to_string(),
-            },
-            on_settings,
-        );
+        let user_info_bar =
+            UserInfoBar::new(auth_state.clone(), on_settings);
 
-        let _ = cx.observe(&auth_state, |_, _, cx| cx.notify());
-        let _ = cx.observe(&channel_list, |_, _, cx| cx.notify());
-        let _ = cx.observe(&clan_list, |_, _, cx| cx.notify());
+        cx.observe(&auth_state, |_, _, cx| cx.notify());
+        cx.observe(&channel_list, |_, _, cx| cx.notify());
+        cx.observe(&clan_list, |_, _, cx| cx.notify());
 
-        // Investigation: fetch real clan list and log it
         let api_clone = api.clone();
         let clan_list_clone = clan_list.clone();
         cx.spawn(async move |_, cx| {
@@ -76,29 +70,8 @@ impl ChatLayout {
                 Ok(clans) => {
                     tracing::info!("✅ Investigation: Fetched {} clans", clans.len());
                     if !clans.is_empty() {
-                        let store_clans: Vec<Clan> = clans
-                            .into_iter()
-                            .map(|c| {
-                                let initials = c
-                                    .clan_name
-                                    .split_whitespace()
-                                    .take(2)
-                                    .map(|s| s.chars().next().unwrap_or_default())
-                                    .collect::<String>()
-                                    .to_uppercase();
-                                Clan {
-                                    id: c.clan_id,
-                                    name: c.clan_name,
-                                    initials: if initials.is_empty() {
-                                        "?".to_string()
-                                    } else {
-                                        initials
-                                    },
-                                    avatar_url: None,
-                                    unread_count: 0,
-                                }
-                            })
-                            .collect();
+                        let store_clans: Vec<Clan> =
+                            clans.into_iter().map(Clan::from).collect();
 
                         let _ = clan_list_clone.update(cx, |model, cx| {
                             model.update_clans(store_clans);
@@ -129,11 +102,7 @@ impl Render for ChatLayout {
         let theme = Theme::dark();
         let channels = self.channel_list.read(cx);
 
-        let active_channel_name = channels
-            .active_channel_id
-            .as_ref()
-            .and_then(|id| channels.find_channel(id))
-            .cloned();
+        let active_channel_name = channels.active_channel().cloned();
 
         let channel_header = div()
             .flex()
@@ -186,7 +155,7 @@ impl Render for ChatLayout {
                                     .child(self.channel_sidebar.clone()),
                             ),
                     )
-                    .child(self.user_info_bar.render(&theme)),
+                    .child(self.user_info_bar.render(&theme, cx)),
             )
             .child(
                 div()

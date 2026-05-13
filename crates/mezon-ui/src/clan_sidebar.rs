@@ -7,21 +7,21 @@ use crate::components::primitives::{Avatar, Badge, Icon, IconName, Size};
 use crate::theme::Theme;
 
 pub struct ClanSidebar {
-    list: Entity<ClanList>,
+    clan_list: Entity<ClanList>,
 }
 
 impl ClanSidebar {
-    pub fn new(list: Entity<ClanList>, cx: &mut Context<Self>) -> Self {
-        let _ = cx.observe(&list, |_, _, cx| cx.notify());
-        Self { list }
+    pub fn new(clan_list: Entity<ClanList>, cx: &mut Context<Self>) -> Self {
+        let _ = cx.observe(&clan_list, |_, _, cx| cx.notify());
+        Self { clan_list }
     }
 }
 
 impl Render for ClanSidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::dark();
-        let list_handle = self.list.clone();
-        let active_id = self.list.read(cx).active_clan_id.clone();
+        let clan_list_handle = self.clan_list.clone();
+        let clan_list_view = self.clan_list.read(cx);
 
         div()
             .flex()
@@ -44,11 +44,11 @@ impl Render for ClanSidebar {
             )
             .child(div().w_full().h_1().bg(theme.border).my_1())
             .child(div().flex().flex_col().gap_3().flex_1().children(
-                self.list.read(cx).clans.iter().map(|clan| {
-                    let is_active = Some(&clan.id) == active_id.as_ref();
+                clan_list_view.clans.iter().map(|clan| {
+                    let is_active = clan_list_view.is_active_clan(&clan.id);
                     let unread = clan.unread_count;
                     let clan_id = clan.id.clone();
-                    let list = list_handle.clone();
+                    let clan_list_handle = clan_list_handle.clone();
 
                     let mut clan_div = div()
                         .id(SharedString::from(format!("clan-{}", clan.id)))
@@ -69,7 +69,7 @@ impl Render for ClanSidebar {
 
                     clan_div.interactivity().on_click(
                         move |_event: &ClickEvent, _window: &mut Window, cx: &mut App| {
-                            list.update(cx, |m, cx| {
+                            clan_list_handle.update(cx, |m, cx| {
                                 m.select_clan(&clan_id);
                                 cx.notify();
                             });

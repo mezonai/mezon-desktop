@@ -1,9 +1,24 @@
 use anyhow::{Context, Result};
 use dirs::config_dir;
-use mezon_client::Session;
+use mezon_client::{Session, transport::ApiClanDesc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::fs;
+
+/// Compute display initials from a name (e.g. "My Clan" → "MC", "john" → "J").
+pub fn compute_initials(name: &str) -> String {
+    let initials: String = name
+        .split_whitespace()
+        .take(2)
+        .filter_map(|s| s.chars().next())
+        .collect::<String>()
+        .to_uppercase();
+    if initials.is_empty() {
+        "?".to_string()
+    } else {
+        initials
+    }
+}
 
 // ─── Clan domain model ────────────────────────────────────────────────────
 
@@ -16,6 +31,19 @@ pub struct Clan {
     pub unread_count: u32,
 }
 
+impl From<ApiClanDesc> for Clan {
+    fn from(c: ApiClanDesc) -> Self {
+        let initials = compute_initials(&c.clan_name);
+        Self {
+            id: c.clan_id,
+            name: c.clan_name,
+            initials,
+            avatar_url: None,
+            unread_count: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ClanList {
     pub clans: Vec<Clan>,
@@ -25,6 +53,22 @@ pub struct ClanList {
 impl ClanList {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn active_clan(&self) -> Option<&Clan> {
+        self.active_clan_id
+            .as_ref()
+            .and_then(|id| self.clans.iter().find(|c| &c.id == id))
+    }
+
+    pub fn active_clan_name(&self) -> &str {
+        self.active_clan()
+            .map(|c| c.name.as_str())
+            .unwrap_or("Select a clan")
+    }
+
+    pub fn is_active_clan(&self, clan_id: &str) -> bool {
+        self.active_clan_id.as_deref() == Some(clan_id)
     }
 
     pub fn select_clan(&mut self, id: &str) {
@@ -79,6 +123,12 @@ pub struct ChannelList {
 impl ChannelList {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn active_channel(&self) -> Option<&Channel> {
+        self.active_channel_id
+            .as_ref()
+            .and_then(|id| self.find_channel(id))
     }
 
     pub fn categories_for_clan(&self, clan_id: &str) -> Vec<&Category> {
@@ -244,4 +294,14 @@ pub enum AuthState {
     AwaitingCallback,
     /// Token received and session is valid.
     Authenticated(Session),
+}
+
+impl AuthState {
+    /// Returns the session username when authenticated.
+    pub fn username(&self) -> Option<&str> {
+        match self {
+            AuthState::Authenticated(session) => Some(&session.username),
+            _ => None,
+        }
+    }
 }

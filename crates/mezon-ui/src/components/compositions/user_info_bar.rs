@@ -1,25 +1,26 @@
 use std::sync::Arc;
 
-use gpui::{App, ClickEvent, Window, div, prelude::*, px};
+use gpui::{App, ClickEvent, Entity, Window, div, prelude::*, px};
 
 use gpui_component::Sizable;
 
 use crate::components::primitives::{Avatar, Icon, IconName, Size};
 use crate::theme::Theme;
+use mezon_store::AuthState;
 
 pub struct UserInfoBar {
-    username: String,
+    auth_state: Entity<AuthState>,
     presence: String,
     on_settings: Option<Arc<dyn Fn(&str, &mut App) + Send + Sync>>,
 }
 
 impl UserInfoBar {
     pub fn new(
-        username: impl Into<String>,
+        auth_state: Entity<AuthState>,
         on_settings: Option<Arc<dyn Fn(&str, &mut App) + Send + Sync>>,
     ) -> Self {
         Self {
-            username: username.into(),
+            auth_state,
             presence: "Online".to_string(),
             on_settings,
         }
@@ -30,14 +31,9 @@ impl UserInfoBar {
         self
     }
 
-    pub fn render(&self, theme: &Theme) -> impl IntoElement {
-        let initials = self
-            .username
-            .chars()
-            .next()
-            .unwrap_or('?')
-            .to_string()
-            .to_uppercase();
+    pub fn render(&self, theme: &Theme, cx: &App) -> impl IntoElement {
+        let username = self.auth_state.read(cx).username().unwrap_or("Unknown");
+        let initials = mezon_store::compute_initials(username);
 
         let presence_color = match self.presence.as_str() {
             "Online" => theme.status_online,
@@ -91,7 +87,7 @@ impl UserInfoBar {
                         div()
                             .text_sm()
                             .text_color(theme.text_primary)
-                            .child(self.username.clone()),
+                            .child(username.to_string()),
                     )
                     .child(
                         div()
