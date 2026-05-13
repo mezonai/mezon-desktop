@@ -8,8 +8,8 @@
 use anyhow::Result;
 use std::sync::Arc;
 use tray_icon::{
-    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     TrayIcon, TrayIconBuilder,
+    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
 };
 
 const SHOW_ID: &str = "show";
@@ -64,8 +64,7 @@ impl MezonTray {
                     UPDATE_ID => {
                         let handle = rt_handle.clone();
                         handle.spawn(async {
-                            match mezon_updater::check_for_updates(env!("CARGO_PKG_VERSION"))
-                                .await
+                            match mezon_updater::check_for_updates(env!("CARGO_PKG_VERSION")).await
                             {
                                 Ok(Some(version)) => {
                                     tracing::info!(

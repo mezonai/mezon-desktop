@@ -1,7 +1,7 @@
 use crate::highlighter::{HighlightTheme, LanguageRegistry};
 use crate::input::RopeExt;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use gpui::{HighlightStyle, SharedString};
 
 use ropey::{ChunkCursor, Rope};

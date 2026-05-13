@@ -11,8 +11,8 @@ use gpui::{
     KeyBinding, LayoutId, ListState, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
     Pixels, Point, RenderOnce, SharedString, Size, StyleRefinement, Styled, Window, div, px,
 };
-use smol::stream::StreamExt;
 use smol::Timer;
+use smol::stream::StreamExt;
 
 use crate::highlighter::HighlightTheme;
 use crate::scroll::ScrollableElement;

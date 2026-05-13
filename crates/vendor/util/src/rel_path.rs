@@ -1,5 +1,5 @@
-use crate::paths::{is_absolute, PathStyle};
-use anyhow::{anyhow, Context as _, Result};
+use crate::paths::{PathStyle, is_absolute};
+use anyhow::{Context as _, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::{Borrow, Cow},

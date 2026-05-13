@@ -3,8 +3,8 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::{
-    transport::{ApiAccount, ApiChannelDesc, ApiClanDesc},
     TransportClient,
+    transport::{ApiAccount, ApiChannelDesc, ApiClanDesc},
 };
 
 #[derive(Clone)]

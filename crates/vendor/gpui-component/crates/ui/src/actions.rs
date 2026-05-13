@@ -1,4 +1,4 @@
-use gpui::{actions, Action};
+use gpui::{Action, actions};
 use serde::Deserialize;
 
 #[derive(Clone, Action, PartialEq, Eq, Deserialize)]

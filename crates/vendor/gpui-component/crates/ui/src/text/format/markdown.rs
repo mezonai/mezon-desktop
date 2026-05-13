@@ -1,17 +1,17 @@
 use gpui::SharedString;
 use markdown::{
-    mdast::{self, Node},
     ParseOptions,
+    mdast::{self, Node},
 };
 
 use crate::{
     highlighter::HighlightTheme,
     text::{
+        TextViewStyle,
         node::{
             self, CodeBlock, ImageNode, InlineNode, LinkMark, NodeContext, Paragraph, Span, Table,
             TableRow, TextMark,
         },
-        TextViewStyle,
     },
 };
 

@@ -293,9 +293,7 @@ impl MezonClient {
             token: refresh_token,
             is_remember,
         };
-        let api: ApiSession = self
-            .post_json("/v2/account/session/refresh", &body)
-            .await?;
+        let api: ApiSession = self.post_json("/v2/account/session/refresh", &body).await?;
         Ok(self.parse_session(api))
     }
 }
