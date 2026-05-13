@@ -38,13 +38,15 @@ impl RootView {
         let router = Router::new();
         let root_entity = cx.entity().clone();
 
-        let navigate: Arc<dyn Fn(&str, &mut App) + Send + Sync> =
+        let navigate: Arc<dyn Fn(&str, &mut App) + Send + Sync> = {
+            let root_id = root_entity.entity_id();
             Arc::new(move |path: &str, cx: &mut App| {
-                root_entity.update(cx, |this, cx| {
+                root_entity.update(cx, |this, _cx| {
                     this.router.navigate(path);
-                    cx.notify();
                 });
-            });
+                cx.notify(root_id);
+            })
+        };
 
         let router_for_chat = router.clone();
         let chat_layout = cx.new(|cx| {

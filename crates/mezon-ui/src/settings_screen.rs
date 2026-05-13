@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use gpui::{App, ClickEvent, Window, div, prelude::*};
+use gpui::{App, ClickEvent, SharedString, Window, div, prelude::*};
 
 use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
@@ -16,11 +16,17 @@ impl SettingsScreen {
 
     pub fn render(&self, theme: &Theme) -> impl IntoElement {
         let navigate = self.navigate.clone();
-        let mut close_btn = div().absolute().top_4().right_4().cursor_pointer().child(
-            Icon::new(IconName::Close)
-                .size_6()
-                .text_color(theme.text_secondary),
-        );
+        let mut close_btn = div()
+            .id(SharedString::from("settings-close-btn"))
+            .absolute()
+            .top_4()
+            .right_4()
+            .cursor_pointer()
+            .child(
+                Icon::new(IconName::Close)
+                    .size_6()
+                    .text_color(theme.text_secondary),
+            );
         close_btn
             .interactivity()
             .on_click(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {

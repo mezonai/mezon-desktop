@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use gpui::{App, ClickEvent, Entity, Window, div, prelude::*, px};
+use gpui::{App, ClickEvent, Entity, SharedString, Window, div, prelude::*, px};
 
 use gpui_component::Sizable;
 
@@ -43,11 +43,14 @@ impl UserInfoBar {
         };
 
         let on_settings = self.on_settings.clone();
-        let mut settings_btn = div().cursor_pointer().child(
-            Icon::new(IconName::Settings)
-                .size(px(16.0))
-                .text_color(theme.text_muted),
-        );
+        let mut settings_btn = div()
+            .id(SharedString::from("settings-btn"))
+            .cursor_pointer()
+            .child(
+                Icon::new(IconName::Settings)
+                    .size(px(16.0))
+                    .text_color(theme.text_muted),
+            );
         settings_btn.interactivity().on_click(
             move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
                 if let Some(ref cb) = on_settings {
