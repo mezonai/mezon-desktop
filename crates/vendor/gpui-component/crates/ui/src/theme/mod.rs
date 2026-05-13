@@ -1,5 +1,5 @@
 use crate::{highlighter::HighlightTheme, scroll::ScrollbarShow};
-use gpui::{px, App, Global, Hsla, Pixels, SharedString, Window, WindowAppearance};
+use gpui::{App, Global, Hsla, Pixels, SharedString, Window, WindowAppearance, px};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{

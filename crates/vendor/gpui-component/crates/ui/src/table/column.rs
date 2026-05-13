@@ -1,6 +1,6 @@
 use gpui::{
-    div, prelude::FluentBuilder, px, Bounds, Context, Edges, Empty, EntityId, IntoElement,
-    ParentElement as _, Pixels, Render, SharedString, Styled as _, TextAlign, Window,
+    Bounds, Context, Edges, Empty, EntityId, IntoElement, ParentElement as _, Pixels, Render,
+    SharedString, Styled as _, TextAlign, Window, div, prelude::FluentBuilder, px,
 };
 
 use crate::ActiveTheme as _;

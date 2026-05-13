@@ -60,11 +60,11 @@ impl SingleInstance {
 
         let mut last_bind_error = None;
         for socket_path in Self::socket_paths() {
-            if let Some(parent) = socket_path.parent() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
-                    last_bind_error = Some(e);
-                    continue;
-                }
+            if let Some(parent) = socket_path.parent()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                last_bind_error = Some(e);
+                continue;
             }
 
             if socket_path.exists() {

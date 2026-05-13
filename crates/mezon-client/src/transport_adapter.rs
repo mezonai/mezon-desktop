@@ -21,12 +21,7 @@ pub type ErrorHandler = Arc<dyn Fn(String) + Send + Sync>;
 #[async_trait]
 pub trait TransportAdapter: Send + Sync {
     /// Connect to the remote endpoint.
-    async fn connect(
-        &mut self,
-        host: &str,
-        port: u16,
-        token: &str,
-    ) -> Result<()>;
+    async fn connect(&mut self, host: &str, port: u16, token: &str) -> Result<()>;
 
     /// Send a message through the transport.
     async fn send(&mut self, message: Vec<u8>) -> Result<()>;

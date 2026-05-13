@@ -56,28 +56,32 @@ impl TransportClient {
     ) -> Result<()> {
         tracing::info!("🚀 TransportClient::connect() starting");
         tracing::debug!("  Spawning connection task on dedicated transport runtime...");
-        
+
         let transport = self.inner.clone();
         let host = host.to_string();
         let token = token.to_string();
-        
+
         runtime()
             .spawn(async move {
-                tracing::debug!("🔧 Inside transport runtime, calling MezonTransport::connect()...");
+                tracing::debug!(
+                    "🔧 Inside transport runtime, calling MezonTransport::connect()..."
+                );
                 let result = transport
                     .connect(&host, port, &token, on_message, on_disconnected)
                     .await;
-                
+
                 match &result {
                     Ok(_) => tracing::debug!("✓ MezonTransport::connect() succeeded in runtime"),
-                    Err(e) => tracing::error!("✗ MezonTransport::connect() failed in runtime: {}", e),
+                    Err(e) => {
+                        tracing::error!("✗ MezonTransport::connect() failed in runtime: {}", e)
+                    }
                 }
-                
+
                 result
             })
             .await
             .expect("Transport task panicked")?;
-        
+
         tracing::info!("✅ TransportClient::connect() completed");
         Ok(())
     }
@@ -87,24 +91,27 @@ impl TransportClient {
     /// Spawns the API call on the dedicated transport runtime.
     pub async fn get_account(&self) -> Result<crate::transport::ApiAccount> {
         tracing::info!("📞 TransportClient::get_account() called");
-        
+
         let transport = self.inner.clone();
-        
+
         tracing::debug!("  Spawning on transport runtime...");
         let result = runtime()
-            .spawn(async move { 
+            .spawn(async move {
                 tracing::debug!("  Inside transport runtime task");
-                transport.get_account().await 
+                transport.get_account().await
             })
             .await
             .expect("Transport task panicked");
-            
+
         tracing::debug!("  Transport runtime task completed");
         result
     }
 
     /// List channel descriptions over the shared transport.
-    pub async fn list_channel_descs(&self, clan_id: &str) -> Result<Vec<crate::transport::ApiChannelDesc>> {
+    pub async fn list_channel_descs(
+        &self,
+        clan_id: &str,
+    ) -> Result<Vec<crate::transport::ApiChannelDesc>> {
         tracing::info!("📞 TransportClient::list_channel_descs() called");
 
         let transport = self.inner.clone();
@@ -150,12 +157,12 @@ impl TransportClient {
     /// Spawns the close operation on the dedicated transport runtime.
     pub async fn close(&self) -> Result<()> {
         let transport = self.inner.clone();
-        
+
         runtime()
             .spawn(async move { transport.close().await })
             .await
             .expect("Transport task panicked")?;
-        
+
         Ok(())
     }
 }
