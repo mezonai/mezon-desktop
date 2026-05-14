@@ -91,7 +91,8 @@ impl Render for ClanSidebar {
                     );
 
                     let clan_initials = compute_initials(&clan.name);
-                    let clan_div = clan_div.child(
+
+                    clan_div.child(
                         div()
                             .flex()
                             .items_center()
@@ -107,9 +108,7 @@ impl Render for ClanSidebar {
                                         .child(Badge::new().count(unread as usize)),
                                 )
                             }),
-                    );
-
-                    clan_div
+                    )
                 }),
             ))
             .child(Icon::new(IconName::Plus))

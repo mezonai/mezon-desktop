@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use gpui::{App, ClickEvent, Context, Entity, SharedString, Window, div, prelude::*, px};
 use mezon_store::{ChannelList, ClanList};
 
@@ -19,11 +17,11 @@ fn on_channel_click(
             m.mark_read(&channel_id);
             cx.notify();
         });
-        if let Some(ref cb) = on_navigate {
-            if let Some(ref cid) = clan_id {
-                let path = format!("/chat/clans/{}/channels/{}", cid, channel_id);
-                cb(&path, cx);
-            }
+        if let Some(ref cb) = on_navigate
+            && let Some(ref cid) = clan_id
+        {
+            let path = format!("/chat/clans/{}/channels/{}", cid, channel_id);
+            cb(&path, cx);
         }
     }
 }

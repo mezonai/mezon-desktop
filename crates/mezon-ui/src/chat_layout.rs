@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use gpui::{App, Context, Entity, FontWeight, Window, div, prelude::*, px};
+use gpui::{Context, Entity, FontWeight, Window, div, prelude::*, px};
 use mezon_client::AppApi;
 use mezon_store::{AuthState, ChannelList, Clan, ClanList};
 
@@ -45,19 +45,17 @@ impl ChatLayout {
 
         let user_info_bar = UserInfoBar::new(auth_state.clone(), on_settings);
 
-        cx.observe(&auth_state, |_, _, cx| cx.notify());
-        cx.observe(&channel_list, |_, _, cx| cx.notify());
-        cx.observe(&clan_list, |_, _, cx| cx.notify());
+        let _ = cx.observe(&auth_state, |_, _, cx| cx.notify());
+        let _ = cx.observe(&channel_list, |_, _, cx| cx.notify());
+        let _ = cx.observe(&clan_list, |_, _, cx| cx.notify());
 
         let api_clone = api.clone();
         let clan_list_clone = clan_list.clone();
         cx.spawn(async move |_, cx| {
             // Wait for connection to be fully ready (TCP open + handshake)
             loop {
-                if api_clone.is_open().await {
-                    if api_clone.ping_roundtrip().await.is_ok() {
-                        break;
-                    }
+                if api_clone.is_open().await && api_clone.ping_roundtrip().await.is_ok() {
+                    break;
                 }
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(1000))
@@ -71,7 +69,7 @@ impl ChatLayout {
                     if !clans.is_empty() {
                         let store_clans: Vec<Clan> = clans.into_iter().map(Clan::from).collect();
 
-                        let _ = clan_list_clone.update(cx, |model, cx| {
+                        clan_list_clone.update(cx, |model, cx| {
                             model.update_clans(store_clans);
                             cx.notify();
                         });

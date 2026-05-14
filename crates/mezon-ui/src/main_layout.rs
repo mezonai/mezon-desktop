@@ -1,26 +1,18 @@
 use gpui::{Context, Entity, FontWeight, Window, div, prelude::*, px};
-use mezon_store::{AuthState, ChannelList};
+use mezon_store::ChannelList;
 
 use crate::theme::Theme;
 
 pub struct MainLayout {
-    auth_state: Entity<AuthState>,
     channel_list: Entity<ChannelList>,
 }
 
 impl MainLayout {
-    pub fn new(
-        auth_state: Entity<AuthState>,
-        channel_list: Entity<ChannelList>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(channel_list: Entity<ChannelList>, cx: &mut Context<Self>) -> Self {
         // Observe the channel list so we re-render when channel selection changes
         let _ = cx.observe(&channel_list, |_, _, cx| cx.notify());
 
-        Self {
-            auth_state,
-            channel_list,
-        }
+        Self { channel_list }
     }
 }
 

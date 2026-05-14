@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use gpui::{App, ClickEvent, SharedString, Window, div, prelude::*};
 
 use crate::components::primitives::{Icon, IconName};
