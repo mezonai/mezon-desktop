@@ -136,7 +136,12 @@ impl TransportClient {
     }
 
     /// Create a new clan.
-    pub async fn create_clan_desc(&self, clan_name: &str, logo: &str, banner: &str) -> Result<crate::transport::ApiClanDesc> {
+    pub async fn create_clan_desc(
+        &self,
+        clan_name: &str,
+        logo: &str,
+        banner: &str,
+    ) -> Result<crate::transport::ApiClanDesc> {
         tracing::info!("📞 TransportClient::create_clan_desc() called");
 
         let transport = self.inner.clone();

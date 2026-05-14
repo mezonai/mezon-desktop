@@ -29,8 +29,15 @@ impl AppApi {
         self.transport.list_clan_descs().await
     }
 
-    pub async fn create_clan_desc(&self, clan_name: &str, logo: &str, banner: &str) -> Result<ApiClanDesc> {
-        self.transport.create_clan_desc(clan_name, logo, banner).await
+    pub async fn create_clan_desc(
+        &self,
+        clan_name: &str,
+        logo: &str,
+        banner: &str,
+    ) -> Result<ApiClanDesc> {
+        self.transport
+            .create_clan_desc(clan_name, logo, banner)
+            .await
     }
 
     pub async fn is_open(&self) -> bool {
