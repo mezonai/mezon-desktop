@@ -22,18 +22,18 @@ impl ChatLayout {
         router: Router,
         auth_state: Entity<AuthState>,
         api: Arc<AppApi>,
-        navigate: Arc<dyn Fn(&str, &mut App) + Send + Sync>,
+        navigate: crate::components::NavigateFn,
         cx: &mut Context<Self>,
     ) -> Self {
         let clan_list = cx.new(|_| ClanList::new());
         let channel_list = cx.new(|_| ChannelList::new());
 
-        let on_navigate: Option<Arc<dyn Fn(&str, &mut App) + Send + Sync>> = {
+        let on_navigate: Option<crate::components::NavigateFn> = {
             let nav = navigate.clone();
             Some(Arc::new(move |path, cx| nav(path, cx)))
         };
 
-        let on_settings: Option<Arc<dyn Fn(&str, &mut App) + Send + Sync>> = {
+        let on_settings: Option<crate::components::NavigateFn> = {
             let nav = navigate.clone();
             Some(Arc::new(move |path, cx| nav(path, cx)))
         };

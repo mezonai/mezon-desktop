@@ -6,11 +6,11 @@ use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
 
 pub struct SettingsScreen {
-    navigate: Arc<dyn Fn(&str, &mut App) + Send + Sync>,
+    navigate: crate::components::NavigateFn,
 }
 
 impl SettingsScreen {
-    pub fn new(navigate: Arc<dyn Fn(&str, &mut App) + Send + Sync>) -> Self {
+    pub fn new(navigate: crate::components::NavigateFn) -> Self {
         Self { navigate }
     }
 

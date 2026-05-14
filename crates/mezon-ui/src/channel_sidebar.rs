@@ -10,7 +10,7 @@ use crate::theme::Theme;
 fn on_channel_click(
     channel_list: Entity<ChannelList>,
     channel_id: String,
-    on_navigate: Option<Arc<dyn Fn(&str, &mut App) + Send + Sync>>,
+    on_navigate: Option<crate::components::NavigateFn>,
     clan_id: Option<String>,
 ) -> impl Fn(&ClickEvent, &mut Window, &mut App) {
     move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
@@ -31,7 +31,7 @@ fn on_channel_click(
 pub struct ChannelSidebar {
     clan_list: Entity<ClanList>,
     channel_list: Entity<ChannelList>,
-    on_navigate: Option<Arc<dyn Fn(&str, &mut App) + Send + Sync>>,
+    on_navigate: Option<crate::components::NavigateFn>,
     collapsed: std::collections::HashSet<String>,
 }
 
@@ -39,7 +39,7 @@ impl ChannelSidebar {
     pub fn new(
         clan_list: Entity<ClanList>,
         channel_list: Entity<ChannelList>,
-        on_navigate: Option<Arc<dyn Fn(&str, &mut App) + Send + Sync>>,
+        on_navigate: Option<crate::components::NavigateFn>,
         cx: &mut Context<Self>,
     ) -> Self {
         let _ = cx.observe(&clan_list, |_, _, cx| cx.notify());

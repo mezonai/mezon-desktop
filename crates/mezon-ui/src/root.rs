@@ -19,7 +19,7 @@ pub struct RootView {
     router: Router,
     chat_layout: Entity<ChatLayout>,
     settings_screen: SettingsScreen,
-    navigate: Arc<dyn Fn(&str, &mut App) + Send + Sync>,
+    navigate: crate::components::NavigateFn,
 }
 
 impl RootView {
@@ -38,7 +38,7 @@ impl RootView {
         let router = Router::new();
         let root_entity = cx.entity().clone();
 
-        let navigate: Arc<dyn Fn(&str, &mut App) + Send + Sync> = {
+        let navigate: crate::components::NavigateFn = {
             let root_id = root_entity.entity_id();
             Arc::new(move |path: &str, cx: &mut App| {
                 root_entity.update(cx, |this, _cx| {
@@ -131,7 +131,7 @@ fn render_awaiting_callback(theme: &Theme) -> gpui::AnyElement {
 
 fn render_not_found(
     theme: &Theme,
-    navigate: &Arc<dyn Fn(&str, &mut App) + Send + Sync>,
+    navigate: &crate::components::NavigateFn,
 ) -> gpui::AnyElement {
     let navigate = navigate.clone();
     let mut back_btn = Button::new("back-to-chat").label("Back to Chat");

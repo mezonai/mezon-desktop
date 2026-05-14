@@ -25,13 +25,13 @@ fn compute_initials(name: &str) -> String {
 pub struct UserInfoBar {
     auth_state: Entity<AuthState>,
     presence: String,
-    on_settings: Option<Arc<dyn Fn(&str, &mut App) + Send + Sync>>,
+    on_settings: Option<crate::components::NavigateFn>,
 }
 
 impl UserInfoBar {
     pub fn new(
         auth_state: Entity<AuthState>,
-        on_settings: Option<Arc<dyn Fn(&str, &mut App) + Send + Sync>>,
+        on_settings: Option<crate::components::NavigateFn>,
     ) -> Self {
         Self {
             auth_state,
