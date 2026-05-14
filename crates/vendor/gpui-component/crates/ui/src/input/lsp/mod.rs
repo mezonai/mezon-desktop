@@ -3,7 +3,7 @@ use gpui::{App, Context, Hsla, MouseMoveEvent, Task, Window};
 use ropey::Rope;
 use std::rc::Rc;
 
-use crate::input::{popovers::ContextMenu, InputState, RopeExt};
+use crate::input::{InputState, RopeExt, popovers::ContextMenu};
 
 mod code_actions;
 mod completions;

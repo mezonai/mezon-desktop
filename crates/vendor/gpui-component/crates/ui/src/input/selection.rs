@@ -4,7 +4,7 @@ use gpui::{Context, Window};
 use ropey::Rope;
 use sum_tree::Bias;
 
-use crate::{input::InputState, RopeExt as _};
+use crate::{RopeExt as _, input::InputState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CharType {

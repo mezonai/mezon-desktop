@@ -125,6 +125,8 @@ impl std::fmt::Display for LoginError {
 ///
 /// Drives which view is shown in the content area of `RootView`.
 #[derive(Debug, Clone, Default)]
+// Session is kept inline because AuthState is cloned and matched as a simple UI/store snapshot.
+#[allow(clippy::large_enum_variant)]
 pub enum AuthState {
     /// No session — show login form.
     #[default]

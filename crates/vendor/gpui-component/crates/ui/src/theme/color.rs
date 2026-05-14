@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fmt::Display};
 
-use gpui::{hsla, Hsla, SharedString};
-use serde::{de::Error, Deserialize, Deserializer};
+use gpui::{Hsla, SharedString, hsla};
+use serde::{Deserialize, Deserializer, de::Error};
 
 use anyhow::Result;
 

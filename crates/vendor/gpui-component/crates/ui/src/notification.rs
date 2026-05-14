@@ -6,17 +6,18 @@ use std::{
 };
 
 use gpui::{
-    div, prelude::FluentBuilder, px, Animation, AnimationExt, AnyElement, App, AppContext,
-    ClickEvent, Context, DismissEvent, ElementId, Entity, EventEmitter, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement,
-    StyleRefinement, Styled, Subscription, Window,
+    Animation, AnimationExt, AnyElement, App, AppContext, ClickEvent, Context, DismissEvent,
+    ElementId, Entity, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Subscription,
+    Window, div, prelude::FluentBuilder, px,
 };
 use smol::Timer;
 
 use crate::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt,
     animation::cubic_bezier,
     button::{Button, ButtonVariants as _},
-    h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt,
+    h_flex, v_flex,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -269,8 +270,14 @@ impl Styled for Notification {
 }
 impl Render for Notification {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let content = self.content_builder.clone().map(|builder| builder(self, window, cx));
-        let action = self.action_builder.clone().map(|builder| builder(self, window, cx).small().mr_3p5());
+        let content = self
+            .content_builder
+            .clone()
+            .map(|builder| builder(self, window, cx));
+        let action = self
+            .action_builder
+            .clone()
+            .map(|builder| builder(self, window, cx).small().mr_3p5());
 
         let closing = self.closing;
         let icon = match self.type_ {
@@ -308,13 +315,9 @@ impl Render for Notification {
                     .when_some(self.message.clone(), |this, message| {
                         this.child(div().text_sm().child(message))
                     })
-                    .when_some(content, |this, content| {
-                        this.child(content)
-                    }),
+                    .when_some(content, |this, content| this.child(content)),
             )
-            .when_some(action, |this, action| {
-                this.child(action)
-            })
+            .when_some(action, |this, action| this.child(action))
             .when_some(self.on_click.clone(), |this, on_click| {
                 this.on_click(cx.listener(move |view, event, window, cx| {
                     view.dismiss(window, cx);

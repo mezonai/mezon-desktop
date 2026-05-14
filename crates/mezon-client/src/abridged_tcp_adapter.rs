@@ -4,13 +4,15 @@ use async_trait::async_trait;
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, Mutex, oneshot};
-use tokio_rustls::rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio_rustls::rustls::client::danger::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
 use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use tokio_rustls::rustls::{DigitallySignedStruct, SignatureScheme};
-use std::sync::OnceLock;
 
 #[derive(Debug)]
 struct NoCertVerifier;
@@ -26,15 +28,34 @@ impl ServerCertVerifier for NoCertVerifier {
     ) -> std::result::Result<ServerCertVerified, tokio_rustls::rustls::Error> {
         Ok(ServerCertVerified::assertion())
     }
-    fn verify_tls12_signature(&self, _m: &[u8], _c: &CertificateDer<'_>, _d: &DigitallySignedStruct) -> std::result::Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> { Ok(HandshakeSignatureValid::assertion()) }
-    fn verify_tls13_signature(&self, _m: &[u8], _c: &CertificateDer<'_>, _d: &DigitallySignedStruct) -> std::result::Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> { Ok(HandshakeSignatureValid::assertion()) }
+    fn verify_tls12_signature(
+        &self,
+        _m: &[u8],
+        _c: &CertificateDer<'_>,
+        _d: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(
+        &self,
+        _m: &[u8],
+        _c: &CertificateDer<'_>,
+        _d: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         vec![
-            SignatureScheme::RSA_PKCS1_SHA256, SignatureScheme::RSA_PKCS1_SHA384,
-            SignatureScheme::RSA_PKCS1_SHA512, SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::ECDSA_NISTP384_SHA384, SignatureScheme::ECDSA_NISTP521_SHA512,
-            SignatureScheme::RSA_PSS_SHA256, SignatureScheme::RSA_PSS_SHA384,
-            SignatureScheme::RSA_PSS_SHA512, SignatureScheme::ED25519,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ED25519,
         ]
     }
 }
@@ -68,7 +89,9 @@ impl AbridgedTcpAdapter {
 
     async fn handle_data(&self, data: Vec<u8>) -> Result<()> {
         tracing::info!("📥 handle_data called: {} bytes", data.len());
-        if data.is_empty() { return Ok(()); }
+        if data.is_empty() {
+            return Ok(());
+        }
 
         tracing::info!("📥 First byte: {:#04x}", data[0]);
         let handlers = self.handlers.lock().await.clone();
@@ -84,7 +107,9 @@ impl AbridgedTcpAdapter {
 
         if data[0] == PREFIX_RAW {
             tracing::info!("📥 RAW API response detected");
-            if data.len() < RAW_HEADER_LENGTH { return Ok(()); }
+            if data.len() < RAW_HEADER_LENGTH {
+                return Ok(());
+            }
             let cid = u16::from_be_bytes([data[1], data[2]]);
             let code = u32::from_be_bytes([data[3], data[4], data[5], data[6]]);
             tracing::info!("📥 RAW: cid={} code={:#x}", cid, code);
@@ -96,18 +121,32 @@ impl AbridgedTcpAdapter {
             let payload_len = u32::from_be_bytes([data[7], data[8], data[9], data[10]]) as usize;
             let payload = if data.len() >= PAYLOAD_HEADER_LENGTH + payload_len {
                 data[PAYLOAD_HEADER_LENGTH..PAYLOAD_HEADER_LENGTH + payload_len].to_vec()
-            } else { vec![] };
+            } else {
+                vec![]
+            };
 
             let response_code = (code >> 16) & 0xffff;
             let fin_flag = (code & 0xffff) as u16;
-            tracing::info!("📥 RAW: response_code={} fin_flag={:#x} payload_len={}", response_code, fin_flag, payload_len);
+            tracing::info!(
+                "📥 RAW: response_code={} fin_flag={:#x} payload_len={}",
+                response_code,
+                fin_flag,
+                payload_len
+            );
 
             let mut streams = self.streams.lock().await;
             if fin_flag == CODE_FIN {
                 let chunks = streams.entry(cid).or_insert_with(Vec::new);
-                if payload_len > 0 { chunks.push(payload); }
+                if payload_len > 0 {
+                    chunks.push(payload);
+                }
                 let complete_buffer: Vec<u8> = chunks.concat();
-                tracing::info!("📨 Complete API response: cid={} code={} len={} bytes", cid, response_code, complete_buffer.len());
+                tracing::info!(
+                    "📨 Complete API response: cid={} code={} len={} bytes",
+                    cid,
+                    response_code,
+                    complete_buffer.len()
+                );
                 handlers.trigger_message(cid, response_code, complete_buffer);
                 streams.remove(&cid);
             } else {
@@ -119,25 +158,43 @@ impl AbridgedTcpAdapter {
         }
 
         let (header_size, payload_length) = if data[0] < 127 {
-            tracing::info!("📥 Standard msg: 1-byte header ({}*4={}bytes)", data[0], data[0] as usize * 4);
+            tracing::info!(
+                "📥 Standard msg: 1-byte header ({}*4={}bytes)",
+                data[0],
+                data[0] as usize * 4
+            );
             (1, data[0] as usize * 4)
         } else if data[0] == PREFIX_EXTENDED {
-            if data.len() < 4 { return Ok(()); }
+            if data.len() < 4 {
+                return Ok(());
+            }
             let len = u32::from_le_bytes([data[1], data[2], data[3], 0]) as usize * 4;
             tracing::info!("📥 Extended msg: len={}", len);
             (4, len)
         } else {
-            tracing::warn!("📥 Unexpected first byte: {:#x}, raw={:02x?}", data[0], &data[..data.len().min(32)]);
+            tracing::warn!(
+                "📥 Unexpected first byte: {:#x}, raw={:02x?}",
+                data[0],
+                &data[..data.len().min(32)]
+            );
             return Ok(());
         };
 
         if data.len() < header_size + payload_length {
-            tracing::warn!("📥 Incomplete packet: have {} need {}", data.len(), header_size + payload_length);
+            tracing::warn!(
+                "📥 Incomplete packet: have {} need {}",
+                data.len(),
+                header_size + payload_length
+            );
             return Ok(());
         }
 
         let payload = &data[header_size..header_size + payload_length];
-        tracing::info!("📨 Std msg payload: {} bytes {:02x?}", payload.len(), &payload[..payload.len().min(32)]);
+        tracing::info!(
+            "📨 Std msg payload: {} bytes {:02x?}",
+            payload.len(),
+            &payload[..payload.len().min(32)]
+        );
 
         if let Ok(envelope) = mezon_proto::realtime::Envelope::decode(payload) {
             tracing::info!("📨 Envelope decoded: cid={}", envelope.cid);
@@ -260,7 +317,9 @@ fn decode_cid_field(payload: &[u8]) -> Option<u16> {
 }
 
 impl Default for AbridgedTcpAdapter {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait]
@@ -288,8 +347,12 @@ impl TransportAdapter for AbridgedTcpAdapter {
         let tcp = TcpStream::connect(&addr)
             .await
             .map_err(|e| anyhow::anyhow!("TCP connect failed: {e}"))?;
-        let local = tcp.local_addr().map_err(|e| anyhow::anyhow!("local_addr: {e}"))?;
-        let peer = tcp.peer_addr().map_err(|e| anyhow::anyhow!("peer_addr: {e}"))?;
+        let local = tcp
+            .local_addr()
+            .map_err(|e| anyhow::anyhow!("local_addr: {e}"))?;
+        let peer = tcp
+            .peer_addr()
+            .map_err(|e| anyhow::anyhow!("peer_addr: {e}"))?;
         tracing::info!("🔌 ✓ TCP connected: local={} peer={}", local, peer);
 
         let domain = ServerName::try_from(host.to_string())
@@ -317,7 +380,9 @@ impl TransportAdapter for AbridgedTcpAdapter {
 
         // Wait for I/O loop to signal readiness
         tracing::info!("🔌 Waiting for I/O loop to be ready...");
-        ready_rx.await.map_err(|_| anyhow::anyhow!("I/O loop panicked before starting"))?;
+        ready_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("I/O loop panicked before starting"))?;
         tracing::info!("🔌 ✓ I/O loop confirmed READY");
 
         // Now send handshake — I/O loop is definitely listening
@@ -329,16 +394,28 @@ impl TransportAdapter for AbridgedTcpAdapter {
         let mut handshake = vec![0xef, len_header];
         handshake.extend(&final_token);
 
-        tracing::info!("🔌 Sending handshake: {} bytes (magic=0xef len={})", handshake.len(), len_header);
-        tracing::info!("🔌 Handshake hex: {:02x?}", &handshake[..handshake.len().min(32)]);
-        write_tx.send(handshake).map_err(|_| anyhow::anyhow!("Write channel closed early"))?;
+        tracing::info!(
+            "🔌 Sending handshake: {} bytes (magic=0xef len={})",
+            handshake.len(),
+            len_header
+        );
+        tracing::info!(
+            "🔌 Handshake hex: {:02x?}",
+            &handshake[..handshake.len().min(32)]
+        );
+        write_tx
+            .send(handshake)
+            .map_err(|_| anyhow::anyhow!("Write channel closed early"))?;
         tracing::info!("🔌 ✓ Handshake queued via mpsc channel");
 
         *self.write_tx.lock().await = Some(write_tx);
         *self.is_connected.lock().await = true;
         tracing::info!("🔌 Connection state: is_connected=true, write_tx set");
 
-        { let h = self.handlers.lock().await; h.trigger_open(); }
+        {
+            let h = self.handlers.lock().await;
+            h.trigger_open();
+        }
         tracing::info!("🔌 ✓ on_open triggered");
 
         tracing::info!("🔌 === CONNECT COMPLETE ===");
@@ -358,7 +435,11 @@ impl TransportAdapter for AbridgedTcpAdapter {
         let padding_needed = (4 - (message.len() % 4)) % 4;
         let mut final_payload = message;
         final_payload.extend(vec![0u8; padding_needed]);
-        tracing::info!("📤 Padded to {} bytes (+{} padding)", final_payload.len(), padding_needed);
+        tracing::info!(
+            "📤 Padded to {} bytes (+{} padding)",
+            final_payload.len(),
+            padding_needed
+        );
 
         let len_div4 = final_payload.len() / 4;
         let header = if len_div4 < 127 {
@@ -373,7 +454,11 @@ impl TransportAdapter for AbridgedTcpAdapter {
 
         let mut packet = header;
         packet.extend(&final_payload);
-        tracing::info!("📤 Full abridged packet: {} bytes {:02x?}", packet.len(), &packet[..packet.len().min(64)]);
+        tracing::info!(
+            "📤 Full abridged packet: {} bytes {:02x?}",
+            packet.len(),
+            &packet[..packet.len().min(64)]
+        );
 
         let guard = self.write_tx.lock().await;
         match *guard {
@@ -394,27 +479,46 @@ impl TransportAdapter for AbridgedTcpAdapter {
     }
 
     async fn send_ping(&mut self, cid: u16) -> Result<()> {
-        if !self.is_open() { return Err(anyhow::anyhow!("Connection is not open")); }
+        if !self.is_open() {
+            return Err(anyhow::anyhow!("Connection is not open"));
+        }
         let mut buffer = vec![0x00];
         buffer.extend(&cid.to_be_bytes());
         let guard = self.write_tx.lock().await;
-        if let Some(ref tx) = *guard { tx.send(buffer).map_err(|_| anyhow::anyhow!("Write channel closed"))?; }
+        if let Some(ref tx) = *guard {
+            tx.send(buffer)
+                .map_err(|_| anyhow::anyhow!("Write channel closed"))?;
+        }
         Ok(())
     }
 
-    fn is_open(&self) -> bool { self.is_connected.try_lock().map(|g| *g).unwrap_or(false) }
-    async fn close(&mut self) -> Result<()> { *self.is_connected.lock().await = false; *self.write_tx.lock().await = None; Ok(()) }
+    fn is_open(&self) -> bool {
+        self.is_connected.try_lock().map(|g| *g).unwrap_or(false)
+    }
+    async fn close(&mut self) -> Result<()> {
+        *self.is_connected.lock().await = false;
+        *self.write_tx.lock().await = None;
+        Ok(())
+    }
 
     fn set_on_message(&mut self, handler: crate::transport_adapter::MessageHandler) {
-        if let Ok(mut h) = self.handlers.try_lock() { h.on_message = Some(handler); }
+        if let Ok(mut h) = self.handlers.try_lock() {
+            h.on_message = Some(handler);
+        }
     }
     fn set_on_open(&mut self, handler: crate::transport_adapter::OpenHandler) {
-        if let Ok(mut h) = self.handlers.try_lock() { h.on_open = Some(handler); }
+        if let Ok(mut h) = self.handlers.try_lock() {
+            h.on_open = Some(handler);
+        }
     }
     fn set_on_close(&mut self, handler: crate::transport_adapter::CloseHandler) {
-        if let Ok(mut h) = self.handlers.try_lock() { h.on_close = Some(handler); }
+        if let Ok(mut h) = self.handlers.try_lock() {
+            h.on_close = Some(handler);
+        }
     }
     fn set_on_error(&mut self, handler: crate::transport_adapter::ErrorHandler) {
-        if let Ok(mut h) = self.handlers.try_lock() { h.on_error = Some(handler); }
+        if let Ok(mut h) = self.handlers.try_lock() {
+            h.on_error = Some(handler);
+        }
     }
 }

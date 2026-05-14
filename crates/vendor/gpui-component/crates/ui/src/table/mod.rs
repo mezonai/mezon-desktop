@@ -1,10 +1,10 @@
 use crate::{
-    actions::{Cancel, SelectDown, SelectUp},
     ActiveTheme, Sizable, Size,
+    actions::{Cancel, SelectDown, SelectUp},
 };
 use gpui::{
-    actions, div, prelude::FluentBuilder, App, Edges, Entity, Focusable, InteractiveElement,
-    IntoElement, KeyBinding, ParentElement, RenderOnce, Styled, Window,
+    App, Edges, Entity, Focusable, InteractiveElement, IntoElement, KeyBinding, ParentElement,
+    RenderOnce, Styled, Window, actions, div, prelude::FluentBuilder,
 };
 
 mod column;
