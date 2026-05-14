@@ -1,10 +1,10 @@
 use std::{env, fs, path::PathBuf};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if env::var("PROTOC").is_err() {
-        if let Ok(path) = protoc_bin_vendored::protoc_bin_path() {
-            unsafe { env::set_var("PROTOC", path) };
-        }
+    if env::var("PROTOC").is_err()
+        && let Ok(path) = protoc_bin_vendored::protoc_bin_path()
+    {
+        unsafe { env::set_var("PROTOC", path) };
     }
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
