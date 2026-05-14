@@ -2237,7 +2237,7 @@ impl MezonTransport {
         clan_name: &str,
         logo: &str,
         banner: &str,
-    ) -> Result<api::ClanDesc> {
+    ) -> Result<ApiClanDesc> {
         let cid = self.generate_cid();
         let body = api::CreateClanDescRequest {
             clan_name: clan_name.to_string(),
@@ -2249,7 +2249,8 @@ impl MezonTransport {
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(api::ClanDesc::decode(response.as_slice())?)
+        let clan = api::ClanDesc::decode(response.as_slice())?;
+        Ok(Self::clan_desc_from_proto(clan))
     }
 
     /// Update clan.

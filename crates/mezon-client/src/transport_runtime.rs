@@ -135,6 +135,26 @@ impl TransportClient {
             .expect("Transport task panicked")
     }
 
+    /// Create a new clan.
+    pub async fn create_clan_desc(
+        &self,
+        clan_name: &str,
+        logo: &str,
+        banner: &str,
+    ) -> Result<crate::transport::ApiClanDesc> {
+        tracing::info!("📞 TransportClient::create_clan_desc() called");
+
+        let transport = self.inner.clone();
+        let clan_name = clan_name.to_string();
+        let logo = logo.to_string();
+        let banner = banner.to_string();
+
+        runtime()
+            .spawn(async move { transport.create_clan_desc(&clan_name, &logo, &banner).await })
+            .await
+            .expect("Transport task panicked")
+    }
+
     /// Ping server and wait for pong.
     pub async fn ping_roundtrip(&self) -> Result<()> {
         tracing::info!("🏓 TransportClient::ping_roundtrip() called");

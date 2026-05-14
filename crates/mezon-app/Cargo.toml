@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 gpui.workspace = true
 gpui-component.workspace = true
+gpui-component-assets.workspace = true
 gpui_platform = { workspace = true, features = ["font-kit"] }
 mezon-ui.workspace = true
 mezon-store.workspace = true

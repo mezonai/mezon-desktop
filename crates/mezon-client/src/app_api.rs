@@ -28,4 +28,23 @@ impl AppApi {
     pub async fn list_clan_descs(&self) -> Result<Vec<ApiClanDesc>> {
         self.transport.list_clan_descs().await
     }
+
+    pub async fn create_clan_desc(
+        &self,
+        clan_name: &str,
+        logo: &str,
+        banner: &str,
+    ) -> Result<ApiClanDesc> {
+        self.transport
+            .create_clan_desc(clan_name, logo, banner)
+            .await
+    }
+
+    pub async fn is_open(&self) -> bool {
+        self.transport.is_open().await
+    }
+
+    pub async fn ping_roundtrip(&self) -> Result<()> {
+        self.transport.ping_roundtrip().await
+    }
 }

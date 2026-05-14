@@ -1,9 +1,15 @@
+pub mod channel;
+pub mod clan;
+
 use anyhow::{Context, Result};
 use dirs::config_dir;
 use mezon_client::Session;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::fs;
+
+pub use channel::*;
+pub use clan::*;
 
 /// Persistent application settings — written to ~/.config/mezon/settings.json
 #[derive(Debug, Clone, Serialize, Deserialize)]

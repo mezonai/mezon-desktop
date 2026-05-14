@@ -54,6 +54,7 @@ todo = "deny"
 gpui               = { path = "crates/vendor/gpui", default-features = false }
 gpui-component     = { path = "crates/vendor/gpui-component/crates/ui", default-features = false }
 gpui-component-macros = { path = "crates/vendor/gpui-component/crates/macros" }
+gpui-component-assets = { path = "crates/vendor/gpui-component/crates/assets" }
 gpui-macros        = { package = "gpui_macros", path = "crates/vendor/gpui_macros" }
 gpui_platform      = { path = "crates/vendor/gpui_platform", default-features = false }
 gpui_linux         = { path = "crates/vendor/gpui_linux", default-features = false }

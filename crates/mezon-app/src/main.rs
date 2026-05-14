@@ -79,77 +79,79 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
         }
     }));
 
-    application().run(move |cx: &mut App| {
-        tracing::debug!("App started");
-        init_ui(cx);
+    application()
+        .with_assets(gpui_component_assets::Assets)
+        .run(move |cx: &mut App| {
+            tracing::debug!("App started");
+            init_ui(cx);
 
-        // Shared channel so background threads can send deep link URLs to the GPUI main thread.
-        let (url_tx, url_rx) = std::sync::mpsc::channel::<String>();
+            // Shared channel so background threads can send deep link URLs to the GPUI main thread.
+            let (url_tx, url_rx) = std::sync::mpsc::channel::<String>();
 
-        // Listen for deep link URLs forwarded from secondary instances.
-        {
-            let tx = url_tx.clone();
-            lock.listen_for_urls(move |url| {
-                let _ = tx.send(url);
-            });
-        }
+            // Listen for deep link URLs forwarded from secondary instances.
+            {
+                let tx = url_tx.clone();
+                lock.listen_for_urls(move |url| {
+                    let _ = tx.send(url);
+                });
+            }
 
-        // If we were launched with a deep link, inject it immediately.
-        if let Some(url) = initial_url {
-            let _ = url_tx.send(url);
-        }
+            // If we were launched with a deep link, inject it immediately.
+            if let Some(url) = initial_url {
+                let _ = url_tx.send(url);
+            }
 
-        // Open the main window and obtain the auth_state entity handle.
-        let auth_state_handle = open_main_window(
-            cx,
-            &settings,
-            client.clone(),
-            api.clone(),
-            initial_auth_state,
-        );
+            // Open the main window and obtain the auth_state entity handle.
+            let auth_state_handle = open_main_window(
+                cx,
+                &settings,
+                client.clone(),
+                api.clone(),
+                initial_auth_state,
+            );
 
-        // Background task: poll `url_rx` and update auth state on the main thread.
-        {
-            let auth_state = auth_state_handle.clone();
-            cx.spawn(async move |cx: &mut AsyncApp| {
-                let exec = cx.background_executor().clone();
-                loop {
-                    match url_rx.try_recv() {
-                        Ok(url) => {
-                            tracing::info!("Received deep link: {url}");
-                            cx.update(|cx| {
-                                auth_state.update(cx, |state, cx| {
-                                    if url.starts_with("mezonapp://callback") {
-                                        // Deep link OAuth — kept for future use.
-                                        *state = AuthState::AwaitingCallback;
-                                    }
-                                    cx.notify();
+            // Background task: poll `url_rx` and update auth state on the main thread.
+            {
+                let auth_state = auth_state_handle.clone();
+                cx.spawn(async move |cx: &mut AsyncApp| {
+                    let exec = cx.background_executor().clone();
+                    loop {
+                        match url_rx.try_recv() {
+                            Ok(url) => {
+                                tracing::info!("Received deep link: {url}");
+                                cx.update(|cx| {
+                                    auth_state.update(cx, |state, cx| {
+                                        if url.starts_with("mezonapp://callback") {
+                                            // Deep link OAuth — kept for future use.
+                                            *state = AuthState::AwaitingCallback;
+                                        }
+                                        cx.notify();
+                                    });
                                 });
-                            });
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                            Err(std::sync::mpsc::TryRecvError::Empty) => {}
                         }
-                        Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
-                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                        exec.timer(std::time::Duration::from_millis(100)).await;
                     }
-                    exec.timer(std::time::Duration::from_millis(100)).await;
-                }
-            })
-            .detach();
-        }
+                })
+                .detach();
+            }
 
-        // Background refresh task: wake every 60s, refresh if session is near expiry.
-        spawn_refresh_task(cx, auth_state_handle.clone(), client.clone());
-        spawn_transport_task(
-            cx,
-            auth_state_handle.clone(),
-            transport.clone(),
-            api.clone(),
-        );
+            // Background refresh task: wake every 60s, refresh if session is near expiry.
+            spawn_refresh_task(cx, auth_state_handle.clone(), client.clone());
+            spawn_transport_task(
+                cx,
+                auth_state_handle.clone(),
+                transport.clone(),
+                api.clone(),
+            );
 
-        // System tray.
-        let _tray = setup_tray(cx, rt_handle.clone());
+            // System tray.
+            let _tray = setup_tray(cx, rt_handle.clone());
 
-        cx.activate(true);
-    });
+            cx.activate(true);
+        });
 }
 
 /// Keep the shared TCP transport connected for authenticated UI API calls.
@@ -172,10 +174,10 @@ fn spawn_transport_task(
             };
 
             let Some(session) = session else {
-                if connected_token.take().is_some() {
-                    if let Err(e) = transport.close().await {
-                        tracing::warn!("Failed to close TCP transport after logout: {e}");
-                    }
+                if connected_token.take().is_some()
+                    && let Err(e) = transport.close().await
+                {
+                    tracing::warn!("Failed to close TCP transport after logout: {e}");
                 }
                 continue;
             };
@@ -196,10 +198,10 @@ fn spawn_transport_task(
             // };
             let port = 7349;
 
-            if transport.is_open().await {
-                if let Err(e) = transport.close().await {
-                    tracing::warn!("Failed to close stale TCP transport: {e}");
-                }
+            if transport.is_open().await
+                && let Err(e) = transport.close().await
+            {
+                tracing::warn!("Failed to close stale TCP transport: {e}");
             }
 
             tracing::info!("Connecting shared TCP transport to {host}:{port}");
