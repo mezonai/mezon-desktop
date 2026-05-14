@@ -1,141 +1,15 @@
+pub mod clan;
+pub mod channel;
+
 use anyhow::{Context, Result};
 use dirs::config_dir;
-use mezon_client::{Session, transport::ApiClanDesc};
+use mezon_client::Session;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::fs;
 
-// ─── Clan domain model ────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-pub struct Clan {
-    pub id: String,
-    pub name: String,
-    pub avatar_url: Option<String>,
-    pub unread_count: u32,
-}
-
-impl From<ApiClanDesc> for Clan {
-    fn from(c: ApiClanDesc) -> Self {
-        Self {
-            id: c.clan_id,
-            name: c.clan_name,
-            avatar_url: None,
-            unread_count: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ClanList {
-    pub clans: Vec<Clan>,
-    pub active_clan_id: Option<String>,
-}
-
-impl ClanList {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn active_clan(&self) -> Option<&Clan> {
-        self.active_clan_id
-            .as_ref()
-            .and_then(|id| self.clans.iter().find(|c| &c.id == id))
-    }
-
-    pub fn is_active_clan(&self, clan_id: &str) -> bool {
-        self.active_clan_id.as_deref() == Some(clan_id)
-    }
-
-    pub fn select_clan(&mut self, id: &str) {
-        self.active_clan_id = Some(id.to_string());
-    }
-
-    pub fn update_clans(&mut self, clans: Vec<Clan>) {
-        self.clans = clans;
-        if !self.clans.is_empty() {
-            if let Some(active_id) = &self.active_clan_id {
-                if !self.clans.iter().any(|c| &c.id == active_id) {
-                    self.active_clan_id = Some(self.clans[0].id.clone());
-                }
-            } else {
-                self.active_clan_id = Some(self.clans[0].id.clone());
-            }
-        }
-    }
-}
-
-// ─── Channel domain model ─────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChannelType {
-    Text,
-    Voice,
-}
-
-#[derive(Debug, Clone)]
-pub struct Channel {
-    pub id: String,
-    pub name: String,
-    pub channel_type: ChannelType,
-    pub unread: bool,
-    pub private: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct Category {
-    pub clan_id: String,
-    pub name: String,
-    pub channels: Vec<Channel>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ChannelList {
-    pub categories: Vec<Category>,
-    pub active_channel_id: Option<String>,
-}
-
-impl ChannelList {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn active_channel(&self) -> Option<&Channel> {
-        self.active_channel_id
-            .as_ref()
-            .and_then(|id| self.find_channel(id))
-    }
-
-    pub fn categories_for_clan(&self, clan_id: &str) -> Vec<&Category> {
-        self.categories
-            .iter()
-            .filter(|c| c.clan_id == clan_id)
-            .collect()
-    }
-
-    pub fn select_channel(&mut self, id: &str) {
-        self.active_channel_id = Some(id.to_string());
-        self.mark_read(id);
-    }
-
-    pub fn mark_read(&mut self, id: &str) {
-        if let Some(ch) = self
-            .categories
-            .iter_mut()
-            .flat_map(|c| &mut c.channels)
-            .find(|ch| ch.id == id)
-        {
-            ch.unread = false;
-        }
-    }
-
-    pub fn find_channel(&self, channel_id: &str) -> Option<&Channel> {
-        self.categories
-            .iter()
-            .flat_map(|category| &category.channels)
-            .find(|channel| channel.id == channel_id)
-    }
-}
+pub use clan::*;
+pub use channel::*;
 
 /// Persistent application settings — written to ~/.config/mezon/settings.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
