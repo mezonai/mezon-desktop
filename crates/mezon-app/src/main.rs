@@ -174,10 +174,10 @@ fn spawn_transport_task(
             };
 
             let Some(session) = session else {
-                if connected_token.take().is_some() {
-                    if let Err(e) = transport.close().await {
-                        tracing::warn!("Failed to close TCP transport after logout: {e}");
-                    }
+                if connected_token.take().is_some()
+                    && let Err(e) = transport.close().await
+                {
+                    tracing::warn!("Failed to close TCP transport after logout: {e}");
                 }
                 continue;
             };
@@ -198,10 +198,10 @@ fn spawn_transport_task(
             // };
             let port = 7349;
 
-            if transport.is_open().await {
-                if let Err(e) = transport.close().await {
-                    tracing::warn!("Failed to close stale TCP transport: {e}");
-                }
+            if transport.is_open().await
+                && let Err(e) = transport.close().await
+            {
+                tracing::warn!("Failed to close stale TCP transport: {e}");
             }
 
             tracing::info!("Connecting shared TCP transport to {host}:{port}");
