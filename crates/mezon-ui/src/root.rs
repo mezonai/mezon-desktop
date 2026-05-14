@@ -129,10 +129,7 @@ fn render_awaiting_callback(theme: &Theme) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn render_not_found(
-    theme: &Theme,
-    navigate: &crate::components::NavigateFn,
-) -> gpui::AnyElement {
+fn render_not_found(theme: &Theme, navigate: &crate::components::NavigateFn) -> gpui::AnyElement {
     let navigate = navigate.clone();
     let mut back_btn = Button::new("back-to-chat").label("Back to Chat");
     back_btn
