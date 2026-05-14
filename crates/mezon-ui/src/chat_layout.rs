@@ -43,8 +43,7 @@ impl ChatLayout {
             ChannelSidebar::new(clan_list.clone(), channel_list.clone(), on_navigate, cx)
         });
 
-        let user_info_bar =
-            UserInfoBar::new(auth_state.clone(), on_settings);
+        let user_info_bar = UserInfoBar::new(auth_state.clone(), on_settings);
 
         cx.observe(&auth_state, |_, _, cx| cx.notify());
         cx.observe(&channel_list, |_, _, cx| cx.notify());
@@ -70,8 +69,7 @@ impl ChatLayout {
                 Ok(clans) => {
                     tracing::info!("✅ Investigation: Fetched {} clans", clans.len());
                     if !clans.is_empty() {
-                        let store_clans: Vec<Clan> =
-                            clans.into_iter().map(Clan::from).collect();
+                        let store_clans: Vec<Clan> = clans.into_iter().map(Clan::from).collect();
 
                         let _ = clan_list_clone.update(cx, |model, cx| {
                             model.update_clans(store_clans);

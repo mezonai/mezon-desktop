@@ -8,6 +8,20 @@ use crate::components::primitives::{Avatar, Icon, IconName, Size};
 use crate::theme::Theme;
 use mezon_store::AuthState;
 
+fn compute_initials(name: &str) -> String {
+    let initials: String = name
+        .split_whitespace()
+        .take(2)
+        .filter_map(|s| s.chars().next())
+        .collect::<String>()
+        .to_uppercase();
+    if initials.is_empty() {
+        "?".to_string()
+    } else {
+        initials
+    }
+}
+
 pub struct UserInfoBar {
     auth_state: Entity<AuthState>,
     presence: String,
@@ -32,8 +46,11 @@ impl UserInfoBar {
     }
 
     pub fn render(&self, theme: &Theme, cx: &App) -> impl IntoElement {
-        let username = self.auth_state.read(cx).username().unwrap_or("Unknown");
-        let initials = mezon_store::compute_initials(username);
+        let username = match self.auth_state.read(cx) {
+            mezon_store::AuthState::Authenticated(session) => &session.username,
+            _ => "Unknown",
+        };
+        let initials = compute_initials(username);
 
         let presence_color = match self.presence.as_str() {
             "Online" => theme.status_online,

@@ -16,6 +16,7 @@ fn on_channel_click(
     move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
         channel_list.update(cx, |m, cx| {
             m.select_channel(&channel_id);
+            m.mark_read(&channel_id);
             cx.notify();
         });
         if let Some(ref cb) = on_navigate {
@@ -31,6 +32,7 @@ pub struct ChannelSidebar {
     clan_list: Entity<ClanList>,
     channel_list: Entity<ChannelList>,
     on_navigate: Option<Arc<dyn Fn(&str, &mut App) + Send + Sync>>,
+    collapsed: std::collections::HashSet<String>,
 }
 
 impl ChannelSidebar {
@@ -46,6 +48,7 @@ impl ChannelSidebar {
             clan_list,
             channel_list,
             on_navigate,
+            collapsed: std::collections::HashSet::new(),
         }
     }
 }
@@ -56,7 +59,11 @@ impl Render for ChannelSidebar {
         let clans = self.clan_list.read(cx);
         let channels = self.channel_list.read(cx);
 
-        let active_clan_name = clans.active_clan_name().to_string();
+        let active_clan_name = clans
+            .active_clan()
+            .map(|c| c.name.as_str())
+            .unwrap_or("Select a clan")
+            .to_string();
 
         let categories: Vec<_> = clans
             .active_clan_id
@@ -64,7 +71,13 @@ impl Render for ChannelSidebar {
             .map(|id| channels.categories_for_clan(id))
             .unwrap_or_default()
             .into_iter()
-            .map(|c| (c.name.clone(), c.collapsed, c.channels.clone()))
+            .map(|c| {
+                (
+                    c.name.clone(),
+                    self.collapsed.contains(&c.name),
+                    c.channels.clone(),
+                )
+            })
             .collect();
 
         let active_channel_id = channels.active_channel_id.clone();
@@ -72,6 +85,7 @@ impl Render for ChannelSidebar {
         let theme_clone = theme.clone();
         let on_navigate = self.on_navigate.clone();
         let active_clan_id_for_nav = clans.active_clan_id.clone();
+        let sidebar_entity = cx.entity().clone();
 
         div()
             .flex()
@@ -102,7 +116,6 @@ impl Render for ChannelSidebar {
                     .flex_1()
                     .children(categories.into_iter().map(
                         move |(cat_name, is_collapsed, cat_channels)| {
-                            let channel_handle = channel_list_handle.clone();
                             let cat_name2 = cat_name.clone();
                             let nav = on_navigate.clone();
                             let clan_id_for_nav = active_clan_id_for_nav.clone();
@@ -130,10 +143,15 @@ impl Render for ChannelSidebar {
                                 )
                                 .child(div().ml_1().child(cat_name.clone()));
 
+                            let sidebar_for_cat = sidebar_entity.clone();
                             header.interactivity().on_click(
                                 move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                                    channel_handle.update(cx, |m, cx| {
-                                        m.toggle_category(&cat_name2);
+                                    sidebar_for_cat.update(cx, |this, cx| {
+                                        if this.collapsed.contains(&cat_name2) {
+                                            this.collapsed.remove(&cat_name2);
+                                        } else {
+                                            this.collapsed.insert(cat_name2.clone());
+                                        }
                                         cx.notify();
                                     });
                                 },
@@ -169,14 +187,12 @@ impl Render for ChannelSidebar {
                                                     .render(&theme_clone),
                                                 );
 
-                                            row.interactivity().on_click(
-                                                on_channel_click(
-                                                    row_handle,
-                                                    ch_id,
-                                                    nav_inner,
-                                                    clan_id_inner,
-                                                ),
-                                            );
+                                            row.interactivity().on_click(on_channel_click(
+                                                row_handle,
+                                                ch_id,
+                                                nav_inner,
+                                                clan_id_inner,
+                                            ));
 
                                             row
                                         })

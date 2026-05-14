@@ -6,6 +6,20 @@ use gpui_component::Sizable;
 use crate::components::primitives::{Avatar, Badge, Icon, IconName, Size};
 use crate::theme::Theme;
 
+fn compute_initials(name: &str) -> String {
+    let initials: String = name
+        .split_whitespace()
+        .take(2)
+        .filter_map(|s| s.chars().next())
+        .collect::<String>()
+        .to_uppercase();
+    if initials.is_empty() {
+        "?".to_string()
+    } else {
+        initials
+    }
+}
+
 pub struct ClanSidebar {
     clan_list: Entity<ClanList>,
 }
@@ -76,17 +90,14 @@ impl Render for ClanSidebar {
                         },
                     );
 
+                    let clan_initials = compute_initials(&clan.name);
                     let clan_div = clan_div.child(
                         div()
                             .flex()
                             .items_center()
                             .justify_center()
                             .relative()
-                            .child(
-                                Avatar::new()
-                                    .name(clan.initials.clone())
-                                    .with_size(Size::Small),
-                            )
+                            .child(Avatar::new().name(clan_initials).with_size(Size::Small))
                             .when(unread > 0, |el| {
                                 el.child(
                                     div()

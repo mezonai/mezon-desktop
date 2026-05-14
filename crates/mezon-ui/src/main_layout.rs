@@ -67,21 +67,21 @@ impl Render for MainLayout {
                                     .read(cx)
                                     .active_channel()
                                     .cloned()
-                                .map_or_else(
-                                    || div().child("Select a channel").into_any_element(),
-                                    |channel| {
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .font_weight(FontWeight::BOLD)
-                                                    .child(channel.name),
-                                            )
-                                            .into_any_element()
-                                    },
-                                ),
+                                    .map_or_else(
+                                        || div().child("Select a channel").into_any_element(),
+                                        |channel| {
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .font_weight(FontWeight::BOLD)
+                                                        .child(channel.name),
+                                                )
+                                                .into_any_element()
+                                        },
+                                    ),
                             ),
                     )
                     .child(
