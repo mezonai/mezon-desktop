@@ -8,6 +8,7 @@ use crate::base_view::BaseView;
 use crate::login_view::LoginView;
 use crate::theme::Theme;
 use crate::title_bar::TitleBar;
+use crate::view_lifecycle::ViewLifecycleContext as _;
 
 /// RootView is the top-level GPUI view inside `gpui_component::Root`.
 ///
@@ -29,11 +30,11 @@ impl RootView {
         _api: Arc<AppApi>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let login_view = cx.new({
+        let login_view = cx.new_lifecycle_view({
             let auth_state = auth_state.clone();
             move |cx| LoginView::new(client, auth_state, cx)
         });
-        let base_view = cx.new(BaseView::new);
+        let base_view = cx.new_lifecycle_view(BaseView::new);
 
         Self {
             title_bar,

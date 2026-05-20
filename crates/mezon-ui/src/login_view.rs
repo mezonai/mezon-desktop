@@ -19,10 +19,12 @@ use mezon_store::{AuthState, LoginMethod};
 
 use crate::components::compositions::FormField;
 use crate::theme::Theme;
+use crate::view_lifecycle::{LifecycleSubscriptions, ViewLifecycle};
 
 // ─── LoginView state ──────────────────────────────────────────────────────────
 
 pub struct LoginView {
+    lifecycle: LifecycleSubscriptions,
     /// Injected API client.
     client: Arc<MezonClient>,
     /// Handle to the global auth state so we can transition it on success.
@@ -60,6 +62,7 @@ impl LoginView {
         _cx: &mut Context<Self>,
     ) -> Self {
         Self {
+            lifecycle: LifecycleSubscriptions::new(),
             client,
             auth_state,
             method: LoginMethod::Otp,
@@ -307,6 +310,12 @@ impl LoginView {
             }
         })
         .detach();
+    }
+}
+
+impl ViewLifecycle for LoginView {
+    fn lifecycle_subscriptions(&mut self) -> &mut LifecycleSubscriptions {
+        &mut self.lifecycle
     }
 }
 

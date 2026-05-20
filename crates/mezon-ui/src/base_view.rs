@@ -12,16 +12,21 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::router::{Route, Router};
+use crate::{
+    router::{Route, Router},
+    view_lifecycle::{LifecycleSubscriptions, ViewLifecycle},
+};
 
 pub struct BaseView {
     router: Router,
+    lifecycle: LifecycleSubscriptions,
 }
 
 impl BaseView {
     pub fn new(_cx: &mut Context<Self>) -> Self {
         Self {
             router: Router::new(),
+            lifecycle: LifecycleSubscriptions::new(),
         }
     }
 
@@ -274,6 +279,12 @@ impl BaseView {
             )
             .when_some(action, |this, action| this.child(action))
             .into_any_element()
+    }
+}
+
+impl ViewLifecycle for BaseView {
+    fn lifecycle_subscriptions(&mut self) -> &mut LifecycleSubscriptions {
+        &mut self.lifecycle
     }
 }
 
