@@ -19,6 +19,15 @@ pub struct Channel {
 }
 
 #[derive(Debug, Clone)]
+pub struct Message {
+    pub id: String,
+    pub content: String,
+    pub sender_id: String,
+    pub sender_name: String,
+    pub create_time: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct Category {
     pub clan_id: String,
     pub name: String,
