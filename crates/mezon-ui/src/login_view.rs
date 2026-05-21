@@ -17,7 +17,7 @@ use gpui_component::{
 use mezon_client::{MezonClient, Session, keychain};
 use mezon_store::{AuthState, LoginMethod};
 
-use crate::components::compositions::FormField;
+use crate::components::compositions::{FormField, OtpInput};
 use crate::theme::Theme;
 
 // ─── LoginView state ──────────────────────────────────────────────────────────
@@ -42,8 +42,8 @@ pub struct LoginView {
     email_field: Option<Entity<FormField>>,
     /// Password field (password mode only).
     password_field: Option<Entity<FormField>>,
-    /// Individual OTP digit inputs (6 boxes).
-    otp_fields: Vec<Entity<FormField>>,
+    /// OTP digit input with auto-advance.
+    otp_input: Option<Entity<OtpInput>>,
 
     /// `true` while an async API call is in-flight.
     loading: bool,
@@ -68,7 +68,7 @@ impl LoginView {
             otp_email: String::new(),
             email_field: None,
             password_field: None,
-            otp_fields: Vec::new(),
+            otp_input: None,
             loading: false,
             error: None,
             countdown: 0,
@@ -88,11 +88,13 @@ impl LoginView {
             }));
         }
 
-        if self.otp_fields.is_empty() {
-            for i in 0..6 {
-                self.otp_fields
-                    .push(cx.new(|cx| FormField::new(window, cx, format!("{}", i))));
-            }
+        if self.otp_input.is_none() {
+            let entity = cx.entity().clone();
+            self.otp_input = Some(cx.new(|cx| {
+                OtpInput::new(window, cx, 6).on_complete(Arc::new(move |code, _window, cx| {
+                    Self::handle_confirm_otp(&entity, code, cx);
+                }))
+            }));
         }
     }
 
@@ -160,20 +162,8 @@ impl LoginView {
     }
 
     /// Called when the user has filled all 6 OTP digits.
-    fn handle_confirm_otp(entity: &Entity<LoginView>, cx: &mut App) {
-        let (req_id, otp_code) = {
-            let this = entity.read(cx);
-            let code: String = this
-                .otp_fields
-                .iter()
-                .map(|f| f.read(cx).value(cx))
-                .collect();
-            (this.otp_req_id.clone(), code)
-        };
-
-        if otp_code.len() != 6 {
-            return;
-        }
+    fn handle_confirm_otp(entity: &Entity<LoginView>, otp_code: String, cx: &mut App) {
+        let req_id = entity.read(cx).otp_req_id.clone();
 
         entity.update(cx, |this, cx| {
             this.loading = true;
@@ -196,12 +186,6 @@ impl LoginView {
                         }
                         Err(e) => {
                             this.error = Some(format!("{e}"));
-                            // Clear OTP fields on failure.
-                            for field in &this.otp_fields {
-                                field.update(cx, |f, cx| {
-                                    f.set_error(Some(String::new()), cx);
-                                });
-                            }
                         }
                     }
                     cx.notify();
@@ -403,30 +387,18 @@ impl Render for LoginView {
                                 )),
                         );
 
-                    // 6 OTP digit boxes in a row.
-                    let mut otp_row = div().flex().flex_row().gap_2().justify_center();
-                    for field in &self.otp_fields {
-                        otp_row = otp_row.child(div().w(gpui::px(44.0)).child(field.clone()));
-                    }
-                    card = card.child(otp_row);
+                    // OTP digit boxes with auto-advance.
+                    card = card.child(self.otp_input.as_ref().expect("otp_input").clone());
 
-                    // Confirm button / auto-submit hint.
-                    let loading = self.loading;
-                    let entity = cx.entity().clone();
-                    card = card.child(
-                        div().w_full().child(
-                            Button::new("verify-otp")
-                                .label("Verify Code")
-                                .primary()
-                                .w_full()
-                                .loading(loading)
-                                .disabled(loading)
-                                .on_click(move |_, _window, cx| {
-                                    Self::handle_confirm_otp(&entity, cx);
-                                })
-                                .into_any_element(),
-                        ),
-                    );
+                    // Loading spinner (shown while verifying code).
+                    if self.loading {
+                        card = card.child(
+                            div()
+                                .flex()
+                                .justify_center()
+                                .child(gpui_component::spinner::Spinner::new()),
+                        );
+                    }
 
                     // Resend / countdown row.
                     let countdown = self.countdown;

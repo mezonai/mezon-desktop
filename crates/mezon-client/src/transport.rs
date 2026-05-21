@@ -225,6 +225,10 @@ pub struct ApiAccount {
     pub username: String,
     pub email: Option<String>,
     pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub about_me: Option<String>,
+    pub phone_number: Option<String>,
+    pub password_setted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -284,12 +288,20 @@ impl MezonTransport {
             .await
     }
 
-    fn account_from_user(user: api::User, email: Option<String>) -> ApiAccount {
+    fn account_from_user(
+        user: api::User,
+        email: Option<String>,
+        password_setted: bool,
+    ) -> ApiAccount {
         ApiAccount {
             user_id: user.id.to_string(),
             username: user.username,
             email,
             display_name: (!user.display_name.is_empty()).then_some(user.display_name),
+            avatar_url: (!user.avatar_url.is_empty()).then_some(user.avatar_url),
+            about_me: (!user.about_me.is_empty()).then_some(user.about_me),
+            phone_number: (!user.phone_number.is_empty()).then_some(user.phone_number),
+            password_setted,
         }
     }
 
@@ -589,6 +601,7 @@ impl MezonTransport {
                 let account = Self::account_from_user(
                     user,
                     (!account.email.is_empty()).then_some(account.email),
+                    account.password_setted,
                 );
                 tracing::info!("✓ Decoded account response: {} bytes", response.len());
                 Ok(account)
@@ -774,7 +787,7 @@ impl MezonTransport {
         Ok(friends
             .friends
             .into_iter()
-            .map(|friend| Self::account_from_user(friend.user.unwrap_or_default(), None))
+            .map(|friend| Self::account_from_user(friend.user.unwrap_or_default(), None, false))
             .collect())
     }
 
@@ -1304,7 +1317,8 @@ impl MezonTransport {
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(api::LogedDeviceList::decode(response.as_slice())?)
+        let devices = api::LogedDeviceList::decode(response.as_slice())?;
+        Ok(devices)
     }
 
     /// List channel users (UC variant).
@@ -4302,11 +4316,18 @@ impl MezonTransport {
     }
 
     /// Update user account.
-    pub async fn update_account(&self, _username: Option<&str>) -> Result<()> {
+    pub async fn update_account(
+        &self,
+        display_name: Option<&str>,
+        avatar_url: Option<&str>,
+        about_me: Option<&str>,
+    ) -> Result<()> {
         let cid = self.generate_cid();
 
         let body = api::UpdateAccountRequest {
-            display_name: _username.map(str::to_string),
+            display_name: display_name.map(str::to_string),
+            avatar_url: avatar_url.map(str::to_string),
+            about_me: about_me.map(str::to_string),
             ..Default::default()
         }
         .encode_to_vec();

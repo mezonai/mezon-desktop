@@ -8,9 +8,10 @@ pub mod login_view;
 pub mod main_layout;
 pub mod root;
 pub mod router;
-pub mod settings_screen;
+pub mod settings;
 pub mod theme;
 pub mod title_bar;
+pub mod util;
 
 pub use account_test_view::AccountTestView;
 pub use base_view::BaseView;
@@ -20,7 +21,7 @@ pub use clan_sidebar::ClanSidebar;
 pub use login_view::LoginView;
 pub use root::RootView;
 pub use router::{Route, Router};
-pub use settings_screen::SettingsScreen;
+pub use settings::SettingsScreen;
 pub use theme::Theme;
 
 pub fn init(cx: &mut gpui::App) {

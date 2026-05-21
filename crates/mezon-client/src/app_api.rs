@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -46,5 +47,74 @@ impl AppApi {
 
     pub async fn ping_roundtrip(&self) -> Result<()> {
         self.transport.ping_roundtrip().await
+    }
+
+    pub async fn update_user(&self, display_name: &str, avatar_url: &str) -> Result<()> {
+        self.transport.update_user(display_name, avatar_url).await
+    }
+
+    pub async fn update_account(
+        &self,
+        display_name: Option<&str>,
+        avatar_url: Option<&str>,
+        about_me: Option<&str>,
+    ) -> Result<()> {
+        self.transport
+            .update_account(display_name, avatar_url, about_me)
+            .await
+    }
+
+    pub async fn upload_attachment_file(
+        &self,
+        filename: &str,
+        filetype: &str,
+        size: i32,
+    ) -> Result<mezon_proto::api::UploadAttachment> {
+        self.transport
+            .upload_attachment_file(filename, filetype, size)
+            .await
+    }
+
+    /// Full avatar upload flow: get pre-signed URL, PUT file bytes, return permanent URL.
+    pub async fn upload_avatar(&self, path: &Path) -> Result<String> {
+        let data = std::fs::read(path)?;
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("avatar")
+            .to_string();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("png")
+            .to_string();
+        let filetype = format!("image/{}", ext);
+        let size = data.len() as i32;
+
+        let upload = self
+            .transport
+            .upload_attachment_file(&filename, &filetype, size)
+            .await?;
+
+        crate::transport_runtime::put_bytes_to_url(&upload.url, data).await?;
+
+        let permanent_url = upload
+            .url
+            .split('?')
+            .next()
+            .unwrap_or(&upload.url)
+            .to_string();
+
+        tracing::info!("Avatar upload complete: url={}", permanent_url);
+
+        Ok(permanent_url)
+    }
+
+    pub async fn list_loged_device(&self) -> Result<Vec<mezon_proto::api::LogedDevice>> {
+        self.transport.list_loged_device().await
+    }
+
+    pub async fn session_logout(&self, token: &str, refresh_token: &str) -> Result<()> {
+        self.transport.session_logout(token, refresh_token).await
     }
 }

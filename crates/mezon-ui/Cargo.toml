@@ -8,6 +8,7 @@ gpui.workspace = true
 gpui-component.workspace = true
 mezon-store.workspace = true
 mezon-client.workspace = true
+mezon-proto.workspace = true
 mezon-native.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

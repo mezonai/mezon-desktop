@@ -80,6 +80,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     }));
 
     application()
+        .with_http_client(Arc::new(reqwest_client::ReqwestClient::new()))
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
             tracing::debug!("App started");

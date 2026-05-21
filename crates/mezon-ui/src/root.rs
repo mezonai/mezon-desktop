@@ -8,7 +8,7 @@ use crate::chat_layout::ChatLayout;
 use crate::components::primitives::{Button, Icon, IconName};
 use crate::login_view::LoginView;
 use crate::router::{Route, Router};
-use crate::settings_screen::SettingsScreen;
+use crate::settings::SettingsScreen;
 use crate::theme::Theme;
 use crate::title_bar::TitleBar;
 
@@ -18,7 +18,7 @@ pub struct RootView {
     login_view: Entity<LoginView>,
     router: Router,
     chat_layout: Entity<ChatLayout>,
-    settings_screen: SettingsScreen,
+    settings_screen: Entity<SettingsScreen>,
     navigate: crate::components::NavigateFn,
 }
 
@@ -59,7 +59,8 @@ impl RootView {
             )
         });
 
-        let settings_screen = SettingsScreen::new(navigate.clone());
+        let settings_screen =
+            cx.new(|cx| SettingsScreen::new(auth_state.clone(), api.clone(), navigate.clone(), cx));
 
         Self {
             title_bar,
@@ -86,7 +87,17 @@ impl Render for RootView {
             AuthState::Authenticated(_) => {
                 let route = self.router.route();
                 match route {
-                    Route::Settings => self.settings_screen.render(&theme).into_any_element(),
+                    Route::SettingsAccount | Route::SettingsProfile | Route::SettingsDevices => {
+                        let page = match route {
+                            Route::SettingsProfile => crate::settings::SettingsPage::Profile,
+                            Route::SettingsDevices => crate::settings::SettingsPage::Device,
+                            _ => crate::settings::SettingsPage::Account,
+                        };
+                        self.settings_screen.update(cx, |s, _| {
+                            s.set_page(page);
+                        });
+                        self.settings_screen.clone().into_any_element()
+                    }
                     Route::NotFound { .. } => render_not_found(&theme, &self.navigate),
                     _ => self.chat_layout.clone().into_any_element(),
                 }

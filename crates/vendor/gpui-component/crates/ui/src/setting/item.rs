@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, App, Axis, Div, InteractiveElement as _, IntoElement, ParentElement, SharedString,
-    Stateful, Styled, Window, div, prelude::FluentBuilder as _,
+    AnyElement, App, Axis, Div, InteractiveElement as _, IntoElement, ParentElement, RenderOnce,
+    SharedString, Stateful, Styled, Window, div, prelude::FluentBuilder as _,
 };
 use std::{any::TypeId, ops::Deref, rc::Rc};
 
@@ -206,5 +206,30 @@ impl SettingItem {
                     (render)(&options, window, cx).into_any_element()
                 }
             })
+    }
+}
+
+impl RenderOnce for SettingItem {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let options = RenderOptions {
+            page_ix: 0,
+            group_ix: 0,
+            item_ix: 0,
+            size: crate::Size::default(),
+            group_variant: crate::group_box::GroupBoxVariant::default(),
+            layout: match &self {
+                SettingItem::Item { layout, .. } => *layout,
+                SettingItem::Element { .. } => Axis::Horizontal,
+            },
+        };
+        self.render_item(&options, window, cx)
+    }
+}
+
+impl IntoElement for SettingItem {
+    type Element = gpui::Component<Self>;
+
+    fn into_element(self) -> gpui::Component<Self> {
+        gpui::Component::new(self)
     }
 }

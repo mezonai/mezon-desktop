@@ -10,7 +10,9 @@ pub enum Route {
         clan_id: String,
         channel_id: String,
     },
-    Settings,
+    SettingsAccount,
+    SettingsProfile,
+    SettingsDevices,
     NotFound {
         path: String,
     },
@@ -68,7 +70,9 @@ pub fn match_path(path: &str) -> Route {
             clan_id: (*clan_id).to_string(),
             channel_id: (*channel_id).to_string(),
         },
-        ["settings"] => Route::Settings,
+        ["settings"] | ["settings", "account"] => Route::SettingsAccount,
+        ["settings", "profile"] => Route::SettingsProfile,
+        ["settings", "devices"] => Route::SettingsDevices,
         _ => Route::NotFound { path: normalized },
     }
 }

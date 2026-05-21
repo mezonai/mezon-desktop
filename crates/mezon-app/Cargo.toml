@@ -18,6 +18,7 @@ mezon-store.workspace = true
 mezon-native.workspace = true
 mezon-updater.workspace = true
 mezon-client.workspace = true
+reqwest_client.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

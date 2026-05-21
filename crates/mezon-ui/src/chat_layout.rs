@@ -203,7 +203,10 @@ impl ChatLayout {
                 &format!("#{channel_id}"),
                 &current_path,
             ),
-            Route::Settings | Route::NotFound { .. } => {
+            Route::SettingsAccount
+            | Route::SettingsProfile
+            | Route::SettingsDevices
+            | Route::NotFound { .. } => {
                 // Handled by RootView, not rendered here
                 div().into_any_element()
             }
