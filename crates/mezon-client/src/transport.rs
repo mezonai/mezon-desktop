@@ -4325,20 +4325,29 @@ impl MezonTransport {
         let cid = self.generate_cid();
 
         let body = api::UpdateAccountRequest {
-            display_name: display_name.map(str::to_string),
-            avatar_url: avatar_url.map(str::to_string),
-            about_me: about_me.map(str::to_string),
+            display_name: display_name
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            avatar_url: avatar_url
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            about_me: about_me
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             ..Default::default()
         }
         .encode_to_vec();
 
-        let (code, _response) = self.send_api_request(cid, "UpdateAccount", body).await?;
+        let (code, response) = self
+            .send_api_request(cid, "UpdateAccount", body)
+            .await?;
 
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+        if code == 0 {
+            Ok(())
+        } else {
+            let msg = String::from_utf8_lossy(&response);
+            Err(anyhow::anyhow!("API error: code={}, response={}", code, msg))
         }
-
-        Ok(())
     }
 
     /// Delete user account.

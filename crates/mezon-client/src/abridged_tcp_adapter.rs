@@ -197,8 +197,16 @@ impl AbridgedTcpAdapter {
         );
 
         if let Ok(envelope) = mezon_proto::realtime::Envelope::decode(payload) {
-            tracing::info!("📨 Envelope decoded: cid={}", envelope.cid);
-            handlers.trigger_message(envelope.cid as u16, 0, payload.to_vec());
+            let code = envelope.message.as_ref().map_or(0, |msg| match msg {
+                mezon_proto::realtime::envelope::Message::Error(err) => err.code as u32,
+                _ => 0,
+            });
+            tracing::info!(
+                "📨 Envelope decoded: cid={} code={}",
+                envelope.cid,
+                code
+            );
+            handlers.trigger_message(envelope.cid as u16, code, payload.to_vec());
         } else {
             let cid = decode_cid_field(payload).unwrap_or(0);
             tracing::warn!("📨 Failed to decode Envelope, passing raw cid={cid}");
