@@ -27,6 +27,10 @@ pub struct Settings {
     pub theme: String,
     /// Enable desktop notifications
     pub notifications_enabled: bool,
+    /// Hide message content in push notifications
+    pub notifications_hide_content: bool,
+    /// Enable activity tracking (show online status to others)
+    pub activity_tracking: bool,
 }
 
 impl Default for Settings {
@@ -38,6 +42,8 @@ impl Default for Settings {
             window_bounds: None,
             theme: "dark".to_string(),
             notifications_enabled: true,
+            notifications_hide_content: false,
+            activity_tracking: true,
         }
     }
 }

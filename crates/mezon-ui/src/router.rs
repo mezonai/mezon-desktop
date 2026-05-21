@@ -13,6 +13,11 @@ pub enum Route {
     SettingsAccount,
     SettingsProfile,
     SettingsDevices,
+    SettingsAppearance,
+    SettingsActivity,
+    SettingsNotifications,
+    SettingsLanguage,
+    SettingsVoice,
     NotFound {
         path: String,
     },
@@ -73,6 +78,11 @@ pub fn match_path(path: &str) -> Route {
         ["settings"] | ["settings", "account"] => Route::SettingsAccount,
         ["settings", "profile"] => Route::SettingsProfile,
         ["settings", "devices"] => Route::SettingsDevices,
+        ["settings", "appearance"] => Route::SettingsAppearance,
+        ["settings", "activity"] => Route::SettingsActivity,
+        ["settings", "notifications"] => Route::SettingsNotifications,
+        ["settings", "language"] => Route::SettingsLanguage,
+        ["settings", "voice"] => Route::SettingsVoice,
         _ => Route::NotFound { path: normalized },
     }
 }

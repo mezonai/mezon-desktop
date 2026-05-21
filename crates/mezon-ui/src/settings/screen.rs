@@ -10,11 +10,16 @@ use gpui_component::{
     v_flex,
 };
 use mezon_client::AppApi;
-use mezon_store::AuthState;
+use mezon_store::{AuthState, Settings};
 
 use super::account_page::AccountPage;
+use super::activity_page::ActivityPage;
+use super::appearance_page::AppearancePage;
 use super::device_page::DevicePage;
+use super::language_page::LanguagePage;
+use super::notifications_page::NotificationsPage;
 use super::profile_page::ProfilePage;
+use super::voice_page::VoicePage;
 use crate::components::NavigateFn;
 use crate::theme::Theme;
 
@@ -23,16 +28,27 @@ pub enum SettingsPage {
     Account,
     Profile,
     Device,
+    Appearance,
+    Activity,
+    Notifications,
+    Language,
+    Voice,
 }
 
 pub struct SettingsScreen {
     navigate: NavigateFn,
     auth_state: Entity<AuthState>,
     api: Arc<AppApi>,
+    settings: Entity<Settings>,
     current_page: SettingsPage,
     account_page: Option<Entity<AccountPage>>,
     profile_page: Option<Entity<ProfilePage>>,
     device_page: Option<Entity<DevicePage>>,
+    appearance_page: Option<Entity<AppearancePage>>,
+    activity_page: Option<Entity<ActivityPage>>,
+    notifications_page: Option<Entity<NotificationsPage>>,
+    language_page: Option<Entity<LanguagePage>>,
+    voice_page: Option<Entity<VoicePage>>,
     prev_page: SettingsPage,
 }
 
@@ -47,10 +63,16 @@ impl SettingsScreen {
             navigate,
             auth_state,
             api,
+            settings: _cx.new(|_| Settings::load_sync()),
             current_page: SettingsPage::Account,
             account_page: None,
             profile_page: None,
             device_page: None,
+            appearance_page: None,
+            activity_page: None,
+            notifications_page: None,
+            language_page: None,
+            voice_page: None,
             prev_page: SettingsPage::Account,
         }
     }
@@ -68,7 +90,7 @@ impl Render for SettingsScreen {
         let auth_state = self.auth_state.clone();
         let page = self.current_page;
 
-        // Lazy init sub-page entities and refresh device on revisit
+        // Lazy init sub-page entities, refresh device on revisit
         match page {
             SettingsPage::Account => {
                 self.account_page
@@ -86,18 +108,83 @@ impl Render for SettingsScreen {
                     device_entity.update(cx, |d, view_cx| d.refresh(view_cx));
                 }
             }
+            SettingsPage::Appearance => {
+                self.appearance_page
+                    .get_or_insert_with(|| cx.new(|_| AppearancePage));
+            }
+            SettingsPage::Activity => {
+                self.activity_page.get_or_insert_with(|| {
+                    let settings = self.settings.clone();
+                    cx.new(|cx| ActivityPage::new(settings, cx))
+                });
+            }
+            SettingsPage::Notifications => {
+                self.notifications_page.get_or_insert_with(|| {
+                    let settings = self.settings.clone();
+                    cx.new(|cx| NotificationsPage::new(settings, cx))
+                });
+            }
+            SettingsPage::Language => {
+                self.language_page
+                    .get_or_insert_with(|| cx.new(|_| LanguagePage));
+            }
+            SettingsPage::Voice => {
+                self.voice_page
+                    .get_or_insert_with(|| cx.new(|_| VoicePage));
+            }
         }
         self.prev_page = page;
 
         let is_account = page == SettingsPage::Account;
         let is_profile = page == SettingsPage::Profile;
         let is_device = page == SettingsPage::Device;
+        let is_appearance = page == SettingsPage::Appearance;
+        let is_activity = page == SettingsPage::Activity;
+        let is_notifications = page == SettingsPage::Notifications;
+        let is_language = page == SettingsPage::Language;
+        let is_voice = page == SettingsPage::Voice;
 
         let content: gpui::AnyElement = match page {
             SettingsPage::Account => self.account_page.clone().unwrap().into_any_element(),
             SettingsPage::Profile => self.profile_page.clone().unwrap().into_any_element(),
             SettingsPage::Device => self.device_page.clone().unwrap().into_any_element(),
+            SettingsPage::Appearance => self.appearance_page.clone().unwrap().into_any_element(),
+            SettingsPage::Activity => self.activity_page.clone().unwrap().into_any_element(),
+            SettingsPage::Notifications => self.notifications_page.clone().unwrap().into_any_element(),
+            SettingsPage::Language => self.language_page.clone().unwrap().into_any_element(),
+            SettingsPage::Voice => self.voice_page.clone().unwrap().into_any_element(),
         };
+
+        fn nav_item(
+            id: &str,
+            label: &str,
+            is_active: bool,
+            theme: &Theme,
+            navigate: NavigateFn,
+            path: &str,
+        ) -> impl IntoElement {
+            let id = id.to_string();
+            let nav = navigate.clone();
+            let path = path.to_string();
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .w_full()
+                .px_2()
+                .py_1()
+                .cursor_pointer()
+                .when(is_active, |el| {
+                    el.bg(theme.bg_primary).text_color(theme.text_primary)
+                })
+                .when(!is_active, |el| {
+                    el.text_color(theme.text_primary)
+                })
+                .child(label.to_string())
+                .on_click(move |_, _, cx| {
+                    nav(&path, cx);
+                })
+        }
 
         h_flex()
             .flex_1()
@@ -123,127 +210,88 @@ impl Render for SettingsScreen {
                     .child(
                         div()
                             .flex_1()
-                            .min_h_0()
-                            .overflow_y_scrollbar()
                             .px_2()
+                            .py_2()
                             .child(
                                 v_flex()
+                                    .gap_1()
+                                    // ACCOUNT SETTINGS section
                                     .child(
                                         div()
-                                            .text_sm()
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
                                             .text_color(theme.text_muted)
                                             .px_2()
                                             .py_1()
-                                            .child("Account Setting"),
+                                            .child("ACCOUNT SETTINGS"),
                                     )
+                                    .child(nav_item("account-page", "Account", is_account, &theme, navigate.clone(), "/settings/account"))
+                                    .child(nav_item("device-page", "Devices", is_device, &theme, navigate.clone(), "/settings/devices"))
+                                    .child(nav_item("profile-page", "Profiles", is_profile, &theme, navigate.clone(), "/settings/profile"))
+                                    // APP SETTINGS section
                                     .child(
                                         div()
-                                            .id("account-page")
-                                            .flex()
-                                            .items_center()
-                                            .w_full()
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(theme.text_muted)
                                             .px_2()
                                             .py_1()
-                                            .cursor_pointer()
-                                            .when(is_account, |el| {
-                                                el.bg(theme.bg_primary)
-                                                    .text_color(theme.text_primary)
-                                            })
-                                            .when(!is_account, |el| {
-                                                el.text_color(theme.text_primary)
-                                            })
-                                            .child("Account")
-                                            .on_click({
-                                                let nav = navigate.clone();
-                                                move |_, _, cx| {
-                                                    nav("/settings/account", cx);
-                                                }
-                                            }),
+                                            .mt_4()
+                                            .child("APP SETTINGS"),
                                     )
-                                    .child(
-                                        div()
-                                            .id("device-page")
-                                            .flex()
-                                            .items_center()
-                                            .w_full()
-                                            .px_2()
-                                            .py_1()
-                                            .cursor_pointer()
-                                            .when(is_device, |el| {
-                                                el.bg(theme.bg_primary)
-                                                    .text_color(theme.text_primary)
-                                            })
-                                            .when(!is_device, |el| {
-                                                el.text_color(theme.text_primary)
-                                            })
-                                            .child("Devices")
-                                            .on_click({
-                                                let nav = navigate.clone();
-                                                move |_, _, cx| {
-                                                    nav("/settings/devices", cx);
-                                                }
-                                            }),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("profile-page")
-                                            .flex()
-                                            .items_center()
-                                            .w_full()
-                                            .px_2()
-                                            .py_1()
-                                            .cursor_pointer()
-                                            .when(is_profile, |el| {
-                                                el.bg(theme.bg_primary)
-                                                    .text_color(theme.text_primary)
-                                            })
-                                            .when(!is_profile, |el| {
-                                                el.text_color(theme.text_primary)
-                                            })
-                                            .child("Profile")
-                                            .on_click({
-                                                let nav = navigate.clone();
-                                                move |_, _, cx| {
-                                                    nav("/settings/profile", cx);
-                                                }
-                                            }),
-                                    ),
+                                    .child(nav_item("appearance-page", "Appearance", is_appearance, &theme, navigate.clone(), "/settings/appearance"))
+                                    .child(nav_item("activity-page", "Activity", is_activity, &theme, navigate.clone(), "/settings/activity"))
+                                    .child(nav_item("notifications-page", "Notifications", is_notifications, &theme, navigate.clone(), "/settings/notifications"))
+                                    .child(nav_item("language-page", "Language", is_language, &theme, navigate.clone(), "/settings/language"))
+                                    .child(nav_item("voice-page", "Voice", is_voice, &theme, navigate.clone(), "/settings/voice")),
                             ),
                     )
-                    .child(div().flex_1())
                     .child(div().h(px(1.0)).w_full().bg(theme.border))
                     .child(
-                        div().px_3().py_2().child(
-                            GpuiButton::new("logout-btn")
-                                .label("Log Out")
-                                .text_color(theme.text_primary)
-                                .ghost()
-                                .w_full()
-                                .on_click({
-                                    let api = api.clone();
-                                    let auth_state = auth_state.clone();
-                                    move |_, _, cx| {
-                                        let auth = auth_state.read(cx);
-                                        if let AuthState::Authenticated(session) = auth {
-                                            let api = api.clone();
-                                            let token = session.token.clone();
-                                            let refresh_token = session.refresh_token.clone();
-                                            let auth_state = auth_state.clone();
-                                            cx.spawn(async move |cx| {
-                                                let _ = api
-                                                    .session_logout(&token, &refresh_token)
-                                                    .await;
-                                                cx.update(|cx| {
-                                                    auth_state.update(cx, |state, _| {
-                                                        *state = AuthState::NotAuthenticated;
-                                                    });
-                                                });
-                                            })
-                                            .detach();
-                                        }
-                                    }
-                                }),
-                        ),
+                        div()
+                            .px_3()
+                            .py_2()
+                            .child(
+                                v_flex()
+                                    .child(
+                                        GpuiButton::new("logout-btn")
+                                            .label("Log Out")
+                                            .text_color(theme.status_dnd)
+                                            .ghost()
+                                            .w_full()
+                                            .on_click({
+                                                let api = api.clone();
+                                                let auth_state = auth_state.clone();
+                                                move |_, _, cx| {
+                                                    let auth = auth_state.read(cx);
+                                                    if let AuthState::Authenticated(session) = auth {
+                                                        let api = api.clone();
+                                                        let token = session.token.clone();
+                                                        let refresh_token = session.refresh_token.clone();
+                                                        let auth_state = auth_state.clone();
+                                                        cx.spawn(async move |cx| {
+                                                            let _ = api
+                                                                .session_logout(&token, &refresh_token)
+                                                                .await;
+                                                            cx.update(|cx| {
+                                                                auth_state.update(cx, |state, _| {
+                                                                    *state = AuthState::NotAuthenticated;
+                                                                });
+                                                            });
+                                                        })
+                                                        .detach();
+                                                    }
+                                                }
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.text_muted)
+                                            .px_2()
+                                            .child(env!("CARGO_PKG_VERSION")),
+                                    ),
+                            ),
                     ),
             )
             .child(

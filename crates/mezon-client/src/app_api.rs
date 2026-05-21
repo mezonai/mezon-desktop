@@ -117,4 +117,8 @@ impl AppApi {
     pub async fn session_logout(&self, token: &str, refresh_token: &str) -> Result<()> {
         self.transport.session_logout(token, refresh_token).await
     }
+
+    pub async fn logout_device(&self, token: &str, refresh_token: &str, device_id: &str) -> Result<()> {
+        self.transport.logout_device(token, refresh_token, device_id).await
+    }
 }

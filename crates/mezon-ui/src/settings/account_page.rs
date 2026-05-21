@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{Context, FontWeight, SharedString, Task, Window, div, prelude::*};
+use gpui::{Context, FontWeight, SharedString, Task, Window, div, prelude::*, px};
 use gpui_component::{
     Sizable, Size,
     avatar::Avatar,
@@ -168,122 +168,214 @@ impl Render for AccountPage {
         }
 
         let account = self.account.as_ref().unwrap();
+        let navigate = self.navigate.clone();
 
-        let username = account.username.clone();
         let display_name = if account.display_name.is_empty() {
-            username.clone()
+            account.username.clone()
         } else {
             account.display_name.clone()
         };
-        let email = if account.email.is_empty() {
-            SharedString::from("No email")
-        } else {
-            account.email.clone()
-        };
-        let avatar_url = account.avatar_url.clone();
-        let phone = account.phone_number.clone();
-        let password_setted = account.password_setted;
 
-        let password_label = if password_setted {
+        let email_display = if account.email.is_empty() {
+            SharedString::from("Not set")
+        } else {
+            SharedString::from(mask_email(&account.email))
+        };
+
+        let email_label = if account.email.is_empty() {
+            SharedString::from("Set Email")
+        } else {
+            SharedString::from("Change Email")
+        };
+
+        let password_label = if account.password_setted {
             SharedString::from("Change Password")
         } else {
             SharedString::from("Set Password")
         };
 
-        let phone_display = phone.clone().unwrap_or(SharedString::from("Not set"));
-        let phone_label = if phone.is_some() {
+        let phone_display = account
+            .phone_number
+            .clone()
+            .unwrap_or(SharedString::from("Not set"));
+
+        let phone_label = if account.phone_number.is_some() {
             SharedString::from("Change Phone")
         } else {
             SharedString::from("Set Phone")
         };
 
+        let avatar_url = account.avatar_url.clone();
+
         v_flex()
             .gap_6()
+            // Profile Card
             .child(
-                h_flex()
-                    .gap_4()
+                v_flex()
+                    .rounded_lg()
+                    .overflow_hidden()
+                    .bg(theme.bg_primary)
                     .child(
-                        Avatar::new()
-                            .when_some(avatar_url, |av, url| av.src(url.clone()))
-                            .name(display_name.clone())
-                            .with_size(Size::Large),
+                        // Color Banner
+                        div().h(px(100.0)).w_full().bg(theme.brand),
                     )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(
-                                Label::new(display_name)
-                                    .text_xl()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(theme.text_primary),
-                            )
-                            .child(
-                                Label::new(format!("@{}", username))
-                                    .text_sm()
-                                    .text_color(theme.text_primary),
-                            )
-                            .child(Label::new(email).text_sm().text_color(theme.text_primary)),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        GpuiButton::new("edit-profile-btn")
-                            .label("Edit")
-                            .text_color(theme.text_primary)
-                            .ghost()
-                            .on_click({
-                                let nav = self.navigate.clone();
-                                move |_, _, cx| {
-                                    nav("/settings/profile", cx);
-                                }
-                            }),
-                    ),
-            )
-            .child(Divider::horizontal())
-            .child(
-                h_flex()
-                    .justify_between()
-                    .items_center()
                     .child(
                         h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(Label::new("Password").text_color(theme.text_primary))
-                            .child(Label::new("••••••••••").text_color(theme.text_muted)),
-                    )
-                    .child(
-                        GpuiButton::new("set-password-btn")
-                            .label(password_label)
-                            .text_color(theme.text_primary)
-                            .ghost()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_toast("Password management coming soon", cx);
-                            })),
+                            .px_6()
+                            .py_4()
+                            .gap_4()
+                            .child(
+                                Avatar::new()
+                                    .when_some(avatar_url.clone(), |av, url| av.src(url))
+                                    .name(display_name.clone())
+                                    .with_size(Size::Large),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(
+                                        Label::new(display_name.clone())
+                                            .text_xl()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(theme.text_primary),
+                                    )
+                                    .child(
+                                        Label::new(format!("@{}", account.username))
+                                            .text_sm()
+                                            .text_color(theme.text_muted),
+                                    ),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                GpuiButton::new("edit-profile-btn")
+                                    .label("Edit User Profile")
+                                    .text_color(theme.text_primary)
+                                    .ghost()
+                                    .on_click(move |_, _, cx| {
+                                        navigate("/settings/profile", cx);
+                                    }),
+                            ),
                     ),
             )
+            // Info Cards
             .child(
-                h_flex()
-                    .justify_between()
-                    .items_center()
+                v_flex()
+                    .rounded_lg()
+                    .overflow_hidden()
+                    .bg(theme.bg_primary)
+                    // Display Name
                     .child(
                         h_flex()
-                            .gap_2()
+                            .justify_between()
                             .items_center()
-                            .child(Label::new("Phone").text_color(theme.text_primary))
-                            .child(Label::new(phone_display).text_color(theme.text_muted)),
+                            .px_6()
+                            .py_4()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        Label::new("Display Name").text_color(theme.text_primary),
+                                    )
+                                    .child(
+                                        Label::new(display_name.clone())
+                                            .text_color(theme.text_muted),
+                                    ),
+                            ),
                     )
+                    .child(Divider::horizontal())
+                    // Username
                     .child(
-                        GpuiButton::new("set-phone-btn")
-                            .label(phone_label)
-                            .text_color(theme.text_primary)
-                            .ghost()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_toast("Phone management coming soon", cx);
-                            })),
+                        h_flex()
+                            .justify_between()
+                            .items_center()
+                            .px_6()
+                            .py_4()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(Label::new("Username").text_color(theme.text_primary))
+                                    .child(
+                                        Label::new(format!("@{}", account.username))
+                                            .text_color(theme.text_muted),
+                                    ),
+                            ),
+                    )
+                    .child(Divider::horizontal())
+                    // Email
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .items_center()
+                            .px_6()
+                            .py_4()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(Label::new("Email").text_color(theme.text_primary))
+                                    .child(Label::new(email_display).text_color(theme.text_muted)),
+                            ),
+                    )
+                    .child(Divider::horizontal())
+                    // Password
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .items_center()
+                            .px_6()
+                            .py_4()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(Label::new("Password").text_color(theme.text_primary))
+                                    .child(Label::new("••••••••••").text_color(theme.text_muted)),
+                            )
+                            .child(
+                                GpuiButton::new("password-btn")
+                                    .label(password_label)
+                                    .text_color(theme.text_primary)
+                                    .ghost()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.show_toast("Password management coming soon", cx);
+                                    })),
+                            ),
+                    )
+                    .child(Divider::horizontal())
+                    // Phone
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .items_center()
+                            .px_6()
+                            .py_4()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(Label::new("Phone").text_color(theme.text_primary))
+                                    .child(Label::new(phone_display).text_color(theme.text_muted)),
+                            )
+                            .child(
+                                GpuiButton::new("phone-btn")
+                                    .label(phone_label)
+                                    .text_color(theme.text_primary)
+                                    .ghost()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.show_toast("Phone management coming soon", cx);
+                                    })),
+                            ),
                     ),
             )
             .when_some(self.toast_message.clone(), |this, msg| {
                 this.child(div().text_sm().text_color(theme.text_muted).child(msg))
             })
             .into_any_element()
+    }
+}
+
+fn mask_email(email: &str) -> String {
+    let at = email.find('@').unwrap_or(email.len());
+    if at > 1 {
+        format!("{}***{}", &email[..1], &email[at..])
+    } else {
+        email.to_string()
     }
 }

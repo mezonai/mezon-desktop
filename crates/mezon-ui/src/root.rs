@@ -87,10 +87,22 @@ impl Render for RootView {
             AuthState::Authenticated(_) => {
                 let route = self.router.route();
                 match route {
-                    Route::SettingsAccount | Route::SettingsProfile | Route::SettingsDevices => {
+                    Route::SettingsAccount
+                    | Route::SettingsProfile
+                    | Route::SettingsDevices
+                    | Route::SettingsAppearance
+                    | Route::SettingsActivity
+                    | Route::SettingsNotifications
+                    | Route::SettingsLanguage
+                    | Route::SettingsVoice => {
                         let page = match route {
                             Route::SettingsProfile => crate::settings::SettingsPage::Profile,
                             Route::SettingsDevices => crate::settings::SettingsPage::Device,
+                            Route::SettingsAppearance => crate::settings::SettingsPage::Appearance,
+                            Route::SettingsActivity => crate::settings::SettingsPage::Activity,
+                            Route::SettingsNotifications => crate::settings::SettingsPage::Notifications,
+                            Route::SettingsLanguage => crate::settings::SettingsPage::Language,
+                            Route::SettingsVoice => crate::settings::SettingsPage::Voice,
                             _ => crate::settings::SettingsPage::Account,
                         };
                         self.settings_screen.update(cx, |s, _| {

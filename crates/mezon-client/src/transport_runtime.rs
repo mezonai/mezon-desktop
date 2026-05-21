@@ -280,4 +280,20 @@ impl TransportClient {
             .await
             .expect("Transport task panicked")
     }
+
+    pub async fn logout_device(&self, token: &str, refresh_token: &str, device_id: &str) -> Result<()> {
+        let transport = self.inner.clone();
+        let token = token.to_string();
+        let refresh_token = refresh_token.to_string();
+        let device_id = device_id.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .logout_device(&token, &refresh_token, &device_id)
+                    .await
+            })
+            .await
+            .expect("Transport task panicked")
+    }
 }

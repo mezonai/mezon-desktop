@@ -1,7 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{Context, Entity, FontWeight, PathPromptOptions, SharedString, Subscription, Task, Window, div, prelude::*, px};
+use gpui::{
+    Context, Entity, FontWeight, PathPromptOptions, SharedString, Subscription, Task, Window, div,
+    prelude::*, px,
+};
 use gpui_component::{
     Sizable, Size,
     avatar::Avatar,
@@ -38,6 +41,7 @@ pub struct ProfilePage {
     fetch_error: bool,
     _fetch_task: Option<Task<()>>,
     toast_message: Option<SharedString>,
+    show_delete_confirm: bool,
 }
 
 impl ProfilePage {
@@ -64,10 +68,7 @@ impl ProfilePage {
                     let api = api_clone.clone();
                     async move {
                         api.get_account().await.map_err(|e| {
-                            tracing::error!(
-                                "Failed to fetch account for profile, retrying: {}",
-                                e
-                            );
+                            tracing::error!("Failed to fetch account for profile, retrying: {}", e);
                             e
                         })
                     }
@@ -121,6 +122,7 @@ impl ProfilePage {
             fetch_error: false,
             _fetch_task: Some(fetch_task),
             toast_message: None,
+            show_delete_confirm: false,
         }
     }
 
@@ -215,12 +217,12 @@ impl ProfilePage {
 
         if let Some((display_name, about_me, _)) = original {
             if let Some(input) = &self.display_name_input {
-                input.update(cx, |input_state, input_cx| {
+                input.update(cx, |input_state: &mut InputState, input_cx| {
                     input_state.set_value(display_name.clone(), window, input_cx);
                 });
             }
             if let Some(input) = &self.about_me_input {
-                input.update(cx, |input_state, input_cx| {
+                input.update(cx, |input_state: &mut InputState, input_cx| {
                     input_state.set_value(about_me, window, input_cx);
                 });
             }
@@ -243,13 +245,10 @@ impl ProfilePage {
         let avatar_url: Option<String> = state.avatar_url.as_ref().map(|s| s.to_string());
 
         cx.spawn(async move |this, cx| {
-            tracing::info!("Saving profile: display_name={display_name}, about_me={about_me}");
-
             if check_connection(cx.background_executor(), &api)
                 .await
                 .is_err()
             {
-                tracing::error!("Profile save failed: no connection after retries");
                 this.update(cx, |this, cx| {
                     if let Some(state) = &mut this.profile {
                         state.saving = false;
@@ -261,14 +260,11 @@ impl ProfilePage {
                 return;
             }
 
-            tracing::info!("Connection verified, saving profile");
-
             match api
                 .update_account(Some(&display_name), avatar_url.as_deref(), Some(&about_me))
                 .await
             {
                 Ok(()) => {
-                    tracing::info!("Profile saved successfully");
                     this.update(cx, |this, cx| {
                         if let Some(state) = &mut this.profile {
                             state.original_display_name = state.display_name.clone();
@@ -282,7 +278,6 @@ impl ProfilePage {
                     .ok();
                 }
                 Err(e) => {
-                    tracing::error!("Profile save failed: {}", e);
                     this.update(cx, |this, cx| {
                         if let Some(state) = &mut this.profile {
                             state.saving = false;
@@ -354,38 +349,90 @@ impl Render for ProfilePage {
         v_flex()
             .gap_6()
             .child(h_flex().gap_8().child(form).child(preview))
+            // Unsaved changes warning
             .when(is_dirty, |el| {
                 el.child(
-                    h_flex()
+                    v_flex()
                         .gap_3()
                         .pt_4()
                         .child(
-                            GpuiButton::new("save-profile-btn")
-                                .label("Save Changes")
-                                .text_color(theme.text_primary)
-                                .on_click({
-                                    let e = entity.clone();
-                                    move |_, _, cx| {
-                                        e.update(cx, |this, view_cx| {
-                                            this.save(view_cx);
-                                        });
-                                    }
-                                }),
+                            h_flex().gap_2().items_center().child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.status_dnd)
+                                    .child("⚠ Careful — you have unsaved changes!"),
+                            ),
                         )
                         .child(
-                            GpuiButton::new("discard-profile-btn")
-                                .label("Discard")
-                                .text_color(theme.text_primary)
-                                .ghost()
-                                .on_click({
-                                    let e = entity.clone();
-                                    move |_, window, cx| {
-                                        e.update(cx, |this, view_cx| {
-                                            this.discard_changes(window, view_cx);
-                                            view_cx.notify();
-                                        });
-                                    }
-                                }),
+                            h_flex()
+                                .gap_3()
+                                .child(
+                                    GpuiButton::new("save-profile-btn")
+                                        .label("Save Changes")
+                                        .text_color(theme.text_secondary)
+                                        .on_click({
+                                            let e = entity.clone();
+                                            move |_, _, cx| {
+                                                e.update(cx, |this, view_cx| {
+                                                    this.save(view_cx);
+                                                });
+                                            }
+                                        }),
+                                )
+                                .child(
+                                    GpuiButton::new("discard-profile-btn")
+                                        .label("Discard")
+                                        .text_color(theme.text_primary)
+                                        .ghost()
+                                        .on_click({
+                                            let e = entity.clone();
+                                            move |_, window, cx| {
+                                                e.update(cx, |this, view_cx| {
+                                                    this.discard_changes(window, view_cx);
+                                                    view_cx.notify();
+                                                });
+                                            }
+                                        }),
+                                ),
+                        ),
+                )
+            })
+            // Delete Account button
+            .child(
+                GpuiButton::new("delete-account-btn")
+                    .label("Delete Account")
+                    .text_color(theme.status_dnd)
+                    .ghost()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_toast("Delete account confirmation coming soon", cx);
+                    })),
+            )
+            // Delete confirmation
+            .when(self.show_delete_confirm, |el| {
+                el.child(
+                    v_flex()
+                        .gap_3()
+                        .p_4()
+                        .rounded_lg()
+                        .bg(theme.bg_floating)
+                        .child(
+                            Label::new("Are you sure? This cannot be undone.")
+                                .text_color(theme.text_primary),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_3()
+                                .child(
+                                    GpuiButton::new("confirm-delete-btn")
+                                        .label("Delete Account")
+                                        .text_color(theme.status_dnd),
+                                )
+                                .child(
+                                    GpuiButton::new("cancel-delete-btn")
+                                        .label("Cancel")
+                                        .text_color(theme.text_primary)
+                                        .ghost(),
+                                ),
                         ),
                 )
             })
@@ -403,6 +450,10 @@ impl ProfilePage {
             .as_ref()
             .map_or("".into(), |p| p.display_name.clone());
         let avatar_url = self.profile.as_ref().and_then(|p| p.avatar_url.clone());
+        let about_me: SharedString = self
+            .profile
+            .as_ref()
+            .map_or("".into(), |p| p.about_me.clone());
 
         v_flex()
             .gap_4()
@@ -424,7 +475,7 @@ impl ProfilePage {
                     )
                     .child(
                         GpuiButton::new("change-avatar-btn")
-                            .label("Change")
+                            .label("Change Avatar")
                             .text_color(theme.text_primary)
                             .ghost()
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -437,34 +488,30 @@ impl ProfilePage {
                                     prompt: Some("Choose an avatar image".into()),
                                 });
                                 cx.spawn(async move |_this, cx| {
-                                    let inner = match rx.await {
-                                        Ok(r) => r,
+                                    let paths = match rx.await {
+                                        Ok(Ok(Some(p))) => p,
                                         _ => return,
                                     };
-                                    let paths: Vec<std::path::PathBuf> = match inner {
-                                        Ok(Some(p)) => p,
-                                        _ => return,
-                                    };
-                                    let path: std::path::PathBuf = match paths.into_iter().next() {
+                                    let path = match paths.into_iter().next() {
                                         Some(p) => p,
                                         None => return,
                                     };
 
-                                    tracing::info!("Avatar file selected: {:?}", path);
-
-                                    if check_connection(cx.background_executor(), &api).await.is_err() {
-                                        tracing::error!("Avatar upload failed: no connection after retries");
+                                    if check_connection(cx.background_executor(), &api)
+                                        .await
+                                        .is_err()
+                                    {
                                         root_entity.update(cx, |this, cx| {
-                                            this.show_toast("Connection lost. Please try again.", cx);
+                                            this.show_toast(
+                                                "Connection lost. Please try again.",
+                                                cx,
+                                            );
                                         });
                                         return;
                                     }
 
-                                    tracing::info!("Connection verified, proceeding with upload");
-
                                     match api.upload_avatar(&path).await {
                                         Ok(url) => {
-                                            tracing::info!("Avatar uploaded successfully: url={}", url);
                                             root_entity.update(cx, |this, cx| {
                                                 if let Some(state) = &mut this.profile {
                                                     state.avatar_url = Some(url.into());
@@ -473,13 +520,28 @@ impl ProfilePage {
                                             });
                                         }
                                         Err(e) => {
-                                            tracing::error!("Avatar upload failed: {}", e);
                                             root_entity.update(cx, |this, cx| {
-                                                this.show_toast(format!("Failed to upload avatar: {}", e), cx);
+                                                this.show_toast(
+                                                    format!("Failed to upload avatar: {}", e),
+                                                    cx,
+                                                );
                                             });
                                         }
                                     }
-                                }).detach();
+                                })
+                                .detach();
+                            })),
+                    )
+                    .child(
+                        GpuiButton::new("remove-avatar-btn")
+                            .label("Remove Avatar")
+                            .text_color(theme.text_muted)
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(state) = &mut this.profile {
+                                    state.avatar_url = None;
+                                }
+                                cx.notify();
                             })),
                     ),
             )
@@ -520,6 +582,12 @@ impl ProfilePage {
                         )
                         .w_full()
                         .h(px(100.0)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.text_muted)
+                            .child(format!("{}/128", about_me.len())),
                     ),
             )
     }
@@ -549,43 +617,49 @@ impl ProfilePage {
             )
             .child(
                 v_flex()
-                    .gap_4()
-                    .px_6()
-                    .py_6()
                     .rounded_lg()
+                    .overflow_hidden()
                     .bg(theme.bg_primary)
+                    // Color banner
+                    .child(div().h(px(105.0)).w_full().bg(theme.brand))
                     .child(
-                        h_flex()
+                        v_flex()
                             .gap_4()
+                            .px_6()
+                            .py_6()
                             .child(
-                                Avatar::new()
-                                    .when_some(avatar_url.clone(), |av, url| av.src(url))
-                                    .name(display_name.clone())
-                                    .with_size(Size::Large),
-                            )
-                            .child(
-                                v_flex()
-                                    .gap_1()
+                                h_flex()
+                                    .gap_4()
                                     .child(
-                                        Label::new(display_name.clone())
-                                            .text_xl()
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_color(theme.text_primary),
+                                        Avatar::new()
+                                            .when_some(avatar_url.clone(), |av, url| av.src(url))
+                                            .name(display_name.clone())
+                                            .with_size(Size::Large),
                                     )
                                     .child(
-                                        Label::new(format!("@{}", username))
-                                            .text_sm()
-                                            .text_color(theme.text_muted),
+                                        v_flex()
+                                            .gap_1()
+                                            .child(
+                                                Label::new(display_name.clone())
+                                                    .text_xl()
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .text_color(theme.text_primary),
+                                            )
+                                            .child(
+                                                Label::new(format!("@{}", username))
+                                                    .text_sm()
+                                                    .text_color(theme.text_muted),
+                                            ),
                                     ),
-                            ),
-                    )
-                    .when(!about_me.is_empty(), |el| {
-                        el.child(
-                            Label::new(about_me.clone())
-                                .text_sm()
-                                .text_color(theme.text_muted),
-                        )
-                    }),
+                            )
+                            .when(!about_me.is_empty(), |el| {
+                                el.child(
+                                    Label::new(about_me.clone())
+                                        .text_sm()
+                                        .text_color(theme.text_muted),
+                                )
+                            }),
+                    ),
             )
     }
 }

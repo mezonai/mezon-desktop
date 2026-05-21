@@ -2574,6 +2574,24 @@ impl MezonTransport {
         Ok(())
     }
 
+    /// Log out / remove a specific device by device_id.
+    /// Uses the current session credentials + target device_id.
+    pub async fn logout_device(&self, token: &str, refresh_token: &str, device_id: &str) -> Result<()> {
+        let cid = self.generate_cid();
+        let body = api::SessionLogoutRequest {
+            token: token.to_string(),
+            refresh_token: refresh_token.to_string(),
+            device_id: device_id.to_string(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let (code, _) = self.send_api_request(cid, "SessionLogout", body).await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(())
+    }
+
     /// Set notification channel setting.
     pub async fn set_notification_channel_setting(
         &self,

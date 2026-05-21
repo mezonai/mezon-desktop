@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{Context, FontWeight, SharedString, Task, Window, div, prelude::*};
+use gpui::{ClickEvent, Context, FontWeight, SharedString, Task, Window, div, prelude::*};
 use gpui_component::{Icon, IconName, h_flex, label::Label, v_flex};
 use mezon_client::AppApi;
 use mezon_proto::api::LogedDevice;
@@ -32,7 +32,6 @@ impl DevicePage {
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         if self.initial_loaded {
-            // Re-fetch data
             self.loading = true;
             self.device_error = None;
             cx.notify();
@@ -79,9 +78,7 @@ impl DevicePage {
                 }
                 Err(_) => {
                     this.update(cx, |this, view_cx| {
-                        this.device_error = Some(
-                            "Failed to load devices after multiple attempts".into(),
-                        );
+                        this.device_error = Some("Failed to load devices after multiple attempts".into());
                         this.loading = false;
                         view_cx.notify();
                     })
@@ -94,7 +91,6 @@ impl DevicePage {
 
 impl Render for DevicePage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Trigger initial fetch on first render
         if !self.initial_loaded {
             self.fetch(cx);
         }
@@ -108,6 +104,11 @@ impl Render for DevicePage {
                     .text_xl()
                     .text_color(theme.text_primary)
                     .font_weight(FontWeight::BOLD),
+            )
+            .child(
+                Label::new("Manage the devices that have access to your account.")
+                    .text_sm()
+                    .text_color(theme.text_muted),
             )
             .child(if let Some(error) = &self.device_error {
                 div()
@@ -123,42 +124,93 @@ impl Render for DevicePage {
                         .child("No devices found.")
                         .into_any_element()
                 } else {
+                    let current: Vec<&LogedDevice> = devices.iter().filter(|d| d.is_current).collect();
+                    let others: Vec<&LogedDevice> = devices.iter().filter(|d| !d.is_current).collect();
+
                     v_flex()
-                        .gap_2()
-                        .children(devices.iter().map(|device| {
-                            let last_active = if device.last_active_seconds > 0 {
-                                let now = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs() as u32;
-                                let ago = now.saturating_sub(device.last_active_seconds);
-                                if ago < 60 {
-                                    format!("{}s ago", ago)
-                                } else if ago < 3600 {
-                                    format!("{}m ago", ago / 60)
-                                } else if ago < 86400 {
-                                    format!("{}h ago", ago / 3600)
-                                } else {
-                                    format!("{}d ago", ago / 86400)
-                                }
-                            } else {
-                                String::from("Unknown")
-                            };
-
-                            let current_label = if device.is_current { " (current)" } else { "" };
-
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .px_4()
-                                .py_3()
-                                .rounded_lg()
-                                .bg(theme.bg_secondary)
+                        .gap_6()
+                        // Current Device Section
+                        .child(
+                            v_flex()
+                                .gap_2()
                                 .child(
+                                    Label::new("CURRENT DEVICE")
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme.text_muted),
+                                )
+                                .children(current.iter().map(|device| {
+                                    let last_active = format_last_active(device.last_active_seconds);
                                     h_flex()
+                                        .items_center()
                                         .gap_3()
+                                        .px_4()
+                                        .py_3()
+                                        .rounded_lg()
+                                        .bg(theme.bg_primary)
                                         .child(
-                                            Icon::new(IconName::SquareTerminal)
+                                            Icon::new(IconName::WindowMaximize)
+                                                .size_5()
+                                                .text_color(theme.status_online),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(theme.text_primary)
+                                                        .child(device.device_name.clone()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme.text_muted)
+                                                        .child(format!("{} · {} · Active now", device.platform, device.ip)),
+                                                ),
+                                        )
+                                        .child(div().flex_1())
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.status_online)
+                                                .child("Active now"),
+                                        )
+                                        .into_any_element()
+                                })),
+                        )
+                        // Other Devices Section
+                        .child(
+                            v_flex()
+                                .gap_2()
+                                .child(
+                                    Label::new("OTHER DEVICES")
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme.text_muted),
+                                )
+                                .when(others.is_empty(), |el| {
+                                    el.child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(theme.text_muted)
+                                            .px_4()
+                                            .child("No other devices."),
+                                    )
+                                })
+                                .children(others.iter().map(|device| {
+                                    let last_active = format_last_active(device.last_active_seconds);
+                                    let device_id = device.device_id.clone();
+                                    let api = self.api.clone();
+                                    h_flex()
+                                        .items_center()
+                                        .gap_3()
+                                        .px_4()
+                                        .py_3()
+                                        .rounded_lg()
+                                        .bg(theme.bg_secondary)
+                                        .child(
+                                            Icon::new(IconName::Speaker)
                                                 .size_5()
                                                 .text_color(theme.text_secondary),
                                         )
@@ -168,30 +220,36 @@ impl Render for DevicePage {
                                                     div()
                                                         .text_sm()
                                                         .text_color(theme.text_primary)
-                                                        .child(format!(
-                                                            "{}{}",
-                                                            device.device_name, current_label
-                                                        )),
+                                                        .child(device.device_name.clone()),
                                                 )
                                                 .child(
                                                     div()
                                                         .text_xs()
                                                         .text_color(theme.text_muted)
-                                                        .child(format!(
-                                                            "{} · {}",
-                                                            device.platform, device.ip
-                                                        )),
+                                                        .child(format!("{} · {}", device.platform, device.location)),
                                                 ),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.text_muted)
-                                        .child(last_active),
-                                )
-                                .into_any_element()
-                        }))
+                                        )
+                                        .child(div().flex_1())
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.text_muted)
+                                                .child(last_active),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(format!("remove-device-{}", device_id))
+                                                .cursor_pointer()
+                                                .text_color(theme.status_dnd)
+                                                .child("✕")
+                                                .on_click(move |_: &ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                                                    // TODO: Wire to actual logout_device call with session tokens
+                                                    tracing::info!("Remove device: {}", device_id);
+                                                }),
+                                        )
+                                        .into_any_element()
+                                })),
+                        )
                         .into_any_element()
                 }
             } else {
@@ -201,5 +259,25 @@ impl Render for DevicePage {
                     .child("Loading devices...")
                     .into_any_element()
             })
+    }
+}
+
+fn format_last_active(seconds: u32) -> String {
+    if seconds == 0 {
+        return "Unknown".to_string();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as u32;
+    let ago = now.saturating_sub(seconds);
+    if ago < 60 {
+        format!("{}s ago", ago)
+    } else if ago < 3600 {
+        format!("{}m ago", ago / 60)
+    } else if ago < 86400 {
+        format!("{}h ago", ago / 3600)
+    } else {
+        format!("{}d ago", ago / 86400)
     }
 }
