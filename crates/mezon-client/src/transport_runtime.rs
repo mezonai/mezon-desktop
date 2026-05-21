@@ -233,6 +233,8 @@ impl TransportClient {
         avatar_url: Option<&str>,
         about_me: Option<&str>,
     ) -> Result<()> {
+        tracing::info!("📞 TransportClient::update_account() called");
+
         let transport = self.inner.clone();
         let display_name = display_name.map(str::to_string);
         let avatar_url = avatar_url.map(str::to_string);
@@ -264,7 +266,11 @@ impl TransportClient {
         let filetype = filetype.to_string();
 
         runtime()
-            .spawn(async move { transport.upload_attachment_file(&filename, &filetype, size).await })
+            .spawn(async move {
+                transport
+                    .upload_attachment_file(&filename, &filetype, size)
+                    .await
+            })
             .await
             .expect("Transport task panicked")
     }
@@ -281,7 +287,12 @@ impl TransportClient {
             .expect("Transport task panicked")
     }
 
-    pub async fn logout_device(&self, token: &str, refresh_token: &str, device_id: &str) -> Result<()> {
+    pub async fn logout_device(
+        &self,
+        token: &str,
+        refresh_token: &str,
+        device_id: &str,
+    ) -> Result<()> {
         let transport = self.inner.clone();
         let token = token.to_string();
         let refresh_token = refresh_token.to_string();

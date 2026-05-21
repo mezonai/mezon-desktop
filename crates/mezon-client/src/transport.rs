@@ -2576,7 +2576,12 @@ impl MezonTransport {
 
     /// Log out / remove a specific device by device_id.
     /// Uses the current session credentials + target device_id.
-    pub async fn logout_device(&self, token: &str, refresh_token: &str, device_id: &str) -> Result<()> {
+    pub async fn logout_device(
+        &self,
+        token: &str,
+        refresh_token: &str,
+        device_id: &str,
+    ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::SessionLogoutRequest {
             token: token.to_string(),
@@ -4342,29 +4347,56 @@ impl MezonTransport {
     ) -> Result<()> {
         let cid = self.generate_cid();
 
-        let body = api::UpdateAccountRequest {
-            display_name: display_name
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
-            avatar_url: avatar_url
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
-            about_me: about_me
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let mut body = Vec::new();
 
-        let (code, response) = self
-            .send_api_request(cid, "UpdateAccount", body)
-            .await?;
+        //
+        // display_name (field 1)
+        //
+        if let Some(name) = display_name.filter(|s| !s.is_empty()) {
+            body.put_u8(0x0a); // field 1, wire type 2
+            body.put_u8((name.len() + 2) as u8);
+
+            // StringValue wrapper
+            body.put_u8(0x0a);
+            body.put_u8(name.len() as u8);
+            body.extend_from_slice(name.as_bytes());
+        }
+
+        //
+        // avatar_url (field 2) -- PLAIN STRING
+        //
+        if let Some(url) = avatar_url.filter(|s| !s.is_empty()) {
+            body.put_u8(0x12); // field 2, wire type 2
+            body.put_u8(url.len() as u8);
+
+            // RAW STRING ONLY
+            body.extend_from_slice(url.as_bytes());
+        }
+
+        //
+        // about_me (field 6)
+        //
+        if let Some(about) = about_me.filter(|s| !s.is_empty()) {
+            body.put_u8(0x32); // field 6, wire type 2
+            body.put_u8((about.len() + 2) as u8);
+
+            // StringValue wrapper
+            body.put_u8(0x0a);
+            body.put_u8(about.len() as u8);
+            body.extend_from_slice(about.as_bytes());
+        }
+
+        let (code, response) = self.send_api_request(cid, "UpdateAccount", body).await?;
 
         if code == 0 {
             Ok(())
         } else {
             let msg = String::from_utf8_lossy(&response);
-            Err(anyhow::anyhow!("API error: code={}, response={}", code, msg))
+            Err(anyhow::anyhow!(
+                "API error: code={}, response={}",
+                code,
+                msg
+            ))
         }
     }
 
