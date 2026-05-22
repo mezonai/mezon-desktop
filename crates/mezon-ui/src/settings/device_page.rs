@@ -163,7 +163,7 @@ impl Render for DevicePage {
                                         .text_color(theme.text_muted),
                                 )
                                 .children(current.iter().map(|device| {
-                                    let last_active = format_last_active(device.last_active_seconds);
+                                    let _last_active = format_last_active(device.last_active_seconds);
                                     h_flex()
                                         .items_center()
                                         .gap_3()
@@ -224,7 +224,7 @@ impl Render for DevicePage {
                                 .children(others.iter().map(|device| {
                                     let last_active = format_last_active(device.last_active_seconds);
                                     let device_id = device.device_id.clone();
-                                    let api = self.api.clone();
+                                    let _api = self.api.clone();
                                     h_flex()
                                         .items_center()
                                         .gap_3()
@@ -265,7 +265,7 @@ impl Render for DevicePage {
                                                 .cursor_pointer()
                                                 .text_color(theme.status_dnd)
                                                 .child("✕")
-                                                .on_click(move |_: &ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                                                .on_click(move |_: &ClickEvent, _: &mut Window, _cx: &mut gpui::App| {
                                                     // TODO: Wire to actual logout_device call with session tokens
                                                     tracing::info!("Remove device: {}", device_id);
                                                 }),

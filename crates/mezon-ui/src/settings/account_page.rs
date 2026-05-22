@@ -182,7 +182,7 @@ impl Render for AccountPage {
             SharedString::from(mask_email(&account.email))
         };
 
-        let email_label = if account.email.is_empty() {
+        let _email_label = if account.email.is_empty() {
             SharedString::from("Set Email")
         } else {
             SharedString::from("Change Email")
