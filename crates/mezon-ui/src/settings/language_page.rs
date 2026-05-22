@@ -4,11 +4,7 @@ use gpui_component::{Icon, IconName, h_flex, label::Label, v_flex};
 
 pub struct LanguagePage;
 
-impl LanguagePage {
-    pub fn new(_cx: &mut Context<Self>) -> Self {
-        Self
-    }
-}
+impl LanguagePage {}
 
 impl Render for LanguagePage {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {

@@ -59,12 +59,11 @@ impl VoicePage {
         subs.push(cx.subscribe(
             &mic_slider,
             move |_this, _slider: Entity<SliderState>, event: &SliderEvent, cx| {
-                if let SliderEvent::Change(value) = event {
-                    mic_settings.update(cx, |s, _| {
-                        s.mic_volume = value.end();
-                        s.save_sync();
-                    });
-                }
+                let SliderEvent::Change(value) = event;
+                mic_settings.update(cx, |s, _| {
+                    s.mic_volume = value.end();
+                    s.save_sync();
+                });
             },
         ));
 
@@ -72,12 +71,11 @@ impl VoicePage {
         subs.push(cx.subscribe(
             &speaker_slider,
             move |_this, _slider: Entity<SliderState>, event: &SliderEvent, cx| {
-                if let SliderEvent::Change(value) = event {
-                    speaker_settings.update(cx, |s, _| {
-                        s.speaker_volume = value.end();
-                        s.save_sync();
-                    });
-                }
+                let SliderEvent::Change(value) = event;
+                speaker_settings.update(cx, |s, _| {
+                    s.speaker_volume = value.end();
+                    s.save_sync();
+                });
             },
         ));
 
@@ -352,6 +350,7 @@ impl Render for VoicePage {
 }
 
 impl VoicePage {
+    #[allow(clippy::too_many_arguments)]
     fn render_selector(
         devices: &[AudioDeviceInfo],
         selected_id: &Option<String>,
