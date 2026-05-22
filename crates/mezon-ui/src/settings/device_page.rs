@@ -4,14 +4,24 @@ use std::time::Duration;
 use gpui::{ClickEvent, Context, FontWeight, SharedString, Task, Window, div, prelude::*};
 use gpui_component::{Icon, IconName, h_flex, label::Label, v_flex};
 use mezon_client::AppApi;
-use mezon_proto::api::LogedDevice;
 
 use crate::theme::Theme;
 use crate::util::{check_connection, retry};
 
+#[derive(Debug, Clone)]
+struct DeviceViewModel {
+    device_id: String,
+    device_name: String,
+    platform: String,
+    ip: String,
+    location: String,
+    is_current: bool,
+    last_active_seconds: u32,
+}
+
 pub struct DevicePage {
     api: Arc<AppApi>,
-    devices: Option<Vec<LogedDevice>>,
+    devices: Option<Vec<DeviceViewModel>>,
     device_error: Option<SharedString>,
     loading: bool,
     initial_loaded: bool,
@@ -67,8 +77,20 @@ impl DevicePage {
             .await
             {
                 Ok(devices) => {
+                    let view_models: Vec<DeviceViewModel> = devices
+                        .into_iter()
+                        .map(|d| DeviceViewModel {
+                            device_id: d.device_id,
+                            device_name: d.device_name,
+                            platform: d.platform,
+                            ip: d.ip,
+                            location: d.location,
+                            is_current: d.is_current,
+                            last_active_seconds: d.last_active_seconds,
+                        })
+                        .collect();
                     this.update(cx, |this, view_cx| {
-                        this.devices = Some(devices);
+                        this.devices = Some(view_models);
                         this.device_error = None;
                         this.loading = false;
                         this.initial_loaded = true;
@@ -125,8 +147,8 @@ impl Render for DevicePage {
                         .child("No devices found.")
                         .into_any_element()
                 } else {
-                    let current: Vec<&LogedDevice> = devices.iter().filter(|d| d.is_current).collect();
-                    let others: Vec<&LogedDevice> = devices.iter().filter(|d| !d.is_current).collect();
+                    let current: Vec<&DeviceViewModel> = devices.iter().filter(|d| d.is_current).collect();
+                    let others: Vec<&DeviceViewModel> = devices.iter().filter(|d| !d.is_current).collect();
 
                     v_flex()
                         .gap_6()
