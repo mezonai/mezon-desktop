@@ -8,9 +8,12 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
 tokio.workspace = true
+flume.workspace = true
+cpal.workspace = true
 open = "5"
 mezon-updater.workspace = true
 dirs = { workspace = true }

@@ -211,6 +211,7 @@ impl ChatLayout {
             | Route::SettingsNotifications
             | Route::SettingsLanguage
             | Route::SettingsVoice
+            | Route::SettingsAdvanced
             | Route::NotFound { .. } => {
                 // Handled by RootView, not rendered here
                 div().into_any_element()

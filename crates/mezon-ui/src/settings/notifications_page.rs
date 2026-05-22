@@ -1,7 +1,7 @@
+use crate::theme::Theme;
 use gpui::{Context, Entity, FontWeight, Window, prelude::*};
 use gpui_component::{h_flex, label::Label, switch::Switch, v_flex};
 use mezon_store::Settings;
-use crate::theme::Theme;
 
 pub struct NotificationsPage {
     settings: Entity<Settings>,
@@ -46,7 +46,8 @@ impl Render for NotificationsPage {
                                     .checked(hide_content)
                                     .on_click(move |_, _window, cx| {
                                         settings.update(cx, |s, _| {
-                                            s.notifications_hide_content = !s.notifications_hide_content;
+                                            s.notifications_hide_content =
+                                                !s.notifications_hide_content;
                                             s.save_sync();
                                         });
                                     }),

@@ -141,7 +141,8 @@ impl BaseView {
             | Route::SettingsActivity
             | Route::SettingsNotifications
             | Route::SettingsLanguage
-            | Route::SettingsVoice => (
+            | Route::SettingsVoice
+            | Route::SettingsAdvanced => (
                 "Settings".into(),
                 format!("Base route: /settings - {current_path}"),
                 self.render_placeholder(

@@ -14,6 +14,7 @@ use mezon_store::{AuthState, Settings};
 
 use super::account_page::AccountPage;
 use super::activity_page::ActivityPage;
+use super::advanced_page::AdvancedPage;
 use super::appearance_page::AppearancePage;
 use super::device_page::DevicePage;
 use super::language_page::LanguagePage;
@@ -33,6 +34,7 @@ pub enum SettingsPage {
     Notifications,
     Language,
     Voice,
+    Advanced,
 }
 
 pub struct SettingsScreen {
@@ -49,6 +51,7 @@ pub struct SettingsScreen {
     notifications_page: Option<Entity<NotificationsPage>>,
     language_page: Option<Entity<LanguagePage>>,
     voice_page: Option<Entity<VoicePage>>,
+    advanced_page: Option<Entity<AdvancedPage>>,
     prev_page: SettingsPage,
 }
 
@@ -73,6 +76,7 @@ impl SettingsScreen {
             notifications_page: None,
             language_page: None,
             voice_page: None,
+            advanced_page: None,
             prev_page: SettingsPage::Account,
         }
     }
@@ -93,8 +97,9 @@ impl Render for SettingsScreen {
         // Lazy init sub-page entities, refresh device on revisit
         match page {
             SettingsPage::Account => {
-                self.account_page
-                    .get_or_insert_with(|| cx.new(|cx| AccountPage::new(api.clone(), navigate.clone(), cx)));
+                self.account_page.get_or_insert_with(|| {
+                    cx.new(|cx| AccountPage::new(api.clone(), navigate.clone(), cx))
+                });
             }
             SettingsPage::Profile => {
                 self.profile_page
@@ -109,8 +114,10 @@ impl Render for SettingsScreen {
                 }
             }
             SettingsPage::Appearance => {
-                self.appearance_page
-                    .get_or_insert_with(|| cx.new(|_| AppearancePage));
+                self.appearance_page.get_or_insert_with(|| {
+                    let settings = self.settings.clone();
+                    cx.new(|cx| AppearancePage::new(settings, cx))
+                });
             }
             SettingsPage::Activity => {
                 self.activity_page.get_or_insert_with(|| {
@@ -129,8 +136,16 @@ impl Render for SettingsScreen {
                     .get_or_insert_with(|| cx.new(|_| LanguagePage));
             }
             SettingsPage::Voice => {
-                self.voice_page
-                    .get_or_insert_with(|| cx.new(|_| VoicePage));
+                self.voice_page.get_or_insert_with(|| {
+                    let settings = self.settings.clone();
+                    cx.new(|cx| VoicePage::new(settings, cx))
+                });
+            }
+            SettingsPage::Advanced => {
+                self.advanced_page.get_or_insert_with(|| {
+                    let settings = self.settings.clone();
+                    cx.new(|cx| AdvancedPage::new(settings, cx))
+                });
             }
         }
         self.prev_page = page;
@@ -143,6 +158,7 @@ impl Render for SettingsScreen {
         let is_notifications = page == SettingsPage::Notifications;
         let is_language = page == SettingsPage::Language;
         let is_voice = page == SettingsPage::Voice;
+        let is_advanced = page == SettingsPage::Advanced;
 
         let content: gpui::AnyElement = match page {
             SettingsPage::Account => self.account_page.clone().unwrap().into_any_element(),
@@ -150,9 +166,12 @@ impl Render for SettingsScreen {
             SettingsPage::Device => self.device_page.clone().unwrap().into_any_element(),
             SettingsPage::Appearance => self.appearance_page.clone().unwrap().into_any_element(),
             SettingsPage::Activity => self.activity_page.clone().unwrap().into_any_element(),
-            SettingsPage::Notifications => self.notifications_page.clone().unwrap().into_any_element(),
+            SettingsPage::Notifications => {
+                self.notifications_page.clone().unwrap().into_any_element()
+            }
             SettingsPage::Language => self.language_page.clone().unwrap().into_any_element(),
             SettingsPage::Voice => self.voice_page.clone().unwrap().into_any_element(),
+            SettingsPage::Advanced => self.advanced_page.clone().unwrap().into_any_element(),
         };
 
         fn nav_item(
@@ -177,9 +196,7 @@ impl Render for SettingsScreen {
                 .when(is_active, |el| {
                     el.bg(theme.bg_primary).text_color(theme.text_primary)
                 })
-                .when(!is_active, |el| {
-                    el.text_color(theme.text_primary)
-                })
+                .when(!is_active, |el| el.text_color(theme.text_primary))
                 .child(label.to_string())
                 .on_click(move |_, _, cx| {
                     nav(&path, cx);
@@ -208,90 +225,160 @@ impl Render for SettingsScreen {
                             .child(Label::new("Settings").text_color(theme.text_primary)),
                     )
                     .child(
-                        div()
-                            .flex_1()
-                            .px_2()
-                            .py_2()
-                            .child(
-                                v_flex()
-                                    .gap_1()
-                                    // ACCOUNT SETTINGS section
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(theme.text_muted)
-                                            .px_2()
-                                            .py_1()
-                                            .child("ACCOUNT SETTINGS"),
-                                    )
-                                    .child(nav_item("account-page", "Account", is_account, &theme, navigate.clone(), "/settings/account"))
-                                    .child(nav_item("device-page", "Devices", is_device, &theme, navigate.clone(), "/settings/devices"))
-                                    .child(nav_item("profile-page", "Profiles", is_profile, &theme, navigate.clone(), "/settings/profile"))
-                                    // APP SETTINGS section
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(theme.text_muted)
-                                            .px_2()
-                                            .py_1()
-                                            .mt_4()
-                                            .child("APP SETTINGS"),
-                                    )
-                                    .child(nav_item("appearance-page", "Appearance", is_appearance, &theme, navigate.clone(), "/settings/appearance"))
-                                    .child(nav_item("activity-page", "Activity", is_activity, &theme, navigate.clone(), "/settings/activity"))
-                                    .child(nav_item("notifications-page", "Notifications", is_notifications, &theme, navigate.clone(), "/settings/notifications"))
-                                    .child(nav_item("language-page", "Language", is_language, &theme, navigate.clone(), "/settings/language"))
-                                    .child(nav_item("voice-page", "Voice", is_voice, &theme, navigate.clone(), "/settings/voice")),
-                            ),
+                        div().flex_1().px_2().py_2().child(
+                            v_flex()
+                                .gap_1()
+                                // ACCOUNT SETTINGS section
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(theme.text_muted)
+                                        .px_2()
+                                        .py_1()
+                                        .child("ACCOUNT SETTINGS"),
+                                )
+                                .child(nav_item(
+                                    "account-page",
+                                    "Account",
+                                    is_account,
+                                    &theme,
+                                    navigate.clone(),
+                                    "/settings/account",
+                                ))
+                                .child(nav_item(
+                                    "device-page",
+                                    "Devices",
+                                    is_device,
+                                    &theme,
+                                    navigate.clone(),
+                                    "/settings/devices",
+                                ))
+                                .child(nav_item(
+                                    "profile-page",
+                                    "Profiles",
+                                    is_profile,
+                                    &theme,
+                                    navigate.clone(),
+                                    "/settings/profile",
+                                ))
+                                // APP SETTINGS section
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(theme.text_muted)
+                                        .px_2()
+                                        .py_1()
+                                        .mt_4()
+                                        .child("APP SETTINGS"),
+                                )
+                                .child(nav_item(
+                                    "appearance-page",
+                                    "Appearance",
+                                    is_appearance,
+                                    &theme,
+                                    navigate.clone(),
+                                    "/settings/appearance",
+                                ))
+                                .child(nav_item(
+                                    "activity-page",
+                                    "Activity",
+                                    is_activity,
+                                    &theme,
+                                    navigate.clone(),
+                                    "/settings/activity",
+                                ))
+                                .child(nav_item(
+                                    "notifications-page",
+                                    "Notifications",
+                                    is_notifications,
+                                    &theme,
+                                    navigate.clone(),
+                                    "/settings/notifications",
+                                ))
+                                .child(nav_item(
+                                    "language-page",
+                                    "Language",
+                                    is_language,
+                                    &theme,
+                                    navigate.clone(),
+                                    "/settings/language",
+                                ))
+                                .child(nav_item(
+                                    "voice-page",
+                                    "Voice",
+                                    is_voice,
+                                    &theme,
+                                    navigate.clone(),
+                                    "/settings/voice",
+                                ))
+                                .child(nav_item(
+                                    "advanced-page",
+                                    "Advanced",
+                                    is_advanced,
+                                    &theme,
+                                    navigate.clone(),
+                                    "/settings/advanced",
+                                )),
+                        ),
                     )
                     .child(div().h(px(1.0)).w_full().bg(theme.border))
                     .child(
-                        div()
-                            .px_3()
-                            .py_2()
-                            .child(
-                                v_flex()
-                                    .child(
-                                        GpuiButton::new("logout-btn")
-                                            .label("Log Out")
-                                            .text_color(theme.status_dnd)
-                                            .ghost()
-                                            .w_full()
-                                            .on_click({
-                                                let api = api.clone();
-                                                let auth_state = auth_state.clone();
-                                                move |_, _, cx| {
-                                                    let auth = auth_state.read(cx);
-                                                    if let AuthState::Authenticated(session) = auth {
-                                                        let api = api.clone();
-                                                        let token = session.token.clone();
-                                                        let refresh_token = session.refresh_token.clone();
-                                                        let auth_state = auth_state.clone();
-                                                        cx.spawn(async move |cx| {
-                                                            let _ = api
-                                                                .session_logout(&token, &refresh_token)
-                                                                .await;
-                                                            cx.update(|cx| {
-                                                                auth_state.update(cx, |state, _| {
-                                                                    *state = AuthState::NotAuthenticated;
-                                                                });
+                        div().px_3().py_2().child(
+                            v_flex()
+                                .child(
+                                    GpuiButton::new("logout-btn")
+                                        .label("Log Out")
+                                        .text_color(theme.status_dnd)
+                                        .ghost()
+                                        .w_full()
+                                        .on_click({
+                                            let api = api.clone();
+                                            let auth_state = auth_state.clone();
+                                            move |_, _, cx| {
+                                                let auth = auth_state.read(cx);
+                                                if let AuthState::Authenticated(session) = auth {
+                                                    let api = api.clone();
+                                                    let token = session.token.clone();
+                                                    let refresh_token =
+                                                        session.refresh_token.clone();
+                                                    let auth_state = auth_state.clone();
+                                                    cx.spawn(async move |cx| {
+                                                        let _ = api
+                                                            .session_logout(&token, &refresh_token)
+                                                            .await;
+                                                        cx.update(|cx| {
+                                                            auth_state.update(cx, |state, _| {
+                                                                *state =
+                                                                    AuthState::NotAuthenticated;
                                                             });
-                                                        })
-                                                        .detach();
-                                                    }
+                                                        });
+                                                    })
+                                                    .detach();
                                                 }
-                                            }),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.text_muted)
-                                            .px_2()
-                                            .child(env!("CARGO_PKG_VERSION")),
-                                    ),
-                            ),
+                                            }
+                                        }),
+                                )
+                                .child(div().h(px(1.0)).w_full().bg(theme.border).my_1())
+                                .child(
+                                    GpuiButton::new("quit-app-btn")
+                                        .label("Quit Mezon Desktop")
+                                        .text_color(theme.status_dnd)
+                                        .ghost()
+                                        .w_full()
+                                        .on_click(move |_, _, cx| {
+                                            cx.quit();
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.text_muted)
+                                        .px_2()
+                                        .child(env!("CARGO_PKG_VERSION")),
+                                ),
+                        ),
                     ),
             )
             .child(

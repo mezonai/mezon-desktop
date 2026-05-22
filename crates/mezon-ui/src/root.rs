@@ -94,15 +94,19 @@ impl Render for RootView {
                     | Route::SettingsActivity
                     | Route::SettingsNotifications
                     | Route::SettingsLanguage
-                    | Route::SettingsVoice => {
+                    | Route::SettingsVoice
+                    | Route::SettingsAdvanced => {
                         let page = match route {
                             Route::SettingsProfile => crate::settings::SettingsPage::Profile,
                             Route::SettingsDevices => crate::settings::SettingsPage::Device,
                             Route::SettingsAppearance => crate::settings::SettingsPage::Appearance,
                             Route::SettingsActivity => crate::settings::SettingsPage::Activity,
-                            Route::SettingsNotifications => crate::settings::SettingsPage::Notifications,
+                            Route::SettingsNotifications => {
+                                crate::settings::SettingsPage::Notifications
+                            }
                             Route::SettingsLanguage => crate::settings::SettingsPage::Language,
                             Route::SettingsVoice => crate::settings::SettingsPage::Voice,
+                            Route::SettingsAdvanced => crate::settings::SettingsPage::Advanced,
                             _ => crate::settings::SettingsPage::Account,
                         };
                         self.settings_screen.update(cx, |s, _| {

@@ -117,4 +117,103 @@ impl Theme {
             title_bar_bg: rgba(227, 229, 232, 1.0),
         }
     }
+
+    pub fn purple() -> Self {
+        Self {
+            bg_primary: rgba(30, 25, 45, 1.0),
+            bg_secondary: rgba(38, 32, 54, 1.0),
+            bg_tertiary: rgba(24, 20, 38, 1.0),
+            bg_floating: rgba(16, 13, 26, 1.0),
+            bg_hover: rgba(120, 90, 200, 0.10),
+
+            text_primary: rgba(242, 243, 245, 1.0),
+            text_secondary: rgba(181, 186, 193, 1.0),
+            text_muted: rgba(128, 132, 142, 1.0),
+            text_link: rgba(160, 130, 255, 1.0),
+
+            interactive_normal: rgba(181, 186, 193, 1.0),
+            interactive_hover: rgba(219, 222, 225, 1.0),
+            interactive_active: rgba(242, 243, 245, 1.0),
+
+            brand: rgba(120, 90, 200, 1.0),
+            brand_hover: rgba(100, 75, 180, 1.0),
+
+            status_online: rgba(35, 165, 90, 1.0),
+            status_idle: rgba(240, 178, 50, 1.0),
+            status_dnd: rgba(242, 63, 67, 1.0),
+            status_offline: rgba(128, 132, 142, 1.0),
+
+            unread_dot: rgba(242, 243, 245, 1.0),
+            mention_badge: rgba(242, 63, 67, 1.0),
+
+            border: rgba(160, 130, 255, 0.12),
+            title_bar_bg: rgba(24, 20, 38, 1.0),
+        }
+    }
+
+    pub fn abyss() -> Self {
+        Self {
+            bg_primary: rgba(13, 15, 22, 1.0),
+            bg_secondary: rgba(18, 20, 30, 1.0),
+            bg_tertiary: rgba(10, 12, 18, 1.0),
+            bg_floating: rgba(6, 8, 14, 1.0),
+            bg_hover: rgba(100, 140, 220, 0.08),
+
+            text_primary: rgba(230, 235, 245, 1.0),
+            text_secondary: rgba(160, 170, 190, 1.0),
+            text_muted: rgba(110, 120, 140, 1.0),
+            text_link: rgba(80, 160, 255, 1.0),
+
+            interactive_normal: rgba(160, 170, 190, 1.0),
+            interactive_hover: rgba(200, 210, 225, 1.0),
+            interactive_active: rgba(230, 235, 245, 1.0),
+
+            brand: rgba(50, 120, 220, 1.0),
+            brand_hover: rgba(40, 100, 190, 1.0),
+
+            status_online: rgba(35, 165, 90, 1.0),
+            status_idle: rgba(240, 178, 50, 1.0),
+            status_dnd: rgba(242, 63, 67, 1.0),
+            status_offline: rgba(110, 120, 140, 1.0),
+
+            unread_dot: rgba(230, 235, 245, 1.0),
+            mention_badge: rgba(242, 63, 67, 1.0),
+
+            border: rgba(80, 120, 200, 0.12),
+            title_bar_bg: rgba(10, 12, 18, 1.0),
+        }
+    }
+
+    pub fn red_dark() -> Self {
+        Self {
+            bg_primary: rgba(40, 22, 24, 1.0),
+            bg_secondary: rgba(48, 26, 28, 1.0),
+            bg_tertiary: rgba(34, 16, 18, 1.0),
+            bg_floating: rgba(22, 12, 14, 1.0),
+            bg_hover: rgba(220, 80, 80, 0.10),
+
+            text_primary: rgba(240, 225, 225, 1.0),
+            text_secondary: rgba(190, 165, 165, 1.0),
+            text_muted: rgba(140, 120, 120, 1.0),
+            text_link: rgba(255, 130, 130, 1.0),
+
+            interactive_normal: rgba(190, 165, 165, 1.0),
+            interactive_hover: rgba(215, 190, 190, 1.0),
+            interactive_active: rgba(240, 225, 225, 1.0),
+
+            brand: rgba(210, 80, 80, 1.0),
+            brand_hover: rgba(180, 65, 65, 1.0),
+
+            status_online: rgba(35, 165, 90, 1.0),
+            status_idle: rgba(240, 178, 50, 1.0),
+            status_dnd: rgba(242, 63, 67, 1.0),
+            status_offline: rgba(140, 120, 120, 1.0),
+
+            unread_dot: rgba(240, 225, 225, 1.0),
+            mention_badge: rgba(242, 63, 67, 1.0),
+
+            border: rgba(220, 100, 100, 0.12),
+            title_bar_bg: rgba(34, 16, 18, 1.0),
+        }
+    }
 }

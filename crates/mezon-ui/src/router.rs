@@ -18,6 +18,7 @@ pub enum Route {
     SettingsNotifications,
     SettingsLanguage,
     SettingsVoice,
+    SettingsAdvanced,
     NotFound {
         path: String,
     },
@@ -83,6 +84,7 @@ pub fn match_path(path: &str) -> Route {
         ["settings", "notifications"] => Route::SettingsNotifications,
         ["settings", "language"] => Route::SettingsLanguage,
         ["settings", "voice"] => Route::SettingsVoice,
+        ["settings", "advanced"] => Route::SettingsAdvanced,
         _ => Route::NotFound { path: normalized },
     }
 }

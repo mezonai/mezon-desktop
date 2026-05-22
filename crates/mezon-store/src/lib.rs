@@ -31,6 +31,14 @@ pub struct Settings {
     pub notifications_hide_content: bool,
     /// Enable activity tracking (show online status to others)
     pub activity_tracking: bool,
+    /// Microphone volume (0.0 – 1.0)
+    pub mic_volume: f32,
+    /// Speaker/headphone volume (0.0 – 1.0)
+    pub speaker_volume: f32,
+    /// Selected audio input device identifier
+    pub input_device_id: Option<String>,
+    /// Selected audio output device identifier
+    pub output_device_id: Option<String>,
 }
 
 impl Default for Settings {
@@ -44,6 +52,10 @@ impl Default for Settings {
             notifications_enabled: true,
             notifications_hide_content: false,
             activity_tracking: true,
+            mic_volume: 0.8,
+            speaker_volume: 0.8,
+            input_device_id: None,
+            output_device_id: None,
         }
     }
 }

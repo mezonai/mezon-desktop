@@ -78,7 +78,8 @@ impl DevicePage {
                 }
                 Err(_) => {
                     this.update(cx, |this, view_cx| {
-                        this.device_error = Some("Failed to load devices after multiple attempts".into());
+                        this.device_error =
+                            Some("Failed to load devices after multiple attempts".into());
                         this.loading = false;
                         view_cx.notify();
                     })
