@@ -201,11 +201,7 @@ impl AbridgedTcpAdapter {
                 mezon_proto::realtime::envelope::Message::Error(err) => err.code as u32,
                 _ => 0,
             });
-            tracing::info!(
-                "📨 Envelope decoded: cid={} code={}",
-                envelope.cid,
-                code
-            );
+            tracing::info!("📨 Envelope decoded: cid={} code={}", envelope.cid, code);
             handlers.trigger_message(envelope.cid as u16, code, payload.to_vec());
         } else {
             let cid = decode_cid_field(payload).unwrap_or(0);
@@ -432,7 +428,7 @@ impl TransportAdapter for AbridgedTcpAdapter {
 
     async fn send(&mut self, message: Vec<u8>) -> Result<()> {
         tracing::info!("📤 send() called: {} bytes", message.len());
-        tracing::info!("📤 Raw msg hex: {:02x?}", &message[..message.len().min(64)]);
+        tracing::info!("📤 Raw msg hex FULL: {:02x?}", message);
 
         if !self.is_open() {
             tracing::warn!("📤 send(): connection NOT open, rejecting");

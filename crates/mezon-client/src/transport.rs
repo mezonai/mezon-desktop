@@ -6,6 +6,7 @@ use crate::transport_adapter::TransportAdapter;
 use anyhow::{Context, Result};
 use mezon_proto::{api, realtime};
 use prost::Message;
+use prost::bytes::BufMut;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
