@@ -4348,7 +4348,9 @@ impl MezonTransport {
         let cid = self.generate_cid();
 
         let body = api::UpdateAccountRequest {
-            display_name: display_name.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            display_name: display_name
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
             avatar_url: avatar_url.filter(|s| !s.is_empty()).map(|s| s.to_string()),
             about_me: about_me.filter(|s| !s.is_empty()).map(|s| s.to_string()),
             ..Default::default()

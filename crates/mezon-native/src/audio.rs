@@ -64,10 +64,7 @@ impl MicCapture {
     ///
     /// RMS levels are computed per-buffer and sent through `sender`.
     /// Returns an error if the device cannot be found or the stream fails to open.
-    pub fn start(
-        device_id: &str,
-        sender: Sender<f32>,
-    ) -> Result<Self, MicCaptureError> {
+    pub fn start(device_id: &str, sender: Sender<f32>) -> Result<Self, MicCaptureError> {
         let host = cpal::default_host();
 
         let mut devices = host
@@ -77,9 +74,12 @@ impl MicCapture {
             .find(|d| matches!(d.id(), Ok(id) if id.to_string() == device_id))
             .ok_or_else(|| MicCaptureError::DeviceNotFound(device_id.to_string()))?;
 
-        let config = device
-            .default_input_config()
-            .map_err(|e: cpal::DefaultStreamConfigError| MicCaptureError::ConfigError(e.to_string()))?;
+        let config =
+            device
+                .default_input_config()
+                .map_err(|e: cpal::DefaultStreamConfigError| {
+                    MicCaptureError::ConfigError(e.to_string())
+                })?;
 
         let err_fn = move |err| {
             tracing::warn!("Audio stream error: {err}");
