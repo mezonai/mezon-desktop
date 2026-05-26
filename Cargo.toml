@@ -8,6 +8,7 @@ members = [
     "crates/mezon-native",
     "crates/mezon-updater",
     "crates/mezon-proto",
+    "crates/mezon-i18n",
     # Vendored GPUI crates
     "crates/vendor/gpui",
     "crates/vendor/gpui_macros",
@@ -85,6 +86,7 @@ mezon-store   = { path = "crates/mezon-store" }
 mezon-native  = { path = "crates/mezon-native" }
 mezon-proto   = { path = "crates/mezon-proto" }
 mezon-updater = { path = "crates/mezon-updater" }
+mezon-i18n    = { path = "crates/mezon-i18n" }
 
 # ---------- Async runtime ----------
 tokio                = { version = "1", features = ["full"] }

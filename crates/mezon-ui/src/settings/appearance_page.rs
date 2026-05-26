@@ -114,6 +114,7 @@ fn theme_swatch(
 impl Render for AppearancePage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let current_theme = self.settings.read(cx).theme.clone();
+        let locale = self.settings.read(cx).language.clone();
         let theme = match current_theme.as_str() {
             "light" => Theme::light(),
             "purple" => Theme::purple(),
@@ -123,12 +124,12 @@ impl Render for AppearancePage {
         };
         let settings = self.settings.clone();
 
-        let themes: [(&str, &str, Rgba); 5] = [
-            ("dark", "Dark", rgba(49, 51, 56, 1.0)),
-            ("light", "Light", rgba(255, 255, 255, 1.0)),
-            ("purple", "Purple", rgba(120, 90, 200, 1.0)),
-            ("abyss", "Abyss", rgba(13, 15, 22, 1.0)),
-            ("red_dark", "Red Dark", rgba(210, 80, 80, 1.0)),
+        let themes = [
+            ("dark", mezon_i18n::t(&locale, "appThemeSetting.fields.dark"), rgba(49, 51, 56, 1.0)),
+            ("light", mezon_i18n::t(&locale, "appThemeSetting.fields.light"), rgba(255, 255, 255, 1.0)),
+            ("purple", mezon_i18n::t(&locale, "appThemeSetting.fields.purpleHaze"), rgba(120, 90, 200, 1.0)),
+            ("abyss", mezon_i18n::t(&locale, "appThemeSetting.fields.abyssDark"), rgba(13, 15, 22, 1.0)),
+            ("red_dark", mezon_i18n::t(&locale, "appThemeSetting.fields.redDark"), rgba(210, 80, 80, 1.0)),
         ];
 
         let sample_msgs = [
@@ -155,7 +156,7 @@ impl Render for AppearancePage {
         v_flex()
             .gap_6()
             .child(
-                Label::new("Appearance")
+                Label::new(mezon_i18n::t(&locale, "setting.appSettings.appearance"))
                     .text_xl()
                     .text_color(theme.text_primary)
                     .font_weight(FontWeight::SEMIBOLD),

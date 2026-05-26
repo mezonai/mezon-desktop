@@ -25,6 +25,8 @@ pub struct Settings {
     pub window_bounds: Option<[i32; 4]>,
     /// UI theme: "dark" | "light" | "system"
     pub theme: String,
+    /// UI language/locale code: "en" | "vi"
+    pub language: String,
     /// Enable desktop notifications
     pub notifications_enabled: bool,
     /// Hide message content in push notifications
@@ -49,6 +51,7 @@ impl Default for Settings {
             zoom_factor: 1.0,
             window_bounds: None,
             theme: "dark".to_string(),
+            language: "en".to_string(),
             notifications_enabled: true,
             notifications_hide_content: false,
             activity_tracking: true,

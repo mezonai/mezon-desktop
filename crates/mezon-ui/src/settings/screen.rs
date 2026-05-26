@@ -91,6 +91,7 @@ impl SettingsScreen {
 impl Render for SettingsScreen {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = resolve_theme(&self.settings.read(cx).theme);
+        let locale = self.settings.read(cx).language.clone();
         let navigate = self.navigate.clone();
         let api = self.api.clone();
         let auth_state = self.auth_state.clone();
@@ -184,7 +185,7 @@ impl Render for SettingsScreen {
 
         fn nav_item(
             id: &str,
-            label: &str,
+            label: String,
             is_active: bool,
             theme: &Theme,
             navigate: NavigateFn,
@@ -218,7 +219,7 @@ impl Render for SettingsScreen {
                     el.bg(active_bg).text_color(theme.text_primary)
                 })
                 .when(!is_active, |el| el.text_color(theme.text_primary))
-                .child(label.to_string())
+                .child(label)
                 .on_click(move |_, _, cx| {
                     nav(&path, cx);
                 })
@@ -243,7 +244,7 @@ impl Render for SettingsScreen {
                             .gap_2()
                             .px_3()
                             .py_3()
-                            .child(Label::new("Settings").text_color(theme.text_primary)),
+                            .child(Label::new(mezon_i18n::t(&locale, "common.settings")).text_color(theme.text_primary)),
                     )
                     .child(
                         div().flex_1().px_2().py_2().child(
@@ -257,11 +258,11 @@ impl Render for SettingsScreen {
                                         .text_color(theme.text_primary)
                                         .px_2()
                                         .py_1()
-                                        .child("ACCOUNT SETTINGS"),
+                                        .child(mezon_i18n::t(&locale, "setting.accountSettings.title").to_uppercase()),
                                 )
                                 .child(nav_item(
                                     "account-page",
-                                    "Account",
+                                    mezon_i18n::t(&locale, "setting.accountSettings.account"),
                                     is_account,
                                     &theme,
                                     navigate.clone(),
@@ -269,7 +270,7 @@ impl Render for SettingsScreen {
                                 ))
                                 .child(nav_item(
                                     "device-page",
-                                    "Devices",
+                                    mezon_i18n::t(&locale, "setting.accountSettings.devices"),
                                     is_device,
                                     &theme,
                                     navigate.clone(),
@@ -277,7 +278,7 @@ impl Render for SettingsScreen {
                                 ))
                                 .child(nav_item(
                                     "profile-page",
-                                    "Profiles",
+                                    mezon_i18n::t(&locale, "setting.accountSettings.profiles"),
                                     is_profile,
                                     &theme,
                                     navigate.clone(),
@@ -292,11 +293,11 @@ impl Render for SettingsScreen {
                                         .px_2()
                                         .py_1()
                                         .mt_4()
-                                        .child("APP SETTINGS"),
+                                        .child(mezon_i18n::t(&locale, "setting.appSettings.title").to_uppercase()),
                                 )
                                 .child(nav_item(
                                     "appearance-page",
-                                    "Appearance",
+                                    mezon_i18n::t(&locale, "setting.appSettings.appearance"),
                                     is_appearance,
                                     &theme,
                                     navigate.clone(),
@@ -304,7 +305,7 @@ impl Render for SettingsScreen {
                                 ))
                                 .child(nav_item(
                                     "activity-page",
-                                    "Activity",
+                                    mezon_i18n::t(&locale, "setting.appSettings.activity"),
                                     is_activity,
                                     &theme,
                                     navigate.clone(),
@@ -312,7 +313,7 @@ impl Render for SettingsScreen {
                                 ))
                                 .child(nav_item(
                                     "notifications-page",
-                                    "Notifications",
+                                    mezon_i18n::t(&locale, "setting.appSettings.notifications"),
                                     is_notifications,
                                     &theme,
                                     navigate.clone(),
@@ -320,7 +321,7 @@ impl Render for SettingsScreen {
                                 ))
                                 .child(nav_item(
                                     "language-page",
-                                    "Language",
+                                    mezon_i18n::t(&locale, "setting.appSettings.language"),
                                     is_language,
                                     &theme,
                                     navigate.clone(),
@@ -328,7 +329,7 @@ impl Render for SettingsScreen {
                                 ))
                                 .child(nav_item(
                                     "voice-page",
-                                    "Voice",
+                                    mezon_i18n::t(&locale, "setting.appSettings.voice"),
                                     is_voice,
                                     &theme,
                                     navigate.clone(),
@@ -336,7 +337,7 @@ impl Render for SettingsScreen {
                                 ))
                                 .child(nav_item(
                                     "advanced-page",
-                                    "Advanced",
+                                    mezon_i18n::t(&locale, "setting.appSettings.advanced"),
                                     is_advanced,
                                     &theme,
                                     navigate.clone(),
@@ -350,7 +351,7 @@ impl Render for SettingsScreen {
                             v_flex()
                                 .child(
                                     GpuiButton::new("logout-btn")
-                                        .label("Log Out")
+                                        .label(mezon_i18n::t(&locale, "setting.logOut"))
                                         .text_color(theme.status_dnd)
                                         .ghost()
                                         .w_full()

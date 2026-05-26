@@ -1,0 +1,7 @@
+[package]
+name = "mezon-i18n"
+version.workspace = true
+edition = "2024"
+
+[dependencies]
+serde_json.workspace = true
