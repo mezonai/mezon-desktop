@@ -1,6 +1,6 @@
 use crate::theme::Theme;
-use gpui::{Context, Entity, FontWeight, Rgba, Window, div, prelude::*};
-use gpui_component::{h_flex, label::Label, v_flex};
+use gpui::{Context, Entity, FontWeight, Rgba, Window, div, prelude::*, px};
+use gpui_component::{Icon, IconName, h_flex, label::Label, v_flex};
 use mezon_store::Settings;
 
 pub struct AppearancePage {
@@ -13,10 +13,114 @@ impl AppearancePage {
     }
 }
 
+fn rgba(r: u8, g: u8, b: u8, a: f32) -> Rgba {
+    Rgba {
+        r: r as f32 / 255.0,
+        g: g as f32 / 255.0,
+        b: b as f32 / 255.0,
+        a,
+    }
+}
+
+fn message_row(
+    avatar_bg: Rgba,
+    display_name: String,
+    timestamp: String,
+    message: String,
+    theme: Theme,
+) -> impl IntoElement {
+    h_flex()
+        .gap_3()
+        .child(
+            div()
+                .size(px(45.0))
+                .rounded_full()
+                .bg(avatar_bg)
+                .flex_none(),
+        )
+        .child(
+            v_flex()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Label::new(display_name)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.text_primary),
+                        )
+                        .child(Label::new(timestamp).text_xs().text_color(theme.text_muted)),
+                )
+                .child(Label::new(message).text_color(theme.text_secondary)),
+        )
+}
+
+fn theme_swatch(
+    key: String,
+    label: String,
+    swatch_color: Rgba,
+    is_selected: bool,
+    theme: Theme,
+    settings: Entity<Settings>,
+) -> impl IntoElement {
+    div()
+        .id(key.clone())
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_2()
+        .cursor_pointer()
+        .on_click(move |_, _, cx| {
+            settings.update(cx, |s, _| {
+                s.theme = key.clone();
+                s.save_sync();
+            });
+        })
+        .child(
+            div()
+                .relative()
+                .child(
+                    div()
+                        .size(px(60.0))
+                        .rounded_full()
+                        .bg(swatch_color)
+                        .border_2()
+                        .border_color(if is_selected {
+                            theme.brand
+                        } else {
+                            theme.border
+                        })
+                        .when(is_selected, |el| el.shadow_lg()),
+                )
+                .when(is_selected, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .rounded_full()
+                            .bg(theme.brand)
+                            .p(px(2.0))
+                            .child(
+                                Icon::new(IconName::Check)
+                                    .size_3()
+                                    .text_color(rgba(255, 255, 255, 1.0)),
+                            ),
+                    )
+                }),
+        )
+        .child(Label::new(label).text_sm().text_color(theme.text_primary))
+}
+
 impl Render for AppearancePage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
         let current_theme = self.settings.read(cx).theme.clone();
+        let theme = match current_theme.as_str() {
+            "light" => Theme::light(),
+            "purple" => Theme::purple(),
+            "abyss" => Theme::abyss(),
+            "red_dark" => Theme::red_dark(),
+            _ => Theme::dark(),
+        };
         let settings = self.settings.clone();
 
         let themes: [(&str, &str, Rgba); 5] = [
@@ -27,70 +131,70 @@ impl Render for AppearancePage {
             ("red_dark", "Red Dark", rgba(210, 80, 80, 1.0)),
         ];
 
+        let sample_msgs = [
+            (
+                rgba(88, 101, 242, 1.0),
+                "Alice",
+                "Today at 2:30 PM",
+                "Hey, have you seen the new theme?",
+            ),
+            (
+                rgba(67, 181, 129, 1.0),
+                "Bob",
+                "Today at 2:31 PM",
+                "Yeah! The dark mode looks great!",
+            ),
+            (
+                rgba(240, 178, 50, 1.0),
+                "Carol",
+                "Today at 2:32 PM",
+                "Look at me I'm a beautiful butterfly",
+            ),
+        ];
+
         v_flex()
             .gap_6()
             .child(
                 Label::new("Appearance")
                     .text_xl()
                     .text_color(theme.text_primary)
-                    .font_weight(FontWeight::BOLD),
+                    .font_weight(FontWeight::SEMIBOLD),
             )
-            .child(h_flex().flex_wrap().gap_3().children(themes.map(
+            .child(
+                v_flex()
+                    .rounded_lg()
+                    .bg(theme.bg_primary)
+                    .p_5()
+                    .gap_5()
+                    .overflow_hidden()
+                    .children(sample_msgs.map(|(bg, name, ts, msg)| {
+                        message_row(
+                            bg,
+                            name.to_string(),
+                            ts.to_string(),
+                            msg.to_string(),
+                            theme.clone(),
+                        )
+                    })),
+            )
+            .child(
+                Label::new("Theme")
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text_primary),
+            )
+            .child(h_flex().flex_wrap().gap(px(30.0)).children(themes.map(
                 |(key, label, swatch_color)| {
                     let is_selected = current_theme == key;
-                    let settings = settings.clone();
-                    let key = key.to_string();
-                    let label = label.to_string();
-                    div()
-                        .id(key.clone())
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .gap_2()
-                        .p_3()
-                        .rounded_lg()
-                        .bg(if is_selected {
-                            theme.bg_primary
-                        } else {
-                            theme.bg_tertiary
-                        })
-                        .border_1()
-                        .border_color(if is_selected {
-                            theme.brand
-                        } else {
-                            theme.border
-                        })
-                        .cursor_pointer()
-                        .on_click(move |_, _, cx| {
-                            settings.update(cx, |s, _| {
-                                s.theme = key.clone();
-                                s.save_sync();
-                            });
-                        })
-                        .child(
-                            div()
-                                .size_12()
-                                .rounded_md()
-                                .bg(swatch_color)
-                                .border_1()
-                                .border_color(theme.border),
-                        )
-                        .child(Label::new(label).text_sm().text_color(theme.text_primary))
+                    theme_swatch(
+                        key.to_string(),
+                        label.to_string(),
+                        swatch_color,
+                        is_selected,
+                        theme.clone(),
+                        settings.clone(),
+                    )
                 },
             )))
-            .child(
-                Label::new("Restart required for theme to apply.")
-                    .text_sm()
-                    .text_color(theme.text_muted),
-            )
-    }
-}
-
-fn rgba(r: u8, g: u8, b: u8, a: f32) -> Rgba {
-    Rgba {
-        r: r as f32 / 255.0,
-        g: g as f32 / 255.0,
-        b: b as f32 / 255.0,
-        a,
     }
 }

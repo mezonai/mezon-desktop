@@ -22,7 +22,7 @@ use super::notifications_page::NotificationsPage;
 use super::profile_page::ProfilePage;
 use super::voice_page::VoicePage;
 use crate::components::NavigateFn;
-use crate::theme::Theme;
+use crate::theme::{Theme, resolve_theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
@@ -60,13 +60,15 @@ impl SettingsScreen {
         auth_state: Entity<AuthState>,
         api: Arc<AppApi>,
         navigate: NavigateFn,
-        _cx: &mut Context<Self>,
+        settings: Entity<Settings>,
+        cx: &mut Context<Self>,
     ) -> Self {
+        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
         Self {
             navigate,
             auth_state,
             api,
-            settings: _cx.new(|_| Settings::load_sync()),
+            settings,
             current_page: SettingsPage::Account,
             account_page: None,
             profile_page: None,
@@ -88,7 +90,7 @@ impl SettingsScreen {
 
 impl Render for SettingsScreen {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        let theme = resolve_theme(&self.settings.read(cx).theme);
         let navigate = self.navigate.clone();
         let api = self.api.clone();
         let auth_state = self.auth_state.clone();
@@ -98,17 +100,22 @@ impl Render for SettingsScreen {
         match page {
             SettingsPage::Account => {
                 self.account_page.get_or_insert_with(|| {
-                    cx.new(|cx| AccountPage::new(api.clone(), navigate.clone(), cx))
+                    let settings = self.settings.clone();
+                    cx.new(|cx| AccountPage::new(api.clone(), navigate.clone(), settings, cx))
                 });
             }
             SettingsPage::Profile => {
-                self.profile_page
-                    .get_or_insert_with(|| cx.new(|cx| ProfilePage::new(api.clone(), cx)));
+                let settings = self.settings.clone();
+                self.profile_page.get_or_insert_with(|| {
+                    cx.new(|cx| ProfilePage::new(api.clone(), settings, cx))
+                });
             }
             SettingsPage::Device => {
                 let just_switched = self.prev_page != SettingsPage::Device;
                 if self.device_page.is_none() {
-                    self.device_page = Some(cx.new(|cx| DevicePage::new(api.clone(), cx)));
+                    let settings = self.settings.clone();
+                    self.device_page =
+                        Some(cx.new(|cx| DevicePage::new(api.clone(), settings, cx)));
                 } else if just_switched && let Some(device_entity) = &self.device_page {
                     device_entity.update(cx, |d, view_cx| d.refresh(view_cx));
                 }
@@ -132,8 +139,9 @@ impl Render for SettingsScreen {
                 });
             }
             SettingsPage::Language => {
+                let settings = self.settings.clone();
                 self.language_page
-                    .get_or_insert_with(|| cx.new(|_| LanguagePage));
+                    .get_or_insert_with(|| cx.new(|cx| LanguagePage::new(settings, cx)));
             }
             SettingsPage::Voice => {
                 self.voice_page.get_or_insert_with(|| {
@@ -185,6 +193,18 @@ impl Render for SettingsScreen {
             let id = id.to_string();
             let nav = navigate.clone();
             let path = path.to_string();
+            let active_bg = gpui::Rgba {
+                r: 233.0 / 255.0,
+                g: 233.0 / 255.0,
+                b: 233.0 / 255.0,
+                a: 0.08,
+            };
+            let hover_bg = gpui::Rgba {
+                r: 255.0 / 255.0,
+                g: 255.0 / 255.0,
+                b: 255.0 / 255.0,
+                a: 0.08,
+            };
             div()
                 .id(id)
                 .flex()
@@ -193,8 +213,9 @@ impl Render for SettingsScreen {
                 .px_2()
                 .py_1()
                 .cursor_pointer()
+                .hover(|s| s.bg(hover_bg))
                 .when(is_active, |el| {
-                    el.bg(theme.bg_primary).text_color(theme.text_primary)
+                    el.bg(active_bg).text_color(theme.text_primary)
                 })
                 .when(!is_active, |el| el.text_color(theme.text_primary))
                 .child(label.to_string())
@@ -231,9 +252,9 @@ impl Render for SettingsScreen {
                                 // ACCOUNT SETTINGS section
                                 .child(
                                     div()
-                                        .text_xs()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(theme.text_muted)
+                                        .text_sm()
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(theme.text_primary)
                                         .px_2()
                                         .py_1()
                                         .child("ACCOUNT SETTINGS"),
@@ -265,9 +286,9 @@ impl Render for SettingsScreen {
                                 // APP SETTINGS section
                                 .child(
                                     div()
-                                        .text_xs()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(theme.text_muted)
+                                        .text_sm()
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(theme.text_primary)
                                         .px_2()
                                         .py_1()
                                         .mt_4()
@@ -387,9 +408,12 @@ impl Render for SettingsScreen {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scrollbar()
-                    .p_6()
+                    .pt(px(94.0))
+                    .pb(px(28.0))
+                    .pl(px(40.0))
+                    .pr(px(10.0))
                     .bg(theme.bg_secondary)
-                    .child(content),
+                    .child(div().max_w(px(740.0)).child(content)),
             )
             .child(
                 div()

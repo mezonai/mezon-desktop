@@ -2,18 +2,19 @@ use std::sync::Arc;
 
 use gpui::{App, ClickEvent, Context, Entity, FontWeight, Window, div, prelude::*};
 use mezon_client::{AppApi, MezonClient};
-use mezon_store::AuthState;
+use mezon_store::{AuthState, Settings};
 
 use crate::chat_layout::ChatLayout;
 use crate::components::primitives::{Button, Icon, IconName};
 use crate::login_view::LoginView;
 use crate::router::{Route, Router};
 use crate::settings::SettingsScreen;
-use crate::theme::Theme;
+use crate::theme::{Theme, resolve_theme};
 use crate::title_bar::TitleBar;
 
 pub struct RootView {
     title_bar: Entity<TitleBar>,
+    settings: Entity<Settings>,
     auth_state: Entity<AuthState>,
     login_view: Entity<LoginView>,
     router: Router,
@@ -28,11 +29,15 @@ impl RootView {
         auth_state: Entity<AuthState>,
         client: Arc<MezonClient>,
         api: Arc<AppApi>,
+        settings: Entity<Settings>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
+
         let login_view = cx.new({
             let auth_state = auth_state.clone();
-            move |cx| LoginView::new(client, auth_state, cx)
+            let settings = settings.clone();
+            move |cx| LoginView::new(client, auth_state, settings, cx)
         });
 
         let router = Router::new();
@@ -49,21 +54,43 @@ impl RootView {
         };
 
         let router_for_chat = router.clone();
-        let chat_layout = cx.new(|cx| {
-            ChatLayout::new(
-                router_for_chat,
-                auth_state.clone(),
-                api.clone(),
-                navigate.clone(),
-                cx,
-            )
+        let auth_state_for_chat = auth_state.clone();
+        let api_for_chat = api.clone();
+        let navigate_for_chat = navigate.clone();
+        let settings_for_chat = settings.clone();
+        let chat_layout = cx.new({
+            let settings = settings_for_chat;
+            move |cx| {
+                ChatLayout::new(
+                    router_for_chat,
+                    auth_state_for_chat.clone(),
+                    api_for_chat.clone(),
+                    navigate_for_chat.clone(),
+                    settings.clone(),
+                    cx,
+                )
+            }
         });
 
-        let settings_screen =
-            cx.new(|cx| SettingsScreen::new(auth_state.clone(), api.clone(), navigate.clone(), cx));
+        let auth_state_for_settings = auth_state.clone();
+        let api_for_settings = api.clone();
+        let navigate_for_settings = navigate.clone();
+        let settings_screen = cx.new({
+            let settings = settings.clone();
+            move |cx| {
+                SettingsScreen::new(
+                    auth_state_for_settings.clone(),
+                    api_for_settings.clone(),
+                    navigate_for_settings.clone(),
+                    settings.clone(),
+                    cx,
+                )
+            }
+        });
 
         Self {
             title_bar,
+            settings,
             auth_state,
             login_view,
             router,
@@ -76,7 +103,7 @@ impl RootView {
 
 impl Render for RootView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        let theme = resolve_theme(&self.settings.read(cx).theme);
         let state = self.auth_state.read(cx).clone();
 
         let content: gpui::AnyElement = match state {

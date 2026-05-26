@@ -1,22 +1,30 @@
-use crate::theme::Theme;
-use gpui::{Context, MouseButton, Window, div, prelude::*, rgb};
+use crate::theme::resolve_theme;
+use gpui::{Context, Entity, MouseButton, Window, div, prelude::*, rgb};
+use mezon_store::Settings;
 
 /// Custom frameless title bar.
 pub struct TitleBar {
     title: String,
+    settings: Entity<Settings>,
 }
 
 impl TitleBar {
-    pub fn new(title: impl Into<String>) -> Self {
+    pub fn new(
+        title: impl Into<String>,
+        settings: Entity<Settings>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
         Self {
             title: title.into(),
+            settings,
         }
     }
 }
 
 impl Render for TitleBar {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = resolve_theme(&self.settings.read(cx).theme);
         let title = self.title.clone();
 
         div()

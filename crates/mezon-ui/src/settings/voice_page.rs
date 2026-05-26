@@ -1,7 +1,7 @@
-use crate::theme::Theme;
+use crate::theme::{Theme, resolve_theme};
 use gpui::{
-    App, ClickEvent, Context, Entity, FontWeight, Subscription, Task, WeakEntity, Window, div,
-    prelude::*, px,
+    App, ClickEvent, Context, Entity, FontWeight, Subscription, Task, WeakEntity, Window, deferred,
+    div, prelude::*, px,
 };
 use gpui_component::{
     h_flex,
@@ -34,6 +34,7 @@ pub struct VoicePage {
 
 impl VoicePage {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
+        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
         let mic_vol = settings.read(cx).mic_volume;
         let speaker_vol = settings.read(cx).speaker_volume;
 
@@ -125,7 +126,7 @@ impl VoicePage {
 
 impl Render for VoicePage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        let theme = resolve_theme(&self.settings.read(cx).theme);
 
         let mic_vol_pct = (self.mic_slider.read(cx).value().end() * 100.0) as u32;
         let speaker_vol_pct = (self.speaker_slider.read(cx).value().end() * 100.0) as u32;
@@ -148,7 +149,7 @@ impl Render for VoicePage {
                 Label::new("Voice & Video")
                     .text_xl()
                     .text_color(theme.text_primary)
-                    .font_weight(FontWeight::BOLD),
+                    .font_weight(FontWeight::SEMIBOLD),
             )
             .child(
                 div()
@@ -411,10 +412,12 @@ impl VoicePage {
                     }),
             )
             .when(is_open && !is_empty, |el| {
-                el.child(
+                el.child(deferred(
                     div()
-                        .flex_col()
-                        .mt_1()
+                        .absolute()
+                        .top(px(36.0))
+                        .left_0()
+                        .right_0()
                         .rounded_lg()
                         .bg(theme.bg_primary)
                         .border_1()
@@ -458,7 +461,7 @@ impl VoicePage {
                                     });
                                 })
                         })),
-                )
+                ))
             })
     }
 

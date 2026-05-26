@@ -184,7 +184,7 @@ impl From<&ThemeColor> for Theme {
         Theme {
             mode: ThemeMode::default(),
             transparent: Hsla::transparent_black(),
-            font_family: ".SystemUIFont".into(),
+            font_family: ".MezonSans".into(),
             font_size: px(16.),
             mono_font_family: if cfg!(target_os = "macos") {
                 // https://en.wikipedia.org/wiki/Menlo_(typeface)

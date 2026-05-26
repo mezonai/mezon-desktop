@@ -15,10 +15,10 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
 };
 use mezon_client::{MezonClient, Session, keychain};
-use mezon_store::{AuthState, LoginMethod};
+use mezon_store::{AuthState, LoginMethod, Settings};
 
 use crate::components::compositions::{FormField, OtpInput};
-use crate::theme::Theme;
+use crate::theme::resolve_theme;
 
 // ─── LoginView state ──────────────────────────────────────────────────────────
 
@@ -27,6 +27,8 @@ pub struct LoginView {
     client: Arc<MezonClient>,
     /// Handle to the global auth state so we can transition it on success.
     auth_state: Entity<AuthState>,
+    /// Handle to settings for theme resolution.
+    settings: Entity<Settings>,
 
     /// Which login mode is active.
     method: LoginMethod,
@@ -57,11 +59,14 @@ impl LoginView {
     pub fn new(
         client: Arc<MezonClient>,
         auth_state: Entity<AuthState>,
-        _cx: &mut Context<Self>,
+        settings: Entity<Settings>,
+        cx: &mut Context<Self>,
     ) -> Self {
+        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
         Self {
             client,
             auth_state,
+            settings,
             method: LoginMethod::Otp,
             otp_step: 0,
             otp_req_id: String::new(),
@@ -299,7 +304,7 @@ impl LoginView {
 impl Render for LoginView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_fields(window, cx);
-        let theme = Theme::dark();
+        let theme = resolve_theme(&self.settings.read(cx).theme);
 
         // Outer centered column.
         let root = div()

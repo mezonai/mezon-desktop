@@ -1,9 +1,9 @@
 use gpui::{App, ClickEvent, Context, Entity, SharedString, Window, div, prelude::*, px};
-use mezon_store::{ChannelList, ClanList};
+use mezon_store::{ChannelList, ClanList, Settings};
 
 use crate::components::compositions::channel_row::ChannelRow;
 use crate::components::primitives::{Icon, IconName};
-use crate::theme::Theme;
+use crate::theme::resolve_theme;
 
 fn on_channel_click(
     channel_list: Entity<ChannelList>,
@@ -30,6 +30,7 @@ pub struct ChannelSidebar {
     clan_list: Entity<ClanList>,
     channel_list: Entity<ChannelList>,
     on_navigate: Option<crate::components::NavigateFn>,
+    settings: Entity<Settings>,
     collapsed: std::collections::HashSet<String>,
 }
 
@@ -38,14 +39,17 @@ impl ChannelSidebar {
         clan_list: Entity<ClanList>,
         channel_list: Entity<ChannelList>,
         on_navigate: Option<crate::components::NavigateFn>,
+        settings: Entity<Settings>,
         cx: &mut Context<Self>,
     ) -> Self {
         let _ = cx.observe(&clan_list, |_, _, cx| cx.notify());
         let _ = cx.observe(&channel_list, |_, _, cx| cx.notify());
+        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
         Self {
             clan_list,
             channel_list,
             on_navigate,
+            settings,
             collapsed: std::collections::HashSet::new(),
         }
     }
@@ -53,7 +57,7 @@ impl ChannelSidebar {
 
 impl Render for ChannelSidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        let theme = resolve_theme(&self.settings.read(cx).theme);
         let clans = self.clan_list.read(cx);
         let channels = self.channel_list.read(cx);
 

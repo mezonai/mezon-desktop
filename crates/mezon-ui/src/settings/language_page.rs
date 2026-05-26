@@ -1,21 +1,29 @@
-use crate::theme::Theme;
-use gpui::{Context, FontWeight, Window, div, prelude::*};
+use crate::theme::resolve_theme;
+use gpui::{Context, Entity, FontWeight, Window, div, prelude::*};
 use gpui_component::{Icon, IconName, h_flex, label::Label, v_flex};
+use mezon_store::Settings;
 
-pub struct LanguagePage;
+pub struct LanguagePage {
+    settings: Entity<Settings>,
+}
 
-impl LanguagePage {}
+impl LanguagePage {
+    pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
+        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
+        Self { settings }
+    }
+}
 
 impl Render for LanguagePage {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = resolve_theme(&self.settings.read(cx).theme);
         v_flex()
             .gap_6()
             .child(
                 Label::new("Language")
                     .text_xl()
                     .text_color(theme.text_primary)
-                    .font_weight(FontWeight::BOLD),
+                    .font_weight(FontWeight::SEMIBOLD),
             )
             .child(
                 Label::new("Select your language")

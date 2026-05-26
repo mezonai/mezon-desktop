@@ -15,8 +15,9 @@ use gpui_component::{
     v_flex,
 };
 use mezon_client::AppApi;
+use mezon_store::Settings;
 
-use crate::theme::Theme;
+use crate::theme::{Theme, resolve_theme};
 use crate::util::{check_connection, retry};
 
 struct ProfileState {
@@ -33,6 +34,7 @@ struct ProfileState {
 
 pub struct ProfilePage {
     api: Arc<AppApi>,
+    settings: Entity<Settings>,
     profile: Option<ProfileState>,
     display_name_input: Option<Entity<InputState>>,
     about_me_input: Option<Entity<InputState>>,
@@ -45,7 +47,8 @@ pub struct ProfilePage {
 }
 
 impl ProfilePage {
-    pub fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
+    pub fn new(api: Arc<AppApi>, settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
+        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
         let api_clone = api.clone();
         let fetch_task = cx.spawn(async move |this, cx| {
             if check_connection(cx.background_executor(), &api_clone)
@@ -114,6 +117,7 @@ impl ProfilePage {
 
         Self {
             api,
+            settings,
             profile: None,
             display_name_input: None,
             about_me_input: None,
@@ -295,7 +299,7 @@ impl ProfilePage {
 
 impl Render for ProfilePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        let theme = resolve_theme(&self.settings.read(cx).theme);
 
         if self.profile.as_ref().is_some_and(|p| !p.loading) && self.display_name_input.is_none() {
             self.init_inputs(window, cx);
@@ -308,7 +312,7 @@ impl Render for ProfilePage {
                     Label::new("Profile")
                         .text_xl()
                         .text_color(theme.text_primary)
-                        .font_weight(FontWeight::BOLD),
+                        .font_weight(FontWeight::SEMIBOLD),
                 )
                 .child(Label::new("Connection failed").text_color(theme.text_muted))
                 .into_any_element();
@@ -321,7 +325,7 @@ impl Render for ProfilePage {
                     Label::new("Profile")
                         .text_xl()
                         .text_color(theme.text_primary)
-                        .font_weight(FontWeight::BOLD),
+                        .font_weight(FontWeight::SEMIBOLD),
                 )
                 .child(Label::new("Failed to load profile data").text_color(theme.text_muted))
                 .into_any_element();
@@ -334,7 +338,7 @@ impl Render for ProfilePage {
                     Label::new("Profile")
                         .text_xl()
                         .text_color(theme.text_primary)
-                        .font_weight(FontWeight::BOLD),
+                        .font_weight(FontWeight::SEMIBOLD),
                 )
                 .child(Label::new("Loading profile...").text_color(theme.text_muted))
                 .into_any_element();
@@ -461,7 +465,7 @@ impl ProfilePage {
                 Label::new("Profile")
                     .text_xl()
                     .text_color(theme.text_primary)
-                    .font_weight(FontWeight::BOLD),
+                    .font_weight(FontWeight::SEMIBOLD),
             )
             .child(
                 h_flex()
@@ -613,7 +617,7 @@ impl ProfilePage {
                 Label::new("Preview")
                     .text_xl()
                     .text_color(theme.text_primary)
-                    .font_weight(FontWeight::BOLD),
+                    .font_weight(FontWeight::SEMIBOLD),
             )
             .child(
                 v_flex()

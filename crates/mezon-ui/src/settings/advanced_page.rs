@@ -1,4 +1,4 @@
-use crate::theme::Theme;
+use crate::theme::resolve_theme;
 use gpui::{Context, Entity, FontWeight, Window, prelude::*};
 use gpui_component::{h_flex, label::Label, switch::Switch, v_flex};
 use mezon_store::Settings;
@@ -8,14 +8,15 @@ pub struct AdvancedPage {
 }
 
 impl AdvancedPage {
-    pub fn new(settings: Entity<Settings>, _cx: &mut Context<Self>) -> Self {
+    pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
+        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
         Self { settings }
     }
 }
 
 impl Render for AdvancedPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        let theme = resolve_theme(&self.settings.read(cx).theme);
         let hw_accel = self.settings.read(cx).hardware_acceleration;
         let settings = self.settings.clone();
 
@@ -25,7 +26,7 @@ impl Render for AdvancedPage {
                 Label::new("Advanced")
                     .text_xl()
                     .text_color(theme.text_primary)
-                    .font_weight(FontWeight::BOLD),
+                    .font_weight(FontWeight::SEMIBOLD),
             )
             .child(
                 v_flex()

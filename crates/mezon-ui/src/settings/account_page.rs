@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{Context, FontWeight, SharedString, Task, Window, div, prelude::*, px};
+use gpui::{Context, Entity, FontWeight, SharedString, Task, Window, div, prelude::*, px};
 use gpui_component::{
     Sizable, Size,
     avatar::Avatar,
@@ -12,9 +12,10 @@ use gpui_component::{
     v_flex,
 };
 use mezon_client::AppApi;
+use mezon_store::Settings;
 
 use crate::components::NavigateFn;
-use crate::theme::Theme;
+use crate::theme::resolve_theme;
 use crate::util::{check_connection, retry};
 
 struct AccountState {
@@ -28,6 +29,7 @@ struct AccountState {
 
 pub struct AccountPage {
     navigate: NavigateFn,
+    settings: Entity<Settings>,
     account: Option<AccountState>,
     connection_ready: bool,
     connection_error: bool,
@@ -38,7 +40,13 @@ pub struct AccountPage {
 }
 
 impl AccountPage {
-    pub fn new(api: Arc<AppApi>, navigate: NavigateFn, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        api: Arc<AppApi>,
+        navigate: NavigateFn,
+        settings: Entity<Settings>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
         let api_clone = api.clone();
         let fetch_task = cx.spawn(async move |this, cx| {
             if check_connection(cx.background_executor(), &api_clone)
@@ -109,6 +117,7 @@ impl AccountPage {
 
         Self {
             navigate,
+            settings,
             account: None,
             connection_ready: false,
             connection_error: false,
@@ -137,7 +146,7 @@ impl AccountPage {
 
 impl Render for AccountPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        let theme = resolve_theme(&self.settings.read(cx).theme);
 
         if self.connection_error {
             return v_flex()
@@ -215,6 +224,7 @@ impl Render for AccountPage {
                     .rounded_lg()
                     .overflow_hidden()
                     .bg(theme.bg_primary)
+                    .shadow_md()
                     .child(
                         // Color Banner
                         div().h(px(100.0)).w_full().bg(theme.brand),
@@ -263,6 +273,7 @@ impl Render for AccountPage {
                     .rounded_lg()
                     .overflow_hidden()
                     .bg(theme.bg_primary)
+                    .shadow_md()
                     // Display Name
                     .child(
                         h_flex()
@@ -274,7 +285,11 @@ impl Render for AccountPage {
                                 h_flex()
                                     .gap_2()
                                     .child(
-                                        Label::new("Display Name").text_color(theme.text_primary),
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.text_primary)
+                                            .child("DISPLAY NAME"),
                                     )
                                     .child(
                                         Label::new(display_name.clone())
@@ -293,7 +308,13 @@ impl Render for AccountPage {
                             .child(
                                 h_flex()
                                     .gap_2()
-                                    .child(Label::new("Username").text_color(theme.text_primary))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.text_primary)
+                                            .child("USERNAME"),
+                                    )
                                     .child(
                                         Label::new(format!("@{}", account.username))
                                             .text_color(theme.text_muted),
@@ -311,7 +332,13 @@ impl Render for AccountPage {
                             .child(
                                 h_flex()
                                     .gap_2()
-                                    .child(Label::new("Email").text_color(theme.text_primary))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.text_primary)
+                                            .child("EMAIL"),
+                                    )
                                     .child(Label::new(email_display).text_color(theme.text_muted)),
                             ),
                     )
@@ -326,7 +353,13 @@ impl Render for AccountPage {
                             .child(
                                 h_flex()
                                     .gap_2()
-                                    .child(Label::new("Password").text_color(theme.text_primary))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.text_primary)
+                                            .child("PASSWORD"),
+                                    )
                                     .child(Label::new("••••••••••").text_color(theme.text_muted)),
                             )
                             .child(
@@ -350,7 +383,13 @@ impl Render for AccountPage {
                             .child(
                                 h_flex()
                                     .gap_2()
-                                    .child(Label::new("Phone").text_color(theme.text_primary))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.text_primary)
+                                            .child("PHONE"),
+                                    )
                                     .child(Label::new(phone_display).text_color(theme.text_muted)),
                             )
                             .child(

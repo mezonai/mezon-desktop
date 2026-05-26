@@ -1,11 +1,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{ClickEvent, Context, FontWeight, SharedString, Task, Window, div, prelude::*};
+use gpui::{ClickEvent, Context, Entity, FontWeight, SharedString, Task, Window, div, prelude::*};
 use gpui_component::{Icon, IconName, h_flex, label::Label, v_flex};
 use mezon_client::AppApi;
+use mezon_store::Settings;
 
-use crate::theme::Theme;
+use crate::theme::resolve_theme;
 use crate::util::{check_connection, retry};
 
 #[derive(Debug, Clone)]
@@ -21,6 +22,7 @@ struct DeviceViewModel {
 
 pub struct DevicePage {
     api: Arc<AppApi>,
+    settings: Entity<Settings>,
     devices: Option<Vec<DeviceViewModel>>,
     device_error: Option<SharedString>,
     loading: bool,
@@ -29,9 +31,11 @@ pub struct DevicePage {
 }
 
 impl DevicePage {
-    pub fn new(api: Arc<AppApi>, _cx: &mut Context<Self>) -> Self {
+    pub fn new(api: Arc<AppApi>, settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
+        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
         Self {
             api,
+            settings,
             devices: None,
             device_error: None,
             loading: true,
@@ -118,7 +122,7 @@ impl Render for DevicePage {
             self.fetch(cx);
         }
 
-        let theme = Theme::dark();
+        let theme = resolve_theme(&self.settings.read(cx).theme);
 
         v_flex()
             .gap_4()
@@ -126,7 +130,7 @@ impl Render for DevicePage {
                 Label::new("Devices")
                     .text_xl()
                     .text_color(theme.text_primary)
-                    .font_weight(FontWeight::BOLD),
+                    .font_weight(FontWeight::SEMIBOLD),
             )
             .child(
                 Label::new("Manage the devices that have access to your account.")
