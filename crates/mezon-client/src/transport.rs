@@ -2488,12 +2488,17 @@ impl MezonTransport {
     }
 
     /// Update user profile by clan.
-    pub async fn update_user_profile_by_clan(&self, clan_id: &str, nick_name: &str) -> Result<()> {
+    pub async fn update_user_profile_by_clan(
+        &self,
+        clan_id: &str,
+        nick_name: &str,
+        avatar_url: Option<&str>,
+    ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateClanProfileRequest {
             clan_id: clan_id.parse().unwrap_or_default(),
             nick_name: Some(nick_name.to_string()),
-            ..Default::default()
+            avatar: avatar_url.map(|s| s.to_string()),
         }
         .encode_to_vec();
         let (code, _) = self
@@ -2771,12 +2776,13 @@ impl MezonTransport {
         &self,
         name: &str,
         r#type: i32,
+        condition_id: i64,
     ) -> Result<api::CheckDuplicateNameResponse> {
         let cid = self.generate_cid();
         let body = api::CheckDuplicateNameRequest {
             name: name.to_string(),
             r#type,
-            ..Default::default()
+            condition_id,
         }
         .encode_to_vec();
         let (code, response) = self

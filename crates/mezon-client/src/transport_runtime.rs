@@ -275,6 +275,66 @@ impl TransportClient {
             .expect("Transport task panicked")
     }
 
+    /// Get user profile on a clan.
+    pub async fn get_user_profile_on_clan(
+        &self,
+        clan_id: &str,
+    ) -> Result<mezon_proto::api::ClanProfile> {
+        let transport = self.inner.clone();
+        let clan_id = clan_id.to_string();
+
+        runtime()
+            .spawn(async move { transport.get_user_profile_on_clan(&clan_id).await })
+            .await
+            .expect("Transport task panicked")
+    }
+
+    /// Update user profile by clan.
+    pub async fn update_user_profile_by_clan(
+        &self,
+        clan_id: &str,
+        nick_name: &str,
+        avatar_url: Option<&str>,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let clan_id = clan_id.to_string();
+        let nick_name = nick_name.to_string();
+        let avatar_url = avatar_url.map(str::to_string);
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .update_user_profile_by_clan(
+                        &clan_id,
+                        &nick_name,
+                        avatar_url.as_deref(),
+                    )
+                    .await
+            })
+            .await
+            .expect("Transport task panicked")
+    }
+
+    /// Check duplicate name.
+    pub async fn check_duplicate_name(
+        &self,
+        name: &str,
+        r#type: i32,
+        condition_id: i64,
+    ) -> Result<mezon_proto::api::CheckDuplicateNameResponse> {
+        let transport = self.inner.clone();
+        let name = name.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .check_duplicate_name(&name, r#type, condition_id)
+                    .await
+            })
+            .await
+            .expect("Transport task panicked")
+    }
+
     /// Log out the current session.
     pub async fn session_logout(&self, token: &str, refresh_token: &str) -> Result<()> {
         let transport = self.inner.clone();

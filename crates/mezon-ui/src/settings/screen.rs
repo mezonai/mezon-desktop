@@ -10,7 +10,7 @@ use gpui_component::{
     v_flex,
 };
 use mezon_client::AppApi;
-use mezon_store::{AuthState, Settings};
+use mezon_store::{AuthState, ClanList, Settings};
 
 use super::account_page::AccountPage;
 use super::activity_page::ActivityPage;
@@ -42,6 +42,7 @@ pub struct SettingsScreen {
     auth_state: Entity<AuthState>,
     api: Arc<AppApi>,
     settings: Entity<Settings>,
+    clan_list: Entity<ClanList>,
     current_page: SettingsPage,
     account_page: Option<Entity<AccountPage>>,
     profile_page: Option<Entity<ProfilePage>>,
@@ -61,6 +62,7 @@ impl SettingsScreen {
         api: Arc<AppApi>,
         navigate: NavigateFn,
         settings: Entity<Settings>,
+        clan_list: Entity<ClanList>,
         cx: &mut Context<Self>,
     ) -> Self {
         let _ = cx.observe(&settings, |_, _, cx| cx.notify());
@@ -69,6 +71,7 @@ impl SettingsScreen {
             auth_state,
             api,
             settings,
+            clan_list,
             current_page: SettingsPage::Account,
             account_page: None,
             profile_page: None,
@@ -107,8 +110,9 @@ impl Render for SettingsScreen {
             }
             SettingsPage::Profile => {
                 let settings = self.settings.clone();
+                let clan_list = self.clan_list.clone();
                 self.profile_page.get_or_insert_with(|| {
-                    cx.new(|cx| ProfilePage::new(api.clone(), settings, cx))
+                    cx.new(|cx| ProfilePage::new(api.clone(), settings, clan_list, cx))
                 });
             }
             SettingsPage::Device => {

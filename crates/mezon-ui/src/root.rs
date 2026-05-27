@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gpui::{App, ClickEvent, Context, Entity, FontWeight, Window, div, prelude::*};
 use mezon_client::{AppApi, MezonClient};
-use mezon_store::{AuthState, Settings};
+use mezon_store::{AuthState, ClanList, Settings};
 
 use crate::chat_layout::ChatLayout;
 use crate::components::primitives::{Button, Icon, IconName};
@@ -57,7 +57,10 @@ impl RootView {
             })
         };
 
+        let clan_list: Entity<ClanList> = cx.new(|_| ClanList::new());
+
         let router_for_chat = router.clone();
+        let clan_list_for_chat = clan_list.clone();
         let auth_state_for_chat = auth_state.clone();
         let api_for_chat = api.clone();
         let navigate_for_chat = navigate.clone();
@@ -67,6 +70,7 @@ impl RootView {
             move |cx| {
                 ChatLayout::new(
                     router_for_chat,
+                    clan_list_for_chat.clone(),
                     auth_state_for_chat.clone(),
                     api_for_chat.clone(),
                     navigate_for_chat.clone(),
@@ -79,6 +83,7 @@ impl RootView {
         let auth_state_for_settings = auth_state.clone();
         let api_for_settings = api.clone();
         let navigate_for_settings = navigate.clone();
+        let clan_list_for_settings = clan_list.clone();
         let settings_screen = cx.new({
             let settings = settings.clone();
             move |cx| {
@@ -87,6 +92,7 @@ impl RootView {
                     api_for_settings.clone(),
                     navigate_for_settings.clone(),
                     settings.clone(),
+                    clan_list_for_settings.clone(),
                     cx,
                 )
             }

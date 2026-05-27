@@ -21,6 +21,7 @@ pub struct ChatLayout {
 impl ChatLayout {
     pub fn new(
         router: Router,
+        clan_list: Entity<ClanList>,
         auth_state: Entity<AuthState>,
         api: Arc<AppApi>,
         navigate: crate::components::NavigateFn,
@@ -29,7 +30,6 @@ impl ChatLayout {
     ) -> Self {
         let _ = cx.observe(&settings, |_, _, cx| cx.notify());
 
-        let clan_list = cx.new(|_| ClanList::new());
         let channel_list = cx.new(|_| ChannelList::new());
 
         let on_navigate: Option<crate::components::NavigateFn> = {

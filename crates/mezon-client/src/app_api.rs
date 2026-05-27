@@ -76,6 +76,36 @@ impl AppApi {
     }
 
     /// Full avatar upload flow: get pre-signed URL, PUT file bytes, return permanent URL.
+    pub async fn get_user_clan_profile(
+        &self,
+        clan_id: &str,
+    ) -> Result<mezon_proto::api::ClanProfile> {
+        self.transport.get_user_profile_on_clan(clan_id).await
+    }
+
+    pub async fn update_user_clan_profile(
+        &self,
+        clan_id: &str,
+        nick_name: &str,
+        avatar_url: Option<&str>,
+    ) -> Result<()> {
+        self.transport
+            .update_user_profile_by_clan(clan_id, nick_name, avatar_url)
+            .await
+    }
+
+    pub async fn check_duplicate_clan_nickname(
+        &self,
+        clan_id: &str,
+        nick_name: &str,
+    ) -> Result<bool> {
+        let resp = self
+            .transport
+            .check_duplicate_name(nick_name, 4, clan_id.parse().unwrap_or_default())
+            .await?;
+        Ok(resp.is_duplicate)
+    }
+
     pub async fn upload_avatar(&self, path: &Path) -> Result<String> {
         let data = std::fs::read(path)?;
         let filename = path
