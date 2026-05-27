@@ -14,7 +14,7 @@ use gpui_component::{
 use mezon_client::AppApi;
 use mezon_store::Settings;
 
-use crate::components::NavigateFn;
+use crate::components::{NavOp, NavigateFn};
 use crate::theme::resolve_theme;
 use crate::util::{check_connection, retry};
 
@@ -262,7 +262,7 @@ impl Render for AccountPage {
                                     .text_color(theme.text_primary)
                                     .ghost()
                                     .on_click(move |_, _, cx| {
-                                        navigate("/settings/profile", cx);
+                                        navigate(NavOp::Replace("/settings/profile".to_string()), cx);
                                     }),
                             ),
                     ),

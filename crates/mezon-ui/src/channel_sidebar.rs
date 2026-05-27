@@ -21,7 +21,7 @@ fn on_channel_click(
             && let Some(ref cid) = clan_id
         {
             let path = format!("/chat/clans/{}/channels/{}", cid, channel_id);
-            cb(&path, cx);
+            cb(crate::components::NavOp::Push(path), cx);
         }
     }
 }

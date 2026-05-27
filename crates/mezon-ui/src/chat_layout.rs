@@ -34,12 +34,12 @@ impl ChatLayout {
 
         let on_navigate: Option<crate::components::NavigateFn> = {
             let nav = navigate.clone();
-            Some(Arc::new(move |path, cx| nav(path, cx)))
+            Some(Arc::new(move |op, cx| nav(op, cx)))
         };
 
         let on_settings: Option<crate::components::NavigateFn> = {
             let nav = navigate.clone();
-            Some(Arc::new(move |path, cx| nav(path, cx)))
+            Some(Arc::new(move |op, cx| nav(op, cx)))
         };
 
         let clan_list_for_sidebar = clan_list.clone();

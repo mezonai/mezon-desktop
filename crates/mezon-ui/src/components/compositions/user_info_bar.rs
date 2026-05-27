@@ -69,7 +69,7 @@ impl UserInfoBar {
         settings_btn.interactivity().on_click(
             move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
                 if let Some(ref cb) = on_settings {
-                    cb("/settings", cx);
+                    cb(crate::components::NavOp::Push("/settings".to_string()), cx);
                 }
             },
         );

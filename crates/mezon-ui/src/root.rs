@@ -45,9 +45,13 @@ impl RootView {
 
         let navigate: crate::components::NavigateFn = {
             let root_id = root_entity.entity_id();
-            Arc::new(move |path: &str, cx: &mut App| {
+            Arc::new(move |op: crate::components::NavOp, cx: &mut App| {
                 root_entity.update(cx, |this, _cx| {
-                    this.router.navigate(path);
+                    match op {
+                        crate::components::NavOp::Push(path) => this.router.navigate(path),
+                        crate::components::NavOp::Replace(path) => this.router.replace(path),
+                        crate::components::NavOp::Back => this.router.go_back(),
+                    }
                 });
                 cx.notify(root_id);
             })
@@ -189,7 +193,7 @@ fn render_not_found(theme: &Theme, navigate: &crate::components::NavigateFn) -> 
     back_btn
         .interactivity()
         .on_click(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-            navigate("/chat", cx);
+            navigate(crate::components::NavOp::Back, cx);
         });
 
     div()

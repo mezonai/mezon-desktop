@@ -21,7 +21,7 @@ use super::language_page::LanguagePage;
 use super::notifications_page::NotificationsPage;
 use super::profile_page::ProfilePage;
 use super::voice_page::VoicePage;
-use crate::components::NavigateFn;
+use crate::components::{NavOp, NavigateFn};
 use crate::theme::{Theme, resolve_theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,7 +221,7 @@ impl Render for SettingsScreen {
                 .when(!is_active, |el| el.text_color(theme.text_primary))
                 .child(label)
                 .on_click(move |_, _, cx| {
-                    nav(&path, cx);
+                    nav(NavOp::Replace(path.clone()), cx);
                 })
         }
 
@@ -431,7 +431,7 @@ impl Render for SettingsScreen {
                     .on_click({
                         let nav = navigate.clone();
                         move |_, _, cx| {
-                            nav("/chat", cx);
+                            nav(NavOp::Back, cx);
                         }
                     }),
             )
