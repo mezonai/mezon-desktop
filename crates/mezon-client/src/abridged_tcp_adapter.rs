@@ -66,7 +66,7 @@ const CODE_FIN: u16 = 0xff;
 const PREFIX_RAW: u8 = 0xff;
 const PREFIX_EXTENDED: u8 = 0x7f;
 const RAW_HEADER_LENGTH: usize = 7;
-const PAYLOAD_HEADER_LENGTH: usize = 11;
+const RAW_CHUNK_HEADER_LENGTH: usize = 11;
 
 type TlsStream = tokio_rustls::client::TlsStream<TcpStream>;
 
@@ -75,6 +75,7 @@ pub struct AbridgedTcpAdapter {
     handlers: Arc<Mutex<AdapterHandlers>>,
     streams: Arc<Mutex<HashMap<u16, Vec<Vec<u8>>>>>,
     is_connected: Arc<Mutex<bool>>,
+    read_buffer: Arc<Mutex<Vec<u8>>>,
 }
 
 impl AbridgedTcpAdapter {
@@ -84,132 +85,186 @@ impl AbridgedTcpAdapter {
             handlers: Arc::new(Mutex::new(AdapterHandlers::default())),
             streams: Arc::new(Mutex::new(HashMap::new())),
             is_connected: Arc::new(Mutex::new(false)),
+            read_buffer: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    async fn handle_data(&self, data: Vec<u8>) -> Result<()> {
-        tracing::info!("📥 handle_data called: {} bytes", data.len());
-        if data.is_empty() {
+    async fn handle_data(&self, incoming: Vec<u8>) -> Result<()> {
+        if incoming.is_empty() {
             return Ok(());
         }
 
-        tracing::info!("📥 First byte: {:#04x}", data[0]);
+        self.read_buffer.lock().await.extend(incoming);
+
         let handlers = self.handlers.lock().await.clone();
 
-        if data[0] == 0x00 {
-            if data.len() >= 3 {
+        loop {
+            let msg_bytes = {
+                let mut buf = self.read_buffer.lock().await;
+                if buf.is_empty() {
+                    return Ok(());
+                }
+
+                let first_byte = buf[0];
+                if first_byte == 0x00 {
+                    if buf.len() < 3 {
+                        return Ok(());
+                    }
+                    let msg = buf[..3].to_vec();
+                    buf.drain(..3);
+                    Some((msg, false))
+                } else if first_byte == PREFIX_RAW {
+                    if buf.len() < RAW_HEADER_LENGTH {
+                        return Ok(());
+                    }
+                    let code = u32::from_be_bytes([buf[3], buf[4], buf[5], buf[6]]);
+                    let fin_flag = (code & 0xffff) as u16;
+                    if fin_flag == CODE_FIN {
+                        if buf.len() == RAW_HEADER_LENGTH {
+                            return Ok(());
+                        }
+                        let msg = buf.clone();
+                        buf.clear();
+                        Some((msg, false))
+                    } else if buf.len() < RAW_CHUNK_HEADER_LENGTH {
+                        return Ok(());
+                    } else {
+                        let payload_len =
+                            u32::from_be_bytes([buf[7], buf[8], buf[9], buf[10]]) as usize;
+                        let total = RAW_CHUNK_HEADER_LENGTH + payload_len;
+                        if buf.len() < total {
+                            return Ok(());
+                        }
+                        let msg = buf[..total].to_vec();
+                        buf.drain(..total);
+                        Some((msg, false))
+                    }
+                } else if first_byte < 127 {
+                    let payload_len = first_byte as usize * 4;
+                    let total = 1 + payload_len;
+                    if buf.len() < total {
+                        return Ok(());
+                    }
+                    let msg = buf[..total].to_vec();
+                    buf.drain(..total);
+                    Some((msg, false))
+                } else if first_byte == PREFIX_EXTENDED {
+                    if buf.len() < 4 {
+                        return Ok(());
+                    }
+                    let payload_len = u32::from_le_bytes([buf[1], buf[2], buf[3], 0]) as usize * 4;
+                    let total = 4 + payload_len;
+                    if buf.len() < total {
+                        return Ok(());
+                    }
+                    let msg = buf[..total].to_vec();
+                    buf.drain(..total);
+                    Some((msg, false))
+                } else {
+                    tracing::warn!("📥 Unexpected first byte: {:#x}, skipping", first_byte);
+                    buf.drain(..1);
+                    Some((vec![], true))
+                }
+            };
+
+            let (data, skipped) = match msg_bytes {
+                Some(v) => v,
+                None => continue,
+            };
+
+            if skipped {
+                continue;
+            }
+
+            tracing::info!("📥 process_message: {} bytes", data.len());
+
+            if data[0] == 0x00 {
                 let cid = u16::from_be_bytes([data[1], data[2]]);
                 tracing::info!("📨 PONG: cid={}", cid);
                 handlers.trigger_message(cid, 0, vec![]);
+                continue;
             }
-            return Ok(());
-        }
 
-        if data[0] == PREFIX_RAW {
-            tracing::info!("📥 RAW API response detected");
-            if data.len() < RAW_HEADER_LENGTH {
-                return Ok(());
-            }
-            let cid = u16::from_be_bytes([data[1], data[2]]);
-            let code = u32::from_be_bytes([data[3], data[4], data[5], data[6]]);
-            tracing::info!("📥 RAW: cid={} code={:#x}", cid, code);
+            if data[0] == PREFIX_RAW {
+                let cid = u16::from_be_bytes([data[1], data[2]]);
+                let code = u32::from_be_bytes([data[3], data[4], data[5], data[6]]);
+                let response_code = (code >> 16) & 0xffff;
+                let fin_flag = (code & 0xffff) as u16;
 
-            if data.len() < PAYLOAD_HEADER_LENGTH {
-                handlers.trigger_message(cid, code, vec![]);
-                return Ok(());
+                let (payload, payload_len) = if fin_flag == CODE_FIN {
+                    (
+                        data[RAW_HEADER_LENGTH..].to_vec(),
+                        data.len() - RAW_HEADER_LENGTH,
+                    )
+                } else {
+                    let len = u32::from_be_bytes([data[7], data[8], data[9], data[10]]) as usize;
+                    (
+                        data[RAW_CHUNK_HEADER_LENGTH..RAW_CHUNK_HEADER_LENGTH + len].to_vec(),
+                        len,
+                    )
+                };
+
+                tracing::info!(
+                    "📥 RAW: cid={} code={:#x} response_code={} fin_flag={:#x} payload_len={}",
+                    cid,
+                    code,
+                    response_code,
+                    fin_flag,
+                    payload_len
+                );
+
+                let mut streams = self.streams.lock().await;
+                if fin_flag == CODE_FIN {
+                    let chunks = streams.entry(cid).or_insert_with(Vec::new);
+                    if payload_len > 0 {
+                        chunks.push(payload);
+                    }
+                    let complete_buffer: Vec<u8> = chunks.concat();
+                    tracing::info!(
+                        "📨 Complete API response: cid={} code={} len={} bytes",
+                        cid,
+                        response_code,
+                        complete_buffer.len()
+                    );
+                    handlers.trigger_message(cid, response_code, complete_buffer);
+                    streams.remove(&cid);
+                } else {
+                    let chunks = streams.entry(cid).or_insert_with(Vec::new);
+                    chunks.push(payload);
+                    tracing::info!("📥 Buffered chunk for cid={} ({} total)", cid, chunks.len());
+                }
+                continue;
             }
-            let payload_len = u32::from_be_bytes([data[7], data[8], data[9], data[10]]) as usize;
-            let payload = if data.len() >= PAYLOAD_HEADER_LENGTH + payload_len {
-                data[PAYLOAD_HEADER_LENGTH..PAYLOAD_HEADER_LENGTH + payload_len].to_vec()
+
+            let (header_size, payload_length) = if data[0] < 127 {
+                tracing::info!(
+                    "📥 Standard msg: 1-byte header ({}*4={}bytes)",
+                    data[0],
+                    data[0] as usize * 4
+                );
+                (1, data[0] as usize * 4)
             } else {
-                vec![]
+                let len = u32::from_le_bytes([data[1], data[2], data[3], 0]) as usize * 4;
+                tracing::info!("📥 Extended msg: len={}", len);
+                (4, len)
             };
 
-            let response_code = (code >> 16) & 0xffff;
-            let fin_flag = (code & 0xffff) as u16;
+            let payload = &data[header_size..header_size + payload_length];
             tracing::info!(
-                "📥 RAW: response_code={} fin_flag={:#x} payload_len={}",
-                response_code,
-                fin_flag,
-                payload_len
+                "📨 Std msg payload: {} bytes {:02x?}",
+                payload.len(),
+                &payload[..payload.len().min(32)]
             );
 
-            let mut streams = self.streams.lock().await;
-            if fin_flag == CODE_FIN {
-                let chunks = streams.entry(cid).or_insert_with(Vec::new);
-                if payload_len > 0 {
-                    chunks.push(payload);
-                }
-                let complete_buffer: Vec<u8> = chunks.concat();
-                tracing::info!(
-                    "📨 Complete API response: cid={} code={} len={} bytes",
-                    cid,
-                    response_code,
-                    complete_buffer.len()
-                );
-                handlers.trigger_message(cid, response_code, complete_buffer);
-                streams.remove(&cid);
+            if let Ok(envelope) = mezon_proto::realtime::Envelope::decode(payload) {
+                tracing::info!("📨 Envelope decoded: cid={}", envelope.cid);
+                handlers.trigger_message(envelope.cid as u16, 0, payload.to_vec());
             } else {
-                let chunks = streams.entry(cid).or_insert_with(Vec::new);
-                chunks.push(payload);
-                tracing::info!("📥 Buffered chunk for cid={} ({} total)", cid, chunks.len());
+                let cid = decode_cid_field(payload).unwrap_or(0);
+                tracing::warn!("📨 Failed to decode Envelope, passing raw cid={cid}");
+                handlers.trigger_message(cid, 0, payload.to_vec());
             }
-            return Ok(());
         }
-
-        let (header_size, payload_length) = if data[0] < 127 {
-            tracing::info!(
-                "📥 Standard msg: 1-byte header ({}*4={}bytes)",
-                data[0],
-                data[0] as usize * 4
-            );
-            (1, data[0] as usize * 4)
-        } else if data[0] == PREFIX_EXTENDED {
-            if data.len() < 4 {
-                return Ok(());
-            }
-            let len = u32::from_le_bytes([data[1], data[2], data[3], 0]) as usize * 4;
-            tracing::info!("📥 Extended msg: len={}", len);
-            (4, len)
-        } else {
-            tracing::warn!(
-                "📥 Unexpected first byte: {:#x}, raw={:02x?}",
-                data[0],
-                &data[..data.len().min(32)]
-            );
-            return Ok(());
-        };
-
-        if data.len() < header_size + payload_length {
-            tracing::warn!(
-                "📥 Incomplete packet: have {} need {}",
-                data.len(),
-                header_size + payload_length
-            );
-            return Ok(());
-        }
-
-        let payload = &data[header_size..header_size + payload_length];
-        tracing::info!(
-            "📨 Std msg payload: {} bytes {:02x?}",
-            payload.len(),
-            &payload[..payload.len().min(32)]
-        );
-
-        if let Ok(envelope) = mezon_proto::realtime::Envelope::decode(payload) {
-            let code = envelope.message.as_ref().map_or(0, |msg| match msg {
-                mezon_proto::realtime::envelope::Message::Error(err) => err.code as u32,
-                _ => 0,
-            });
-            tracing::info!("📨 Envelope decoded: cid={} code={}", envelope.cid, code);
-            handlers.trigger_message(envelope.cid as u16, code, payload.to_vec());
-        } else {
-            let cid = decode_cid_field(payload).unwrap_or(0);
-            tracing::warn!("📨 Failed to decode Envelope, passing raw cid={cid}");
-            handlers.trigger_message(cid, 0, payload.to_vec());
-        }
-
-        Ok(())
     }
 
     async fn io_loop(
@@ -219,6 +274,7 @@ impl AbridgedTcpAdapter {
         handlers: Arc<Mutex<AdapterHandlers>>,
         streams: Arc<Mutex<HashMap<u16, Vec<Vec<u8>>>>>,
         is_connected: Arc<Mutex<bool>>,
+        read_buffer: Arc<Mutex<Vec<u8>>>,
     ) {
         let mut read_buf = vec![0u8; 8192];
         let mut read_count = 0u64;
@@ -251,6 +307,7 @@ impl AbridgedTcpAdapter {
                                 handlers: handlers.clone(),
                                 streams: streams.clone(),
                                 is_connected: is_connected.clone(),
+                                read_buffer: read_buffer.clone(),
                             };
                             if let Err(e) = adapter.handle_data(data).await {
                                 tracing::error!("✗ handle_data error: {}", e);
@@ -376,10 +433,11 @@ impl TransportAdapter for AbridgedTcpAdapter {
         let h = self.handlers.clone();
         let st = self.streams.clone();
         let ic = self.is_connected.clone();
+        let rb = self.read_buffer.clone();
 
         tracing::info!("🔌 Spawning I/O loop...");
         tokio::spawn(async move {
-            Self::io_loop(tls, write_rx, ready_tx, h, st, ic).await;
+            Self::io_loop(tls, write_rx, ready_tx, h, st, ic, rb).await;
         });
 
         // Wait for I/O loop to signal readiness
