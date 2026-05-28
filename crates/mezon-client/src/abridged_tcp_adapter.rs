@@ -117,8 +117,7 @@ impl AbridgedTcpAdapter {
                     if buf.len() < RAW_HEADER_LENGTH {
                         return Ok(());
                     }
-                    let code =
-                        u32::from_be_bytes([buf[3], buf[4], buf[5], buf[6]]);
+                    let code = u32::from_be_bytes([buf[3], buf[4], buf[5], buf[6]]);
                     let fin_flag = (code & 0xffff) as u16;
                     if fin_flag == CODE_FIN {
                         if buf.len() == RAW_HEADER_LENGTH {
@@ -153,8 +152,7 @@ impl AbridgedTcpAdapter {
                     if buf.len() < 4 {
                         return Ok(());
                     }
-                    let payload_len =
-                        u32::from_le_bytes([buf[1], buf[2], buf[3], 0]) as usize * 4;
+                    let payload_len = u32::from_le_bytes([buf[1], buf[2], buf[3], 0]) as usize * 4;
                     let total = 4 + payload_len;
                     if buf.len() < total {
                         return Ok(());
@@ -163,10 +161,7 @@ impl AbridgedTcpAdapter {
                     buf.drain(..total);
                     Some((msg, false))
                 } else {
-                    tracing::warn!(
-                        "📥 Unexpected first byte: {:#x}, skipping",
-                        first_byte
-                    );
+                    tracing::warn!("📥 Unexpected first byte: {:#x}, skipping", first_byte);
                     buf.drain(..1);
                     Some((vec![], true))
                 }
@@ -197,10 +192,16 @@ impl AbridgedTcpAdapter {
                 let fin_flag = (code & 0xffff) as u16;
 
                 let (payload, payload_len) = if fin_flag == CODE_FIN {
-                    (data[RAW_HEADER_LENGTH..].to_vec(), data.len() - RAW_HEADER_LENGTH)
+                    (
+                        data[RAW_HEADER_LENGTH..].to_vec(),
+                        data.len() - RAW_HEADER_LENGTH,
+                    )
                 } else {
                     let len = u32::from_be_bytes([data[7], data[8], data[9], data[10]]) as usize;
-                    (data[RAW_CHUNK_HEADER_LENGTH..RAW_CHUNK_HEADER_LENGTH + len].to_vec(), len)
+                    (
+                        data[RAW_CHUNK_HEADER_LENGTH..RAW_CHUNK_HEADER_LENGTH + len].to_vec(),
+                        len,
+                    )
                 };
 
                 tracing::info!(
@@ -230,11 +231,7 @@ impl AbridgedTcpAdapter {
                 } else {
                     let chunks = streams.entry(cid).or_insert_with(Vec::new);
                     chunks.push(payload);
-                    tracing::info!(
-                        "📥 Buffered chunk for cid={} ({} total)",
-                        cid,
-                        chunks.len()
-                    );
+                    tracing::info!("📥 Buffered chunk for cid={} ({} total)", cid, chunks.len());
                 }
                 continue;
             }
@@ -247,8 +244,7 @@ impl AbridgedTcpAdapter {
                 );
                 (1, data[0] as usize * 4)
             } else {
-                let len =
-                    u32::from_le_bytes([data[1], data[2], data[3], 0]) as usize * 4;
+                let len = u32::from_le_bytes([data[1], data[2], data[3], 0]) as usize * 4;
                 tracing::info!("📥 Extended msg: len={}", len);
                 (4, len)
             };
