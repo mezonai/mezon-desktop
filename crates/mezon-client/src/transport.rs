@@ -239,6 +239,11 @@ pub struct ApiChannelDesc {
     pub channel_id: String,
     pub channel_label: String,
     pub channel_type: u32,
+    pub clan_id: String,
+    pub category_name: String,
+    pub category_id: String,
+    pub channel_private: i32,
+    pub count_mess_unread: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -298,6 +303,11 @@ impl MezonTransport {
             channel_id: channel.channel_id.to_string(),
             channel_label: channel.channel_label,
             channel_type: channel.r#type as u32,
+            clan_id: channel.clan_id.to_string(),
+            category_name: channel.category_name,
+            category_id: channel.category_id.to_string(),
+            channel_private: channel.channel_private,
+            count_mess_unread: channel.count_mess_unread,
         }
     }
 
@@ -913,7 +923,7 @@ impl MezonTransport {
     }
 
     /// List channels by user ID.
-    pub async fn list_channel_by_user_id(&self) -> Result<api::ChannelDescList> {
+    pub async fn list_channel_by_user_id(&self) -> Result<Vec<ApiChannelDesc>> {
         let cid = self.generate_cid();
         let (code, response) = self
             .send_api_request(cid, "ListChannelByUserId", Vec::new())
@@ -921,7 +931,12 @@ impl MezonTransport {
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(api::ChannelDescList::decode(response.as_slice())?)
+        let channel_list = api::ChannelDescList::decode(response.as_slice())?;
+        Ok(channel_list
+            .channeldesc
+            .into_iter()
+            .map(Self::channel_desc_from_proto)
+            .collect())
     }
 
     /// Get notification settings for a clan.

@@ -1,3 +1,5 @@
+use mezon_client::transport::ApiChannelDesc;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelType {
     Text,
@@ -11,6 +13,9 @@ pub struct Channel {
     pub channel_type: ChannelType,
     pub unread: bool,
     pub private: bool,
+    pub clan_id: String,
+    pub category_name: String,
+    pub category_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,5 +70,20 @@ impl ChannelList {
             .iter()
             .flat_map(|category| &category.channels)
             .find(|channel| channel.id == channel_id)
+    }
+}
+
+impl From<ApiChannelDesc> for Channel {
+    fn from(c: ApiChannelDesc) -> Self {
+        Self {
+            id: c.channel_id,
+            name: c.channel_label,
+            channel_type: ChannelType::Text,
+            unread: c.count_mess_unread > 0,
+            private: c.channel_private != 0,
+            clan_id: c.clan_id,
+            category_name: c.category_name,
+            category_id: Some(c.category_id).filter(|s| !s.is_empty() && s != "0"),
+        }
     }
 }

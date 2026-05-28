@@ -9,6 +9,7 @@ pub mod main_layout;
 pub mod root;
 pub mod router;
 pub mod settings_screen;
+pub mod text_utils;
 pub mod theme;
 pub mod title_bar;
 
