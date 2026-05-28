@@ -196,7 +196,7 @@ fn spawn_transport_task(
             //     tracing::warn!("Authenticated session missing tcp_port; TCP APIs unavailable");
             //     continue;
             // };
-            let port = 7349;
+            let port = 4433;
 
             if transport.is_open().await
                 && let Err(e) = transport.close().await
