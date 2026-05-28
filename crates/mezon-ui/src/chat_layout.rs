@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use gpui::{App, AsyncApp, Context, Entity, FontWeight, Window, div, prelude::*, px};
+use gpui::{App, Context, Entity, FontWeight, Window, div, prelude::*, px};
 use mezon_client::AppApi;
 use mezon_store::{AuthState, Category, Channel, ChannelList, Clan, ClanList};
 
@@ -39,20 +39,8 @@ fn group_channels_by_category(channels: Vec<Channel>) -> Vec<Category> {
     categories
 }
 
-async fn wait_for_api_ready(api: &AppApi, cx: &AsyncApp) {
-    loop {
-        if api.is_open().await && api.ping_roundtrip().await.is_ok() {
-            break;
-        }
-        cx.background_executor()
-            .timer(std::time::Duration::from_millis(1000))
-            .await;
-    }
-}
-
 fn spawn_clan_list_fetcher(api: Arc<AppApi>, clan_list: Entity<ClanList>, cx: &mut App) {
     cx.spawn(async move |cx| {
-        wait_for_api_ready(&api, cx).await;
         tracing::info!("Fetching clan list...");
         match api.list_clan_descs().await {
             Ok(clans) => {
@@ -81,8 +69,6 @@ fn spawn_channel_list_fetcher(
     cx: &mut App,
 ) {
     cx.spawn(async move |cx| {
-        wait_for_api_ready(&api, cx).await;
-
         let mut last_clan_id: Option<String> = None;
         let mut error_count: u32 = 0;
         const MAX_CONSECUTIVE_ERRORS: u32 = 5;
@@ -133,6 +119,10 @@ pub struct ChatLayout {
     clan_sidebar: Entity<ClanSidebar>,
     channel_sidebar: Entity<ChannelSidebar>,
     user_info_bar: UserInfoBar,
+    /// Guard: spawn data fetchers only on the first render call.
+    fetchers_spawned: bool,
+    api: Arc<AppApi>,
+    clan_list: Entity<ClanList>,
 }
 
 impl ChatLayout {
@@ -167,21 +157,31 @@ impl ChatLayout {
         let _ = cx.observe(&channel_list, |_, _, cx| cx.notify());
         let _ = cx.observe(&clan_list, |_, _, cx| cx.notify());
 
-        spawn_clan_list_fetcher(api.clone(), clan_list.clone(), cx);
-
-        spawn_channel_list_fetcher(api.clone(), clan_list.clone(), channel_list.clone(), cx);
         Self {
             router,
             channel_list,
             clan_sidebar,
             channel_sidebar,
             user_info_bar,
+            fetchers_spawned: false,
+            api,
+            clan_list,
         }
     }
 }
 
 impl Render for ChatLayout {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.fetchers_spawned {
+            self.fetchers_spawned = true;
+            spawn_clan_list_fetcher(self.api.clone(), self.clan_list.clone(), cx);
+            spawn_channel_list_fetcher(
+                self.api.clone(),
+                self.clan_list.clone(),
+                self.channel_list.clone(),
+                cx,
+            );
+        }
         let theme = Theme::dark();
         let channels = self.channel_list.read(cx);
 
