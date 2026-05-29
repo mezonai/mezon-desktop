@@ -4,6 +4,7 @@ use gpui::{App, Context, Entity, FontWeight, Window, div, prelude::*, px};
 use mezon_client::AppApi;
 use mezon_store::{AuthState, Category, Channel, ChannelList, Clan, ClanList};
 
+use crate::chat_area::ChatArea;
 use crate::components::compositions::user_info_bar::UserInfoBar;
 use crate::router::{Route, Router};
 use crate::theme::Theme;
@@ -116,6 +117,7 @@ fn spawn_channel_list_fetcher(
 pub struct ChatLayout {
     router: Router,
     channel_list: Entity<ChannelList>,
+    pub chat_area: ChatArea,
     clan_sidebar: Entity<ClanSidebar>,
     channel_sidebar: Entity<ChannelSidebar>,
     user_info_bar: UserInfoBar,
@@ -160,6 +162,7 @@ impl ChatLayout {
         Self {
             router,
             channel_list,
+            chat_area: ChatArea::new(),
             clan_sidebar,
             channel_sidebar,
             user_info_bar,
@@ -211,6 +214,7 @@ impl Render for ChatLayout {
                     .unwrap_or_else(|| div().child("Select a channel").into_any_element()),
             );
 
+        self.chat_area.ensure_input(_window, cx);
         let content = self.render_content(cx);
 
         div()
@@ -254,8 +258,19 @@ impl Render for ChatLayout {
 }
 
 impl ChatLayout {
-    fn render_content(&self, _cx: &Context<Self>) -> impl IntoElement {
+    fn render_content(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = Theme::dark();
+
+        // Use channel_list.active_channel_id to detect channel selection instead
+        // of self.router.route(), because the router clone in ChatLayout is stale
+        // (only the RootView's router gets updated on navigation).
+        if self.channel_list.read(cx).active_channel_id.is_some() {
+            return self
+                .chat_area
+                .render(&theme, cx.entity())
+                .into_any_element();
+        }
+
         let route = self.router.route();
         let current_path = self.router.current_path().to_string();
 
@@ -281,22 +296,19 @@ impl ChatLayout {
                 &format!("Direct {direct_id}"),
                 &current_path,
             ),
-            Route::Channel {
-                clan_id: _,
-                channel_id,
-            } => self.render_placeholder(
-                theme,
-                crate::components::primitives::IconName::FolderOpen,
-                &format!("#{channel_id}"),
-                &current_path,
-            ),
             Route::Settings | Route::NotFound { .. } => {
                 // Handled by RootView, not rendered here
                 div().into_any_element()
             }
+            _ => unreachable!(),
         };
 
-        div().flex_1().min_h_0().p_6().child(placeholder)
+        div()
+            .flex_1()
+            .min_h_0()
+            .p_6()
+            .child(placeholder)
+            .into_any_element()
     }
 
     fn render_placeholder(
