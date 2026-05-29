@@ -2,11 +2,18 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
+use image::GenericImageView;
 
 use crate::{
     TransportClient,
     transport::{ApiAccount, ApiChannelDesc, ApiClanDesc},
 };
+
+fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
 
 #[derive(Clone)]
 pub struct AppApi {
@@ -73,9 +80,11 @@ impl AppApi {
         filename: &str,
         filetype: &str,
         size: i32,
+        width: i32,
+        height: i32,
     ) -> Result<mezon_proto::api::UploadAttachment> {
         self.transport
-            .upload_attachment_file(filename, filetype, size)
+            .upload_attachment_file(filename, filetype, size, width, height)
             .await
     }
 
@@ -113,11 +122,13 @@ impl AppApi {
     pub async fn upload_avatar(&self, path: &Path) -> Result<String> {
         tracing::info!("upload_avatar: reading file path={:?}", path);
         let data = std::fs::read(path)?;
-        let filename = path
+
+        let raw_filename = path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("avatar")
             .to_string();
+        let filename = sanitize_filename(&raw_filename);
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
@@ -125,17 +136,33 @@ impl AppApi {
             .to_string();
         let filetype = format!("image/{}", ext);
         let size = data.len() as i32;
+
+        let (width, height) = image::load_from_memory(&data)
+            .ok()
+            .and_then(|img| {
+                let dims = img.dimensions();
+                tracing::info!(
+                    "upload_avatar: detected image dimensions {}x{}",
+                    dims.0,
+                    dims.1
+                );
+                Some(dims)
+            })
+            .unwrap_or((0, 0));
+
         tracing::info!(
-            "upload_avatar: file read ok filename={} filetype={} size={}",
+            "upload_avatar: file read ok filename={} filetype={} size={} width={} height={}",
             filename,
             filetype,
-            size
+            size,
+            width,
+            height
         );
 
         tracing::info!("upload_avatar: requesting presigned URL");
         let upload = self
             .transport
-            .upload_attachment_file(&filename, &filetype, size)
+            .upload_attachment_file(&filename, &filetype, size, width as i32, height as i32)
             .await?;
         tracing::info!("upload_avatar: presigned URL received url={}", upload.url);
 

@@ -2825,13 +2825,16 @@ impl MezonTransport {
         filename: &str,
         filetype: &str,
         size: i32,
+        width: i32,
+        height: i32,
     ) -> Result<api::UploadAttachment> {
         let cid = self.generate_cid();
         let body = api::UploadAttachmentRequest {
             filename: filename.to_string(),
             filetype: filetype.to_string(),
             size,
-            ..Default::default()
+            width,
+            height,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -2844,6 +2847,17 @@ impl MezonTransport {
                 code,
                 msg
             );
+
+            if let Ok(envelope) = realtime::Envelope::decode(response.as_slice())
+                && let Some(realtime::envelope::Message::Error(error)) = envelope.message
+            {
+                return Err(anyhow::anyhow!(
+                    "UploadAttachmentFile API error: code={} error={}",
+                    error.code,
+                    error.message
+                ));
+            }
+
             return Err(anyhow::anyhow!("API error: code={}, response={}", code, msg));
         }
         Ok(api::UploadAttachment::decode(response.as_slice())?)

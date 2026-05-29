@@ -275,6 +275,8 @@ impl TransportClient {
         filename: &str,
         filetype: &str,
         size: i32,
+        width: i32,
+        height: i32,
     ) -> Result<mezon_proto::api::UploadAttachment> {
         let transport = self.inner.clone();
         let filename = filename.to_string();
@@ -283,7 +285,7 @@ impl TransportClient {
         runtime()
             .spawn(async move {
                 transport
-                    .upload_attachment_file(&filename, &filetype, size)
+                    .upload_attachment_file(&filename, &filetype, size, width, height)
                     .await
             })
             .await
