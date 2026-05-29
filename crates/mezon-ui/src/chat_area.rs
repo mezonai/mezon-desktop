@@ -1,4 +1,4 @@
-use gpui::{App, ClickEvent, Context, Entity, Window, div, prelude::*, px, relative};
+use gpui::{App, ClickEvent, Context, Entity, Window, div, prelude::*, relative};
 use gpui_component::input::{Input, InputState};
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::{Sizable, v_flex};
