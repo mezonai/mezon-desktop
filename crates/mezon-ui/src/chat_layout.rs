@@ -190,7 +190,7 @@ impl ChatLayout {
 
 impl Render for ChatLayout {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = resolve_theme(&self.settings.read(cx).theme);
+        let _theme = resolve_theme(&self.settings.read(cx).theme);
 
         if !self.fetchers_spawned {
             self.fetchers_spawned = true;

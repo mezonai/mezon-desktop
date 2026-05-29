@@ -108,10 +108,7 @@ impl AbridgedTcpAdapter {
                     let cid = u16::from_be_bytes([header[1], header[2]]);
                     let code = u32::from_be_bytes([header[3], header[4], header[5], header[6]]);
                     let response_code = (code >> 16) & 0xffff;
-                    tracing::info!(
-                        "📨 Completing pending 0-length response for cid={}",
-                        cid
-                    );
+                    tracing::info!("📨 Completing pending 0-length response for cid={}", cid);
                     let handlers = self.handlers.lock().await.clone();
                     handlers.trigger_message(cid, response_code, vec![]);
                 } else {
@@ -165,17 +162,12 @@ impl AbridgedTcpAdapter {
                                 tokio::time::sleep(Duration::from_millis(100)).await;
                                 let mut pending = pending_raw.lock().await;
                                 if let Some(header) = pending.take() {
-                                    let cid =
-                                        u16::from_be_bytes([header[1], header[2]]);
+                                    let cid = u16::from_be_bytes([header[1], header[2]]);
                                     let code = u32::from_be_bytes([
                                         header[3], header[4], header[5], header[6],
                                     ]);
                                     let response_code = (code >> 16) & 0xffff;
-                                    handlers.trigger_message(
-                                        cid,
-                                        response_code,
-                                        vec![],
-                                    );
+                                    handlers.trigger_message(cid, response_code, vec![]);
                                 }
                             });
                             return Ok(());

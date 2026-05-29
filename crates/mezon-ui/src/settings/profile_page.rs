@@ -65,41 +65,39 @@ impl ProfilePage {
         let _ = cx.observe(&settings, |_, _, cx| cx.notify());
         let _ = cx.observe(&clan_list, |_, _, cx| cx.notify());
         let api_clone = api.clone();
-        let fetch_task = cx.spawn(async move |this, cx| {
-            match api_clone.get_account().await {
-                Ok(acct) => {
-                    this.update(cx, |this, view_cx| {
-                        let display = acct
-                            .display_name
-                            .clone()
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| acct.username.clone());
-                        let about = acct.about_me.unwrap_or_default();
-                        let avatar = acct.avatar_url;
+        let fetch_task = cx.spawn(async move |this, cx| match api_clone.get_account().await {
+            Ok(acct) => {
+                this.update(cx, |this, view_cx| {
+                    let display = acct
+                        .display_name
+                        .clone()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| acct.username.clone());
+                    let about = acct.about_me.unwrap_or_default();
+                    let avatar = acct.avatar_url;
 
-                        this.profile = Some(ProfileState {
-                            username: acct.username.into(),
-                            display_name: display.clone().into(),
-                            about_me: about.clone().into(),
-                            avatar_url: avatar.clone().map(Into::into),
-                            original_display_name: display.into(),
-                            original_about_me: about.into(),
-                            original_avatar_url: avatar.map(Into::into),
-                            loading: false,
-                            saving: false,
-                        });
+                    this.profile = Some(ProfileState {
+                        username: acct.username.into(),
+                        display_name: display.clone().into(),
+                        about_me: about.clone().into(),
+                        avatar_url: avatar.clone().map(Into::into),
+                        original_display_name: display.into(),
+                        original_about_me: about.into(),
+                        original_avatar_url: avatar.map(Into::into),
+                        loading: false,
+                        saving: false,
+                    });
 
-                        view_cx.notify();
-                    })
-                    .ok();
-                }
-                Err(_) => {
-                    this.update(cx, |this, cx| {
-                        this.fetch_error = true;
-                        cx.notify();
-                    })
-                    .ok();
-                }
+                    view_cx.notify();
+                })
+                .ok();
+            }
+            Err(_) => {
+                this.update(cx, |this, cx| {
+                    this.fetch_error = true;
+                    cx.notify();
+                })
+                .ok();
             }
         });
 
@@ -155,13 +153,14 @@ impl ProfilePage {
         self._subscriptions.push(cx.subscribe_in(&display, window, {
             let display = display.clone();
             move |this: &mut Self, _, event: &InputEvent, _, cx| {
-                if let InputEvent::Change = event {
-                    if let Some(state) = &mut this.profile && !state.saving {
+                if let InputEvent::Change = event
+                    && let Some(state) = &mut this.profile
+                        && !state.saving
+                    {
                         let value = display.read(cx).value().to_string();
                         state.display_name = value.into();
                         cx.notify();
                     }
-                }
             }
         }));
 
@@ -181,13 +180,14 @@ impl ProfilePage {
         self._subscriptions.push(cx.subscribe_in(&about, window, {
             let about = about.clone();
             move |this: &mut Self, _, event: &InputEvent, _, cx| {
-                if let InputEvent::Change = event {
-                    if let Some(state) = &mut this.profile && !state.saving {
+                if let InputEvent::Change = event
+                    && let Some(state) = &mut this.profile
+                        && !state.saving
+                    {
                         let value = about.read(cx).value().to_string();
                         state.about_me = value.into();
                         cx.notify();
                     }
-                }
             }
         }));
 
@@ -301,11 +301,7 @@ impl ProfilePage {
         .detach();
     }
 
-    fn render_user_section(
-        &mut self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_user_section(&mut self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity().clone();
         let form = self.render_form(theme, cx);
         let preview = self.render_preview(theme);
@@ -474,13 +470,10 @@ impl Render for ProfilePage {
                             .as_ref()
                             .map(|p| p.username.clone())
                             .unwrap_or_default();
-                        let active_clan_id = this
-                            .clan_list
-                            .read(cx)
-                            .active_clan()
-                            .map(|c| c.id.clone());
-                        this.clan_section
-                            .get_or_insert_with(|| cx.new(|cx| {
+                        let active_clan_id =
+                            this.clan_list.read(cx).active_clan().map(|c| c.id.clone());
+                        this.clan_section.get_or_insert_with(|| {
+                            cx.new(|cx| {
                                 let section = ClanProfileSection::new(
                                     this.api.clone(),
                                     this.settings.clone(),
@@ -489,7 +482,8 @@ impl Render for ProfilePage {
                                 );
                                 cx.notify();
                                 section
-                            }));
+                            })
+                        });
                         if let Some(section) = &this.clan_section {
                             section.update(cx, |s, cx| {
                                 s.set_user_profile(display_name, username);

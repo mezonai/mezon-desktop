@@ -125,11 +125,31 @@ impl Render for AppearancePage {
         let settings = self.settings.clone();
 
         let themes = [
-            ("dark", mezon_i18n::t(&locale, "appThemeSetting.fields.dark"), rgba(49, 51, 56, 1.0)),
-            ("light", mezon_i18n::t(&locale, "appThemeSetting.fields.light"), rgba(255, 255, 255, 1.0)),
-            ("purple", mezon_i18n::t(&locale, "appThemeSetting.fields.purpleHaze"), rgba(120, 90, 200, 1.0)),
-            ("abyss", mezon_i18n::t(&locale, "appThemeSetting.fields.abyssDark"), rgba(13, 15, 22, 1.0)),
-            ("red_dark", mezon_i18n::t(&locale, "appThemeSetting.fields.redDark"), rgba(210, 80, 80, 1.0)),
+            (
+                "dark",
+                mezon_i18n::t(&locale, "appThemeSetting.fields.dark"),
+                rgba(49, 51, 56, 1.0),
+            ),
+            (
+                "light",
+                mezon_i18n::t(&locale, "appThemeSetting.fields.light"),
+                rgba(255, 255, 255, 1.0),
+            ),
+            (
+                "purple",
+                mezon_i18n::t(&locale, "appThemeSetting.fields.purpleHaze"),
+                rgba(120, 90, 200, 1.0),
+            ),
+            (
+                "abyss",
+                mezon_i18n::t(&locale, "appThemeSetting.fields.abyssDark"),
+                rgba(13, 15, 22, 1.0),
+            ),
+            (
+                "red_dark",
+                mezon_i18n::t(&locale, "appThemeSetting.fields.redDark"),
+                rgba(210, 80, 80, 1.0),
+            ),
         ];
 
         let sample_msgs = [

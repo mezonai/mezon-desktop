@@ -45,36 +45,34 @@ impl AccountPage {
     ) -> Self {
         let _ = cx.observe(&settings, |_, _, cx| cx.notify());
         let api_clone = api.clone();
-        let fetch_task = cx.spawn(async move |this, cx| {
-            match api_clone.get_account().await {
-                Ok(acct) => {
-                    this.update(cx, |this, view_cx| {
-                        let display = acct
-                            .display_name
-                            .clone()
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| acct.username.clone());
-                        this.account = Some(AccountState {
-                            username: acct.username.into(),
-                            display_name: display.into(),
-                            email: acct.email.unwrap_or_default().into(),
-                            avatar_url: acct.avatar_url.map(Into::into),
-                            phone_number: acct.phone_number.map(Into::into),
-                            password_setted: acct.password_setted,
-                        });
-                        this.loading = false;
-                        view_cx.notify();
-                    })
-                    .ok();
-                }
-                Err(_) => {
-                    this.update(cx, |this, cx| {
-                        this.fetch_error = true;
-                        this.loading = false;
-                        cx.notify();
-                    })
-                    .ok();
-                }
+        let fetch_task = cx.spawn(async move |this, cx| match api_clone.get_account().await {
+            Ok(acct) => {
+                this.update(cx, |this, view_cx| {
+                    let display = acct
+                        .display_name
+                        .clone()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| acct.username.clone());
+                    this.account = Some(AccountState {
+                        username: acct.username.into(),
+                        display_name: display.into(),
+                        email: acct.email.unwrap_or_default().into(),
+                        avatar_url: acct.avatar_url.map(Into::into),
+                        phone_number: acct.phone_number.map(Into::into),
+                        password_setted: acct.password_setted,
+                    });
+                    this.loading = false;
+                    view_cx.notify();
+                })
+                .ok();
+            }
+            Err(_) => {
+                this.update(cx, |this, cx| {
+                    this.fetch_error = true;
+                    this.loading = false;
+                    cx.notify();
+                })
+                .ok();
             }
         });
 
@@ -209,7 +207,10 @@ impl Render for AccountPage {
                                     .text_color(theme.text_primary)
                                     .ghost()
                                     .on_click(move |_, _, cx| {
-                                        navigate(NavOp::Replace("/settings/profile".to_string()), cx);
+                                        navigate(
+                                            NavOp::Replace("/settings/profile".to_string()),
+                                            cx,
+                                        );
                                     }),
                             ),
                     ),

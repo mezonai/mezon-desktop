@@ -47,12 +47,10 @@ impl RootView {
         let navigate: crate::components::NavigateFn = {
             let root_id = root_entity.entity_id();
             Arc::new(move |op: crate::components::NavOp, cx: &mut App| {
-                root_entity.update(cx, |this, _cx| {
-                    match op {
-                        crate::components::NavOp::Push(path) => this.router.navigate(path),
-                        crate::components::NavOp::Replace(path) => this.router.replace(path),
-                        crate::components::NavOp::Back => this.router.go_back(),
-                    }
+                root_entity.update(cx, |this, _cx| match op {
+                    crate::components::NavOp::Push(path) => this.router.navigate(path),
+                    crate::components::NavOp::Replace(path) => this.router.replace(path),
+                    crate::components::NavOp::Back => this.router.go_back(),
                 });
                 cx.notify(root_id);
             })

@@ -321,11 +321,7 @@ impl TransportClient {
         runtime()
             .spawn(async move {
                 transport
-                    .update_user_profile_by_clan(
-                        &clan_id,
-                        &nick_name,
-                        avatar_url.as_deref(),
-                    )
+                    .update_user_profile_by_clan(&clan_id, &nick_name, avatar_url.as_deref())
                     .await
             })
             .await

@@ -105,7 +105,9 @@ impl ClanProfileSection {
             move |this: &mut Self, _, event: &InputEvent, _, cx| {
                 if let InputEvent::Change = event {
                     let value = nick.read(cx).value().to_string();
-                    if let Some(state) = &mut this.profile && !state.saving {
+                    if let Some(state) = &mut this.profile
+                        && !state.saving
+                    {
                         state.nick_name = value.clone().into();
                         state.duplicate_error = false;
                     }
@@ -241,47 +243,48 @@ impl ClanProfileSection {
         });
         cx.notify();
 
-        self._fetch_task = Some(cx.spawn(async move |_, cx| {
-            match api.get_user_clan_profile(&clan_id).await {
-                Ok(profile) => {
-                    entity.update(cx, |this, cx| {
-                        let nick: SharedString = profile.nick_name.clone().into();
-                        let avatar: Option<SharedString> = Some(profile.avatar.clone())
-                            .filter(|s| !s.is_empty())
-                            .map(Into::into);
-                        this.profile = Some(ClanProfileState {
-                            selected_clan_id: clan_id.clone().into(),
-                            nick_name: nick.clone(),
-                            avatar_url: avatar.clone(),
-                            original_nick_name: nick,
-                            original_avatar_url: avatar,
-                            loading: false,
-                            saving: false,
-                            duplicate_error: false,
-                            fetched: true,
+        self._fetch_task =
+            Some(cx.spawn(
+                async move |_, cx| match api.get_user_clan_profile(&clan_id).await {
+                    Ok(profile) => {
+                        entity.update(cx, |this, cx| {
+                            let nick: SharedString = profile.nick_name.clone().into();
+                            let avatar: Option<SharedString> = Some(profile.avatar.clone())
+                                .filter(|s| !s.is_empty())
+                                .map(Into::into);
+                            this.profile = Some(ClanProfileState {
+                                selected_clan_id: clan_id.clone().into(),
+                                nick_name: nick.clone(),
+                                avatar_url: avatar.clone(),
+                                original_nick_name: nick,
+                                original_avatar_url: avatar,
+                                loading: false,
+                                saving: false,
+                                duplicate_error: false,
+                                fetched: true,
+                            });
+                            cx.notify();
                         });
-                        cx.notify();
-                    });
-                }
-                Err(e) => {
-                    entity.update(cx, |this, cx| {
-                        this.profile = Some(ClanProfileState {
-                            selected_clan_id: clan_id.clone().into(),
-                            nick_name: "".into(),
-                            avatar_url: None,
-                            original_nick_name: "".into(),
-                            original_avatar_url: None,
-                            loading: false,
-                            saving: false,
-                            duplicate_error: false,
-                            fetched: true,
+                    }
+                    Err(e) => {
+                        entity.update(cx, |this, cx| {
+                            this.profile = Some(ClanProfileState {
+                                selected_clan_id: clan_id.clone().into(),
+                                nick_name: "".into(),
+                                avatar_url: None,
+                                original_nick_name: "".into(),
+                                original_avatar_url: None,
+                                loading: false,
+                                saving: false,
+                                duplicate_error: false,
+                                fetched: true,
+                            });
+                            this.show_toast(format!("Failed to load clan profile: {}", e), cx);
+                            cx.notify();
                         });
-                        this.show_toast(format!("Failed to load clan profile: {}", e), cx);
-                        cx.notify();
-                    });
-                }
-            }
-        }));
+                    }
+                },
+            ));
     }
 }
 
@@ -420,14 +423,12 @@ impl ClanProfileSection {
         v_flex()
             .gap_4()
             .child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.text_muted)
-                            .child("Customize how you appear in each clan."),
-                    ),
+                v_flex().gap_1().child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.text_muted)
+                        .child("Customize how you appear in each clan."),
+                ),
             )
             .child(
                 v_flex()
@@ -476,19 +477,15 @@ impl ClanProfileSection {
                                     .child(name.clone())
                                     .child(div().flex_1())
                                     .when(is_selected, |el| {
-                                        el.child(
-                                            Label::new("✓")
-                                                .text_color(theme.brand)
-                                                .text_sm(),
-                                        )
+                                        el.child(Label::new("✓").text_color(theme.brand).text_sm())
                                     })
                                     .on_click({
                                         let e = e.clone();
                                         let click_id = click_id.clone();
                                         move |_, _, cx| {
-                                        e.update(cx, |this, cx| {
-                                            this.fetch(&click_id, cx);
-                                        });
+                                            e.update(cx, |this, cx| {
+                                                this.fetch(&click_id, cx);
+                                            });
                                         }
                                     })
                             }))
@@ -530,9 +527,7 @@ impl ClanProfileSection {
                                                     files: true,
                                                     directories: false,
                                                     multiple: false,
-                                                    prompt: Some(
-                                                        "Choose an avatar image".into(),
-                                                    ),
+                                                    prompt: Some("Choose an avatar image".into()),
                                                 });
                                                 cx.spawn(async move |cx| {
                                                     let paths = match rx.await {
@@ -597,13 +592,11 @@ impl ClanProfileSection {
                                         .text_color(theme.text_primary)
                                         .child("CLAN NICKNAME"),
                                 )
-                                .child(
-                                    Input::new(
-                                        self.nick_name_input
-                                            .as_ref()
-                                            .expect("nick_name_input not initialized"),
-                                    ),
-                                )
+                                .child(Input::new(
+                                    self.nick_name_input
+                                        .as_ref()
+                                        .expect("nick_name_input not initialized"),
+                                ))
                                 .when(duplicate_error, |el| {
                                     el.child(
                                         div()
@@ -645,35 +638,31 @@ impl ClanProfileSection {
                     .bg(theme.bg_primary)
                     .child(div().h(px(105.0)).w_full().bg(theme.brand))
                     .child(
-                        v_flex()
-                            .gap_4()
-                            .px_6()
-                            .py_6()
-                            .child(
-                                h_flex()
-                                    .gap_4()
-                                    .child(
-                                        Avatar::new()
-                                            .when_some(avatar_url, |av, url| av.src(url))
-                                            .name(nick_name.clone())
-                                            .with_size(Size::Large),
-                                    )
-                                    .child(
-                                        v_flex()
-                                            .gap_1()
-                                            .child(
-                                                Label::new(display_label)
-                                                    .text_xl()
-                                                    .font_weight(FontWeight::BOLD)
-                                                    .text_color(theme.text_primary),
-                                            )
-                                            .child(
-                                                Label::new(format!("@{}", username))
-                                                    .text_sm()
-                                                    .text_color(theme.text_muted),
-                                            ),
-                                    ),
-                            ),
+                        v_flex().gap_4().px_6().py_6().child(
+                            h_flex()
+                                .gap_4()
+                                .child(
+                                    Avatar::new()
+                                        .when_some(avatar_url, |av, url| av.src(url))
+                                        .name(nick_name.clone())
+                                        .with_size(Size::Large),
+                                )
+                                .child(
+                                    v_flex()
+                                        .gap_1()
+                                        .child(
+                                            Label::new(display_label)
+                                                .text_xl()
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(theme.text_primary),
+                                        )
+                                        .child(
+                                            Label::new(format!("@{}", username))
+                                                .text_sm()
+                                                .text_color(theme.text_muted),
+                                        ),
+                                ),
+                        ),
                     ),
             )
     }

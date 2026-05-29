@@ -11,7 +11,13 @@ use crate::{
 
 fn sanitize_filename(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -139,14 +145,14 @@ impl AppApi {
 
         let (width, height) = image::load_from_memory(&data)
             .ok()
-            .and_then(|img| {
+            .map(|img| {
                 let dims = img.dimensions();
                 tracing::info!(
                     "upload_avatar: detected image dimensions {}x{}",
                     dims.0,
                     dims.1
                 );
-                Some(dims)
+                dims
             })
             .unwrap_or((0, 0));
 

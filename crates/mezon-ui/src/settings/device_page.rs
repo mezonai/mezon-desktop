@@ -53,8 +53,8 @@ impl DevicePage {
 
     fn fetch(&mut self, cx: &mut Context<Self>) {
         let api = self.api.clone();
-        self._fetch_task = Some(cx.spawn(async move |this, cx| {
-            match api.list_loged_device().await {
+        self._fetch_task = Some(cx.spawn(
+            async move |this, cx| match api.list_loged_device().await {
                 Ok(devices) => {
                     let view_models: Vec<DeviceViewModel> = devices
                         .into_iter()
@@ -86,8 +86,8 @@ impl DevicePage {
                     })
                     .ok();
                 }
-            }
-        }));
+            },
+        ));
     }
 }
 

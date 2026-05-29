@@ -28,7 +28,9 @@ pub fn t(locale: &str, key: &str) -> String {
     if let Some(value) = data(locale).get(key) {
         return value.clone();
     }
-    if locale != "en" && let Some(value) = data("en").get(key) {
+    if locale != "en"
+        && let Some(value) = data("en").get(key)
+    {
         return value.clone();
     }
     key.to_string()

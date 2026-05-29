@@ -1,4 +1,4 @@
-use crate::theme::{resolve_theme, Theme};
+use crate::theme::{Theme, resolve_theme};
 use gpui::{Context, Entity, FontWeight, Window, div, prelude::*, px};
 use gpui_component::{Icon, IconName, label::Label, v_flex};
 use mezon_store::Settings;
@@ -34,21 +34,16 @@ fn language_row(
         .px_4()
         .py_3()
         .cursor_pointer()
-        .child(
-            div()
-                .rounded_full()
-                .size_2()
-                .bg(if is_selected {
-                    theme.status_online
-                } else {
-                    gpui::Rgba {
-                        r: 128.0 / 255.0,
-                        g: 132.0 / 255.0,
-                        b: 142.0 / 255.0,
-                        a: 1.0,
-                    }
-                }),
-        )
+        .child(div().rounded_full().size_2().bg(if is_selected {
+            theme.status_online
+        } else {
+            gpui::Rgba {
+                r: 128.0 / 255.0,
+                g: 132.0 / 255.0,
+                b: 142.0 / 255.0,
+                a: 1.0,
+            }
+        }))
         .child(format!("{} {}", flag, display_name))
         .child(div().flex_1());
 

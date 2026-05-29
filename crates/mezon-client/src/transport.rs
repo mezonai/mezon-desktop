@@ -2499,7 +2499,11 @@ impl MezonTransport {
         if code != 0 {
             let msg = String::from_utf8_lossy(&response);
             tracing::error!("UpdateUser error: code={}, response={}", code, msg);
-            return Err(anyhow::anyhow!("API error: code={}, response={}", code, msg));
+            return Err(anyhow::anyhow!(
+                "API error: code={}, response={}",
+                code,
+                msg
+            ));
         }
         Ok(())
     }
@@ -2528,7 +2532,11 @@ impl MezonTransport {
                 code,
                 msg
             );
-            return Err(anyhow::anyhow!("API error: code={}, response={}", code, msg));
+            return Err(anyhow::anyhow!(
+                "API error: code={}, response={}",
+                code,
+                msg
+            ));
         }
         Ok(())
     }
@@ -2858,7 +2866,11 @@ impl MezonTransport {
                 ));
             }
 
-            return Err(anyhow::anyhow!("API error: code={}, response={}", code, msg));
+            return Err(anyhow::anyhow!(
+                "API error: code={}, response={}",
+                code,
+                msg
+            ));
         }
         Ok(api::UploadAttachment::decode(response.as_slice())?)
     }
@@ -4408,7 +4420,11 @@ impl MezonTransport {
 
         let (code, response) = self.send_api_request(cid, "UpdateAccount", body).await?;
 
-        tracing::debug!("UpdateAccount response: code={}, response={:?}", code, response);
+        tracing::debug!(
+            "UpdateAccount response: code={}, response={:?}",
+            code,
+            response
+        );
 
         if code == 0 {
             Ok(())

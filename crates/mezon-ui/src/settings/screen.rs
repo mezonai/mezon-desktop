@@ -243,12 +243,10 @@ impl Render for SettingsScreen {
                     .border_r_1()
                     .border_color(theme.border)
                     .child(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .px_3()
-                            .py_3()
-                            .child(Label::new(mezon_i18n::t(&locale, "common.settings")).text_color(theme.text_primary)),
+                        h_flex().items_center().gap_2().px_3().py_3().child(
+                            Label::new(mezon_i18n::t(&locale, "common.settings"))
+                                .text_color(theme.text_primary),
+                        ),
                     )
                     .child(
                         div().flex_1().px_2().py_2().child(
@@ -262,7 +260,10 @@ impl Render for SettingsScreen {
                                         .text_color(theme.text_primary)
                                         .px_2()
                                         .py_1()
-                                        .child(mezon_i18n::t(&locale, "setting.accountSettings.title").to_uppercase()),
+                                        .child(
+                                            mezon_i18n::t(&locale, "setting.accountSettings.title")
+                                                .to_uppercase(),
+                                        ),
                                 )
                                 .child(nav_item(
                                     "account-page",
@@ -297,7 +298,10 @@ impl Render for SettingsScreen {
                                         .px_2()
                                         .py_1()
                                         .mt_4()
-                                        .child(mezon_i18n::t(&locale, "setting.appSettings.title").to_uppercase()),
+                                        .child(
+                                            mezon_i18n::t(&locale, "setting.appSettings.title")
+                                                .to_uppercase(),
+                                        ),
                                 )
                                 .child(nav_item(
                                     "appearance-page",
