@@ -5,18 +5,18 @@ use gpui_component::Sizable;
 
 use crate::components::primitives::{Avatar, Badge, Icon, IconName, Size};
 use crate::theme::resolve_theme;
+use crate::text_utils::compute_initials;
+use crate::theme::Theme;
 
-fn compute_initials(name: &str) -> String {
-    let initials: String = name
-        .split_whitespace()
-        .take(2)
-        .filter_map(|s| s.chars().next())
-        .collect::<String>()
-        .to_uppercase();
-    if initials.is_empty() {
-        "?".to_string()
-    } else {
-        initials
+fn on_clan_click(
+    clan_list: Entity<ClanList>,
+    clan_id: String,
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) {
+    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+        clan_list.update(cx, |m, cx| {
+            m.select_clan(&clan_id);
+            cx.notify();
+        });
     }
 }
 
@@ -90,14 +90,9 @@ impl Render for ClanSidebar {
                             )
                         });
 
-                    clan_div.interactivity().on_click(
-                        move |_event: &ClickEvent, _window: &mut Window, cx: &mut App| {
-                            clan_list_handle.update(cx, |m, cx| {
-                                m.select_clan(&clan_id);
-                                cx.notify();
-                            });
-                        },
-                    );
+                    clan_div
+                        .interactivity()
+                        .on_click(on_clan_click(clan_list_handle, clan_id));
 
                     let clan_initials = compute_initials(&clan.name);
 

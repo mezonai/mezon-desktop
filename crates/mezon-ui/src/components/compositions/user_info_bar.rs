@@ -3,23 +3,19 @@ use gpui::{App, ClickEvent, Entity, SharedString, Window, div, prelude::*, px};
 use gpui_component::Sizable;
 
 use crate::components::primitives::{Avatar, Icon, IconName, Size};
+use crate::text_utils::compute_initials;
 use crate::theme::Theme;
 use mezon_store::AuthState;
 
-fn compute_initials(name: &str) -> String {
-    let initials: String = name
-        .split_whitespace()
-        .take(2)
-        .filter_map(|s| s.chars().next())
-        .collect::<String>()
-        .to_uppercase();
-    if initials.is_empty() {
-        "?".to_string()
-    } else {
-        initials
+fn on_settings_click(
+    on_settings: Option<crate::components::NavigateFn>,
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) {
+    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+        if let Some(ref cb) = on_settings {
+            cb("/settings", cx);
+        }
     }
 }
-
 pub struct UserInfoBar {
     auth_state: Entity<AuthState>,
     presence: String,
@@ -57,7 +53,6 @@ impl UserInfoBar {
             _ => theme.status_offline,
         };
 
-        let on_settings = self.on_settings.clone();
         let mut settings_btn = div()
             .id(SharedString::from("settings-btn"))
             .cursor_pointer()
@@ -66,13 +61,9 @@ impl UserInfoBar {
                     .size(px(16.0))
                     .text_color(theme.text_muted),
             );
-        settings_btn.interactivity().on_click(
-            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                if let Some(ref cb) = on_settings {
-                    cb(crate::components::NavOp::Push("/settings".to_string()), cx);
-                }
-            },
-        );
+        settings_btn
+            .interactivity()
+            .on_click(on_settings_click(self.on_settings.clone()));
 
         div()
             .flex()

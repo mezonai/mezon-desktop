@@ -1,13 +1,117 @@
 use std::sync::Arc;
 
-use gpui::{Context, Entity, FontWeight, Window, div, prelude::*, px};
+use gpui::{App, Context, Entity, FontWeight, Window, div, prelude::*, px};
 use mezon_client::AppApi;
-use mezon_store::{AuthState, ChannelList, Clan, ClanList, Settings};
+use mezon_store::{AuthState, Category, Channel, ChannelList, Clan, ClanList};
 
 use crate::components::compositions::user_info_bar::UserInfoBar;
 use crate::router::{Route, Router};
 use crate::theme::{Theme, resolve_theme};
 use crate::{ChannelSidebar, ClanSidebar};
+
+/// Group flat channels into categories by `category_name`.
+/// Channels with an empty `category_name` are placed into a "General" category.
+fn group_channels_by_category(channels: Vec<Channel>) -> Vec<Category> {
+    let mut map: std::collections::HashMap<String, Vec<Channel>> = std::collections::HashMap::new();
+
+    for ch in channels {
+        let cat_name = if ch.category_name.is_empty() {
+            "General".to_string()
+        } else {
+            ch.category_name.clone()
+        };
+        map.entry(cat_name).or_default().push(ch);
+    }
+
+    let mut categories: Vec<Category> = map
+        .into_iter()
+        .map(|(name, chs)| {
+            let clan_id = chs.first().map(|ch| ch.clan_id.clone()).unwrap_or_default();
+            Category {
+                clan_id,
+                name,
+                channels: chs,
+            }
+        })
+        .collect();
+
+    categories.sort_by(|a, b| a.name.cmp(&b.name));
+    categories
+}
+
+fn spawn_clan_list_fetcher(api: Arc<AppApi>, clan_list: Entity<ClanList>, cx: &mut App) {
+    cx.spawn(async move |cx| {
+        tracing::info!("Fetching clan list...");
+        match api.list_clan_descs().await {
+            Ok(clans) => {
+                tracing::info!("Fetched {} clans", clans.len());
+                if !clans.is_empty() {
+                    let store_clans: Vec<Clan> = clans.into_iter().map(Clan::from).collect();
+                    clan_list.update(cx, |model, cx| {
+                        model.update_clans(store_clans);
+                        cx.notify();
+                    });
+                    tracing::info!("Updated ClanList with real data");
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to fetch clan list: {}", e);
+            }
+        }
+    })
+    .detach();
+}
+
+fn spawn_channel_list_fetcher(
+    api: Arc<AppApi>,
+    clan_list: Entity<ClanList>,
+    channel_list: Entity<ChannelList>,
+    cx: &mut App,
+) {
+    cx.spawn(async move |cx| {
+        let mut last_clan_id: Option<String> = None;
+        let mut error_count: u32 = 0;
+        const MAX_CONSECUTIVE_ERRORS: u32 = 5;
+        loop {
+            let current_clan_id: Option<String> =
+                cx.update(|app| clan_list.read(app).active_clan_id.clone());
+            if current_clan_id.is_some() && current_clan_id != last_clan_id {
+                if let Some(ref clan_id) = current_clan_id {
+                    match api.list_channel_by_user_id().await {
+                        Ok(api_channels) => {
+                            error_count = 0;
+                            let clan_channels: Vec<Channel> = api_channels
+                                .into_iter()
+                                .filter(|c| c.clan_id == *clan_id)
+                                .map(Channel::from)
+                                .collect();
+                            let categories = group_channels_by_category(clan_channels);
+                            channel_list.update(cx, |list, cx| {
+                                list.categories = categories;
+                                cx.notify();
+                            });
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to fetch channels: {}", e);
+                            error_count += 1;
+                            if error_count >= MAX_CONSECUTIVE_ERRORS {
+                                tracing::error!(
+                                    "Too many consecutive channel fetch failures, stopping watcher"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+                last_clan_id = current_clan_id;
+            }
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(500))
+                .await;
+        }
+    })
+    .detach();
+}
 
 pub struct ChatLayout {
     router: Router,
@@ -16,6 +120,10 @@ pub struct ChatLayout {
     clan_sidebar: Entity<ClanSidebar>,
     channel_sidebar: Entity<ChannelSidebar>,
     user_info_bar: UserInfoBar,
+    /// Guard: spawn data fetchers only on the first render call.
+    fetchers_spawned: bool,
+    api: Arc<AppApi>,
+    clan_list: Entity<ClanList>,
 }
 
 impl ChatLayout {
@@ -66,40 +174,6 @@ impl ChatLayout {
         let _ = cx.observe(&channel_list, |_, _, cx| cx.notify());
         let _ = cx.observe(&clan_list, |_, _, cx| cx.notify());
 
-        let api_clone = api.clone();
-        let clan_list_clone = clan_list.clone();
-        cx.spawn(async move |_, cx| {
-            // Wait for connection to be fully ready (TCP open + handshake)
-            loop {
-                if api_clone.is_open().await && api_clone.ping_roundtrip().await.is_ok() {
-                    break;
-                }
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(1000))
-                    .await;
-            }
-
-            tracing::info!("🔍 Investigation: Fetching real clan list...");
-            match api_clone.list_clan_descs().await {
-                Ok(clans) => {
-                    tracing::info!("✅ Investigation: Fetched {} clans", clans.len());
-                    if !clans.is_empty() {
-                        let store_clans: Vec<Clan> = clans.into_iter().map(Clan::from).collect();
-
-                        clan_list_clone.update(cx, |model, cx| {
-                            model.update_clans(store_clans);
-                            cx.notify();
-                        });
-                        tracing::info!("✅ Updated ClanList with real data");
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("❌ Investigation: Failed to fetch clan list: {}", e);
-                }
-            }
-        })
-        .detach();
-
         Self {
             router,
             settings,
@@ -107,6 +181,9 @@ impl ChatLayout {
             clan_sidebar,
             channel_sidebar,
             user_info_bar,
+            fetchers_spawned: false,
+            api,
+            clan_list,
         }
     }
 }
@@ -114,6 +191,18 @@ impl ChatLayout {
 impl Render for ChatLayout {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = resolve_theme(&self.settings.read(cx).theme);
+
+        if !self.fetchers_spawned {
+            self.fetchers_spawned = true;
+            spawn_clan_list_fetcher(self.api.clone(), self.clan_list.clone(), cx);
+            spawn_channel_list_fetcher(
+                self.api.clone(),
+                self.clan_list.clone(),
+                self.channel_list.clone(),
+                cx,
+            );
+        }
+        let theme = Theme::dark();
         let channels = self.channel_list.read(cx);
 
         let active_channel_name = channels.active_channel().cloned();

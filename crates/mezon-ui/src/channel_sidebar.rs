@@ -26,6 +26,22 @@ fn on_channel_click(
     }
 }
 
+fn on_category_click(
+    sidebar: Entity<ChannelSidebar>,
+    category_name: String,
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) {
+    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+        sidebar.update(cx, |this, cx| {
+            if this.collapsed.contains(&category_name) {
+                this.collapsed.remove(&category_name);
+            } else {
+                this.collapsed.insert(category_name.clone());
+            }
+            cx.notify();
+        });
+    }
+}
+
 pub struct ChannelSidebar {
     clan_list: Entity<ClanList>,
     channel_list: Entity<ChannelList>,
@@ -117,13 +133,13 @@ impl Render for ChannelSidebar {
                     .flex_col()
                     .flex_1()
                     .children(categories.into_iter().map(
-                        move |(cat_name, is_collapsed, cat_channels)| {
-                            let cat_name2 = cat_name.clone();
+                        move |(category_name, is_collapsed, category_channels)| {
+                            let category_name = category_name.clone();
                             let nav = on_navigate.clone();
                             let clan_id_for_nav = active_clan_id_for_nav.clone();
 
                             let mut header = div()
-                                .id(SharedString::from(format!("cat-{}", cat_name)))
+                                .id(SharedString::from(format!("cat-{}", category_name)))
                                 .flex()
                                 .flex_row()
                                 .items_center()
@@ -143,21 +159,11 @@ impl Render for ChannelSidebar {
                                     .size(px(12.0))
                                     .text_color(theme_clone.text_muted),
                                 )
-                                .child(div().ml_1().child(cat_name.clone()));
+                                .child(div().ml_1().child(category_name.clone()));
 
-                            let sidebar_for_cat = sidebar_entity.clone();
-                            header.interactivity().on_click(
-                                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                                    sidebar_for_cat.update(cx, |this, cx| {
-                                        if this.collapsed.contains(&cat_name2) {
-                                            this.collapsed.remove(&cat_name2);
-                                        } else {
-                                            this.collapsed.insert(cat_name2.clone());
-                                        }
-                                        cx.notify();
-                                    });
-                                },
-                            );
+                            header
+                                .interactivity()
+                                .on_click(on_category_click(sidebar_entity.clone(), category_name));
 
                             div()
                                 .flex()
@@ -166,7 +172,7 @@ impl Render for ChannelSidebar {
                                 .children(if is_collapsed {
                                     vec![]
                                 } else {
-                                    cat_channels
+                                    category_channels
                                         .iter()
                                         .map(|ch| {
                                             let ch_id = ch.id.clone();

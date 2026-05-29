@@ -197,6 +197,8 @@ pub enum AuthState {
     /// OAuth2 browser was opened; waiting for the `mezonapp://callback` deep link.
     /// Kept for future OAuth integration.
     AwaitingCallback,
-    /// Token received and session is valid.
+    /// TCP transport handshake in progress — loading screen visible.
+    Connecting(Session),
+    /// Token received, transport connected, and session is valid.
     Authenticated(Session),
 }

@@ -141,6 +141,18 @@ impl TransportClient {
             .expect("Transport task panicked")
     }
 
+    /// List channels for the current user over the shared transport.
+    pub async fn list_channel_by_user_id(&self) -> Result<Vec<crate::transport::ApiChannelDesc>> {
+        tracing::info!("📞 TransportClient::list_channel_by_user_id() called");
+
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.list_channel_by_user_id().await })
+            .await
+            .expect("Transport task panicked")
+    }
+
     /// List clan descriptions over the shared transport.
     pub async fn list_clan_descs(&self) -> Result<Vec<crate::transport::ApiClanDesc>> {
         tracing::info!("📞 TransportClient::list_clan_descs() called");

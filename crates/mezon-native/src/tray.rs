@@ -34,6 +34,9 @@ impl MezonTray {
         on_quit: impl Fn() + Send + Sync + 'static,
         rt_handle: Arc<tokio::runtime::Handle>,
     ) -> Result<Self> {
+        #[cfg(target_os = "linux")]
+        let _ = gtk::init();
+
         let menu = Menu::new();
 
         let item_show = MenuItem::with_id(SHOW_ID, "Show Mezon", true, None);
