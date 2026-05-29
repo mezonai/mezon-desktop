@@ -155,12 +155,12 @@ impl ProfilePage {
             move |this: &mut Self, _, event: &InputEvent, _, cx| {
                 if let InputEvent::Change = event
                     && let Some(state) = &mut this.profile
-                        && !state.saving
-                    {
-                        let value = display.read(cx).value().to_string();
-                        state.display_name = value.into();
-                        cx.notify();
-                    }
+                    && !state.saving
+                {
+                    let value = display.read(cx).value().to_string();
+                    state.display_name = value.into();
+                    cx.notify();
+                }
             }
         }));
 
@@ -182,12 +182,12 @@ impl ProfilePage {
             move |this: &mut Self, _, event: &InputEvent, _, cx| {
                 if let InputEvent::Change = event
                     && let Some(state) = &mut this.profile
-                        && !state.saving
-                    {
-                        let value = about.read(cx).value().to_string();
-                        state.about_me = value.into();
-                        cx.notify();
-                    }
+                    && !state.saving
+                {
+                    let value = about.read(cx).value().to_string();
+                    state.about_me = value.into();
+                    cx.notify();
+                }
             }
         }));
 
