@@ -279,8 +279,8 @@ impl LoginView {
         tracing::info!("  TCP URL: {:?}", session.tcp_url);
 
         auth_state.update(cx, |state, cx| {
-            *state = AuthState::Authenticated(session);
-            tracing::debug!("User authenticated, transitioning to main app view.");
+            *state = AuthState::Connecting(session);
+            tracing::debug!("User authenticated, connecting transport.");
             cx.notify();
         });
     }

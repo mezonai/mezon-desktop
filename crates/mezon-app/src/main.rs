@@ -169,7 +169,7 @@ fn spawn_transport_task(
             exec.timer(std::time::Duration::from_millis(500)).await;
 
             let session = match cx.update(|cx| auth_state.read(cx).clone()) {
-                AuthState::Authenticated(session) => Some(session),
+                AuthState::Connecting(session) | AuthState::Authenticated(session) => Some(session),
                 _ => None,
             };
 
@@ -190,13 +190,21 @@ fn spawn_transport_task(
 
             let Some(host) = session.tcp_host.clone() else {
                 tracing::warn!("Authenticated session missing tcp_host; TCP APIs unavailable");
+                cx.update(|cx| {
+                    auth_state.update(cx, |state, cx| {
+                        if matches!(state, AuthState::Connecting(_)) {
+                            *state = AuthState::NotAuthenticated;
+                            cx.notify();
+                        }
+                    });
+                });
                 continue;
             };
             // let Some(port) = session.tcp_port else {
             //     tracing::warn!("Authenticated session missing tcp_port; TCP APIs unavailable");
             //     continue;
             // };
-            let port = 7349;
+            let port = 4433;
 
             if transport.is_open().await
                 && let Err(e) = transport.close().await
@@ -206,6 +214,7 @@ fn spawn_transport_task(
 
             tracing::info!("Connecting shared TCP transport to {host}:{port}");
             let token = session.token.clone();
+            let session_for_update = session.clone();
             match transport
                 .connect(
                     &host,
@@ -230,21 +239,31 @@ fn spawn_transport_task(
                 .await
             {
                 Ok(()) => {
-                    connected_token = Some(token);
                     tracing::info!("Shared TCP transport connected");
 
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(250))
-                        .await;
+                    exec.timer(std::time::Duration::from_millis(250)).await;
                     match api.get_account().await {
                         Ok(account) => {
+                            connected_token = Some(token);
                             tracing::info!("get_account over shared TCP succeeded");
                             tracing::info!("  User ID: {}", account.user_id);
                             tracing::info!("  Username: {}", account.username);
                             tracing::info!("  Email: {:?}", account.email);
                             tracing::info!("  Display name: {:?}", account.display_name);
+
+                            cx.update(|cx| {
+                                auth_state.update(cx, |state, cx| {
+                                    if matches!(state, AuthState::Connecting(_)) {
+                                        *state = AuthState::Authenticated(session_for_update);
+                                        cx.notify();
+                                    }
+                                });
+                            });
                         }
-                        Err(e) => tracing::error!("get_account over shared TCP failed: {e}"),
+                        Err(e) => {
+                            tracing::error!("get_account over shared TCP failed: {e}");
+                            let _ = transport.close().await;
+                        }
                     }
                 }
                 Err(e) => {
@@ -260,8 +279,8 @@ fn spawn_transport_task(
 
 /// Attempt to restore a valid session from the OS keychain.
 ///
-/// - Valid + not expired → `Authenticated`
-/// - Valid + expired     → try silent refresh → `Authenticated` on success, else `NotAuthenticated`
+/// - Valid + not expired → `Connecting` (TCP transport not yet established)
+/// - Valid + expired     → try silent refresh → `Connecting` on success, else `NotAuthenticated`
 /// - Nothing stored      → `NotAuthenticated`
 fn resolve_initial_auth_state(rt: &tokio::runtime::Runtime, client: &MezonClient) -> AuthState {
     match keychain::load_session() {
@@ -271,7 +290,7 @@ fn resolve_initial_auth_state(rt: &tokio::runtime::Runtime, client: &MezonClient
         }
         Some(session) if !mezon_client::Session::is_expired(&session) => {
             tracing::info!("Restored valid session for user_id={}", session.user_id);
-            AuthState::Authenticated(session)
+            AuthState::Connecting(session)
         }
         Some(session) => {
             tracing::info!("Stored session expired — attempting silent refresh");
@@ -284,7 +303,7 @@ fn resolve_initial_auth_state(rt: &tokio::runtime::Runtime, client: &MezonClient
                     if let Err(e) = keychain::save_session(&new_session) {
                         tracing::warn!("Failed to update keychain after refresh: {e}");
                     }
-                    AuthState::Authenticated(new_session)
+                    AuthState::Connecting(new_session)
                 }
                 Err(e) => {
                     tracing::warn!("Silent refresh failed: {e} — showing login");

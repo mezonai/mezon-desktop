@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use gpui::{App, ClickEvent, Context, Entity, FontWeight, Window, div, prelude::*};
+use gpui_component::Sizable;
 use mezon_client::{AppApi, MezonClient};
 use mezon_store::AuthState;
 
 use crate::chat_layout::ChatLayout;
-use crate::components::primitives::{Button, Icon, IconName};
+use crate::components::primitives::{Button, Icon, IconName, Size, Spinner};
 use crate::login_view::LoginView;
 use crate::router::{Route, Router};
 use crate::settings_screen::SettingsScreen;
@@ -83,6 +84,7 @@ impl Render for RootView {
                 self.login_view.clone().into_any_element()
             }
             AuthState::AwaitingCallback => render_awaiting_callback(&theme),
+            AuthState::Connecting(_) => render_connecting(&theme),
             AuthState::Authenticated(_) => {
                 let route = self.router.route();
                 match route {
@@ -125,6 +127,29 @@ fn render_awaiting_callback(theme: &Theme) -> gpui::AnyElement {
                 .text_sm()
                 .text_color(theme.text_secondary)
                 .child("Connecting - complete sign-in in your browser..."),
+        )
+        .into_any_element()
+}
+
+fn render_connecting(theme: &Theme) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .flex_col()
+        .gap_4()
+        .child(
+            Spinner::new()
+                .with_size(Size::Large)
+                .color(theme.brand.into()),
+        )
+        .child(
+            div()
+                .text_xl()
+                .font_weight(FontWeight::BOLD)
+                .text_color(theme.text_primary)
+                .child("Loading..."),
         )
         .into_any_element()
 }
