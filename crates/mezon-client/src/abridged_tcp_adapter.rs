@@ -71,6 +71,14 @@ const RAW_CHUNK_HEADER_LENGTH: usize = 11;
 
 type TlsStream = tokio_rustls::client::TlsStream<TcpStream>;
 
+struct IoLoopState {
+    handlers: Arc<Mutex<AdapterHandlers>>,
+    streams: Arc<Mutex<HashMap<u16, Vec<Vec<u8>>>>>,
+    is_connected: Arc<Mutex<bool>>,
+    read_buffer: Arc<Mutex<Vec<u8>>>,
+    pending_raw: Arc<Mutex<Option<Vec<u8>>>>,
+}
+
 pub struct AbridgedTcpAdapter {
     write_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
     handlers: Arc<Mutex<AdapterHandlers>>,
@@ -320,11 +328,7 @@ impl AbridgedTcpAdapter {
         mut tls: TlsStream,
         mut write_rx: mpsc::UnboundedReceiver<Vec<u8>>,
         ready_tx: oneshot::Sender<()>,
-        handlers: Arc<Mutex<AdapterHandlers>>,
-        streams: Arc<Mutex<HashMap<u16, Vec<Vec<u8>>>>>,
-        is_connected: Arc<Mutex<bool>>,
-        read_buffer: Arc<Mutex<Vec<u8>>>,
-        pending_raw: Arc<Mutex<Option<Vec<u8>>>>,
+        state: IoLoopState,
     ) {
         let mut read_buf = vec![0u8; 8192];
         let mut read_count = 0u64;
@@ -341,8 +345,8 @@ impl AbridgedTcpAdapter {
                     match result {
                         Ok(0) => {
                             tracing::info!("📖 Server closed connection after {} reads", read_count);
-                            *is_connected.lock().await = false;
-                            let h = handlers.lock().await;
+                            *state.is_connected.lock().await = false;
+                            let h = state.handlers.lock().await;
                             h.trigger_close(true);
                             break;
                         }
@@ -354,11 +358,11 @@ impl AbridgedTcpAdapter {
                             let data = read_buf[..n].to_vec();
                             let adapter = AbridgedTcpAdapter {
                                 write_tx: Arc::new(Mutex::new(None)),
-                                handlers: handlers.clone(),
-                                streams: streams.clone(),
-                                is_connected: is_connected.clone(),
-                                read_buffer: read_buffer.clone(),
-                                pending_raw: pending_raw.clone(),
+                                handlers: state.handlers.clone(),
+                                streams: state.streams.clone(),
+                                is_connected: state.is_connected.clone(),
+                                read_buffer: state.read_buffer.clone(),
+                                pending_raw: state.pending_raw.clone(),
                             };
                             if let Err(e) = adapter.handle_data(data).await {
                                 tracing::error!("✗ handle_data error: {}", e);
@@ -366,8 +370,8 @@ impl AbridgedTcpAdapter {
                         }
                         Err(e) => {
                             tracing::error!("✗ READ error: kind={:?} msg={}", e.kind(), e);
-                            *is_connected.lock().await = false;
-                            let h = handlers.lock().await;
+                            *state.is_connected.lock().await = false;
+                            let h = state.handlers.lock().await;
                             h.trigger_error(e.to_string());
                             h.trigger_close(false);
                             break;
@@ -481,15 +485,17 @@ impl TransportAdapter for AbridgedTcpAdapter {
         // Spawn I/O loop and wait for it to be ready
         let (ready_tx, ready_rx) = oneshot::channel();
         let (write_tx, write_rx) = mpsc::unbounded_channel();
-        let h = self.handlers.clone();
-        let st = self.streams.clone();
-        let ic = self.is_connected.clone();
-        let rb = self.read_buffer.clone();
-        let pr = self.pending_raw.clone();
+        let state = IoLoopState {
+            handlers: self.handlers.clone(),
+            streams: self.streams.clone(),
+            is_connected: self.is_connected.clone(),
+            read_buffer: self.read_buffer.clone(),
+            pending_raw: self.pending_raw.clone(),
+        };
 
         tracing::info!("🔌 Spawning I/O loop...");
         tokio::spawn(async move {
-            Self::io_loop(tls, write_rx, ready_tx, h, st, ic, rb, pr).await;
+            Self::io_loop(tls, write_rx, ready_tx, state).await;
         });
 
         // Wait for I/O loop to signal readiness
