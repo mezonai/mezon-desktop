@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod autostart;
 pub mod badge;
 pub mod deep_link;

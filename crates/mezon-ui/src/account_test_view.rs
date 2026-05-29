@@ -6,7 +6,7 @@ use mezon_client::{
     transport::{ApiAccount, ApiChannelDesc, ApiClanDesc},
 };
 
-use crate::theme::Theme;
+use crate::theme::{Theme, resolve_theme};
 
 pub struct AccountTestView {
     api: Arc<AppApi>,
@@ -91,7 +91,7 @@ impl Render for AccountTestView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.start(cx.entity().clone(), cx);
 
-        let theme = Theme::dark();
+        let theme = resolve_theme("dark");
         let mut card = div()
             .flex()
             .flex_col()

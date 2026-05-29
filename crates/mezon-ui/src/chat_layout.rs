@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use gpui::{App, Context, Entity, FontWeight, Window, div, prelude::*, px};
 use mezon_client::AppApi;
-use mezon_store::{AuthState, Category, Channel, ChannelList, Clan, ClanList};
+use mezon_store::{AuthState, Category, Channel, ChannelList, Clan, ClanList, Settings};
 
 use crate::components::compositions::user_info_bar::UserInfoBar;
 use crate::router::{Route, Router};
-use crate::theme::Theme;
+use crate::theme::{Theme, resolve_theme};
 use crate::{ChannelSidebar, ClanSidebar};
 
 /// Group flat channels into categories by `category_name`.
@@ -115,6 +115,7 @@ fn spawn_channel_list_fetcher(
 
 pub struct ChatLayout {
     router: Router,
+    settings: Entity<Settings>,
     channel_list: Entity<ChannelList>,
     clan_sidebar: Entity<ClanSidebar>,
     channel_sidebar: Entity<ChannelSidebar>,
@@ -128,27 +129,43 @@ pub struct ChatLayout {
 impl ChatLayout {
     pub fn new(
         router: Router,
+        clan_list: Entity<ClanList>,
         auth_state: Entity<AuthState>,
         api: Arc<AppApi>,
         navigate: crate::components::NavigateFn,
+        settings: Entity<Settings>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let clan_list = cx.new(|_| ClanList::new());
+        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
+
         let channel_list = cx.new(|_| ChannelList::new());
 
         let on_navigate: Option<crate::components::NavigateFn> = {
             let nav = navigate.clone();
-            Some(Arc::new(move |path, cx| nav(path, cx)))
+            Some(Arc::new(move |op, cx| nav(op, cx)))
         };
 
         let on_settings: Option<crate::components::NavigateFn> = {
             let nav = navigate.clone();
-            Some(Arc::new(move |path, cx| nav(path, cx)))
+            Some(Arc::new(move |op, cx| nav(op, cx)))
         };
 
-        let clan_sidebar = cx.new(|cx| ClanSidebar::new(clan_list.clone(), cx));
-        let channel_sidebar = cx.new(|cx| {
-            ChannelSidebar::new(clan_list.clone(), channel_list.clone(), on_navigate, cx)
+        let clan_list_for_sidebar = clan_list.clone();
+        let settings_for_clan = settings.clone();
+        let clan_sidebar =
+            cx.new(move |cx| ClanSidebar::new(clan_list_for_sidebar, settings_for_clan, cx));
+
+        let clan_list_for_channel = clan_list.clone();
+        let channel_list_for_channel = channel_list.clone();
+        let settings_for_channel = settings.clone();
+        let channel_sidebar = cx.new(move |cx| {
+            ChannelSidebar::new(
+                clan_list_for_channel,
+                channel_list_for_channel,
+                on_navigate,
+                settings_for_channel,
+                cx,
+            )
         });
 
         let user_info_bar = UserInfoBar::new(auth_state.clone(), on_settings);
@@ -159,6 +176,7 @@ impl ChatLayout {
 
         Self {
             router,
+            settings,
             channel_list,
             clan_sidebar,
             channel_sidebar,
@@ -172,6 +190,8 @@ impl ChatLayout {
 
 impl Render for ChatLayout {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _theme = resolve_theme(&self.settings.read(cx).theme);
+
         if !self.fetchers_spawned {
             self.fetchers_spawned = true;
             spawn_clan_list_fetcher(self.api.clone(), self.clan_list.clone(), cx);
@@ -254,8 +274,8 @@ impl Render for ChatLayout {
 }
 
 impl ChatLayout {
-    fn render_content(&self, _cx: &Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+    fn render_content(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = resolve_theme(&self.settings.read(cx).theme);
         let route = self.router.route();
         let current_path = self.router.current_path().to_string();
 
@@ -290,7 +310,16 @@ impl ChatLayout {
                 &format!("#{channel_id}"),
                 &current_path,
             ),
-            Route::Settings | Route::NotFound { .. } => {
+            Route::SettingsAccount
+            | Route::SettingsProfile
+            | Route::SettingsDevices
+            | Route::SettingsAppearance
+            | Route::SettingsActivity
+            | Route::SettingsNotifications
+            | Route::SettingsLanguage
+            | Route::SettingsVoice
+            | Route::SettingsAdvanced
+            | Route::NotFound { .. } => {
                 // Handled by RootView, not rendered here
                 div().into_any_element()
             }

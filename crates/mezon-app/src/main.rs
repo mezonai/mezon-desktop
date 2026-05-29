@@ -5,6 +5,7 @@ use mezon_client::{AppApi, MezonClient, TransportClient, keychain};
 use mezon_native::instance::SingleInstance;
 use mezon_store::{AuthState, Settings};
 use mezon_ui::{RootView, init as init_ui, title_bar::TitleBar};
+use std::borrow::Cow;
 use std::sync::Arc;
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -80,9 +81,46 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     }));
 
     application()
+        .with_http_client(Arc::new(reqwest_client::ReqwestClient::new()))
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
             tracing::debug!("App started");
+
+            // Register gg sans font (TTFs pre-decompressed by build.rs)
+            let gg_sans_paths: &[(&[u8], &str)] = &[
+                (
+                    include_bytes!(concat!(env!("OUT_DIR"), "/ggsans-Normal.ttf")),
+                    "Normal",
+                ),
+                (
+                    include_bytes!(concat!(env!("OUT_DIR"), "/ggsans-Medium.ttf")),
+                    "Medium",
+                ),
+                (
+                    include_bytes!(concat!(env!("OUT_DIR"), "/ggsans-Semibold.ttf")),
+                    "Semibold",
+                ),
+                (
+                    include_bytes!(concat!(env!("OUT_DIR"), "/ggsans-Bold.ttf")),
+                    "Bold",
+                ),
+                (
+                    include_bytes!(concat!(env!("OUT_DIR"), "/ggsans-ExtraBold.ttf")),
+                    "ExtraBold",
+                ),
+            ];
+            let fonts: Vec<Cow<'static, [u8]>> = gg_sans_paths
+                .iter()
+                .map(|(data, _)| Cow::Borrowed(*data))
+                .collect();
+            if !fonts.is_empty() {
+                if let Err(e) = cx.text_system().add_fonts(fonts) {
+                    tracing::error!("Failed to register gg sans fonts: {e}");
+                } else {
+                    tracing::info!("Registered gg sans font ({} weights)", gg_sans_paths.len());
+                }
+            }
+
             init_ui(cx);
 
             // Shared channel so background threads can send deep link URLs to the GPUI main thread.
@@ -101,10 +139,14 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                 let _ = url_tx.send(url);
             }
 
+            // Create the shared Settings entity so all views can observe theme changes.
+            let settings_entity = cx.new(|_| Settings::load_sync());
+
             // Open the main window and obtain the auth_state entity handle.
             let auth_state_handle = open_main_window(
                 cx,
                 &settings,
+                settings_entity,
                 client.clone(),
                 api.clone(),
                 initial_auth_state,
@@ -381,6 +423,7 @@ fn spawn_refresh_task(cx: &mut App, auth_state: Entity<AuthState>, client: Arc<M
 fn open_main_window(
     cx: &mut App,
     settings: &Settings,
+    settings_entity: Entity<Settings>,
     client: Arc<MezonClient>,
     api: Arc<AppApi>,
     initial_auth: AuthState,
@@ -416,8 +459,17 @@ fn open_main_window(
         let auth_state = cx.new(|_cx| initial_auth);
         *auth_out_clone.lock().unwrap() = Some(auth_state.clone());
 
-        let title_bar = cx.new(|_cx| TitleBar::new("Mezon"));
-        let view = cx.new(|cx| RootView::new(title_bar, auth_state, client, api, cx));
+        let title_bar = cx.new(|cx| TitleBar::new("Mezon", settings_entity.clone(), cx));
+        let view = cx.new(|cx| {
+            RootView::new(
+                title_bar,
+                auth_state,
+                client,
+                api,
+                settings_entity.clone(),
+                cx,
+            )
+        });
         cx.new(|cx| gpui_component::Root::new(view, window, cx))
     })
     .unwrap_or_else(|e| {

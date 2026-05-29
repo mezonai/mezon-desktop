@@ -10,7 +10,15 @@ pub enum Route {
         clan_id: String,
         channel_id: String,
     },
-    Settings,
+    SettingsAccount,
+    SettingsProfile,
+    SettingsDevices,
+    SettingsAppearance,
+    SettingsActivity,
+    SettingsNotifications,
+    SettingsLanguage,
+    SettingsVoice,
+    SettingsAdvanced,
     NotFound {
         path: String,
     },
@@ -18,7 +26,8 @@ pub enum Route {
 
 #[derive(Debug, Clone)]
 pub struct Router {
-    current_path: String,
+    history: Vec<String>,
+    current: usize,
 }
 
 impl Default for Router {
@@ -32,20 +41,38 @@ impl Router {
 
     pub fn new() -> Self {
         Self {
-            current_path: Self::DEFAULT_PATH.to_string(),
+            history: vec![Self::DEFAULT_PATH.to_string()],
+            current: 0,
         }
     }
 
     pub fn current_path(&self) -> &str {
-        &self.current_path
+        &self.history[self.current]
     }
 
     pub fn navigate(&mut self, path: impl Into<String>) {
-        self.current_path = normalize_path(path.into());
+        let path = normalize_path(path.into());
+        self.history.truncate(self.current + 1);
+        self.history.push(path);
+        self.current = self.history.len() - 1;
+    }
+
+    pub fn replace(&mut self, path: impl Into<String>) {
+        self.history[self.current] = normalize_path(path.into());
+    }
+
+    pub fn go_back(&mut self) {
+        if self.current > 0 {
+            self.current -= 1;
+        }
+    }
+
+    pub fn can_go_back(&self) -> bool {
+        self.current > 0
     }
 
     pub fn route(&self) -> Route {
-        match_path(&self.current_path)
+        match_path(&self.history[self.current])
     }
 }
 
@@ -68,7 +95,15 @@ pub fn match_path(path: &str) -> Route {
             clan_id: (*clan_id).to_string(),
             channel_id: (*channel_id).to_string(),
         },
-        ["settings"] => Route::Settings,
+        ["settings"] | ["settings", "account"] => Route::SettingsAccount,
+        ["settings", "profile"] => Route::SettingsProfile,
+        ["settings", "devices"] => Route::SettingsDevices,
+        ["settings", "appearance"] => Route::SettingsAppearance,
+        ["settings", "activity"] => Route::SettingsActivity,
+        ["settings", "notifications"] => Route::SettingsNotifications,
+        ["settings", "language"] => Route::SettingsLanguage,
+        ["settings", "voice"] => Route::SettingsVoice,
+        ["settings", "advanced"] => Route::SettingsAdvanced,
         _ => Route::NotFound { path: normalized },
     }
 }

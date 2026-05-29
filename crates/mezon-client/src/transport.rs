@@ -225,6 +225,10 @@ pub struct ApiAccount {
     pub username: String,
     pub email: Option<String>,
     pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub about_me: Option<String>,
+    pub phone_number: Option<String>,
+    pub password_setted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -289,12 +293,20 @@ impl MezonTransport {
             .await
     }
 
-    fn account_from_user(user: api::User, email: Option<String>) -> ApiAccount {
+    fn account_from_user(
+        user: api::User,
+        email: Option<String>,
+        password_setted: bool,
+    ) -> ApiAccount {
         ApiAccount {
             user_id: user.id.to_string(),
             username: user.username,
             email,
             display_name: (!user.display_name.is_empty()).then_some(user.display_name),
+            avatar_url: (!user.avatar_url.is_empty()).then_some(user.avatar_url),
+            about_me: (!user.about_me.is_empty()).then_some(user.about_me),
+            phone_number: (!user.phone_number.is_empty()).then_some(user.phone_number),
+            password_setted,
         }
     }
 
@@ -599,6 +611,7 @@ impl MezonTransport {
                 let account = Self::account_from_user(
                     user,
                     (!account.email.is_empty()).then_some(account.email),
+                    account.password_setted,
                 );
                 tracing::info!("✓ Decoded account response: {} bytes", response.len());
                 Ok(account)
@@ -784,7 +797,7 @@ impl MezonTransport {
         Ok(friends
             .friends
             .into_iter()
-            .map(|friend| Self::account_from_user(friend.user.unwrap_or_default(), None))
+            .map(|friend| Self::account_from_user(friend.user.unwrap_or_default(), None, false))
             .collect())
     }
 
@@ -1319,7 +1332,8 @@ impl MezonTransport {
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(api::LogedDeviceList::decode(response.as_slice())?)
+        let devices = api::LogedDeviceList::decode(response.as_slice())?;
+        Ok(devices)
     }
 
     /// List channel users (UC variant).
@@ -2481,27 +2495,48 @@ impl MezonTransport {
             avatar_url: avatar_url.to_string(),
         }
         .encode_to_vec();
-        let (code, _) = self.send_api_request(cid, "UpdateUser", body).await?;
+        let (code, response) = self.send_api_request(cid, "UpdateUser", body).await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            let msg = String::from_utf8_lossy(&response);
+            tracing::error!("UpdateUser error: code={}, response={}", code, msg);
+            return Err(anyhow::anyhow!(
+                "API error: code={}, response={}",
+                code,
+                msg
+            ));
         }
         Ok(())
     }
 
     /// Update user profile by clan.
-    pub async fn update_user_profile_by_clan(&self, clan_id: &str, nick_name: &str) -> Result<()> {
+    pub async fn update_user_profile_by_clan(
+        &self,
+        clan_id: &str,
+        nick_name: &str,
+        avatar_url: Option<&str>,
+    ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateClanProfileRequest {
             clan_id: clan_id.parse().unwrap_or_default(),
             nick_name: Some(nick_name.to_string()),
-            ..Default::default()
+            avatar: avatar_url.map(|s| s.to_string()),
         }
         .encode_to_vec();
-        let (code, _) = self
+        let (code, response) = self
             .send_api_request(cid, "UpdateUserProfileByClan", body)
             .await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            let msg = String::from_utf8_lossy(&response);
+            tracing::error!(
+                "UpdateUserProfileByClan error: code={}, response={}",
+                code,
+                msg
+            );
+            return Err(anyhow::anyhow!(
+                "API error: code={}, response={}",
+                code,
+                msg
+            ));
         }
         Ok(())
     }
@@ -2565,6 +2600,29 @@ impl MezonTransport {
         let body = api::SessionLogoutRequest {
             token: token.to_string(),
             refresh_token: refresh_token.to_string(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let (code, _) = self.send_api_request(cid, "SessionLogout", body).await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(())
+    }
+
+    /// Log out / remove a specific device by device_id.
+    /// Uses the current session credentials + target device_id.
+    pub async fn logout_device(
+        &self,
+        token: &str,
+        refresh_token: &str,
+        device_id: &str,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        let body = api::SessionLogoutRequest {
+            token: token.to_string(),
+            refresh_token: refresh_token.to_string(),
+            device_id: device_id.to_string(),
             ..Default::default()
         }
         .encode_to_vec();
@@ -2749,12 +2807,13 @@ impl MezonTransport {
         &self,
         name: &str,
         r#type: i32,
+        condition_id: i64,
     ) -> Result<api::CheckDuplicateNameResponse> {
         let cid = self.generate_cid();
         let body = api::CheckDuplicateNameRequest {
             name: name.to_string(),
             r#type,
-            ..Default::default()
+            condition_id,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -2774,20 +2833,44 @@ impl MezonTransport {
         filename: &str,
         filetype: &str,
         size: i32,
+        width: i32,
+        height: i32,
     ) -> Result<api::UploadAttachment> {
         let cid = self.generate_cid();
         let body = api::UploadAttachmentRequest {
             filename: filename.to_string(),
             filetype: filetype.to_string(),
             size,
-            ..Default::default()
+            width,
+            height,
         }
         .encode_to_vec();
         let (code, response) = self
             .send_api_request(cid, "UploadAttachmentFile", body)
             .await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            let msg = String::from_utf8_lossy(&response);
+            tracing::error!(
+                "UploadAttachmentFile error: code={}, response={}",
+                code,
+                msg
+            );
+
+            if let Ok(envelope) = realtime::Envelope::decode(response.as_slice())
+                && let Some(realtime::envelope::Message::Error(error)) = envelope.message
+            {
+                return Err(anyhow::anyhow!(
+                    "UploadAttachmentFile API error: code={} error={}",
+                    error.code,
+                    error.message
+                ));
+            }
+
+            return Err(anyhow::anyhow!(
+                "API error: code={}, response={}",
+                code,
+                msg
+            ));
         }
         Ok(api::UploadAttachment::decode(response.as_slice())?)
     }
@@ -4317,22 +4400,43 @@ impl MezonTransport {
     }
 
     /// Update user account.
-    pub async fn update_account(&self, _username: Option<&str>) -> Result<()> {
+    pub async fn update_account(
+        &self,
+        display_name: Option<&str>,
+        avatar_url: Option<&str>,
+        about_me: Option<&str>,
+    ) -> Result<()> {
         let cid = self.generate_cid();
 
         let body = api::UpdateAccountRequest {
-            display_name: _username.map(str::to_string),
+            display_name: display_name
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
+            avatar_url: avatar_url.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            about_me: about_me.filter(|s| !s.is_empty()).map(|s| s.to_string()),
             ..Default::default()
         }
         .encode_to_vec();
 
-        let (code, _response) = self.send_api_request(cid, "UpdateAccount", body).await?;
+        let (code, response) = self.send_api_request(cid, "UpdateAccount", body).await?;
 
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+        tracing::debug!(
+            "UpdateAccount response: code={}, response={:?}",
+            code,
+            response
+        );
+
+        if code == 0 {
+            Ok(())
+        } else {
+            let msg = String::from_utf8_lossy(&response);
+            tracing::error!("UpdateAccount error: code={}, response={}", code, msg);
+            Err(anyhow::anyhow!(
+                "API error: code={}, response={}",
+                code,
+                msg
+            ))
         }
-
-        Ok(())
     }
 
     /// Delete user account.

@@ -6,6 +6,8 @@
 use crate::abridged_tcp_adapter::AbridgedTcpAdapter;
 use crate::transport::MezonTransport;
 use anyhow::Result;
+use http_client::{AsyncBody, HttpClient, http};
+use reqwest_client::ReqwestClient;
 use std::sync::OnceLock;
 use tokio::runtime::Runtime;
 
@@ -21,6 +23,25 @@ fn runtime() -> &'static Runtime {
             .build()
             .expect("Failed to build transport runtime")
     })
+}
+
+/// HTTP PUT bytes to a pre-signed URL (e.g., S3 upload URL from upload_attachment_file).
+pub async fn put_bytes_to_url(url: &str, data: Vec<u8>) -> Result<()> {
+    tracing::debug!("put_bytes_to_url: PUTting {} bytes to {}", data.len(), url);
+    let client = ReqwestClient::new();
+    let request = http::Request::builder()
+        .method(http::Method::PUT)
+        .uri(url)
+        .header("Content-Type", "application/octet-stream")
+        .body(AsyncBody::from(data))?;
+    let response = client.send(request).await?;
+    let status = response.status();
+    tracing::debug!("put_bytes_to_url: response status={}", status);
+    if !status.is_success() {
+        tracing::error!("put_bytes_to_url: HTTP PUT failed with status {}", status);
+        anyhow::bail!("HTTP PUT failed with status {}", status);
+    }
+    Ok(())
 }
 
 /// Transport client wrapper that spawns all operations on a dedicated tokio runtime.
@@ -196,5 +217,167 @@ impl TransportClient {
             .expect("Transport task panicked")?;
 
         Ok(())
+    }
+
+    /// Update user profile (display name, avatar URL).
+    pub async fn update_user(&self, display_name: &str, avatar_url: &str) -> Result<()> {
+        let transport = self.inner.clone();
+        let display_name = display_name.to_string();
+        let avatar_url = avatar_url.to_string();
+
+        runtime()
+            .spawn(async move { transport.update_user(&display_name, &avatar_url).await })
+            .await
+            .expect("Transport task panicked")
+    }
+
+    /// List currently logged-in devices.
+    pub async fn list_loged_device(&self) -> Result<Vec<mezon_proto::api::LogedDevice>> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.list_loged_device().await.map(|l| l.devices) })
+            .await
+            .expect("Transport task panicked")
+    }
+
+    /// Update account profile (display name, avatar URL, about me).
+    pub async fn update_account(
+        &self,
+        display_name: Option<&str>,
+        avatar_url: Option<&str>,
+        about_me: Option<&str>,
+    ) -> Result<()> {
+        tracing::info!("📞 TransportClient::update_account() called");
+
+        let transport = self.inner.clone();
+        let display_name = display_name.map(str::to_string);
+        let avatar_url = avatar_url.map(str::to_string);
+        let about_me = about_me.map(str::to_string);
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .update_account(
+                        display_name.as_deref(),
+                        avatar_url.as_deref(),
+                        about_me.as_deref(),
+                    )
+                    .await
+            })
+            .await
+            .expect("Transport task panicked")
+    }
+
+    /// Upload an attachment file (used for avatar upload).
+    pub async fn upload_attachment_file(
+        &self,
+        filename: &str,
+        filetype: &str,
+        size: i32,
+        width: i32,
+        height: i32,
+    ) -> Result<mezon_proto::api::UploadAttachment> {
+        let transport = self.inner.clone();
+        let filename = filename.to_string();
+        let filetype = filetype.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .upload_attachment_file(&filename, &filetype, size, width, height)
+                    .await
+            })
+            .await
+            .expect("Transport task panicked")
+    }
+
+    /// Get user profile on a clan.
+    pub async fn get_user_profile_on_clan(
+        &self,
+        clan_id: &str,
+    ) -> Result<mezon_proto::api::ClanProfile> {
+        let transport = self.inner.clone();
+        let clan_id = clan_id.to_string();
+
+        runtime()
+            .spawn(async move { transport.get_user_profile_on_clan(&clan_id).await })
+            .await
+            .expect("Transport task panicked")
+    }
+
+    /// Update user profile by clan.
+    pub async fn update_user_profile_by_clan(
+        &self,
+        clan_id: &str,
+        nick_name: &str,
+        avatar_url: Option<&str>,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let clan_id = clan_id.to_string();
+        let nick_name = nick_name.to_string();
+        let avatar_url = avatar_url.map(str::to_string);
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .update_user_profile_by_clan(&clan_id, &nick_name, avatar_url.as_deref())
+                    .await
+            })
+            .await
+            .expect("Transport task panicked")
+    }
+
+    /// Check duplicate name.
+    pub async fn check_duplicate_name(
+        &self,
+        name: &str,
+        r#type: i32,
+        condition_id: i64,
+    ) -> Result<mezon_proto::api::CheckDuplicateNameResponse> {
+        let transport = self.inner.clone();
+        let name = name.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .check_duplicate_name(&name, r#type, condition_id)
+                    .await
+            })
+            .await
+            .expect("Transport task panicked")
+    }
+
+    /// Log out the current session.
+    pub async fn session_logout(&self, token: &str, refresh_token: &str) -> Result<()> {
+        let transport = self.inner.clone();
+        let token = token.to_string();
+        let refresh_token = refresh_token.to_string();
+
+        runtime()
+            .spawn(async move { transport.session_logout(&token, &refresh_token).await })
+            .await
+            .expect("Transport task panicked")
+    }
+
+    pub async fn logout_device(
+        &self,
+        token: &str,
+        refresh_token: &str,
+        device_id: &str,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let token = token.to_string();
+        let refresh_token = refresh_token.to_string();
+        let device_id = device_id.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .logout_device(&token, &refresh_token, &device_id)
+                    .await
+            })
+            .await
+            .expect("Transport task panicked")
     }
 }

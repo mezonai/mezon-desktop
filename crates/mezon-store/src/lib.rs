@@ -25,8 +25,22 @@ pub struct Settings {
     pub window_bounds: Option<[i32; 4]>,
     /// UI theme: "dark" | "light" | "system"
     pub theme: String,
+    /// UI language/locale code: "en" | "vi"
+    pub language: String,
     /// Enable desktop notifications
     pub notifications_enabled: bool,
+    /// Hide message content in push notifications
+    pub notifications_hide_content: bool,
+    /// Enable activity tracking (show online status to others)
+    pub activity_tracking: bool,
+    /// Microphone volume (0.0 – 1.0)
+    pub mic_volume: f32,
+    /// Speaker/headphone volume (0.0 – 1.0)
+    pub speaker_volume: f32,
+    /// Selected audio input device identifier
+    pub input_device_id: Option<String>,
+    /// Selected audio output device identifier
+    pub output_device_id: Option<String>,
 }
 
 impl Default for Settings {
@@ -37,7 +51,14 @@ impl Default for Settings {
             zoom_factor: 1.0,
             window_bounds: None,
             theme: "dark".to_string(),
+            language: "en".to_string(),
             notifications_enabled: true,
+            notifications_hide_content: false,
+            activity_tracking: true,
+            mic_volume: 0.8,
+            speaker_volume: 0.8,
+            input_device_id: None,
+            output_device_id: None,
         }
     }
 }
@@ -49,6 +70,41 @@ impl Settings {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("mezon")
             .join("settings.json")
+    }
+
+    /// Load settings from disk synchronously. Returns defaults if the file does not exist.
+    pub fn load_sync() -> Self {
+        let path = Self::path();
+        if !path.exists() {
+            tracing::debug!(
+                "Settings file not found, using defaults: {}",
+                path.display()
+            );
+            return Self::default();
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
+            Err(e) => {
+                tracing::warn!("Failed to read settings: {}", e);
+                Self::default()
+            }
+        }
+    }
+
+    /// Save settings to disk synchronously, creating the directory if needed.
+    pub fn save_sync(&self) {
+        let path = Self::path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match serde_json::to_string_pretty(self) {
+            Ok(data) => {
+                if let Err(e) = std::fs::write(&path, data) {
+                    tracing::warn!("Failed to save settings: {}", e);
+                }
+            }
+            Err(e) => tracing::warn!("Failed to serialize settings: {}", e),
+        }
     }
 
     /// Load settings from disk. Returns defaults if the file does not exist.

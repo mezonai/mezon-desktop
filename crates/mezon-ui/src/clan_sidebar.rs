@@ -1,11 +1,11 @@
 use gpui::{App, ClickEvent, Context, Entity, SharedString, Window, div, prelude::*, px};
-use mezon_store::ClanList;
+use mezon_store::{ClanList, Settings};
 
 use gpui_component::Sizable;
 
 use crate::components::primitives::{Avatar, Badge, Icon, IconName, Size};
 use crate::text_utils::compute_initials;
-use crate::theme::Theme;
+use crate::theme::resolve_theme;
 
 fn on_clan_click(
     clan_list: Entity<ClanList>,
@@ -21,18 +21,27 @@ fn on_clan_click(
 
 pub struct ClanSidebar {
     clan_list: Entity<ClanList>,
+    settings: Entity<Settings>,
 }
 
 impl ClanSidebar {
-    pub fn new(clan_list: Entity<ClanList>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        clan_list: Entity<ClanList>,
+        settings: Entity<Settings>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let _ = cx.observe(&clan_list, |_, _, cx| cx.notify());
-        Self { clan_list }
+        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
+        Self {
+            clan_list,
+            settings,
+        }
     }
 }
 
 impl Render for ClanSidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        let theme = resolve_theme(&self.settings.read(cx).theme);
         let clan_list_handle = self.clan_list.clone();
         let clan_list_view = self.clan_list.read(cx);
 

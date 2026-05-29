@@ -134,7 +134,15 @@ impl BaseView {
                     None,
                 ),
             ),
-            Route::Settings => (
+            Route::SettingsAccount
+            | Route::SettingsProfile
+            | Route::SettingsDevices
+            | Route::SettingsAppearance
+            | Route::SettingsActivity
+            | Route::SettingsNotifications
+            | Route::SettingsLanguage
+            | Route::SettingsVoice
+            | Route::SettingsAdvanced => (
                 "Settings".into(),
                 format!("Base route: /settings - {current_path}"),
                 self.render_placeholder(

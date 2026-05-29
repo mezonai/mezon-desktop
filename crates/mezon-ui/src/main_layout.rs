@@ -1,24 +1,31 @@
 use gpui::{Context, Entity, FontWeight, Window, div, prelude::*, px};
-use mezon_store::ChannelList;
+use mezon_store::{ChannelList, Settings};
 
-use crate::theme::Theme;
+use crate::theme::resolve_theme;
 
 pub struct MainLayout {
     channel_list: Entity<ChannelList>,
+    settings: Entity<Settings>,
 }
 
 impl MainLayout {
-    pub fn new(channel_list: Entity<ChannelList>, cx: &mut Context<Self>) -> Self {
-        // Observe the channel list so we re-render when channel selection changes
+    pub fn new(
+        channel_list: Entity<ChannelList>,
+        settings: Entity<Settings>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let _ = cx.observe(&channel_list, |_, _, cx| cx.notify());
-
-        Self { channel_list }
+        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
+        Self {
+            channel_list,
+            settings,
+        }
     }
 }
 
 impl Render for MainLayout {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        let theme = resolve_theme(&self.settings.read(cx).theme);
         div()
             .flex()
             .flex_row()
