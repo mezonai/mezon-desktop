@@ -111,6 +111,7 @@ impl AppApi {
     }
 
     pub async fn upload_avatar(&self, path: &Path) -> Result<String> {
+        tracing::info!("upload_avatar: reading file path={:?}", path);
         let data = std::fs::read(path)?;
         let filename = path
             .file_name()
@@ -124,13 +125,23 @@ impl AppApi {
             .to_string();
         let filetype = format!("image/{}", ext);
         let size = data.len() as i32;
+        tracing::info!(
+            "upload_avatar: file read ok filename={} filetype={} size={}",
+            filename,
+            filetype,
+            size
+        );
 
+        tracing::info!("upload_avatar: requesting presigned URL");
         let upload = self
             .transport
             .upload_attachment_file(&filename, &filetype, size)
             .await?;
+        tracing::info!("upload_avatar: presigned URL received url={}", upload.url);
 
+        tracing::info!("upload_avatar: PUTing file bytes to presigned URL");
         crate::transport_runtime::put_bytes_to_url(&upload.url, data).await?;
+        tracing::info!("upload_avatar: PUT completed successfully");
 
         let permanent_url = upload
             .url

@@ -2495,9 +2495,11 @@ impl MezonTransport {
             avatar_url: avatar_url.to_string(),
         }
         .encode_to_vec();
-        let (code, _) = self.send_api_request(cid, "UpdateUser", body).await?;
+        let (code, response) = self.send_api_request(cid, "UpdateUser", body).await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            let msg = String::from_utf8_lossy(&response);
+            tracing::error!("UpdateUser error: code={}, response={}", code, msg);
+            return Err(anyhow::anyhow!("API error: code={}, response={}", code, msg));
         }
         Ok(())
     }
@@ -2516,11 +2518,17 @@ impl MezonTransport {
             avatar: avatar_url.map(|s| s.to_string()),
         }
         .encode_to_vec();
-        let (code, _) = self
+        let (code, response) = self
             .send_api_request(cid, "UpdateUserProfileByClan", body)
             .await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            let msg = String::from_utf8_lossy(&response);
+            tracing::error!(
+                "UpdateUserProfileByClan error: code={}, response={}",
+                code,
+                msg
+            );
+            return Err(anyhow::anyhow!("API error: code={}, response={}", code, msg));
         }
         Ok(())
     }
@@ -2830,7 +2838,13 @@ impl MezonTransport {
             .send_api_request(cid, "UploadAttachmentFile", body)
             .await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            let msg = String::from_utf8_lossy(&response);
+            tracing::error!(
+                "UploadAttachmentFile error: code={}, response={}",
+                code,
+                msg
+            );
+            return Err(anyhow::anyhow!("API error: code={}, response={}", code, msg));
         }
         Ok(api::UploadAttachment::decode(response.as_slice())?)
     }
@@ -4380,10 +4394,13 @@ impl MezonTransport {
 
         let (code, response) = self.send_api_request(cid, "UpdateAccount", body).await?;
 
+        tracing::debug!("UpdateAccount response: code={}, response={:?}", code, response);
+
         if code == 0 {
             Ok(())
         } else {
             let msg = String::from_utf8_lossy(&response);
+            tracing::error!("UpdateAccount error: code={}, response={}", code, msg);
             Err(anyhow::anyhow!(
                 "API error: code={}, response={}",
                 code,

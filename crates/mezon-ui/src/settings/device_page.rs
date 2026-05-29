@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use gpui::{ClickEvent, Context, Entity, FontWeight, SharedString, Task, Window, div, prelude::*};
 use gpui_component::{Icon, IconName, h_flex, label::Label, v_flex};
@@ -7,7 +6,6 @@ use mezon_client::AppApi;
 use mezon_store::Settings;
 
 use crate::theme::resolve_theme;
-use crate::util::{check_connection, retry};
 
 #[derive(Debug, Clone)]
 struct DeviceViewModel {
@@ -56,30 +54,7 @@ impl DevicePage {
     fn fetch(&mut self, cx: &mut Context<Self>) {
         let api = self.api.clone();
         self._fetch_task = Some(cx.spawn(async move |this, cx| {
-            if check_connection(cx.background_executor(), &api)
-                .await
-                .is_err()
-            {
-                this.update(cx, |this, view_cx| {
-                    this.loading = false;
-                    this.device_error = Some("Connection failed".into());
-                    view_cx.notify();
-                })
-                .ok();
-                return;
-            }
-
-            match retry(
-                cx.background_executor(),
-                5,
-                Duration::from_millis(1000),
-                || {
-                    let api = api.clone();
-                    async move { api.list_loged_device().await }
-                },
-            )
-            .await
-            {
+            match api.list_loged_device().await {
                 Ok(devices) => {
                     let view_models: Vec<DeviceViewModel> = devices
                         .into_iter()
@@ -118,7 +93,7 @@ impl DevicePage {
 
 impl Render for DevicePage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.initial_loaded {
+        if !self.initial_loaded && self._fetch_task.is_none() {
             self.fetch(cx);
         }
 

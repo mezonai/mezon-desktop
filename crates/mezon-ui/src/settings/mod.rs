@@ -2,6 +2,7 @@ mod account_page;
 mod activity_page;
 mod advanced_page;
 mod appearance_page;
+mod clan_profile_section;
 mod device_page;
 mod language_page;
 mod notifications_page;

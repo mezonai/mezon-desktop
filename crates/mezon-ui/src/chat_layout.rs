@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gpui::{App, Context, Entity, FontWeight, Window, div, prelude::*, px};
 use mezon_client::AppApi;
-use mezon_store::{AuthState, Category, Channel, ChannelList, Clan, ClanList};
+use mezon_store::{AuthState, Category, Channel, ChannelList, Clan, ClanList, Settings};
 
 use crate::components::compositions::user_info_bar::UserInfoBar;
 use crate::router::{Route, Router};

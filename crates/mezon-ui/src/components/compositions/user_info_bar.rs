@@ -12,7 +12,7 @@ fn on_settings_click(
 ) -> impl Fn(&ClickEvent, &mut Window, &mut App) {
     move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
         if let Some(ref cb) = on_settings {
-            cb("/settings", cx);
+            cb(crate::components::NavOp::Push("/settings".to_string()), cx);
         }
     }
 }

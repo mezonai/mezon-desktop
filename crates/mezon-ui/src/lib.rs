@@ -9,11 +9,9 @@ pub mod main_layout;
 pub mod root;
 pub mod router;
 pub mod settings;
-pub mod settings_screen;
 pub mod text_utils;
 pub mod theme;
 pub mod title_bar;
-pub mod util;
 
 pub use account_test_view::AccountTestView;
 pub use base_view::BaseView;

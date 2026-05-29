@@ -205,9 +205,9 @@ impl Render for SettingsScreen {
                 a: 0.08,
             };
             let hover_bg = gpui::Rgba {
-                r: 255.0 / 255.0,
-                g: 255.0 / 255.0,
-                b: 255.0 / 255.0,
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
                 a: 0.08,
             };
             div()

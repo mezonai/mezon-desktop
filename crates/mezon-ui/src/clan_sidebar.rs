@@ -6,7 +6,6 @@ use gpui_component::Sizable;
 use crate::components::primitives::{Avatar, Badge, Icon, IconName, Size};
 use crate::theme::resolve_theme;
 use crate::text_utils::compute_initials;
-use crate::theme::Theme;
 
 fn on_clan_click(
     clan_list: Entity<ClanList>,

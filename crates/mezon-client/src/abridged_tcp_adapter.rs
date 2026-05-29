@@ -5,6 +5,7 @@ use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -76,6 +77,7 @@ pub struct AbridgedTcpAdapter {
     streams: Arc<Mutex<HashMap<u16, Vec<Vec<u8>>>>>,
     is_connected: Arc<Mutex<bool>>,
     read_buffer: Arc<Mutex<Vec<u8>>>,
+    pending_raw: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl AbridgedTcpAdapter {
@@ -86,6 +88,7 @@ impl AbridgedTcpAdapter {
             streams: Arc::new(Mutex::new(HashMap::new())),
             is_connected: Arc::new(Mutex::new(false)),
             read_buffer: Arc::new(Mutex::new(Vec::new())),
+            pending_raw: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -94,8 +97,39 @@ impl AbridgedTcpAdapter {
             return Ok(());
         }
 
-        self.read_buffer.lock().await.extend(incoming);
+        // Check for a pending 0xff FIN header that was waiting for its body.
+        // A 0xff FIN body is always protobuf (starts with byte < 0x80), so if
+        // the incoming data starts with PREFIX_RAW (0xff) it is a *new* message
+        // and the pending header must be completed with an empty payload.
+        {
+            let mut pending = self.pending_raw.lock().await;
+            if let Some(header) = pending.take() {
+                if incoming[0] == PREFIX_RAW {
+                    let cid = u16::from_be_bytes([header[1], header[2]]);
+                    let code = u32::from_be_bytes([header[3], header[4], header[5], header[6]]);
+                    let response_code = (code >> 16) & 0xffff;
+                    tracing::info!(
+                        "📨 Completing pending 0-length response for cid={}",
+                        cid
+                    );
+                    let handlers = self.handlers.lock().await.clone();
+                    handlers.trigger_message(cid, response_code, vec![]);
+                } else {
+                    // Continuation — prepend the pending header to incoming data
+                    let mut combined = header;
+                    combined.extend(&incoming);
+                    drop(pending);
+                    self.read_buffer.lock().await.extend(combined);
+                    return self.process_raw_buffer().await;
+                }
+            }
+        }
 
+        self.read_buffer.lock().await.extend(incoming);
+        self.process_raw_buffer().await
+    }
+
+    async fn process_raw_buffer(&self) -> Result<()> {
         let handlers = self.handlers.lock().await.clone();
 
         loop {
@@ -121,6 +155,29 @@ impl AbridgedTcpAdapter {
                     let fin_flag = (code & 0xffff) as u16;
                     if fin_flag == CODE_FIN {
                         if buf.len() == RAW_HEADER_LENGTH {
+                            // Header-only FIN: save as pending — body may arrive in next TCP read
+                            *self.pending_raw.lock().await = Some(buf.clone());
+                            buf.drain(..RAW_HEADER_LENGTH);
+                            // Spawn timeout: if body never arrives, dispatch as zero-body response
+                            let pending_raw = self.pending_raw.clone();
+                            let handlers = self.handlers.lock().await.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                                let mut pending = pending_raw.lock().await;
+                                if let Some(header) = pending.take() {
+                                    let cid =
+                                        u16::from_be_bytes([header[1], header[2]]);
+                                    let code = u32::from_be_bytes([
+                                        header[3], header[4], header[5], header[6],
+                                    ]);
+                                    let response_code = (code >> 16) & 0xffff;
+                                    handlers.trigger_message(
+                                        cid,
+                                        response_code,
+                                        vec![],
+                                    );
+                                }
+                            });
                             return Ok(());
                         }
                         let msg = buf.clone();
@@ -275,6 +332,7 @@ impl AbridgedTcpAdapter {
         streams: Arc<Mutex<HashMap<u16, Vec<Vec<u8>>>>>,
         is_connected: Arc<Mutex<bool>>,
         read_buffer: Arc<Mutex<Vec<u8>>>,
+        pending_raw: Arc<Mutex<Option<Vec<u8>>>>,
     ) {
         let mut read_buf = vec![0u8; 8192];
         let mut read_count = 0u64;
@@ -308,6 +366,7 @@ impl AbridgedTcpAdapter {
                                 streams: streams.clone(),
                                 is_connected: is_connected.clone(),
                                 read_buffer: read_buffer.clone(),
+                                pending_raw: pending_raw.clone(),
                             };
                             if let Err(e) = adapter.handle_data(data).await {
                                 tracing::error!("✗ handle_data error: {}", e);
@@ -434,10 +493,11 @@ impl TransportAdapter for AbridgedTcpAdapter {
         let st = self.streams.clone();
         let ic = self.is_connected.clone();
         let rb = self.read_buffer.clone();
+        let pr = self.pending_raw.clone();
 
         tracing::info!("🔌 Spawning I/O loop...");
         tokio::spawn(async move {
-            Self::io_loop(tls, write_rx, ready_tx, h, st, ic, rb).await;
+            Self::io_loop(tls, write_rx, ready_tx, h, st, ic, rb, pr).await;
         });
 
         // Wait for I/O loop to signal readiness

@@ -27,6 +27,7 @@ fn runtime() -> &'static Runtime {
 
 /// HTTP PUT bytes to a pre-signed URL (e.g., S3 upload URL from upload_attachment_file).
 pub async fn put_bytes_to_url(url: &str, data: Vec<u8>) -> Result<()> {
+    tracing::debug!("put_bytes_to_url: PUTting {} bytes to {}", data.len(), url);
     let client = ReqwestClient::new();
     let request = http::Request::builder()
         .method(http::Method::PUT)
@@ -35,7 +36,9 @@ pub async fn put_bytes_to_url(url: &str, data: Vec<u8>) -> Result<()> {
         .body(AsyncBody::from(data))?;
     let response = client.send(request).await?;
     let status = response.status();
+    tracing::debug!("put_bytes_to_url: response status={}", status);
     if !status.is_success() {
+        tracing::error!("put_bytes_to_url: HTTP PUT failed with status {}", status);
         anyhow::bail!("HTTP PUT failed with status {}", status);
     }
     Ok(())

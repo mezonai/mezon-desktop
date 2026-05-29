@@ -16,7 +16,6 @@ use mezon_store::Settings;
 
 use crate::components::{NavOp, NavigateFn};
 use crate::theme::resolve_theme;
-use crate::util::{check_connection, retry};
 
 struct AccountState {
     username: SharedString,
@@ -31,8 +30,6 @@ pub struct AccountPage {
     navigate: NavigateFn,
     settings: Entity<Settings>,
     account: Option<AccountState>,
-    connection_ready: bool,
-    connection_error: bool,
     fetch_error: bool,
     loading: bool,
     toast_message: Option<SharedString>,
@@ -49,41 +46,7 @@ impl AccountPage {
         let _ = cx.observe(&settings, |_, _, cx| cx.notify());
         let api_clone = api.clone();
         let fetch_task = cx.spawn(async move |this, cx| {
-            if check_connection(cx.background_executor(), &api_clone)
-                .await
-                .is_err()
-            {
-                this.update(cx, |this, cx| {
-                    this.connection_error = true;
-                    this.loading = false;
-                    cx.notify();
-                })
-                .ok();
-                return;
-            }
-
-            this.update(cx, |this, cx| {
-                this.connection_ready = true;
-                cx.notify();
-            })
-            .ok();
-
-            match retry(
-                cx.background_executor(),
-                5,
-                Duration::from_millis(1000),
-                || {
-                    let api = api_clone.clone();
-                    async move {
-                        api.get_account().await.map_err(|e| {
-                            tracing::error!("Failed to fetch account, retrying: {}", e);
-                            e
-                        })
-                    }
-                },
-            )
-            .await
-            {
+            match api_clone.get_account().await {
                 Ok(acct) => {
                     this.update(cx, |this, view_cx| {
                         let display = acct
@@ -119,8 +82,6 @@ impl AccountPage {
             navigate,
             settings,
             account: None,
-            connection_ready: false,
-            connection_error: false,
             fetch_error: false,
             loading: true,
             toast_message: None,
@@ -148,24 +109,10 @@ impl Render for AccountPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = resolve_theme(&self.settings.read(cx).theme);
 
-        if self.connection_error {
-            return v_flex()
-                .gap_4()
-                .child(Label::new("Connection failed").text_color(theme.text_muted))
-                .into_any_element();
-        }
-
         if self.fetch_error {
             return v_flex()
                 .gap_4()
                 .child(Label::new("Failed to load account data").text_color(theme.text_muted))
-                .into_any_element();
-        }
-
-        if !self.connection_ready {
-            return v_flex()
-                .gap_4()
-                .child(Label::new("Connecting...").text_color(theme.text_muted))
                 .into_any_element();
         }
 
