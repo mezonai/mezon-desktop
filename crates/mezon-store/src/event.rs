@@ -2,14 +2,16 @@ use mezon_proto::realtime;
 
 #[derive(Debug, Clone)]
 pub enum RealtimeEvent {
-    ChannelMessage(mezon_proto::api::ChannelMessage),
+    ChannelMessage(Box<mezon_proto::api::ChannelMessage>),
     Other { variant: String, payload: Vec<u8> },
 }
 
 impl RealtimeEvent {
     pub fn from_envelope(envelope: realtime::Envelope, raw_payload: Vec<u8>) -> Option<Self> {
         match envelope.message? {
-            realtime::envelope::Message::ChannelMessage(msg) => Some(Self::ChannelMessage(msg)),
+            realtime::envelope::Message::ChannelMessage(msg) => {
+                Some(Self::ChannelMessage(Box::new(msg)))
+            }
             other => {
                 let variant = format!("{:?}", other)
                     .split('(')

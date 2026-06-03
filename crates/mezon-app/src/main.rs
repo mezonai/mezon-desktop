@@ -249,16 +249,17 @@ fn spawn_transport_task(
                 if let (Some(cid), Some(chid)) = (new_clan, new_channel) {
                     // Leave old channel if different
                     if let Some((old_cid, old_chid)) = subscribed
-                        && (old_cid != cid || old_chid != chid) {
-                            transport
-                                .leave_channel(
-                                    old_cid,
-                                    old_chid,
-                                    pending.channel_type,
-                                    pending.is_public,
-                                )
-                                .await;
-                        }
+                        && (old_cid != cid || old_chid != chid)
+                    {
+                        transport
+                            .leave_channel(
+                                old_cid,
+                                old_chid,
+                                pending.channel_type,
+                                pending.is_public,
+                            )
+                            .await;
+                    }
                     // Join new channel
                     let _ = transport
                         .subscribe_channel(cid, chid, pending.channel_type, pending.is_public)
