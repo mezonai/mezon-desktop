@@ -2,11 +2,11 @@ use anyhow::Result;
 use gpui::{App, AppContext, AsyncApp, Bounds, Entity, WindowBounds, WindowOptions, px, size};
 use gpui_platform::application;
 use mezon_client::{AppApi, MezonClient, TransportClient, keychain};
-use mezon_proto::realtime;
-use prost::Message;
 use mezon_native::instance::SingleInstance;
+use mezon_proto::realtime;
 use mezon_store::{AuthState, ChannelList, Settings, event::RealtimeEvent};
 use mezon_ui::{RootView, init as init_ui, title_bar::TitleBar};
+use prost::Message;
 use std::borrow::Cow;
 use std::sync::Arc;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -241,18 +241,28 @@ fn spawn_transport_task(
             }
 
             // Poll pending_subscribe from ChannelList
-            if let Some(pending) = cx.update(|cx| channel_list.update(cx, |cl, _| cl.pending_subscribe.take())) {
+            if let Some(pending) =
+                cx.update(|cx| channel_list.update(cx, |cl, _| cl.pending_subscribe.take()))
+            {
                 let new_clan = pending.clan_id.parse::<i64>().ok();
                 let new_channel = pending.channel_id.parse::<i64>().ok();
                 if let (Some(cid), Some(chid)) = (new_clan, new_channel) {
                     // Leave old channel if different
-                    if let Some((old_cid, old_chid)) = subscribed {
-                        if old_cid != cid || old_chid != chid {
-                            transport.leave_channel(old_cid, old_chid, pending.channel_type, pending.is_public).await;
+                    if let Some((old_cid, old_chid)) = subscribed
+                        && (old_cid != cid || old_chid != chid) {
+                            transport
+                                .leave_channel(
+                                    old_cid,
+                                    old_chid,
+                                    pending.channel_type,
+                                    pending.is_public,
+                                )
+                                .await;
                         }
-                    }
                     // Join new channel
-                    let _ = transport.subscribe_channel(cid, chid, pending.channel_type, pending.is_public).await;
+                    let _ = transport
+                        .subscribe_channel(cid, chid, pending.channel_type, pending.is_public)
+                        .await;
                     subscribed = Some((cid, chid));
                 }
             }

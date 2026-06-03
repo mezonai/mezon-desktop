@@ -16,7 +16,10 @@ impl RealtimeEvent {
                     .next()
                     .unwrap_or("Unknown")
                     .to_string();
-                Some(Self::Other { variant, payload: raw_payload })
+                Some(Self::Other {
+                    variant,
+                    payload: raw_payload,
+                })
             }
         }
     }

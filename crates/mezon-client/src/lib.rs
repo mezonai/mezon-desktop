@@ -12,14 +12,14 @@ pub mod transport_runtime;
 pub mod ws_adapter;
 
 pub use abridged_tcp_adapter::AbridgedTcpAdapter;
-pub use ws_adapter::WsAdapter;
 pub use app_api::AppApi;
 pub use auth::MezonClient;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
 pub use session::Session;
 pub use transport::MezonTransport;
 pub use transport_adapter::TransportAdapter;
-pub use transport_runtime::{ensure_crypto_provider, TransportClient};
+pub use transport_runtime::{TransportClient, ensure_crypto_provider};
+pub use ws_adapter::WsAdapter;
 
 /// Default WebSocket host (used for Stage 2+ WebSocket connection).
 pub const DEFAULT_WS_HOST: &str = "sock.mezon.ai";

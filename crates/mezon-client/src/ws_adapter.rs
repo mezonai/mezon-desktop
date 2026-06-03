@@ -1,16 +1,16 @@
 use crate::transport_adapter::{AdapterHandlers, TransportAdapter};
 use anyhow::Result;
 use async_trait::async_trait;
-use futures::stream::{SplitSink, SplitStream, StreamExt};
 use futures::SinkExt;
+use futures::stream::{SplitSink, SplitStream, StreamExt};
 use mezon_proto::realtime;
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::net::TcpStream;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 const PREFIX_RAW: u8 = 0xff;
 const CODE_FIN: u16 = 0xff;
@@ -45,9 +45,7 @@ impl WsAdapter {
     }
 
     fn build_url(host: &str, port: u16, token: &str) -> String {
-        format!(
-            "wss://{host}:{port}/ws?lang=en&status=true&token={token}&format=protobuf"
-        )
+        format!("wss://{host}:{port}/ws?lang=en&status=true&token={token}&format=protobuf")
     }
 
     async fn handle_message(&self, data: Vec<u8>) {
@@ -129,8 +127,7 @@ impl WsAdapter {
                 tracing::warn!("📥 ws_adapter: short RAW chunk header ({})", data.len());
                 return;
             }
-            let payload_len =
-                u32::from_be_bytes([data[7], data[8], data[9], data[10]]) as usize;
+            let payload_len = u32::from_be_bytes([data[7], data[8], data[9], data[10]]) as usize;
             let total = RAW_CHUNK_HEADER_LENGTH + payload_len;
             if data.len() < total {
                 tracing::warn!("📥 ws_adapter: short RAW chunk body ({})", data.len());
@@ -297,7 +294,11 @@ impl TransportAdapter for WsAdapter {
     }
 
     async fn send(&mut self, message: Vec<u8>) -> Result<()> {
-        tracing::trace!("📤 send() called: {} bytes {:02x?}", message.len(), &message[..message.len().min(64)]);
+        tracing::trace!(
+            "📤 send() called: {} bytes {:02x?}",
+            message.len(),
+            &message[..message.len().min(64)]
+        );
 
         if !self.is_open() {
             tracing::warn!("📤 send(): connection NOT open, rejecting");

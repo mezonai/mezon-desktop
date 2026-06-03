@@ -110,14 +110,36 @@ impl MezonTransport {
                 // Server-initiated message
                 if let Ok(envelope) = mezon_proto::realtime::Envelope::decode(message.as_slice()) {
                     let envelope_cid = envelope.cid;
-                    let variant = envelope.message.as_ref().map(|m| {
-                        format!("{:?}", m).split('(').next().unwrap_or("Unknown").to_string()
-                    }).unwrap_or_else(|| "Empty".into());
-                    let hex: String = message.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-                    tracing::debug!("📩 {variant} cid={envelope_cid} len={} hex=[{hex}]", message.len());
+                    let variant = envelope
+                        .message
+                        .as_ref()
+                        .map(|m| {
+                            format!("{:?}", m)
+                                .split('(')
+                                .next()
+                                .unwrap_or("Unknown")
+                                .to_string()
+                        })
+                        .unwrap_or_else(|| "Empty".into());
+                    let hex: String = message
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    tracing::debug!(
+                        "📩 {variant} cid={envelope_cid} len={} hex=[{hex}]",
+                        message.len()
+                    );
                 } else {
-                    let hex: String = message.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-                    tracing::debug!("📩 Unknown(cid={cid} code={code}) len={} hex=[{hex}]", message.len());
+                    let hex: String = message
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    tracing::debug!(
+                        "📩 Unknown(cid={cid} code={code}) len={} hex=[{hex}]",
+                        message.len()
+                    );
                 }
                 on_message(cid, code, message);
             }
@@ -4465,21 +4487,34 @@ impl MezonTransport {
     }
 
     /// Subscribe (join) a realtime channel to receive its events.
-    pub async fn subscribe_channel(&self, clan_id: i64, channel_id: i64, channel_type: i32, is_public: bool) -> Result<()> {
+    pub async fn subscribe_channel(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        channel_type: i32,
+        is_public: bool,
+    ) -> Result<()> {
         let cid = self.generate_cid();
         let envelope = realtime::Envelope {
             cid: cid as i32,
-            message: Some(realtime::envelope::Message::ChannelJoin(realtime::ChannelJoin {
-                clan_id,
-                channel_id,
-                channel_type,
-                is_public,
-            })),
+            message: Some(realtime::envelope::Message::ChannelJoin(
+                realtime::ChannelJoin {
+                    clan_id,
+                    channel_id,
+                    channel_type,
+                    is_public,
+                },
+            )),
         };
         let bytes = envelope.encode_to_vec();
         match self.send(cid, bytes).await {
             Ok((code, _)) => {
-                tracing::info!("✅ Joined channel {} (clan {}): code={}", channel_id, clan_id, code);
+                tracing::info!(
+                    "✅ Joined channel {} (clan {}): code={}",
+                    channel_id,
+                    clan_id,
+                    code
+                );
             }
             Err(e) => {
                 tracing::debug!("Subscribe channel {} result (timeout ok): {e}", channel_id);
@@ -4489,15 +4524,23 @@ impl MezonTransport {
     }
 
     /// Leave a realtime channel (fire-and-forget).
-    pub async fn leave_channel(&self, clan_id: i64, channel_id: i64, channel_type: i32, is_public: bool) {
+    pub async fn leave_channel(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        channel_type: i32,
+        is_public: bool,
+    ) {
         let envelope = realtime::Envelope {
             cid: 0,
-            message: Some(realtime::envelope::Message::ChannelLeave(realtime::ChannelLeave {
-                clan_id,
-                channel_id,
-                channel_type,
-                is_public,
-            })),
+            message: Some(realtime::envelope::Message::ChannelLeave(
+                realtime::ChannelLeave {
+                    clan_id,
+                    channel_id,
+                    channel_type,
+                    is_public,
+                },
+            )),
         };
         let bytes = envelope.encode_to_vec();
         match self.adapter.lock().await.send(bytes).await {

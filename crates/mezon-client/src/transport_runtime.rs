@@ -230,21 +230,41 @@ impl TransportClient {
     }
 
     /// Subscribe (join) a realtime channel to receive its messages and events.
-    pub async fn subscribe_channel(&self, clan_id: i64, channel_id: i64, channel_type: i32, is_public: bool) -> Result<()> {
+    pub async fn subscribe_channel(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        channel_type: i32,
+        is_public: bool,
+    ) -> Result<()> {
         let transport = self.inner.clone();
 
         runtime()
-            .spawn(async move { transport.subscribe_channel(clan_id, channel_id, channel_type, is_public).await })
+            .spawn(async move {
+                transport
+                    .subscribe_channel(clan_id, channel_id, channel_type, is_public)
+                    .await
+            })
             .await
             .expect("Transport task panicked")
     }
 
     /// Leave a realtime channel (fire-and-forget).
-    pub async fn leave_channel(&self, clan_id: i64, channel_id: i64, channel_type: i32, is_public: bool) {
+    pub async fn leave_channel(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        channel_type: i32,
+        is_public: bool,
+    ) {
         let transport = self.inner.clone();
 
         runtime()
-            .spawn(async move { transport.leave_channel(clan_id, channel_id, channel_type, is_public).await })
+            .spawn(async move {
+                transport
+                    .leave_channel(clan_id, channel_id, channel_type, is_public)
+                    .await
+            })
             .await
             .ok();
     }
