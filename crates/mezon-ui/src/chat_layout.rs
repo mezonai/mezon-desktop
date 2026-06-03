@@ -130,6 +130,7 @@ impl ChatLayout {
     pub fn new(
         router: Router,
         clan_list: Entity<ClanList>,
+        channel_list: Entity<ChannelList>,
         auth_state: Entity<AuthState>,
         api: Arc<AppApi>,
         navigate: crate::components::NavigateFn,
@@ -137,8 +138,6 @@ impl ChatLayout {
         cx: &mut Context<Self>,
     ) -> Self {
         let _ = cx.observe(&settings, |_, _, cx| cx.notify());
-
-        let channel_list = cx.new(|_| ChannelList::new());
 
         let on_navigate: Option<crate::components::NavigateFn> = {
             let nav = navigate.clone();

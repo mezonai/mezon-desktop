@@ -5,13 +5,29 @@
 
 use crate::abridged_tcp_adapter::AbridgedTcpAdapter;
 use crate::transport::MezonTransport;
+use crate::transport_adapter::TransportAdapter;
 use anyhow::Result;
 use http_client::{AsyncBody, HttpClient, http};
 use reqwest_client::ReqwestClient;
 use std::sync::OnceLock;
 use tokio::runtime::Runtime;
+use tokio_rustls::rustls;
 
 static TRANSPORT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+static CRYPTO_PROVIDER: OnceLock<()> = OnceLock::new();
+
+/// Ensure the rustls CryptoProvider (ring) is installed exactly once.
+///
+/// Must be called before any TLS operation (TCP or WS) that uses rustls.
+/// Calling more than once is safe — the `OnceLock` guarantees single init.
+pub fn ensure_crypto_provider() {
+    CRYPTO_PROVIDER.get_or_init(|| {
+        tracing::debug!("🔐 Installing ring crypto provider");
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .expect("Failed to install ring CryptoProvider");
+    });
+}
 
 /// Get or create the shared transport runtime.
 fn runtime() -> &'static Runtime {
@@ -58,6 +74,14 @@ impl TransportClient {
     /// Create a new transport client with the given base API path.
     pub fn new(base_path: String) -> Self {
         let adapter = Box::new(AbridgedTcpAdapter::new());
+        let transport = MezonTransport::new(adapter, base_path);
+        Self {
+            inner: std::sync::Arc::new(transport),
+        }
+    }
+
+    /// Create a transport client with a custom adapter.
+    pub fn new_with_adapter(adapter: Box<dyn TransportAdapter>, base_path: String) -> Self {
         let transport = MezonTransport::new(adapter, base_path);
         Self {
             inner: std::sync::Arc::new(transport),
@@ -203,6 +227,26 @@ impl TransportClient {
     /// Check if the connection is open.
     pub async fn is_open(&self) -> bool {
         self.inner.is_open().await
+    }
+
+    /// Subscribe (join) a realtime channel to receive its messages and events.
+    pub async fn subscribe_channel(&self, clan_id: i64, channel_id: i64, channel_type: i32, is_public: bool) -> Result<()> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.subscribe_channel(clan_id, channel_id, channel_type, is_public).await })
+            .await
+            .expect("Transport task panicked")
+    }
+
+    /// Leave a realtime channel (fire-and-forget).
+    pub async fn leave_channel(&self, clan_id: i64, channel_id: i64, channel_type: i32, is_public: bool) {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.leave_channel(clan_id, channel_id, channel_type, is_public).await })
+            .await
+            .ok();
     }
 
     /// Close the connection.

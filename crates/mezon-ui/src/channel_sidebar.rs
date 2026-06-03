@@ -1,5 +1,5 @@
 use gpui::{App, ClickEvent, Context, Entity, SharedString, Window, div, prelude::*, px};
-use mezon_store::{ChannelList, ClanList, Settings};
+use mezon_store::{ChannelList, ClanList, PendingSubscribe, Settings};
 
 use crate::components::compositions::channel_row::ChannelRow;
 use crate::components::primitives::{Icon, IconName};
@@ -15,6 +15,14 @@ fn on_channel_click(
         channel_list.update(cx, |m, cx| {
             m.select_channel(&channel_id);
             m.mark_read(&channel_id);
+            if let Some(ch) = m.find_channel(&channel_id) {
+                m.pending_subscribe = Some(PendingSubscribe {
+                    clan_id: ch.clan_id.clone(),
+                    channel_id: ch.id.clone(),
+                    channel_type: ch.channel_type.as_proto_int(),
+                    is_public: !ch.private,
+                });
+            }
             cx.notify();
         });
         if let Some(ref cb) = on_navigate

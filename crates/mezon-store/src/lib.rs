@@ -1,5 +1,6 @@
 pub mod channel;
 pub mod clan;
+pub mod event;
 
 use anyhow::{Context, Result};
 use dirs::config_dir;

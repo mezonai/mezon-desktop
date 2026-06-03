@@ -6,6 +6,15 @@ pub enum ChannelType {
     Voice,
 }
 
+impl ChannelType {
+    pub fn as_proto_int(&self) -> i32 {
+        match self {
+            ChannelType::Text => 0,
+            ChannelType::Voice => 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Channel {
     pub id: String,
@@ -25,10 +34,19 @@ pub struct Category {
     pub channels: Vec<Channel>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PendingSubscribe {
+    pub clan_id: String,
+    pub channel_id: String,
+    pub channel_type: i32,
+    pub is_public: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ChannelList {
     pub categories: Vec<Category>,
     pub active_channel_id: Option<String>,
+    pub pending_subscribe: Option<PendingSubscribe>,
 }
 
 impl ChannelList {

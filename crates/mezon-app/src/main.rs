@@ -2,8 +2,10 @@ use anyhow::Result;
 use gpui::{App, AppContext, AsyncApp, Bounds, Entity, WindowBounds, WindowOptions, px, size};
 use gpui_platform::application;
 use mezon_client::{AppApi, MezonClient, TransportClient, keychain};
+use mezon_proto::realtime;
+use prost::Message;
 use mezon_native::instance::SingleInstance;
-use mezon_store::{AuthState, Settings};
+use mezon_store::{AuthState, ChannelList, Settings, event::RealtimeEvent};
 use mezon_ui::{RootView, init as init_ui, title_bar::TitleBar};
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -60,7 +62,10 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 
     // ── Determine initial auth state from keychain ────────────────────────────
     let client = Arc::new(MezonClient::default());
-    let transport = Arc::new(TransportClient::new(String::new()));
+    let transport = Arc::new(TransportClient::new_with_adapter(
+        Box::new(mezon_client::WsAdapter::new()),
+        String::new(),
+    ));
     let api = Arc::new(AppApi::new(transport.clone()));
     let initial_auth_state = resolve_initial_auth_state(&rt, &client);
 
@@ -141,12 +146,14 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 
             // Create the shared Settings entity so all views can observe theme changes.
             let settings_entity = cx.new(|_| Settings::load_sync());
+            let channel_list = cx.new(|_| ChannelList::new());
 
             // Open the main window and obtain the auth_state entity handle.
             let auth_state_handle = open_main_window(
                 cx,
                 &settings,
                 settings_entity,
+                channel_list.clone(),
                 client.clone(),
                 api.clone(),
                 initial_auth_state,
@@ -185,6 +192,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             spawn_transport_task(
                 cx,
                 auth_state_handle.clone(),
+                channel_list.clone(),
                 transport.clone(),
                 api.clone(),
             );
@@ -200,15 +208,54 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 fn spawn_transport_task(
     cx: &mut App,
     auth_state: Entity<AuthState>,
+    channel_list: Entity<ChannelList>,
     transport: Arc<TransportClient>,
     api: Arc<AppApi>,
 ) {
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<RealtimeEvent>(256);
+
     cx.spawn(async move |cx: &mut AsyncApp| {
         let exec = cx.background_executor().clone();
         let mut connected_token: Option<String> = None;
+        let mut subscribed: Option<(i64, i64)> = None;
+        let mut event_rx = event_rx;
 
         loop {
             exec.timer(std::time::Duration::from_millis(500)).await;
+
+            // Poll realtime events from the transport thread.
+            while let Ok(event) = event_rx.try_recv() {
+                match event {
+                    RealtimeEvent::ChannelMessage(msg) => {
+                        tracing::info!(
+                            "📨 [STORE] ChannelMessage channel={} sender={} content={}",
+                            msg.channel_id,
+                            msg.sender_id,
+                            msg.content,
+                        );
+                    }
+                    RealtimeEvent::Other { variant, .. } => {
+                        tracing::trace!("Other realtime event: {variant}");
+                    }
+                }
+            }
+
+            // Poll pending_subscribe from ChannelList
+            if let Some(pending) = cx.update(|cx| channel_list.update(cx, |cl, _| cl.pending_subscribe.take())) {
+                let new_clan = pending.clan_id.parse::<i64>().ok();
+                let new_channel = pending.channel_id.parse::<i64>().ok();
+                if let (Some(cid), Some(chid)) = (new_clan, new_channel) {
+                    // Leave old channel if different
+                    if let Some((old_cid, old_chid)) = subscribed {
+                        if old_cid != cid || old_chid != chid {
+                            transport.leave_channel(old_cid, old_chid, pending.channel_type, pending.is_public).await;
+                        }
+                    }
+                    // Join new channel
+                    let _ = transport.subscribe_channel(cid, chid, pending.channel_type, pending.is_public).await;
+                    subscribed = Some((cid, chid));
+                }
+            }
 
             let session = match cx.update(|cx| auth_state.read(cx).clone()) {
                 AuthState::Connecting(session) | AuthState::Authenticated(session) => Some(session),
@@ -219,7 +266,7 @@ fn spawn_transport_task(
                 if connected_token.take().is_some()
                     && let Err(e) = transport.close().await
                 {
-                    tracing::warn!("Failed to close TCP transport after logout: {e}");
+                    tracing::warn!("Failed to close transport after logout: {e}");
                 }
                 continue;
             };
@@ -230,8 +277,14 @@ fn spawn_transport_task(
                 continue;
             }
 
-            let Some(host) = session.tcp_host.clone() else {
-                tracing::warn!("Authenticated session missing tcp_host; TCP APIs unavailable");
+            let (host, port) = if let Some(ws_host) = session.ws_host.clone() {
+                let ws_port = session.ws_port.unwrap_or(443);
+                (ws_host, ws_port)
+            } else if let Some(tcp_host) = session.tcp_host.clone() {
+                let tcp_port = session.tcp_port.unwrap_or(4433);
+                (tcp_host, tcp_port)
+            } else {
+                tracing::warn!("Authenticated session missing both ws_host and tcp_host");
                 cx.update(|cx| {
                     auth_state.update(cx, |state, cx| {
                         if matches!(state, AuthState::Connecting(_)) {
@@ -242,52 +295,62 @@ fn spawn_transport_task(
                 });
                 continue;
             };
-            // let Some(port) = session.tcp_port else {
-            //     tracing::warn!("Authenticated session missing tcp_port; TCP APIs unavailable");
-            //     continue;
-            // };
-            let port = 4433;
 
             if transport.is_open().await
                 && let Err(e) = transport.close().await
             {
-                tracing::warn!("Failed to close stale TCP transport: {e}");
+                tracing::warn!("Failed to close stale transport: {e}");
             }
 
-            tracing::info!("Connecting shared TCP transport to {host}:{port}");
+            tracing::info!("Connecting shared transport to {host}:{port}");
             let token = session.token.clone();
             let session_for_update = session.clone();
+            let event_tx = event_tx.clone();
             match transport
                 .connect(
                     &host,
                     port,
                     &token,
-                    move |cid, code, message| {
-                        tracing::debug!(
-                            "TCP server message: cid={}, code={}, len={}",
-                            cid,
-                            code,
-                            message.len()
-                        );
+                    move |cid, _code, message| {
+                        if let Ok(envelope) = realtime::Envelope::decode(message.as_slice()) {
+                            if let Some(event) = RealtimeEvent::from_envelope(envelope, message) {
+                                if let RealtimeEvent::ChannelMessage(ref msg) = event {
+                                    tracing::info!(
+                                        "📨 ChannelMessage channel={} sender={} content={}",
+                                        msg.channel_id,
+                                        msg.sender_id,
+                                        msg.content,
+                                    );
+                                }
+                                let _ = event_tx.try_send(event);
+                            }
+                        } else {
+                            tracing::debug!(
+                                "📩 Unknown(cid={} code={}) len={}",
+                                cid,
+                                _code,
+                                message.len(),
+                            );
+                        }
                     },
                     move |was_clean| {
                         if was_clean {
-                            tracing::info!("TCP transport closed cleanly");
+                            tracing::info!("Transport closed cleanly");
                         } else {
-                            tracing::warn!("TCP transport closed with error");
+                            tracing::warn!("Transport closed with error");
                         }
                     },
                 )
                 .await
             {
                 Ok(()) => {
-                    tracing::info!("Shared TCP transport connected");
+                    tracing::info!("Shared transport connected");
 
                     exec.timer(std::time::Duration::from_millis(250)).await;
                     match api.get_account().await {
                         Ok(account) => {
                             connected_token = Some(token);
-                            tracing::info!("get_account over shared TCP succeeded");
+                            tracing::info!("get_account over shared transport succeeded");
                             tracing::info!("  User ID: {}", account.user_id);
                             tracing::info!("  Username: {}", account.username);
                             tracing::info!("  Email: {:?}", account.email);
@@ -301,16 +364,19 @@ fn spawn_transport_task(
                                     }
                                 });
                             });
+
+                            // Reset subscribed tracking to force re-subscribe after reconnect.
+                            subscribed = None;
                         }
                         Err(e) => {
-                            tracing::error!("get_account over shared TCP failed: {e}");
+                            tracing::error!("get_account over shared transport failed: {e}");
                             let _ = transport.close().await;
                         }
                     }
                 }
                 Err(e) => {
                     connected_token = None;
-                    tracing::error!("Shared TCP transport connect failed: {e}");
+                    tracing::error!("Shared transport connect failed: {e}");
                     exec.timer(std::time::Duration::from_secs(3)).await;
                 }
             }
@@ -424,6 +490,7 @@ fn open_main_window(
     cx: &mut App,
     settings: &Settings,
     settings_entity: Entity<Settings>,
+    channel_list: Entity<ChannelList>,
     client: Arc<MezonClient>,
     api: Arc<AppApi>,
     initial_auth: AuthState,
@@ -464,6 +531,7 @@ fn open_main_window(
             RootView::new(
                 title_bar,
                 auth_state,
+                channel_list.clone(),
                 client,
                 api,
                 settings_entity.clone(),

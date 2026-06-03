@@ -3,7 +3,7 @@ use std::sync::Arc;
 use gpui::{App, ClickEvent, Context, Entity, FontWeight, Window, div, prelude::*};
 use gpui_component::Sizable;
 use mezon_client::{AppApi, MezonClient};
-use mezon_store::{AuthState, ClanList, Settings};
+use mezon_store::{AuthState, ChannelList, ClanList, Settings};
 
 use crate::chat_layout::ChatLayout;
 use crate::components::primitives::{Button, Icon, IconName, Size, Spinner};
@@ -28,6 +28,7 @@ impl RootView {
     pub fn new(
         title_bar: Entity<TitleBar>,
         auth_state: Entity<AuthState>,
+        channel_list: Entity<ChannelList>,
         client: Arc<MezonClient>,
         api: Arc<AppApi>,
         settings: Entity<Settings>,
@@ -60,6 +61,7 @@ impl RootView {
 
         let router_for_chat = router.clone();
         let clan_list_for_chat = clan_list.clone();
+        let channel_list_for_chat = channel_list.clone();
         let auth_state_for_chat = auth_state.clone();
         let api_for_chat = api.clone();
         let navigate_for_chat = navigate.clone();
@@ -70,6 +72,7 @@ impl RootView {
                 ChatLayout::new(
                     router_for_chat,
                     clan_list_for_chat.clone(),
+                    channel_list_for_chat.clone(),
                     auth_state_for_chat.clone(),
                     api_for_chat.clone(),
                     navigate_for_chat.clone(),
