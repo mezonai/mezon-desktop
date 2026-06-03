@@ -126,17 +126,29 @@ pub struct ChatLayout {
     clan_list: Entity<ClanList>,
 }
 
+pub struct ChatLayoutParams {
+    pub router: Router,
+    pub clan_list: Entity<ClanList>,
+    pub channel_list: Entity<ChannelList>,
+    pub auth_state: Entity<AuthState>,
+    pub api: Arc<AppApi>,
+    pub navigate: crate::components::NavigateFn,
+    pub settings: Entity<Settings>,
+}
+
 impl ChatLayout {
-    pub fn new(
-        router: Router,
-        clan_list: Entity<ClanList>,
-        channel_list: Entity<ChannelList>,
-        auth_state: Entity<AuthState>,
-        api: Arc<AppApi>,
-        navigate: crate::components::NavigateFn,
-        settings: Entity<Settings>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(params: ChatLayoutParams, cx: &mut Context<Self>) -> Self {
+        let ChatLayoutParams {
+            router,
+            clan_list,
+            channel_list,
+            auth_state,
+            api,
+            navigate,
+            settings,
+        } = params;
+
+        let _ = cx.observe(&settings, |_, _, cx| cx.notify());
         let _ = cx.observe(&settings, |_, _, cx| cx.notify());
 
         let on_navigate: Option<crate::components::NavigateFn> = {

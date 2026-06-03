@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::chat_layout::ChatLayoutParams;
 use gpui::{App, ClickEvent, Context, Entity, FontWeight, Window, div, prelude::*};
 use gpui_component::Sizable;
 use mezon_client::{AppApi, MezonClient};
@@ -67,19 +68,16 @@ impl RootView {
         let navigate_for_chat = navigate.clone();
         let settings_for_chat = settings.clone();
         let chat_layout = cx.new({
-            let settings = settings_for_chat;
-            move |cx| {
-                ChatLayout::new(
-                    router_for_chat,
-                    clan_list_for_chat.clone(),
-                    channel_list_for_chat.clone(),
-                    auth_state_for_chat.clone(),
-                    api_for_chat.clone(),
-                    navigate_for_chat.clone(),
-                    settings.clone(),
-                    cx,
-                )
-            }
+            let params = ChatLayoutParams {
+                router: router_for_chat,
+                clan_list: clan_list_for_chat,
+                channel_list: channel_list_for_chat,
+                auth_state: auth_state_for_chat,
+                api: api_for_chat,
+                navigate: navigate_for_chat,
+                settings: settings_for_chat.clone(),
+            };
+            move |cx| ChatLayout::new(params, cx)
         });
 
         let auth_state_for_settings = auth_state.clone();
