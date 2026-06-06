@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
-use gpui::{App, Context, Entity, FontWeight, Window, div, prelude::*, px};
+use gpui::{App, Context, Entity, Window, div, prelude::*, px};
 use mezon_client::AppApi;
-use mezon_store::{AuthState, Category, Channel, ChannelList, Clan, ClanList, Settings};
+use mezon_store::{AuthState, Category, Channel, ChannelList, Clan, ClanList, Message, Settings};
 
+use crate::chat_area::ChatArea;
 use crate::components::compositions::user_info_bar::UserInfoBar;
 use crate::router::{Route, Router};
 use crate::theme::{Theme, resolve_theme};
@@ -117,6 +118,7 @@ pub struct ChatLayout {
     router: Router,
     settings: Entity<Settings>,
     channel_list: Entity<ChannelList>,
+    pub chat_area: ChatArea,
     clan_sidebar: Entity<ClanSidebar>,
     channel_sidebar: Entity<ChannelSidebar>,
     user_info_bar: UserInfoBar,
@@ -124,6 +126,8 @@ pub struct ChatLayout {
     fetchers_spawned: bool,
     api: Arc<AppApi>,
     clan_list: Entity<ClanList>,
+    auth_state: Entity<AuthState>,
+    last_fetched_channel_id: Option<String>,
 }
 
 pub struct ChatLayoutParams {
@@ -189,19 +193,22 @@ impl ChatLayout {
             router,
             settings,
             channel_list,
+            chat_area: ChatArea::new(),
             clan_sidebar,
             channel_sidebar,
             user_info_bar,
             fetchers_spawned: false,
             api,
             clan_list,
+            auth_state,
+            last_fetched_channel_id: None,
         }
     }
 }
 
 impl Render for ChatLayout {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _theme = resolve_theme(&self.settings.read(cx).theme);
+        let theme = resolve_theme(&self.settings.read(cx).theme);
 
         if !self.fetchers_spawned {
             self.fetchers_spawned = true;
@@ -213,35 +220,52 @@ impl Render for ChatLayout {
                 cx,
             );
         }
-        let theme = Theme::dark();
-        let channels = self.channel_list.read(cx);
 
-        let active_channel_name = channels.active_channel().cloned();
+        let active_ch = self.channel_list.read(cx).active_channel().cloned();
+        if let Some(ref ch) = active_ch {
+            let prev_id = self.last_fetched_channel_id.clone();
+            if Some(&ch.id) != prev_id.as_ref() {
+                self.last_fetched_channel_id = Some(ch.id.clone());
+                let api = self.api.clone();
+                let ch_id = ch.id.clone();
+                let cl_id = ch.clan_id.clone();
+                cx.spawn(
+                    async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| match api
+                        .list_channel_messages(&cl_id, &ch_id, 20)
+                        .await
+                    {
+                        Ok(msgs) => {
+                            tracing::info!("Fetched {} messages for channel {}", msgs.len(), ch_id);
+                            let mut store_msgs: Vec<Message> = msgs
+                                .into_iter()
+                                .map(|m| {
+                                    Message::new(
+                                        m.message_id,
+                                        m.content,
+                                        m.sender_id,
+                                        m.sender_name,
+                                        m.create_time,
+                                    )
+                                })
+                                .collect();
+                            store_msgs.sort_by_key(|m| m.create_time);
+                            let fetched_ch_id = ch_id.clone();
+                            let _ = this.update(cx, |this, cx| {
+                                if this.last_fetched_channel_id.as_deref() != Some(&fetched_ch_id) {
+                                    return;
+                                }
+                                this.chat_area.messages = store_msgs;
+                                cx.notify();
+                            });
+                        }
+                        Err(e) => tracing::error!("Failed to fetch messages for {ch_id}: {e}"),
+                    },
+                )
+                .detach();
+            }
+        }
 
-        let channel_header = div()
-            .flex()
-            .items_center()
-            .h(px(44.0))
-            .px_4()
-            .border_b_1()
-            .border_color(theme.border)
-            .bg(theme.bg_tertiary)
-            .text_sm()
-            .text_color(theme.text_primary)
-            .child(
-                active_channel_name
-                    .as_ref()
-                    .map(|ch| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(div().font_weight(FontWeight::BOLD).child(ch.name.clone()))
-                            .into_any_element()
-                    })
-                    .unwrap_or_else(|| div().child("Select a channel").into_any_element()),
-            );
-
+        self.chat_area.ensure_input(_window, cx);
         let content = self.render_content(cx);
 
         div()
@@ -278,15 +302,31 @@ impl Render for ChatLayout {
                     .flex_1()
                     .h_full()
                     .bg(theme.bg_secondary)
-                    .child(channel_header)
                     .child(content),
             )
     }
 }
 
 impl ChatLayout {
-    fn render_content(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn render_content(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = resolve_theme(&self.settings.read(cx).theme);
+
+        let session_user_id = match self.auth_state.read(cx) {
+            AuthState::Authenticated(session) => session.user_id.clone(),
+            _ => String::new(),
+        };
+
+        // Use channel_list.active_channel_id to detect channel selection instead
+        // of self.router.route(), because the router clone in ChatLayout is stale
+        // (only the RootView's router gets updated on navigation).
+        let channels = self.channel_list.read(cx);
+        if let Some(ch) = channels.active_channel() {
+            return self
+                .chat_area
+                .render(&theme, cx.entity(), &ch.name, &session_user_id)
+                .into_any_element();
+        }
+
         let route = self.router.route();
         let current_path = self.router.current_path().to_string();
 
@@ -336,7 +376,12 @@ impl ChatLayout {
             }
         };
 
-        div().flex_1().min_h_0().p_6().child(placeholder)
+        div()
+            .flex_1()
+            .min_h_0()
+            .p_6()
+            .child(placeholder)
+            .into_any_element()
     }
 
     fn render_placeholder(

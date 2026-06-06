@@ -25,6 +25,38 @@ pub struct Channel {
     pub clan_id: String,
     pub category_name: String,
     pub category_id: Option<String>,
+    pub member_count: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct Message {
+    pub id: String,
+    pub content: String,
+    pub sender_id: String,
+    pub sender_name: String,
+    pub create_time: i64,
+    pub reactions: Vec<String>,
+    pub attachments: Vec<String>,
+}
+
+impl Message {
+    pub fn new(
+        id: impl Into<String>,
+        content: impl Into<String>,
+        sender_id: impl Into<String>,
+        sender_name: impl Into<String>,
+        create_time: i64,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            content: content.into(),
+            sender_id: sender_id.into(),
+            sender_name: sender_name.into(),
+            create_time,
+            reactions: Vec::new(),
+            attachments: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +134,7 @@ impl From<ApiChannelDesc> for Channel {
             clan_id: c.clan_id,
             category_name: c.category_name,
             category_id: Some(c.category_id).filter(|s| !s.is_empty() && s != "0"),
+            member_count: c.member_count as u32,
         }
     }
 }

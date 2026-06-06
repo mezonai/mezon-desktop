@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use mezon_proto::{api, realtime};
 use prost::Message;
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -280,6 +281,7 @@ pub struct ApiChannelDesc {
     pub category_id: String,
     pub channel_private: i32,
     pub count_mess_unread: i32,
+    pub member_count: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -294,6 +296,7 @@ pub struct ApiMessage {
     pub message_id: String,
     pub content: String,
     pub sender_id: String,
+    pub sender_name: String,
     pub create_time: i64,
 }
 
@@ -352,6 +355,7 @@ impl MezonTransport {
             category_id: channel.category_id.to_string(),
             channel_private: channel.channel_private,
             count_mess_unread: channel.count_mess_unread,
+            member_count: channel.member_count,
         }
     }
 
@@ -364,10 +368,22 @@ impl MezonTransport {
     }
 
     fn message_from_proto(message: api::ChannelMessage) -> ApiMessage {
+        let content = serde_json::from_str::<serde_json::Value>(&message.content)
+            .ok()
+            .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
+            .unwrap_or(message.content);
+
         ApiMessage {
             message_id: message.message_id.to_string(),
-            content: message.content,
+            content,
             sender_id: message.sender_id.to_string(),
+            sender_name: if !message.clan_nick.is_empty() {
+                message.clan_nick
+            } else if !message.display_name.is_empty() {
+                message.display_name
+            } else {
+                message.username
+            },
             create_time: i64::from(message.create_time_seconds),
         }
     }
@@ -759,14 +775,16 @@ impl MezonTransport {
     /// List messages in a channel.
     pub async fn list_channel_messages(
         &self,
-        _channel_id: &str,
+        clan_id: &str,
+        channel_id: &str,
         _limit: u32,
     ) -> Result<Vec<ApiMessage>> {
         let cid = self.generate_cid();
 
         let api_name = "ListChannelMessages";
         let body = api::ListChannelMessagesRequest {
-            channel_id: _channel_id.parse().unwrap_or_default(),
+            clan_id: clan_id.parse().unwrap_or_default(),
+            channel_id: channel_id.parse().unwrap_or_default(),
             limit: _limit as i32,
             ..Default::default()
         }
@@ -782,6 +800,14 @@ impl MezonTransport {
         Ok(messages
             .messages
             .into_iter()
+            .filter(|m| {
+                if m.code != 0 {
+                    tracing::warn!("Skipping message with code={}", m.code);
+                    false
+                } else {
+                    true
+                }
+            })
             .map(Self::message_from_proto)
             .collect())
     }
@@ -789,15 +815,33 @@ impl MezonTransport {
     /// Send a message to a channel.
     pub async fn send_channel_message(
         &self,
-        _channel_id: &str,
+        clan_id: &str,
+        channel_id: &str,
         content: &str,
     ) -> Result<ApiMessage> {
         let cid = self.generate_cid();
 
+        let message_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+
         let api_name = "SendChannelMessage";
+        let parsed_clan_id: i64 = clan_id.parse().unwrap_or(0);
+        let parsed_channel_id: i64 = channel_id.parse().unwrap_or(0);
+        tracing::info!(
+            "send_channel_message: clan_id={} channel_id={} content_len={}",
+            parsed_clan_id,
+            parsed_channel_id,
+            content.len()
+        );
         let body = realtime::ChannelMessageSend {
-            channel_id: _channel_id.parse().unwrap_or_default(),
+            clan_id: parsed_clan_id,
+            channel_id: parsed_channel_id,
             content: content.to_string(),
+            id: message_id,
+            mode: 0,
+            code: 0,
             ..Default::default()
         }
         .encode_to_vec();

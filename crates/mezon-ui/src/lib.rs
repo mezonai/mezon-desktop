@@ -1,6 +1,8 @@
 pub mod account_test_view;
 pub mod base_view;
 pub mod channel_sidebar;
+pub mod chat;
+pub mod chat_area;
 pub mod chat_layout;
 pub mod clan_sidebar;
 pub mod components;
