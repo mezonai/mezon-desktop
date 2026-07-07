@@ -468,6 +468,16 @@ impl ChannelList {
         self.user_channels.get(&channel_id)
     }
 
+    pub fn user_channels(&self) -> impl Iterator<Item = &Channel> + '_ {
+        self.user_channels.values()
+    }
+
+    pub fn ensure_user_channels_loaded(&mut self, cx: &mut Context<Self>) {
+        if self.user_channels.is_empty() && !self.user_channels_loading {
+            self.fetch_user_channels(cx);
+        }
+    }
+
     async fn fetch_clan_data(
         api: &AppApi,
         clan_id: ClanId,

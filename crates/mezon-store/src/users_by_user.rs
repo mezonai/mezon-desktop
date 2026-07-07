@@ -97,6 +97,10 @@ impl UsersByUserStore {
         self.by_id.get(&user_id)
     }
 
+    pub fn users(&self) -> impl Iterator<Item = &User> + '_ {
+        self.by_id.values()
+    }
+
     pub fn count(&self) -> usize {
         self.by_id.len()
     }

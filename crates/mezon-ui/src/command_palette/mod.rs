@@ -1,17 +1,37 @@
+mod items;
+
+use std::rc::Rc;
+
 use gpui::{
-    div, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, FontWeight, SharedString,
-    Subscription, Window,
+    div, prelude::*, px, uniform_list, App, Context, Entity, FocusHandle, Focusable, FontWeight,
+    SharedString, Subscription, UniformListScrollHandle, Window,
+};
+use mezon_store::{
+    AuthState, ChannelList, ClanList, ClanMembersStore, DirectMessageStore, LoginStore, Settings,
+    UsersByUserStore,
 };
 
 use crate::app::shell::Shell;
-use crate::components::primitives::{v_flex, Input, InputEvent, InputState};
+use crate::components::primitives::{Input, InputEvent, InputState};
 use crate::theme::ActiveTheme;
+
+use items::{
+    build_palette_items, ensure_palette_sources_loaded, render_palette_row, PaletteItem, ROW_PX,
+};
 
 pub struct CommandPaletteModal {
     focus_handle: FocusHandle,
     locale: SharedString,
     search_input: Entity<InputState>,
+    items: Rc<Vec<PaletteItem>>,
+    items_dirty: bool,
+    scroll: UniformListScrollHandle,
     _search_sub: Subscription,
+    _channel_observe: Subscription,
+    _clan_observe: Subscription,
+    _direct_observe: Subscription,
+    _users_observe: Subscription,
+    _members_observe: Subscription,
 }
 
 impl Focusable for CommandPaletteModal {
@@ -31,6 +51,8 @@ impl CommandPaletteModal {
     }
 
     pub fn open(locale: SharedString, window: &mut Window, cx: &mut App) {
+        ensure_palette_sources_loaded(cx);
+
         let placeholder: SharedString = mezon_i18n::t(&locale, "common.searchModal.placeholder")
             .to_string()
             .into();
@@ -45,8 +67,41 @@ impl CommandPaletteModal {
                 focus_handle: cx.focus_handle(),
                 locale,
                 search_input,
+                items: Rc::new(build_palette_items(cx)),
+                items_dirty: false,
+                scroll: UniformListScrollHandle::new(),
                 _search_sub: search_sub,
+                _channel_observe: Subscription::new(|| ()),
+                _clan_observe: Subscription::new(|| ()),
+                _direct_observe: Subscription::new(|| ()),
+                _users_observe: Subscription::new(|| ()),
+                _members_observe: Subscription::new(|| ()),
             }
+        });
+
+        let view_for_observe = view.clone();
+        cx.defer(move |cx| {
+            view_for_observe.update(cx, |this, cx| {
+                this._channel_observe = cx.observe(&ChannelList::global(cx), |this, _, cx| {
+                    this.mark_items_dirty(cx);
+                });
+                this._clan_observe = cx.observe(&ClanList::global(cx), |this, _, cx| {
+                    this.mark_items_dirty(cx);
+                });
+                this._direct_observe = cx.observe(&DirectMessageStore::global(cx), |this, _, cx| {
+                    this.mark_items_dirty(cx);
+                });
+                if let Some(store) = UsersByUserStore::try_global(cx) {
+                    this._users_observe = cx.observe(&store, |this, _, cx| {
+                        this.mark_items_dirty(cx);
+                    });
+                }
+                if let Some(store) = ClanMembersStore::try_global(cx) {
+                    this._members_observe = cx.observe(&store, |this, _, cx| {
+                        this.mark_items_dirty(cx);
+                    });
+                }
+            });
         });
 
         let focus_handle = view.read(cx).search_input.read(cx).focus_handle(cx);
@@ -60,7 +115,6 @@ impl CommandPaletteModal {
 
     pub fn try_toggle_authenticated(cx: &mut App) {
         use gpui::AppContext;
-        use mezon_store::{AuthState, LoginStore, Settings};
 
         let Some(settings) = Settings::try_global(cx) else {
             return;
@@ -86,16 +140,33 @@ impl CommandPaletteModal {
             });
         });
     }
+
+    fn mark_items_dirty(&mut self, cx: &mut Context<Self>) {
+        if !self.items_dirty {
+            self.items_dirty = true;
+            cx.notify();
+        }
+    }
+
+    fn refresh_items_if_needed(&mut self, cx: &App) {
+        if self.items_dirty {
+            self.items = Rc::new(build_palette_items(cx));
+            self.items_dirty = false;
+        }
+    }
 }
 
 impl Render for CommandPaletteModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.refresh_items_if_needed(cx);
+
         let theme = cx.theme();
         let locale = self.locale.clone();
         let protip = mezon_i18n::t(&locale, "common.searchModal.protip");
         let protip_description = mezon_i18n::t(&locale, "common.searchModal.protipDescription");
 
         let search = div()
+            .flex_shrink_0()
             .mt_2()
             .mb(px(15.))
             .rounded_lg()
@@ -111,41 +182,75 @@ impl Render for CommandPaletteModal {
                     .text_color(theme.tokens.text_theme_message),
             );
 
-        let list = div()
-            .id("command-palette-list")
-            .max_h(px(250.))
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .gap(px(3.))
-            .pr(px(5.));
-
-        let footer = div().pt_2().child(
+        let count = self.items.len();
+        let list = if count == 0 {
             div()
+                .id("command-palette-list")
+                .flex_shrink_0()
+                .max_h(px(250.))
+                .min_h(px(120.))
                 .flex()
-                .flex_row()
-                .flex_wrap()
-                .text_size(px(13.))
-                .font_weight(FontWeight::MEDIUM)
+                .items_center()
+                .justify_center()
+                .px_4()
+                .text_size(px(14.))
                 .text_color(theme.tokens.text_theme_primary)
+                .child(mezon_i18n::t(&locale, "common.searchModal.noResults"))
+        } else {
+            let items = self.items.clone();
+            let list_h = (count as f32 * ROW_PX).min(250.);
+            div()
+                .id("command-palette-list")
+                .flex_shrink_0()
+                .w_full()
                 .child(
-                    div()
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(theme.status_online)
-                        .child(format!("{protip} ")),
+                    uniform_list("command-palette-list-inner", count, move |range, _window, cx| {
+                        let theme = cx.theme();
+                        let items = items.clone();
+                        range
+                            .map(|ix| match items.get(ix) {
+                                Some(item) => render_palette_row(theme, item),
+                                None => div().h(px(ROW_PX)).into_any_element(),
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .track_scroll(&self.scroll)
+                    .h(px(list_h))
+                    .w_full(),
                 )
-                .child(div().child(protip_description)),
-        );
+        };
 
-        v_flex()
+        let footer = div()
+            .flex_shrink_0()
+            .pt_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.tokens.text_theme_primary)
+                    .child(
+                        div()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(theme.status_online)
+                            .child(format!("{protip} ")),
+                    )
+                    .child(div().child(protip_description)),
+            );
+
+        div()
             .track_focus(&self.focus_handle)
             .key_context("menu")
             .occlude()
             .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
                 Self::close(cx);
             }))
-            .mx_4()
             .w(px(640.))
+            .max_w_full()
+            .flex()
+            .flex_col()
             .px_6()
             .py_4()
             .rounded(px(6.))
