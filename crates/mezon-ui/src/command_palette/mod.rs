@@ -1,11 +1,14 @@
+mod filter;
 mod items;
 
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui::{
     div, prelude::*, px, uniform_list, App, Context, Entity, FocusHandle, Focusable, FontWeight,
-    SharedString, Subscription, UniformListScrollHandle, Window,
+    SharedString, Subscription, Task, UniformListScrollHandle, Window,
 };
+use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 use mezon_store::{
     AuthState, ChannelList, ClanList, ClanMembersStore, DirectMessageStore, LoginStore, Settings,
     UsersByUserStore,
@@ -15,18 +18,24 @@ use crate::app::shell::Shell;
 use crate::components::primitives::{Input, InputEvent, InputState};
 use crate::theme::ActiveTheme;
 
+use filter::filter_and_sort_indices;
 use items::{
     build_palette_items, ensure_palette_sources_loaded, render_palette_row, PaletteItem, ROW_PX,
 };
+
+const FILTER_DEBOUNCE_MS: u64 = 200;
 
 pub struct CommandPaletteModal {
     focus_handle: FocusHandle,
     locale: SharedString,
     search_input: Entity<InputState>,
     items: Rc<Vec<PaletteItem>>,
+    debounced_query: String,
+    filtered: Rc<Vec<usize>>,
     items_dirty: bool,
     scroll: UniformListScrollHandle,
     _search_sub: Subscription,
+    _debounce_task: Task<()>,
     _channel_observe: Subscription,
     _clan_observe: Subscription,
     _direct_observe: Subscription,
@@ -60,17 +69,27 @@ impl CommandPaletteModal {
         let view = cx.new(|cx| {
             let search_input =
                 cx.new(|cx| InputState::new(window, cx).placeholder(placeholder.clone()));
-            let search_sub = cx.subscribe(&search_input, |_this, _, _event: &InputEvent, cx| {
-                cx.notify();
-            });
+            let search_sub = cx.subscribe(
+                &search_input,
+                |this: &mut Self, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.schedule_debounced_filter(cx);
+                    }
+                },
+            );
+            let items = Rc::new(build_palette_items(cx));
+            let filtered = Rc::new(filter_and_sort_indices(items.as_ref(), ""));
             Self {
                 focus_handle: cx.focus_handle(),
                 locale,
                 search_input,
-                items: Rc::new(build_palette_items(cx)),
+                items,
+                debounced_query: String::new(),
+                filtered,
                 items_dirty: false,
                 scroll: UniformListScrollHandle::new(),
                 _search_sub: search_sub,
+                _debounce_task: Task::ready(()),
                 _channel_observe: Subscription::new(|| ()),
                 _clan_observe: Subscription::new(|| ()),
                 _direct_observe: Subscription::new(|| ()),
@@ -148,19 +167,40 @@ impl CommandPaletteModal {
         }
     }
 
+    fn schedule_debounced_filter(&mut self, cx: &mut Context<Self>) {
+        self._debounce_task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(FILTER_DEBOUNCE_MS))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.debounced_query = this.search_input.read(cx).value().to_string();
+                this.recompute_filtered();
+                cx.notify();
+            });
+        });
+    }
+
+    fn recompute_filtered(&mut self) {
+        self.filtered = Rc::new(filter_and_sort_indices(
+            self.items.as_ref(),
+            &self.debounced_query,
+        ));
+    }
+
     fn refresh_items_if_needed(&mut self, cx: &App) {
         if self.items_dirty {
             self.items = Rc::new(build_palette_items(cx));
             self.items_dirty = false;
+            self.recompute_filtered();
         }
     }
 }
 
 impl Render for CommandPaletteModal {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.refresh_items_if_needed(cx);
 
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
         let locale = self.locale.clone();
         let protip = mezon_i18n::t(&locale, "common.searchModal.protip");
         let protip_description = mezon_i18n::t(&locale, "common.searchModal.protipDescription");
@@ -182,7 +222,8 @@ impl Render for CommandPaletteModal {
                     .text_color(theme.tokens.text_theme_message),
             );
 
-        let count = self.items.len();
+        let count = self.filtered.len();
+        let search_query = self.debounced_query.clone();
         let list = if count == 0 {
             div()
                 .id("command-palette-list")
@@ -198,18 +239,28 @@ impl Render for CommandPaletteModal {
                 .child(mezon_i18n::t(&locale, "common.searchModal.noResults"))
         } else {
             let items = self.items.clone();
+            let filtered = self.filtered.clone();
+            let search_query = search_query.clone();
             let list_h = (count as f32 * ROW_PX).min(250.);
             div()
                 .id("command-palette-list")
                 .flex_shrink_0()
                 .w_full()
+                .max_h(px(250.))
+                .pr(px(5.))
+                .overflow_hidden()
                 .child(
                     uniform_list("command-palette-list-inner", count, move |range, _window, cx| {
                         let theme = cx.theme();
                         let items = items.clone();
+                        let filtered = filtered.clone();
+                        let search_query = search_query.clone();
                         range
-                            .map(|ix| match items.get(ix) {
-                                Some(item) => render_palette_row(theme, item),
+                            .map(|visible_ix| match filtered.get(visible_ix).copied() {
+                                Some(item_ix) => items
+                                    .get(item_ix)
+                                    .map(|item| render_palette_row(theme, item, &search_query))
+                                    .unwrap_or_else(|| div().h(px(ROW_PX)).into_any_element()),
                                 None => div().h(px(ROW_PX)).into_any_element(),
                             })
                             .collect::<Vec<_>>()
@@ -217,6 +268,11 @@ impl Render for CommandPaletteModal {
                     .track_scroll(&self.scroll)
                     .h(px(list_h))
                     .w_full(),
+                )
+                .custom_scrollbars(
+                    Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(&self.scroll),
+                    window,
+                    cx,
                 )
         };
 
