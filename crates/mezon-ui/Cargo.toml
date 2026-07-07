@@ -26,6 +26,7 @@ chrono.workspace = true
 flume.workspace = true
 rust-embed.workspace = true
 unicode-segmentation.workspace = true
+unicode-normalization  = "0.1"
 indexmap.workspace = true
 image.workspace = true
 qrcode.workspace = true

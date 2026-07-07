@@ -82,6 +82,7 @@ pub fn init(cx: &mut gpui::App) {
     });
     components::primitives::init_input(cx);
     chat::mention_input::init(cx);
+    command_palette::init(cx);
     router::Router::init(cx);
     init_menus(cx);
 }

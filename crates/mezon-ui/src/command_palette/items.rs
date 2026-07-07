@@ -1,12 +1,13 @@
 use std::collections::HashSet;
 
+use std::rc::Rc;
+
 use gpui::{
-    AnyElement, App, ClickEvent, Entity, FontWeight, Pixels, SharedString, div, img, prelude::*,
-    px,
+    AnyElement, App, Entity, FontWeight, Pixels, SharedString, div, img, prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, DirectKind, DirectMessageStore,
-    User, UserId, UsersByUserStore,
+    ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore, DirectKind,
+    DirectMessageStore, User, UserId, UsersByUserStore,
 };
 use unicode_normalization::UnicodeNormalization;
 
@@ -48,8 +49,13 @@ pub struct PaletteItem {
     pub avatar: SharedString,
     pub unread_count: u32,
     pub last_sent_timestamp: i64,
+    pub last_seen_timestamp: i64,
     pub channel_id: Option<ChannelId>,
+    pub clan_id: Option<ClanId>,
     pub user_id: Option<UserId>,
+    pub channel_type: Option<ChannelType>,
+    pub dm_kind: Option<DirectKind>,
+    pub dm_channel_type: Option<i32>,
     pub(crate) filter_prioritize: String,
     pub(crate) filter_name: String,
     pub(crate) filter_display: String,
@@ -57,6 +63,11 @@ pub struct PaletteItem {
 }
 
 impl PaletteItem {
+    pub fn is_unread(&self) -> bool {
+        self.unread_count > 0
+            || (self.last_sent_timestamp > 0
+                && self.last_seen_timestamp < self.last_sent_timestamp)
+    }
     pub(crate) fn matches_search(&self, search: &str) -> bool {
         if search.is_empty() {
             return true;
@@ -117,8 +128,13 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
             avatar,
             unread_count: dm.unread_count,
             last_sent_timestamp: dm.last_sent_timestamp,
+            last_seen_timestamp: dm.last_seen_timestamp,
             channel_id: Some(dm.id),
+            clan_id: None,
             user_id: dm.peer_user_id,
+            channel_type: None,
+            dm_kind: Some(dm.kind),
+            dm_channel_type: Some(dm.kind.channel_type()),
             filter_prioritize: normalize_search_string(&label),
             filter_name: normalize_search_string(&username),
             filter_display: String::new(),
@@ -129,11 +145,22 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
     let channel_list = ChannelList::global(cx);
     let clan_list = ClanList::global(cx);
     for channel in channel_list.read(cx).user_channels() {
-        let subtext = clan_list
-            .read(cx)
-            .clan(channel.clan_id)
-            .map(|clan| clan.name.to_uppercase())
-            .unwrap_or_default();
+        let subtext = if channel.channel_type == ChannelType::Thread {
+            channel
+                .parent_id
+                .and_then(|parent_id| {
+                    channel_list
+                        .read(cx)
+                        .channel_display_name(channel.clan_id, parent_id)
+                })
+                .unwrap_or_default()
+        } else {
+            clan_list
+                .read(cx)
+                .clan(channel.clan_id)
+                .map(|clan| clan.name.to_uppercase())
+                .unwrap_or_default()
+        };
         let name = channel.name.clone();
         items.push(PaletteItem {
             kind: PaletteItemKind::Channel,
@@ -142,8 +169,13 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
             avatar: SharedString::default(),
             unread_count: channel.badge_count,
             last_sent_timestamp: channel.last_sent_timestamp,
+            last_seen_timestamp: channel.last_seen_timestamp,
             channel_id: Some(channel.id),
+            clan_id: Some(channel.clan_id),
             user_id: None,
+            channel_type: Some(channel.channel_type),
+            dm_kind: None,
+            dm_channel_type: None,
             filter_prioritize: normalize_search_string(&name),
             filter_name: normalize_search_string(&name),
             filter_display: String::new(),
@@ -188,8 +220,13 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
             avatar: avatar_url(cx, &user.avatar_url),
             unread_count: 0,
             last_sent_timestamp: 0,
+            last_seen_timestamp: 0,
             channel_id: None,
+            clan_id: None,
             user_id: Some(user.id),
+            channel_type: None,
+            dm_kind: None,
+            dm_channel_type: None,
             filter_prioritize: normalize_search_string(&prioritize),
             filter_name: normalize_search_string(&username),
             filter_display: normalize_search_string(&display_name),
@@ -230,7 +267,18 @@ fn avatar_url(cx: &App, raw: &str) -> SharedString {
     }
 }
 
-pub fn render_palette_row(theme: &Theme, item: &PaletteItem, search_query: &str) -> AnyElement {
+pub struct PaletteRowActions {
+    pub on_hover: Rc<dyn Fn(&mut App)>,
+    pub on_click: Rc<dyn Fn(&mut App)>,
+}
+
+pub fn render_palette_row(
+    theme: &Theme,
+    item: &PaletteItem,
+    search_query: &str,
+    selected: bool,
+    actions: Option<PaletteRowActions>,
+) -> AnyElement {
     let unread = item.unread_count;
     let show_badge = SHOW_UNREAD_BADGE_COUNT && unread > 0;
     let badge_label = if unread > 99 {
@@ -343,7 +391,7 @@ pub fn render_palette_row(theme: &Theme, item: &PaletteItem, search_query: &str)
             .into_any_element(),
     };
 
-    div()
+    let mut row = div()
         .id(format!(
             "palette-item-{}-{}-{}",
             palette_item_kind_id(item.kind),
@@ -360,7 +408,8 @@ pub fn render_palette_row(theme: &Theme, item: &PaletteItem, search_query: &str)
         .py(px(4.))
         .rounded(px(6.))
         .cursor_pointer()
-        .hover(|s| s.bg(theme.tokens.bg_item_theme_hover))
+        .when(selected, |row| row.bg(theme.tokens.bg_item_theme_hover))
+        .when(!selected, |row| row.hover(|s| s.bg(theme.tokens.bg_item_theme_hover)))
         .child(row_content)
         .when(show_badge, |row| {
             row.child(
@@ -379,9 +428,19 @@ pub fn render_palette_row(theme: &Theme, item: &PaletteItem, search_query: &str)
                     .text_color(theme.tokens.text_theme_message)
                     .child(badge_label),
             )
-        })
-        .on_click(|_: &ClickEvent, _, _| {})
-        .into_any_element()
+        });
+    if let Some(actions) = actions {
+        row = row
+            .on_mouse_move({
+                let on_hover = actions.on_hover.clone();
+                move |_, _, cx| on_hover(cx)
+            })
+            .on_click({
+                let on_click = actions.on_click.clone();
+                move |_, _, cx| on_click(cx)
+            });
+    }
+    row.into_any_element()
 }
 
 fn highlight_query(raw_query: &str, kind: PaletteItemKind) -> &str {

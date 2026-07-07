@@ -150,6 +150,7 @@ pub struct ChannelList {
     active_clan_id: Option<ClanId>,
     pub active_channel_id: Option<ChannelId>,
     remembered_channels: HashMap<ClanId, ChannelId>,
+    previous_channels: HashMap<ClanId, Vec<ChannelId>>,
     api: Arc<AppApi>,
     collapsed: HashSet<(String, String)>,
     show_empty_categories: HashSet<ClanId>,
@@ -250,6 +251,7 @@ impl ChannelList {
         self.user_channels_loading = false;
         self.loading.clear();
         self.remembered_channels.clear();
+        self.previous_channels.clear();
         self.invalidate_channel_index_all();
         self.active_clan_id = None;
         if self.active_channel_id.take().is_some() {
@@ -308,6 +310,7 @@ impl ChannelList {
             active_clan_id: None,
             active_channel_id: None,
             remembered_channels: HashMap::new(),
+            previous_channels: HashMap::new(),
             api,
             collapsed: HashSet::new(),
             show_empty_categories: HashSet::new(),
@@ -1142,6 +1145,54 @@ impl ChannelList {
 
     pub fn remembered_channel(&self, clan_id: ClanId) -> Option<ChannelId> {
         self.remembered_channels.get(&clan_id).copied()
+    }
+
+    pub fn previous_channels_for_clan(&self, clan_id: ClanId) -> &[ChannelId] {
+        self.previous_channels
+            .get(&clan_id)
+            .map(|channels| channels.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn previous_channel_ids_for_palette(&self, active_clan_id: ClanId) -> Vec<ChannelId> {
+        let mut ids = self.previous_channels_for_clan(active_clan_id).to_vec();
+        if active_clan_id != ClanId(0) {
+            for dm_id in self.previous_channels_for_clan(ClanId(0)) {
+                if !ids.contains(dm_id) {
+                    ids.push(*dm_id);
+                }
+            }
+        }
+        ids
+    }
+
+    pub fn channel_display_name(&self, clan_id: ClanId, channel_id: ChannelId) -> Option<String> {
+        self.user_channels
+            .get(&channel_id)
+            .map(|channel| channel.name.clone())
+            .or_else(|| {
+                self.channel(clan_id, channel_id)
+                    .map(|channel| channel.name.clone())
+            })
+    }
+
+    pub fn record_previous_channel(&mut self, clan_id: ClanId, channel_id: ChannelId) {
+        let entry = self.previous_channels.entry(clan_id).or_default();
+        entry.retain(|id| *id != channel_id);
+        entry.insert(0, channel_id);
+        entry.truncate(5);
+    }
+
+    pub fn reset_user_channel_unread(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        let Some(ch) = self.user_channels.get_mut(&channel_id) else {
+            return;
+        };
+        if ch.badge_count == 0 && ch.last_seen_timestamp >= ch.last_sent_timestamp {
+            return;
+        }
+        ch.badge_count = 0;
+        ch.last_seen_timestamp = ch.last_sent_timestamp;
+        cx.notify();
     }
 
     pub fn default_channel_id(&self, clan_id: ClanId) -> Option<ChannelId> {
