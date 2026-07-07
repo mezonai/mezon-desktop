@@ -33,6 +33,7 @@ struct ToastItem {
 pub struct Shell {
     toasts: Vec<ToastItem>,
     modal: Option<AnyView>,
+    command_palette_open: bool,
     next_id: usize,
 }
 
@@ -44,6 +45,7 @@ impl Shell {
         let entity = cx.new(|_| Self {
             toasts: Vec::new(),
             modal: None,
+            command_palette_open: false,
             next_id: 0,
         });
         cx.set_global(GlobalShell(entity.clone()));
@@ -93,8 +95,19 @@ impl Shell {
 
     /// Show `view` as the active modal (backdrop click dismisses). The view renders its own card.
     pub fn show_modal(&mut self, view: AnyView, cx: &mut Context<Self>) {
+        self.command_palette_open = false;
         self.modal = Some(view);
         cx.notify();
+    }
+
+    pub fn show_command_palette(&mut self, view: AnyView, cx: &mut Context<Self>) {
+        self.command_palette_open = true;
+        self.modal = Some(view);
+        cx.notify();
+    }
+
+    pub fn command_palette_open(&self) -> bool {
+        self.command_palette_open
     }
 
     /// Open a placeholder modal for a not-yet-implemented feature: the given `title` plus a
@@ -180,6 +193,7 @@ impl Shell {
 
     pub fn close_modal(&mut self, cx: &mut Context<Self>) {
         if self.modal.take().is_some() {
+            self.command_palette_open = false;
             cx.notify();
         }
     }
