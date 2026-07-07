@@ -47,6 +47,7 @@ pub struct DirectChannel {
     pub kind: DirectKind,
     pub avatar: String,
     pub peer_user_id: Option<UserId>,
+    pub peer_username: String,
     pub creator_id: Option<UserId>,
     pub online: bool,
     pub member_count: u32,
@@ -544,8 +545,8 @@ fn dm_peer_index(c: &ApiDirectChannel) -> usize {
 
 fn direct_from_api(c: ApiDirectChannel) -> DirectChannel {
     let kind = DirectKind::from_raw(c.channel_type);
-    let (avatar, peer_user_id, online) = match kind {
-        DirectKind::Group => (c.channel_avatar.clone(), None, false),
+    let (avatar, peer_user_id, peer_username, online) = match kind {
+        DirectKind::Group => (c.channel_avatar.clone(), None, String::new(), false),
         DirectKind::Dm => {
             let peer_idx = dm_peer_index(&c);
             (
@@ -555,6 +556,11 @@ fn direct_from_api(c: ApiDirectChannel) -> DirectChannel {
                     .cloned()
                     .unwrap_or_default(),
                 c.user_ids.get(peer_idx).copied().map(UserId),
+                c.usernames
+                    .get(peer_idx)
+                    .filter(|name| !name.is_empty())
+                    .cloned()
+                    .unwrap_or_default(),
                 c.onlines.get(peer_idx).copied().unwrap_or(false),
             )
         }
@@ -572,6 +578,7 @@ fn direct_from_api(c: ApiDirectChannel) -> DirectChannel {
         kind,
         avatar,
         peer_user_id,
+        peer_username,
         creator_id: (c.creator_id != 0).then_some(UserId(c.creator_id)),
         online,
         member_count: c.member_count.max(0) as u32,
@@ -724,6 +731,7 @@ mod tests {
                 kind: DirectKind::Dm,
                 avatar: String::new(),
                 peer_user_id: None,
+                peer_username: String::new(),
                 creator_id: None,
                 online: false,
                 member_count: 0,
@@ -737,6 +745,7 @@ mod tests {
                 kind: DirectKind::Dm,
                 avatar: String::new(),
                 peer_user_id: None,
+                peer_username: String::new(),
                 creator_id: None,
                 online: false,
                 member_count: 0,

@@ -6,8 +6,8 @@ use gpui::{
     AnyElement, App, Entity, FontWeight, Pixels, SharedString, div, img, prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore, DirectKind,
-    DirectMessageStore, User, UserId, UsersByUserStore,
+    ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore, DirectChannel,
+    DirectKind, DirectMessageStore, User, UserId, UsersByUserStore,
 };
 use unicode_normalization::UnicodeNormalization;
 
@@ -85,6 +85,50 @@ fn cmp_items(a: &PaletteItem, b: &PaletteItem) -> std::cmp::Ordering {
         .then_with(|| a.label.cmp(&b.label))
 }
 
+fn dm_username_subtext(
+    dm: &DirectChannel,
+    users_store: Option<&Entity<UsersByUserStore>>,
+    cx: &App,
+) -> SharedString {
+    if dm.kind != DirectKind::Dm {
+        return SharedString::default();
+    }
+    if !dm.peer_username.is_empty() {
+        return SharedString::from(dm.peer_username.clone());
+    }
+    if let Some(user_id) = dm.peer_user_id {
+        if let Some(store) = users_store {
+            if let Some(user) = store.read(cx).user(user_id) {
+                if !user.username.is_empty() {
+                    return SharedString::from(user.username.clone());
+                }
+            }
+        }
+    }
+    SharedString::default()
+}
+
+fn palette_channel_subtext(
+    channel: &mezon_store::Channel,
+    channel_list: &ChannelList,
+    clan_list: &ClanList,
+) -> String {
+    let raw = if channel.channel_type == ChannelType::Thread {
+        channel
+            .parent_id
+            .and_then(|parent_id| channel_list.channel_display_name(channel.clan_id, parent_id))
+            .unwrap_or_default()
+    } else if !channel.clan_name.is_empty() {
+        channel.clan_name.clone()
+    } else {
+        clan_list
+            .clan(channel.clan_id)
+            .map(|clan| clan.name.clone())
+            .unwrap_or_default()
+    };
+    raw.to_uppercase()
+}
+
 pub fn ensure_palette_sources_loaded(cx: &mut App) {
     ChannelList::global(cx).update(cx, |store, cx| store.ensure_user_channels_loaded(cx));
     DirectMessageStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
@@ -107,20 +151,9 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
         }
         let avatar = avatar_url(cx, &dm.avatar);
         let label = dm.label.clone();
-        let username = dm
-            .peer_user_id
-            .and_then(|user_id| {
-                users_store
-                    .as_ref()
-                    .and_then(|store| store.read(cx).user(user_id))
-                    .map(|user| user.username.clone())
-            })
-            .unwrap_or_default();
-        let subtext = if username.is_empty() {
-            SharedString::default()
-        } else {
-            SharedString::from(username.clone())
-        };
+        let subtext = dm_username_subtext(dm, users_store.as_ref(), cx);
+        let filter_name = normalize_search_string(subtext.as_ref());
+        let filter_blob = normalize_search_string(&format!("{label} {}", subtext.as_ref()));
         items.push(PaletteItem {
             kind: PaletteItemKind::Direct,
             label: SharedString::from(label.clone()),
@@ -136,31 +169,18 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
             dm_kind: Some(dm.kind),
             dm_channel_type: Some(dm.kind.channel_type()),
             filter_prioritize: normalize_search_string(&label),
-            filter_name: normalize_search_string(&username),
+            filter_name,
             filter_display: String::new(),
-            filter_blob: normalize_search_string(&format!("{label} {username}")),
+            filter_blob,
         });
     }
 
     let channel_list = ChannelList::global(cx);
     let clan_list = ClanList::global(cx);
-    for channel in channel_list.read(cx).user_channels() {
-        let subtext = if channel.channel_type == ChannelType::Thread {
-            channel
-                .parent_id
-                .and_then(|parent_id| {
-                    channel_list
-                        .read(cx)
-                        .channel_display_name(channel.clan_id, parent_id)
-                })
-                .unwrap_or_default()
-        } else {
-            clan_list
-                .read(cx)
-                .clan(channel.clan_id)
-                .map(|clan| clan.name.to_uppercase())
-                .unwrap_or_default()
-        };
+    let channels = channel_list.read(cx);
+    let clans = clan_list.read(cx);
+    for channel in channels.user_channels() {
+        let subtext = palette_channel_subtext(channel, channels, clans);
         let name = channel.name.clone();
         items.push(PaletteItem {
             kind: PaletteItemKind::Channel,
@@ -292,7 +312,7 @@ pub fn render_palette_row(
     } else {
         FontWeight::MEDIUM
     };
-    let (subtext_size, _subtext_uppercase) = match item.kind {
+    let (subtext_size, subtext_uppercase) = match item.kind {
         PaletteItemKind::Channel => (px(10.), true),
         PaletteItemKind::Direct | PaletteItemKind::Member => (px(13.), false),
     };
@@ -340,11 +360,16 @@ pub fn render_palette_row(
     );
 
     let subtext = (!item.subtext.is_empty()).then(|| {
+        let text = if subtext_uppercase {
+            item.subtext.to_uppercase()
+        } else {
+            item.subtext.to_string()
+        };
         div()
             .flex_shrink_0()
             .max_w(px(240.))
             .child(render_highlighted_text(
-                &item.subtext,
+                &text,
                 highlight,
                 theme,
                 subtext_size,

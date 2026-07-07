@@ -89,6 +89,7 @@ pub struct Channel {
     pub channel_type: ChannelType,
     pub private: bool,
     pub clan_id: ClanId,
+    pub clan_name: String,
     pub category_name: String,
     pub category_id: Option<String>,
     pub member_count: u32,
@@ -130,6 +131,13 @@ fn collapse_state_path() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("mezon")
         .join("collapse_state.json")
+}
+
+fn previous_channels_path() -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("mezon")
+        .join("previous_channels.json")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,6 +260,7 @@ impl ChannelList {
         self.loading.clear();
         self.remembered_channels.clear();
         self.previous_channels.clear();
+        self.persist_previous_channels(cx);
         self.invalidate_channel_index_all();
         self.active_clan_id = None;
         if self.active_channel_id.take().is_some() {
@@ -286,13 +295,26 @@ impl ChannelList {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
         cx.spawn(async move |this, cx| {
-            let collapsed = cx
+            let (collapsed, previous_channels) = cx
                 .background_executor()
-                .spawn(async { load_collapse_state() })
+                .spawn(async {
+                    (
+                        load_collapse_state(),
+                        load_previous_channels(),
+                    )
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                let mut changed = false;
                 if !collapsed.is_empty() {
                     this.collapsed = collapsed;
+                    changed = true;
+                }
+                if !previous_channels.is_empty() {
+                    this.previous_channels = previous_channels;
+                    changed = true;
+                }
+                if changed {
                     cx.notify();
                 }
             });
@@ -928,6 +950,7 @@ impl ChannelList {
                         channel_type: ChannelType::from_raw(e.channel_type as u32),
                         private: e.channel_private != 0,
                         clan_id,
+                        clan_name: String::new(),
                         category_name: String::new(),
                         category_id: Some(e.category_id.to_string())
                             .filter(|s| !s.is_empty() && s != "0"),
@@ -1062,6 +1085,7 @@ impl ChannelList {
                     channel_type: ChannelType::from_raw(channel_type),
                     private: desc.channel_private != 0,
                     clan_id,
+                    clan_name: desc.clan_name.clone(),
                     category_name: String::new(),
                     category_id: Some(desc.category_id.to_string())
                         .filter(|s| !s.is_empty() && s != "0"),
@@ -1154,16 +1178,8 @@ impl ChannelList {
             .unwrap_or(&[])
     }
 
-    pub fn previous_channel_ids_for_palette(&self, active_clan_id: ClanId) -> Vec<ChannelId> {
-        let mut ids = self.previous_channels_for_clan(active_clan_id).to_vec();
-        if active_clan_id != ClanId(0) {
-            for dm_id in self.previous_channels_for_clan(ClanId(0)) {
-                if !ids.contains(dm_id) {
-                    ids.push(*dm_id);
-                }
-            }
-        }
-        ids
+    pub fn previous_channel_ids_for_palette(&self) -> Vec<ChannelId> {
+        merged_previous_channel_ids(&self.previous_channels)
     }
 
     pub fn channel_display_name(&self, clan_id: ClanId, channel_id: ChannelId) -> Option<String> {
@@ -1176,11 +1192,24 @@ impl ChannelList {
             })
     }
 
-    pub fn record_previous_channel(&mut self, clan_id: ClanId, channel_id: ChannelId) {
+    pub fn record_previous_channel(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
         let entry = self.previous_channels.entry(clan_id).or_default();
         entry.retain(|id| *id != channel_id);
         entry.insert(0, channel_id);
         entry.truncate(5);
+        self.persist_previous_channels(cx);
+    }
+
+    fn persist_previous_channels(&self, cx: &mut Context<Self>) {
+        let snapshot = self.previous_channels.clone();
+        cx.background_executor()
+            .spawn(async move { save_previous_channels(snapshot) })
+            .detach();
     }
 
     pub fn reset_user_channel_unread(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
@@ -1416,6 +1445,7 @@ fn thread_channel_from_context(
         channel_type: ChannelType::Thread,
         private: false,
         clan_id,
+        clan_name: String::new(),
         category_name: String::new(),
         category_id: None,
         member_count: 0,
@@ -1452,6 +1482,7 @@ fn channel_from_desc(
         channel_type: ChannelType::from_raw(c.channel_type),
         private: c.channel_private != 0,
         clan_id: ClanId(c.clan_id),
+        clan_name: c.clan_name,
         category_name: c.category_name,
         category_id: Some(c.category_id.to_string()).filter(|s| !s.is_empty() && s != "0"),
         member_count: c.member_count.max(0) as u32,
@@ -1784,6 +1815,40 @@ fn clear_topic_badges_for_clan(
     topic_badges.retain(|_, tracked| tracked.clan_id != clan_id);
 }
 
+fn merged_previous_channel_ids(
+    previous_channels: &HashMap<ClanId, Vec<ChannelId>>,
+) -> Vec<ChannelId> {
+    if previous_channels.is_empty() {
+        return Vec::new();
+    }
+    let mut ordered_clans: Vec<ClanId> = previous_channels.keys().copied().collect();
+    ordered_clans.sort_by(|a, b| match (a.is_zero(), b.is_zero()) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.get().cmp(&b.get()),
+    });
+    let max_len = previous_channels
+        .values()
+        .map(|channels| channels.len())
+        .max()
+        .unwrap_or(0);
+    let mut ids = Vec::new();
+    for rank in 0..max_len {
+        for clan_id in &ordered_clans {
+            let Some(list) = previous_channels.get(clan_id) else {
+                continue;
+            };
+            let Some(channel_id) = list.get(rank) else {
+                continue;
+            };
+            if !ids.contains(channel_id) {
+                ids.push(*channel_id);
+            }
+        }
+    }
+    ids
+}
+
 fn load_collapse_state() -> HashSet<(String, String)> {
     let path = collapse_state_path();
     let data = match std::fs::read_to_string(&path) {
@@ -1812,6 +1877,33 @@ fn save_collapse_state(pairs: Vec<(String, String)>) {
     }
 }
 
+fn load_previous_channels() -> HashMap<ClanId, Vec<ChannelId>> {
+    let path = previous_channels_path();
+    let data = match std::fs::read_to_string(&path) {
+        Ok(d) => d,
+        Err(_) => return HashMap::new(),
+    };
+    match serde_json::from_str(&data) {
+        Ok(v) => v,
+        Err(_) => HashMap::new(),
+    }
+}
+
+fn save_previous_channels(channels: HashMap<ClanId, Vec<ChannelId>>) {
+    let path = previous_channels_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match serde_json::to_string(&channels) {
+        Ok(data) => {
+            if let Err(e) = std::fs::write(&path, data) {
+                tracing::warn!("Failed to save previous channels: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("Failed to serialize previous channels: {e}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1833,6 +1925,40 @@ mod tests {
     }
 
     #[test]
+    fn previous_channels_roundtrip() {
+        let mut channels: HashMap<ClanId, Vec<ChannelId>> = HashMap::new();
+        channels.insert(
+            ClanId(1),
+            vec![ChannelId(10), ChannelId(20), ChannelId(30)],
+        );
+        channels.insert(ClanId(0), vec![ChannelId(99)]);
+
+        let json = serde_json::to_string(&channels).unwrap();
+        let restored: HashMap<ClanId, Vec<ChannelId>> = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.get(&ClanId(1)).map(Vec::as_slice), Some(&[ChannelId(10), ChannelId(20), ChannelId(30)][..]));
+        assert_eq!(restored.get(&ClanId(0)).map(Vec::as_slice), Some(&[ChannelId(99)][..]));
+    }
+
+    #[test]
+    fn previous_channel_ids_for_palette_merges_all_clans() {
+        let mut previous_channels = HashMap::new();
+        previous_channels.insert(ClanId(0), vec![ChannelId(99)]);
+        previous_channels.insert(ClanId(1), vec![ChannelId(10), ChannelId(20)]);
+        previous_channels.insert(ClanId(2), vec![ChannelId(30)]);
+
+        assert_eq!(
+            merged_previous_channel_ids(&previous_channels),
+            vec![
+                ChannelId(99),
+                ChannelId(10),
+                ChannelId(30),
+                ChannelId(20),
+            ]
+        );
+    }
+
+    #[test]
     fn is_category_collapsed_defaults_to_false() {
         let collapsed: HashSet<(String, String)> = HashSet::new();
         let is_collapsed =
@@ -1847,6 +1973,7 @@ mod tests {
             channel_type: ChannelType::Text,
             private: false,
             clan_id: ClanId(1),
+            clan_name: String::new(),
             category_name: "General".into(),
             category_id: Some(cat_id.into()),
             member_count: 0,
@@ -2142,6 +2269,7 @@ mod tests {
             last_sent_timestamp: 0,
             badge_count: badge,
             creator_id: 0,
+            clan_name: String::new(),
         };
 
         let badge_descs = vec![
@@ -2252,6 +2380,7 @@ mod tests {
             channel_type: ChannelType::Text,
             private: false,
             clan_id: ClanId(1),
+            clan_name: String::new(),
             category_name: "General".into(),
             category_id: Some("c1".into()),
             member_count: 0,
@@ -2278,6 +2407,7 @@ mod tests {
                 channel_type: ChannelType::Text,
                 private: false,
                 clan_id: ClanId(1),
+                clan_name: String::new(),
                 category_name: "Main".into(),
                 category_id: Some("cat1".into()),
                 member_count: 0,
@@ -2298,6 +2428,7 @@ mod tests {
                 channel_type: ChannelType::Text,
                 private: false,
                 clan_id: ClanId(1),
+                clan_name: String::new(),
                 category_name: "Main".into(),
                 category_id: Some("cat1".into()),
                 member_count: 0,

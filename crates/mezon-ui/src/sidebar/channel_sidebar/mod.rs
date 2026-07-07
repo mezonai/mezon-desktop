@@ -864,7 +864,6 @@ fn render_sidebar_item(
             voice_members,
         } => {
             let ch_id = id.clone();
-            let row_handle = channel_list_handle.clone();
             let clan_id_inner = active_clan_id_for_nav;
             let selected_bg = theme.tokens.bg_active_member_channel;
             let hover_bg = theme.bg_hover;
@@ -1045,7 +1044,6 @@ fn render_sidebar_item(
             });
 
             channel_col.interactivity().on_click(on_channel_click(
-                row_handle,
                 ch_id,
                 clan_id_inner,
             ));

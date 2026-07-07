@@ -11,7 +11,7 @@ use gpui::{
     UniformListScrollHandle, WeakEntity, Window,
 };
 use mezon_store::{
-    AuthState, ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, DirectKind,
+    AuthState, ChannelId, ChannelList, ClanList, ClanMembersStore, DirectKind,
     DirectMessageStore, LoginStore, Settings, UserId, UsersByUserStore,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
@@ -596,13 +596,9 @@ fn section_labels(locale: &SharedString) -> PaletteSectionLabels {
 }
 
 fn previous_channel_ids(cx: &App) -> Vec<ChannelId> {
-    let active_clan_id = ClanList::global(cx)
-        .read(cx)
-        .active_clan_id
-        .unwrap_or(ClanId(0));
     ChannelList::global(cx)
         .read(cx)
-        .previous_channel_ids_for_palette(active_clan_id)
+        .previous_channel_ids_for_palette()
 }
 
 fn first_selectable_row(rows: &[PaletteDisplayRow]) -> usize {

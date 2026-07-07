@@ -6,14 +6,10 @@ use crate::app::shell::Shell;
 use crate::components::primitives::ContextMenu;
 
 pub(super) fn on_channel_click(
-    channel_list: Entity<ChannelList>,
     channel_id: String,
     clan_id: Option<ClanId>,
 ) -> impl Fn(&ClickEvent, &mut Window, &mut App) {
     move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-        channel_list.update(cx, |m, cx| {
-            m.select_channel(channel_id.parse().unwrap_or_default(), cx);
-        });
         if let Some(ref cid) = clan_id {
             crate::router::navigate(
                 cx,
