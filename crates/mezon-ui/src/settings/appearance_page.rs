@@ -208,12 +208,6 @@ impl Render for AppearancePage {
         v_flex()
             .gap_6()
             .child(
-                Label::new(mezon_i18n::t(&locale, "setting.appSettings.appearance"))
-                    .text_xl()
-                    .text_color(theme.text_primary)
-                    .font_weight(FontWeight::SEMIBOLD),
-            )
-            .child(
                 v_flex()
                     .rounded_lg()
                     .bg(theme.bg_primary)

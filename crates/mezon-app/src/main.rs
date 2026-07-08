@@ -87,8 +87,13 @@ fn log_dir() -> std::path::PathBuf {
 /// Initialise tracing to stdout **and** a daily-rotated log file. Uses a blocking file writer
 /// (not `non_blocking`) so a panic is flushed to disk before the process aborts.
 fn init_logging() {
+    let default_filter = if cfg!(debug_assertions) {
+        "mezon=debug,info"
+    } else {
+        "mezon=info,warn"
+    };
     let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("mezon=debug,info"));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
 
     let dir = log_dir();
     let dir_err = std::fs::create_dir_all(&dir).err();
@@ -167,7 +172,10 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     );
     let client = Arc::new(client);
     let transport = Arc::new(TransportClient::new(String::new()));
-    let api = Arc::new(AppApi::new(transport.clone()));
+    let api = Arc::new(AppApi::new(
+        transport.clone(),
+        app_config.base_img_url.clone(),
+    ));
     let initial_auth_state = mezon_store::resolve_initial_auth_state();
 
     // Subscribe to screen lock/unlock events.
@@ -459,13 +467,23 @@ fn open_main_window(
             size: size(px(w as f32), px(h as f32)),
         })
     } else {
-        WindowBounds::Windowed(Bounds::centered(None, size(px(1280.0), px(720.0)), cx))
+        WindowBounds::Windowed(Bounds::centered(
+            None,
+            size(
+                px(mezon_ui::MAIN_WINDOW_DEFAULT_WIDTH),
+                px(mezon_ui::MAIN_WINDOW_DEFAULT_HEIGHT),
+            ),
+            cx,
+        ))
     };
 
     let options = WindowOptions {
         titlebar: Some(window_title_options()),
         window_bounds: Some(window_bounds),
-        window_min_size: Some(size(px(950.0), px(500.0))),
+        window_min_size: Some(size(
+            px(mezon_ui::MAIN_WINDOW_MIN_WIDTH),
+            px(mezon_ui::MAIN_WINDOW_MIN_HEIGHT),
+        )),
         kind: gpui::WindowKind::Normal,
         focus: true,
         show: true,

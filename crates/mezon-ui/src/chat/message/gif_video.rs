@@ -23,9 +23,12 @@ pub struct VideoThumbView {
 
 impl VideoThumbView {
     pub fn new(url: SharedString, cx: &mut Context<Self>) -> Self {
-        let player = VideoPlayer::open(url.as_ref(), Some((THUMB_DECODE_MAX_PX, THUMB_DECODE_MAX_PX)))
-            .ok()
-            .map(Rc::new);
+        let player = VideoPlayer::open(
+            url.as_ref(),
+            Some((THUMB_DECODE_MAX_PX, THUMB_DECODE_MAX_PX)),
+        )
+        .ok()
+        .map(Rc::new);
         if let Some(player) = player.as_ref() {
             player.set_muted(true);
             player.play();
@@ -103,16 +106,12 @@ impl VideoThumbView {
 
     #[cfg(not(target_os = "macos"))]
     fn frame_child(&self) -> Option<AnyElement> {
-        self.shared
-            .borrow()
-            .frame
-            .clone()
-            .map(|frame| {
-                gpui::img(frame)
-                    .size_full()
-                    .object_fit(ObjectFit::Cover)
-                    .into_any_element()
-            })
+        self.shared.borrow().frame.clone().map(|frame| {
+            gpui::img(frame)
+                .size_full()
+                .object_fit(ObjectFit::Cover)
+                .into_any_element()
+        })
     }
 }
 
@@ -123,11 +122,9 @@ impl Render for VideoThumbView {
         if !self.frozen && self.player.is_some() && !self.shared.borrow().failed {
             window.request_animation_frame();
         }
-        div().size_full().children(if has_frame {
-            self.frame_child()
-        } else {
-            None
-        })
+        div()
+            .size_full()
+            .children(if has_frame { self.frame_child() } else { None })
     }
 }
 

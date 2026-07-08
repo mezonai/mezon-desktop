@@ -18,6 +18,7 @@ use tokio::sync::{oneshot, watch};
 const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
 const DEFAULT_CONNECT_GATE_MS: u64 = 5000;
 const DEFAULT_PING_TIMEOUT_MS: u64 = 5000;
+const MULTIPART_OP_TIMEOUT_MS: u64 = 120000;
 
 fn parse_id<T>(value: &str) -> Result<T>
 where
@@ -287,6 +288,17 @@ impl MezonTransport {
 
     /// Send a raw message and wait for response.
     pub async fn send(&self, cid: u16, message: Vec<u8>) -> Result<(u32, Vec<u8>)> {
+        self.send_with_timeout(cid, message, self.send_timeout_ms)
+            .await
+    }
+
+    /// Send a raw message and wait for response, using an explicit timeout.
+    pub async fn send_with_timeout(
+        &self,
+        cid: u16,
+        message: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<(u32, Vec<u8>)> {
         self.wait_connected(self.connect_gate).await?;
         let (tx, rx) = oneshot::channel();
         self.pending_requests
@@ -296,7 +308,7 @@ impl MezonTransport {
             self.pending_requests.lock().remove(&cid);
             return Err(e);
         }
-        let result = tokio::time::timeout(self.send_timeout_ms, rx)
+        let result = tokio::time::timeout(timeout, rx)
             .await
             .map_err(|_| {
                 self.pending_requests.lock().remove(&cid);
@@ -1518,6 +1530,39 @@ pub fn detect_markdown(text: &str) -> Vec<OutgoingMarkdown> {
     out
 }
 
+fn with_presign_finish(content_json: String, keys: &[String]) -> String {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&content_json).unwrap_or_else(|_| serde_json::json!({}));
+    let Some(obj) = value.as_object_mut() else {
+        return content_json;
+    };
+    obj.insert(
+        "presign_finish".into(),
+        serde_json::Value::Array(
+            keys.iter()
+                .map(|k| serde_json::Value::String(k.clone()))
+                .collect(),
+        ),
+    );
+    serde_json::to_string(&value).unwrap_or(content_json)
+}
+
+fn with_create_time_seconds(content_json: String, create_time_seconds: u32) -> String {
+    if create_time_seconds == 0 {
+        return content_json;
+    }
+    let mut value: serde_json::Value =
+        serde_json::from_str(&content_json).unwrap_or_else(|_| serde_json::json!({}));
+    let Some(obj) = value.as_object_mut() else {
+        return content_json;
+    };
+    obj.insert(
+        "create_time_seconds".into(),
+        serde_json::Value::Number(create_time_seconds.into()),
+    );
+    serde_json::to_string(&value).unwrap_or(content_json)
+}
+
 fn build_message_content_json(
     text: &str,
     mentions: &[OutgoingMention],
@@ -1687,6 +1732,18 @@ impl MezonTransport {
     ) -> Result<(u32, Vec<u8>)> {
         tracing::debug!(target: "socket", "api_send: action={api_name} cid={cid}");
         self.send(cid, self.build_api_request(cid, api_name, body)?)
+            .await
+    }
+
+    async fn send_api_request_with_timeout(
+        &self,
+        cid: u16,
+        api_name: &str,
+        body: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<(u32, Vec<u8>)> {
+        tracing::debug!(target: "socket", "api_send: action={api_name} cid={cid}");
+        self.send_with_timeout(cid, self.build_api_request(cid, api_name, body)?, timeout)
             .await
     }
 
@@ -2522,10 +2579,12 @@ impl MezonTransport {
             mentions,
             hashtags,
             emojis,
+            None,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_channel_message_with_attachments(
         &self,
         clan_id: i64,
@@ -2534,7 +2593,27 @@ impl MezonTransport {
         is_public: bool,
         mode: i32,
         attachments: Vec<api::MessageAttachment>,
+        reply: Option<OutgoingReply>,
+        mentions: Vec<OutgoingMention>,
+        hashtags: Vec<OutgoingHashtag>,
+        emojis: Vec<OutgoingEmoji>,
+        presign_finish: Option<Vec<String>>,
     ) -> Result<ApiMessage> {
+        let references = reply
+            .map(|reply| api::MessageRef {
+                message_ref_id: reply.message_ref_id,
+                content: reply.content,
+                has_attachment: reply.has_attachment,
+                ref_type: 0,
+                message_sender_id: reply.message_sender_id,
+                message_sender_username: reply.message_sender_username,
+                message_sender_avatar: reply.message_sender_avatar,
+                message_sender_clan_nick: reply.message_sender_clan_nick,
+                message_sender_display_name: reply.message_sender_display_name,
+                ..Default::default()
+            })
+            .into_iter()
+            .collect();
         self.send_channel_message_inner(
             clan_id,
             channel_id,
@@ -2542,10 +2621,11 @@ impl MezonTransport {
             is_public,
             mode,
             attachments,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            references,
+            mentions,
+            hashtags,
+            emojis,
+            presign_finish,
         )
         .await
     }
@@ -2587,6 +2667,7 @@ impl MezonTransport {
             mentions,
             hashtags,
             emojis,
+            None,
         )
         .await
     }
@@ -2604,6 +2685,7 @@ impl MezonTransport {
         mentions: Vec<OutgoingMention>,
         hashtags: Vec<OutgoingHashtag>,
         emojis: Vec<OutgoingEmoji>,
+        presign_finish: Option<Vec<String>>,
     ) -> Result<ApiMessage> {
         let cid = self.generate_cid();
 
@@ -2622,6 +2704,10 @@ impl MezonTransport {
         let markdowns = detect_markdown(content);
         let content_json =
             build_message_content_json(content, &mentions, &hashtags, &emojis, &markdowns);
+        let content_json = match &presign_finish {
+            Some(keys) => with_presign_finish(content_json, keys),
+            None => content_json,
+        };
         let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
         let proto_mentions: Vec<api::MessageMention> = mentions
             .iter()
@@ -3552,6 +3638,50 @@ impl MezonTransport {
             attachments,
             mode,
             is_public,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let (code, _) = self
+            .send_api_request(cid, "UpdateChannelMessage", body)
+            .await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn patch_message_presign_finish(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        content: &str,
+        mentions: Vec<OutgoingMention>,
+        presign_finish: Vec<String>,
+        create_time_seconds: u32,
+        mode: i32,
+        is_public: bool,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        let markdowns = detect_markdown(content);
+        let content_json = build_message_content_json(content, &mentions, &[], &[], &markdowns);
+        let content_json = with_presign_finish(content_json, &presign_finish);
+        let content_json = with_create_time_seconds(content_json, create_time_seconds);
+        let proto_mentions: Vec<api::MessageMention> = mentions
+            .iter()
+            .filter_map(OutgoingMention::to_proto)
+            .collect();
+        let body = realtime::ChannelMessageUpdate {
+            clan_id,
+            channel_id,
+            message_id,
+            content: content_json,
+            mentions: proto_mentions,
+            mode,
+            is_public,
+            hide_editted: true,
+            create_time_seconds,
             ..Default::default()
         }
         .encode_to_vec();
@@ -6650,7 +6780,12 @@ impl MezonTransport {
         let cid = self.generate_cid();
         let body = req.encode_to_vec();
         let (code, response) = self
-            .send_api_request(cid, "MultipartUploadAttachmentFileStart", body)
+            .send_api_request_with_timeout(
+                cid,
+                "MultipartUploadAttachmentFileStart",
+                body,
+                Duration::from_millis(MULTIPART_OP_TIMEOUT_MS),
+            )
             .await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -6666,7 +6801,12 @@ impl MezonTransport {
         let cid = self.generate_cid();
         let body = req.encode_to_vec();
         let (code, response) = self
-            .send_api_request(cid, "MultipartUploadAttachmentFileFinish", body)
+            .send_api_request_with_timeout(
+                cid,
+                "MultipartUploadAttachmentFileFinish",
+                body,
+                Duration::from_millis(MULTIPART_OP_TIMEOUT_MS),
+            )
             .await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));

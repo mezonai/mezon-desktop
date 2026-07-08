@@ -4,9 +4,9 @@ mod text_field;
 use std::path::PathBuf;
 
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, Focusable, FontWeight, IntoElement, KeyBinding,
-    PathPromptOptions, ScrollStrategy, SharedString, Subscription, UniformListScrollHandle, Window,
-    actions, deferred, div, img, prelude::*, px, uniform_list,
+    AnyElement, App, Context, Entity, EventEmitter, Focusable, FontWeight, Image, ImageFormat,
+    IntoElement, KeyBinding, PathPromptOptions, ScrollStrategy, SharedString, Subscription,
+    UniformListScrollHandle, Window, actions, deferred, div, img, prelude::*, px, uniform_list,
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanList, EmojiEvent, EmojiStore, MENTION_HERE_ID,
@@ -15,7 +15,8 @@ use mezon_store::{
 };
 
 use attachments::{
-    AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, build_pending, validate_batch,
+    AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, build_pending, mime_from_extension,
+    validate_batch,
 };
 
 use crate::app::shell::Shell;
@@ -32,6 +33,8 @@ use text_field::{
 
 const KEY_CONTEXT: &str = "MezonMention";
 const MAX_SUGGESTIONS: usize = 50;
+const CONVERT_TO_FILE_THRESHOLD: usize = 3700;
+const CONVERT_PREFIX_LEN: usize = 8;
 const MENTION_ROW_PX: f32 = 36.;
 const MENTION_POPUP_MAX_PX: f32 = MENTION_ROW_PX * 6.;
 const PICKER_EMOJI_PX: f32 = 28.;
@@ -158,15 +161,71 @@ pub struct MentionInput {
     sticker_rows: Vec<Vec<StickerCellRaw>>,
     sticker_scroll: UniformListScrollHandle,
     avatar_cache: Entity<LruImageCache>,
+    preview_cache: Entity<LruImageCache>,
     settings: Entity<Settings>,
     pending_attachments: Vec<PendingAttachment>,
     compact: bool,
+    overflow_to_file: bool,
     _input_sub: Subscription,
     _emoji_sub: Option<Subscription>,
     _sticker_sub: Option<Subscription>,
 }
 
 impl EventEmitter<MentionInputEvent> for MentionInput {}
+
+fn json_string_utf16_len(s: &str) -> usize {
+    serde_json::to_string(s)
+        .map(|j| j.encode_utf16().count())
+        .unwrap_or_else(|_| s.encode_utf16().count() + 2)
+}
+
+fn content_payload_utf8_len(text: &str) -> usize {
+    serde_json::to_string(&serde_json::json!({ "t": text }))
+        .map(|j| j.len())
+        .unwrap_or(text.len() + CONVERT_PREFIX_LEN)
+}
+
+fn needs_png_transcode(format: ImageFormat) -> bool {
+    matches!(
+        format,
+        ImageFormat::Tiff | ImageFormat::Ico | ImageFormat::Pnm
+    )
+}
+
+fn image_format_extension(format: ImageFormat) -> &'static str {
+    match format {
+        ImageFormat::Png => "png",
+        ImageFormat::Jpeg => "jpg",
+        ImageFormat::Webp => "webp",
+        ImageFormat::Gif => "gif",
+        ImageFormat::Svg => "svg",
+        ImageFormat::Bmp => "bmp",
+        ImageFormat::Tiff => "tiff",
+        ImageFormat::Ico => "ico",
+        ImageFormat::Pnm => "pnm",
+    }
+}
+
+fn write_clipboard_image(image: &Image, base: i64, index: usize) -> Option<PathBuf> {
+    let dir = std::env::temp_dir();
+    if needs_png_transcode(image.format())
+        && let Ok(decoded) = image::load_from_memory(image.bytes())
+    {
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        if decoded
+            .write_to(&mut buffer, image::ImageFormat::Png)
+            .is_ok()
+        {
+            let path = dir.join(format!("pasted-image-{base}-{index}.png"));
+            std::fs::write(&path, buffer.into_inner()).ok()?;
+            return Some(path);
+        }
+    }
+    let ext = image_format_extension(image.format());
+    let path = dir.join(format!("pasted-image-{base}-{index}.{ext}"));
+    std::fs::write(&path, image.bytes()).ok()?;
+    Some(path)
+}
 
 impl MentionInput {
     pub fn new(
@@ -175,7 +234,9 @@ impl MentionInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::build(placeholder, settings, false, window, cx)
+        let mut this = Self::build(placeholder, settings, false, window, cx);
+        this.overflow_to_file = true;
+        this
     }
 
     pub fn new_edit(
@@ -211,6 +272,13 @@ impl MentionInput {
                 MentionFieldEvent::PressEnter => this.on_enter(window, cx),
                 MentionFieldEvent::NavUp => this.on_nav_up(cx),
                 MentionFieldEvent::NavDown => this.on_nav_down(cx),
+                MentionFieldEvent::Paste(text) => this.on_paste(text.clone(), window, cx),
+                MentionFieldEvent::PasteImages(images) => {
+                    this.on_paste_images(images.clone(), window, cx)
+                }
+                MentionFieldEvent::PastePaths(paths) => {
+                    this.on_paste_paths(paths.clone(), window, cx)
+                }
             },
         );
         let emoji_sub = EmojiStore::try_global(cx).map(|store| {
@@ -229,9 +297,10 @@ impl MentionInput {
                 }
             })
         });
-        let avatar_cache = cx.new(|cx| {
+        let avatar_cache = crate::image_cache::shared_avatar_cache(cx);
+        let preview_cache = cx.new(|cx| {
             LruImageCache::avatar_thumbnail(
-                "mention-avatar",
+                "composer-attachment-preview",
                 AVATAR_IMAGE_CACHE_CAPACITY,
                 AVATAR_IMAGE_CACHE_BYTES,
                 AVATAR_ENTRY_MAX_BYTES,
@@ -258,9 +327,11 @@ impl MentionInput {
             sticker_rows: Vec::new(),
             sticker_scroll: UniformListScrollHandle::new(),
             avatar_cache,
+            preview_cache,
             settings,
             pending_attachments: Vec::new(),
             compact,
+            overflow_to_file: false,
             _input_sub: input_sub,
             _emoji_sub: emoji_sub,
             _sticker_sub: sticker_sub,
@@ -300,6 +371,20 @@ impl MentionInput {
         } else {
             raw.trim_end().to_string()
         };
+        if self.overflow_to_file
+            && !text.is_empty()
+            && content_payload_utf8_len(&text) > CONVERT_TO_FILE_THRESHOLD
+        {
+            self.convert_text_to_file(text, window, cx);
+            self.committed.clear();
+            self.reset_popup();
+            self.picker_open = false;
+            self.input.update(cx, |input, cx| {
+                input.set_mention_spans(Vec::new(), cx);
+                input.set_value("", window, cx);
+            });
+            return None;
+        }
         let mut content = OutgoingContent::default();
         for token in &self.committed {
             let s = byte_offset_to_utf16(&raw, token.start) as i32;
@@ -395,6 +480,87 @@ impl MentionInput {
         .detach();
     }
 
+    fn on_paste(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        if text.is_empty() {
+            return;
+        }
+        if self.overflow_to_file {
+            if json_string_utf16_len(&text) > CONVERT_TO_FILE_THRESHOLD {
+                self.convert_text_to_file(text, window, cx);
+                return;
+            }
+            let current = self.input.read(cx).value().to_string();
+            let combined = format!("{current}{text}");
+            if json_string_utf16_len(&combined) > CONVERT_TO_FILE_THRESHOLD {
+                self.committed.clear();
+                self.reset_popup();
+                self.input.update(cx, |input, cx| {
+                    input.set_mention_spans(Vec::new(), cx);
+                    input.set_value("", window, cx);
+                });
+                self.convert_text_to_file(combined, window, cx);
+                cx.notify();
+                return;
+            }
+        }
+        self.input
+            .update(cx, |input, cx| input.insert_text(&text, window, cx));
+    }
+
+    fn convert_text_to_file(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let filename = format!("{}.txt", chrono::Utc::now().timestamp_millis());
+        cx.spawn_in(window, async move |this, cx| {
+            let pending = cx
+                .background_spawn(async move {
+                    let path = std::env::temp_dir().join(&filename);
+                    if let Err(err) = std::fs::write(&path, text.as_bytes()) {
+                        tracing::warn!("failed to write converted text attachment: {err}");
+                        return None;
+                    }
+                    build_pending(path)
+                })
+                .await;
+            if let Some(pending) = pending {
+                this.update_in(cx, |this, window, cx| {
+                    this.add_pending(vec![pending], window, cx)
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn on_paste_images(&mut self, images: Vec<Image>, window: &mut Window, cx: &mut Context<Self>) {
+        if images.is_empty() {
+            return;
+        }
+        let base = chrono::Utc::now().timestamp_millis();
+        cx.spawn_in(window, async move |this, cx| {
+            let pending = cx
+                .background_spawn(async move {
+                    images
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(index, image)| {
+                            build_pending(write_clipboard_image(&image, base, index)?)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| this.add_pending(pending, window, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    fn on_paste_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let images: Vec<PathBuf> = paths
+            .into_iter()
+            .filter(|path| mime_from_extension(path).starts_with("image/"))
+            .collect();
+        self.add_dropped_paths(images, window, cx);
+    }
+
     fn add_pending(
         &mut self,
         candidates: Vec<PendingAttachment>,
@@ -448,7 +614,8 @@ impl MentionInput {
             .flex_wrap()
             .gap(px(8.))
             .px(px(8.))
-            .pt(px(8.));
+            .pt(px(8.))
+            .image_cache(self.preview_cache.clone());
         for (index, att) in self.pending_attachments.iter().enumerate() {
             let preview = if att.is_image {
                 div()
@@ -1083,13 +1250,13 @@ impl MentionInput {
         let count = self.picker_rows.len();
         let list_h = (count as f32 * PICKER_ROW_PX).min(264.);
         let list = uniform_list("emoji-picker-list", count, move |range, _window, cx| {
-            let theme = cx.theme().clone();
+            let theme = cx.theme();
             let this = entity.read(cx);
             range
                 .map(|ix| match this.picker_rows.get(ix) {
-                    Some(PickerRow::Header(label)) => render_picker_header(&theme, label),
+                    Some(PickerRow::Header(label)) => render_picker_header(theme, label),
                     Some(PickerRow::Emojis(emojis)) => {
-                        render_picker_emoji_row(&theme, emojis, &entity)
+                        render_picker_emoji_row(theme, emojis, &entity)
                     }
                     None => div().h(px(PICKER_ROW_PX)).into_any_element(),
                 })
@@ -1144,11 +1311,11 @@ impl MentionInput {
         let count = self.sticker_rows.len();
         let list_h = (count as f32 * STICKER_ROW_PX).min(STICKER_ROW_PX * 3.);
         let list = uniform_list("sticker-picker-list", count, move |range, _window, cx| {
-            let theme = cx.theme().clone();
+            let theme = cx.theme();
             let this = entity.read(cx);
             range
                 .map(|ix| match this.sticker_rows.get(ix) {
-                    Some(cells) => render_sticker_row(&theme, cells, &entity),
+                    Some(cells) => render_sticker_row(theme, cells, &entity),
                     None => div().h(px(STICKER_ROW_PX)).into_any_element(),
                 })
                 .collect::<Vec<_>>()
@@ -1176,12 +1343,12 @@ impl MentionInput {
             "mention-suggestion-list",
             count,
             move |range, _window, cx| {
-                let theme = cx.theme().clone();
+                let theme = cx.theme();
                 let this = entity.read(cx);
                 range
                     .map(|ix| match this.suggestions.get(ix) {
                         Some(suggestion) => {
-                            this.render_suggestion_row(&theme, &locale, ix, suggestion, &entity)
+                            this.render_suggestion_row(theme, &locale, ix, suggestion, &entity)
                         }
                         None => div().h(px(MENTION_ROW_PX)).into_any_element(),
                     })
@@ -1431,6 +1598,16 @@ impl Render for MentionInput {
         };
         let plus_color = theme.text_muted;
         let has_pending = !self.pending_attachments.is_empty();
+        let overflow_counter = {
+            let raw = self.input.read(cx).value();
+            let threshold = CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN;
+            if self.overflow_to_file && raw.len() > threshold {
+                let len = raw.encode_utf16().count();
+                (len > threshold).then_some(threshold as isize - len as isize)
+            } else {
+                None
+            }
+        };
 
         let popup = open.then(|| self.build_suggestion_popup(cx));
 
@@ -1538,6 +1715,17 @@ impl Render for MentionInput {
             .when_some(picker, |this, picker| this.child(picker))
             .when_some(sticker_picker, |this, sticker_picker| {
                 this.child(sticker_picker)
+            })
+            .when_some(overflow_counter, |this, remaining| {
+                this.child(
+                    div()
+                        .absolute()
+                        .bottom(px(4.))
+                        .right(px(8.))
+                        .text_xs()
+                        .text_color(gpui::rgb(0xfca5a5))
+                        .child(remaining.to_string()),
+                )
             });
 
         div()
@@ -1547,5 +1735,42 @@ impl Render for MentionInput {
             .when_some(previews, |this, previews| this.child(previews))
             .child(input_area)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod convert_tests {
+    use super::{
+        CONVERT_PREFIX_LEN, CONVERT_TO_FILE_THRESHOLD, content_payload_utf8_len,
+        json_string_utf16_len,
+    };
+
+    #[test]
+    fn prefix_len_matches_empty_content_wrapper() {
+        assert_eq!(CONVERT_PREFIX_LEN, 8);
+        assert_eq!(content_payload_utf8_len(""), 8);
+    }
+
+    #[test]
+    fn json_utf16_len_counts_quotes_and_escapes_like_js() {
+        assert_eq!(json_string_utf16_len(""), 2);
+        assert_eq!(json_string_utf16_len("ab"), 4);
+        assert_eq!(json_string_utf16_len("\n"), 4);
+    }
+
+    #[test]
+    fn send_measures_utf8_bytes_paste_measures_utf16_units() {
+        let s = "é";
+        assert_eq!(json_string_utf16_len(s), 3);
+        assert_eq!(content_payload_utf8_len(s), 10);
+    }
+
+    #[test]
+    fn threshold_boundary_is_strict() {
+        let text = "a".repeat(CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN);
+        assert_eq!(content_payload_utf8_len(&text), CONVERT_TO_FILE_THRESHOLD);
+        assert!(!(content_payload_utf8_len(&text) > CONVERT_TO_FILE_THRESHOLD));
+        let over = "a".repeat(CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN + 1);
+        assert!(content_payload_utf8_len(&over) > CONVERT_TO_FILE_THRESHOLD);
     }
 }

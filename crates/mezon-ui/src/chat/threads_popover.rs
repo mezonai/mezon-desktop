@@ -19,9 +19,7 @@ use crate::components::primitives::{
     Avatar, Button, ButtonVariants, Icon, IconName, Input, InputState, Sizable, Size, Spinner,
     h_flex, v_flex,
 };
-use crate::image_cache::{
-    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
-};
+use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme};
 
 const PANEL_WIDTH: f32 = 540.;
@@ -215,15 +213,7 @@ impl ThreadsPopoverPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
-        let avatar_image_cache = cx.new(|cx| {
-            LruImageCache::avatar_thumbnail(
-                "thread-avatar",
-                AVATAR_IMAGE_CACHE_CAPACITY,
-                AVATAR_IMAGE_CACHE_BYTES,
-                AVATAR_ENTRY_MAX_BYTES,
-                cx,
-            )
-        });
+        let avatar_image_cache = crate::image_cache::shared_avatar_cache(cx);
         let scroll_body =
             cx.new(|cx| ThreadsScrollBody::new(layout.clone(), avatar_image_cache.clone(), cx));
 

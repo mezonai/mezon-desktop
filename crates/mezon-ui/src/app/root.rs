@@ -3,8 +3,8 @@ use gpui::{
     AnyView, App, ClickEvent, Context, Entity, FontWeight, MouseButton, NavigationDirection,
     StyleRefinement, Window, div, img, prelude::*, px,
 };
-use ui::utils::ROUNDED_BORDER_WINDOW;
 use mezon_store::{AuthState, ChannelList, ClanId, ClanList, ConnectionStore, Settings};
+use ui::utils::ROUNDED_BORDER_WINDOW;
 
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls;
@@ -177,8 +177,9 @@ impl RootView {
 }
 
 impl Render for RootView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("RootView");
+        crate::image_cache::flush_atlas_drops(window, cx);
         let locale = self.settings.read(cx).language.clone();
         let base_font_family = ::theme::theme_settings(cx).ui_font(cx).family.clone();
         let theme = cx.theme();
@@ -246,10 +247,10 @@ impl Render for RootView {
             })
             .child(content)
             .when(cfg!(target_os = "macos"), |this| {
-                this.child(window_controls::render_controls(theme, _window))
+                this.child(window_controls::render_controls(theme, window))
             })
             .when(window_controls::is_edge_resizable(), |this| {
-                this.child(window_controls::render_resize_edges(_window))
+                this.child(window_controls::render_resize_edges(window))
             })
             .child(overlay)
     }

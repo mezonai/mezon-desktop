@@ -191,9 +191,9 @@ pub fn resolve_attachment_uploader(
         return info;
     }
     if clan_id.0 != 0 {
-        if let Some(member) = ClanMembersStore::try_global(cx).and_then(|store| {
-            store.read(cx).member(clan_id, uid)
-        }) {
+        if let Some(member) =
+            ClanMembersStore::try_global(cx).and_then(|store| store.read(cx).member(clan_id, uid))
+        {
             let name = member.name().to_string();
             if !name.is_empty() {
                 let (avatar, avatar_raw) = uploader_urls(member.avatar(), cfg);
@@ -506,14 +506,7 @@ impl GalleryStore {
             (None, None) => None,
             (a, b) => Some((a.unwrap_or(0), b.unwrap_or(0))),
         };
-        self.fetch(
-            clan_id,
-            channel_id,
-            range,
-            LoadDirection::Before,
-            true,
-            cx,
-        );
+        self.fetch(clan_id, channel_id, range, LoadDirection::Before, true, cx);
     }
 
     pub fn clear_date_filter(
@@ -658,25 +651,31 @@ fn sort_desc_in_place(items: &mut [ChannelAttachment]) {
 }
 
 fn merge_two_desc_sorted(
-    mut left: Vec<ChannelAttachment>,
-    mut right: Vec<ChannelAttachment>,
+    left: Vec<ChannelAttachment>,
+    right: Vec<ChannelAttachment>,
 ) -> Vec<ChannelAttachment> {
     let mut merged = Vec::with_capacity(left.len() + right.len());
-    let (mut left_ix, mut right_ix) = (0usize, 0usize);
-    while left_ix < left.len() && right_ix < right.len() {
-        match attachment_desc_cmp(&left[left_ix], &right[right_ix]) {
-            std::cmp::Ordering::Less | std::cmp::Ordering::Equal => {
-                merged.push(left[left_ix].clone());
-                left_ix += 1;
+    let mut left = left.into_iter().peekable();
+    let mut right = right.into_iter().peekable();
+    loop {
+        match (left.peek(), right.peek()) {
+            (Some(l), Some(r)) => {
+                if attachment_desc_cmp(l, r) == std::cmp::Ordering::Greater {
+                    merged.push(right.next().unwrap());
+                } else {
+                    merged.push(left.next().unwrap());
+                }
             }
-            std::cmp::Ordering::Greater => {
-                merged.push(right[right_ix].clone());
-                right_ix += 1;
+            (Some(_), None) => {
+                merged.extend(left);
+                break;
+            }
+            (None, _) => {
+                merged.extend(right);
+                break;
             }
         }
     }
-    merged.extend(left.into_iter().skip(left_ix));
-    merged.extend(right.into_iter().skip(right_ix));
     merged
 }
 

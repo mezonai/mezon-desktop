@@ -8,9 +8,7 @@ use mezon_store::{MessageId, MessagesStore, PollAnswerView, PollVoter};
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{Icon, IconName};
-use crate::image_cache::{
-    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
-};
+use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
 
 pub struct PollDetailModal {
@@ -63,15 +61,7 @@ impl PollDetailModal {
         });
 
         let view = cx.new(|cx| {
-            let image_cache = cx.new(|cx| {
-                LruImageCache::avatar_thumbnail(
-                    "poll-voter",
-                    AVATAR_IMAGE_CACHE_CAPACITY,
-                    AVATAR_IMAGE_CACHE_BYTES,
-                    AVATAR_ENTRY_MAX_BYTES,
-                    cx,
-                )
-            });
+            let image_cache = crate::image_cache::shared_avatar_cache(cx);
             let fetch = cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
                 let result = fetch_task.await;
                 let _ = this.update(cx, |modal, cx| {

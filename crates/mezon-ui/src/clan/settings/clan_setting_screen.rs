@@ -1,6 +1,7 @@
 use crate::components::primitives::{Icon, IconName, h_flex, v_flex};
 use gpui::{
-    App, Context, Entity, ScrollHandle, SharedString, Window, deferred, div, point, prelude::*, px,
+    App, Context, Entity, FocusHandle, Focusable, ScrollHandle, SharedString, Window, deferred,
+    div, point, prelude::*, px,
 };
 use mezon_store::{
     ChannelList, ClanId, ClanList, ClanSettingsPermissions, PermissionStore, Settings,
@@ -156,6 +157,8 @@ pub struct ClanSettingScreen {
     overview_page: Option<Entity<OverviewSettingPage>>,
     scroll: ScrollHandle,
     nav_scroll: ScrollHandle,
+    focus_handle: FocusHandle,
+    focus_on_show: bool,
 }
 
 impl ClanSettingScreen {
@@ -183,6 +186,8 @@ impl ClanSettingScreen {
             overview_page: None,
             scroll: ScrollHandle::new(),
             nav_scroll: ScrollHandle::new(),
+            focus_handle: cx.focus_handle(),
+            focus_on_show: false,
         };
         if !clan_id.is_zero() {
             PermissionStore::global(cx).update(cx, |store, cx| {
@@ -262,6 +267,7 @@ impl ClanSettingScreen {
         }
         self.current_page = resolved;
         self.activate_page(resolved, cx);
+        self.focus_on_show = true;
         cx.notify();
     }
 
@@ -292,14 +298,6 @@ impl ClanSettingScreen {
         }
     }
 
-    fn clan_name(&self, cx: &App) -> String {
-        self.clan_list
-            .read(cx)
-            .clan_by_id(self.clan_id)
-            .map(|c| c.name.clone())
-            .unwrap_or_default()
-    }
-
     fn page_title(&self, page: ClanSettingsPage, locale: &str) -> SharedString {
         mezon_i18n::t(locale, page.i18n_key()).into()
     }
@@ -315,13 +313,24 @@ impl ClanSettingScreen {
     }
 }
 
+impl Focusable for ClanSettingScreen {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
 impl Render for ClanSettingScreen {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.focus_on_show {
+            self.focus_on_show = false;
+            window.focus(&self.focus_handle, cx);
+        }
+
+        const SETTINGS_CONTENT_WIDTH: f32 = 808.0;
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
         let page = self.current_page;
         let clan_id = self.clan_id;
-        let clan_name = self.clan_name(cx);
         let perms = PermissionStore::global(cx)
             .read(cx)
             .clan_settings_permissions(clan_id, cx);
@@ -393,16 +402,9 @@ impl Render for ClanSettingScreen {
                 .child(text.to_uppercase())
         }
 
-        let clan_name_upper = clan_name.to_uppercase();
-        let mut nav = v_flex().w(px(220.0)).child(
-            div()
-                .pl(px(10.0))
-                .pb(px(6.0))
-                .text_sm()
-                .font_weight(gpui::FontWeight::BOLD)
-                .text_color(theme.text_primary)
-                .child(clan_name_upper),
-        );
+        let sidebar_title =
+            mezon_i18n::t(&locale, "clanMenu.modalPanel.clanSettings").to_uppercase();
+        let mut nav = v_flex().w(px(220.0));
 
         for section in SIDEBAR_SECTIONS {
             let visible_pages: Vec<ClanSettingsPage> = section
@@ -460,6 +462,12 @@ impl Render for ClanSettingScreen {
         }
 
         h_flex()
+            .id("clan-settings-screen")
+            .track_focus(&self.focus_handle)
+            .key_context("menu")
+            .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
+                crate::router::go_back(cx);
+            }))
             .flex_1()
             .min_h_0()
             .w_full()
@@ -467,96 +475,151 @@ impl Render for ClanSettingScreen {
             .relative()
             .bg(theme.tokens.theme_setting_primary)
             .child(
-                div()
-                    .id("clan-settings-nav-scroll")
+                v_flex()
+                    .id("clan-settings-nav")
                     .flex_shrink_0()
                     .w(gpui::relative(0.25))
                     .min_w(px(220.0))
                     .h_full()
+                    .min_h_0()
                     .bg(theme.tokens.theme_setting_nav)
-                    .overflow_y_scroll()
-                    .track_scroll(&self.nav_scroll)
                     .child(
                         div()
-                            .flex()
-                            .flex_row()
-                            .justify_end()
+                            .flex_shrink_0()
                             .w_full()
                             .pt(px(80.0))
-                            .pb(px(60.0))
                             .pr(px(20.0))
                             .pl(px(20.0))
-                            .child(nav),
+                            .pb(px(6.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .justify_end()
+                                    .w_full()
+                                    .child(
+                                        div()
+                                            .w(px(220.0))
+                                            .pl(px(10.0))
+                                            .text_base()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(theme.text_primary)
+                                            .child(sidebar_title),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("clan-settings-nav-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.nav_scroll)
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .justify_end()
+                                    .w_full()
+                                    .pb(px(60.0))
+                                    .pr(px(20.0))
+                                    .pl(px(20.0))
+                                    .child(nav),
+                            ),
                     ),
             )
             .child(
-                div().flex_1().h_full().relative().child(
-                    div()
-                        .id("clan-settings-scroll")
-                        .size_full()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.scroll)
-                        .pb(px(28.0))
-                        .pl(px(40.0))
-                        .pr(px(28.0))
-                        .bg(theme.tokens.theme_setting_primary)
-                        .child(
-                            div()
-                                .max_w(px(740.0))
-                                .when(!hide_page_title, |el| {
-                                    el.child(
+                h_flex()
+                    .flex_1()
+                    .h_full()
+                    .min_h_0()
+                    .justify_start()
+                    .bg(theme.tokens.theme_setting_primary)
+                    .child(
+                        h_flex()
+                            .h_full()
+                            .min_h_0()
+                            .flex_shrink_0()
+                            .items_start()
+                            .child(
+                                v_flex()
+                                    .h_full()
+                                    .min_h_0()
+                                    .w(px(SETTINGS_CONTENT_WIDTH))
+                                    .when(!hide_page_title, |panel| {
+                                        panel.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .w_full()
+                                                .pl(px(40.0))
+                                                .pr(px(28.0))
+                                                .pt(px(60.0))
+                                                .child(
+                                                    div()
+                                                        .max_w(px(740.0))
+                                                        .text_xl()
+                                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                        .mb_5()
+                                                        .text_color(theme.text_primary)
+                                                        .child(self.page_title(page, &locale)),
+                                                ),
+                                        )
+                                    })
+                                    .child(
                                         div()
-                                            .text_xl()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .mb_5()
-                                            .mt(px(60.0))
-                                            .text_color(theme.text_primary)
-                                            .child(self.page_title(page, &locale)),
+                                            .id("clan-settings-scroll")
+                                            .flex_1()
+                                            .min_h_0()
+                                            .overflow_y_scroll()
+                                            .track_scroll(&self.scroll)
+                                            .pb(px(28.0))
+                                            .pl(px(40.0))
+                                            .pr(px(28.0))
+                                            .when(hide_page_title, |el| el.pt(px(60.0)))
+                                            .child(div().max_w(px(740.0)).child(content)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("clan-settings-close-btn")
+                                    .flex_shrink_0()
+                                    .pt(px(94.0))
+                                    .pl(px(20.0))
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .gap_2()
+                                    .cursor_pointer()
+                                    .child(
+                                        div()
+                                            .p(px(10.0))
+                                            .rounded_full()
+                                            .border_1()
+                                            .border_color(theme.border)
+                                            .bg(theme.bg_secondary)
+                                            .child(
+                                                Icon::new(IconName::Close)
+                                                    .size(px(18.0))
+                                                    .text_color(theme.text_secondary),
+                                            ),
                                     )
-                                })
-                                .child(content),
-                        ),
-                ),
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(theme.text_secondary)
+                                            .child("ESC"),
+                                    )
+                                    .on_click(move |_, _, cx| {
+                                        crate::router::go_back(cx);
+                                    }),
+                            ),
+                    ),
             )
             .when_some(overview_save_bar, |panel, overview| {
                 panel.child(deferred(render_clan_overview_save_bar(
                     overview, &locale, &theme, cx,
                 )))
             })
-            .child(
-                div()
-                    .id("clan-settings-close-btn")
-                    .absolute()
-                    .top(px(94.0))
-                    .right(px(40.0))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_2()
-                    .cursor_pointer()
-                    .child(
-                        div()
-                            .p(px(10.0))
-                            .rounded_full()
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.bg_secondary)
-                            .child(
-                                Icon::new(IconName::Close)
-                                    .size(px(18.0))
-                                    .text_color(theme.text_secondary),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text_secondary)
-                            .child("ESC"),
-                    )
-                    .on_click(move |_, _, cx| {
-                        crate::router::go_back(cx);
-                    }),
-            )
     }
 }

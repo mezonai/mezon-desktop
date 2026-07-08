@@ -77,6 +77,7 @@ pub fn render_mini_bar(
     camera_enabled: bool,
     screen_enabled: bool,
     link_copied: bool,
+    noise_control: AnyElement,
 ) -> AnyElement {
     let neutral_bg = theme.bg_secondary;
     let neutral_hover = darken(theme.bg_secondary, 0.1);
@@ -189,7 +190,15 @@ pub fn render_mini_bar(
                 )
                 .child(div().flex().flex_row().child(subtitle)),
         )
-        .child(copy_button);
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(noise_control)
+                .child(copy_button),
+        );
 
     let mic_button = {
         let voice = voice.clone();
@@ -1564,9 +1573,6 @@ fn tile_inner(theme: &Theme, store: &VoiceStore, cell: &VideoCell, large: bool) 
     if !cell.avatar_url.is_empty() {
         avatar = avatar.src(cell.avatar_url.clone());
     }
-    if cell.speaking {
-        avatar = avatar.border_color(theme.status_online);
-    }
     avatar.into_any_element()
 }
 
@@ -1899,6 +1905,22 @@ fn control_bar(
         })
     };
 
+    let sound_button = {
+        let chat = chat.clone();
+        circle_button(
+            "voice-sound-btn",
+            neutral_bg,
+            neutral_hover,
+            IconName::VoiceSoundControlIcon,
+            theme.text_muted,
+        )
+        .on_click(move |_, window, cx| {
+            chat.update(cx, |layout, cx| {
+                layout.toggle_voice_sound_picker(window, cx)
+            });
+        })
+    };
+
     let left = div()
         .flex()
         .flex_row()
@@ -1906,7 +1928,7 @@ fn control_bar(
         .items_center()
         .gap_3()
         .child(emoji_button)
-        .child(decorative_circle(theme, IconName::VoiceSoundControlIcon));
+        .child(sound_button);
 
     let center = div()
         .flex()

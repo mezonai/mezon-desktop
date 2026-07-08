@@ -37,12 +37,12 @@ pub mod voice;
 
 use anyhow::{Context, Result};
 use dirs::config_dir;
-pub use mezon_client::{
-    clean_download_url, download_url_to_downloads, resolve_download_filename,
-    sanitize_filename, write_bytes_to_downloads,
-};
 pub use mezon_client::Session;
 pub use mezon_client::transport::{MENTION_HERE_ID, MENTION_HERE_USER_ID, is_here_user_id};
+pub use mezon_client::{
+    clean_download_url, download_url_to_downloads, resolve_download_filename, sanitize_filename,
+    write_bytes_to_downloads,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -95,7 +95,7 @@ pub use platform::{
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
 pub use roles::{Role, RolesEvent, RolesStore};
-pub use sticker::{Sticker, StickerEvent, StickerStore};
+pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
 pub use threads::{THREAD_STATUS_JOINED, ThreadSummary, ThreadsEvent, ThreadsStore, group_threads};
 pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
 pub use topics::{TopicsEvent, TopicsStore};
@@ -105,9 +105,9 @@ pub use user_profile::{
 };
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 pub use voice::{
-    DisplayedReaction, NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareOption,
-    ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection,
-    VoiceModerationError, VoiceParticipant, VoiceStore, camera_tile_id,
+    DisplayedReaction, NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareListError,
+    ScreenShareOption, ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceCallStatus,
+    VoiceConnection, VoiceModerationError, VoiceParticipant, VoiceStore, camera_tile_id,
     capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
     screen_tile_id,
 };

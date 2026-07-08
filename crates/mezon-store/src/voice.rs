@@ -9,9 +9,9 @@ use mezon_voice::{IceServerConfig, VoiceEvent, VoiceSession};
 use parking_lot::Mutex;
 
 pub use mezon_voice::{
-    NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareOption, ScreenSharePreview,
-    VideoFrameData, VideoFrameStore, VoiceParticipant, capture_screen_share_preview,
-    list_screen_share_options, peek_screen_share_options,
+    NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareListError, ScreenShareOption,
+    ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceParticipant,
+    capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
 };
 
 use crate::AppConfig;
@@ -29,6 +29,7 @@ const SOUND_CACHE_CAP: usize = 8;
 const EMOJI_REACTION_RATE_LIMIT: Duration = Duration::from_millis(150);
 const EMOJI_REACTION_TAIL: Duration = Duration::from_millis(500);
 const MAX_DISPLAYED_REACTIONS: usize = 20;
+const DEFAULT_NOISE_SUPPRESSION_LEVEL: u8 = 20;
 static RAISE_HAND_SOUND: &[u8] = include_bytes!("../assets/audio/raising-hand.mp3");
 
 fn parse_raise_token(token: &str) -> Option<bool> {
@@ -122,6 +123,8 @@ pub struct VoiceStore {
     mic_permission_denied: bool,
     camera_enabled: bool,
     screen_share_enabled: bool,
+    noise_suppression_enabled: bool,
+    noise_suppression_level: u8,
     focused_tile: Option<String>,
     fullscreen_screen: Option<u64>,
     pip: Option<PipWindow>,
@@ -138,6 +141,7 @@ pub struct VoiceStore {
     active_sounds: HashMap<String, ActiveSound>,
     sound_throttle: HashMap<String, Instant>,
     sound_cache: Vec<(String, Arc<DecodedPcm>)>,
+    sound_preview: Option<SoundPreview>,
     displayed_reactions: Vec<DisplayedReaction>,
     reaction_seq: u64,
     last_emoji_at: Option<Instant>,
@@ -162,6 +166,13 @@ struct PipWindow {
 struct ActiveSound {
     _player: Option<AudioPlayer>,
     _remove_timer: Option<Task<()>>,
+    _fetch_task: Option<Task<()>>,
+}
+
+struct SoundPreview {
+    url: String,
+    _player: Option<AudioPlayer>,
+    _end_timer: Option<Task<()>>,
     _fetch_task: Option<Task<()>>,
 }
 
@@ -212,6 +223,8 @@ impl VoiceStore {
             mic_permission_denied: false,
             camera_enabled: false,
             screen_share_enabled: false,
+            noise_suppression_enabled: false,
+            noise_suppression_level: DEFAULT_NOISE_SUPPRESSION_LEVEL,
             focused_tile: None,
             fullscreen_screen: None,
             pip: None,
@@ -228,6 +241,7 @@ impl VoiceStore {
             active_sounds: HashMap::new(),
             sound_throttle: HashMap::new(),
             sound_cache: Vec::new(),
+            sound_preview: None,
             displayed_reactions: Vec::new(),
             reaction_seq: 0,
             last_emoji_at: None,
@@ -321,6 +335,39 @@ impl VoiceStore {
 
     pub fn screen_share_enabled(&self) -> bool {
         self.screen_share_enabled
+    }
+
+    pub fn noise_suppression_enabled(&self) -> bool {
+        self.noise_suppression_enabled
+    }
+
+    pub fn noise_suppression_level(&self) -> u8 {
+        self.noise_suppression_level
+    }
+
+    pub fn toggle_noise_suppression(&mut self, cx: &mut Context<Self>) {
+        self.noise_suppression_enabled = !self.noise_suppression_enabled;
+        self.sync_noise_suppression();
+        cx.notify();
+    }
+
+    pub fn set_noise_suppression_level(&mut self, level: u8, cx: &mut Context<Self>) {
+        let level = level.min(100);
+        if self.noise_suppression_level == level {
+            return;
+        }
+        self.noise_suppression_level = level;
+        self.sync_noise_suppression();
+        cx.notify();
+    }
+
+    fn sync_noise_suppression(&self) {
+        if let Some(session) = &self.session {
+            session.set_noise_suppression(
+                self.noise_suppression_enabled,
+                self.noise_suppression_level,
+            );
+        }
     }
 
     pub fn frame_store(&self) -> Option<Arc<VideoFrameStore>> {
@@ -790,6 +837,131 @@ impl VoiceStore {
         .detach();
     }
 
+    pub fn send_sound_reaction(&mut self, sound_url: String, cx: &mut Context<Self>) {
+        let Some(channel_id) = self
+            .connection
+            .active_channel_id()
+            .and_then(|c| c.parse::<i64>().ok())
+        else {
+            return;
+        };
+        if !self.can_send_reaction() {
+            return;
+        }
+        let api = self.api.clone();
+        cx.spawn(async move |_this, _cx| {
+            if let Err(e) = api
+                .write_voice_reaction(vec![format!("sound:{sound_url}")], channel_id)
+                .await
+            {
+                tracing::warn!("send_sound_reaction failed: {e}");
+            }
+        })
+        .detach();
+    }
+
+    pub fn previewing_sound(&self) -> Option<&str> {
+        self.sound_preview.as_ref().map(|p| p.url.as_str())
+    }
+
+    pub fn stop_sound_preview(&mut self, cx: &mut Context<Self>) {
+        if self.sound_preview.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub fn toggle_sound_preview(&mut self, url: String, cx: &mut Context<Self>) {
+        if self.previewing_sound() == Some(url.as_str()) {
+            self.stop_sound_preview(cx);
+            return;
+        }
+        if let Some(pcm) = self
+            .sound_cache
+            .iter()
+            .find(|(u, _)| *u == url)
+            .map(|(_, pcm)| pcm.clone())
+        {
+            self.sound_preview = Some(SoundPreview {
+                url: url.clone(),
+                _player: None,
+                _end_timer: None,
+                _fetch_task: None,
+            });
+            self.start_sound_preview(&url, &pcm, cx);
+            cx.notify();
+            return;
+        }
+        let fetch_url = url.clone();
+        let fetch_task = cx.spawn(async move |this, cx| {
+            let bytes = match mezon_client::transport_runtime::fetch_bytes(&fetch_url).await {
+                Ok((bytes, _)) => bytes,
+                Err(e) => {
+                    tracing::warn!("sound preview fetch failed: {e}");
+                    this.update(cx, |this, cx| this.clear_sound_preview(&fetch_url, cx))
+                        .ok();
+                    return;
+                }
+            };
+            let decoded = cx
+                .background_executor()
+                .spawn(async move { mezon_audio::decode_audio(&bytes) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.previewing_sound() != Some(fetch_url.as_str()) {
+                    return;
+                }
+                match decoded {
+                    Ok(pcm) => {
+                        let pcm = Arc::new(pcm);
+                        this.cache_sound_pcm(fetch_url.clone(), pcm.clone());
+                        this.start_sound_preview(&fetch_url, &pcm, cx);
+                    }
+                    Err(e) => {
+                        tracing::warn!("sound preview decode failed: {e}");
+                        this.clear_sound_preview(&fetch_url, cx);
+                    }
+                }
+            })
+            .ok();
+        });
+        self.sound_preview = Some(SoundPreview {
+            url,
+            _player: None,
+            _end_timer: None,
+            _fetch_task: Some(fetch_task),
+        });
+        cx.notify();
+    }
+
+    fn start_sound_preview(&mut self, url: &str, pcm: &Arc<DecodedPcm>, cx: &mut Context<Self>) {
+        let delay = Duration::try_from_secs_f64(pcm.duration_secs()).unwrap_or(Duration::ZERO);
+        let player = AudioPlayer::new().ok().inspect(|player| {
+            player.set_data(DecodedPcm {
+                samples: pcm.samples.clone(),
+                channels: pcm.channels,
+                sample_rate: pcm.sample_rate,
+            });
+            player.play();
+        });
+        let key = url.to_string();
+        let end_timer = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update(cx, |this, cx| this.clear_sound_preview(&key, cx))
+                .ok();
+        });
+        if let Some(preview) = self.sound_preview.as_mut().filter(|p| p.url == url) {
+            preview._player = player;
+            preview._end_timer = Some(end_timer);
+        }
+    }
+
+    fn clear_sound_preview(&mut self, url: &str, cx: &mut Context<Self>) {
+        if self.previewing_sound() == Some(url) {
+            self.sound_preview = None;
+            cx.notify();
+        }
+    }
+
     fn desired_screen_full_res(&self) -> bool {
         let Some(local) = self.participants.iter().find(|p| p.is_local) else {
             return false;
@@ -1128,6 +1300,7 @@ impl VoiceStore {
         let frame_store = session.frame_store();
         self.frame_store = Some(frame_store.clone());
         self.session = Some(session);
+        self.sync_noise_suppression();
 
         let task = cx.spawn(async move |this, cx| {
             while let Ok(event) = events.recv_async().await {
@@ -1299,12 +1472,17 @@ impl VoiceStore {
         cx.notify();
     }
 
-    pub fn start_screen_share(&mut self, pick: PickedScreen, cx: &mut Context<Self>) {
+    pub fn start_screen_share(
+        &mut self,
+        pick: PickedScreen,
+        share_audio: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.screen_share_enabled {
             return;
         }
         if let Some(session) = &self.session {
-            session.start_screen_share(pick);
+            session.start_screen_share(pick, share_audio);
         }
         cx.notify();
     }
@@ -1341,6 +1519,8 @@ impl VoiceStore {
         self.mic_permission_denied = false;
         self.camera_enabled = false;
         self.screen_share_enabled = false;
+        self.noise_suppression_enabled = false;
+        self.noise_suppression_level = DEFAULT_NOISE_SUPPRESSION_LEVEL;
         self.focused_tile = None;
         self.room_name.clear();
         self.participant_menu = None;
@@ -1352,6 +1532,7 @@ impl VoiceStore {
         self.active_sounds.clear();
         self.sound_throttle.clear();
         self.sound_cache.clear();
+        self.sound_preview = None;
         self.displayed_reactions.clear();
         self.last_emoji_at = None;
         self.meet_token_prefetching = None;

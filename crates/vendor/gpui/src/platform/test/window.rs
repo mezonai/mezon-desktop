@@ -27,7 +27,8 @@ pub(crate) struct TestWindowState {
     sprite_atlas: Arc<dyn PlatformAtlas>,
     renderer: Option<Box<dyn PlatformHeadlessRenderer>>,
     pub(crate) should_close_handler: Option<Box<dyn FnMut() -> bool>>,
-    hit_test_window_control_callback: Option<Box<dyn FnMut(Point<Pixels>) -> Option<WindowControlArea>>>,
+    hit_test_window_control_callback:
+        Option<Box<dyn FnMut(Point<Pixels>) -> Option<WindowControlArea>>>,
     input_callback: Option<Box<dyn FnMut(PlatformInput) -> DispatchEventResult>>,
     active_status_change_callback: Option<Box<dyn FnMut(bool)>>,
     hover_status_change_callback: Option<Box<dyn FnMut(bool)>>,

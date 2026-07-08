@@ -1,6 +1,6 @@
 use crate::components::primitives::{Label, Switch, h_flex, v_flex};
 use crate::theme::ActiveTheme;
-use gpui::{Context, Entity, FontWeight, Window, prelude::*};
+use gpui::{Context, Entity, Window, prelude::*};
 use mezon_store::Settings;
 
 pub struct NotificationsPage {
@@ -22,12 +22,6 @@ impl Render for NotificationsPage {
 
         v_flex()
             .gap_6()
-            .child(
-                Label::new(mezon_i18n::t(&locale, "setting.notifications.title"))
-                    .text_xl()
-                    .text_color(theme.text_primary)
-                    .font_weight(FontWeight::SEMIBOLD),
-            )
             .child(
                 v_flex()
                     .rounded_lg()

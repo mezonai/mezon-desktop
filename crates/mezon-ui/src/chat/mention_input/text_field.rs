@@ -2,16 +2,18 @@
 mod blink_manager;
 
 use std::ops::Range;
+use std::path::PathBuf;
 
 use blink_manager::CaretBlink;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, Div, Element, ElementId, ElementInputHandler,
-    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, FontWeight, GlobalElementId,
-    Hsla, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce, SharedString,
-    Style, StyleRefinement, Styled, Subscription, TextAlign, TextRun, UTF16Selection,
-    UnderlineStyle, Window, WrappedLine, actions, div, fill, point, prelude::*, px, rgb, size,
+    App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, Div, Element, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    FontWeight, GlobalElementId, Hsla, Image, InspectorElementId, IntoElement, KeyBinding,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    Render, RenderOnce, SharedString, Style, StyleRefinement, Styled, Subscription, TextAlign,
+    TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point,
+    prelude::*, px, rgb, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -188,17 +190,21 @@ pub(crate) fn init(cx: &mut App) {
     ]);
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum MentionFieldEvent {
     Change,
     PressEnter,
     NavUp,
     NavDown,
+    Paste(String),
+    PasteImages(Vec<Image>),
+    PastePaths(Vec<PathBuf>),
 }
 
 pub(crate) struct MentionInputState {
     focus_handle: FocusHandle,
     content: SharedString,
+    line_count: usize,
     placeholder: SharedString,
     selected_range: Range<usize>,
     selection_reversed: bool,
@@ -227,6 +233,7 @@ impl MentionInputState {
         let this = Self {
             focus_handle: focus_handle.clone(),
             content: SharedString::default(),
+            line_count: 1,
             placeholder: SharedString::default(),
             selected_range: 0..0,
             selection_reversed: false,
@@ -298,7 +305,7 @@ impl MentionInputState {
         next.push_str(&self.content[..start]);
         next.push_str(text);
         next.push_str(&self.content[end..]);
-        self.content = next.into();
+        self.set_content(next);
         let caret = start + text.len();
         self.selected_range = caret..caret;
         self.selection_reversed = false;
@@ -314,7 +321,7 @@ impl MentionInputState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.content = value.into();
+        self.set_content(value);
         let end = self.content.len();
         self.selected_range = end..end;
         self.marked_range = None;
@@ -470,11 +477,42 @@ impl MentionInputState {
         window.show_character_palette();
     }
 
-    fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            let normalized = normalize_pasted(&text);
-            self.replace_text_in_range(None, &normalized, window, cx);
+    fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        let images: Vec<Image> = item
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                ClipboardEntry::Image(image) => Some(image.clone()),
+                _ => None,
+            })
+            .collect();
+        if !images.is_empty() {
+            cx.emit(MentionFieldEvent::PasteImages(images));
+            return;
         }
+        let paths: Vec<PathBuf> = item
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                ClipboardEntry::ExternalPaths(paths) => Some(paths.paths().to_vec()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        if !paths.is_empty() {
+            cx.emit(MentionFieldEvent::PastePaths(paths));
+            return;
+        }
+        if let Some(text) = item.text() {
+            cx.emit(MentionFieldEvent::Paste(normalize_pasted(&text)));
+        }
+    }
+
+    pub(crate) fn insert_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.replace_text_in_range(None, text, window, cx);
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -518,12 +556,31 @@ impl MentionInputState {
         self.masked && !self.content.is_empty()
     }
 
-    fn visible_line_count(&self) -> usize {
-        if self.is_masked() || self.content.is_empty() {
-            1
-        } else {
-            self.content.split('\n').count().max(1)
+    fn clamp_offset(&self, offset: usize) -> usize {
+        let mut offset = offset.min(self.content.len());
+        while offset > 0 && !self.content.is_char_boundary(offset) {
+            offset -= 1;
         }
+        offset
+    }
+
+    fn clamp_range(&self, range: Range<usize>) -> Range<usize> {
+        let start = self.clamp_offset(range.start);
+        let end = self.clamp_offset(range.end).max(start);
+        start..end
+    }
+
+    fn set_content(&mut self, content: impl Into<SharedString>) {
+        self.content = content.into();
+        self.line_count = self.content.split('\n').count().max(1);
+        self.selected_range = self.clamp_range(self.selected_range.clone());
+        if let Some(marked) = self.marked_range.clone() {
+            self.marked_range = Some(self.clamp_range(marked));
+        }
+    }
+
+    fn visible_line_count(&self) -> usize {
+        if self.is_masked() { 1 } else { self.line_count }
     }
 
     fn display_text(&self) -> SharedString {
@@ -684,10 +741,10 @@ impl EntityInputHandler for MentionInputState {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let range = self.clamp_range(range);
 
-        self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
-                .into();
+        let next = self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
+        self.set_content(next);
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
         self.pause_caret_blink(cx);
@@ -708,10 +765,10 @@ impl EntityInputHandler for MentionInputState {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let range = self.clamp_range(range);
 
-        self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
-                .into();
+        let next = self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
+        self.set_content(next);
         if !new_text.is_empty() {
             self.marked_range = Some(range.start..range.start + new_text.len());
         } else {

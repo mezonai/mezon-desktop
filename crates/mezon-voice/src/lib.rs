@@ -2,6 +2,7 @@ mod audio;
 mod camera;
 mod runtime;
 mod screen;
+mod screen_audio;
 mod screen_picker;
 mod screen_previews;
 mod screen_targets;
@@ -32,7 +33,8 @@ pub fn microphone_denied() -> bool {
 pub use screen_picker::PickedScreen;
 pub use screen_previews::{ScreenSharePreview, capture_screen_share_preview};
 pub use screen_targets::{
-    ScreenShareKind, ScreenShareOption, list_screen_share_options, peek_screen_share_options,
+    ScreenShareKind, ScreenShareListError, ScreenShareOption, list_screen_share_options,
+    peek_screen_share_options,
 };
 pub use video::{VideoFrameData, VideoFrameStore};
 
@@ -83,7 +85,8 @@ pub enum VoiceEvent {
 enum Command {
     SetMicEnabled(bool),
     SetCameraEnabled(bool),
-    StartScreenShare(PickedScreen),
+    SetNoiseSuppression(bool, u8),
+    StartScreenShare(PickedScreen, bool),
     StopScreenShare,
     Disconnect,
 }
@@ -156,8 +159,16 @@ impl VoiceSession {
         let _ = self.cmd_tx.send(Command::SetCameraEnabled(enabled));
     }
 
-    pub fn start_screen_share(&self, pick: PickedScreen) {
-        let _ = self.cmd_tx.send(Command::StartScreenShare(pick));
+    pub fn set_noise_suppression(&self, enabled: bool, level: u8) {
+        let _ = self
+            .cmd_tx
+            .send(Command::SetNoiseSuppression(enabled, level));
+    }
+
+    pub fn start_screen_share(&self, pick: PickedScreen, share_audio: bool) {
+        let _ = self
+            .cmd_tx
+            .send(Command::StartScreenShare(pick, share_audio));
     }
 
     pub fn stop_screen_share(&self) {
@@ -183,6 +194,30 @@ struct CameraSession {
 struct ScreenSession {
     track: LocalVideoTrack,
     stopper: ScreenStopper,
+    audio: Option<ScreenAudioSession>,
+}
+
+struct ScreenAudioSession {
+    track: LocalAudioTrack,
+    _capture: screen_audio::ScreenAudioCapture,
+    pump: tokio::task::JoinHandle<()>,
+}
+
+impl ScreenSession {
+    async fn stop(self, room: &Room) {
+        self.stopper.stop();
+        let _ = room
+            .local_participant()
+            .unpublish_track(&self.track.sid())
+            .await;
+        if let Some(audio) = self.audio {
+            audio.pump.abort();
+            let _ = room
+                .local_participant()
+                .unpublish_track(&audio.track.sid())
+                .await;
+        }
+    }
 }
 
 fn room_options(ice_servers: Vec<IceServerConfig>) -> RoomOptions {
@@ -416,6 +451,11 @@ async fn session_main(
                         }
                         emit(&room, mic_on, &camera_session, &screen_session);
                     }
+                    Ok(Command::SetNoiseSuppression(enabled, level)) => {
+                        if let Some(io) = &audio_io {
+                            io.set_noise_suppression(enabled, level);
+                        }
+                    }
                     Ok(Command::SetCameraEnabled(true)) => {
                         if camera_session.is_none() && camera_task.is_none() {
                             let room = room.clone();
@@ -445,7 +485,7 @@ async fn session_main(
                             emit(&room, mic_on, &camera_session, &screen_session);
                         }
                     }
-                    Ok(Command::StartScreenShare(pick)) => {
+                    Ok(Command::StartScreenShare(pick, share_audio)) => {
                         if screen_session.is_none() && screen_task.is_none() {
                             screen_full_res.store(false, Ordering::Relaxed);
                             let room = room.clone();
@@ -456,7 +496,7 @@ async fn session_main(
                             let generation = screen_gen;
                             screen_task = Some(runtime::runtime().spawn(async move {
                                 let result =
-                                    start_screen_track(&room, &identity, store, full_res, pick).await;
+                                    start_screen_track(&room, &identity, store, full_res, pick, share_audio).await;
                                 let _ = tx.send_async((generation, result)).await;
                             }));
                         }
@@ -468,8 +508,7 @@ async fn session_main(
                             changed = true;
                         }
                         if let Some(session) = screen_session.take() {
-                            session.stopper.stop();
-                            let _ = room.local_participant().unpublish_track(&session.track.sid()).await;
+                            session.stop(&room).await;
                             frame_store.remove(local_screen_key(&local_identity));
                             changed = true;
                         }
@@ -489,6 +528,9 @@ async fn session_main(
                         }
                         if let Some(session) = screen_session.take() {
                             session.stopper.stop();
+                            if let Some(audio) = &session.audio {
+                                audio.pump.abort();
+                            }
                         }
                         let _ = room.close().await;
                         let _ = evt_tx.send(VoiceEvent::Disconnected { reason: "left".into() });
@@ -529,8 +571,7 @@ async fn session_main(
                         emit(&room, mic_on, &camera_session, &screen_session);
                     }
                     Ok((_, Ok(session))) => {
-                        session.stopper.stop();
-                        let _ = room.local_participant().unpublish_track(&session.track.sid()).await;
+                        session.stop(&room).await;
                         if screen_session.is_none() {
                             frame_store.remove(local_screen_key(&local_identity));
                         }
@@ -586,6 +627,7 @@ async fn start_screen_track(
     frame_store: Arc<VideoFrameStore>,
     full_res: Arc<AtomicBool>,
     pick: PickedScreen,
+    share_audio: bool,
 ) -> Result<ScreenSession> {
     let (stopper, track_rx) =
         screen::start_screen(identity.to_string(), frame_store, full_res, pick);
@@ -601,14 +643,80 @@ async fn start_screen_track(
                 source: TrackSource::Screenshare,
                 simulcast: false,
                 video_encoding: Some(VideoEncoding {
-                    max_bitrate: 6_000_000,
+                    max_bitrate: 8_000_000,
                     max_framerate: 30.0,
                 }),
                 ..Default::default()
             },
         )
         .await?;
-    Ok(ScreenSession { track, stopper })
+    let audio = if share_audio {
+        match start_screen_audio_track(room).await {
+            Ok(audio) => Some(audio),
+            Err(e) => {
+                tracing::warn!("system audio share unavailable: {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    Ok(ScreenSession {
+        track,
+        stopper,
+        audio,
+    })
+}
+
+async fn start_screen_audio_track(room: &Room) -> Result<ScreenAudioSession> {
+    let capture = tokio::task::spawn_blocking(screen_audio::start_screen_audio)
+        .await
+        .map_err(|e| anyhow::anyhow!("screen audio init task failed: {e}"))?
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    let source = NativeAudioSource::new(
+        AudioSourceOptions::default(),
+        screen_audio::SCREEN_AUDIO_SAMPLE_RATE,
+        screen_audio::SCREEN_AUDIO_CHANNELS,
+        1000,
+    );
+    let track =
+        LocalAudioTrack::create_audio_track("screen-audio", RtcAudioSource::Native(source.clone()));
+    room.local_participant()
+        .publish_track(
+            LocalTrack::Audio(track.clone()),
+            TrackPublishOptions {
+                source: TrackSource::ScreenshareAudio,
+                dtx: false,
+                audio_encoding: Some(livekit::options::audio::SPEECH.encoding.clone()),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    let rx = capture.rx.clone();
+    let pump = runtime::runtime().spawn(async move {
+        let channels = screen_audio::SCREEN_AUDIO_CHANNELS;
+        while let Ok(samples) = rx.recv_async().await {
+            let samples_per_channel = samples.len() as u32 / channels;
+            if samples_per_channel == 0 {
+                continue;
+            }
+            let frame = AudioFrame {
+                data: samples.into(),
+                num_channels: channels,
+                sample_rate: screen_audio::SCREEN_AUDIO_SAMPLE_RATE,
+                samples_per_channel,
+            };
+            let _ = source.capture_frame(&frame).await;
+        }
+    });
+
+    Ok(ScreenAudioSession {
+        track,
+        _capture: capture,
+        pump,
+    })
 }
 
 fn spawn_playback(

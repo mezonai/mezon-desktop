@@ -29,8 +29,7 @@ use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::user_profile_popover::UserProfilePopover;
 use crate::components::primitives::{Icon, IconName, context_menu_at};
 use crate::image_cache::{
-    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
-    MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
+    LruImageCache, MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
 };
 use crate::theme::{ActiveTheme, Theme};
 
@@ -429,7 +428,7 @@ impl ChannelMessages {
                         });
                     }));
                 }
-                MessagesEvent::ReplyTargetChanged => {}
+                MessagesEvent::ReplyTargetChanged => return,
             }
             if structural {
                 {
@@ -536,15 +535,7 @@ impl ChannelMessages {
                 cx,
             )
         });
-        let avatar_image_cache = cx.new(|cx| {
-            LruImageCache::avatar_thumbnail(
-                "msg-avatar",
-                AVATAR_IMAGE_CACHE_CAPACITY,
-                AVATAR_IMAGE_CACHE_BYTES,
-                AVATAR_ENTRY_MAX_BYTES,
-                cx,
-            )
-        });
+        let avatar_image_cache = crate::image_cache::shared_avatar_cache(cx);
         let last_cold_inputs = Self::cold_inputs(cx);
         let (welcome, onboarding) = Self::compute_indicator_contexts(cx);
         let cached_unread_boundary = unread_boundary(&MessagesStore::global(cx), None, cx);
@@ -1196,8 +1187,13 @@ impl ChannelMessages {
         self.fab_scroll_pending = false;
         self.image_cache
             .update(cx, |cache, cx| cache.clear(window, cx));
-        self.avatar_image_cache
-            .update(cx, |cache, cx| cache.clear(window, cx));
+        crate::image_cache::release_freed_memory_to_os(cx);
+        crate::image_cache::log_cache_budgets(cx);
+        let messages_store = MessagesStore::global(cx);
+        let (msg_channels, messages) = messages_store.read(cx).debug_memory();
+        let members_store = ClanMembersStore::global(cx);
+        let (member_clans, members) = members_store.read(cx).debug_memory();
+        tracing::info!(msg_channels, messages, member_clans, members, "store sizes");
         self.refresh_derived_state(cx);
     }
 

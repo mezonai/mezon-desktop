@@ -16,12 +16,12 @@ pub mod transport;
 pub mod transport_adapter;
 pub mod transport_runtime;
 
-pub use attachment_download::{
-    clean_download_url, download_url_to_downloads, resolve_download_filename,
-    sanitize_filename, write_bytes_to_downloads,
-};
 pub use abridged_tcp_adapter::AbridgedTcpAdapter;
 pub use app_api::{AppApi, ConnectionStatus, UploadFile, UploadThumbnail, UrlAttachment};
+pub use attachment_download::{
+    clean_download_url, download_url_to_downloads, resolve_download_filename, sanitize_filename,
+    write_bytes_to_downloads,
+};
 pub use auth::MezonClient;
 pub use auth::QrLoginId;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
@@ -41,8 +41,7 @@ pub use transport::MezonTransport;
 pub use transport::RealtimeEvent;
 pub use transport::{
     ApiCategoryDesc, ApiChannelApp, ApiChannelAttachment, ApiChannelDesc, ApiPinMessage,
-    ApiThreadDesc,
-    ApiVoiceChannelUser,
+    ApiThreadDesc, ApiVoiceChannelUser,
 };
 pub use transport_adapter::TransportAdapter;
 pub use transport_runtime::TransportClient;

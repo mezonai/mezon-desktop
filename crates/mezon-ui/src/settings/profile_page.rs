@@ -370,12 +370,6 @@ impl Render for ProfilePage {
             return v_flex()
                 .gap_4()
                 .child(
-                    Label::new(mezon_i18n::t(&locale, "setting.profile.title"))
-                        .text_xl()
-                        .text_color(theme.text_primary)
-                        .font_weight(FontWeight::SEMIBOLD),
-                )
-                .child(
                     Label::new(mezon_i18n::t(&locale, "setting.profile.failedToLoad"))
                         .text_color(theme.text_muted),
                 )
@@ -385,12 +379,6 @@ impl Render for ProfilePage {
         if self.profile.is_none() || self.profile.as_ref().is_some_and(|p| p.loading) {
             return v_flex()
                 .gap_4()
-                .child(
-                    Label::new(mezon_i18n::t(&locale, "setting.profile.title"))
-                        .text_xl()
-                        .text_color(theme.text_primary)
-                        .font_weight(FontWeight::SEMIBOLD),
-                )
                 .child(
                     Label::new(mezon_i18n::t(&locale, "setting.profile.loading"))
                         .text_color(theme.text_muted),
@@ -541,12 +529,6 @@ impl ProfilePage {
 
         v_flex()
             .gap_4()
-            .child(
-                Label::new(mezon_i18n::t(&locale, "setting.profile.title"))
-                    .text_xl()
-                    .text_color(theme.text_primary)
-                    .font_weight(FontWeight::SEMIBOLD),
-            )
             .child(
                 h_flex()
                     .gap_3()

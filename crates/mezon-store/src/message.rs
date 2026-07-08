@@ -30,6 +30,7 @@ pub struct MessageAttachment {
     pub display_height: f32,
     pub tenor_mp4: Option<SharedString>,
     pub local_source: Option<std::path::PathBuf>,
+    pub uploading: bool,
 }
 
 pub fn format_file_size(bytes: u64) -> String {
@@ -1313,7 +1314,8 @@ impl Message {
     }
 
     pub fn is_sending(&self) -> bool {
-        self.id.is_optimistic() && !self.send_failed
+        (self.id.is_optimistic() || self.attachments.iter().any(|a| a.uploading))
+            && !self.send_failed
     }
 
     pub fn token_transaction_parts(&self) -> (SharedString, SharedString) {

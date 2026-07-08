@@ -14,8 +14,7 @@ use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::components::primitives::{h_flex, v_flex};
 use crate::image_cache::{
-    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
-    MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
+    LruImageCache, MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
 };
 
 use crate::chat::inbox::row::{
@@ -62,15 +61,7 @@ impl InboxPopoverPanel {
         let list_state = ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW)).measure_all();
         let weak = cx.weak_entity();
         Self::attach_list_scroll_handler(&list_state, weak);
-        let avatar_image_cache = cx.new(|cx| {
-            LruImageCache::avatar_thumbnail(
-                "inbox-avatar",
-                AVATAR_IMAGE_CACHE_CAPACITY,
-                AVATAR_IMAGE_CACHE_BYTES,
-                AVATAR_ENTRY_MAX_BYTES,
-                cx,
-            )
-        });
+        let avatar_image_cache = crate::image_cache::shared_avatar_cache(cx);
         let message_image_cache = cx.new(|cx| {
             LruImageCache::message(
                 "inbox-image",

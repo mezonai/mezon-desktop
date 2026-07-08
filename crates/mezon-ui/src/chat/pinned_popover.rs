@@ -16,9 +16,7 @@ use crate::chat::message::DEFAULT_DISPLAY_NAME_COLOR;
 use crate::components::primitives::{
     Avatar, Button, ButtonVariants, Icon, IconName, Sizable, Size, Spinner, h_flex, v_flex,
 };
-use crate::image_cache::{
-    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
-};
+use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme};
 
 const POPOVER_WIDTH: f32 = 420.;
@@ -87,15 +85,7 @@ impl PinnedPopoverPanel {
         .detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
 
-        let avatar_image_cache = cx.new(|cx| {
-            LruImageCache::avatar_thumbnail(
-                "pin-avatar",
-                AVATAR_IMAGE_CACHE_CAPACITY,
-                AVATAR_IMAGE_CACHE_BYTES,
-                AVATAR_ENTRY_MAX_BYTES,
-                cx,
-            )
-        });
+        let avatar_image_cache = crate::image_cache::shared_avatar_cache(cx);
 
         let pin_cards = Self::compute_pin_cards(cx);
         let list_state = ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW)).measure_all();

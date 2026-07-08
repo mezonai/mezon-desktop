@@ -33,6 +33,7 @@ scap = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 nokhwa = { version = "0.10", default-features = false, features = ["input-avfoundation"] }
 screencapturekit = "0.2.8"
+screencapturekit-sys = "0.2.8"
 core-graphics-helmer-fork = "0.24.0"
 cocoa = "0.25.0"
 objc = "0.2.7"

@@ -13,9 +13,7 @@ use crate::app::shell::Shell;
 use crate::components::primitives::{
     Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState,
 };
-use crate::image_cache::{
-    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
-};
+use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme};
 
 const ROW_PX: f32 = 44.;
@@ -151,15 +149,7 @@ impl ForwardMessageModal {
                     cx.notify();
                 },
             );
-            let image_cache = cx.new(|cx| {
-                LruImageCache::avatar_thumbnail(
-                    "forward-target",
-                    AVATAR_IMAGE_CACHE_CAPACITY,
-                    AVATAR_IMAGE_CACHE_BYTES,
-                    AVATAR_ENTRY_MAX_BYTES,
-                    cx,
-                )
-            });
+            let image_cache = crate::image_cache::shared_avatar_cache(cx);
             let options = build_options(cx);
             let filtered = (0..options.len()).collect();
             Self {

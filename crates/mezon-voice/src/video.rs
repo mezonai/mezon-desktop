@@ -200,6 +200,46 @@ pub fn i420_to_bgra_into(
     if out.len() < needed {
         return;
     }
+
+    let planar = yuv::YuvPlanarImage {
+        y_plane,
+        y_stride: stride_y as u32,
+        u_plane,
+        u_stride: stride_u as u32,
+        v_plane,
+        v_stride: stride_v as u32,
+        width: width as u32,
+        height: height as u32,
+    };
+    if yuv::yuv420_to_bgra(
+        &planar,
+        &mut out[..needed],
+        (width * 4) as u32,
+        yuv::YuvRange::Limited,
+        yuv::YuvStandardMatrix::Bt601,
+    )
+    .is_ok()
+    {
+        return;
+    }
+
+    i420_to_bgra_scalar(
+        out, y_plane, u_plane, v_plane, stride_y, stride_u, stride_v, width, height,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn i420_to_bgra_scalar(
+    out: &mut [u8],
+    y_plane: &[u8],
+    u_plane: &[u8],
+    v_plane: &[u8],
+    stride_y: usize,
+    stride_u: usize,
+    stride_v: usize,
+    width: usize,
+    height: usize,
+) {
     let cw = width / 2;
     for y in 0..height {
         let c_row = y / 2;
@@ -351,6 +391,22 @@ mod tests {
         out
     }
 
+    fn assert_bgra_close(actual: &[u8], expected: &[u8], width: usize, height: usize) {
+        assert_eq!(actual.len(), expected.len());
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            let (px, ch) = (i / 4, i % 4);
+            let (x, y) = (px % width, px / width);
+            if ch == 3 {
+                assert_eq!(*a, 255, "alpha at ({x},{y}) of {width}x{height}");
+            } else {
+                assert!(
+                    a.abs_diff(*e) <= 2,
+                    "channel {ch} at ({x},{y}) of {width}x{height}: {a} vs {e}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn i420_to_bgra_matches_reference() {
         let width = 8usize;
@@ -362,10 +418,14 @@ mod tests {
         let stride_v = cw + 1;
 
         let y_plane: Vec<u8> = (0..stride_y * height)
-            .map(|i| (i * 7 % 256) as u8)
+            .map(|i| (16 + i * 7 % 220) as u8)
             .collect();
-        let u_plane: Vec<u8> = (0..stride_u * ch).map(|i| (i * 13 % 256) as u8).collect();
-        let v_plane: Vec<u8> = (0..stride_v * ch).map(|i| (i * 29 % 256) as u8).collect();
+        let u_plane: Vec<u8> = (0..stride_u * ch)
+            .map(|i| (16 + i * 13 % 225) as u8)
+            .collect();
+        let v_plane: Vec<u8> = (0..stride_v * ch)
+            .map(|i| (16 + i * 29 % 225) as u8)
+            .collect();
 
         let expected = reference_i420_to_bgra(
             &y_plane, &u_plane, &v_plane, stride_y, stride_u, stride_v, width, height,
@@ -384,7 +444,7 @@ mod tests {
             height,
         );
 
-        assert_eq!(actual, expected);
+        assert_bgra_close(&actual, &expected, width, height);
     }
 
     #[test]
@@ -398,6 +458,46 @@ mod tests {
         let stride_v = cw + 1;
 
         let y_plane: Vec<u8> = (0..stride_y * height)
+            .map(|i| (16 + i * 7 % 220) as u8)
+            .collect();
+        let u_plane: Vec<u8> = (0..stride_u * ch)
+            .map(|i| (16 + i * 13 % 225) as u8)
+            .collect();
+        let v_plane: Vec<u8> = (0..stride_v * ch)
+            .map(|i| (16 + i * 29 % 225) as u8)
+            .collect();
+
+        let expected = reference_i420_to_bgra(
+            &y_plane, &u_plane, &v_plane, stride_y, stride_u, stride_v, width, height,
+        );
+
+        let mut actual = vec![0u8; width * height * 4];
+        i420_to_bgra_into(
+            &mut actual,
+            &y_plane,
+            &u_plane,
+            &v_plane,
+            stride_y,
+            stride_u,
+            stride_v,
+            width,
+            height,
+        );
+
+        assert_bgra_close(&actual, &expected, width, height);
+    }
+
+    #[test]
+    fn i420_to_bgra_scalar_matches_reference() {
+        let width = 8usize;
+        let height = 6usize;
+        let stride_y = width;
+        let cw = width / 2;
+        let ch = height / 2;
+        let stride_u = cw;
+        let stride_v = cw;
+
+        let y_plane: Vec<u8> = (0..stride_y * height)
             .map(|i| (i * 7 % 256) as u8)
             .collect();
         let u_plane: Vec<u8> = (0..stride_u * ch).map(|i| (i * 13 % 256) as u8).collect();
@@ -408,7 +508,7 @@ mod tests {
         );
 
         let mut actual = vec![0u8; width * height * 4];
-        i420_to_bgra_into(
+        i420_to_bgra_scalar(
             &mut actual,
             &y_plane,
             &u_plane,

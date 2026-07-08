@@ -1,7 +1,7 @@
 use crate::components::primitives::{Label, Slider, SliderEvent, SliderState, h_flex, v_flex};
 use crate::theme::{ActiveTheme, Theme};
 use gpui::{
-    App, ClickEvent, Context, Entity, FontWeight, Subscription, Task, WeakEntity, Window, deferred,
+    App, ClickEvent, Context, Entity, Subscription, Task, WeakEntity, Window, deferred,
     div, prelude::*, px,
 };
 use mezon_store::{AudioDeviceInfo, AudioStore, Settings};
@@ -185,12 +185,6 @@ impl Render for VoicePage {
         let mic_level = self.mic_level;
         v_flex()
             .gap_6()
-            .child(
-                Label::new(mezon_i18n::t(&locale, "setting.voice.title"))
-                    .text_xl()
-                    .text_color(theme.text_primary)
-                    .font_weight(FontWeight::SEMIBOLD),
-            )
             .child(
                 div()
                     .flex()

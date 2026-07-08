@@ -16,6 +16,7 @@ pub mod screen_share_pip;
 pub mod threads_popover;
 pub mod user_profile_popover;
 pub mod voice;
+pub mod voice_sound_picker;
 
 pub use area::ChatArea;
 pub use channel_header::ChannelHeader;

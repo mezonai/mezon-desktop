@@ -487,9 +487,10 @@ mod tests {
             buckets: HashMap::new(),
             active_clan_id: Some("1".into()),
             active_channel_id: Some("7".into()),
-            api: Arc::new(AppApi::new(Arc::new(mezon_client::TransportClient::new(
+            api: Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
                 String::new(),
-            )))),
+            )),
             reset_generation: 0,
             _conn_watch: Task::ready(()),
         };

@@ -465,6 +465,25 @@ fn render_mention_breadcrumb(theme: &Theme, breadcrumb: &MentionBreadcrumb) -> i
         })
 }
 
+fn utf16_offset_to_byte(text: &str, utf16_offset: usize) -> usize {
+    let mut utf16_count = 0;
+    for (byte_idx, ch) in text.char_indices() {
+        if utf16_count >= utf16_offset {
+            return byte_idx;
+        }
+        utf16_count += ch.len_utf16();
+    }
+    text.len()
+}
+
+fn mention_byte_range(text: &str, start: i32, end: i32) -> Option<(usize, usize)> {
+    let start = start.max(0) as usize;
+    let end = end.max(start as i32) as usize;
+    let byte_start = utf16_offset_to_byte(text, start);
+    let byte_end = utf16_offset_to_byte(text, end);
+    (byte_start <= byte_end && byte_end <= text.len()).then_some((byte_start, byte_end))
+}
+
 fn render_message_content(
     theme: &Theme,
     text: &SharedString,
@@ -487,9 +506,10 @@ fn render_message_content(
     let mut ordered = spans.to_vec();
     ordered.sort_by_key(|span| span.start);
     for span in ordered {
-        let start = span.start.max(0) as usize;
-        let end = span.end.max(span.start) as usize;
-        if start > cursor && start <= text_str.len() {
+        let Some((start, end)) = mention_byte_range(&text_str, span.start, span.end) else {
+            continue;
+        };
+        if start > cursor {
             children.push(
                 div()
                     .text_sm()
@@ -498,7 +518,7 @@ fn render_message_content(
                     .into_any_element(),
             );
         }
-        if end > start && end <= text_str.len() {
+        if end > start {
             let mention_text = SharedString::from(text_str[start..end].to_string());
             if span.is_role {
                 children.push(
@@ -542,6 +562,25 @@ fn render_message_content(
         .overflow_hidden()
         .children(children)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mention_byte_range_handles_vietnamese_utf16_offsets() {
+        let text = "Thứ tư, @Cù Mạnh Tuấn Tài";
+        let (start, end) = mention_byte_range(text, 8, 26).expect("valid range");
+        assert_eq!(&text[start..end], "@Cù Mạnh Tuấn Tài");
+    }
+
+    #[test]
+    fn mention_byte_range_handles_emoji_utf16_offsets() {
+        let text = "hello 📢 world";
+        let (start, end) = mention_byte_range(text, 6, 8).expect("valid range");
+        assert_eq!(&text[start..end], "📢");
+    }
 }
 
 fn render_attachment_preview(

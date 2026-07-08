@@ -185,18 +185,11 @@ impl VideoPlayerView {
         let duration = player.duration();
         let muted = player.is_muted();
         let failed = player.failed();
-        if playing
-            && duration > 0.0
-            && current_time >= duration - STUCK_PLAYING_END_SECONDS
-        {
+        if playing && duration > 0.0 && current_time >= duration - STUCK_PLAYING_END_SECONDS {
             player.pause();
             playing = false;
         }
-        let new_frame = if playing {
-            player.copy_frame()
-        } else {
-            None
-        };
+        let new_frame = if playing { player.copy_frame() } else { None };
         let previous = {
             let mut shared = self.shared.borrow_mut();
             shared.failed = failed;
@@ -457,30 +450,22 @@ impl VideoPlayerView {
 
     #[cfg(target_os = "macos")]
     fn frame_child(&self) -> Option<AnyElement> {
-        self.shared
-            .borrow()
-            .frame
-            .clone()
-            .map(|frame| {
-                gpui::surface(frame)
-                    .size_full()
-                    .object_fit(ObjectFit::Contain)
-                    .into_any_element()
-            })
+        self.shared.borrow().frame.clone().map(|frame| {
+            gpui::surface(frame)
+                .size_full()
+                .object_fit(ObjectFit::Contain)
+                .into_any_element()
+        })
     }
 
     #[cfg(not(target_os = "macos"))]
     fn frame_child(&self) -> Option<AnyElement> {
-        self.shared
-            .borrow()
-            .frame
-            .clone()
-            .map(|frame| {
-                gpui::img(frame)
-                    .size_full()
-                    .object_fit(ObjectFit::Contain)
-                    .into_any_element()
-            })
+        self.shared.borrow().frame.clone().map(|frame| {
+            gpui::img(frame)
+                .size_full()
+                .object_fit(ObjectFit::Contain)
+                .into_any_element()
+        })
     }
 
     fn has_frame(&self) -> bool {
@@ -666,11 +651,7 @@ impl Render for VideoPlayerView {
             return root
                 .cursor_pointer()
                 .when(!self.poster.is_empty(), |d| {
-                    d.child(
-                        img(self.poster.clone())
-                            .size_full()
-                            .object_fit(poster_fit),
-                    )
+                    d.child(img(self.poster.clone()).size_full().object_fit(poster_fit))
                 })
                 .child(play_circle())
                 .on_click(cx.listener(|view, _, _window, cx| view.open_external(cx)))
@@ -688,11 +669,7 @@ impl Render for VideoPlayerView {
                 } else {
                     ObjectFit::Cover
                 };
-                d.child(
-                    img(self.poster.clone())
-                        .size_full()
-                        .object_fit(poster_fit),
-                )
+                d.child(img(self.poster.clone()).size_full().object_fit(poster_fit))
             })
             .child(self.render_controls(cx))
             .into_any_element()
@@ -744,8 +721,7 @@ fn play_circle() -> impl IntoElement {
 fn should_replay_from_start(playing: bool, current_time: f64, duration: f64) -> bool {
     !playing
         && duration > 0.0
-        && (current_time >= duration - REPLAY_THRESHOLD_SECONDS
-            || current_time / duration >= 0.98)
+        && (current_time >= duration - REPLAY_THRESHOLD_SECONDS || current_time / duration >= 0.98)
 }
 
 fn display_playhead(playing: bool, current_time: f64, duration: f64) -> f64 {

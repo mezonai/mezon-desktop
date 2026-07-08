@@ -9,9 +9,7 @@ use mezon_store::{ClanList, EmojiEvent, EmojiStore};
 
 use super::reaction_detail::emoji_error_fallback;
 use crate::components::primitives::{Icon, IconName, Input, InputEvent, InputState};
-use crate::image_cache::{
-    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
-};
+use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme};
 
 const RAIL_W: f32 = 44.;
@@ -106,15 +104,7 @@ impl ReactionPicker {
                 cx.notify();
             })
         });
-        let image_cache = cx.new(|cx| {
-            LruImageCache::avatar_thumbnail(
-                "reaction-picker",
-                AVATAR_IMAGE_CACHE_CAPACITY,
-                AVATAR_IMAGE_CACHE_BYTES,
-                AVATAR_ENTRY_MAX_BYTES,
-                cx,
-            )
-        });
+        let image_cache = crate::image_cache::shared_avatar_cache(cx);
         let mut picker = Self {
             focus_handle,
             search,

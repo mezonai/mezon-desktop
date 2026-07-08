@@ -17,6 +17,12 @@ pub struct ScreenShareOption {
     pub target: Target,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScreenShareListError {
+    PermissionDenied,
+    Unavailable(String),
+}
+
 const CACHE_TTL: Duration = Duration::from_secs(15);
 
 static CACHE: Mutex<Option<(Instant, Vec<ScreenShareOption>)>> = Mutex::new(None);
@@ -30,7 +36,7 @@ pub fn peek_screen_share_options() -> Option<Vec<ScreenShareOption>> {
     Some(options.clone())
 }
 
-pub fn list_screen_share_options() -> Result<Vec<ScreenShareOption>, String> {
+pub fn list_screen_share_options() -> Result<Vec<ScreenShareOption>, ScreenShareListError> {
     if let Some(options) = peek_screen_share_options() {
         return Ok(options);
     }
@@ -40,22 +46,24 @@ pub fn list_screen_share_options() -> Result<Vec<ScreenShareOption>, String> {
     Ok(options)
 }
 
-fn fetch_screen_share_options() -> Result<Vec<ScreenShareOption>, String> {
+fn fetch_screen_share_options() -> Result<Vec<ScreenShareOption>, ScreenShareListError> {
     if !scap::is_supported() {
-        return Err("screen capture not supported".into());
+        return Err(ScreenShareListError::Unavailable(
+            "screen capture not supported".into(),
+        ));
     }
     if !scap::has_permission() && !scap::request_permission() {
-        return Err("screen recording permission denied".into());
+        return Err(ScreenShareListError::PermissionDenied);
     }
 
     #[cfg(target_os = "macos")]
     {
-        list_macos_options()
+        list_macos_options().map_err(ScreenShareListError::Unavailable)
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        list_scap_options()
+        list_scap_options().map_err(ScreenShareListError::Unavailable)
     }
 }
 

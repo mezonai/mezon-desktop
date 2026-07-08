@@ -898,11 +898,7 @@ impl WindowsWindowInner {
             y: lparam.signed_hiword().into(),
         };
         unsafe { ScreenToClient(handle, &mut cursor_point).ok().log_err() };
-        let position = logical_point(
-            cursor_point.x as f32,
-            cursor_point.y as f32,
-            scale_factor,
-        );
+        let position = logical_point(cursor_point.x as f32, cursor_point.y as f32, scale_factor);
 
         let callback = self.state.callbacks.hit_test_window_control.take();
         let mut drag_area = if let Some(mut callback) = callback {
@@ -943,8 +939,11 @@ impl WindowsWindowInner {
         }
 
         if drag_area.is_none()
-            && let Some(code) =
-                hit_test_custom_titlebar_controls(cursor_point, scale_factor, self.state.logical_size.get())
+            && let Some(code) = hit_test_custom_titlebar_controls(
+                cursor_point,
+                scale_factor,
+                self.state.logical_size.get(),
+            )
         {
             drag_area = Some(code as _);
         }
@@ -1681,7 +1680,12 @@ fn hit_test_custom_titlebar_controls(
     Some(HTCAPTION)
 }
 
-fn hit_test_resize_edge(handle: HWND, cursor_point: POINT, frame_x: i32, frame_y: i32) -> Option<u32> {
+fn hit_test_resize_edge(
+    handle: HWND,
+    cursor_point: POINT,
+    frame_x: i32,
+    frame_y: i32,
+) -> Option<u32> {
     let mut rect = RECT::default();
     unsafe { GetWindowRect(handle, &mut rect) }.log_err();
     let right = rect.right - rect.left - 1;

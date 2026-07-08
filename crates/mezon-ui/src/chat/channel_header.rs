@@ -290,7 +290,9 @@ impl ChannelHeader {
                 );
                 continue;
             }
-            if id == "hdr-gallery" && let Some(trigger) = gallery_trigger.take() {
+            if id == "hdr-gallery"
+                && let Some(trigger) = gallery_trigger.take()
+            {
                 buttons.push(trigger);
                 continue;
             }

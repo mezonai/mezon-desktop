@@ -216,7 +216,6 @@ impl AppConfig {
         }
     }
 
-    /// Load configuration from environment variables, falling back to [`prod_defaults`].
     pub fn from_env() -> Self {
         let defaults = Self::prod_defaults();
         Self {

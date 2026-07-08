@@ -172,8 +172,6 @@ impl Shell {
         self.show_modal(view.into(), cx);
     }
 
-    /// React's `TooManyUpload` popup: a red validation card shown when a drop/pick
-    /// exceeds the attachment count or per-file size limit.
     pub fn show_upload_limit(
         &mut self,
         title: impl Into<SharedString>,

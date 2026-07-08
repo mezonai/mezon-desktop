@@ -2,26 +2,25 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::AsyncReadExt as _;
+use gpui::Size as GpuiSize;
+use gpui::http_client::HttpClient;
 use gpui::{
-    App, AppContext, Bounds, Context, Corners, Entity, FocusHandle, Focusable, FontWeight,
+    App, AppContext, BackgroundExecutor, Bounds, Context, Corners, Entity, FocusHandle, Focusable,
+    FontWeight,
     ImageCache, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels,
     Point, Render, RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString, SharedUri,
     Subscription, UniformListScrollHandle, Window, WindowBounds, WindowHandle, WindowKind,
-    WindowOptions, canvas,
-    div, img, point, prelude::*, px, relative, size, uniform_list,
+    WindowOptions, canvas, div, img, point, prelude::*, px, relative, size, uniform_list,
 };
-use gpui::http_client::HttpClient;
-use gpui::Size as GpuiSize;
 use mezon_store::{
-    AppConfig, ChannelAttachment, ChannelId, ChannelList, ClanId, DirectMessageStore,
-    GalleryStore, PlatformStore, Settings, UploaderInfo, fetch_channel_attachments,
-    resolve_attachment_uploader,
+    AppConfig, ChannelAttachment, ChannelId, ChannelList, ClanId, DirectMessageStore, GalleryStore,
+    PlatformStore, Settings, UploaderInfo, fetch_channel_attachments, resolve_attachment_uploader,
 };
 
-use crate::chat::message::{VideoActivation, VideoFullscreenMode, VideoLayout, VideoPlayerView};
-use crate::app::main_window::activate_main_window;
+use crate::app::main_window::{activate_main_window, main_window_bounds};
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls::{self, APP_NAME};
+use crate::chat::message::{VideoActivation, VideoFullscreenMode, VideoLayout, VideoPlayerView};
 use crate::components::primitives::{Avatar, Icon, IconName, Spinner};
 use crate::components::primitives::{ContextMenu, context_menu_at};
 use crate::image_cache::{
@@ -88,7 +87,9 @@ pub(crate) fn trim_process_memory() {
 pub(crate) fn trim_process_memory() {}
 
 fn close_image_viewer_window(handle: WindowHandle<ImageViewer>, cx: &mut App) {
-    let _ = handle.update(cx, |viewer, window, cx| viewer.release_resources(window, cx));
+    let _ = handle.update(cx, |viewer, window, cx| {
+        viewer.release_resources(window, cx)
+    });
     clear_image_viewer_global(cx);
     let _ = handle.update(cx, |_, window, _| window.remove_window());
     trim_process_memory();
@@ -117,14 +118,23 @@ fn open_image_viewer_now(request: OpenViewerRequest, cx: &mut App) {
     spawn_image_viewer_window(request, prior_bounds, cx);
 }
 
+fn default_viewer_bounds(cx: &mut App) -> Bounds<Pixels> {
+    const MIN_W: f32 = 640.0;
+    const MIN_H: f32 = 480.0;
+    if let Some(main) = main_window_bounds(cx) {
+        let w = (f32::from(main.size.width) * 0.8).max(MIN_W);
+        let h = (f32::from(main.size.height) * 0.8).max(MIN_H);
+        return Bounds::centered(None, size(px(w), px(h)), cx);
+    }
+    Bounds::centered(None, size(px(1100.0), px(740.0)), cx)
+}
+
 fn spawn_image_viewer_window(
     request: OpenViewerRequest,
     prior_bounds: Option<Bounds<Pixels>>,
     cx: &mut App,
 ) {
-    let bounds = prior_bounds.unwrap_or_else(|| {
-        Bounds::centered(None, size(px(1100.0), px(740.0)), cx)
-    });
+    let bounds = prior_bounds.unwrap_or_else(|| default_viewer_bounds(cx));
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: Some(size(px(640.0), px(480.0))),
@@ -169,6 +179,7 @@ pub struct ImageViewer {
     active_video: Option<Entity<VideoPlayerView>>,
     active_video_url: Option<String>,
     session: u64,
+    list_generation: u64,
     video_sync_token: Option<(u64, usize)>,
     video_sync_scheduled: bool,
     last_trim: Option<Instant>,
@@ -201,6 +212,7 @@ impl ImageViewer {
         let cache_for_release = image_cache.clone();
         let release = cx.on_release(move |viewer, cx| {
             viewer.session = viewer.session.wrapping_add(1);
+            viewer.list_generation = viewer.list_generation.wrapping_add(1);
             if let Some(view) = viewer.active_video.take() {
                 view.update(cx, |view, cx| view.shutdown(None, cx));
                 drop(view);
@@ -244,6 +256,7 @@ impl ImageViewer {
             active_video: None,
             active_video_url: None,
             session: 0,
+            list_generation: 0,
             video_sync_token: None,
             video_sync_scheduled: false,
             last_trim: None,
@@ -260,6 +273,7 @@ impl ImageViewer {
         }
         self.closing = true;
         self.session = self.session.wrapping_add(1);
+        self.list_generation = self.list_generation.wrapping_add(1);
         self.loading = false;
         self.context_menu = None;
         self.drop_video_player(Some(window), cx);
@@ -339,8 +353,7 @@ impl ImageViewer {
         if let Some(view) = self.active_video.clone() {
             view.update(cx, |player, cx| player.reopen(activation, window, cx));
         } else {
-            self.active_video =
-                Some(cx.new(|cx| VideoPlayerView::new(activation, window, cx)));
+            self.active_video = Some(cx.new(|cx| VideoPlayerView::new(activation, window, cx)));
         }
         self.active_video_url = Some(url);
         self.video_sync_token = Some((self.session, self.index));
@@ -377,6 +390,7 @@ impl ImageViewer {
         cx: &mut Context<Self>,
     ) {
         self.session = self.session.wrapping_add(1);
+        self.list_generation = self.list_generation.wrapping_add(1);
         self.clan_id = request.clan_id;
         self.channel_id = request.channel_id;
         self.channel_label = resolve_channel_label(
@@ -415,12 +429,7 @@ impl ImageViewer {
             self.fetch_initial(request.anchor_before, request.selected_url, cx);
         } else {
             self.loading = false;
-            resolve_uploaders(
-                &mut self.attachments,
-                self.clan_id,
-                self.channel_id,
-                cx,
-            );
+            resolve_uploaders(&mut self.attachments, self.clan_id, self.channel_id, cx);
             self.schedule_video_player_sync(window, cx);
         }
         cx.notify();
@@ -455,13 +464,13 @@ impl ImageViewer {
         let clan = self.clan();
         let channel = self.channel();
         let before = anchor_before.unwrap_or(0);
-        let session = self.session;
+        let generation = self.list_generation;
         cx.spawn(async move |this, cx| {
             let result =
                 fetch_channel_attachments(api, cfg, clan, channel, before, 0, VIEWER_FETCH_LIMIT)
                     .await;
             let _ = this.update(cx, |this, cx| {
-                if this.session != session {
+                if this.list_generation != generation {
                     return;
                 }
                 this.loading = false;
@@ -507,13 +516,13 @@ impl ImageViewer {
         let clan = self.clan();
         let channel = self.channel();
         self.loading = true;
-        let session = self.session;
+        let generation = self.list_generation;
         cx.spawn(async move |this, cx| {
             let result =
                 fetch_channel_attachments(api, cfg, clan, channel, 0, after, VIEWER_FETCH_LIMIT)
                     .await;
             let _ = this.update(cx, |this, cx| {
-                if this.session != session {
+                if this.list_generation != generation {
                     return;
                 }
                 this.loading = false;
@@ -528,13 +537,11 @@ impl ImageViewer {
                             .collect();
                         let added = fresh.len();
                         if added > 0 {
-                            let selected_id =
-                                this.attachments.get(this.index).map(|a| a.id);
+                            let selected_id = this.attachments.get(this.index).map(|a| a.id);
                             let mut merged = fresh;
                             merged.extend(std::mem::take(&mut this.attachments));
-                            merged.sort_by(|a, b| {
-                                b.create_time_seconds.cmp(&a.create_time_seconds)
-                            });
+                            merged
+                                .sort_by(|a, b| b.create_time_seconds.cmp(&a.create_time_seconds));
                             this.index = selected_id
                                 .and_then(|id| merged.iter().position(|a| a.id == id))
                                 .unwrap_or(this.index);
@@ -569,13 +576,13 @@ impl ImageViewer {
         let clan = self.clan();
         let channel = self.channel();
         self.loading = true;
-        let session = self.session;
+        let generation = self.list_generation;
         cx.spawn(async move |this, cx| {
             let result =
                 fetch_channel_attachments(api, cfg, clan, channel, before, 0, VIEWER_FETCH_LIMIT)
                     .await;
             let _ = this.update(cx, |this, cx| {
-                if this.session != session {
+                if this.list_generation != generation {
                     return;
                 }
                 this.loading = false;
@@ -613,14 +620,7 @@ impl ImageViewer {
         let uploader_id = att.uploader_id;
         let message_id = att.message_id;
         let cfg = AppConfig::try_global(cx);
-        let info = resolve_attachment_uploader(
-            clan,
-            channel,
-            uploader_id,
-            message_id,
-            cfg,
-            cx,
-        );
+        let info = resolve_attachment_uploader(clan, channel, uploader_id, message_id, cfg, cx);
         if let Some(att) = self.attachments.get_mut(index) {
             apply_uploader_info(att, info);
         }
@@ -709,8 +709,9 @@ impl ImageViewer {
         self.session = self.session.wrapping_add(1);
         let session = self.session;
         let client = cx.http_client();
+        let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
-            let result = fetch_rotated_image(&url, degrees, client).await;
+            let result = fetch_rotated_image(&url, degrees, client, executor).await;
             let _ = this.update(cx, |this, cx| {
                 if this.session != session {
                     return;
@@ -795,17 +796,11 @@ impl ImageViewer {
         let Some(att) = self.current() else {
             return;
         };
-        let url = att.url.clone();
-        let filename = att.filename.clone();
-        cx.spawn(async move |_this, cx| {
-            match mezon_store::download_url_to_downloads(&url, &filename).await {
-                Ok(path) => {
-                    let _ = cx.update(|cx| cx.reveal_path(&path));
-                }
-                Err(e) => tracing::warn!("save image failed: {e}"),
-            }
-        })
-        .detach();
+        mezon_store::download_url_with_dialog(
+            SharedString::from(att.url.clone()),
+            SharedString::from(att.filename.clone()),
+            cx,
+        );
     }
 }
 
@@ -856,12 +851,7 @@ pub fn resolve_channel_label(
             .unwrap_or_default()
     } else {
         DirectMessageStore::try_global(cx)
-            .and_then(|store| {
-                store
-                    .read(cx)
-                    .find(channel_id)
-                    .map(|dm| dm.label.clone())
-            })
+            .and_then(|store| store.read(cx).find(channel_id).map(|dm| dm.label.clone()))
             .map(SharedString::from)
             .unwrap_or_default()
     }
@@ -1006,9 +996,7 @@ impl ImageViewer {
                 el.child(
                     nav_button(IconName::ChevronRight, theme, false).on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                            this.next(window, cx)
-                        }),
+                        cx.listener(|this, _: &MouseDownEvent, window, cx| this.next(window, cx)),
                     ),
                 )
             })
@@ -1065,8 +1053,7 @@ impl ImageViewer {
                         if let Some(image) = rotated_image {
                             return Some(image);
                         }
-                        let resource =
-                            Resource::Uri(SharedUri::from(viewer_src.as_ref()));
+                        let resource = Resource::Uri(SharedUri::from(viewer_src.as_ref()));
                         image_cache.update(cx, |cache, cx| {
                             ImageCache::load(cache, &resource, window, cx).and_then(|r| r.ok())
                         })
@@ -1076,10 +1063,7 @@ impl ImageViewer {
                             return;
                         };
                         let raw = image.size(0);
-                        let content = size(
-                            px(raw.width.0 as f32),
-                            px(raw.height.0 as f32),
-                        );
+                        let content = size(px(raw.width.0 as f32), px(raw.height.0 as f32));
                         let fitted = fit_contain(bounds.size, content);
                         if fitted.width <= px(0.) || fitted.height <= px(0.) {
                             return;
@@ -1168,9 +1152,11 @@ impl ImageViewer {
         let list = uniform_list("viewer-thumbnails", count, move |range, _window, cx| {
             range
                 .map(|ix| {
-                    let info = entity.read(cx).attachments.get(ix).map(|att| {
-                        (att.is_video, SharedUri::from(&att.thumb_src))
-                    });
+                    let info = entity
+                        .read(cx)
+                        .attachments
+                        .get(ix)
+                        .map(|att| (att.is_video, SharedUri::from(&att.thumb_src)));
                     let Some((is_video, src)) = info else {
                         return div().into_any_element();
                     };
@@ -1259,8 +1245,7 @@ impl ImageViewer {
                 let proxied = att.uploader_avatar.clone();
                 let raw = att.uploader_avatar_raw.clone();
                 if !proxied.is_empty() {
-                    let use_fallback =
-                        !raw.is_empty() && raw.as_ref() != proxied.as_ref();
+                    let use_fallback = !raw.is_empty() && raw.as_ref() != proxied.as_ref();
                     avatar = avatar.src(proxied);
                     if use_fallback {
                         avatar = avatar.fallback_src(raw);
@@ -1271,9 +1256,7 @@ impl ImageViewer {
             }
             avatar
         };
-        let timestamp = att
-            .map(|a| a.viewer_timestamp.clone())
-            .unwrap_or_default();
+        let timestamp = att.map(|a| a.viewer_timestamp.clone()).unwrap_or_default();
         let counter = if self.attachments.is_empty() {
             SharedString::default()
         } else {
@@ -1463,17 +1446,14 @@ fn tool_button(icon: IconName, theme: &Theme) -> gpui::Stateful<gpui::Div> {
 }
 
 fn tool_divider(theme: &Theme) -> impl IntoElement {
-    div()
-        .w(px(1.))
-        .h(px(20.))
-        .mx_1()
-        .bg(theme.border)
+    div().w(px(1.)).h(px(20.)).mx_1().bg(theme.border)
 }
 
 async fn fetch_rotated_image(
     url: &str,
     degrees: i32,
     client: Arc<dyn HttpClient>,
+    executor: BackgroundExecutor,
 ) -> anyhow::Result<Arc<RenderImage>> {
     if !url.starts_with("https://") {
         anyhow::bail!("rotation fetch rejected: only https scheme is allowed");
@@ -1484,18 +1464,22 @@ async fn fetch_rotated_image(
     }
     let mut bytes = Vec::new();
     response.body_mut().read_to_end(&mut bytes).await?;
-    let decoded = image::load_from_memory(&bytes)?;
-    let rotated = match degrees.rem_euclid(360) {
-        90 => decoded.rotate90(),
-        180 => decoded.rotate180(),
-        270 => decoded.rotate270(),
-        _ => decoded,
-    };
-    let mut rgba = rotated.to_rgba8();
-    for pixel in rgba.chunks_exact_mut(4) {
-        pixel.swap(0, 2);
-    }
-    Ok(Arc::new(RenderImage::new(vec![image::Frame::new(rgba)])))
+    executor
+        .spawn(async move {
+            let decoded = image::load_from_memory(&bytes)?;
+            let rotated = match degrees.rem_euclid(360) {
+                90 => decoded.rotate90(),
+                180 => decoded.rotate180(),
+                270 => decoded.rotate270(),
+                _ => decoded,
+            };
+            let mut rgba = rotated.to_rgba8();
+            for pixel in rgba.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+            anyhow::Ok(Arc::new(RenderImage::new(vec![image::Frame::new(rgba)])))
+        })
+        .await
 }
 
 fn fit_contain(container: GpuiSize<Pixels>, content: GpuiSize<Pixels>) -> GpuiSize<Pixels> {
@@ -1512,12 +1496,8 @@ fn fit_contain(container: GpuiSize<Pixels>, content: GpuiSize<Pixels>) -> GpuiSi
 
 fn video_decode_max_size(window: &Window) -> (u32, u32) {
     let viewport = window.viewport_size();
-    let w = f32::from(viewport.width)
-        .min(VIEWER_VIDEO_MAX_W)
-        .max(1.0) as u32;
-    let h = f32::from(viewport.height)
-        .min(VIEWER_VIDEO_MAX_H)
-        .max(1.0) as u32;
+    let w = f32::from(viewport.width).min(VIEWER_VIDEO_MAX_W).max(1.0) as u32;
+    let h = f32::from(viewport.height).min(VIEWER_VIDEO_MAX_H).max(1.0) as u32;
     (w, h)
 }
 

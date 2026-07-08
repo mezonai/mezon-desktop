@@ -41,12 +41,10 @@ impl DatePicker {
             open: false,
             view_year: today.year(),
             view_month: today.month(),
-            min_date: Some(NaiveDate::from_ymd_opt(
-                MIN_GALLERY_DATE.0,
-                MIN_GALLERY_DATE.1,
-                MIN_GALLERY_DATE.2,
-            )
-            .unwrap_or(today)),
+            min_date: Some(
+                NaiveDate::from_ymd_opt(MIN_GALLERY_DATE.0, MIN_GALLERY_DATE.1, MIN_GALLERY_DATE.2)
+                    .unwrap_or(today),
+            ),
             max_date: None,
             locale: SharedString::default(),
         }
@@ -229,18 +227,16 @@ impl Render for DatePicker {
             )
             .when(self.open, |el| {
                 el.child(
-                    deferred(
-                        render_calendar(
-                            &theme,
-                            &locale,
-                            self.view_year,
-                            self.view_month,
-                            self.selected,
-                            self.min_date,
-                            self.max_date,
-                            entity,
-                        ),
-                    )
+                    deferred(render_calendar(
+                        &theme,
+                        &locale,
+                        self.view_year,
+                        self.view_month,
+                        self.selected,
+                        self.min_date,
+                        self.max_date,
+                        entity,
+                    ))
                     .with_priority(1),
                 )
             })
@@ -305,30 +301,20 @@ fn render_calendar(
                         .flex_row()
                         .items_center()
                         .gap_1()
-                        .child(calendar_nav_button(
-                            IconName::ArrowDown,
-                            theme,
-                            true,
-                            {
-                                let entity = entity.clone();
-                                move |_: &MouseDownEvent, _window, cx: &mut App| {
-                                    cx.stop_propagation();
-                                    entity.update(cx, |this, cx| this.prev_month(cx));
-                                }
-                            },
-                        ))
-                        .child(calendar_nav_button(
-                            IconName::ArrowDown,
-                            theme,
-                            false,
-                            {
-                                let entity = entity.clone();
-                                move |_: &MouseDownEvent, _window, cx: &mut App| {
-                                    cx.stop_propagation();
-                                    entity.update(cx, |this, cx| this.next_month(cx));
-                                }
-                            },
-                        )),
+                        .child(calendar_nav_button(IconName::ArrowDown, theme, true, {
+                            let entity = entity.clone();
+                            move |_: &MouseDownEvent, _window, cx: &mut App| {
+                                cx.stop_propagation();
+                                entity.update(cx, |this, cx| this.prev_month(cx));
+                            }
+                        }))
+                        .child(calendar_nav_button(IconName::ArrowDown, theme, false, {
+                            let entity = entity.clone();
+                            move |_: &MouseDownEvent, _window, cx: &mut App| {
+                                cx.stop_propagation();
+                                entity.update(cx, |this, cx| this.next_month(cx));
+                            }
+                        })),
                 ),
         )
         .child(render_weekday_header(theme))
@@ -486,7 +472,11 @@ fn render_day_rows(
     rows
 }
 
-fn is_day_in_range(date: NaiveDate, min_date: Option<NaiveDate>, max_date: Option<NaiveDate>) -> bool {
+fn is_day_in_range(
+    date: NaiveDate,
+    min_date: Option<NaiveDate>,
+    max_date: Option<NaiveDate>,
+) -> bool {
     if let Some(min) = min_date
         && date < min
     {

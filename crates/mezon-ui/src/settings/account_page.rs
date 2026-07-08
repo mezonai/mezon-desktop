@@ -102,6 +102,7 @@ impl Render for AccountPage {
 
         v_flex()
             .gap_6()
+            .text_sm()
             .child(
                 v_flex()
                     .rounded_lg()
@@ -125,8 +126,8 @@ impl Render for AccountPage {
                                     .gap_1()
                                     .child(
                                         Label::new(display_name.clone())
-                                            .text_xl()
-                                            .font_weight(FontWeight::BOLD)
+                                            .text_lg()
+                                            .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(theme.text_primary),
                                     )
                                     .child(

@@ -9,6 +9,7 @@ use crate::Freshness;
 use crate::clan::{ClanEvent, ClanList};
 
 const STICKER_MEDIA_TYPE: i32 = 0;
+const AUDIO_MEDIA_TYPE: i32 = 1;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Sticker {
@@ -19,6 +20,16 @@ pub struct Sticker {
     pub clan_id: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClanSound {
+    pub id: String,
+    pub shortname: String,
+    pub src: String,
+    pub clan_id: String,
+    pub clan_name: String,
+    pub logo: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum StickerEvent {
     Changed,
@@ -27,6 +38,7 @@ pub enum StickerEvent {
 pub struct StickerStore {
     by_id: HashMap<String, Sticker>,
     order: Vec<String>,
+    sounds: Vec<ClanSound>,
     freshness: Freshness,
     loading: bool,
     api: Arc<AppApi>,
@@ -57,6 +69,7 @@ impl StickerStore {
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.by_id.clear();
         self.order.clear();
+        self.sounds.clear();
         self.freshness.mark_stale();
         self.loading = false;
         cx.notify();
@@ -74,6 +87,7 @@ impl StickerStore {
         Self {
             by_id: HashMap::new(),
             order: Vec::new(),
+            sounds: Vec::new(),
             freshness: Freshness::new(),
             loading: false,
             api,
@@ -127,13 +141,22 @@ impl StickerStore {
                     Ok(stickers) => {
                         this.by_id.clear();
                         this.order.clear();
+                        this.sounds.clear();
                         for proto in stickers {
-                            if let Some(sticker) = sticker_from_proto(proto) {
+                            if proto.media_type == AUDIO_MEDIA_TYPE {
+                                if let Some(sound) = sound_from_proto(proto) {
+                                    this.sounds.push(sound);
+                                }
+                            } else if let Some(sticker) = sticker_from_proto(proto) {
                                 this.insert(sticker);
                             }
                         }
                         this.freshness.mark_fetched();
-                        tracing::info!("StickerStore: fetched {} stickers", this.order.len());
+                        tracing::info!(
+                            "StickerStore: fetched {} stickers, {} sounds",
+                            this.order.len(),
+                            this.sounds.len()
+                        );
                         cx.emit(StickerEvent::Changed);
                         cx.notify();
                     }
@@ -153,6 +176,10 @@ impl StickerStore {
 
     pub fn all(&self) -> Vec<&Sticker> {
         ordered_stickers(&self.by_id, &self.order).collect()
+    }
+
+    pub fn sounds(&self) -> &[ClanSound] {
+        &self.sounds
     }
 
     pub fn for_clan(&self, clan_id: &str) -> Vec<&Sticker> {
@@ -200,6 +227,30 @@ fn sticker_from_proto(s: api::ClanSticker) -> Option<Sticker> {
         src: s.source,
         category,
         clan_id: s.clan_id.to_string(),
+    })
+}
+
+fn sound_from_proto(s: api::ClanSticker) -> Option<ClanSound> {
+    if s.id == 0 || s.source.is_empty() || s.media_type != AUDIO_MEDIA_TYPE {
+        return None;
+    }
+    let shortname = if !s.shortname.is_empty() {
+        s.shortname
+    } else {
+        "sound.mp3".to_string()
+    };
+    let clan_name = if !s.clan_name.is_empty() {
+        s.clan_name
+    } else {
+        "MY SOUNDS".to_string()
+    };
+    Some(ClanSound {
+        id: s.id.to_string(),
+        shortname,
+        src: s.source,
+        clan_id: s.clan_id.to_string(),
+        clan_name,
+        logo: s.logo,
     })
 }
 
@@ -263,6 +314,25 @@ mod tests {
         let mut no_source = proto(3, "wave", 7, STICKER_MEDIA_TYPE);
         no_source.source = String::new();
         assert!(sticker_from_proto(no_source).is_none());
+    }
+
+    #[test]
+    fn maps_audio_proto_to_sound_with_fallbacks() {
+        let mapped = sound_from_proto(proto(5, "boom", 7, AUDIO_MEDIA_TYPE)).unwrap();
+        assert_eq!(mapped.id, "5");
+        assert_eq!(mapped.shortname, "boom");
+        assert_eq!(mapped.src, "https://cdn/5.webp");
+        assert_eq!(mapped.clan_id, "7");
+        assert_eq!(mapped.clan_name, "MyClan");
+
+        let mut anonymous = proto(6, "", 0, AUDIO_MEDIA_TYPE);
+        anonymous.clan_name = String::new();
+        let mapped = sound_from_proto(anonymous).unwrap();
+        assert_eq!(mapped.shortname, "sound.mp3");
+        assert_eq!(mapped.clan_name, "MY SOUNDS");
+
+        assert!(sound_from_proto(proto(8, "boom", 7, STICKER_MEDIA_TYPE)).is_none());
+        assert!(sound_from_proto(proto(0, "boom", 7, AUDIO_MEDIA_TYPE)).is_none());
     }
 
     #[test]

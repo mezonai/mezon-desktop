@@ -295,7 +295,6 @@ pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
         return None;
     }
     let theme = ctx.theme;
-    let sending = msg.is_sending();
     let mut videos = Vec::new();
     let mut audios: Vec<&MessageAttachment> = Vec::new();
     let mut images: Vec<(usize, &MessageAttachment)> = Vec::new();
@@ -325,10 +324,10 @@ pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
 
     let mut col = div().flex().flex_col().gap_2().mt_1().w_full();
     for (i, att) in videos.iter().enumerate() {
-        col = col.child(render_video(msg.id, i, att, ctx, sending));
+        col = col.child(render_video(msg.id, i, att, ctx, att.uploading));
     }
     for (i, att) in audios.iter().enumerate() {
-        col = col.child(render_audio(msg.id, i, att, ctx, sending));
+        col = col.child(render_audio(msg.id, i, att, ctx, att.uploading));
     }
     if images.len() >= 2
         && let Some(layout) = msg.album_layout.as_ref()
@@ -341,7 +340,6 @@ pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
             &uploader,
             msg,
             ctx,
-            sending,
         ));
     } else if let Some(&(att_index, att)) = images.first() {
         let gif_player = att
@@ -356,7 +354,7 @@ pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
             &msg.viewer_media,
             &uploader,
             gif_player,
-            sending,
+            att.uploading,
         ));
     }
     for (i, att) in documents.iter().enumerate() {
@@ -449,7 +447,6 @@ fn render_album(
     _uploader: &Uploader,
     msg: &Message,
     ctx: &RowCtx,
-    sending: bool,
 ) -> AnyElement {
     let mut container = div()
         .relative()
@@ -476,6 +473,11 @@ fn render_album(
             .justify_center()
             .bg(theme.bg_tertiary);
         if let Some(path) = att.local_source.clone() {
+            tile_element = tile_element.when(!att.uploading && !raw_url.is_empty(), |d| {
+                d.cursor_pointer().on_click(move |_, _window, cx| {
+                    open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
+                })
+            });
             tile_element = tile_element.child(img(path).size_full().object_fit(ObjectFit::Cover));
         } else if att.presign_pending {
             tile_element = presign_child(tile_element, att, theme);
@@ -490,7 +492,7 @@ fn render_album(
                     open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
                 });
         }
-        if sending {
+        if att.uploading {
             tile_element = tile_element.child(attachment_sending_overlay(theme));
         }
         container = container.child(tile_element);
@@ -541,6 +543,11 @@ fn render_photo(
     }
     let theme = ctx.theme;
     if let Some(path) = att.local_source.clone() {
+        let settings = ctx.settings.clone();
+        let raw_url = SharedString::from(att.url.clone());
+        let anchor = (msg.create_time + 86_400).max(0) as u32;
+        let fallback_bg = theme.bg_tertiary;
+        let fallback_fg = theme.text_muted;
         let mut el = div()
             .id(("msg-img", index))
             .relative()
@@ -548,8 +555,31 @@ fn render_photo(
             .h(px(att.display_height))
             .rounded_md()
             .overflow_hidden()
-            .bg(theme.bg_tertiary)
-            .child(img(path).size_full().object_fit(ObjectFit::Cover));
+            .bg(theme.bg_tertiary);
+        el = el.when(!sending && !raw_url.is_empty(), |d| {
+            d.cursor_pointer().on_click(move |_, _window, cx| {
+                open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
+            })
+        });
+        el = el.child(
+            img(path)
+                .size_full()
+                .object_fit(ObjectFit::Cover)
+                .with_fallback(move || {
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(fallback_bg)
+                        .child(
+                            Icon::new(IconName::ImageThumbnail)
+                                .size(px(32.))
+                                .text_color(fallback_fg),
+                        )
+                        .into_any_element()
+                }),
+        );
         if sending {
             el = el.child(attachment_sending_overlay(theme));
         }
@@ -774,7 +804,7 @@ fn render_file_box(
     ctx: &RowCtx,
 ) -> AnyElement {
     let theme = ctx.theme;
-    let sending = msg.is_sending();
+    let sending = att.uploading;
     let is_owner = ctx.current_user_id == msg.sender_id.as_str();
     let filename = if att.filename.is_empty() {
         SharedString::from("Attachment")

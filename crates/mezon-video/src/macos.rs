@@ -404,10 +404,8 @@ fn video_natural_size(asset: *mut Object) -> Option<(u32, u32)> {
         }
         let size: CgSize = msg_send![track, naturalSize];
         let transform: CgAffineTransform = msg_send![track, preferredTransform];
-        let display_width = size.width * transform.a + size.height * transform.c;
-        let display_height = size.width * transform.b + size.height * transform.d;
-        let width = display_width.abs().round();
-        let height = display_height.abs().round();
+        let width = ((size.width * transform.a).abs() + (size.height * transform.c).abs()).round();
+        let height = ((size.width * transform.b).abs() + (size.height * transform.d).abs()).round();
         if !(width.is_finite() && height.is_finite()) || width < 1.0 || height < 1.0 {
             return None;
         }

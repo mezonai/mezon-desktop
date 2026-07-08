@@ -158,12 +158,6 @@ impl Render for LanguagePage {
         v_flex()
             .gap_8()
             .child(
-                Label::new(mezon_i18n::t(&locale, "setting.language.title"))
-                    .text_xl()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text_primary),
-            )
-            .child(
                 v_flex()
                     .rounded_lg()
                     .bg(theme.bg_primary)

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use anyhow::{Result, anyhow, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -79,17 +79,28 @@ fn flush_reverse(
     }
 }
 
+fn mix_noise_suppression(dry: &mut [i16], wet: &[i16], level: u32) {
+    for (d, w) in dry.iter_mut().zip(wet) {
+        let dry_val = *d as i32;
+        *d = (dry_val + ((*w as i32 - dry_val) * level as i32) / 100) as i16;
+    }
+}
+
 fn run_apm(
     capture_rx: flume::Receiver<CaptureChunk>,
     reverse_rx: flume::Receiver<ReverseChunk>,
     mic_tx: flume::Sender<Vec<i16>>,
+    ns_enabled: Arc<AtomicBool>,
+    ns_level: Arc<AtomicU32>,
 ) {
     enum Event {
         Capture(CaptureChunk),
         Reverse(ReverseChunk),
         Stop,
     }
-    let mut apm = AudioProcessingModule::new(true, true, true, true);
+    let mut apm = AudioProcessingModule::new(true, true, true, false);
+    let mut ns = AudioProcessingModule::new(false, false, false, true);
+    let mut wet: Vec<i16> = Vec::new();
     loop {
         let event = flume::Selector::new()
             .recv(&reverse_rx, |r| {
@@ -106,6 +117,21 @@ fn run_apm(
             Event::Capture(mut chunk) => {
                 let _ = apm.set_stream_delay_ms(chunk.delay_ms);
                 let _ = apm.process_stream(&mut chunk.data, chunk.rate, chunk.channels);
+                let level = ns_level.load(Ordering::Relaxed).min(100);
+                if ns_enabled.load(Ordering::Relaxed) && level > 0 {
+                    wet.clear();
+                    wet.extend_from_slice(&chunk.data);
+                    if ns
+                        .process_stream(&mut wet, chunk.rate, chunk.channels)
+                        .is_ok()
+                    {
+                        if level >= 100 {
+                            chunk.data.copy_from_slice(&wet);
+                        } else {
+                            mix_noise_suppression(&mut chunk.data, &wet, level);
+                        }
+                    }
+                }
                 let _ = mic_tx.try_send(chunk.data);
             }
             Event::Stop => break,
@@ -168,11 +194,19 @@ pub struct AudioIo {
     pub mic_rx: flume::Receiver<Vec<i16>>,
     pub input_format_rx: flume::Receiver<AudioFormat>,
     pub mixer: Arc<PlaybackMixer>,
+    ns_enabled: Arc<AtomicBool>,
+    ns_level: Arc<AtomicU32>,
 }
 
 impl AudioIo {
     pub fn set_input_active(&self, active: bool) {
         let _ = self.ctrl_tx.send(AudioCmd::SetInputActive(active));
+    }
+
+    pub fn set_noise_suppression(&self, enabled: bool, level: u8) {
+        self.ns_enabled.store(enabled, Ordering::Relaxed);
+        self.ns_level
+            .store(level.min(100) as u32, Ordering::Relaxed);
     }
 
     pub fn start(
@@ -186,10 +220,14 @@ impl AudioIo {
         let (ctrl_tx, ctrl_rx) = flume::unbounded::<AudioCmd>();
         let (out_fmt_tx, out_fmt_rx) = flume::bounded::<Result<AudioFormat, String>>(1);
         let (in_fmt_tx, in_fmt_rx) = flume::bounded::<AudioFormat>(1);
+        let ns_enabled = Arc::new(AtomicBool::new(false));
+        let ns_level = Arc::new(AtomicU32::new(20));
 
+        let ns_enabled_apm = ns_enabled.clone();
+        let ns_level_apm = ns_level.clone();
         std::thread::Builder::new()
             .name("mezon-voice-apm".into())
-            .spawn(move || run_apm(capture_rx, reverse_rx, mic_tx))?;
+            .spawn(move || run_apm(capture_rx, reverse_rx, mic_tx, ns_enabled_apm, ns_level_apm))?;
 
         let mixer_for_thread = mixer.clone();
         std::thread::Builder::new()
@@ -269,6 +307,8 @@ impl AudioIo {
             mic_rx,
             input_format_rx: in_fmt_rx,
             mixer,
+            ns_enabled,
+            ns_level,
         })
     }
 }

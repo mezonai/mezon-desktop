@@ -50,12 +50,6 @@ impl Render for DevicePage {
         v_flex()
             .gap_4()
             .child(
-                Label::new(mezon_i18n::t(&locale, "setting.devices.title"))
-                    .text_xl()
-                    .text_color(theme.text_primary)
-                    .font_weight(FontWeight::SEMIBOLD),
-            )
-            .child(
                 Label::new(mezon_i18n::t(&locale, "setting.devices.description"))
                     .text_sm()
                     .text_color(theme.text_muted),
