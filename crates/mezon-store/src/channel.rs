@@ -1178,10 +1178,6 @@ impl ChannelList {
             .unwrap_or(&[])
     }
 
-    pub fn previous_channel_ids_for_palette(&self) -> Vec<ChannelId> {
-        merged_previous_channel_ids(&self.previous_channels)
-    }
-
     pub fn channel_display_name(&self, clan_id: ClanId, channel_id: ChannelId) -> Option<String> {
         self.user_channels
             .get(&channel_id)
@@ -1815,40 +1811,6 @@ fn clear_topic_badges_for_clan(
     topic_badges.retain(|_, tracked| tracked.clan_id != clan_id);
 }
 
-fn merged_previous_channel_ids(
-    previous_channels: &HashMap<ClanId, Vec<ChannelId>>,
-) -> Vec<ChannelId> {
-    if previous_channels.is_empty() {
-        return Vec::new();
-    }
-    let mut ordered_clans: Vec<ClanId> = previous_channels.keys().copied().collect();
-    ordered_clans.sort_by(|a, b| match (a.is_zero(), b.is_zero()) {
-        (true, false) => std::cmp::Ordering::Less,
-        (false, true) => std::cmp::Ordering::Greater,
-        _ => a.get().cmp(&b.get()),
-    });
-    let max_len = previous_channels
-        .values()
-        .map(|channels| channels.len())
-        .max()
-        .unwrap_or(0);
-    let mut ids = Vec::new();
-    for rank in 0..max_len {
-        for clan_id in &ordered_clans {
-            let Some(list) = previous_channels.get(clan_id) else {
-                continue;
-            };
-            let Some(channel_id) = list.get(rank) else {
-                continue;
-            };
-            if !ids.contains(channel_id) {
-                ids.push(*channel_id);
-            }
-        }
-    }
-    ids
-}
-
 fn load_collapse_state() -> HashSet<(String, String)> {
     let path = collapse_state_path();
     let data = match std::fs::read_to_string(&path) {
@@ -1938,24 +1900,6 @@ mod tests {
 
         assert_eq!(restored.get(&ClanId(1)).map(Vec::as_slice), Some(&[ChannelId(10), ChannelId(20), ChannelId(30)][..]));
         assert_eq!(restored.get(&ClanId(0)).map(Vec::as_slice), Some(&[ChannelId(99)][..]));
-    }
-
-    #[test]
-    fn previous_channel_ids_for_palette_merges_all_clans() {
-        let mut previous_channels = HashMap::new();
-        previous_channels.insert(ClanId(0), vec![ChannelId(99)]);
-        previous_channels.insert(ClanId(1), vec![ChannelId(10), ChannelId(20)]);
-        previous_channels.insert(ClanId(2), vec![ChannelId(30)]);
-
-        assert_eq!(
-            merged_previous_channel_ids(&previous_channels),
-            vec![
-                ChannelId(99),
-                ChannelId(10),
-                ChannelId(30),
-                ChannelId(20),
-            ]
-        );
     }
 
     #[test]

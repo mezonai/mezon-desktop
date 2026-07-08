@@ -6,6 +6,8 @@ use crate::theme::Theme;
 
 use super::items::{PaletteItem, PaletteItemKind, ROW_PX};
 
+const GROUP_ITEM_LIMIT: usize = 5;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteDisplayRow {
     SectionHeader(SharedString),
@@ -71,19 +73,29 @@ fn build_grouped_rows(
     let mut rows = Vec::new();
     if !recent.is_empty() {
         rows.push(PaletteDisplayRow::SectionHeader(labels.previous.clone()));
-        rows.extend(recent.into_iter().map(|item_index| PaletteDisplayRow::Item { item_index }));
+        rows.extend(
+            recent
+                .into_iter()
+                .map(|item_index| PaletteDisplayRow::Item { item_index }),
+        );
     }
     if !mentions.is_empty() {
         rows.push(PaletteDisplayRow::SectionHeader(labels.mentions.clone()));
         rows.extend(
             mentions
                 .into_iter()
+                .take(GROUP_ITEM_LIMIT)
                 .map(|item_index| PaletteDisplayRow::Item { item_index }),
         );
     }
     if !unread.is_empty() {
         rows.push(PaletteDisplayRow::SectionHeader(labels.unread.clone()));
-        rows.extend(unread.into_iter().map(|item_index| PaletteDisplayRow::Item { item_index }));
+        rows.extend(
+            unread
+                .into_iter()
+                .take(GROUP_ITEM_LIMIT)
+                .map(|item_index| PaletteDisplayRow::Item { item_index }),
+        );
     }
     rows
 }
@@ -120,8 +132,8 @@ pub fn render_section_header(theme: &Theme, label: &SharedString) -> AnyElement 
         .px(px(10.))
         .text_size(px(12.))
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme.tokens.text_theme_primary)
-        .child(label.to_string())
+        .text_color(theme.tokens.text_theme_primary_hover)
+        .child(label.to_string().to_uppercase())
         .into_any_element()
 }
 

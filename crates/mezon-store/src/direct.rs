@@ -3,11 +3,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
-use mezon_client::transport::ApiDirectChannel;
+use mezon_client::transport::{ApiChannelDesc, ApiDirectChannel};
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 
 use crate::Freshness;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+use crate::users_by_user::UsersByUserStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirectKind {
@@ -142,9 +143,37 @@ impl DirectChannelList {
             .iter()
             .map(|c| (c.id, c.unread_count))
             .collect();
+        let pending: Vec<DirectChannel> = self
+            .channels
+            .iter()
+            .filter(|local| !channels.iter().any(|remote| remote.id == local.id))
+            .cloned()
+            .collect();
         merge_dm_unread_counts(&mut channels, badge_map, &local_counts);
+        channels.extend(pending);
         self.channels = channels;
         self.sort_by_recent();
+    }
+
+    fn upsert(&mut self, channel: DirectChannel) {
+        if let Some(existing) = self.find_mut(channel.id) {
+            if !channel.label.is_empty() {
+                existing.label = channel.label;
+            }
+            if !channel.avatar.is_empty() {
+                existing.avatar = channel.avatar;
+            }
+            if channel.peer_user_id.is_some() {
+                existing.peer_user_id = channel.peer_user_id;
+            }
+            if !channel.peer_username.is_empty() {
+                existing.peer_username = channel.peer_username;
+            }
+            self.sort_by_recent();
+        } else {
+            self.channels.push(channel);
+            self.sort_by_recent();
+        }
     }
 
     fn push_new(&mut self, channel: DirectChannel) -> bool {
@@ -282,12 +311,60 @@ impl DirectMessageStore {
     pub fn create_dm_with_user(
         &self,
         user_id: UserId,
+        member_label: String,
+        member_avatar: String,
+        member_username: String,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<(ChannelId, i32)>> {
         let api = self.api.clone();
-        cx.spawn(async move |_this, _cx| {
+        cx.spawn(async move |this, cx| {
             let desc = api.create_direct_channel(&[user_id.0]).await?;
-            Ok((ChannelId(desc.channel_id), desc.channel_type as i32))
+            let channel_id = ChannelId(desc.channel_id);
+            let channel_type = desc.channel_type as i32;
+            let _ = this.update(cx, |this, cx| {
+                let (peer_username, peer_avatar) = if !member_username.is_empty()
+                    && !member_avatar.is_empty()
+                {
+                    (member_username.clone(), member_avatar.clone())
+                } else {
+                    UsersByUserStore::try_global(cx)
+                        .and_then(|store| store.read(cx).user(user_id))
+                        .map(|user| {
+                            (
+                                if user.username.is_empty() {
+                                    member_username.clone()
+                                } else {
+                                    user.username.clone()
+                                },
+                                if user.avatar_url.is_empty() {
+                                    member_avatar.clone()
+                                } else {
+                                    user.avatar_url.clone()
+                                },
+                            )
+                        })
+                        .unwrap_or((member_username.clone(), member_avatar.clone()))
+                };
+                let label = if !member_label.is_empty() {
+                    member_label
+                } else if !peer_username.is_empty() {
+                    peer_username.clone()
+                } else {
+                    desc.channel_label.clone()
+                };
+                let channel = direct_from_created(
+                    &desc,
+                    user_id,
+                    &label,
+                    &peer_avatar,
+                    &peer_username,
+                );
+                this.channels.upsert(channel);
+                this.freshness.mark_fetched();
+                cx.emit(DirectEvent::Changed);
+                cx.notify();
+            })?;
+            Ok((channel_id, channel_type))
         })
     }
 
@@ -531,6 +608,34 @@ fn direct_from_channel_desc(desc: &mezon_proto::api::ChannelDescription) -> ApiD
         last_sent_timestamp,
         last_seen_timestamp,
         creator_id: desc.creator_id,
+    }
+}
+
+fn direct_from_created(
+    desc: &ApiChannelDesc,
+    peer_user_id: UserId,
+    label: &str,
+    peer_avatar: &str,
+    peer_username: &str,
+) -> DirectChannel {
+    let kind = DirectKind::from_raw(desc.channel_type);
+    DirectChannel {
+        id: ChannelId(desc.channel_id),
+        label: label.to_string(),
+        kind,
+        avatar: peer_avatar.to_string(),
+        peer_user_id: Some(peer_user_id),
+        peer_username: peer_username.to_string(),
+        creator_id: if desc.creator_id == 0 {
+            None
+        } else {
+            Some(UserId(desc.creator_id))
+        },
+        online: false,
+        member_count: desc.member_count.max(0) as u32,
+        unread_count: desc.count_mess_unread.max(0) as u32,
+        last_sent_timestamp: desc.last_sent_timestamp,
+        last_seen_timestamp: desc.last_seen_timestamp,
     }
 }
 

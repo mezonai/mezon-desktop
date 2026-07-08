@@ -11,7 +11,7 @@ use gpui::{
     UniformListScrollHandle, WeakEntity, Window,
 };
 use mezon_store::{
-    AuthState, ChannelId, ChannelList, ClanList, ClanMembersStore, DirectKind,
+    AuthState, ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, DirectKind,
     DirectMessageStore, LoginStore, Settings, UserId, UsersByUserStore,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
@@ -21,7 +21,7 @@ use crate::components::primitives::{Input, InputEvent, InputState};
 use crate::image_cache::{
     AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
 };
-use crate::router::{Route, navigate};
+use crate::router::{Route, Router, navigate};
 use crate::theme::ActiveTheme;
 
 use filter::filter_and_sort_indices;
@@ -290,7 +290,6 @@ impl CommandPaletteModal {
             return;
         };
         let locale = self.locale.clone();
-        Self::close(cx);
         match item.kind {
             PaletteItemKind::Channel => {
                 let Some(clan_id) = item.clan_id else {
@@ -299,7 +298,9 @@ impl CommandPaletteModal {
                 let Some(channel_id) = item.channel_id else {
                     return;
                 };
+                Self::close(cx);
                 ChannelList::global(cx).update(cx, |store, cx| {
+                    store.record_previous_channel(clan_id, channel_id, cx);
                     store.reset_user_channel_unread(channel_id, cx);
                     store.apply_read(clan_id, channel_id, cx);
                 });
@@ -319,9 +320,12 @@ impl CommandPaletteModal {
                     .dm_channel_type
                     .map(|ty| ty.to_string())
                     .unwrap_or_else(|| DirectKind::Dm.channel_type().to_string());
+                Self::close(cx);
+                ChannelList::global(cx).update(cx, |store, cx| {
+                    store.record_previous_channel(ClanId(0), direct_id, cx);
+                });
                 DirectMessageStore::global(cx).update(cx, |store, cx| {
                     store.note_read(direct_id, cx);
-                    store.set_current(direct_id, item.dm_channel_type.unwrap_or(3));
                 });
                 navigate(
                     cx,
@@ -335,10 +339,16 @@ impl CommandPaletteModal {
                 let Some(user_id) = item.user_id else {
                     return;
                 };
+                let member_label = item.label.to_string();
+                let member_avatar = item.avatar.to_string();
+                let member_username = item.subtext.to_string();
+                Self::close(cx);
                 if let Some((direct_id, channel_type)) = find_dm_for_user(user_id, cx) {
+                    ChannelList::global(cx).update(cx, |store, cx| {
+                        store.record_previous_channel(ClanId(0), direct_id, cx);
+                    });
                     DirectMessageStore::global(cx).update(cx, |store, cx| {
                         store.note_read(direct_id, cx);
-                        store.set_current(direct_id, channel_type);
                     });
                     navigate(
                         cx,
@@ -348,37 +358,14 @@ impl CommandPaletteModal {
                         },
                     );
                 } else {
-                    let error_message: SharedString = mezon_i18n::t(
-                        &locale,
-                        "common.searchModal.noResults",
-                    )
-                    .to_string()
-                    .into();
-                    let task = DirectMessageStore::global(cx).update(cx, |store, cx| {
-                        store.create_dm_with_user(user_id, cx)
-                    });
-                    cx.spawn(async move |_, cx| match task.await {
-                        Ok((direct_id, channel_type)) => {
-                            cx.update(|cx| {
-                                navigate(
-                                    cx,
-                                    Route::DirectMessage {
-                                        direct_id,
-                                        message_type: channel_type.to_string(),
-                                    },
-                                );
-                            });
-                        }
-                        Err(err) => {
-                            tracing::warn!("create DM failed: {err}");
-                            cx.update(|cx| {
-                                Shell::global(cx).update(cx, |shell, cx| {
-                                    shell.error(error_message, cx)
-                                });
-                            });
-                        }
-                    })
-                    .detach();
+                    create_dm_with_user(
+                        user_id,
+                        member_label,
+                        member_avatar,
+                        member_username,
+                        locale,
+                        cx,
+                    );
                 }
             }
         }
@@ -596,9 +583,73 @@ fn section_labels(locale: &SharedString) -> PaletteSectionLabels {
 }
 
 fn previous_channel_ids(cx: &App) -> Vec<ChannelId> {
+    let clan_id = if palette_dm_context(cx) {
+        ClanId(0)
+    } else {
+        let Some(active_clan_id) = ClanList::global(cx).read(cx).active_clan_id else {
+            return Vec::new();
+        };
+        active_clan_id
+    };
     ChannelList::global(cx)
         .read(cx)
-        .previous_channel_ids_for_palette()
+        .previous_channels_for_clan(clan_id)
+        .to_vec()
+}
+
+fn palette_dm_context(cx: &App) -> bool {
+    matches!(
+        Router::global(cx).read(cx).route(),
+        Route::Direct | Route::DirectMessage { .. } | Route::Friends
+    )
+}
+
+fn create_dm_with_user(
+    user_id: UserId,
+    member_label: String,
+    member_avatar: String,
+    member_username: String,
+    locale: SharedString,
+    cx: &mut App,
+) {
+    let Some(store) = DirectMessageStore::try_global(cx) else {
+        return;
+    };
+    let error_message: SharedString = mezon_i18n::t(&locale, "common.searchModal.noResults")
+        .to_string()
+        .into();
+    let task = store.update(cx, |store, cx| {
+        store.create_dm_with_user(
+            user_id,
+            member_label,
+            member_avatar,
+            member_username,
+            cx,
+        )
+    });
+    cx.spawn(async move |cx| match task.await {
+        Ok((direct_id, channel_type)) => {
+            cx.update(|cx| {
+                ChannelList::global(cx).update(cx, |store, cx| {
+                    store.record_previous_channel(ClanId(0), direct_id, cx);
+                });
+                navigate(
+                    cx,
+                    Route::DirectMessage {
+                        direct_id,
+                        message_type: channel_type.to_string(),
+                    },
+                );
+            });
+        }
+        Err(err) => {
+            tracing::warn!("create DM failed: {err}");
+            cx.update(|cx| {
+                Shell::global(cx).update(cx, |shell, cx| shell.error(error_message, cx));
+            });
+        }
+    })
+    .detach();
 }
 
 fn first_selectable_row(rows: &[PaletteDisplayRow]) -> usize {

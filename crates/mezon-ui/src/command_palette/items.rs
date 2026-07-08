@@ -301,16 +301,22 @@ pub fn render_palette_row(
 ) -> AnyElement {
     let unread = item.unread_count;
     let show_badge = SHOW_UNREAD_BADGE_COUNT && unread > 0;
+    let emphasized = item.is_unread();
     let badge_label = if unread > 99 {
         SharedString::from("99+")
     } else {
         SharedString::from(unread.to_string())
     };
     let highlight = highlight_query(search_query, item.kind);
-    let label_weight = if unread > 0 {
+    let label_weight = if emphasized {
         FontWeight::SEMIBOLD
     } else {
         FontWeight::MEDIUM
+    };
+    let label_color = if emphasized {
+        theme.tokens.text_theme_primary_hover
+    } else {
+        theme.tokens.text_theme_primary
     };
     let (subtext_size, subtext_uppercase) = match item.kind {
         PaletteItemKind::Channel => (px(10.), true),
@@ -329,7 +335,11 @@ pub fn render_palette_row(
             .child(
                 crate::components::primitives::Icon::new(crate::components::primitives::IconName::Hashtag)
                     .size(px(14.))
-                    .text_color(theme.tokens.text_theme_primary),
+                    .text_color(if emphasized {
+                        theme.tokens.text_theme_primary_hover
+                    } else {
+                        theme.tokens.text_theme_primary
+                    }),
             )
             .into_any_element(),
         PaletteItemKind::Direct | PaletteItemKind::Member => {
@@ -353,9 +363,9 @@ pub fn render_palette_row(
     let label = render_highlighted_text(
         &item.label,
         highlight,
-        theme,
         px(15.),
         label_weight,
+        label_color,
         highlight_label,
     );
 
@@ -371,9 +381,9 @@ pub fn render_palette_row(
             .child(render_highlighted_text(
                 &text,
                 highlight,
-                theme,
                 subtext_size,
                 FontWeight::SEMIBOLD,
+                theme.tokens.text_theme_primary,
                 true,
             ))
     });
@@ -483,12 +493,11 @@ fn highlight_query(raw_query: &str, kind: PaletteItemKind) -> &str {
 fn render_highlighted_text(
     text: &str,
     query: &str,
-    theme: &Theme,
     text_size: Pixels,
     base_weight: FontWeight,
+    color: gpui::Rgba,
     highlight: bool,
 ) -> AnyElement {
-    let color = theme.tokens.text_theme_primary;
     let plain = |value: &str| {
         div()
             .truncate()
