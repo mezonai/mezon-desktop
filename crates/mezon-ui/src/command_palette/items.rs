@@ -140,10 +140,12 @@ pub fn ensure_palette_sources_loaded(cx: &mut App) {
 pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
     let mut items = Vec::new();
     let mut dm_user_ids = HashSet::new();
+    let mut dm_channel_ids = HashSet::new();
 
     let users_store = UsersByUserStore::try_global(cx);
     let dm_store = DirectMessageStore::global(cx);
     for dm in dm_store.read(cx).channels() {
+        dm_channel_ids.insert(dm.id);
         if dm.kind == DirectKind::Dm
             && let Some(user_id) = dm.peer_user_id
         {
@@ -180,16 +182,48 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
     let channels = channel_list.read(cx);
     let clans = clan_list.read(cx);
     for channel in channels.user_channels() {
+        let raw_type = channel.channel_type.as_raw();
+        if channel.clan_id.is_zero()
+            && (raw_type == 2 || raw_type == 3)
+            && !dm_channel_ids.contains(&channel.id)
+        {
+            let kind = DirectKind::from_raw(raw_type);
+            let (unread_count, last_sent_timestamp, last_seen_timestamp) =
+                channels.palette_channel_unread(channel);
+            let name = channel.name.clone();
+            items.push(PaletteItem {
+                kind: PaletteItemKind::Direct,
+                label: SharedString::from(name.clone()),
+                subtext: SharedString::default(),
+                avatar: SharedString::default(),
+                unread_count,
+                last_sent_timestamp,
+                last_seen_timestamp,
+                channel_id: Some(channel.id),
+                clan_id: None,
+                user_id: None,
+                channel_type: None,
+                dm_kind: Some(kind),
+                dm_channel_type: Some(kind.channel_type()),
+                filter_prioritize: normalize_search_string(&name),
+                filter_name: normalize_search_string(&name),
+                filter_display: String::new(),
+                filter_blob: normalize_search_string(&name),
+            });
+            continue;
+        }
         let subtext = palette_channel_subtext(channel, channels, clans);
         let name = channel.name.clone();
+        let (unread_count, last_sent_timestamp, last_seen_timestamp) =
+            channels.palette_channel_unread(channel);
         items.push(PaletteItem {
             kind: PaletteItemKind::Channel,
             label: SharedString::from(name.clone()),
             subtext: SharedString::from(subtext.clone()),
             avatar: SharedString::default(),
-            unread_count: channel.badge_count,
-            last_sent_timestamp: channel.last_sent_timestamp,
-            last_seen_timestamp: channel.last_seen_timestamp,
+            unread_count,
+            last_sent_timestamp,
+            last_seen_timestamp,
             channel_id: Some(channel.id),
             clan_id: Some(channel.clan_id),
             user_id: None,

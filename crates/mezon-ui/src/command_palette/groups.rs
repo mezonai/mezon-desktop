@@ -1,6 +1,6 @@
 use gpui::{AnyElement, FontWeight, SharedString, div, prelude::*, px};
 
-use mezon_store::{ChannelId, ChannelType, DirectKind};
+use mezon_store::{ChannelId, ChannelType, ClanId, DirectKind};
 
 use crate::theme::Theme;
 
@@ -20,15 +20,28 @@ pub struct PaletteSectionLabels {
     pub unread: SharedString,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaletteBrowseContext {
+    Direct,
+    Clan(ClanId),
+}
+
 pub fn build_display_rows(
     items: &[PaletteItem],
     filtered_indices: &[usize],
     raw_query: &str,
     previous_channel_ids: &[ChannelId],
+    browse_context: Option<PaletteBrowseContext>,
     labels: &PaletteSectionLabels,
 ) -> Vec<PaletteDisplayRow> {
     if raw_query.is_empty() {
-        build_grouped_rows(items, filtered_indices, previous_channel_ids, labels)
+        build_grouped_rows(
+            items,
+            filtered_indices,
+            previous_channel_ids,
+            browse_context,
+            labels,
+        )
     } else {
         filtered_indices
             .iter()
@@ -41,6 +54,7 @@ fn build_grouped_rows(
     items: &[PaletteItem],
     sorted_indices: &[usize],
     previous_channel_ids: &[ChannelId],
+    browse_context: Option<PaletteBrowseContext>,
     labels: &PaletteSectionLabels,
 ) -> Vec<PaletteDisplayRow> {
     let mut remaining: Vec<usize> = sorted_indices.to_vec();
@@ -63,9 +77,15 @@ fn build_grouped_rows(
         let Some(item) = items.get(item_index) else {
             continue;
         };
-        if is_mention_item(item) {
+        let Some(context) = browse_context else {
+            continue;
+        };
+        if !item_matches_browse_context(item, context) {
+            continue;
+        }
+        if is_mention_item(item, context) {
             mentions.push(item_index);
-        } else if is_unread_list_item(item) {
+        } else if is_unread_list_item(item, context) {
             unread.push(item_index);
         }
     }
@@ -100,7 +120,34 @@ fn build_grouped_rows(
     rows
 }
 
-fn is_mention_item(item: &PaletteItem) -> bool {
+const DM_GROUP_CHANNEL_TYPE: u32 = 2;
+const DM_PEER_CHANNEL_TYPE: u32 = 3;
+
+fn is_dm_tab_conversation(item: &PaletteItem) -> bool {
+    match item.kind {
+        PaletteItemKind::Direct => matches!(
+            item.dm_kind,
+            Some(DirectKind::Dm | DirectKind::Group) | None
+        ),
+        PaletteItemKind::Channel => item.clan_id.is_none_or(|id| id.is_zero()) && matches!(
+            item.channel_type,
+            Some(ChannelType::Unknown(DM_GROUP_CHANNEL_TYPE))
+                | Some(ChannelType::Unknown(DM_PEER_CHANNEL_TYPE))
+        ),
+        PaletteItemKind::Member => false,
+    }
+}
+
+fn item_matches_browse_context(item: &PaletteItem, context: PaletteBrowseContext) -> bool {
+    match context {
+        PaletteBrowseContext::Direct => is_dm_tab_conversation(item),
+        PaletteBrowseContext::Clan(clan_id) => {
+            item.kind == PaletteItemKind::Channel && item.clan_id == Some(clan_id)
+        }
+    }
+}
+
+fn is_mention_item(item: &PaletteItem, _context: PaletteBrowseContext) -> bool {
     item.unread_count > 0
         && matches!(
             item.channel_type,
@@ -108,19 +155,17 @@ fn is_mention_item(item: &PaletteItem) -> bool {
         )
 }
 
-fn is_unread_list_item(item: &PaletteItem) -> bool {
+fn is_unread_list_item(item: &PaletteItem, context: PaletteBrowseContext) -> bool {
     if !item.is_unread() {
         return false;
     }
-    match item.kind {
-        PaletteItemKind::Channel => matches!(
-            item.channel_type,
-            Some(ChannelType::Text) | Some(ChannelType::Thread)
-        ),
-        PaletteItemKind::Direct => {
-            matches!(item.dm_kind, Some(DirectKind::Dm | DirectKind::Group))
-        }
-        PaletteItemKind::Member => false,
+    match context {
+        PaletteBrowseContext::Direct => is_dm_tab_conversation(item),
+        PaletteBrowseContext::Clan(_) => matches!(item.kind, PaletteItemKind::Channel)
+            && matches!(
+                item.channel_type,
+                Some(ChannelType::Text) | Some(ChannelType::Thread)
+            ),
     }
 }
 
@@ -190,7 +235,7 @@ mod tests {
         ];
         let sorted = vec![0, 1, 2];
         let previous = vec![ChannelId(1)];
-        let rows = build_display_rows(&items, &sorted, "", &previous, &labels());
+        let rows = build_display_rows(&items, &sorted, "", &previous, Some(PaletteBrowseContext::Clan(ClanId(1))), &labels());
         assert_eq!(rows.len(), 6);
         assert!(matches!(rows[0], PaletteDisplayRow::SectionHeader(_)));
         assert!(matches!(rows[1], PaletteDisplayRow::Item { item_index: 0 }));
@@ -199,10 +244,80 @@ mod tests {
     }
 
     #[test]
+    fn grouped_view_scopes_mentions_and_unread_to_browse_context() {
+        let mut dm = channel_item(10, "dm-unread", ChannelType::Text, 0, 50, 10);
+        dm.kind = PaletteItemKind::Direct;
+        dm.clan_id = None;
+        dm.channel_type = None;
+        dm.dm_kind = Some(DirectKind::Dm);
+        let items = vec![
+            channel_item(1, "clan-mention", ChannelType::Text, 2, 90, 90),
+            dm,
+        ];
+        let sorted = vec![0, 1];
+        let clan_rows = build_display_rows(
+            &items,
+            &sorted,
+            "",
+            &[],
+            Some(PaletteBrowseContext::Clan(ClanId(1))),
+            &labels(),
+        );
+        let mention_items: Vec<_> = clan_rows
+            .iter()
+            .filter_map(|row| match row {
+                PaletteDisplayRow::Item { item_index } => Some(*item_index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(mention_items, vec![0]);
+
+        let dm_rows = build_display_rows(
+            &items,
+            &sorted,
+            "",
+            &[],
+            Some(PaletteBrowseContext::Direct),
+            &labels(),
+        );
+        let dm_unread: Vec<_> = dm_rows
+            .iter()
+            .filter_map(|row| match row {
+                PaletteDisplayRow::Item { item_index } => Some(*item_index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dm_unread, vec![1]);
+    }
+
+    #[test]
+    fn grouped_view_includes_user_channel_group_on_dm_tab() {
+        let mut group = channel_item(20, "group-unread", ChannelType::Unknown(2), 1, 60, 10);
+        group.clan_id = Some(ClanId(0));
+        let items = vec![group];
+        let rows = build_display_rows(
+            &items,
+            &[0],
+            "",
+            &[],
+            Some(PaletteBrowseContext::Direct),
+            &labels(),
+        );
+        let unread: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                PaletteDisplayRow::Item { item_index } => Some(*item_index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(unread, vec![0]);
+    }
+
+    #[test]
     fn search_query_uses_flat_rows() {
         let items = vec![channel_item(1, "general", ChannelType::Text, 0, 10, 10)];
         let filtered = vec![0];
-        let rows = build_display_rows(&items, &filtered, "gen", &[], &labels());
+        let rows = build_display_rows(&items, &filtered, "gen", &[], None, &labels());
         assert_eq!(rows, vec![PaletteDisplayRow::Item { item_index: 0 }]);
     }
 }

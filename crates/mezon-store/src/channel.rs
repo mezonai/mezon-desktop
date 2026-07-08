@@ -729,6 +729,7 @@ impl ChannelList {
     ) {
         let mut visible_changed = false;
         let mut found = false;
+        let mut updated_channel = None;
         if let Some(categories) = self.cache.get_mut(&clan_id) {
             for ch in categories
                 .iter_mut()
@@ -755,14 +756,140 @@ impl ChannelList {
                 }
                 visible_changed =
                     visible_changed || was_unread != ch.is_unread() || was_badge != ch.badge_count;
+                updated_channel = Some(ch.clone());
             }
         }
-        if !found && is_mention && !seen {
-            *self.pending_channel_badges.entry(channel_id).or_default() += 1;
+        if !found {
+            if is_mention && !seen {
+                *self.pending_channel_badges.entry(channel_id).or_default() += 1;
+            }
+            self.patch_user_channel_message(channel_id, is_mention, seen, ts, message_id, cx);
+        } else if let Some(channel) = updated_channel {
+            self.sync_user_channel_from(&channel, cx);
         }
         if visible_changed {
             self.notify_channel_list(clan_id, cx);
         }
+    }
+
+    pub fn palette_channel_unread(&self, channel: &Channel) -> (u32, i64, i64) {
+        if let Some(live) = self.channel(channel.clan_id, channel.id) {
+            return (
+                live.badge_count,
+                live.last_sent_timestamp,
+                live.last_seen_timestamp,
+            );
+        }
+        let pending = self
+            .pending_channel_badges
+            .get(&channel.id)
+            .copied()
+            .unwrap_or(0);
+        (
+            channel.badge_count.max(pending),
+            channel.last_sent_timestamp,
+            channel.last_seen_timestamp,
+        )
+    }
+
+    fn sync_user_channel_from(&mut self, source: &Channel, cx: &mut Context<Self>) {
+        let Some(user_channel) = self.user_channels.get_mut(&source.id) else {
+            return;
+        };
+        let was_unread = user_channel.is_unread();
+        let was_badge = user_channel.badge_count;
+        copy_channel_unread_fields(user_channel, source);
+        if was_unread != user_channel.is_unread() || was_badge != user_channel.badge_count {
+            cx.notify();
+        }
+    }
+
+    fn patch_user_channel_message(
+        &mut self,
+        channel_id: ChannelId,
+        is_mention: bool,
+        seen: bool,
+        ts: i64,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(user_channel) = self.user_channels.get_mut(&channel_id) else {
+            return;
+        };
+        let was_unread = user_channel.is_unread();
+        let was_badge = user_channel.badge_count;
+        if ts > 0 {
+            user_channel.last_sent_timestamp = ts;
+            if !message_id.is_zero() {
+                user_channel.last_sent_message_id = message_id;
+            }
+            if seen {
+                user_channel.last_seen_timestamp = ts;
+                if !message_id.is_zero() {
+                    user_channel.last_seen_message_id = message_id;
+                }
+            }
+        }
+        if is_mention && !seen {
+            user_channel.badge_count = user_channel.badge_count.saturating_add(1);
+        }
+        if was_unread != user_channel.is_unread() || was_badge != user_channel.badge_count {
+            cx.notify();
+        }
+    }
+
+    fn bump_user_channel_badge(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        let Some(user_channel) = self.user_channels.get_mut(&channel_id) else {
+            return;
+        };
+        user_channel.badge_count = user_channel.badge_count.saturating_add(1);
+        cx.notify();
+    }
+
+    pub fn note_user_channel_dm_message(
+        &mut self,
+        channel_id: ChannelId,
+        ts: i64,
+        from_me: bool,
+        increment_unread: bool,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(user_channel) = self.user_channels.get_mut(&channel_id) else {
+            return;
+        };
+        if !Self::is_user_channel_dm_type(user_channel.channel_type, user_channel.clan_id) {
+            return;
+        }
+        let was_unread = user_channel.is_unread();
+        let was_badge = user_channel.badge_count;
+        if ts > 0 {
+            user_channel.last_sent_timestamp = ts;
+            if !message_id.is_zero() {
+                user_channel.last_sent_message_id = message_id;
+            }
+        }
+        if from_me {
+            if ts > 0 {
+                user_channel.last_seen_timestamp = ts;
+                if !message_id.is_zero() {
+                    user_channel.last_seen_message_id = message_id;
+                }
+            }
+        } else if increment_unread {
+            user_channel.badge_count = user_channel.badge_count.saturating_add(1);
+        }
+        if was_unread != user_channel.is_unread() || was_badge != user_channel.badge_count {
+            cx.notify();
+        }
+    }
+
+    fn is_user_channel_dm_type(channel_type: ChannelType, clan_id: ClanId) -> bool {
+        clan_id.is_zero()
+            && matches!(
+                channel_type,
+                ChannelType::Unknown(2) | ChannelType::Unknown(3)
+            )
     }
 
     pub fn decrement_channel_on_delete(
@@ -809,6 +936,12 @@ impl ChannelList {
             cleared_badge = overlaid.unwrap_or(0);
         }
         clear_topic_badges_for_parent(&mut self.topic_parent_badges, channel_id);
+        if let Some(user_channel) = self.user_channels.get_mut(&channel_id) {
+            user_channel.badge_count = 0;
+            user_channel.last_seen_timestamp = user_channel.last_sent_timestamp;
+            user_channel.last_seen_message_id = user_channel.last_sent_message_id;
+            cx.notify();
+        }
         if should_notify {
             self.notify_channel_list(clan_id, cx);
         }
@@ -895,6 +1028,9 @@ impl ChannelList {
             }
         }
         clear_topic_badges_for_parent(&mut self.topic_parent_badges, channel_id);
+        if let Some(live) = self.channel(clan_id, channel_id).cloned() {
+            self.sync_user_channel_from(&live, cx);
+        }
         if visible_changed {
             self.notify_channel_list(clan_id, cx);
         }
@@ -920,6 +1056,11 @@ impl ChannelList {
         if changed {
             record_topic_parent_badge(&mut self.topic_parent_badges, clan_id, parent_id, topic_id);
             self.notify_channel_list(clan_id, cx);
+        }
+        if let Some(parent) = self.channel(clan_id, parent_id).cloned() {
+            self.sync_user_channel_from(&parent, cx);
+        } else {
+            self.bump_user_channel_badge(parent_id, cx);
         }
     }
 
@@ -1704,6 +1845,14 @@ fn update_channel(
         }
     }
     found
+}
+
+fn copy_channel_unread_fields(target: &mut Channel, source: &Channel) {
+    target.badge_count = source.badge_count;
+    target.last_sent_timestamp = source.last_sent_timestamp;
+    target.last_seen_timestamp = source.last_seen_timestamp;
+    target.last_sent_message_id = source.last_sent_message_id;
+    target.last_seen_message_id = source.last_seen_message_id;
 }
 
 fn merge_pending_badges_into(pending: &mut HashMap<ChannelId, u32>, categories: &mut [Category]) {

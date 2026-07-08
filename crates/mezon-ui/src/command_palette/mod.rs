@@ -26,7 +26,8 @@ use crate::theme::ActiveTheme;
 
 use filter::filter_and_sort_indices;
 use groups::{
-    PaletteDisplayRow, PaletteSectionLabels, build_display_rows, render_section_header,
+    PaletteBrowseContext, PaletteDisplayRow, PaletteSectionLabels, build_display_rows,
+    render_section_header,
 };
 use items::{
     build_palette_items, ensure_palette_sources_loaded, render_palette_row, PaletteItem,
@@ -66,6 +67,7 @@ pub struct CommandPaletteModal {
     _direct_observe: Subscription,
     _users_observe: Subscription,
     _members_observe: Subscription,
+    _router_observe: Subscription,
 }
 
 impl Focusable for CommandPaletteModal {
@@ -108,6 +110,7 @@ impl CommandPaletteModal {
                 filtered.as_ref(),
                 "",
                 &previous_channel_ids(cx),
+                palette_browse_context(cx),
                 &section_labels(&locale),
             ));
             Self {
@@ -138,6 +141,7 @@ impl CommandPaletteModal {
                 _direct_observe: Subscription::new(|| ()),
                 _users_observe: Subscription::new(|| ()),
                 _members_observe: Subscription::new(|| ()),
+                _router_observe: Subscription::new(|| ()),
             }
         });
 
@@ -163,6 +167,10 @@ impl CommandPaletteModal {
                         this.mark_items_dirty(cx);
                     });
                 }
+                this._router_observe = cx.observe(&Router::global(cx), |this, _, cx| {
+                    this.recompute_filtered(cx);
+                    cx.notify();
+                });
             });
         });
 
@@ -233,11 +241,17 @@ impl CommandPaletteModal {
         } else {
             Vec::new()
         };
+        let browse_context = if self.debounced_query.is_empty() {
+            palette_browse_context(cx)
+        } else {
+            None
+        };
         self.display_rows = Rc::new(build_display_rows(
             self.items.as_ref(),
             self.filtered.as_ref(),
             &self.debounced_query,
             &previous,
+            browse_context,
             &section_labels(&self.locale),
         ));
         self.selected_visible = first_selectable_row(self.display_rows.as_ref());
@@ -583,18 +597,28 @@ fn section_labels(locale: &SharedString) -> PaletteSectionLabels {
 }
 
 fn previous_channel_ids(cx: &App) -> Vec<ChannelId> {
-    let clan_id = if palette_dm_context(cx) {
-        ClanId(0)
-    } else {
-        let Some(active_clan_id) = ClanList::global(cx).read(cx).active_clan_id else {
-            return Vec::new();
-        };
-        active_clan_id
+    let Some(context) = palette_browse_context(cx) else {
+        return Vec::new();
+    };
+    let clan_id = match context {
+        PaletteBrowseContext::Direct => ClanId(0),
+        PaletteBrowseContext::Clan(clan_id) => clan_id,
     };
     ChannelList::global(cx)
         .read(cx)
         .previous_channels_for_clan(clan_id)
         .to_vec()
+}
+
+fn palette_browse_context(cx: &App) -> Option<PaletteBrowseContext> {
+    if palette_dm_context(cx) {
+        Some(PaletteBrowseContext::Direct)
+    } else {
+        ClanList::global(cx)
+            .read(cx)
+            .active_clan_id
+            .map(PaletteBrowseContext::Clan)
+    }
 }
 
 fn palette_dm_context(cx: &App) -> bool {
