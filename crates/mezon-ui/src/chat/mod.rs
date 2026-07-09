@@ -11,6 +11,7 @@ pub mod member_list;
 pub mod member_row_element;
 pub mod mention_input;
 pub mod message;
+pub mod message_search;
 pub mod pinned_popover;
 pub mod screen_share_modal;
 pub mod screen_share_pip;

@@ -7,6 +7,10 @@ pub fn register_main_window(handle: AnyWindowHandle, cx: &mut App) {
     cx.set_global(MainWindowHandle(handle));
 }
 
+pub fn handle(cx: &App) -> Option<AnyWindowHandle> {
+    cx.try_global::<MainWindowHandle>().map(|g| g.0)
+}
+
 pub fn main_window_bounds(cx: &mut App) -> Option<Bounds<Pixels>> {
     let handle = cx.try_global::<MainWindowHandle>().map(|g| g.0)?;
     match cx.update_window(handle, |_, window, _| window.window_bounds()) {

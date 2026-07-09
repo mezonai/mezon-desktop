@@ -18,6 +18,7 @@ pub mod ids;
 pub mod inbox;
 pub mod login;
 pub mod message;
+pub mod message_search;
 pub mod message_time;
 pub mod messages;
 pub mod permissions;
@@ -78,6 +79,9 @@ pub use message::*;
 pub use message::{
     COMBINE_TIME_WINDOW, Message, MessageAttachment, message_combined_with_prev,
     recompute_message_grouping, same_message_sender, should_show_message_head,
+};
+pub use message_search::{
+    ChannelSearchState, MessageSearchStore, SearchHit, search_hit_from_document,
 };
 pub use messages::*;
 pub use mezon_client::{

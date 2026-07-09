@@ -14,7 +14,7 @@ use crate::chat::layout::ChatLayout;
 use crate::chat::pinned_popover::{PinnedPopoverPanel, pin_popover_on_open};
 use crate::chat::threads_popover::{ThreadsPopoverPanel, thread_popover_on_open};
 use crate::components::primitives::{
-    Button, ButtonVariant, ButtonVariants, Icon, IconName, Sizable, Size,
+    Button, ButtonVariant, ButtonVariants, Icon, IconName, InputState, Sizable, Size,
 };
 use crate::theme::{ActiveTheme, Theme};
 
@@ -38,6 +38,7 @@ pub struct ChannelHeader {
     pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
     settings: Option<Entity<Settings>>,
     gallery_trigger: Option<AnyElement>,
+    search_bar: Option<AnyElement>,
 }
 
 impl ChannelHeader {
@@ -58,6 +59,7 @@ impl ChannelHeader {
             pin_handle: None,
             settings: None,
             gallery_trigger: None,
+            search_bar: None,
         }
     }
 
@@ -73,6 +75,11 @@ impl ChannelHeader {
 
     pub fn members_active(mut self, active: bool) -> Self {
         self.members_active = active;
+        self
+    }
+
+    pub fn search_bar(mut self, search_bar: AnyElement) -> Self {
+        self.search_bar = Some(search_bar);
         self
     }
 
@@ -142,11 +149,53 @@ impl ChannelHeader {
             ("hdr-gallery", IconName::ImageThumbnail),
             ("hdr-files", IconName::FileIcon),
         ];
-        let inbox_el = if self.show_inbox && !self.dm {
-            Some(self.render_inbox_button(theme, cx))
+        let ChannelHeader {
+            name,
+            dm,
+            members_action,
+            members_active,
+            on_toggle_members,
+            show_inbox,
+            inbox_handle,
+            clan_id,
+            locale,
+            show_threads,
+            layout,
+            thread_handle,
+            pin_handle,
+            settings,
+            gallery_trigger,
+            search_bar,
+        } = self;
+        let inbox_el = if show_inbox && !dm {
+            Some(Self::render_inbox_button_for(
+                theme,
+                cx,
+                inbox_handle,
+                clan_id,
+                locale,
+            ))
         } else {
             None
         };
+        let buttons = Self::build_action_buttons(
+            actions,
+            theme,
+            icon_color,
+            icon_active,
+            bg_hover,
+            bg_active,
+            members_action,
+            members_active,
+            on_toggle_members,
+            show_threads,
+            thread_handle,
+            layout,
+            pin_handle,
+            settings,
+            gallery_trigger,
+            cx,
+        );
 
         div()
             .flex()
@@ -166,7 +215,7 @@ impl ChannelHeader {
                     .flex_row()
                     .items_center()
                     .gap_1()
-                    .when(!self.dm, |this| {
+                    .when(!dm, |this| {
                         this.child(
                             Icon::new(IconName::Hashtag)
                                 .size(px(20.0))
@@ -178,7 +227,7 @@ impl ChannelHeader {
                             .text_base()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.text_primary)
-                            .child(self.name.clone()),
+                            .child(name),
                     ),
             )
             .child(div().flex_1())
@@ -188,16 +237,94 @@ impl ChannelHeader {
                     .flex_row()
                     .items_center()
                     .gap_1()
-                    .children(self.action_buttons(
-                        actions,
-                        theme,
-                        icon_color,
-                        icon_active,
-                        bg_hover,
-                        bg_active,
-                    ))
-                    .children(inbox_el),
+                    .children(buttons)
+                    .children(inbox_el.map(|inbox| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .pl_4()
+                            .border_l_1()
+                            .border_color(theme.tokens.border_theme_primary)
+                            .child(inbox)
+                            .into_any_element()
+                    }))
+                    .children(search_bar),
             )
+    }
+
+    fn render_inbox_button_for(
+        theme: &Theme,
+        cx: &App,
+        inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
+        clan_id: Option<String>,
+        locale: Option<String>,
+    ) -> gpui::AnyElement {
+        let header = ChannelHeader {
+            name: String::new(),
+            dm: false,
+            members_action: false,
+            members_active: false,
+            on_toggle_members: None,
+            show_inbox: true,
+            inbox_handle,
+            clan_id,
+            locale,
+            show_threads: false,
+            layout: None,
+            thread_handle: None,
+            pin_handle: None,
+            settings: None,
+            gallery_trigger: None,
+            search_bar: None,
+        };
+        header.render_inbox_button(theme, cx)
+    }
+
+    fn build_action_buttons(
+        actions: [(&'static str, IconName); 8],
+        theme: &Theme,
+        icon_color: gpui::Rgba,
+        icon_active: gpui::Rgba,
+        bg_hover: gpui::Rgba,
+        bg_active: gpui::Rgba,
+        members_action: bool,
+        members_active: bool,
+        on_toggle_members: Option<ToggleHandler>,
+        show_threads: bool,
+        thread_handle: Option<PopoverMenuHandle<ThreadsPopoverPanel>>,
+        layout: Option<Entity<ChatLayout>>,
+        pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
+        settings: Option<Entity<Settings>>,
+        gallery_trigger: Option<AnyElement>,
+        cx: &App,
+    ) -> Vec<AnyElement> {
+        let header = ChannelHeader {
+            name: String::new(),
+            dm: false,
+            members_action,
+            members_active,
+            on_toggle_members,
+            show_inbox: false,
+            inbox_handle: None,
+            clan_id: None,
+            locale: None,
+            show_threads,
+            layout,
+            thread_handle,
+            pin_handle,
+            settings,
+            gallery_trigger,
+            search_bar: None,
+        };
+        header.action_buttons(
+            actions,
+            theme,
+            icon_color,
+            icon_active,
+            bg_hover,
+            bg_active,
+            cx,
+        )
     }
 
     fn action_buttons(
@@ -208,6 +335,7 @@ impl ChannelHeader {
         icon_active: gpui::Rgba,
         bg_hover: gpui::Rgba,
         bg_active: gpui::Rgba,
+        cx: &App,
     ) -> Vec<AnyElement> {
         let members_action = self.members_action;
         let members_active = self.members_active;
@@ -408,6 +536,10 @@ pub struct ChatHeader {
     dm: bool,
     members_action: bool,
     members_active: bool,
+    show_search_bar: bool,
+    search_expanded: bool,
+    show_search_options: bool,
+    search_input: Option<Entity<InputState>>,
     show_inbox: bool,
     inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
     clan_id: Option<String>,
@@ -431,6 +563,10 @@ impl ChatHeader {
             dm: false,
             members_action: true,
             members_active: false,
+            show_search_bar: false,
+            search_expanded: false,
+            show_search_options: false,
+            search_input: None,
             show_inbox: true,
             inbox_handle: None,
             clan_id: None,
@@ -453,6 +589,10 @@ impl ChatHeader {
         inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
         clan_id: Option<String>,
         pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
+        show_search_bar: bool,
+        search_expanded: bool,
+        show_search_options: bool,
+        search_input: Option<Entity<InputState>>,
         locale: Option<String>,
         cx: &mut Context<Self>,
     ) {
@@ -460,6 +600,7 @@ impl ChatHeader {
         let name = name.unwrap_or_else(|| self.name.clone());
         self.inbox_handle = inbox_handle;
         self.pin_handle = pin_handle;
+        self.search_input = search_input;
         let show_threads = if resolving && !dm {
             self.show_threads
         } else {
@@ -469,6 +610,9 @@ impl ChatHeader {
             && self.dm == dm
             && self.members_action == members_action
             && self.members_active == members_active
+            && self.show_search_bar == show_search_bar
+            && self.search_expanded == search_expanded
+            && self.show_search_options == show_search_options
             && self.show_inbox == show_inbox
             && self.clan_id == clan_id
             && self.locale == locale
@@ -480,6 +624,9 @@ impl ChatHeader {
         self.dm = dm;
         self.members_action = members_action;
         self.members_active = members_active;
+        self.show_search_bar = show_search_bar;
+        self.search_expanded = search_expanded;
+        self.show_search_options = show_search_options;
         self.show_inbox = show_inbox;
         self.clan_id = clan_id;
         self.locale = locale;
@@ -490,16 +637,21 @@ impl ChatHeader {
 
 impl Render for ChatHeader {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
         let layout_weak = self.layout.clone();
         let settings = self.settings.clone();
         let show_threads = self.show_threads;
+        let show_search_bar = self.show_search_bar;
+        let search_expanded = self.search_expanded;
+        let show_search_options = self.show_search_options;
+        let search_input = self.search_input.clone();
+        let locale = self.locale.clone().unwrap_or_else(|| "en".to_string());
 
         let gallery_trigger = PopoverMenu::new("hdr-gallery-popover")
             .anchor(Anchor::TopRight)
             .attach(Anchor::BottomRight)
             .offset(point(px(0.), px(4.)))
-            .trigger(GalleryTrigger::new(theme))
+            .trigger(GalleryTrigger::new(&theme))
             .menu({
                 let settings = settings.clone();
                 move |window, cx| build_gallery_modal(settings.clone(), window, cx)
@@ -517,6 +669,18 @@ impl Render for ChatHeader {
             .show_inbox(self.show_inbox)
             .on_toggle_members(members_toggle)
             .show_threads(show_threads);
+        if show_search_bar {
+            let search_bar = crate::chat::message_search::render_header_search_bar(
+                &theme,
+                &locale,
+                search_input.as_ref(),
+                search_expanded,
+                show_search_options,
+                self.layout.clone(),
+                cx,
+            );
+            header = header.search_bar(search_bar);
+        }
         if show_threads
             && let Ok(thread_handle) = self
                 .layout
@@ -535,7 +699,7 @@ impl Render for ChatHeader {
         if let Some(handle) = self.pin_handle.clone() {
             header = header.pin_popover(handle, settings);
         }
-        header.render(theme, cx).into_any_element()
+        header.render(&theme, cx).into_any_element()
     }
 }
 
