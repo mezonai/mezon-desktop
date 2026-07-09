@@ -320,6 +320,15 @@ impl AppApi {
             .await
     }
 
+    pub async fn search_message(
+        &self,
+        request: mezon_proto::api::SearchMessageRequest,
+    ) -> Result<mezon_proto::api::SearchMessageResponse> {
+        self.transport
+            .search_message(request.filters, request.from, request.size, request.sorts)
+            .await
+    }
+
     pub async fn check_duplicate_thread_name(
         &self,
         name: &str,

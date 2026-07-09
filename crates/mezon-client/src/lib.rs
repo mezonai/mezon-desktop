@@ -10,6 +10,7 @@ pub mod inbox;
 pub mod keychain;
 pub mod network_monitor;
 pub mod network_probe;
+pub mod search_message;
 pub mod session;
 pub mod tls_crypto;
 pub mod transport;
@@ -37,6 +38,11 @@ pub use inbox::{
 pub use network_monitor::NetworkMonitor;
 pub use network_probe::{
     RECONNECT_NETWORK_PROBE_TIMEOUT, favicon_probe_url, probe_network_reachability,
+};
+pub use search_message::{
+    SEARCH_PAGE_SIZE, build_clan_channel_content_search, build_direct_content_search,
+    build_search_request, clan_channel_scope, content_filter, direct_channel_scope, filter,
+    has_filter, mention_user_filter, username_filter,
 };
 pub use session::Session;
 pub use transport::MezonTransport;

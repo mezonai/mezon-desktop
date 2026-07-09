@@ -3990,18 +3990,20 @@ impl MezonTransport {
         Ok(api::ListAuditLog::decode(response.as_slice())?)
     }
 
-    /// Search message.
+    /// Search messages via Elasticsearch (server RPC `SearchMessage`).
     pub async fn search_message(
         &self,
-        _query: &str,
+        filters: Vec<api::FilterParam>,
         from: i32,
         size: i32,
+        sorts: Vec<api::SortParam>,
     ) -> Result<api::SearchMessageResponse> {
         let cid = self.generate_cid();
         let body = api::SearchMessageRequest {
+            filters,
             from,
             size,
-            ..Default::default()
+            sorts,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "SearchMessage", body).await?;

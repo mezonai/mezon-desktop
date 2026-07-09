@@ -782,6 +782,21 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn search_message(
+        &self,
+        filters: Vec<mezon_proto::api::FilterParam>,
+        from: i32,
+        size: i32,
+        sorts: Vec<mezon_proto::api::SortParam>,
+    ) -> Result<mezon_proto::api::SearchMessageResponse> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.search_message(filters, from, size, sorts).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn join_chat(
         &self,
         clan_id: i64,
