@@ -1309,6 +1309,7 @@ impl ChatLayout {
                     .render(
                         &locale,
                         Some(dm.label.as_str()),
+                        Some(ChannelType::Text),
                         true,
                         Some(dm.id),
                         is_group,
@@ -1328,7 +1329,7 @@ impl ChatLayout {
                 return self
                     .chat_area
                     .render(
-                        &locale, None, true, None, false, false, false, None, None, None, cx,
+                        &locale, None,Some(ChannelType::Text), true, None, false, false, false, None, None, None, cx,
                     )
                     .into_any_element();
             }
@@ -1413,12 +1414,14 @@ impl ChatLayout {
             }
 
             let channel_name = ch.name.clone();
+            let channel_type = ch.channel_type.clone();
             let channel_id = ch.id;
             return self
                 .chat_area
                 .render(
                     &locale,
                     Some(channel_name.as_str()),
+                    Some(channel_type),
                     false,
                     Some(channel_id),
                     true,
@@ -1444,6 +1447,7 @@ impl ChatLayout {
                 .render(
                     &locale,
                     None,
+                    Some(ChannelType::Text),
                     false,
                     None,
                     true,

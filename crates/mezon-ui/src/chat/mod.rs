@@ -17,10 +17,11 @@ pub mod threads_popover;
 pub mod user_profile_popover;
 pub mod voice;
 pub mod voice_sound_picker;
-
+pub mod launch_app_button;
 pub use area::ChatArea;
 pub use channel_header::ChannelHeader;
 pub use chat_sending::ChatSending;
+pub use launch_app_button::LaunchAppButton;
 pub use grouping::is_combined;
 pub use input_bar::InputBar;
 pub use layout::ChatLayout;

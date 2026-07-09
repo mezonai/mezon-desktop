@@ -4,7 +4,8 @@ use gpui::{
     AnyView, App, Context, Entity, ExternalPaths, FontWeight, SharedString, StyleRefinement,
     Subscription, Window, div, prelude::*, px, rgb, rgba,
 };
-use mezon_store::{ChannelId, MessagesEvent, MessagesStore, Settings};
+use mezon_store::{ChannelId, ChannelType, MessagesEvent, MessagesStore, Settings};
+use serde_json::Number;
 use ui::PopoverMenuHandle;
 
 use crate::chat::ReplyTarget;
@@ -12,6 +13,7 @@ use crate::chat::channel_header::ChatHeader;
 use crate::chat::channel_typing::ChannelTyping;
 use crate::chat::inbox::InboxPopoverPanel;
 use crate::chat::input_bar::InputBar;
+use crate::chat::launch_app_button::LaunchAppButton;
 use crate::chat::member_list::{MemberListPanel, MemberSource};
 use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::ChannelMessages;
@@ -19,7 +21,6 @@ use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::components::primitives::{Icon, IconName};
 use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
-
 pub struct ChatArea {
     pub(crate) timeline: Entity<ChannelMessages>,
     pub(crate) mention_input: Option<Entity<MentionInput>>,
@@ -137,6 +138,7 @@ impl ChatArea {
         &self,
         locale: &str,
         channel_name: Option<&str>,
+        channel_type: Option<ChannelType>,
         is_dm: bool,
         channel_id: Option<ChannelId>,
         show_members_button: bool,
@@ -265,6 +267,14 @@ impl ChatArea {
             ))
             .child(self.typing.clone())
             .child(input_bar.render(theme, locale))
+            // .child(LaunchAppButton::new().render(theme))
+            .when_some(channel_type.as_ref(), |this, c_type| {
+                if matches!(c_type, ChannelType::App) {
+                    this.child(LaunchAppButton::new().render(theme))
+                } else {
+                    this
+                }
+            })
             .child(drop_overlay);
 
         let body = div()
