@@ -645,6 +645,7 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn set_title(&mut self, title: &str);
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance);
     fn minimize(&self);
+    fn hide(&self) {}
     fn zoom(&self);
     fn toggle_fullscreen(&self);
     fn is_fullscreen(&self) -> bool;
@@ -1040,7 +1041,7 @@ impl AtlasKey {
                 }
             }
             AtlasKey::Svg(_) => AtlasTextureKind::Monochrome,
-            AtlasKey::Image(_) => AtlasTextureKind::Polychrome,
+            AtlasKey::Image(_) => AtlasTextureKind::Image,
         }
     }
 }
@@ -1148,6 +1149,8 @@ pub enum AtlasTextureKind {
     Monochrome = 0,
     Polychrome = 1,
     Subpixel = 2,
+    Image = 3,
+    ImageSmall = 4,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

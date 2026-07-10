@@ -72,7 +72,7 @@ impl ScreenShareModal {
 
         cx.on_release(|this, cx| {
             for (_, image) in this.previews.drain() {
-                cx.drop_image(image, None);
+                crate::image_cache::queue_atlas_drop(cx, image);
             }
         })
         .detach();
@@ -123,7 +123,7 @@ impl ScreenShareModal {
                         this.preview_task = None;
                         this.preview_loading = false;
                         for (_, image) in this.previews.drain() {
-                            cx.drop_image(image, None);
+                            crate::image_cache::queue_atlas_drop(cx, image);
                         }
                         this.preview_requests.clear();
                     }
