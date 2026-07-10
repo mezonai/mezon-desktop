@@ -505,7 +505,7 @@ fn day_cell(
     let text_color = if !enabled {
         Hsla::from(theme.text_muted)
     } else if selected {
-        Hsla::from(gpui::white())
+        gpui::white()
     } else if today {
         Hsla::from(theme.brand)
     } else {

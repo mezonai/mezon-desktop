@@ -552,8 +552,8 @@ impl Render for GalleryModal {
                         }
                         let entity_row = entity.clone();
                         let theme_row = theme_for_list.clone();
-                        return entity_row
-                            .update(cx, |this, cx| this.render_image_row_at(ix, &theme_row, cx));
+                        entity_row
+                            .update(cx, |this, cx| this.render_image_row_at(ix, &theme_row, cx))
                     })
                     .flex_1()
                     .size_full(),

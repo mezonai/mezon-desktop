@@ -6,9 +6,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    actions, div, prelude::*, px, uniform_list, App, Context, Entity, FocusHandle, Focusable,
-    FontWeight, KeyBinding, ScrollStrategy, SharedString, Subscription, Task,
-    UniformListScrollHandle, WeakEntity, Window,
+    App, Context, Entity, FocusHandle, Focusable, FontWeight, KeyBinding, ScrollStrategy,
+    SharedString, Subscription, Task, UniformListScrollHandle, WeakEntity, Window, actions, div,
+    prelude::*, px, uniform_list,
 };
 use mezon_store::{
     AuthState, ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, DirectKind,
@@ -30,8 +30,8 @@ use groups::{
     render_section_header,
 };
 use items::{
-    build_palette_items, ensure_palette_sources_loaded, render_palette_row, PaletteItem,
-    PaletteItemKind, PaletteRowActions, ROW_PX,
+    PaletteItem, PaletteItemKind, PaletteRowActions, ROW_PX, build_palette_items,
+    ensure_palette_sources_loaded, render_palette_row,
 };
 
 const FILTER_DEBOUNCE_MS: u64 = 200;
@@ -154,9 +154,10 @@ impl CommandPaletteModal {
                 this._clan_observe = cx.observe(&ClanList::global(cx), |this, _, cx| {
                     this.mark_items_dirty(cx);
                 });
-                this._direct_observe = cx.observe(&DirectMessageStore::global(cx), |this, _, cx| {
-                    this.mark_items_dirty(cx);
-                });
+                this._direct_observe =
+                    cx.observe(&DirectMessageStore::global(cx), |this, _, cx| {
+                        this.mark_items_dirty(cx);
+                    });
                 if let Some(store) = UsersByUserStore::try_global(cx) {
                     this._users_observe = cx.observe(&store, |this, _, cx| {
                         this.mark_items_dirty(cx);
@@ -212,10 +213,16 @@ impl CommandPaletteModal {
     }
 
     fn mark_items_dirty(&mut self, cx: &mut Context<Self>) {
-        if !self.items_dirty {
-            self.items_dirty = true;
-            cx.notify();
+        if self.items_dirty {
+            return;
         }
+        self.items_dirty = true;
+        let handle = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |this, cx| {
+                this.refresh_items_if_needed(cx);
+            });
+        });
     }
 
     fn schedule_debounced_filter(&mut self, cx: &mut Context<Self>) {
@@ -226,12 +233,15 @@ impl CommandPaletteModal {
             let _ = this.update(cx, |this, cx| {
                 this.debounced_query = this.search_input.read(cx).value().to_string();
                 this.recompute_filtered(cx);
+                this.scroll
+                    .scroll_to_item(this.selected_visible, ScrollStrategy::Top);
                 cx.notify();
             });
         });
     }
 
     fn recompute_filtered(&mut self, cx: &App) {
+        let previous_selection = self.selected_item_id();
         self.filtered = Rc::new(filter_and_sort_indices(
             self.items.as_ref(),
             &self.debounced_query,
@@ -254,17 +264,30 @@ impl CommandPaletteModal {
             browse_context,
             &section_labels(&self.locale),
         ));
-        self.selected_visible = first_selectable_row(self.display_rows.as_ref());
-        self.scroll
-            .scroll_to_item(self.selected_visible, ScrollStrategy::Top);
+        self.selected_visible = previous_selection
+            .and_then(|id| {
+                find_visible_row_by_item_id(self.display_rows.as_ref(), self.items.as_ref(), id)
+            })
+            .unwrap_or_else(|| first_selectable_row(self.display_rows.as_ref()));
     }
 
-    fn refresh_items_if_needed(&mut self, cx: &App) {
-        if self.items_dirty {
-            self.items = Rc::new(build_palette_items(cx));
-            self.items_dirty = false;
-            self.recompute_filtered(cx);
+    fn selected_item_id(&self) -> Option<PaletteItemId> {
+        let PaletteDisplayRow::Item { item_index } =
+            self.display_rows.get(self.selected_visible)?
+        else {
+            return None;
+        };
+        palette_item_id(self.items.get(*item_index)?)
+    }
+
+    fn refresh_items_if_needed(&mut self, cx: &mut Context<Self>) {
+        if !self.items_dirty {
+            return;
         }
+        self.items = Rc::new(build_palette_items(cx));
+        self.items_dirty = false;
+        self.recompute_filtered(cx);
+        cx.notify();
     }
 
     fn move_selection(&mut self, delta: i32, cx: &mut Context<Self>) {
@@ -284,8 +307,7 @@ impl CommandPaletteModal {
             if matches!(self.display_rows[ix], PaletteDisplayRow::Item { .. }) {
                 self.selected_visible = ix;
                 self.keyboard_nav = true;
-                self.scroll
-                    .scroll_to_item(ix, ScrollStrategy::Nearest);
+                self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
                 cx.notify();
                 return;
             }
@@ -401,8 +423,6 @@ impl CommandPaletteModal {
 
 impl Render for CommandPaletteModal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.refresh_items_if_needed(cx);
-
         let theme = cx.theme().clone();
         let locale = self.locale.clone();
         let protip = mezon_i18n::t(&locale, "common.searchModal.protip");
@@ -460,26 +480,30 @@ impl Render for CommandPaletteModal {
                     }
                 }))
                 .child(
-                    uniform_list("command-palette-list-inner", count, move |range, _window, cx| {
-                        let theme = cx.theme();
-                        let items = items.clone();
-                        let display_rows = display_rows.clone();
-                        let search_query = search_query.clone();
-                        let entity = entity.clone();
-                        range
-                            .map(|visible_ix| {
-                                render_display_row(
-                                    theme,
-                                    visible_ix,
-                                    &display_rows,
-                                    items.as_ref(),
-                                    &search_query,
-                                    selected_visible,
-                                    entity.clone(),
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    })
+                    uniform_list(
+                        "command-palette-list-inner",
+                        count,
+                        move |range, _window, cx| {
+                            let theme = cx.theme();
+                            let items = items.clone();
+                            let display_rows = display_rows.clone();
+                            let search_query = search_query.clone();
+                            let entity = entity.clone();
+                            range
+                                .map(|visible_ix| {
+                                    render_display_row(
+                                        theme,
+                                        visible_ix,
+                                        &display_rows,
+                                        items.as_ref(),
+                                        &search_query,
+                                        selected_visible,
+                                        entity.clone(),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        },
+                    )
                     .track_scroll(&self.scroll)
                     .h(px(list_h))
                     .w_full(),
@@ -491,25 +515,22 @@ impl Render for CommandPaletteModal {
                 )
         };
 
-        let footer = div()
-            .flex_shrink_0()
-            .pt_2()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.tokens.text_theme_primary)
-                    .child(
-                        div()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(theme.status_online)
-                            .child(format!("{protip} ")),
-                    )
-                    .child(div().child(protip_description)),
-            );
+        let footer = div().flex_shrink_0().pt_2().child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .text_size(px(13.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.tokens.text_theme_primary)
+                .child(
+                    div()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(theme.status_online)
+                        .child(format!("{protip} ")),
+                )
+                .child(div().child(protip_description)),
+        );
 
         div()
             .track_focus(&self.focus_handle)
@@ -566,17 +587,13 @@ fn render_display_row(
                 on_click: Rc::new({
                     let entity = entity.clone();
                     move |cx| {
-                        let _ = entity.update(cx, |this, cx| {
-                            this.select_visible(visible_ix, cx)
-                        });
+                        let _ = entity.update(cx, |this, cx| this.select_visible(visible_ix, cx));
                     }
                 }),
             };
             items
                 .get(*item_index)
-                .map(|item| {
-                    render_palette_row(theme, item, search_query, selected, Some(actions))
-                })
+                .map(|item| render_palette_row(theme, item, search_query, selected, Some(actions)))
                 .unwrap_or_else(|| div().h(px(ROW_PX)).into_any_element())
         }
     }
@@ -643,13 +660,7 @@ fn create_dm_with_user(
         .to_string()
         .into();
     let task = store.update(cx, |store, cx| {
-        store.create_dm_with_user(
-            user_id,
-            member_label,
-            member_avatar,
-            member_username,
-            cx,
-        )
+        store.create_dm_with_user(user_id, member_label, member_avatar, member_username, cx)
     });
     cx.spawn(async move |cx| match task.await {
         Ok((direct_id, channel_type)) => {
@@ -680,6 +691,37 @@ fn first_selectable_row(rows: &[PaletteDisplayRow]) -> usize {
     rows.iter()
         .position(|row| matches!(row, PaletteDisplayRow::Item { .. }))
         .unwrap_or(0)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteItemId {
+    Channel(ChannelId),
+    Direct(ChannelId),
+    Member(UserId),
+}
+
+fn palette_item_id(item: &PaletteItem) -> Option<PaletteItemId> {
+    match item.kind {
+        PaletteItemKind::Channel => item.channel_id.map(PaletteItemId::Channel),
+        PaletteItemKind::Direct => item.channel_id.map(PaletteItemId::Direct),
+        PaletteItemKind::Member => item.user_id.map(PaletteItemId::Member),
+    }
+}
+
+fn find_visible_row_by_item_id(
+    rows: &[PaletteDisplayRow],
+    items: &[PaletteItem],
+    id: PaletteItemId,
+) -> Option<usize> {
+    rows.iter().position(|row| {
+        let PaletteDisplayRow::Item { item_index } = row else {
+            return false;
+        };
+        items
+            .get(*item_index)
+            .and_then(palette_item_id)
+            .is_some_and(|item_id| item_id == id)
+    })
 }
 
 fn find_dm_for_user(user_id: UserId, cx: &App) -> Option<(ChannelId, i32)> {

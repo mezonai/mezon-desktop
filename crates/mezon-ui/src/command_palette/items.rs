@@ -2,17 +2,15 @@ use std::collections::HashSet;
 
 use std::rc::Rc;
 
-use gpui::{
-    AnyElement, App, Entity, FontWeight, Pixels, SharedString, div, img, prelude::*, px,
-};
+use gpui::{AnyElement, App, Entity, FontWeight, Pixels, SharedString, div, img, prelude::*, px};
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore, DirectChannel,
     DirectKind, DirectMessageStore, User, UserId, UsersByUserStore,
 };
 use unicode_normalization::UnicodeNormalization;
 
-use crate::theme::Theme;
 use crate::SHOW_UNREAD_BADGE_COUNT;
+use crate::theme::Theme;
 
 pub(crate) const ROW_PX: f32 = 32.;
 
@@ -28,10 +26,7 @@ pub(crate) fn normalize_string(value: &str) -> String {
 }
 
 pub(crate) fn normalize_search_string(value: &str) -> String {
-    normalize_string(value)
-        .replace('-', " ")
-        .replace('_', " ")
-        .replace('+', " ")
+    normalize_string(value).replace(['-', '_', '+'], " ")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +49,7 @@ pub struct PaletteItem {
     pub clan_id: Option<ClanId>,
     pub user_id: Option<UserId>,
     pub channel_type: Option<ChannelType>,
+    pub private: bool,
     pub dm_kind: Option<DirectKind>,
     pub dm_channel_type: Option<i32>,
     pub(crate) filter_prioritize: String,
@@ -65,8 +61,7 @@ pub struct PaletteItem {
 impl PaletteItem {
     pub fn is_unread(&self) -> bool {
         self.unread_count > 0
-            || (self.last_sent_timestamp > 0
-                && self.last_seen_timestamp < self.last_sent_timestamp)
+            || (self.last_sent_timestamp > 0 && self.last_seen_timestamp < self.last_sent_timestamp)
     }
     pub(crate) fn matches_search(&self, search: &str) -> bool {
         if search.is_empty() {
@@ -96,14 +91,12 @@ fn dm_username_subtext(
     if !dm.peer_username.is_empty() {
         return SharedString::from(dm.peer_username.clone());
     }
-    if let Some(user_id) = dm.peer_user_id {
-        if let Some(store) = users_store {
-            if let Some(user) = store.read(cx).user(user_id) {
-                if !user.username.is_empty() {
-                    return SharedString::from(user.username.clone());
-                }
-            }
-        }
+    if let Some(user_id) = dm.peer_user_id
+        && let Some(store) = users_store
+        && let Some(user) = store.read(cx).user(user_id)
+        && !user.username.is_empty()
+    {
+        return SharedString::from(user.username.clone());
     }
     SharedString::default()
 }
@@ -168,6 +161,7 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
             clan_id: None,
             user_id: dm.peer_user_id,
             channel_type: None,
+            private: false,
             dm_kind: Some(dm.kind),
             dm_channel_type: Some(dm.kind.channel_type()),
             filter_prioritize: normalize_search_string(&label),
@@ -203,6 +197,7 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
                 clan_id: None,
                 user_id: None,
                 channel_type: None,
+                private: false,
                 dm_kind: Some(kind),
                 dm_channel_type: Some(kind.channel_type()),
                 filter_prioritize: normalize_search_string(&name),
@@ -228,6 +223,7 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
             clan_id: Some(channel.clan_id),
             user_id: None,
             channel_type: Some(channel.channel_type),
+            private: channel.private,
             dm_kind: None,
             dm_channel_type: None,
             filter_prioritize: normalize_search_string(&name),
@@ -261,12 +257,16 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
         } else {
             SharedString::from(username.clone())
         };
-        let search_blob = [username.as_str(), display_name.as_str(), prioritize.as_str()]
-            .iter()
-            .filter(|part| !part.is_empty())
-            .copied()
-            .collect::<Vec<_>>()
-            .join(".");
+        let search_blob = [
+            username.as_str(),
+            display_name.as_str(),
+            prioritize.as_str(),
+        ]
+        .iter()
+        .filter(|part| !part.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join(".");
         items.push(PaletteItem {
             kind: PaletteItemKind::Member,
             label: SharedString::from(label.clone()),
@@ -279,6 +279,7 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
             clan_id: None,
             user_id: Some(user.id),
             channel_type: None,
+            private: false,
             dm_kind: None,
             dm_channel_type: None,
             filter_prioritize: normalize_search_string(&prioritize),
@@ -367,13 +368,16 @@ pub fn render_palette_row(
             .items_center()
             .justify_center()
             .child(
-                crate::components::primitives::Icon::new(crate::components::primitives::IconName::Hashtag)
-                    .size(px(14.))
-                    .text_color(if emphasized {
-                        theme.tokens.text_theme_primary_hover
-                    } else {
-                        theme.tokens.text_theme_primary
-                    }),
+                crate::components::primitives::Icon::new(palette_channel_icon(
+                    item.channel_type,
+                    item.private,
+                ))
+                .size(px(14.))
+                .text_color(if emphasized {
+                    theme.tokens.text_theme_primary_hover
+                } else {
+                    theme.tokens.text_theme_primary
+                }),
             )
             .into_any_element(),
         PaletteItemKind::Direct | PaletteItemKind::Member => {
@@ -478,7 +482,9 @@ pub fn render_palette_row(
         .rounded(px(6.))
         .cursor_pointer()
         .when(selected, |row| row.bg(theme.tokens.bg_item_theme_hover))
-        .when(!selected, |row| row.hover(|s| s.bg(theme.tokens.bg_item_theme_hover)))
+        .when(!selected, |row| {
+            row.hover(|s| s.bg(theme.tokens.bg_item_theme_hover))
+        })
         .child(row_content)
         .when(show_badge, |row| {
             row.child(
@@ -524,6 +530,25 @@ fn highlight_query(raw_query: &str, kind: PaletteItemKind) -> &str {
     }
 }
 
+fn palette_channel_icon(
+    channel_type: Option<ChannelType>,
+    private: bool,
+) -> crate::components::primitives::IconName {
+    match (channel_type.unwrap_or(ChannelType::Text), private) {
+        (ChannelType::Thread, true) => crate::components::primitives::IconName::ThreadIconLocker,
+        (ChannelType::Thread, false) => crate::components::primitives::IconName::ThreadIcon,
+        (ChannelType::Voice, true) => crate::components::primitives::IconName::SpeakerLocked,
+        (ChannelType::Voice, false) => crate::components::primitives::IconName::Speaker,
+        (ChannelType::Stream, _) => crate::components::primitives::IconName::Stream,
+        (ChannelType::App, true) => crate::components::primitives::IconName::PrivateAppChannelIcon,
+        (ChannelType::App, false) => crate::components::primitives::IconName::AppChannelIcon,
+        (ChannelType::Forum, _) => crate::components::primitives::IconName::Forum,
+        (ChannelType::Announcement, _) => crate::components::primitives::IconName::Announcement,
+        (_, true) => crate::components::primitives::IconName::HashtagLocked,
+        (_, false) => crate::components::primitives::IconName::Hashtag,
+    }
+}
+
 fn render_highlighted_text(
     text: &str,
     query: &str,
@@ -552,17 +577,16 @@ fn render_highlighted_text(
         return plain(text);
     }
 
-    let Some(index) = normalized_text.find(normalized_query.as_str()) else {
+    let Some(norm_start) = normalized_text.find(normalized_query.as_str()) else {
         return plain(text);
     };
+    let norm_end = norm_start + normalized_query.len();
 
-    if normalized_text.len() != text.len() {
+    let Some((before, matched, after)) =
+        split_highlight_by_normalized_range(text, &normalized_text, norm_start, norm_end)
+    else {
         return plain(text);
-    }
-
-    let (before, rest) = text.split_at(index);
-    let match_len = query.len().min(rest.len());
-    let (matched, after) = rest.split_at(match_len);
+    };
 
     div()
         .flex()
@@ -571,22 +595,52 @@ fn render_highlighted_text(
         .min_w_0()
         .text_size(text_size)
         .text_color(color)
-        .child(
-            div()
-                .font_weight(base_weight)
-                .child(before.to_string()),
-        )
+        .child(div().font_weight(base_weight).child(before.to_string()))
         .child(
             div()
                 .font_weight(FontWeight::BOLD)
                 .child(matched.to_string()),
         )
-        .child(
-            div()
-                .font_weight(base_weight)
-                .child(after.to_string()),
-        )
+        .child(div().font_weight(base_weight).child(after.to_string()))
         .into_any_element()
+}
+
+fn split_highlight_by_normalized_range<'a>(
+    text: &'a str,
+    normalized_text: &str,
+    norm_start: usize,
+    norm_end: usize,
+) -> Option<(&'a str, &'a str, &'a str)> {
+    let mut text_start = None;
+    let mut text_end = None;
+    let mut norm_offset = 0usize;
+
+    for (byte_idx, ch) in text.char_indices() {
+        let ch_norm = normalize_string(&ch.to_string());
+        let next_norm = norm_offset + ch_norm.len();
+        if text_start.is_none() && next_norm > norm_start {
+            text_start = Some(byte_idx);
+        }
+        if text_end.is_none() && next_norm >= norm_end {
+            text_end = Some(byte_idx + ch.len_utf8());
+            break;
+        }
+        norm_offset = next_norm;
+    }
+
+    if text_end.is_none()
+        && norm_offset == normalized_text.len()
+        && norm_end == normalized_text.len()
+    {
+        text_end = Some(text.len());
+    }
+
+    let start = text_start.unwrap_or(0);
+    let end = text_end?;
+    if end < start || end > text.len() {
+        return None;
+    }
+    Some((&text[..start], &text[start..end], &text[end..]))
 }
 
 fn palette_item_kind_id(kind: PaletteItemKind) -> u8 {
@@ -594,5 +648,39 @@ fn palette_item_kind_id(kind: PaletteItemKind) -> u8 {
         PaletteItemKind::Channel => 0,
         PaletteItemKind::Direct => 1,
         PaletteItemKind::Member => 2,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn highlight_maps_eszett_without_splitting_inside_char() {
+        let normalized = normalize_string("Maß");
+        assert_eq!(normalized, "MASS");
+        let start = normalized.find('S').unwrap();
+        let end = start + 1;
+        let (before, matched, after) =
+            split_highlight_by_normalized_range("Maß", &normalized, start, end).unwrap();
+        assert_eq!(before, "Ma");
+        assert_eq!(matched, "ß");
+        assert_eq!(after, "");
+    }
+
+    #[test]
+    fn highlight_uses_normalized_query_span_for_diacritics() {
+        let text = "café";
+        let normalized = normalize_string(text);
+        let query = normalize_string("café");
+        assert_eq!(normalized, "CAFE");
+        assert_eq!(query, "CAFE");
+        let start = normalized.find(query.as_str()).unwrap();
+        let end = start + query.len();
+        let (before, matched, after) =
+            split_highlight_by_normalized_range(text, &normalized, start, end).unwrap();
+        assert_eq!(before, "");
+        assert_eq!(matched, "café");
+        assert_eq!(after, "");
     }
 }

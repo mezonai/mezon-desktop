@@ -155,21 +155,20 @@ impl Render for LanguagePage {
         let theme = cx.theme();
         let settings = self.settings.clone();
 
-        v_flex()
-            .gap_8()
-            .child(
-                v_flex()
-                    .rounded_lg()
-                    .bg(theme.bg_primary)
-                    .p_4()
-                    .gap_4()
-                    .child(
-                        Label::new(mezon_i18n::t(&locale, "setting.language.description"))
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text_primary),
-                    )
-                    .child(v_flex().gap_3().children(LANGUAGES.iter().map(
+        v_flex().gap_8().child(
+            v_flex()
+                .rounded_lg()
+                .bg(theme.bg_primary)
+                .p_4()
+                .gap_4()
+                .child(
+                    Label::new(mezon_i18n::t(&locale, "setting.language.description"))
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_primary),
+                )
+                .child(
+                    v_flex().gap_3().children(LANGUAGES.iter().map(
                         |&(value, flag, name_key, contributor)| {
                             language_row(
                                 value,
@@ -181,7 +180,8 @@ impl Render for LanguagePage {
                                 settings.clone(),
                             )
                         },
-                    ))),
-            )
+                    )),
+                ),
+        )
     }
 }

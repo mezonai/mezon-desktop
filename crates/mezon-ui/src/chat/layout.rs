@@ -4,9 +4,8 @@ use gpui::{
 };
 use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, DirectChannel,
-    DirectKind, DirectMessageStore, GroupMembersStore, InboxStore, MessagesStore,
-    PinnedMessagesStore, Settings, ThreadsEvent, ThreadsStore, VoiceMember, VoiceModerationError,
-    VoiceStore,
+    DirectKind, DirectMessageStore, GroupMembersStore, InboxStore, MessagesStore, Settings,
+    ThreadsEvent, ThreadsStore, VoiceMember, VoiceModerationError, VoiceStore,
 };
 use ui::PopoverMenuHandle;
 use ui::utils::ROUNDED_BORDER_WINDOW;
@@ -341,9 +340,9 @@ impl ChatLayout {
             } => self.sync_channel_route(clan_id, channel_id, cx),
             Route::Thread {
                 clan_id,
-                thread_id,
+                channel_id,
                 ..
-            } => self.sync_channel_route(clan_id, thread_id, cx),
+            } => self.sync_channel_route(clan_id, channel_id, cx),
             Route::Canvas {
                 clan_id,
                 channel_id,
@@ -354,8 +353,8 @@ impl ChatLayout {
                 message_type,
             } => {
                 self.pending_channel_id = None;
-                let already_current = self.direct_store.read(cx).current().map(|(id, _)| id)
-                    == Some(direct_id);
+                let already_current =
+                    self.direct_store.read(cx).current().map(|(id, _)| id) == Some(direct_id);
                 if !already_current {
                     self.channel_list.update(cx, |channel_list, cx| {
                         channel_list.record_previous_channel(ClanId(0), direct_id, cx);

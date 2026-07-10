@@ -129,11 +129,14 @@ fn is_dm_tab_conversation(item: &PaletteItem) -> bool {
             item.dm_kind,
             Some(DirectKind::Dm | DirectKind::Group) | None
         ),
-        PaletteItemKind::Channel => item.clan_id.is_none_or(|id| id.is_zero()) && matches!(
-            item.channel_type,
-            Some(ChannelType::Unknown(DM_GROUP_CHANNEL_TYPE))
-                | Some(ChannelType::Unknown(DM_PEER_CHANNEL_TYPE))
-        ),
+        PaletteItemKind::Channel => {
+            item.clan_id.is_none_or(|id| id.is_zero())
+                && matches!(
+                    item.channel_type,
+                    Some(ChannelType::Unknown(DM_GROUP_CHANNEL_TYPE))
+                        | Some(ChannelType::Unknown(DM_PEER_CHANNEL_TYPE))
+                )
+        }
         PaletteItemKind::Member => false,
     }
 }
@@ -161,11 +164,13 @@ fn is_unread_list_item(item: &PaletteItem, context: PaletteBrowseContext) -> boo
     }
     match context {
         PaletteBrowseContext::Direct => is_dm_tab_conversation(item),
-        PaletteBrowseContext::Clan(_) => matches!(item.kind, PaletteItemKind::Channel)
-            && matches!(
-                item.channel_type,
-                Some(ChannelType::Text) | Some(ChannelType::Thread)
-            ),
+        PaletteBrowseContext::Clan(_) => {
+            matches!(item.kind, PaletteItemKind::Channel)
+                && matches!(
+                    item.channel_type,
+                    Some(ChannelType::Text) | Some(ChannelType::Thread)
+                )
+        }
     }
 }
 
@@ -185,7 +190,7 @@ pub fn render_section_header(theme: &Theme, label: &SharedString) -> AnyElement 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command_palette::items::{normalize_search_string, PaletteItemKind};
+    use crate::command_palette::items::{PaletteItemKind, normalize_search_string};
     use gpui::SharedString;
     use mezon_store::ClanId;
 
@@ -209,6 +214,7 @@ mod tests {
             clan_id: Some(ClanId(1)),
             user_id: None,
             channel_type: Some(channel_type),
+            private: false,
             dm_kind: None,
             dm_channel_type: None,
             filter_prioritize: normalize_search_string(label),
@@ -235,7 +241,14 @@ mod tests {
         ];
         let sorted = vec![0, 1, 2];
         let previous = vec![ChannelId(1)];
-        let rows = build_display_rows(&items, &sorted, "", &previous, Some(PaletteBrowseContext::Clan(ClanId(1))), &labels());
+        let rows = build_display_rows(
+            &items,
+            &sorted,
+            "",
+            &previous,
+            Some(PaletteBrowseContext::Clan(ClanId(1))),
+            &labels(),
+        );
         assert_eq!(rows.len(), 6);
         assert!(matches!(rows[0], PaletteDisplayRow::SectionHeader(_)));
         assert!(matches!(rows[1], PaletteDisplayRow::Item { item_index: 0 }));

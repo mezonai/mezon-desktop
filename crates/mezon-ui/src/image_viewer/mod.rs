@@ -6,11 +6,11 @@ use gpui::Size as GpuiSize;
 use gpui::http_client::HttpClient;
 use gpui::{
     App, AppContext, BackgroundExecutor, Bounds, Context, Corners, Entity, FocusHandle, Focusable,
-    FontWeight,
-    ImageCache, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels,
-    Point, Render, RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString, SharedUri,
-    Subscription, UniformListScrollHandle, Window, WindowBounds, WindowHandle, WindowKind,
-    WindowOptions, canvas, div, img, point, prelude::*, px, relative, size, uniform_list,
+    FontWeight, ImageCache, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit,
+    Pixels, Point, Render, RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString,
+    SharedUri, Subscription, UniformListScrollHandle, Window, WindowBounds, WindowHandle,
+    WindowKind, WindowOptions, canvas, div, img, point, prelude::*, px, relative, size,
+    uniform_list,
 };
 use mezon_store::{
     AppConfig, ChannelAttachment, ChannelId, ChannelList, ClanId, DirectMessageStore, GalleryStore,

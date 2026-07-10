@@ -2,6 +2,7 @@ use crate::ids::{ChannelId, ClanId, MessageId, UserId};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
 use mezon_client::transport::{ApiCategoryDesc, ApiChannelDesc};
@@ -13,6 +14,8 @@ use crate::messages::MessagesStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 pub const FAVOR_CATE_ID: &str = "favorCate";
+
+const PREVIOUS_CHANNELS_PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChannelType {
@@ -164,6 +167,7 @@ pub struct ChannelList {
     show_empty_categories: HashSet<ClanId>,
     channel_index: RefCell<ChannelLocationCache>,
     reset_generation: u64,
+    _previous_channels_persist: Task<()>,
     _clan_sub: Subscription,
     _conn_watch: Task<()>,
 }
@@ -297,12 +301,7 @@ impl ChannelList {
         cx.spawn(async move |this, cx| {
             let (collapsed, previous_channels) = cx
                 .background_executor()
-                .spawn(async {
-                    (
-                        load_collapse_state(),
-                        load_previous_channels(),
-                    )
-                })
+                .spawn(async { (load_collapse_state(), load_previous_channels()) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let mut changed = false;
@@ -338,6 +337,7 @@ impl ChannelList {
             show_empty_categories: HashSet::new(),
             channel_index: RefCell::new(ChannelLocationCache::default()),
             reset_generation: 0,
+            _previous_channels_persist: Task::ready(()),
             _clan_sub: clan_sub,
             _conn_watch: conn_watch,
         }
@@ -1339,10 +1339,27 @@ impl ChannelList {
         entry.retain(|id| *id != channel_id);
         entry.insert(0, channel_id);
         entry.truncate(5);
-        self.persist_previous_channels(cx);
+        self.schedule_persist_previous_channels(cx);
     }
 
-    fn persist_previous_channels(&self, cx: &mut Context<Self>) {
+    fn schedule_persist_previous_channels(&mut self, cx: &mut Context<Self>) {
+        self._previous_channels_persist = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(PREVIOUS_CHANNELS_PERSIST_DEBOUNCE)
+                .await;
+            let snapshot = this
+                .update(cx, |this, _cx| this.previous_channels.clone())
+                .ok();
+            if let Some(snapshot) = snapshot {
+                cx.background_executor()
+                    .spawn(async move { save_previous_channels(snapshot) })
+                    .await;
+            }
+        });
+    }
+
+    fn persist_previous_channels(&mut self, cx: &mut Context<Self>) {
+        self._previous_channels_persist = Task::ready(());
         let snapshot = self.previous_channels.clone();
         cx.background_executor()
             .spawn(async move { save_previous_channels(snapshot) })
@@ -1990,14 +2007,10 @@ fn save_collapse_state(pairs: Vec<(String, String)>) {
 
 fn load_previous_channels() -> HashMap<ClanId, Vec<ChannelId>> {
     let path = previous_channels_path();
-    let data = match std::fs::read_to_string(&path) {
-        Ok(d) => d,
-        Err(_) => return HashMap::new(),
+    let Ok(data) = std::fs::read_to_string(&path) else {
+        return HashMap::new();
     };
-    match serde_json::from_str(&data) {
-        Ok(v) => v,
-        Err(_) => HashMap::new(),
-    }
+    serde_json::from_str(&data).unwrap_or_default()
 }
 
 fn save_previous_channels(channels: HashMap<ClanId, Vec<ChannelId>>) {
@@ -2038,17 +2051,20 @@ mod tests {
     #[test]
     fn previous_channels_roundtrip() {
         let mut channels: HashMap<ClanId, Vec<ChannelId>> = HashMap::new();
-        channels.insert(
-            ClanId(1),
-            vec![ChannelId(10), ChannelId(20), ChannelId(30)],
-        );
+        channels.insert(ClanId(1), vec![ChannelId(10), ChannelId(20), ChannelId(30)]);
         channels.insert(ClanId(0), vec![ChannelId(99)]);
 
         let json = serde_json::to_string(&channels).unwrap();
         let restored: HashMap<ClanId, Vec<ChannelId>> = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(restored.get(&ClanId(1)).map(Vec::as_slice), Some(&[ChannelId(10), ChannelId(20), ChannelId(30)][..]));
-        assert_eq!(restored.get(&ClanId(0)).map(Vec::as_slice), Some(&[ChannelId(99)][..]));
+        assert_eq!(
+            restored.get(&ClanId(1)).map(Vec::as_slice),
+            Some(&[ChannelId(10), ChannelId(20), ChannelId(30)][..])
+        );
+        assert_eq!(
+            restored.get(&ClanId(0)).map(Vec::as_slice),
+            Some(&[ChannelId(99)][..])
+        );
     }
 
     #[test]

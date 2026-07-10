@@ -25,15 +25,15 @@ pub use gallery::GalleryModal;
 pub use image_viewer::{OpenViewerRequest, open_image_viewer};
 pub use router::{Route, Router};
 pub use settings::SettingsScreen;
-pub use window_layout::{
-    MAIN_WINDOW_DEFAULT_HEIGHT, MAIN_WINDOW_DEFAULT_WIDTH, MAIN_WINDOW_MIN_HEIGHT,
-    MAIN_WINDOW_MIN_WIDTH,
-};
 pub use sidebar::channel_sidebar::ChannelSidebar;
 pub use sidebar::clan_sidebar::ClanSidebar;
 pub use sidebar::direct_sidebar::DirectSidebar;
 pub use theme::Theme;
 pub use theme::tokens::ThemeTokens;
+pub use window_layout::{
+    MAIN_WINDOW_DEFAULT_HEIGHT, MAIN_WINDOW_DEFAULT_WIDTH, MAIN_WINDOW_MIN_HEIGHT,
+    MAIN_WINDOW_MIN_WIDTH,
+};
 
 pub(crate) const SHOW_UNREAD_BADGE_COUNT: bool = true;
 
@@ -78,10 +78,11 @@ pub fn init(cx: &mut gpui::App) {
     )]);
     #[cfg(debug_assertions)]
     cx.bind_keys([gpui::KeyBinding::new("cmd-alt-i", ToggleInspector, None)]);
-    cx.bind_keys([
-        gpui::KeyBinding::new("secondary-k", OpenCommandPalette, None),
-        gpui::KeyBinding::new("ctrl-k", OpenCommandPalette, None),
-    ]);
+    cx.bind_keys([gpui::KeyBinding::new(
+        "secondary-k",
+        OpenCommandPalette,
+        None,
+    )]);
     cx.on_action(|_: &OpenCommandPalette, cx: &mut gpui::App| {
         command_palette::CommandPaletteModal::try_toggle_authenticated(cx);
     });

@@ -18,7 +18,9 @@ pub fn filter_and_sort_indices(items: &[PaletteItem], raw_query: &str) -> Vec<us
         let mut indices: Vec<usize> = items
             .iter()
             .enumerate()
-            .filter(|(_, item)| item.kind == PaletteItemKind::Member && item.matches_search(&search))
+            .filter(|(_, item)| {
+                item.kind == PaletteItemKind::Member && item.matches_search(&search)
+            })
             .map(|(index, _)| index)
             .collect();
         sort_indices(items, &mut indices, raw_query);
@@ -58,21 +60,21 @@ fn sort_indices(items: &[PaletteItem], indices: &mut [usize], raw_query: &str) {
     }
 
     if raw_query.starts_with('#') {
-        let search = raw_query.get(1..).unwrap_or_default();
-        indices.sort_by(|&left, &right| compare_items(&items[left], &items[right], search, false));
+        let search = normalize_search_string(raw_query.get(1..).unwrap_or_default());
+        indices.sort_by(|&left, &right| compare_items(&items[left], &items[right], &search, false));
         return;
     }
 
-    indices.sort_by(|&left, &right| compare_items(&items[left], &items[right], raw_query, true));
+    let search = normalize_search_string(raw_query);
+    indices.sort_by(|&left, &right| compare_items(&items[left], &items[right], &search, true));
 }
 
 fn compare_items(
     left: &PaletteItem,
     right: &PaletteItem,
-    search_text: &str,
+    search: &str,
     use_name: bool,
 ) -> Ordering {
-    let search = normalize_search_string(search_text);
     let left_prioritize = left.filter_prioritize.as_str();
     let right_prioritize = right.filter_prioritize.as_str();
 
@@ -86,8 +88,8 @@ fn compare_items(
         };
     }
 
-    let left_index = left_prioritize.find(&search);
-    let right_index = right_prioritize.find(&search);
+    let left_index = left_prioritize.find(search);
+    let right_index = right_prioritize.find(search);
 
     if use_name {
         let left_name = left.filter_name.as_str();
@@ -103,8 +105,8 @@ fn compare_items(
             };
         }
 
-        let left_name_index = left_name.find(&search);
-        let right_name_index = right_name.find(&search);
+        let left_name_index = left_name.find(search);
+        let right_name_index = right_name.find(search);
 
         match (left_index, right_index) {
             (None, None) => return cmp_index(left_name_index, right_name_index),
@@ -137,7 +139,7 @@ fn cmp_index(left: Option<usize>, right: Option<usize>) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command_palette::items::{normalize_search_string, PaletteItemKind};
+    use crate::command_palette::items::{PaletteItemKind, normalize_search_string};
     use gpui::SharedString;
 
     fn item(
@@ -160,6 +162,7 @@ mod tests {
             clan_id: None,
             user_id: None,
             channel_type: None,
+            private: false,
             dm_kind: None,
             dm_channel_type: None,
             filter_prioritize: normalize_search_string(label),
@@ -172,14 +175,7 @@ mod tests {
     #[test]
     fn empty_query_returns_all_sorted_by_timestamp() {
         let items = vec![
-            item(
-                PaletteItemKind::Channel,
-                "general",
-                "general",
-                "",
-                "",
-                10,
-            ),
+            item(PaletteItemKind::Channel, "general", "general", "", "", 10),
             item(PaletteItemKind::Direct, "alice", "alice", "", "", 30),
         ];
         let indices = filter_and_sort_indices(&items, "");
@@ -189,14 +185,7 @@ mod tests {
     #[test]
     fn at_prefix_filters_members_only() {
         let items = vec![
-            item(
-                PaletteItemKind::Channel,
-                "general",
-                "general",
-                "",
-                "",
-                10,
-            ),
+            item(PaletteItemKind::Channel, "general", "general", "", "", 10),
             item(
                 PaletteItemKind::Member,
                 "Alice",
@@ -213,15 +202,15 @@ mod tests {
     #[test]
     fn hash_prefix_filters_channels_only() {
         let items = vec![
+            item(PaletteItemKind::Channel, "general", "general", "", "", 10),
             item(
-                PaletteItemKind::Channel,
-                "general",
-                "general",
+                PaletteItemKind::Direct,
+                "general-dm",
+                "general-dm",
                 "",
                 "",
-                10,
+                20,
             ),
-            item(PaletteItemKind::Direct, "general-dm", "general-dm", "", "", 20),
         ];
         let indices = filter_and_sort_indices(&items, "#gen");
         assert_eq!(indices, vec![0]);
@@ -267,6 +256,9 @@ mod tests {
 
     #[test]
     fn normalize_search_string_replaces_separators() {
-        assert_eq!(normalize_search_string("foo-bar_baz+qux"), "FOO BAR BAZ QUX");
+        assert_eq!(
+            normalize_search_string("foo-bar_baz+qux"),
+            "FOO BAR BAZ QUX"
+        );
     }
 }

@@ -177,8 +177,8 @@ pub fn resolve_attachment_uploader(
     } else {
         ProfileContext::Clan(clan_id)
     };
-    if let Some(profile) = resolve_user_profile(uid, context, cx) {
-        if !profile.display_name.is_empty() {
+    if let Some(profile) = resolve_user_profile(uid, context, cx)
+        && !profile.display_name.is_empty() {
             let (avatar, avatar_raw) = uploader_urls(&profile.avatar_url, cfg);
             return UploaderInfo {
                 name: profile.display_name,
@@ -186,12 +186,11 @@ pub fn resolve_attachment_uploader(
                 avatar_raw,
             };
         }
-    }
     if let Some(info) = uploader_from_message(channel_id, message_id, cfg, cx) {
         return info;
     }
-    if clan_id.0 != 0 {
-        if let Some(member) =
+    if clan_id.0 != 0
+        && let Some(member) =
             ClanMembersStore::try_global(cx).and_then(|store| store.read(cx).member(clan_id, uid))
         {
             let name = member.name().to_string();
@@ -204,7 +203,6 @@ pub fn resolve_attachment_uploader(
                 };
             }
         }
-    }
     let is_self = BadgeService::global(cx)
         .read(cx)
         .current_user_id(cx)

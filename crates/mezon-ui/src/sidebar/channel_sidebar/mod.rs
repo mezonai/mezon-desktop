@@ -1043,10 +1043,9 @@ fn render_sidebar_item(
                 }
             });
 
-            channel_col.interactivity().on_click(on_channel_click(
-                ch_id,
-                clan_id_inner,
-            ));
+            channel_col
+                .interactivity()
+                .on_click(on_channel_click(ch_id, clan_id_inner));
 
             channel_col.into_any_element()
         }
