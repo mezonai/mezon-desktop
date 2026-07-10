@@ -928,7 +928,14 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
                             &content.cvtt,
                         ));
                     }
-                    "lk_ogp" => {}
+                    "lk_ogp" => {
+                        let url = tok.url.clone().unwrap_or_else(|| inner.clone());
+                        spans.push(MessageSpan::Link {
+                            text: inner.into(),
+                            url,
+                            kind: LinkKind::Plain,
+                        });
+                    }
                     _ => spans.push(MessageSpan::Text(inner.into())),
                 }
             }

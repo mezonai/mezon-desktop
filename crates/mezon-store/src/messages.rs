@@ -3898,31 +3898,108 @@ fn map_poll_detail(
     }
 }
 
-fn build_ogp_preview(
+pub(crate) fn build_ogp_preview(
     content: &ApiMessageContent,
     cfg: Option<&AppConfig>,
 ) -> Option<Box<OgpPreview>> {
     let token = content.mk.iter().find(|tok| {
         tok.kind.as_deref() == Some("lk_ogp")
-            && tok
+            && !tok
                 .url
                 .as_deref()
-                .is_some_and(|url| !url.to_ascii_lowercase().contains("/invite/"))
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .contains("/invite/")
     })?;
-    let url = token.url.clone().unwrap_or_default();
+    let mut url = token
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .unwrap_or("")
+        .to_string();
     if url.is_empty() {
+        url = first_content_link_url(content).unwrap_or_default();
+    }
+    if url.is_empty() {
+        let s = token.s.unwrap_or(0);
+        let e = token.e.unwrap_or(0);
+        if e > s {
+            url = utf16_slice(&content.t, s, e);
+        }
+    }
+    let title = token.title.clone().unwrap_or_default();
+    let description = token.description.clone().unwrap_or_default();
+    let image = token.image.as_deref().unwrap_or_default();
+    if url.is_empty() && title.is_empty() && description.is_empty() && image.is_empty() {
         return None;
     }
-    let image = token.image.as_deref().unwrap_or_default();
     let image_proxied = cfg
         .map(|c| c.imgproxy_url(image, 350, 200, "fit"))
         .unwrap_or_else(|| image.to_string());
     Some(Box::new(OgpPreview {
         url,
-        title: token.title.clone().unwrap_or_default().into(),
-        description: token.description.clone().unwrap_or_default().into(),
+        title: title.into(),
+        description: description.into(),
         image_proxied: image_proxied.into(),
     }))
+}
+
+fn utf16_slice(text: &str, start: i64, end: i64) -> String {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let total = units.len() as i64;
+    let s = start.clamp(0, total) as usize;
+    let e = end.clamp(0, total) as usize;
+    if e <= s {
+        return String::new();
+    }
+    String::from_utf16_lossy(&units[s..e])
+}
+
+fn first_content_link_url(content: &ApiMessageContent) -> Option<String> {
+    let resolve = |tok: &mezon_client::transport::ContentToken| -> Option<String> {
+        if let Some(url) = tok
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+        {
+            return Some(url.to_string());
+        }
+        let s = tok.s.unwrap_or(0);
+        let e = tok.e.unwrap_or(0);
+        if e > s {
+            let sliced = utf16_slice(&content.t, s, e);
+            if !sliced.is_empty() {
+                return Some(sliced);
+            }
+        }
+        None
+    };
+    for tok in &content.mk {
+        if matches!(
+            tok.kind.as_deref(),
+            Some("lk" | "vk" | "lk_yt" | "lk_fb" | "lk_tt")
+        ) && let Some(url) = resolve(tok)
+        {
+            return Some(url);
+        }
+    }
+    for tok in content
+        .lk
+        .iter()
+        .chain(content.vk.iter())
+        .chain(content.lky.iter())
+    {
+        if let Some(url) = resolve(tok) {
+            return Some(url);
+        }
+    }
+    detect_markdown(&content.t)
+        .into_iter()
+        .find(|tok| tok.kind == "lk")
+        .map(|tok| utf16_slice(&content.t, i64::from(tok.s), i64::from(tok.e)))
+        .filter(|url| !url.is_empty())
 }
 
 fn proxy_image(url: &str, width: u32, height: u32, cfg: Option<&AppConfig>) -> String {
@@ -4007,7 +4084,7 @@ fn build_call_log(content: &ApiMessageContent) -> Option<CallLog> {
     })
 }
 
-fn build_embeds(content: &ApiMessageContent, cfg: Option<&AppConfig>) -> Arc<[Embed]> {
+pub(crate) fn build_embeds(content: &ApiMessageContent, cfg: Option<&AppConfig>) -> Arc<[Embed]> {
     if content.embed.is_empty() {
         return Vec::new().into();
     }

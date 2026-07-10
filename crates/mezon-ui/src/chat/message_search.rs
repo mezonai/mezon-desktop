@@ -4,16 +4,17 @@ use std::rc::Rc;
 
 use chrono::Local;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, FontWeight, Global, HighlightStyle,
-    ListAlignment, ListState, MouseButton, MouseDownEvent, ObjectFit, Render, SharedString,
+    App, Context, Entity, FocusHandle, Focusable, FontWeight, Global, HighlightStyle, ListAlignment,
+    ListOffset, ListState, MouseButton, MouseDownEvent, ObjectFit, Render, SharedString,
     StyledText, Transformation, WeakEntity, Window, deferred, div, img, list, prelude::*, px,
     radians,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanId, ClanMembersStore, MessageSearchStore,
-    MessagesStore, RolesStore, SearchDropdownMode, SearchHit, SearchPageToken, autocomplete_needle,
-    has_filter_options, search_content_highlight_terms, search_dropdown_mode, search_page_count,
-    search_page_numbers, should_show_search_dropdown,
+    ChannelId, ChannelList, ChannelType, ClanId, ClanMembersStore, MessageSearchStore, MessageSpan,
+    MessagesStore, RichLayout, RichRunKind, RolesStore, SearchDropdownMode, SearchHit,
+    SearchPageToken, autocomplete_needle, has_filter_options, resolve_search_hit_ogp,
+    search_content_highlight_terms, search_dropdown_mode, search_page_count, search_page_numbers,
+    should_show_search_dropdown,
 };
 use ui::ScrollAxes;
 use ui::Scrollbars;
@@ -21,7 +22,9 @@ use ui::WithScrollbar;
 
 use crate::chat::layout::ChatLayout;
 use crate::chat::member_list::{MentionMemberRaw, mention_member_pool};
-use crate::chat::message::{DEFAULT_DISPLAY_NAME_COLOR, format_message_time};
+use crate::chat::message::{
+    DEFAULT_DISPLAY_NAME_COLOR, format_message_time, open_message_link, render_ogp_preview,
+};
 use crate::components::primitives::{Icon, IconName, Input, InputState, Sizable, Size, Spinner};
 use crate::image_cache::{
     LruImageCache, MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
@@ -33,14 +36,13 @@ pub const MESSAGE_SEARCH_PANEL_WIDTH: f32 = 420.;
 pub const SEARCH_BAR_WIDTH_COLLAPSED: f32 = 160.;
 pub const SEARCH_BAR_WIDTH_EXPANDED: f32 = 320.;
 pub const SEARCH_OPTIONS_WIDTH: f32 = 400.;
-const SEARCH_VIRTUALIZE_THRESHOLD: usize = 30;
-const SEARCH_LIST_OVERDRAW: f32 = 120.;
 const DEFAULT_ROLE_COLOR: u32 = 0x99_aab5;
 
 const SEARCH_PREFIX_OPTIONS: &[&str] = &[">", "~", "&"];
 
 const KEY_CONTEXT: &str = "MessageSearchPanel";
 const SEARCH_DROPDOWN_KEY_CONTEXT: &str = "MessageSearchDropdown";
+const SEARCH_LIST_OVERDRAW: f32 = 200.;
 
 struct GlobalChatLayout(WeakEntity<ChatLayout>);
 impl Global for GlobalChatLayout {}
@@ -162,7 +164,6 @@ pub struct MessageSearchPanel {
     clan_id: ClanId,
     is_direct: bool,
     locale: SharedString,
-    scroll: gpui::ScrollHandle,
     list_state: ListState,
     last_results_page: i32,
     avatar_image_cache: Entity<LruImageCache>,
@@ -184,6 +185,16 @@ impl MessageSearchPanel {
         locale: SharedString,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.observe(&MessageSearchStore::global(cx), |this, _, cx| {
+            this.list_state.remeasure();
+            cx.notify();
+        })
+        .detach();
+        cx.observe(&MessagesStore::global(cx), |this, _, cx| {
+            this.list_state.remeasure();
+            cx.notify();
+        })
+        .detach();
         Self {
             focus_handle: cx.focus_handle(),
             layout,
@@ -191,7 +202,6 @@ impl MessageSearchPanel {
             clan_id,
             is_direct,
             locale,
-            scroll: gpui::ScrollHandle::new(),
             list_state: ListState::new(0, ListAlignment::Top, px(SEARCH_LIST_OVERDRAW))
                 .measure_all(),
             last_results_page: 0,
@@ -225,8 +235,7 @@ impl MessageSearchPanel {
     fn set_results_page(&mut self, page: i32, cx: &mut Context<Self>) {
         if self.last_results_page != page {
             self.last_results_page = page;
-            self.scroll.set_offset(gpui::point(px(0.), px(0.)));
-            self.list_state.scroll_to(gpui::ListOffset {
+            self.list_state.scroll_to(ListOffset {
                 item_ix: 0,
                 offset_in_item: px(0.),
             });
@@ -346,122 +355,73 @@ impl Render for MessageSearchPanel {
             let current_page = state.current_page;
             let panel = cx.weak_entity();
             let now = Local::now();
-            let highlight_terms = search_content_highlight_terms(&state.query);
-            let highlight_terms = Rc::new(highlight_terms);
-            let use_virtual_list = flat.len() > SEARCH_VIRTUALIZE_THRESHOLD;
+            let highlight_terms = Rc::new(search_content_highlight_terms(&state.query));
+            let avatar_cache = self.avatar_image_cache.clone();
+            let attachment_cache = self.attachment_image_cache.clone();
+            let pagination = (page_count > 1)
+                .then(|| render_search_pagination(&theme, current_page, page_count, panel));
             if self.list_state.item_count() != flat.len() {
                 self.list_state.reset(flat.len());
-            } else if use_virtual_list {
-                self.list_state.remeasure();
             }
             let list_state = self.list_state.clone();
             let flat_rows = Rc::new(flat);
-            let avatar_cache = self.avatar_image_cache.clone();
-            let attachment_cache = self.attachment_image_cache.clone();
-            let scroll = self.scroll.clone();
-            let pagination = (page_count > 1)
-                .then(|| render_search_pagination(&theme, current_page, page_count, panel));
-            let scroll_area = if use_virtual_list {
-                let theme_for_list = theme.clone();
-                let locale_for_list = locale.clone();
-                let entity_for_list = entity.clone();
-                let highlight_for_list = highlight_terms.clone();
-                let is_direct_for_list = is_direct;
-                let avatar_cache_for_list = avatar_cache.clone();
-                let attachment_cache_for_list = attachment_cache.clone();
-                div()
-                    .id(format!("message-search-results-{current_page}"))
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&scroll)
-                    .custom_scrollbars(
-                        Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(&scroll),
-                        window,
-                        cx,
-                    )
-                    .px_4()
-                    .pt_4()
-                    .pb_2()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div().flex_1().min_h_0().child(
-                            list(list_state.clone(), move |ix, _window, cx| {
-                                let Some(row) = flat_rows.get(ix) else {
-                                    return div().into_any_element();
-                                };
-                                render_search_row(
-                                    &theme_for_list,
-                                    &row.hit,
-                                    show_channel_label,
-                                    row.channel_label.as_ref(),
-                                    &locale_for_list,
-                                    entity_for_list.clone(),
-                                    row.show_group_header,
-                                    now,
-                                    &highlight_for_list,
-                                    is_direct_for_list,
-                                    avatar_cache_for_list.clone(),
-                                    attachment_cache_for_list.clone(),
-                                    cx,
-                                )
-                            })
-                            .size_full(),
-                        ),
-                    )
-                    .children(pagination)
-                    .into_any_element()
-            } else {
-                let rows = flat_rows
-                    .iter()
-                    .map(|row| {
-                        render_search_row(
-                            &theme,
-                            &row.hit,
-                            show_channel_label,
-                            row.channel_label.as_ref(),
-                            &locale,
-                            entity.clone(),
-                            row.show_group_header,
-                            now,
-                            &highlight_terms,
-                            is_direct,
-                            avatar_cache.clone(),
-                            attachment_cache.clone(),
-                            cx,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                div()
-                    .id(format!("message-search-results-{current_page}"))
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&scroll)
-                    .custom_scrollbars(
-                        Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(&scroll),
-                        window,
-                        cx,
-                    )
-                    .px_4()
-                    .pt_4()
-                    .pb_2()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .w_full()
-                    .children(rows)
-                    .children(pagination)
-                    .into_any_element()
-            };
+            let theme_for_list = theme.clone();
+            let locale_for_list = locale.clone();
+            let entity_for_list = entity.clone();
+            let row_count = flat_rows.len();
             div()
                 .flex_1()
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .child(scroll_area)
+                .child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .overflow_hidden()
+                        .child(
+                            list(list_state.clone(), move |ix, _window, cx| {
+                                let Some(row) = flat_rows.get(ix) else {
+                                    return div().into_any_element();
+                                };
+                                div()
+                                    .w_full()
+                                    .px_4()
+                                    .pt(if ix == 0 { px(16.) } else { px(0.) })
+                                    .pb(if ix + 1 == row_count {
+                                        px(8.)
+                                    } else {
+                                        px(0.)
+                                    })
+                                    .child(render_search_row(
+                                        &theme_for_list,
+                                        &row.hit,
+                                        show_channel_label,
+                                        row.channel_label.as_ref(),
+                                        &locale_for_list,
+                                        entity_for_list.clone(),
+                                        row.show_group_header,
+                                        now,
+                                        &highlight_terms,
+                                        is_direct,
+                                        avatar_cache.clone(),
+                                        attachment_cache.clone(),
+                                        cx,
+                                    ))
+                                    .into_any_element()
+                            })
+                            .size_full(),
+                        )
+                        .custom_scrollbars(
+                            Scrollbars::new(ScrollAxes::Vertical)
+                                .tracked_scroll_handle(&list_state),
+                            window,
+                            cx,
+                        ),
+                )
+                .children(pagination)
                 .into_any_element()
         };
 
@@ -534,20 +494,15 @@ fn render_search_pagination(
         .items_center()
         .justify_center()
         .gap_2()
-        .child(render_pagination_nav_button(
-            theme,
-            true,
-            prev_disabled,
-            {
-                let panel = panel.clone();
-                let page = current_page - 1;
-                move |_, _, cx| {
-                    if let Some(panel) = panel.upgrade() {
-                        panel.update(cx, |panel, cx| panel.go_to_page(page, cx));
-                    }
+        .child(render_pagination_nav_button(theme, true, prev_disabled, {
+            let panel = panel.clone();
+            let page = current_page - 1;
+            move |_, _, cx| {
+                if let Some(panel) = panel.upgrade() {
+                    panel.update(cx, |panel, cx| panel.go_to_page(page, cx));
                 }
-            },
-        ))
+            }
+        }))
         .child(
             div()
                 .flex()
@@ -577,20 +532,15 @@ fn render_search_pagination(
                     }
                 })),
         )
-        .child(render_pagination_nav_button(
-            theme,
-            false,
-            next_disabled,
-            {
-                let panel = panel.clone();
-                let page = current_page + 1;
-                move |_, _, cx| {
-                    if let Some(panel) = panel.upgrade() {
-                        panel.update(cx, |panel, cx| panel.go_to_page(page, cx));
-                    }
+        .child(render_pagination_nav_button(theme, false, next_disabled, {
+            let panel = panel.clone();
+            let page = current_page + 1;
+            move |_, _, cx| {
+                if let Some(panel) = panel.upgrade() {
+                    panel.update(cx, |panel, cx| panel.go_to_page(page, cx));
                 }
-            },
-        ))
+            }
+        }))
         .into_any_element()
 }
 
@@ -734,7 +684,14 @@ fn render_search_row(
     let entity_for_jump = entity.clone();
     let jump_label = mezon_i18n::t(locale, "searchMessageChannel.jump");
     let time_label = format_message_time(&hit.time_hhmm, hit.local_date, locale, now);
-    let has_text = !hit.content_preview.is_empty();
+    let has_text = !hit.content_preview.is_empty()
+        || hit
+            .rich_layout
+            .as_ref()
+            .is_some_and(|layout| !layout.text.is_empty())
+        || hit.spans.iter().any(|span| {
+            !matches!(span, MessageSpan::CodeBlock { .. })
+        });
     let sender_color = resolve_search_sender_color(hit, is_direct, cx);
     let resolved_channel_label = resolve_search_channel_label(hit, channel_label, cx);
     let leading = if hit.avatar_proxied.is_empty() {
@@ -760,22 +717,27 @@ fn render_search_row(
         if image.proxied_src.is_empty() {
             return None;
         }
+        let width = image.display_width.clamp(1., 280.);
+        let height = image.display_height.clamp(1., 200.);
         Some(
             div()
                 .mt_1()
-                .image_cache(attachment_image_cache)
+                .w(px(width))
+                .h(px(height))
+                .max_w_full()
+                .flex_shrink_0()
+                .overflow_hidden()
+                .rounded_md()
+                .image_cache(attachment_image_cache.clone())
                 .child(
                     img(image.proxied_src.clone())
-                        .w(px(image.display_width))
-                        .h(px(image.display_height))
-                        .max_w(px(280.))
-                        .max_h(px(200.))
-                        .rounded_md()
+                        .size_full()
                         .object_fit(ObjectFit::Cover),
                 )
                 .into_any_element(),
         )
     });
+    let ogp = resolve_search_hit_ogp(hit, cx);
 
     let group_header =
         (show_channel_label && show_group_header && resolved_channel_label.is_some()).then(|| {
@@ -798,6 +760,8 @@ fn render_search_row(
                 .relative()
                 .group("message-search-hit")
                 .w_full()
+                .min_w_0()
+                .overflow_hidden()
                 .px(px(5.))
                 .pb_3()
                 .rounded_md()
@@ -842,6 +806,7 @@ fn render_search_row(
                             div()
                                 .flex_1()
                                 .min_w_0()
+                                .overflow_hidden()
                                 .flex()
                                 .flex_col()
                                 .gap_1()
@@ -855,7 +820,7 @@ fn render_search_row(
                                         .child(
                                             div()
                                                 .text_size(px(16.))
-                                                .font_weight(FontWeight::MEDIUM)
+                                                .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(sender_color)
                                                 .child(hit.sender_name.to_string()),
                                         )
@@ -873,16 +838,28 @@ fn render_search_row(
                                 .when(has_text, |el| {
                                     el.child(
                                         div()
+                                            .w_full()
+                                            .min_w_0()
+                                            .overflow_hidden()
                                             .text_size(px(14.))
                                             .text_color(theme.tokens.text_theme_message)
-                                            .line_clamp(3)
-                                            .child(render_highlighted_content(
-                                                hit.content_preview.as_ref(),
+                                            .child(render_search_message_content(
+                                                hit,
                                                 highlight_terms,
                                                 theme,
                                             )),
                                     )
                                 })
+                                .children(ogp.as_ref().and_then(|ogp| {
+                                    let preview = render_ogp_preview(ogp, hit.message_id, theme)?;
+                                    Some(
+                                        div()
+                                            .w_full()
+                                            .image_cache(attachment_image_cache.clone())
+                                            .child(preview)
+                                            .into_any_element(),
+                                    )
+                                }))
                                 .children(image_preview),
                         ),
                 ),
@@ -952,6 +929,237 @@ fn parse_hex_role_color(raw: &str) -> Option<gpui::Rgba> {
         b: (value & 0xff) as f32 / 255.,
         a: 1.,
     })
+}
+
+fn render_search_message_content(
+    hit: &SearchHit,
+    terms: &[String],
+    theme: &Theme,
+) -> gpui::AnyElement {
+    if hit
+        .spans
+        .iter()
+        .any(|span| !matches!(span, MessageSpan::CodeBlock { .. }))
+    {
+        return render_search_spans(&hit.spans, theme);
+    }
+    if let Some(layout) = hit.rich_layout.as_ref() {
+        if !layout.text.is_empty() {
+            return render_rich_search_content(layout, terms, theme);
+        }
+    }
+    if !hit.content_preview.is_empty() {
+        return render_highlighted_content(hit.content_preview.as_ref(), terms, theme);
+    }
+    div().into_any_element()
+}
+
+fn render_search_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
+    let link_color = theme.tokens.mention_color;
+    let mention_bg = theme.tokens.mention_primary;
+    let mention_color = theme.tokens.mention_color;
+    let code_bg = theme.tokens.bg_markdown_code;
+    let mut row = div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_baseline()
+        .gap_x(px(4.));
+    let mut link_index = 0usize;
+    for span in spans {
+        match span {
+            MessageSpan::Text(text) => {
+                for child in search_text_segments(text) {
+                    row = row.child(child);
+                }
+            }
+            MessageSpan::Bold(text) => {
+                row = row.child(
+                    div()
+                        .font_weight(FontWeight::BOLD)
+                        .child(text.to_string()),
+                );
+            }
+            MessageSpan::Code(text) => {
+                row = row.child(
+                    div()
+                        .px_1()
+                        .rounded_sm()
+                        .bg(code_bg)
+                        .child(text.to_string()),
+                );
+            }
+            MessageSpan::Link { text, url, .. } => {
+                let resolved = if url.is_empty() {
+                    text.to_string()
+                } else {
+                    url.clone()
+                };
+                row = row.child(search_link_element(
+                    text.as_ref(),
+                    &resolved,
+                    link_color,
+                    &mut link_index,
+                ));
+            }
+            MessageSpan::Mention { display, .. } | MessageSpan::Hashtag { display, .. } => {
+                row = row.child(
+                    div()
+                        .flex_none()
+                        .px(px(2.))
+                        .rounded_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .bg(mention_bg)
+                        .text_color(mention_color)
+                        .child(display.to_string()),
+                );
+            }
+            MessageSpan::Emoji { name, .. } => {
+                row = row.child(div().child(name.to_string()));
+            }
+            MessageSpan::CodeBlock { text, .. } => {
+                row = row.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .my_1()
+                        .p_2()
+                        .rounded_md()
+                        .bg(code_bg)
+                        .child(text.to_string()),
+                );
+            }
+            MessageSpan::Canvas { title, .. } | MessageSpan::Heading { text: title, .. } => {
+                row = row.child(div().child(title.to_string()));
+            }
+        }
+    }
+    row.into_any_element()
+}
+
+fn search_link_element(
+    text: &str,
+    url: &str,
+    color: gpui::Rgba,
+    link_index: &mut usize,
+) -> gpui::AnyElement {
+    let open_url = url.to_string();
+    let index = *link_index;
+    *link_index += 1;
+    let mut link = div()
+        .id(("search-link", index))
+        .min_w_0()
+        .max_w_full()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .cursor_pointer()
+        .text_color(color)
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+            open_message_link(open_url.clone(), cx);
+        });
+    for segment in split_search_link_segments(text) {
+        link = link.child(segment);
+    }
+    link.into_any_element()
+}
+
+fn split_search_link_segments(text: &str) -> Vec<String> {
+    const MAX_SEGMENT_LEN: usize = 24;
+    let mut parts = Vec::new();
+    let mut buf = String::new();
+    for ch in text.chars() {
+        buf.push(ch);
+        if matches!(
+            ch,
+            '/' | '-' | '_' | '.' | '?' | '&' | '#' | '=' | '@' | ':'
+        ) || buf.chars().count() >= MAX_SEGMENT_LEN
+        {
+            parts.push(std::mem::take(&mut buf));
+        }
+    }
+    if !buf.is_empty() {
+        parts.push(buf);
+    }
+    if parts.is_empty() {
+        parts.push(text.to_string());
+    }
+    parts
+}
+
+fn search_text_segments(text: &str) -> Vec<gpui::AnyElement> {
+    let mut out = Vec::new();
+    let mut first_line = true;
+    for line in text.split('\n') {
+        if !first_line {
+            out.push(div().w_full().h_0().into_any_element());
+        }
+        first_line = false;
+        for word in line.split_whitespace() {
+            out.push(div().child(word.to_string()).into_any_element());
+        }
+    }
+    out
+}
+
+fn render_rich_search_content(
+    layout: &RichLayout,
+    terms: &[String],
+    theme: &Theme,
+) -> gpui::AnyElement {
+    let mention_color: gpui::Hsla = theme.tokens.mention_color.into();
+    let mention_bg: gpui::Hsla = theme.tokens.mention_primary.into();
+    let code_bg: gpui::Hsla = theme.tokens.bg_markdown_code.into();
+    let link_color: gpui::Hsla = theme.tokens.mention_color.into();
+    let search_bg: gpui::Hsla = theme.tokens.bg_item_theme_hover.into();
+    let text = layout.text.clone();
+    let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
+
+    for range in search_highlight_ranges(text.as_ref(), terms) {
+        highlights.push((
+            range,
+            HighlightStyle {
+                background_color: Some(search_bg),
+                color: Some(theme.tokens.text_theme_message.into()),
+                ..Default::default()
+            },
+        ));
+    }
+
+    for run in layout.runs.iter() {
+        let style = match run.kind {
+            RichRunKind::Bold => HighlightStyle {
+                font_weight: Some(FontWeight::BOLD),
+                ..Default::default()
+            },
+            RichRunKind::Code => HighlightStyle {
+                background_color: Some(code_bg),
+                ..Default::default()
+            },
+            RichRunKind::Link => HighlightStyle {
+                color: Some(link_color),
+                underline: Some(gpui::UnderlineStyle {
+                    thickness: px(1.),
+                    color: Some(link_color),
+                    wavy: false,
+                }),
+                ..Default::default()
+            },
+            RichRunKind::Mention | RichRunKind::Hashtag => HighlightStyle {
+                color: Some(mention_color),
+                background_color: Some(mention_bg),
+                ..Default::default()
+            },
+        };
+        highlights.push((run.range.clone(), style));
+    }
+
+    div()
+        .child(StyledText::new(text).with_highlights(highlights))
+        .into_any_element()
 }
 
 fn render_highlighted_content(text: &str, terms: &[String], theme: &Theme) -> gpui::AnyElement {
@@ -1666,8 +1874,7 @@ fn filter_members_for_mentions<'a>(
     for member in members {
         if member.username_lc == needle_lc || member.display_lc == needle_lc {
             exact.push(member);
-        } else if member.username_lc.contains(&needle_lc)
-            || member.display_lc.contains(&needle_lc)
+        } else if member.username_lc.contains(&needle_lc) || member.display_lc.contains(&needle_lc)
         {
             partial.push(member);
         }

@@ -54,7 +54,7 @@ pub use transport::MezonTransport;
 pub use transport::RealtimeEvent;
 pub use transport::{
     ApiCategoryDesc, ApiChannelApp, ApiChannelAttachment, ApiChannelDesc, ApiPinMessage,
-    ApiThreadDesc, ApiVoiceChannelUser, parse_search_attachment_field,
+    ApiThreadDesc, ApiVoiceChannelUser, parse_search_attachment_field, parse_search_mentions_field,
 };
 pub use transport_adapter::TransportAdapter;
 pub use transport_runtime::TransportClient;

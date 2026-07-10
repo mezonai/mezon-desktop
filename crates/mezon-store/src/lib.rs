@@ -82,7 +82,7 @@ pub use message::{
 };
 pub use message_search::{
     ChannelSearchState, MessageSearchEvent, MessageSearchStore, SearchHit, SearchHitImage,
-    search_hit_from_document,
+    enrich_search_results_ogp, resolve_search_hit_ogp, search_hit_from_document,
 };
 pub use messages::*;
 pub use mezon_client::{

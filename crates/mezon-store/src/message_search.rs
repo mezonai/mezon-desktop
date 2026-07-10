@@ -3,17 +3,24 @@ use std::sync::Arc;
 use chrono::NaiveDate;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, SharedString, Task};
 use mezon_client::AppApi;
+use mezon_client::transport::{
+    ApiMessageContent, ContentToken, detect_markdown, enrich_content_tokens,
+    markdown_content_tokens,
+};
 use mezon_client::{
     build_clan_channel_content_search, build_direct_content_search, parse_search_attachment_field,
-    search_page_count,
+    parse_search_mentions_field, search_page_count,
 };
 use mezon_proto::api::SearchMessageDocument;
 
 use crate::AppConfig;
 use crate::cache::KeyedCache;
 use crate::ids::{ChannelId, ClanId, MessageId, UserId};
-use crate::message::MessageAttachment;
+use crate::message::{
+    Embed, MessageAttachment, MessageSpan, OgpPreview, RichLayout, build_rich_layout, parse_spans,
+};
 use crate::message_time::{format_local_time_hhmm, local_datetime};
+use crate::messages::{MessagesStore, build_embeds, build_ogp_preview};
 
 #[derive(Debug, Clone, Default)]
 pub struct ChannelSearchState {
@@ -33,7 +40,7 @@ pub struct SearchHitImage {
     pub display_height: f32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct SearchHit {
     pub message_id: MessageId,
     pub channel_id: ChannelId,
@@ -45,6 +52,10 @@ pub struct SearchHit {
     pub avatar_url: SharedString,
     pub avatar_proxied: SharedString,
     pub content_preview: SharedString,
+    pub spans: Arc<[MessageSpan]>,
+    pub rich_layout: Option<Arc<RichLayout>>,
+    pub ogp: Option<Box<OgpPreview>>,
+    pub embeds: Arc<[Embed]>,
     pub channel_label: SharedString,
     pub create_time_seconds: i64,
     pub time_hhmm: SharedString,
@@ -62,6 +73,7 @@ pub struct MessageSearchStore {
     api: Arc<AppApi>,
     search_generation: u64,
     _search_task: Task<()>,
+    _ogp_hydrate_task: Task<()>,
 }
 
 struct GlobalMessageSearchStore(Entity<MessageSearchStore>);
@@ -76,6 +88,7 @@ impl MessageSearchStore {
             api,
             search_generation: 0,
             _search_task: Task::ready(()),
+            _ogp_hydrate_task: Task::ready(()),
         });
         cx.set_global(GlobalMessageSearchStore(entity.clone()));
         entity
@@ -197,38 +210,128 @@ impl MessageSearchStore {
 
             let _ = this.update(cx, |this, cx| {
                 let cfg = AppConfig::try_global(cx);
-                let Some(state) = this.states.get_mut(&channel_id) else {
+                let missing_ogp = {
+                    let Some(state) = this.states.get_mut(&channel_id) else {
+                        return;
+                    };
+                    if !search_response_matches(state, generation, &query, page) {
+                        if state.generation == generation {
+                            state.is_searching = false;
+                            cx.notify();
+                        }
+                        return;
+                    }
+                    state.is_searching = false;
+                    match result {
+                        Ok(response) => {
+                            state.has_error = false;
+                            state.total = response.total;
+                            state.current_page = page;
+                            state.results = response
+                                .messages
+                                .iter()
+                                .filter_map(|doc| search_hit_from_document(doc, cfg))
+                                .collect();
+                            enrich_search_results_ogp(&mut state.results, cx);
+                            state
+                                .results
+                                .iter()
+                                .filter(|hit| hit.ogp.is_none() && search_hit_may_have_ogp(hit))
+                                .map(|hit| (hit.clan_id, hit.channel_id, hit.message_id))
+                                .collect::<Vec<_>>()
+                        }
+                        Err(err) => {
+                            tracing::warn!("search_message failed: {err}");
+                            state.has_error = true;
+                            state.total = 0;
+                            state.results.clear();
+                            cx.emit(MessageSearchEvent::SearchFailed);
+                            Vec::new()
+                        }
+                    }
+                };
+                cx.notify();
+                if !missing_ogp.is_empty() {
+                    this.hydrate_missing_ogp(channel_id, generation, missing_ogp, cx);
+                }
+            });
+        });
+    }
+
+    fn hydrate_missing_ogp(
+        &mut self,
+        channel_id: ChannelId,
+        generation: u64,
+        missing: Vec<(ClanId, ChannelId, MessageId)>,
+        cx: &mut Context<Self>,
+    ) {
+        let api = self.api.clone();
+        let cfg = AppConfig::try_global(cx).cloned();
+        self._ogp_hydrate_task = cx.spawn(async move |this, cx| {
+            for (clan_id, hit_channel_id, message_id) in missing {
+                let Some(still_needed) = this
+                    .update(cx, |this, _| {
+                        let state = this.states.get(&channel_id)?;
+                        if state.generation != generation {
+                            return None;
+                        }
+                        Some(state.results.iter().any(|hit| {
+                            hit.message_id == message_id && hit.ogp.is_none()
+                        }))
+                    })
+                    .ok()
+                    .flatten()
+                else {
                     return;
                 };
-                if !search_response_matches(state, generation, &query, page) {
-                    if state.generation == generation {
-                        state.is_searching = false;
+                if !still_needed {
+                    continue;
+                }
+                let page = match api
+                    .list_channel_messages(
+                        clan_id.get(),
+                        hit_channel_id.get(),
+                        message_id.get(),
+                        2,
+                        5,
+                    )
+                    .await
+                {
+                    Ok(page) => page,
+                    Err(err) => {
+                        tracing::debug!(
+                            channel_id = hit_channel_id.get(),
+                            message_id = message_id.get(),
+                            "search ogp hydrate failed: {err}"
+                        );
+                        continue;
+                    }
+                };
+                let ogp = page
+                    .messages
+                    .into_iter()
+                    .find(|msg| msg.message_id == message_id.get())
+                    .and_then(|msg| build_ogp_preview(&msg.content_tokens, cfg.as_ref()));
+                let Some(ogp) = ogp else {
+                    continue;
+                };
+                let _ = this.update(cx, |this, cx| {
+                    let Some(state) = this.states.get_mut(&channel_id) else {
+                        return;
+                    };
+                    if state.generation != generation {
+                        return;
+                    }
+                    if let Some(hit) = state
+                        .results
+                        .iter_mut()
+                        .find(|hit| hit.message_id == message_id && hit.ogp.is_none())
+                    {
+                        hit.ogp = Some(ogp);
                         cx.notify();
                     }
-                    return;
-                }
-                state.is_searching = false;
-                match result {
-                    Ok(response) => {
-                        state.has_error = false;
-                        state.total = response.total;
-                        state.current_page = page;
-                        state.results = response
-                            .messages
-                            .iter()
-                            .filter_map(|doc| search_hit_from_document(doc, cfg))
-                            .collect();
-                    }
-                    Err(err) => {
-                        tracing::warn!("search_message failed: {err}");
-                        state.has_error = true;
-                        state.total = 0;
-                        state.results.clear();
-                        cx.emit(MessageSearchEvent::SearchFailed);
-                    }
-                }
-                cx.notify();
-            });
+                });
+            }
         });
     }
 }
@@ -267,6 +370,7 @@ pub fn search_hit_from_document(
         .unwrap_or_else(|| avatar_url.clone());
     let image_attachment = first_search_media(&doc.attachments, cfg);
     let sender_id = raw_to_user_id(&doc.sender_id);
+    let parsed = parse_search_hit_content(&doc.content, &doc.mentions, cfg);
 
     Some(SearchHit {
         message_id,
@@ -278,13 +382,190 @@ pub fn search_hit_from_document(
         sender_username: SharedString::from(doc.username.clone()),
         avatar_url: SharedString::from(avatar_url),
         avatar_proxied: SharedString::from(avatar_proxied),
-        content_preview: SharedString::from(content_preview_from_raw(&doc.content)),
+        content_preview: SharedString::from(parsed.preview),
+        spans: parsed.spans,
+        rich_layout: parsed.rich_layout,
+        ogp: parsed.ogp,
+        embeds: parsed.embeds,
         channel_label: SharedString::from(doc.channel_label.clone()),
         create_time_seconds,
         time_hhmm,
         local_date,
         image_attachment,
     })
+}
+
+pub fn enrich_search_results_ogp(results: &mut [SearchHit], cx: &App) {
+    let Some(messages) = MessagesStore::try_global(cx) else {
+        return;
+    };
+    let messages = messages.read(cx);
+    for hit in results.iter_mut() {
+        if hit.ogp.is_some() {
+            continue;
+        }
+        if let Some(ogp) = messages
+            .message_in_channel(hit.channel_id, hit.message_id)
+            .and_then(|msg| msg.ogp.clone())
+        {
+            hit.ogp = Some(ogp);
+        }
+    }
+}
+
+pub fn resolve_search_hit_ogp(hit: &SearchHit, cx: &App) -> Option<Box<OgpPreview>> {
+    if let Some(ogp) = hit.ogp.clone() {
+        return Some(ogp);
+    }
+    MessagesStore::try_global(cx)?
+        .read(cx)
+        .message_in_channel(hit.channel_id, hit.message_id)
+        .and_then(|msg| msg.ogp.clone())
+}
+
+fn search_hit_may_have_ogp(hit: &SearchHit) -> bool {
+    hit.spans
+        .iter()
+        .any(|span| matches!(span, MessageSpan::Link { .. }))
+        || hit.content_preview.contains("http://")
+        || hit.content_preview.contains("https://")
+}
+
+struct ParsedSearchContent {
+    preview: String,
+    spans: Arc<[MessageSpan]>,
+    rich_layout: Option<Arc<RichLayout>>,
+    ogp: Option<Box<OgpPreview>>,
+    embeds: Arc<[Embed]>,
+}
+
+fn parse_search_hit_content(
+    content_raw: &str,
+    mentions_raw: &str,
+    cfg: Option<&AppConfig>,
+) -> ParsedSearchContent {
+    let trimmed = content_raw.trim();
+    let mut tokens = parse_search_content_tokens(trimmed);
+    if tokens.t.is_empty()
+        && let Some(text) = extract_message_text_content(trimmed)
+    {
+        tokens.t = text;
+    }
+    let entity_mentions = parse_search_mentions_field(mentions_raw);
+    if !entity_mentions.is_empty() {
+        enrich_content_tokens(&mut tokens, &entity_mentions);
+    }
+    merge_detected_markdown_links(&mut tokens);
+    let spans = parse_spans(&tokens);
+    let rich_layout = build_rich_layout(&spans);
+    let ogp = build_ogp_preview(&tokens, cfg);
+    let embeds = build_embeds(&tokens, cfg);
+    let preview = if tokens.t.is_empty() {
+        content_preview_from_raw(content_raw)
+    } else {
+        crate::message::reply_preview_line(tokens.t.trim())
+    };
+    ParsedSearchContent {
+        preview,
+        spans: spans.into(),
+        rich_layout,
+        ogp,
+        embeds,
+    }
+}
+
+fn parse_search_content_tokens(trimmed: &str) -> ApiMessageContent {
+    if trimmed.is_empty() {
+        return ApiMessageContent::default();
+    }
+    if let Ok(tokens) = serde_json::from_str::<ApiMessageContent>(trimmed) {
+        return tokens;
+    }
+    if let Ok(serde_json::Value::String(inner)) = serde_json::from_str::<serde_json::Value>(trimmed)
+        && let Ok(tokens) = serde_json::from_str::<ApiMessageContent>(&inner)
+    {
+        return tokens;
+    }
+    recover_search_content_tokens(trimmed)
+}
+
+fn recover_search_content_tokens(trimmed: &str) -> ApiMessageContent {
+    let mut fallback = ApiMessageContent::default();
+    let root = match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(serde_json::Value::String(inner)) => {
+            serde_json::from_str::<serde_json::Value>(&inner).ok()
+        }
+        Ok(value) => Some(value),
+        Err(_) => None,
+    };
+    if let Some(serde_json::Value::Object(map)) = root {
+        if let Some(text) = map.get("t").and_then(|v| match v {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        }) {
+            fallback.t = text;
+        }
+        fallback.mentions = recover_content_token_array(map.get("mentions"));
+        fallback.mk = recover_content_token_array(map.get("mk"));
+        fallback.lk = recover_content_token_array(map.get("lk"));
+        fallback.vk = recover_content_token_array(map.get("vk"));
+        fallback.lky = recover_content_token_array(map.get("lky"));
+    }
+    if fallback.t.is_empty() {
+        if let Some(text) = extract_message_text_content(trimmed) {
+            fallback.t = text;
+        } else if !trimmed.starts_with('{') && !trimmed.starts_with('"') {
+            fallback.t = trimmed.to_string();
+        }
+    }
+    fallback
+}
+
+fn recover_content_token_array(value: Option<&serde_json::Value>) -> Vec<ContentToken> {
+    let Some(serde_json::Value::Array(items)) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| serde_json::from_value::<ContentToken>(item.clone()).ok())
+        .collect()
+}
+
+fn merge_detected_markdown_links(tokens: &mut ApiMessageContent) {
+    if tokens.t.is_empty() {
+        return;
+    }
+    let detected = detect_markdown(&tokens.t);
+    if detected.is_empty() {
+        return;
+    }
+    let existing: std::collections::HashSet<(i64, i64)> = tokens
+        .lk
+        .iter()
+        .chain(tokens.mk.iter().filter(|tok| {
+            matches!(
+                tok.kind.as_deref(),
+                Some("lk" | "vk" | "lk_yt" | "lk_fb" | "lk_tt" | "lk_ogp")
+            )
+        }))
+        .filter_map(|tok| Some((tok.s.unwrap_or(0), tok.e?)))
+        .filter(|(s, e)| *e > *s)
+        .collect();
+    for tok in markdown_content_tokens(&detected) {
+        let Some(s) = tok.s else {
+            continue;
+        };
+        let Some(e) = tok.e else {
+            continue;
+        };
+        if existing.contains(&(s, e)) {
+            continue;
+        }
+        if tok.kind.as_deref() == Some("lk") {
+            tokens.mk.push(tok);
+        }
+    }
 }
 
 fn first_search_media(raw: &str, cfg: Option<&AppConfig>) -> Option<SearchHitImage> {
@@ -299,17 +580,23 @@ fn first_search_media(raw: &str, cfg: Option<&AppConfig>) -> Option<SearchHitIma
                 att.proxied_src
             };
             let (display_width, display_height) =
-                if att.display_width > 0. && att.display_height > 0. {
-                    (att.display_width.min(280.), att.display_height.min(200.))
-                } else {
-                    (200., 150.)
-                };
+                clamp_search_media_size(att.display_width, att.display_height);
             SearchHitImage {
                 proxied_src,
                 display_width,
                 display_height,
             }
         })
+}
+
+fn clamp_search_media_size(width: f32, height: f32) -> (f32, f32) {
+    const MAX_W: f32 = 280.;
+    const MAX_H: f32 = 200.;
+    if width <= 0. || height <= 0. {
+        return (200., 150.);
+    }
+    let scale = (MAX_W / width).min(MAX_H / height).min(1.);
+    ((width * scale).max(1.), (height * scale).max(1.))
 }
 
 fn parse_create_time_seconds(raw: &str) -> i64 {
@@ -530,6 +817,272 @@ mod tests {
         assert_eq!(hit.sender_name.as_ref(), "Alice");
         assert_eq!(hit.create_time_seconds, 1_700_000_000);
         assert!(!hit.time_hhmm.is_empty());
+        assert_eq!(
+            hit.rich_layout.as_ref().map(|layout| layout.text.as_ref()),
+            Some("find me")
+        );
+    }
+
+    #[test]
+    fn search_hit_builds_mention_runs_from_content_tokens() {
+        let doc = SearchMessageDocument {
+            message_id: "100".into(),
+            channel_id: "200".into(),
+            content:
+                r#"{"t":"@KOMU hello","mentions":[{"s":0,"e":5,"user_id":"42","username":"KOMU"}]}"#
+                    .into(),
+            display_name: "Alice".into(),
+            ..Default::default()
+        };
+        let hit = search_hit_from_document(&doc, None).expect("hit");
+        let layout = hit.rich_layout.expect("rich layout");
+        assert_eq!(layout.text.as_ref(), "@KOMU hello");
+        assert!(layout.runs.iter().any(|run| {
+            run.kind == crate::message::RichRunKind::Mention && run.range == (0..5)
+        }));
+    }
+
+    #[test]
+    fn search_hit_detects_bare_url_as_link() {
+        let doc = SearchMessageDocument {
+            message_id: "100".into(),
+            channel_id: "200".into(),
+            content: r#"{"t":"see https://github.com/mezonai/mezon/pull/1 please"}"#.into(),
+            display_name: "Alice".into(),
+            ..Default::default()
+        };
+        let hit = search_hit_from_document(&doc, None).expect("hit");
+        assert!(
+            hit.spans
+                .iter()
+                .any(|span| matches!(span, crate::message::MessageSpan::Link { .. })),
+            "expected link span, got {:?}",
+            hit.spans
+        );
+    }
+
+    #[test]
+    fn search_hit_keeps_link_text_and_ogp_from_lk_ogp() {
+        let doc = SearchMessageDocument {
+            message_id: "100".into(),
+            channel_id: "200".into(),
+            content: r#"{"t":"https://github.com/mezonai/mezon/pull/1","mk":[{"s":0,"e":42,"type":"lk_ogp","url":"https://github.com/mezonai/mezon/pull/1","title":"PR title","description":"Bug:","image":"https://cdn/og.png"}]}"#.into(),
+            display_name: "Alice".into(),
+            ..Default::default()
+        };
+        let hit = search_hit_from_document(&doc, None).expect("hit");
+        assert!(
+            hit.spans
+                .iter()
+                .any(|span| matches!(span, crate::message::MessageSpan::Link { .. })),
+            "expected link span from lk_ogp, got {:?}",
+            hit.spans
+        );
+        let ogp = hit.ogp.expect("ogp");
+        assert_eq!(ogp.title.as_ref(), "PR title");
+        assert_eq!(ogp.description.as_ref(), "Bug:");
+    }
+
+    #[test]
+    fn search_hit_keeps_ogp_marker_past_end_of_text() {
+        let text = "https://github.com/mezonai/mezon-desktop/pull/71 @huy.lexuan hi";
+        let end = text.encode_utf16().count();
+        let content = format!(
+            r#"{{"t":"{text}","mk":[{{"s":0,"e":50,"type":"lk"}},{{"s":{end},"e":{},"type":"lk_ogp","url":"https://github.com/mezonai/mezon-desktop/pull/71","title":"PR 71","description":"Bug:","image":"https://cdn/og.png"}}]}}"#,
+            end + 1
+        );
+        let doc = SearchMessageDocument {
+            message_id: "100".into(),
+            channel_id: "200".into(),
+            content,
+            display_name: "Alice".into(),
+            ..Default::default()
+        };
+        let hit = search_hit_from_document(&doc, None).expect("hit");
+        let ogp = hit.ogp.expect("past-end lk_ogp should still build ogp");
+        assert_eq!(ogp.title.as_ref(), "PR 71");
+        assert_eq!(
+            ogp.url.as_str(),
+            "https://github.com/mezonai/mezon-desktop/pull/71"
+        );
+    }
+
+    #[test]
+    fn search_hit_keeps_ogp_when_content_has_null_embed() {
+        let doc = SearchMessageDocument {
+            message_id: "100".into(),
+            channel_id: "200".into(),
+            content: r#"{"t":"https://github.com/mezonai/mezon/pull/1 hi","mk":[{"s":0,"e":42,"type":"lk"},{"s":45,"e":46,"type":"lk_ogp","url":"https://github.com/mezonai/mezon/pull/1","title":"PR title","description":"Bug:","image":"https://cdn/og.png"}],"embed":null}"#.into(),
+            display_name: "Alice".into(),
+            ..Default::default()
+        };
+        let hit = search_hit_from_document(&doc, None).expect("hit");
+        assert!(
+            hit.ogp.is_some(),
+            "null embed must not drop lk_ogp; preview={}",
+            hit.content_preview
+        );
+    }
+
+    #[test]
+    fn search_hit_keeps_ogp_when_embed_fields_null() {
+        let doc = SearchMessageDocument {
+            message_id: "100".into(),
+            channel_id: "200".into(),
+            content: r#"{"t":"https://github.com/mezonai/mezon/pull/1","mk":[{"s":39,"e":40,"type":"lk_ogp","url":"https://github.com/mezonai/mezon/pull/1","title":"PR title","description":"Bug:","image":"https://cdn/og.png"}],"embed":[{"fields":null}]}"#.into(),
+            display_name: "Alice".into(),
+            ..Default::default()
+        };
+        let hit = search_hit_from_document(&doc, None).expect("hit");
+        assert!(
+            hit.ogp.is_some(),
+            "null embed.fields must not drop lk_ogp; preview={}",
+            hit.content_preview
+        );
+    }
+
+    #[test]
+    fn search_hit_may_have_ogp_detects_links() {
+        let doc = SearchMessageDocument {
+            message_id: "100".into(),
+            channel_id: "200".into(),
+            content: r#"{"t":"see https://example.com/page please"}"#.into(),
+            display_name: "Alice".into(),
+            ..Default::default()
+        };
+        let hit = search_hit_from_document(&doc, None).expect("hit");
+        assert!(
+            search_hit_may_have_ogp(&hit),
+            "bare URL content should be hydrate candidate"
+        );
+    }
+
+    #[test]
+    fn search_hit_keeps_ogp_when_url_missing_on_token() {
+        let doc = SearchMessageDocument {
+            message_id: "100".into(),
+            channel_id: "200".into(),
+            content: r#"{"t":"https://github.com/mezonai/mezon/pull/1 more","mk":[{"s":0,"e":42,"type":"lk_ogp","title":"PR title","description":"Bug:","image":"https://cdn/og.png"}]}"#.into(),
+            display_name: "Alice".into(),
+            ..Default::default()
+        };
+        let hit = search_hit_from_document(&doc, None).expect("hit");
+        let ogp = hit.ogp.expect("ogp url should fall back from text slice");
+        assert_eq!(ogp.title.as_ref(), "PR title");
+        assert_eq!(ogp.url.as_str(), "https://github.com/mezonai/mezon/pull/1");
+    }
+
+    #[test]
+    fn search_hit_keeps_ogp_when_cvtt_is_null() {
+        let doc = SearchMessageDocument {
+            message_id: "100".into(),
+            channel_id: "200".into(),
+            content: r#"{"t":"https://github.com/mezonai/mezon/pull/1","mk":[{"s":39,"e":40,"type":"lk_ogp","url":"https://github.com/mezonai/mezon/pull/1","title":"PR title","description":"Bug:","image":"https://cdn/og.png"}],"cvtt":null}"#.into(),
+            display_name: "Alice".into(),
+            ..Default::default()
+        };
+        let hit = search_hit_from_document(&doc, None).expect("hit");
+        assert!(hit.ogp.is_some(), "null cvtt must not drop lk_ogp");
+    }
+
+    #[test]
+    fn search_hit_keeps_ogp_from_double_encoded_content() {
+        let inner = r#"{"t":"https://github.com/mezonai/mezon/pull/1","mk":[{"s":39,"e":40,"type":"lk_ogp","url":"https://github.com/mezonai/mezon/pull/1","title":"PR title","description":"Bug:","image":"https://cdn/og.png"}]}"#;
+        let content = serde_json::to_string(inner).expect("encode");
+        let doc = SearchMessageDocument {
+            message_id: "100".into(),
+            channel_id: "200".into(),
+            content,
+            display_name: "Alice".into(),
+            ..Default::default()
+        };
+        let hit = search_hit_from_document(&doc, None).expect("hit");
+        assert!(
+            hit.ogp.is_some(),
+            "double-encoded content must keep lk_ogp; preview={}",
+            hit.content_preview
+        );
+    }
+
+    #[test]
+    fn search_hit_applies_mentions_from_document_field() {
+        let doc = SearchMessageDocument {
+            message_id: "100".into(),
+            channel_id: "200".into(),
+            content: r#"{"t":"hello @huy.lexuan check"}"#.into(),
+            mentions: r#"[{"s":6,"e":17,"user_id":"99","username":"huy.lexuan"}]"#.into(),
+            display_name: "Alice".into(),
+            ..Default::default()
+        };
+        let hit = search_hit_from_document(&doc, None).expect("hit");
+        assert!(
+            hit.spans.iter().any(|span| {
+                matches!(
+                    span,
+                    crate::message::MessageSpan::Mention { display, .. }
+                        if display.as_ref() == "@huy.lexuan"
+                )
+            }),
+            "expected mention span, got {:?}",
+            hit.spans
+        );
+    }
+
+    #[test]
+    fn search_hit_formats_leading_mention_when_s_omitted() {
+        let doc = SearchMessageDocument {
+            message_id: "100".into(),
+            channel_id: "200".into(),
+            content: r#"{"t":"@gia.chuvan hello"}"#.into(),
+            mentions: r#"[{"e":11,"user_id":"7","username":"gia.chuvan"}]"#.into(),
+            display_name: "Alice".into(),
+            ..Default::default()
+        };
+        let hit = search_hit_from_document(&doc, None).expect("hit");
+        assert!(
+            hit.spans.iter().any(|span| {
+                matches!(
+                    span,
+                    crate::message::MessageSpan::Mention { display, .. }
+                        if display.as_ref() == "@gia.chuvan"
+                )
+            }),
+            "expected leading mention when s is omitted, got {:?}",
+            hit.spans
+        );
+        let layout = hit.rich_layout.expect("rich layout");
+        assert!(layout.runs.iter().any(|run| {
+            run.kind == crate::message::RichRunKind::Mention && run.range.start == 0
+        }));
+    }
+
+    #[test]
+    fn search_hit_keeps_all_mentions_when_entity_field_partial() {
+        let doc = SearchMessageDocument {
+            message_id: "100".into(),
+            channel_id: "200".into(),
+            content: r#"{"t":"@huy.lexuan @gia.chuvan hi","mentions":[{"s":0,"e":11,"user_id":"1","username":"huy.lexuan"},{"s":12,"e":23,"user_id":"7","username":"gia.chuvan"}]}"#.into(),
+            mentions: r#"[{"s":12,"e":23,"user_id":"7","username":"gia.chuvan"}]"#.into(),
+            display_name: "Alice".into(),
+            ..Default::default()
+        };
+        let hit = search_hit_from_document(&doc, None).expect("hit");
+        let mention_displays: Vec<_> = hit
+            .spans
+            .iter()
+            .filter_map(|span| match span {
+                crate::message::MessageSpan::Mention { display, .. } => Some(display.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            mention_displays.contains(&"@huy.lexuan"),
+            "expected leading content mention kept, got {mention_displays:?}"
+        );
+        assert!(
+            mention_displays.contains(&"@gia.chuvan"),
+            "expected entity mention present, got {mention_displays:?}"
+        );
     }
 
     #[test]

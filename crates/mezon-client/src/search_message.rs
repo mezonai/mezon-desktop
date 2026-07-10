@@ -234,10 +234,7 @@ pub fn active_search_trigger(query: &str) -> Option<ActiveSearchTrigger> {
 }
 
 fn query_ends_with_whitespace(query: &str) -> bool {
-    query
-        .chars()
-        .next_back()
-        .is_some_and(|c| c.is_whitespace())
+    query.chars().next_back().is_some_and(|c| c.is_whitespace())
 }
 
 fn is_complete_colon_filter(word: &str) -> bool {
