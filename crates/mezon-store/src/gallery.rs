@@ -178,15 +178,14 @@ pub fn resolve_attachment_uploader(
         ProfileContext::Clan(clan_id)
     };
     if let Some(profile) = resolve_user_profile(uid, context, cx)
-        && !profile.display_name.is_empty()
-    {
-        let (avatar, avatar_raw) = uploader_urls(&profile.avatar_url, cfg);
-        return UploaderInfo {
-            name: profile.display_name,
-            avatar,
-            avatar_raw,
-        };
-    }
+        && !profile.display_name.is_empty() {
+            let (avatar, avatar_raw) = uploader_urls(&profile.avatar_url, cfg);
+            return UploaderInfo {
+                name: profile.display_name,
+                avatar,
+                avatar_raw,
+            };
+        }
     if let Some(info) = uploader_from_message(channel_id, message_id, cfg, cx) {
         return info;
     }

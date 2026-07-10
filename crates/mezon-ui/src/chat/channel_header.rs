@@ -597,7 +597,11 @@ impl ChatHeader {
         cx: &mut Context<Self>,
     ) {
         let resolving = name.is_none();
-        let name = name.unwrap_or_else(|| self.name.clone());
+        let name = match name {
+            Some(name) => name,
+            None if dm => SharedString::default(),
+            None => self.name.clone(),
+        };
         self.inbox_handle = inbox_handle;
         self.pin_handle = pin_handle;
         self.search_input = search_input;

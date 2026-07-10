@@ -755,6 +755,13 @@ impl ChatLayout {
                 message_type,
             } => {
                 self.pending_channel_id = None;
+                let already_current =
+                    self.direct_store.read(cx).current().map(|(id, _)| id) == Some(direct_id);
+                if !already_current {
+                    self.channel_list.update(cx, |channel_list, cx| {
+                        channel_list.record_previous_channel(ClanId(0), direct_id, cx);
+                    });
+                }
                 self.direct_store
                     .update(cx, |store, cx| store.ensure_loaded(cx));
                 let channel_type = message_type.parse::<i32>().unwrap_or_else(|_| {
@@ -818,6 +825,7 @@ impl ChatLayout {
             self.pending_channel_id = None;
             if !already_active {
                 self.channel_list.update(cx, |channel_list, cx| {
+                    channel_list.record_previous_channel(clan_id, channel_id, cx);
                     channel_list.select_channel(channel_id, cx);
                 });
             }
@@ -831,6 +839,9 @@ impl ChatLayout {
         let Some(channel_id) = self.pending_channel_id else {
             return;
         };
+        let Some(clan_id) = self.clan_list.read(cx).active_clan_id else {
+            return;
+        };
         if self
             .channel_list
             .read(cx)
@@ -839,6 +850,9 @@ impl ChatLayout {
         {
             self.pending_channel_id = None;
             self.channel_list.update(cx, |channel_list, cx| {
+                if channel_list.active_channel_id != Some(channel_id) {
+                    channel_list.record_previous_channel(clan_id, channel_id, cx);
+                }
                 channel_list.select_channel(channel_id, cx);
             });
         }
@@ -1302,7 +1316,6 @@ impl ChatLayout {
             } else {
                 list.ensure_thread_channel(channel_id, label.clone(), cx);
             }
-            list.select_channel(channel_id, cx);
         });
         crate::router::navigate(
             cx,

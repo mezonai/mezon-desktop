@@ -344,6 +344,16 @@ impl BadgeService {
                         DirectMessageStore::global(cx).update(cx, |dm, cx| {
                             dm.note_message(channel_id, ts, from_me, increment_unread, cx);
                         });
+                        ChannelList::global(cx).update(cx, |cl, cx| {
+                            cl.note_user_channel_dm_message(
+                                channel_id,
+                                ts,
+                                from_me,
+                                increment_unread,
+                                message_id,
+                                cx,
+                            );
+                        });
                         if !from_me && increment_unread {
                             self.maybe_show_dm_notification(cx, m, channel_id, message_id);
                         }

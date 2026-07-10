@@ -43,6 +43,14 @@ impl LoginStore {
         cx.global::<GlobalLoginStore>().0.clone()
     }
 
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalLoginStore>().map(|g| g.0.clone())
+    }
+
+    pub fn auth_state(&self) -> Entity<AuthState> {
+        self.auth_state.clone()
+    }
+
     pub fn client(&self) -> Arc<MezonClient> {
         self.client.clone()
     }
