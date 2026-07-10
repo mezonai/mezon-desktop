@@ -3666,6 +3666,7 @@
   "searchMessageChannel.searchOptionsData.mentionsUserShort": "メンションで検索",
   "searchMessageChannel.searchPlaceholder": "検索",
   "searchMessageChannel.searching": "検索中...",
+  "searchMessageChannel.searchFailed": "検索に失敗しました。もう一度お試しください。",
   "searchMessageChannel.streamingChannels": "ストリーミングチャンネル",
   "searchMessageChannel.textChannels": "テキストチャンネル",
   "searchMessageChannel.voiceChannels": "ボイスチャンネル",

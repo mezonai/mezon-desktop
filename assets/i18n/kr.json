@@ -3659,6 +3659,7 @@
   "searchMessageChannel.searchOptionsData.mentionsUserShort": "참조된 사람 검색",
   "searchMessageChannel.searchPlaceholder": "검색",
   "searchMessageChannel.searching": "검색 중...",
+  "searchMessageChannel.searchFailed": "검색에 실패했습니다. 다시 시도해 주세요.",
   "searchMessageChannel.streamingChannels": "스트리밍 채널",
   "searchMessageChannel.textChannels": "텍스트 채널",
   "searchMessageChannel.voiceChannels": "음성 채널",

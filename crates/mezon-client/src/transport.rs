@@ -532,16 +532,7 @@ fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
             .attachments
             .into_iter()
             .filter(|a| !a.url.is_empty())
-            .map(|a| ApiAttachment {
-                url: a.url,
-                filename: a.filename,
-                filetype: a.filetype,
-                width: a.width,
-                height: a.height,
-                thumbnail: a.thumbnail,
-                duration: a.duration,
-                size: a.size,
-            })
+            .map(api_attachment_from_proto)
             .collect(),
         Err(e) => {
             tracing::warn!(
@@ -551,6 +542,105 @@ fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
             Vec::new()
         }
     }
+}
+
+fn api_attachment_from_proto(a: api::MessageAttachment) -> ApiAttachment {
+    ApiAttachment {
+        url: a.url,
+        filename: a.filename,
+        filetype: a.filetype,
+        width: a.width,
+        height: a.height,
+        thumbnail: a.thumbnail,
+        duration: a.duration,
+        size: a.size,
+    }
+}
+
+pub fn parse_search_attachment_field(raw: &str) -> Vec<ApiAttachment> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if (trimmed.starts_with('[') || trimmed.starts_with('{'))
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
+    {
+        let parsed = parse_search_attachment_json_value(&value);
+        if !parsed.is_empty() {
+            return parsed;
+        }
+    }
+    if let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, trimmed) {
+        let decoded = parse_message_attachments(&bytes);
+        if !decoded.is_empty() {
+            return decoded;
+        }
+    }
+    parse_message_attachments(trimmed.as_bytes())
+}
+
+fn parse_search_attachment_json_value(value: &serde_json::Value) -> Vec<ApiAttachment> {
+    let items = if let Some(array) = value.as_array() {
+        array.clone()
+    } else if let Some(array) = value.get("attachments").and_then(|v| v.as_array()) {
+        array.clone()
+    } else if value.is_object() {
+        vec![value.clone()]
+    } else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(parse_search_attachment_json_item)
+        .collect()
+}
+
+fn parse_search_attachment_json_item(item: &serde_json::Value) -> Option<ApiAttachment> {
+    let url = item.get("url").and_then(|v| v.as_str())?;
+    if url.is_empty() {
+        return None;
+    }
+    Some(ApiAttachment {
+        url: url.to_string(),
+        filename: item
+            .get("filename")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        filetype: item
+            .get("filetype")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        width: item
+            .get("width")
+            .and_then(json_to_i32)
+            .unwrap_or_default(),
+        height: item
+            .get("height")
+            .and_then(json_to_i32)
+            .unwrap_or_default(),
+        thumbnail: item
+            .get("thumbnail")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        duration: item
+            .get("duration")
+            .and_then(json_to_i32)
+            .unwrap_or_default(),
+        size: item
+            .get("size")
+            .and_then(json_to_i32)
+            .unwrap_or_default(),
+    })
+}
+
+fn json_to_i32(value: &serde_json::Value) -> Option<i32> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+        .and_then(|n| i32::try_from(n).ok())
 }
 
 fn parse_message_text(content: &str) -> String {
@@ -7622,5 +7712,21 @@ mod tests {
         assert!(!call_log.is_video);
         assert_eq!(call_log.call_log_type, 1);
         assert!(!call_log.show_call_back);
+    }
+
+    #[test]
+    fn parse_search_attachment_reads_json_object_wrapper() {
+        let raw = r#"{"attachments":[{"url":"https://cdn/a.jpg","filetype":"image/jpeg","width":400,"height":300}]}"#;
+        let parsed = parse_search_attachment_field(raw);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].url, "https://cdn/a.jpg");
+    }
+
+    #[test]
+    fn parse_search_attachment_reads_json_array() {
+        let raw = r#"[{"url":"https://cdn/b.png","filetype":"image/png"}]"#;
+        let parsed = parse_search_attachment_field(raw);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].url, "https://cdn/b.png");
     }
 }

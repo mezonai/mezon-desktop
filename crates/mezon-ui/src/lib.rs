@@ -24,15 +24,15 @@ pub use gallery::GalleryModal;
 pub use image_viewer::{OpenViewerRequest, open_image_viewer};
 pub use router::{Route, Router};
 pub use settings::SettingsScreen;
-pub use window_layout::{
-    MAIN_WINDOW_DEFAULT_HEIGHT, MAIN_WINDOW_DEFAULT_WIDTH, MAIN_WINDOW_MIN_HEIGHT,
-    MAIN_WINDOW_MIN_WIDTH,
-};
 pub use sidebar::channel_sidebar::ChannelSidebar;
 pub use sidebar::clan_sidebar::ClanSidebar;
 pub use sidebar::direct_sidebar::DirectSidebar;
 pub use theme::Theme;
 pub use theme::tokens::ThemeTokens;
+pub use window_layout::{
+    MAIN_WINDOW_DEFAULT_HEIGHT, MAIN_WINDOW_DEFAULT_WIDTH, MAIN_WINDOW_MIN_HEIGHT,
+    MAIN_WINDOW_MIN_WIDTH,
+};
 
 pub(crate) const SHOW_UNREAD_BADGE_COUNT: bool = true;
 

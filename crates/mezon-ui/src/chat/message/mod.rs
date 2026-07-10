@@ -32,6 +32,7 @@ pub use channel_messages::ChannelMessages;
 pub use context::DEFAULT_DISPLAY_NAME_COLOR;
 pub use gif_video::VideoThumbView;
 pub(crate) use reaction_picker::{ReactionPicker, ReactionPickerEvent};
+pub(crate) use time::format_message_time;
 pub use video_player::{VideoActivation, VideoFullscreenMode, VideoLayout, VideoPlayerView};
 
 use gpui::{App, SharedString};

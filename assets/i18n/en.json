@@ -3775,6 +3775,7 @@
   "searchMessageChannel.searchOptionsData.mentionsUserShort": "search by mentioned user",
   "searchMessageChannel.searchPlaceholder": "Search",
   "searchMessageChannel.searching": "Searching...",
+  "searchMessageChannel.searchFailed": "Search failed. Please try again.",
   "searchMessageChannel.streamingChannels": "Streaming Channels",
   "searchMessageChannel.textChannels": "Text Channels",
   "searchMessageChannel.voiceChannels": "Voice Channels",

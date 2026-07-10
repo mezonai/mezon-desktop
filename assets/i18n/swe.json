@@ -3666,6 +3666,7 @@
   "searchMessageChannel.searchOptionsData.mentionsUserShort": "söka efter nämnd",
   "searchMessageChannel.searchPlaceholder": "Sök",
   "searchMessageChannel.searching": "Söker...",
+  "searchMessageChannel.searchFailed": "Sökningen misslyckades. Försök igen.",
   "searchMessageChannel.streamingChannels": "Streaming kanaler",
   "searchMessageChannel.textChannels": "Textkanaler",
   "searchMessageChannel.voiceChannels": "Röstkanaler",

@@ -3666,6 +3666,7 @@
   "searchMessageChannel.searchOptionsData.mentionsUserShort": "nach Erwähnungen suchen",
   "searchMessageChannel.searchPlaceholder": "Suche",
   "searchMessageChannel.searching": "Suche läuft...",
+  "searchMessageChannel.searchFailed": "Suche fehlgeschlagen. Bitte versuche es erneut.",
   "searchMessageChannel.streamingChannels": "Streaming-Kanäle",
   "searchMessageChannel.textChannels": "Textkanäle",
   "searchMessageChannel.voiceChannels": "Sprachkanäle",

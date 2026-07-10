@@ -3677,6 +3677,7 @@
   "searchMessageChannel.searchOptionsData.mentionsUserShort": "поиск по упомянутому пользователю",
   "searchMessageChannel.searchPlaceholder": "Поиск",
   "searchMessageChannel.searching": "Поиск...",
+  "searchMessageChannel.searchFailed": "Ошибка поиска. Повторите попытку.",
   "searchMessageChannel.streamingChannels": "Стриминговые каналы",
   "searchMessageChannel.textChannels": "Текстовые каналы",
   "searchMessageChannel.voiceChannels": "Голосовые каналы",

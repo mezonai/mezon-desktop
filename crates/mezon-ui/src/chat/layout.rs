@@ -1,12 +1,14 @@
+use std::collections::HashMap;
+
 use gpui::{
     AnyView, App, Context, DismissEvent, Entity, Focusable, StyleRefinement, Subscription, Task,
     Window, deferred, div, prelude::*, px,
 };
 use mezon_store::{
-    AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, DirectChannel,
-    DirectKind, DirectMessageStore, GroupMembersStore, InboxStore, MessageSearchStore,
-    MessagesStore, Settings, ThreadsEvent, ThreadsStore, VoiceMember, VoiceModerationError,
-    VoiceStore,
+    AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
+    DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
+    MessageSearchEvent, MessageSearchStore, MessagesStore, Settings, ThreadsEvent, ThreadsStore,
+    VoiceMember, VoiceModerationError, VoiceStore, expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
 use ui::utils::ROUNDED_BORDER_WINDOW;
@@ -15,7 +17,9 @@ use crate::app::shell::Shell;
 use crate::chat::area::ChatArea;
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
 use crate::chat::message::{ReactionPicker, ReactionPickerEvent};
-use crate::chat::message_search::{MessageSearchPanel, register_chat_layout};
+use crate::chat::message_search::{
+    MessageSearchPanel, apply_search_dropdown_item, register_chat_layout,
+};
 use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::chat::threads_popover::ThreadsPopoverPanel;
 use crate::chat::voice_sound_picker::{VoiceSoundPicker, VoiceSoundPickerEvent};
@@ -49,6 +53,8 @@ pub struct ChatLayout {
     message_search_panel: Option<Entity<MessageSearchPanel>>,
     message_search_input: Option<Entity<InputState>>,
     message_search_context: Option<(ChannelId, ClanId, bool)>,
+    search_dropdown_index: usize,
+    search_mention_ids: HashMap<String, String>,
     _message_search_input_sub: Option<Subscription>,
     inbox_handle: PopoverMenuHandle<InboxPopoverPanel>,
     pub(crate) thread_popover_handle: PopoverMenuHandle<ThreadsPopoverPanel>,
@@ -205,6 +211,18 @@ impl ChatLayout {
         .detach();
 
         cx.subscribe(
+            &MessageSearchStore::global(cx),
+            |this, _, event: &MessageSearchEvent, cx| {
+                if *event == MessageSearchEvent::SearchFailed {
+                    let locale = this.settings.read(cx).language.clone();
+                    let msg = mezon_i18n::t(&locale, "searchMessageChannel.searchFailed");
+                    Shell::global(cx).update(cx, |shell, cx| shell.error(msg, cx));
+                }
+            },
+        )
+        .detach();
+
+        cx.subscribe(
             &mezon_store::ClanMembersStore::global(cx),
             |this, _, event: &mezon_store::ClanMembersEvent, cx| {
                 let mezon_store::ClanMembersEvent::Changed { clan_id } = event;
@@ -291,6 +309,8 @@ impl ChatLayout {
             message_search_panel: None,
             message_search_input: None,
             message_search_context: None,
+            search_dropdown_index: 0,
+            search_mention_ids: HashMap::new(),
             _message_search_input_sub: None,
             inbox_handle: PopoverMenuHandle::default(),
             thread_popover_handle: PopoverMenuHandle::default(),
@@ -322,6 +342,119 @@ impl ChatLayout {
         this
     }
 
+    pub(crate) fn search_dropdown_index(&self) -> usize {
+        self.search_dropdown_index
+    }
+
+    fn reset_search_dropdown_index(&mut self, cx: &mut Context<Self>) {
+        if self.search_dropdown_index != 0 {
+            self.search_dropdown_index = 0;
+            cx.notify();
+        }
+    }
+
+    fn move_search_dropdown_index(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(input) = self.message_search_input.as_ref() else {
+            return;
+        };
+        let query = input.read(cx).value().to_string();
+        let count = crate::chat::message_search::search_dropdown_item_count(&query, cx);
+        if count == 0 {
+            return;
+        }
+        let next =
+            (self.search_dropdown_index as isize + delta).rem_euclid(count as isize) as usize;
+        if next != self.search_dropdown_index {
+            self.search_dropdown_index = next;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn select_next_search_dropdown_item(&mut self, cx: &mut Context<Self>) {
+        if self.show_search_options {
+            self.move_search_dropdown_index(1, cx);
+        }
+    }
+
+    pub(crate) fn select_prev_search_dropdown_item(&mut self, cx: &mut Context<Self>) {
+        if self.show_search_options {
+            self.move_search_dropdown_index(-1, cx);
+        }
+    }
+
+    pub(crate) fn try_activate_search_dropdown_item(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.show_search_options {
+            return false;
+        }
+        let Some(input) = self.message_search_input.as_ref() else {
+            return false;
+        };
+        let query = input.read(cx).value().to_string();
+        let mode = mezon_store::search_dropdown_mode(&query);
+        if matches!(
+            mode,
+            mezon_store::SearchDropdownMode::FromUser
+                | mezon_store::SearchDropdownMode::Mentions
+                | mezon_store::SearchDropdownMode::Has
+        ) && mezon_store::autocomplete_needle(&query).is_empty()
+        {
+            return false;
+        }
+        let items = crate::chat::message_search::search_dropdown_items(&query, cx);
+        if items.is_empty() {
+            return false;
+        }
+        let index = self.search_dropdown_index.min(items.len() - 1);
+        apply_search_dropdown_item(self, &items[index], window, cx);
+        true
+    }
+
+    pub(crate) fn try_finalize_incomplete_search_filter(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(input) = self.message_search_input.clone() else {
+            return false;
+        };
+        let query = input.read(cx).value().to_string();
+        let Some(next) = mezon_store::finalize_incomplete_filter_token(&query) else {
+            return false;
+        };
+        if next == query {
+            return false;
+        }
+        input.update(cx, |input, cx| input.set_value(&next, window, cx));
+        self.message_search_expanded = true;
+        self.show_search_options =
+            crate::chat::message_search::should_show_message_search_dropdown(&next);
+        self.reset_search_dropdown_index(cx);
+        self.sync_search_filter_highlights(cx);
+        input.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+        true
+    }
+
+    fn sync_search_filter_highlights(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.message_search_input.clone() else {
+            return;
+        };
+        let query = input.read(cx).value().to_string();
+        let ranges = mezon_store::search_filter_chip_ranges(&query);
+        let color = cx.theme().tokens.bg_item_hover.into();
+        input.update(cx, |input, cx| {
+            if ranges.is_empty() {
+                input.clear_token_backgrounds(cx);
+            } else {
+                input.set_token_backgrounds(ranges, color, cx);
+            }
+        });
+    }
+
     pub(crate) fn expand_message_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((channel_id, clan_id, is_direct)) =
             crate::chat::message_search::message_search_available(cx)
@@ -339,7 +472,9 @@ impl ChatLayout {
             .as_ref()
             .map(|input| input.read(cx).value().to_string())
             .unwrap_or_default();
-        self.show_search_options = !crate::chat::message_search::query_has_filter_prefix(&query);
+        self.show_search_options =
+            crate::chat::message_search::should_show_message_search_dropdown(&query);
+        self.reset_search_dropdown_index(cx);
         if let Some(input) = self.message_search_input.clone() {
             input.update(cx, |input, cx| input.focus(window, cx));
         }
@@ -380,6 +515,14 @@ impl ChatLayout {
         if query.trim().is_empty() {
             return;
         }
+        let mention_ids = self.search_mention_ids.clone();
+        let query = expand_mention_name_tokens(&query, |name| {
+            let key = name.to_lowercase();
+            if let Some(id) = mention_ids.get(&key) {
+                return Some(id.clone());
+            }
+            resolve_mention_name_to_user_id(name, clan_id, is_direct, channel_id, cx)
+        });
         self.show_search_options = false;
         self.show_results_panel = true;
         self.message_search_expanded = true;
@@ -391,9 +534,9 @@ impl ChatLayout {
         });
         let recreate = self.message_search_panel.is_none();
         if recreate {
-            self.message_search_panel = Some(
-                cx.new(|cx| MessageSearchPanel::new(layout, channel_id, is_direct, locale, cx)),
-            );
+            self.message_search_panel = Some(cx.new(|cx| {
+                MessageSearchPanel::new(layout, channel_id, clan_id, is_direct, locale, cx)
+            }));
         }
         cx.notify();
     }
@@ -401,6 +544,11 @@ impl ChatLayout {
     pub(crate) fn close_results_panel(&mut self, cx: &mut Context<Self>) {
         if !self.show_results_panel {
             return;
+        }
+        if let Some((channel_id, _, _)) = self.message_search_context {
+            MessageSearchStore::global(cx).update(cx, |store, cx| {
+                store.clear_channel(channel_id, cx);
+            });
         }
         self.show_results_panel = false;
         if let Some(was) = self.member_list_before_search.take() {
@@ -424,6 +572,7 @@ impl ChatLayout {
         }
         self.message_search_panel = None;
         self.message_search_context = None;
+        self.search_mention_ids.clear();
         cx.notify();
     }
 
@@ -452,15 +601,54 @@ impl ChatLayout {
             format!("{current}{prefix}")
         };
         input.update(cx, |input, cx| input.set_value(&next, window, cx));
-        self.show_search_options = false;
+        self.message_search_expanded = true;
+        self.show_search_options =
+            crate::chat::message_search::should_show_message_search_dropdown(&next);
+        self.reset_search_dropdown_index(cx);
+        self.sync_search_filter_highlights(cx);
+        input.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    pub(crate) fn insert_search_filter_markup(
+        &mut self,
+        trigger: char,
+        display: &str,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = self.message_search_input.clone() else {
+            return;
+        };
+        if trigger == '~' && !display.is_empty() && !id.is_empty() {
+            self.search_mention_ids
+                .insert(display.to_lowercase(), id.to_string());
+        }
+        let current = input.read(cx).value().to_string();
+        let next = mezon_store::insert_filter_markup(&current, trigger, display, id);
+        input.update(cx, |input, cx| input.set_value(&next, window, cx));
+        self.message_search_expanded = true;
+        self.show_search_options =
+            crate::chat::message_search::should_show_message_search_dropdown(&next);
+        self.reset_search_dropdown_index(cx);
+        self.sync_search_filter_highlights(cx);
         input.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
 
     pub(crate) fn on_search_input_cleared(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_search_options = self.message_search_expanded;
-        if let Some(input) = self.message_search_input.clone() {
-            input.update(cx, |input, cx| input.focus(window, cx));
+        if self.show_results_panel {
+            self.close_results_panel(cx);
+            self.message_search_expanded = false;
+            self.show_search_options = false;
+            self.search_mention_ids.clear();
+            self.blur_message_search(window, cx);
+        } else {
+            self.show_search_options = false;
+            if let Some(input) = self.message_search_input.clone() {
+                input.update(cx, |input, cx| input.focus(window, cx));
+            }
         }
         cx.notify();
     }
@@ -475,6 +663,7 @@ impl ChatLayout {
             InputState::new(window, cx)
                 .placeholder(placeholder)
                 .embedded(true)
+                .filter_token_chips(true)
                 .padding_right(px(4.))
         });
         let input_for_sub = input.clone();
@@ -483,12 +672,22 @@ impl ChatLayout {
             window,
             move |this: &mut ChatLayout, _, event: &InputEvent, window, cx| match event {
                 InputEvent::PressEnter => {
+                    if this.show_search_options
+                        && this.try_activate_search_dropdown_item(window, cx)
+                    {
+                        return;
+                    }
+                    if this.try_finalize_incomplete_search_filter(window, cx) {
+                        return;
+                    }
                     this.execute_message_search(window, cx);
                 }
                 InputEvent::Change => {
                     let query = input_for_sub.read(cx).value().to_string();
                     this.show_search_options = this.message_search_expanded
-                        && !crate::chat::message_search::query_has_filter_prefix(&query);
+                        && crate::chat::message_search::should_show_message_search_dropdown(&query);
+                    this.reset_search_dropdown_index(cx);
+                    this.sync_search_filter_highlights(cx);
                     cx.notify();
                 }
             },
@@ -1799,4 +1998,30 @@ impl ChatLayout {
             )
             .into_any_element()
     }
+}
+
+fn resolve_mention_name_to_user_id(
+    name: &str,
+    clan_id: ClanId,
+    is_direct: bool,
+    channel_id: ChannelId,
+    cx: &App,
+) -> Option<String> {
+    let needle = name.to_lowercase();
+    if is_direct {
+        let store = GroupMembersStore::global(cx);
+        let store = store.read(cx);
+        return store.members(channel_id).iter().find_map(|member| {
+            let username_match = member.user.username.eq_ignore_ascii_case(name);
+            let name_match = member.name().to_lowercase() == needle;
+            (username_match || name_match).then(|| member.id().to_string())
+        });
+    }
+    let store = ClanMembersStore::global(cx);
+    let store = store.read(cx);
+    store.members(clan_id).into_iter().find_map(|member| {
+        let username_match = member.user.username.eq_ignore_ascii_case(name);
+        let name_match = member.name().to_lowercase() == needle;
+        (username_match || name_match).then(|| member.id().to_string())
+    })
 }

@@ -3136,6 +3136,7 @@
   "searchMessageChannel.searchOptionsData.mentionsUserShort": "искәртелгән кулланучы буенча эзләү",
   "searchMessageChannel.searchPlaceholder": "Эзләү",
   "searchMessageChannel.searching": "Эзләү...",
+  "searchMessageChannel.searchFailed": "Эзләү уңышсыз булды. Яңадан тырышыгыз.",
   "searchMessageChannel.streamingChannels": "Стриминг каналлары",
   "searchMessageChannel.textChannels": "Текст каналлары",
   "searchMessageChannel.voiceChannels": "Тавыш каналлары",

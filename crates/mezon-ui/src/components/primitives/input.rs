@@ -6,12 +6,12 @@ use std::ops::Range;
 use blink_manager::CaretBlink;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, Div, Element, ElementId, ElementInputHandler,
-    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla,
-    InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce, ShapedLine,
-    SharedString, Style, StyleRefinement, Styled, TextRun, UTF16Selection, UnderlineStyle, Window,
-    actions, div, fill, point, prelude::*, px, size, svg,
+    App, Bounds, ClipboardItem, Context, Corners, CursorStyle, Div, Element, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce,
+    ShapedLine, SharedString, Style, StyleRefinement, Styled, TextRun, UTF16Selection,
+    UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, size, svg,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -89,6 +89,9 @@ pub struct InputState {
     padding_x: Option<Pixels>,
     padding_right: Option<Pixels>,
     show_border: bool,
+    filter_token_chips: bool,
+    token_bg_ranges: Vec<Range<usize>>,
+    token_bg_color: Option<Hsla>,
     pub(crate) caret_blink: CaretBlink,
 }
 
@@ -119,6 +122,9 @@ impl InputState {
             padding_x: None,
             padding_right: None,
             show_border: true,
+            filter_token_chips: false,
+            token_bg_ranges: Vec::new(),
+            token_bg_color: None,
             caret_blink: CaretBlink::new(),
         };
 
@@ -199,6 +205,11 @@ impl InputState {
         self
     }
 
+    pub fn filter_token_chips(mut self, enabled: bool) -> Self {
+        self.filter_token_chips = enabled;
+        self
+    }
+
     pub fn validate(mut self, validate: impl Fn(&str, &mut App) -> bool + 'static) -> Self {
         self.validate = Some(Box::new(validate));
         self
@@ -218,8 +229,43 @@ impl InputState {
         let end = self.content.len();
         self.selected_range = end..end;
         self.marked_range = None;
+        self.refresh_filter_token_chips(cx);
         cx.notify();
         cx.emit(InputEvent::Change);
+    }
+
+    pub fn set_token_backgrounds(
+        &mut self,
+        ranges: Vec<Range<usize>>,
+        color: Hsla,
+        cx: &mut Context<Self>,
+    ) {
+        self.token_bg_ranges = ranges;
+        self.token_bg_color = Some(color);
+        cx.notify();
+    }
+
+    pub fn clear_token_backgrounds(&mut self, cx: &mut Context<Self>) {
+        if self.token_bg_ranges.is_empty() && self.token_bg_color.is_none() {
+            return;
+        }
+        self.token_bg_ranges.clear();
+        self.token_bg_color = None;
+        cx.notify();
+    }
+
+    fn refresh_filter_token_chips(&mut self, cx: &mut Context<Self>) {
+        if !self.filter_token_chips {
+            return;
+        }
+        let ranges = mezon_store::search_filter_chip_ranges(self.content.as_ref());
+        if ranges.is_empty() {
+            self.token_bg_ranges.clear();
+            self.token_bg_color = None;
+            return;
+        }
+        self.token_bg_ranges = ranges;
+        self.token_bg_color = Some(cx.theme().tokens.bg_item_hover.into());
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
@@ -229,6 +275,8 @@ impl InputState {
         self.content = SharedString::default();
         self.selected_range = 0..0;
         self.marked_range = None;
+        self.token_bg_ranges.clear();
+        self.token_bg_color = None;
         cx.notify();
     }
 
@@ -576,6 +624,7 @@ impl EntityInputHandler for InputState {
         self.content = candidate.into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
+        self.refresh_filter_token_chips(cx);
         self.pause_caret_blink(cx);
         cx.notify();
         cx.emit(InputEvent::Change);
@@ -609,6 +658,7 @@ impl EntityInputHandler for InputState {
             .map(|new_range| new_range.start + range.start..new_range.end + range.end)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
 
+        self.refresh_filter_token_chips(cx);
         self.pause_caret_blink(cx);
         cx.notify();
         cx.emit(InputEvent::Change);
@@ -728,6 +778,60 @@ impl Render for InputState {
     }
 }
 
+fn build_input_text_runs(
+    text_len: usize,
+    base: &TextRun,
+    marked: Option<Range<usize>>,
+    token_ranges: &[Range<usize>],
+    token_bg: Option<Hsla>,
+) -> Vec<TextRun> {
+    if marked.is_none() && (token_ranges.is_empty() || token_bg.is_none()) {
+        return vec![base.clone()];
+    }
+
+    let mut bounds = vec![0usize, text_len];
+    if let Some(marked) = &marked {
+        bounds.push(marked.start.min(text_len));
+        bounds.push(marked.end.min(text_len));
+    }
+    for range in token_ranges {
+        bounds.push(range.start.min(text_len));
+        bounds.push(range.end.min(text_len));
+    }
+    bounds.sort_unstable();
+    bounds.dedup();
+
+    bounds
+        .windows(2)
+        .filter_map(|window| {
+            let (start, end) = (window[0], window[1]);
+            if end <= start {
+                return None;
+            }
+            let in_marked = marked
+                .as_ref()
+                .is_some_and(|marked| marked.start <= start && end <= marked.end);
+            let in_token = token_bg.is_some()
+                && token_ranges
+                    .iter()
+                    .any(|range| range.start <= start && end <= range.end);
+            let mut run = base.clone();
+            run.len = end - start;
+            if in_token {
+                run.background_color = token_bg;
+            }
+            if in_marked {
+                run.underline = Some(UnderlineStyle {
+                    color: Some(run.color),
+                    thickness: px(1.0),
+                    wavy: false,
+                });
+            }
+            Some(run)
+        })
+        .collect()
+}
+
 struct TextElement {
     input: Entity<InputState>,
 }
@@ -810,32 +914,13 @@ impl Element for TextElement {
             underline: None,
             strikethrough: None,
         };
-        let runs = if let (false, Some(marked_range)) = (masked, marked_range) {
-            vec![
-                TextRun {
-                    len: marked_range.start,
-                    ..run.clone()
-                },
-                TextRun {
-                    len: marked_range.end - marked_range.start,
-                    underline: Some(UnderlineStyle {
-                        color: Some(run.color),
-                        thickness: px(1.0),
-                        wavy: false,
-                    }),
-                    ..run.clone()
-                },
-                TextRun {
-                    len: display_text.len() - marked_range.end,
-                    ..run
-                },
-            ]
-            .into_iter()
-            .filter(|run| run.len > 0)
-            .collect()
-        } else {
-            vec![run]
-        };
+        let runs = build_input_text_runs(
+            display_text.len(),
+            &run,
+            if masked { None } else { marked_range },
+            &[],
+            None,
+        );
 
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line = window
@@ -901,6 +986,37 @@ impl Element for TextElement {
         let Some(line) = prepaint.line.take() else {
             return;
         };
+
+        let (token_ranges, token_color) = {
+            let input = self.input.read(cx);
+            (input.token_bg_ranges.clone(), input.token_bg_color)
+        };
+        if let Some(color) = token_color {
+            let pad_x = px(2.);
+            let chip_height = (bounds.size.height - px(2.)).max(px(16.));
+            let chip_top = bounds.top() + (bounds.size.height - chip_height) / 2.;
+            for range in token_ranges {
+                if range.start >= range.end || range.end > line.len() {
+                    continue;
+                }
+                let x0 = line.x_for_index(range.start);
+                let x1 = line.x_for_index(range.end);
+                if x1 <= x0 {
+                    continue;
+                }
+                window.paint_quad(
+                    fill(
+                        Bounds::new(
+                            point(bounds.left() + x0 - pad_x, chip_top),
+                            size((x1 - x0) + pad_x * 2., chip_height),
+                        ),
+                        color,
+                    )
+                    .corner_radii(Corners::all(px(4.))),
+                );
+            }
+        }
+
         if let Err(e) = line.paint(
             bounds.origin,
             window.line_height(),

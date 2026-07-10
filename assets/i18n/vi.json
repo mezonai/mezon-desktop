@@ -3747,6 +3747,7 @@
   "searchMessageChannel.searchOptionsData.mentionsUserShort": "tìm kiếm theo người được nhắc đến",
   "searchMessageChannel.searchPlaceholder": "Tìm kiếm",
   "searchMessageChannel.searching": "Đang tìm kiếm...",
+  "searchMessageChannel.searchFailed": "Tìm kiếm thất bại. Vui lòng thử lại.",
   "searchMessageChannel.streamingChannels": "Kênh phát trực tuyến",
   "searchMessageChannel.textChannels": "Kênh văn bản",
   "searchMessageChannel.voiceChannels": "Kênh thoại",

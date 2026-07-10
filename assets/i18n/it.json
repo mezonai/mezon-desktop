@@ -3666,6 +3666,7 @@
   "searchMessageChannel.searchOptionsData.mentionsUserShort": "cerca per menzione",
   "searchMessageChannel.searchPlaceholder": "Cerca",
   "searchMessageChannel.searching": "Ricerca in corso...",
+  "searchMessageChannel.searchFailed": "Ricerca fallita. Riprova.",
   "searchMessageChannel.streamingChannels": "Canali streaming",
   "searchMessageChannel.textChannels": "Canali testo",
   "searchMessageChannel.voiceChannels": "Canali vocali",

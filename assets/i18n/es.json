@@ -3680,6 +3680,7 @@
   "searchMessageChannel.searchOptionsData.mentionsUserShort": "buscar por usuario mencionado",
   "searchMessageChannel.searchPlaceholder": "Búsqueda",
   "searchMessageChannel.searching": "Buscando...",
+  "searchMessageChannel.searchFailed": "La búsqueda falló. Inténtalo de nuevo.",
   "searchMessageChannel.streamingChannels": "Canales de retransmisión",
   "searchMessageChannel.textChannels": "Canales de texto",
   "searchMessageChannel.voiceChannels": "Canales de voz",
