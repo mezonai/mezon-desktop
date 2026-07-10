@@ -89,7 +89,7 @@ impl VideoThumbView {
     fn register_teardown(cx: &mut Context<Self>) {
         cx.on_release(|view, cx| {
             if let Some(frame) = view.shared.borrow_mut().frame.take() {
-                cx.drop_image(frame, None);
+                crate::image_cache::queue_atlas_drop(cx, frame);
             }
         })
         .detach();
@@ -218,7 +218,7 @@ impl GifVideoView {
     fn register_teardown(cx: &mut Context<Self>) {
         cx.on_release(|view, cx| {
             if let Some(frame) = view.shared.borrow_mut().frame.take() {
-                cx.drop_image(frame, None);
+                crate::image_cache::queue_atlas_drop(cx, frame);
             }
         })
         .detach();

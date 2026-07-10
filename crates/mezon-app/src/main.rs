@@ -502,6 +502,8 @@ fn open_main_window(
     mezon_store::ClanMembersStore::init(api.clone(), cx);
     mezon_store::ChannelList::init(api.clone(), cx);
     mezon_store::DirectMessageStore::init(api.clone(), cx);
+    mezon_store::FriendStore::init(api.clone(), cx);
+    mezon_store::ActivityStore::init(api.clone(), cx);
     mezon_store::BadgeService::init(auth_state.clone(), cx);
     mezon_store::MessagesStore::init(api.clone(), cx);
     mezon_store::ThreadsStore::init(api.clone(), cx);

@@ -1,4 +1,5 @@
 pub mod account;
+pub mod activity;
 pub mod album_layout;
 pub mod audio;
 pub mod badge;
@@ -12,6 +13,7 @@ pub mod config;
 pub mod connection;
 pub mod direct;
 pub mod emoji;
+pub mod friend;
 pub mod gallery;
 pub mod group_members;
 pub mod ids;
@@ -50,6 +52,7 @@ use std::time::Duration;
 use tokio::fs;
 
 pub use account::*;
+pub use activity::{ActivityEvent, ActivityStore, UserActivity};
 pub use album_layout::{AlbumLayout, AlbumTile, calculate_album_layout};
 pub use audio::{AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle};
 pub use badge::BadgeService;
@@ -67,6 +70,7 @@ pub use config::AppConfig;
 pub use connection::{ConnectionStore, resolve_initial_auth_state};
 pub use direct::{DirectChannel, DirectEvent, DirectKind, DirectMessageStore};
 pub use emoji::{Emoji, EmojiEvent, EmojiStore};
+pub use friend::{Friend, FriendEvent, FriendState, FriendStore};
 pub use gallery::{
     ChannelAttachment, GalleryEvent, GalleryStore, LoadDirection, MediaFilter, UploaderInfo,
     enrich_uploader, fetch_channel_attachments, resolve_attachment_uploader,

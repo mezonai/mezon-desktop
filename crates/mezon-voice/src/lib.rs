@@ -8,6 +8,7 @@ mod screen_previews;
 mod screen_targets;
 mod video;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -22,8 +23,9 @@ use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
 use livekit::webrtc::peer_connection_factory::IceServer;
 use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions, RtcAudioSource, VideoBuffer};
+use livekit::webrtc::video_frame::I420Buffer;
 use livekit::webrtc::video_stream::native::NativeVideoStream;
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 
 pub use audio::AudioFormat;
 
@@ -354,6 +356,8 @@ async fn session_main(
     let mut screen_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut camera_gen: u64 = 0;
     let mut screen_gen: u64 = 0;
+    let mut audio_tracks: HashMap<u64, tokio::task::JoinHandle<()>> = HashMap::new();
+    let mut video_tracks: HashMap<u64, VideoTrackHandle> = HashMap::new();
 
     let emit =
         |room: &Room, mic: bool, camera: &Option<CameraSession>, screen: &Option<ScreenSession>| {
@@ -368,6 +372,16 @@ async fn session_main(
         };
     emit(&room, mic_on, &camera_session, &screen_session);
 
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    let trim_task = runtime::runtime().spawn(async {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            unsafe { libc::malloc_trim(0) };
+        }
+    });
+
     loop {
         tokio::select! {
             event = room_events.recv() => {
@@ -378,18 +392,32 @@ async fn session_main(
                             RemoteTrack::Audio(audio_track) => {
                                 if let (Some(mixer), Some(out_fmt)) = (&audio_mixer, out_fmt) {
                                     let key = track_frame_key(participant.identity().as_str(), audio_track.sid().as_str());
-                                    spawn_playback(audio_track, key, mixer.clone(), out_fmt);
+                                    if let Some(handle) = audio_tracks.remove(&key) {
+                                        handle.abort();
+                                    }
+                                    let handle = spawn_playback(audio_track, key, mixer.clone(), out_fmt);
+                                    audio_tracks.insert(key, handle);
                                 }
                             }
                             RemoteTrack::Video(video_track) => {
                                 let key = track_frame_key(participant.identity().as_str(), video_track.sid().as_str());
-                                spawn_video(video_track, key, frame_store.clone());
+                                if let Some(handle) = video_tracks.remove(&key) {
+                                    handle.stop();
+                                }
+                                let handle = spawn_video(video_track, key, frame_store.clone());
+                                video_tracks.insert(key, handle);
                             }
                         }
                         emit(&room, mic_on, &camera_session, &screen_session);
                     }
                     RoomEvent::TrackUnsubscribed { track, participant, .. } => {
                         let key = track_frame_key(participant.identity().as_str(), track.sid().as_str());
+                        if let Some(handle) = audio_tracks.remove(&key) {
+                            handle.abort();
+                        }
+                        if let Some(handle) = video_tracks.remove(&key) {
+                            handle.stop();
+                        }
                         if let Some(mixer) = &audio_mixer {
                             mixer.remove(key);
                         }
@@ -557,9 +585,7 @@ async fn session_main(
                         tracing::warn!("camera enable failed: {e:#}");
                         let _ = evt_tx.send(VoiceEvent::Error(format!("camera: {e}")));
                     }
-                    Ok((_, Err(e))) => {
-                        tracing::debug!("stale camera result dropped: {e:#}");
-                    }
+                    Ok((_, Err(_))) => {}
                     Err(_) => {}
                 }
             }
@@ -581,14 +607,22 @@ async fn session_main(
                         tracing::warn!("screen share enable failed: {e:#}");
                         let _ = evt_tx.send(VoiceEvent::Error(format!("screen: {e}")));
                     }
-                    Ok((_, Err(e))) => {
-                        tracing::debug!("stale screen result dropped: {e:#}");
-                    }
+                    Ok((_, Err(_))) => {}
                     Err(_) => {}
                 }
             }
         }
     }
+
+    for handle in audio_tracks.into_values() {
+        handle.abort();
+    }
+    for handle in video_tracks.into_values() {
+        handle.stop();
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    trim_task.abort();
 
     Ok(())
 }
@@ -643,8 +677,8 @@ async fn start_screen_track(
                 source: TrackSource::Screenshare,
                 simulcast: false,
                 video_encoding: Some(VideoEncoding {
-                    max_bitrate: 8_000_000,
-                    max_framerate: 30.0,
+                    max_bitrate: 4_000_000,
+                    max_framerate: 15.0,
                 }),
                 ..Default::default()
             },
@@ -724,7 +758,7 @@ fn spawn_playback(
     key: u64,
     mixer: Arc<audio::PlaybackMixer>,
     out_fmt: AudioFormat,
-) {
+) -> tokio::task::JoinHandle<()> {
     let rtc_track = track.rtc_track();
     runtime::runtime().spawn(async move {
         let mut stream = NativeAudioStream::new(
@@ -736,37 +770,108 @@ fn spawn_playback(
             mixer.push(key, &frame.data);
         }
         mixer.remove(key);
-    });
+    })
 }
 
-fn spawn_video(track: RemoteVideoTrack, key: u64, frame_store: Arc<VideoFrameStore>) {
-    let rtc_track = track.rtc_track();
-    runtime::runtime().spawn(async move {
-        let mut stream = NativeVideoStream::new(rtc_track);
-        let mut bgra: Vec<u8> = Vec::new();
-        while let Some(frame) = stream.next().await {
-            let buffer = frame.buffer.to_i420();
-            let width = buffer.width();
-            let height = buffer.height();
-            let (sy, su, sv) = buffer.strides();
-            let (y, u, v) = buffer.data();
-            bgra.clear();
-            bgra.resize(width as usize * height as usize * 4, 0);
-            i420_to_bgra_into(
-                &mut bgra,
-                y,
-                u,
-                v,
-                sy as usize,
-                su as usize,
-                sv as usize,
-                width as usize,
-                height as usize,
-            );
-            frame_store.publish(key, width, height, std::mem::take(&mut bgra));
+#[derive(Default)]
+struct VideoConvertState {
+    latest: Option<I420Buffer>,
+    closed: bool,
+}
+
+#[derive(Default)]
+struct VideoConvertSlot {
+    state: Mutex<VideoConvertState>,
+    cond: Condvar,
+}
+
+impl VideoConvertSlot {
+    fn put(&self, buffer: I420Buffer) {
+        self.state.lock().latest = Some(buffer);
+        self.cond.notify_one();
+    }
+
+    fn close(&self) {
+        self.state.lock().closed = true;
+        self.cond.notify_one();
+    }
+
+    fn take_latest(&self) -> Option<I420Buffer> {
+        let mut state = self.state.lock();
+        loop {
+            if let Some(buffer) = state.latest.take() {
+                return Some(buffer);
+            }
+            if state.closed {
+                return None;
+            }
+            self.cond.wait(&mut state);
         }
-        frame_store.remove(key);
+    }
+}
+
+struct VideoTrackHandle {
+    task: tokio::task::JoinHandle<()>,
+    slot: Arc<VideoConvertSlot>,
+}
+
+impl VideoTrackHandle {
+    fn stop(self) {
+        self.task.abort();
+        self.slot.close();
+    }
+}
+
+fn spawn_video(
+    track: RemoteVideoTrack,
+    key: u64,
+    frame_store: Arc<VideoFrameStore>,
+) -> VideoTrackHandle {
+    let rtc_track = track.rtc_track();
+    let slot = Arc::new(VideoConvertSlot::default());
+
+    let convert_slot = slot.clone();
+    let convert_store = frame_store;
+    if let Err(e) = std::thread::Builder::new()
+        .name("mezon-video-convert".into())
+        .spawn(move || {
+            let mut bgra: Vec<u8> = Vec::new();
+            while let Some(buffer) = convert_slot.take_latest() {
+                let width = buffer.width();
+                let height = buffer.height();
+                let (sy, su, sv) = buffer.strides();
+                let (y, u, v) = buffer.data();
+                bgra.clear();
+                bgra.resize(width as usize * height as usize * 4, 0);
+                i420_to_bgra_into(
+                    &mut bgra,
+                    y,
+                    u,
+                    v,
+                    sy as usize,
+                    su as usize,
+                    sv as usize,
+                    width as usize,
+                    height as usize,
+                );
+                convert_store.publish(key, width, height, std::mem::take(&mut bgra));
+            }
+            convert_store.remove(key);
+        })
+    {
+        tracing::error!("failed to spawn video convert thread: {e}");
+    }
+
+    let task_slot = slot.clone();
+    let task = runtime::runtime().spawn(async move {
+        let mut stream = NativeVideoStream::new(rtc_track);
+        while let Some(frame) = stream.next().await {
+            task_slot.put(frame.buffer.to_i420());
+        }
+        task_slot.close();
     });
+
+    VideoTrackHandle { task, slot }
 }
 
 fn emit_participants(

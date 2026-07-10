@@ -133,6 +133,12 @@ impl LoginStore {
         if let Some(e) = crate::direct::DirectMessageStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }
+        if let Some(e) = crate::friend::FriendStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::activity::ActivityStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
         if let Some(e) = crate::messages::MessagesStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }

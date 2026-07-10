@@ -274,8 +274,8 @@ impl ChatArea {
             .child(div().flex_1().min_h_0().overflow_hidden().child(
                 AnyView::from(self.timeline.clone()).cached(StyleRefinement::default().size_full()),
             ))
-            .child(self.typing.clone())
             .child(input_bar.render(theme, locale))
+            .child(self.typing.clone())
             .child(drop_overlay);
 
         let has_search_panel = show_results_panel && message_search_panel.is_some();

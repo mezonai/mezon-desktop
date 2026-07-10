@@ -18,6 +18,7 @@ const EMOJI_PX: f32 = 32.;
 const ROW_PX: f32 = 44.;
 const PANEL_W: f32 = 468.;
 const LIST_H: f32 = 352.;
+const HOVER_BAR_PX: f32 = 36.;
 const COLS: usize = 9;
 const SEARCH_PLACEHOLDER: &str = "Find the perfect reaction";
 
@@ -68,6 +69,8 @@ pub struct ReactionPicker {
     nav: Vec<NavCategory>,
     collapsed: HashSet<String>,
     selected: Option<String>,
+    hover_emoji: Option<(SharedString, SharedString)>,
+    embedded_search: bool,
     scroll: UniformListScrollHandle,
     image_cache: Entity<LruImageCache>,
     _emoji_sub: Option<Subscription>,
@@ -85,6 +88,22 @@ impl Focusable for ReactionPicker {
 
 impl ReactionPicker {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::build(true, window, cx)
+    }
+
+    pub fn new_hosted(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::build(false, window, cx)
+    }
+
+    pub fn set_query(&mut self, query: String, cx: &mut Context<Self>) {
+        if self.query != query {
+            self.query = query;
+            self.rebuild();
+            cx.notify();
+        }
+    }
+
+    fn build(embedded_search: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         let search = cx.new(|cx| {
             InputState::new(window, cx)
@@ -122,6 +141,8 @@ impl ReactionPicker {
             nav: Vec::new(),
             collapsed: HashSet::new(),
             selected: None,
+            hover_emoji: None,
+            embedded_search,
             scroll: UniformListScrollHandle::new(),
             image_cache,
             _emoji_sub: emoji_sub,
@@ -243,9 +264,15 @@ impl ReactionPicker {
         cx.notify();
     }
 
-    fn set_hover_name(&mut self, name: SharedString, cx: &mut Context<Self>) {
-        self.search
-            .update(cx, |input, cx| input.set_placeholder(name, cx));
+    fn set_hover_emoji(&mut self, src: SharedString, name: SharedString, cx: &mut Context<Self>) {
+        if self
+            .hover_emoji
+            .as_ref()
+            .is_none_or(|(_, current)| current != &name)
+        {
+            self.hover_emoji = Some((src, name));
+            cx.notify();
+        }
     }
 }
 
@@ -339,6 +366,47 @@ impl Render for ReactionPicker {
             .children(rail)
             .child(div().flex_1().child(list));
 
+        let hover_bar = div()
+            .w_full()
+            .h(px(HOVER_BAR_PX))
+            .mt_1()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .pl_1()
+            .bg(theme.bg_tertiary)
+            .rounded_md()
+            .when_some(self.hover_emoji.clone(), |el, (src, name)| {
+                el.when(!src.is_empty(), |el| {
+                    el.child(
+                        img(src)
+                            .max_w(px(28.))
+                            .max_h(px(28.))
+                            .with_fallback(emoji_error_fallback(px(28.), theme.text_muted)),
+                    )
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(13.))
+                        .text_color(theme.text_primary)
+                        .truncate()
+                        .child(name),
+                )
+            });
+
+        if !self.embedded_search {
+            return div()
+                .image_cache(self.image_cache.clone())
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(body)
+                .child(hover_bar)
+                .into_any_element();
+        }
+
         div()
             .track_focus(&self.focus_handle)
             .key_context("menu")
@@ -357,6 +425,8 @@ impl Render for ReactionPicker {
             .p_2()
             .child(div().w_full().pb_2().child(Input::new(&self.search)))
             .child(body)
+            .child(hover_bar)
+            .into_any_element()
     }
 }
 
@@ -431,6 +501,7 @@ fn render_emoji_row(
         let ent = entity.clone();
         let hover_ent = entity.clone();
         let hover_name = emoji.emoji.clone();
+        let hover_src = emoji.src.clone();
         let mut cell = div()
             .id(emoji.cell_id.clone())
             .flex()
@@ -451,7 +522,8 @@ fn render_emoji_row(
             .on_hover(move |hovered, _window, cx| {
                 if *hovered {
                     let name = hover_name.clone();
-                    hover_ent.update(cx, |this, cx| this.set_hover_name(name, cx));
+                    let src = hover_src.clone();
+                    hover_ent.update(cx, |this, cx| this.set_hover_emoji(src, name, cx));
                 }
             })
             .on_click(move |_event, _window, cx| {

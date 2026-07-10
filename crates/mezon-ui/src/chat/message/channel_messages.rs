@@ -1658,7 +1658,8 @@ impl Render for ChannelMessages {
                 el.child(context_menu_at(position, menu))
             })
             .custom_scrollbars(
-                Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(&self.list_state),
+                Scrollbars::always_visible(ScrollAxes::Vertical)
+                    .tracked_scroll_handle(&self.list_state),
                 window,
                 cx,
             )

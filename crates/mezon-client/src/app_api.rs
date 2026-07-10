@@ -7,8 +7,8 @@ use crate::{
     TransportClient,
     transport::{
         ApiAccount, ApiAttachment, ApiCategoryDesc, ApiChannelApp, ApiChannelAttachment,
-        ApiChannelDesc, ApiClanDesc, ApiDirectChannel, ApiMessage, ApiPinMessage, ApiThreadDesc,
-        ApiVoiceChannelUser, RealtimeEvent,
+        ApiChannelDesc, ApiClanDesc, ApiDirectChannel, ApiFriend, ApiMessage, ApiPinMessage,
+        ApiThreadDesc, ApiVoiceChannelUser, RealtimeEvent,
     },
 };
 
@@ -755,6 +755,36 @@ impl AppApi {
 
     pub async fn create_direct_channel(&self, user_ids: &[i64]) -> Result<ApiChannelDesc> {
         self.transport.create_direct_channel(user_ids).await
+    }
+
+    /// List the current user's friends, with relationship state preserved.
+    pub async fn list_friends(&self) -> Result<Vec<ApiFriend>> {
+        self.transport.list_friends().await
+    }
+
+    /// Send or accept a friend request by ids and/or usernames. Returns response ids.
+    pub async fn add_friends(&self, ids: Vec<i64>, usernames: Vec<String>) -> Result<Vec<i64>> {
+        self.transport.add_friends(ids, usernames).await
+    }
+
+    /// Delete, cancel, or reject a friend relationship by ids and/or usernames.
+    pub async fn delete_friends(&self, ids: Vec<i64>, usernames: Vec<String>) -> Result<()> {
+        self.transport.delete_friends(ids, usernames).await
+    }
+
+    /// Block users by id.
+    pub async fn block_friends(&self, ids: Vec<i64>) -> Result<()> {
+        self.transport.block_friends(ids).await
+    }
+
+    /// Unblock users by id.
+    pub async fn unblock_friends(&self, ids: Vec<i64>) -> Result<()> {
+        self.transport.unblock_friends(ids).await
+    }
+
+    /// List rich-presence activities for users (React `listActivity` / `ListActivity`).
+    pub async fn list_activity(&self) -> Result<mezon_proto::api::ListUserActivity> {
+        self.transport.list_activity().await
     }
 
     /// Create a category in a clan; returns its id.

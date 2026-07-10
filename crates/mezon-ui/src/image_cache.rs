@@ -15,7 +15,7 @@ use indexmap::IndexMap;
 struct PendingAtlasDrops(Vec<Arc<RenderImage>>);
 impl Global for PendingAtlasDrops {}
 
-fn queue_atlas_drop(cx: &mut App, image: Arc<RenderImage>) {
+pub(crate) fn queue_atlas_drop(cx: &mut App, image: Arc<RenderImage>) {
     cx.default_global::<PendingAtlasDrops>().0.push(image);
 }
 
@@ -24,6 +24,39 @@ pub fn flush_atlas_drops(window: &mut Window, cx: &mut App) {
     for image in pending {
         cx.drop_image(image, Some(window));
     }
+}
+
+const IDLE_TRIM_INTERVAL: Duration = Duration::from_secs(120);
+const IDLE_TRIM_TTL: Duration = Duration::from_secs(600);
+
+#[derive(Default)]
+struct IdleTrimRegistry(Vec<gpui::WeakEntity<LruImageCache>>);
+impl Global for IdleTrimRegistry {}
+
+static IDLE_TRIM_STARTED: AtomicBool = AtomicBool::new(false);
+
+pub fn start_idle_trim(cx: &mut App) {
+    if IDLE_TRIM_STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let executor = cx.background_executor().clone();
+    cx.spawn(async move |cx| {
+        loop {
+            executor.timer(IDLE_TRIM_INTERVAL).await;
+            cx.update(|cx| {
+                let registry = std::mem::take(&mut cx.default_global::<IdleTrimRegistry>().0);
+                let mut live = Vec::with_capacity(registry.len());
+                for weak in registry {
+                    if let Some(cache) = weak.upgrade() {
+                        cache.update(cx, |cache, cx| cache.evict_idle(IDLE_TRIM_TTL, cx));
+                        live.push(weak);
+                    }
+                }
+                cx.default_global::<IdleTrimRegistry>().0.extend(live);
+            });
+        }
+    })
+    .detach();
 }
 
 const SHARED_AVATAR_CACHE_CAPACITY: usize = 512;
@@ -101,11 +134,20 @@ mod os_mem {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+mod os_mem {
+    pub fn release_freed_pages() {
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 static MEMORY_RELIEF_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 pub fn release_freed_memory_to_os(cx: &mut App) {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
     {
         if MEMORY_RELIEF_IN_FLIGHT.swap(true, Ordering::AcqRel) {
             return;
@@ -117,7 +159,7 @@ pub fn release_freed_memory_to_os(cx: &mut App) {
             })
             .detach();
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
     let _ = cx;
 }
 
@@ -374,6 +416,8 @@ impl LruImageCache {
         .detach();
 
         let instance = CACHE_INSTANCE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let weak = cx.weak_entity();
+        cx.default_global::<IdleTrimRegistry>().0.push(weak);
         Self {
             label,
             instance,
@@ -464,6 +508,27 @@ impl LruImageCache {
                 items = stats.items,
                 "image cache stats"
             );
+        }
+    }
+
+    fn evict_idle(&mut self, ttl: Duration, cx: &mut App) {
+        let idle: Vec<u64> = self
+            .cache
+            .iter()
+            .filter(|(_, entry)| entry.last_used.elapsed() > ttl)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in idle {
+            if let Some(mut entry) = self.cache.shift_remove(&key) {
+                entry.abort.abort();
+                self.metrics.evictions.fetch_add(1, Ordering::Relaxed);
+                if let Some(bytes) = entry.bytes {
+                    self.total_bytes = self.total_bytes.saturating_sub(bytes);
+                }
+                if let Some(Ok(image)) = entry.item.get() {
+                    queue_atlas_drop(cx, image);
+                }
+            }
         }
     }
 
