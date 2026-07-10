@@ -1,7 +1,13 @@
 use crate::theme::Theme;
 use gpui::{
-    App, AppContext, BackgroundExecutor, Bounds, Context, Corners, Entity, FocusHandle, Focusable, FontWeight, ImageCache, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Point, Render, RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString, SharedUri, Subscription, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, canvas, div, img, point, prelude::*, px, relative, rgb, size, uniform_list,
+    App, AppContext, BackgroundExecutor, Bounds, Context, Corners, Entity, FocusHandle, Focusable,
+    FontWeight, ImageCache, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit,
+    Pixels, Point, Render, RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString,
+    SharedUri, Subscription, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds,
+    WindowHandle, WindowKind, WindowOptions, canvas, div, img, point, prelude::*, px, relative,
+    rgb, size, uniform_list,
 };
+use std::process::Command;
 
 pub struct EmptyWindow {}
 
@@ -25,23 +31,26 @@ impl LaunchAppButton {
     }
 
     pub fn open_app_window(cx: &mut App) {
-        let bounds = gpui::Bounds::centered(None, size(px(800.0), px(600.0)), cx);
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(640.0), px(480.0))),
-            kind: WindowKind::Normal,
-            focus: true,
-            show: true,
-            titlebar: Some(TitlebarOptions {
-                title: Some("Window App".into()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+        let url = "https://www.youtube.com";
 
-        match cx.open_window(options, |_window, cx| cx.new(|_| EmptyWindow {})) {
-            Ok(_) => {}
-            Err(e) => println!("failed to open window: {e}"),
+        #[cfg(target_os = "windows")]
+        {
+            use std::process::Command;
+
+            Command::new("cmd")
+                .args(["/C", "start", "", url])
+                .spawn()
+                .unwrap();
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            Command::new("open").arg(url).spawn().unwrap();
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            Command::new("xdg-open").arg(url).spawn().unwrap();
         }
     }
 
