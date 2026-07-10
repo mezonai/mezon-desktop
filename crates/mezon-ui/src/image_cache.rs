@@ -26,6 +26,39 @@ pub fn flush_atlas_drops(window: &mut Window, cx: &mut App) {
     }
 }
 
+const IDLE_TRIM_INTERVAL: Duration = Duration::from_secs(120);
+const IDLE_TRIM_TTL: Duration = Duration::from_secs(600);
+
+#[derive(Default)]
+struct IdleTrimRegistry(Vec<gpui::WeakEntity<LruImageCache>>);
+impl Global for IdleTrimRegistry {}
+
+static IDLE_TRIM_STARTED: AtomicBool = AtomicBool::new(false);
+
+pub fn start_idle_trim(cx: &mut App) {
+    if IDLE_TRIM_STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let executor = cx.background_executor().clone();
+    cx.spawn(async move |cx| {
+        loop {
+            executor.timer(IDLE_TRIM_INTERVAL).await;
+            cx.update(|cx| {
+                let registry = std::mem::take(&mut cx.default_global::<IdleTrimRegistry>().0);
+                let mut live = Vec::with_capacity(registry.len());
+                for weak in registry {
+                    if let Some(cache) = weak.upgrade() {
+                        cache.update(cx, |cache, cx| cache.evict_idle(IDLE_TRIM_TTL, cx));
+                        live.push(weak);
+                    }
+                }
+                cx.default_global::<IdleTrimRegistry>().0.extend(live);
+            });
+        }
+    })
+    .detach();
+}
+
 const SHARED_AVATAR_CACHE_CAPACITY: usize = 512;
 const SHARED_AVATAR_CACHE_BYTES: u64 = 40 * 1024 * 1024;
 const SHARED_SMALL_AVATAR_CACHE_BYTES: u64 = 20 * 1024 * 1024;
@@ -383,6 +416,8 @@ impl LruImageCache {
         .detach();
 
         let instance = CACHE_INSTANCE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let weak = cx.weak_entity();
+        cx.default_global::<IdleTrimRegistry>().0.push(weak);
         Self {
             label,
             instance,
@@ -473,6 +508,27 @@ impl LruImageCache {
                 items = stats.items,
                 "image cache stats"
             );
+        }
+    }
+
+    fn evict_idle(&mut self, ttl: Duration, cx: &mut App) {
+        let idle: Vec<u64> = self
+            .cache
+            .iter()
+            .filter(|(_, entry)| entry.last_used.elapsed() > ttl)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in idle {
+            if let Some(mut entry) = self.cache.shift_remove(&key) {
+                entry.abort.abort();
+                self.metrics.evictions.fetch_add(1, Ordering::Relaxed);
+                if let Some(bytes) = entry.bytes {
+                    self.total_bytes = self.total_bytes.saturating_sub(bytes);
+                }
+                if let Some(Ok(image)) = entry.item.get() {
+                    queue_atlas_drop(cx, image);
+                }
+            }
         }
     }
 

@@ -53,10 +53,10 @@ impl DirectXAtlas {
     pub(crate) fn get_texture_view(
         &self,
         id: AtlasTextureId,
-    ) -> [Option<ID3D11ShaderResourceView>; 1] {
+    ) -> Option<[Option<ID3D11ShaderResourceView>; 1]> {
         let lock = self.0.lock();
-        let tex = lock.texture(id);
-        tex.view.clone()
+        let tex = lock.texture(id)?;
+        Some(tex.view.clone())
     }
 
     pub(crate) fn handle_device_lost(
@@ -94,7 +94,9 @@ impl PlatformAtlas for DirectXAtlas {
             let tile = lock
                 .allocate(size, key.texture_kind())
                 .ok_or_else(|| anyhow::anyhow!("failed to allocate"))?;
-            let texture = lock.texture(tile.texture_id);
+            let texture = lock
+                .texture(tile.texture_id)
+                .ok_or_else(|| anyhow::anyhow!("texture missing after allocation"))?;
             texture.upload(&lock.device_context, tile.bounds, &bytes);
             lock.tiles_by_key.insert(key.clone(), tile);
             Ok(Some(tile))
@@ -276,22 +278,15 @@ impl DirectXAtlasState {
         }
     }
 
-    fn texture(&self, id: AtlasTextureId) -> &DirectXAtlasTexture {
-        match id.kind {
-            AtlasTextureKind::Monochrome => &self.monochrome_textures[id.index as usize]
-                .as_ref()
-                .unwrap(),
-            AtlasTextureKind::Polychrome => {
-                &self.polychrome_textures[id.index as usize].as_ref().unwrap()
-            }
-            AtlasTextureKind::Image => &self.image_textures[id.index as usize].as_ref().unwrap(),
-            AtlasTextureKind::ImageSmall => {
-                &self.image_small_textures[id.index as usize].as_ref().unwrap()
-            }
-            AtlasTextureKind::Subpixel => {
-                &self.subpixel_textures[id.index as usize].as_ref().unwrap()
-            }
-        }
+    fn texture(&self, id: AtlasTextureId) -> Option<&DirectXAtlasTexture> {
+        let textures = match id.kind {
+            AtlasTextureKind::Monochrome => &self.monochrome_textures,
+            AtlasTextureKind::Polychrome => &self.polychrome_textures,
+            AtlasTextureKind::Image => &self.image_textures,
+            AtlasTextureKind::ImageSmall => &self.image_small_textures,
+            AtlasTextureKind::Subpixel => &self.subpixel_textures,
+        };
+        textures.textures.get(id.index as usize)?.as_ref()
     }
 }
 

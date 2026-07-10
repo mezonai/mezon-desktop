@@ -198,14 +198,9 @@ impl ImageViewer {
             let _ = weak.update(app, |viewer, cx| {
                 viewer.release_resources(window, cx);
             });
+            clear_image_viewer_global(app);
             activate_main_window(app);
-            if cfg!(target_os = "macos") {
-                window.hide_window();
-                false
-            } else {
-                clear_image_viewer_global(app);
-                true
-            }
+            true
         });
         let image_cache = cx.new(|cx| {
             LruImageCache::viewer(
@@ -748,13 +743,9 @@ impl ImageViewer {
 
     fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.release_resources(window, cx);
+        clear_image_viewer_global(cx);
         activate_main_window(cx);
-        if cfg!(target_os = "macos") {
-            window.hide_window();
-        } else {
-            clear_image_viewer_global(cx);
-            window.remove_window();
-        }
+        window.remove_window();
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {

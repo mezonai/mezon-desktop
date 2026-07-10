@@ -1073,6 +1073,12 @@ impl Drop for MacWindow {
     fn drop(&mut self) {
         eprintln!("[gpui_window_lifecycle] MacWindow::drop");
         let mut this = self.0.lock();
+        let layer = this.renderer.layer_ptr() as *mut Object;
+        if !layer.is_null() {
+            unsafe {
+                let _: *mut Object = msg_send![layer, retain];
+            }
+        }
         this.renderer.destroy();
         let window = this.native_window;
         let sheet_parent = this.sheet_parent.take();
@@ -1081,6 +1087,7 @@ impl Drop for MacWindow {
             this.native_window.setDelegate_(nil);
         }
         this.input_handler.take();
+        let view = this.native_view.as_ptr();
         this.foreground_executor
             .spawn(async move {
                 unsafe {
@@ -1089,6 +1096,10 @@ impl Drop for MacWindow {
                     }
                     window.close();
                     window.autorelease();
+                    if !layer.is_null() {
+                        let _: () = msg_send![view, setLayer: nil];
+                        let _: () = msg_send![layer, release];
+                    }
                 }
             })
             .detach();
@@ -1366,9 +1377,17 @@ impl PlatformWindow for MacWindow {
         let window = lock.native_window;
         let closed = lock.closed.clone();
         let executor = lock.foreground_executor.clone();
+        drop(lock);
+        let state = self.0.clone();
         executor
             .spawn(async move {
                 if !closed.load(Ordering::Acquire) {
+                    {
+                        let mut lock = state.lock();
+                        let scale_factor = lock.scale_factor();
+                        let size = lock.content_size().to_device_pixels(scale_factor);
+                        lock.renderer.restore_drawable_size_if_needed(size);
+                    }
                     unsafe {
                         let _: () = msg_send![window, makeKeyAndOrderFront: nil];
                     }
@@ -1519,10 +1538,22 @@ impl PlatformWindow for MacWindow {
     }
 
     fn hide(&self) {
-        let window = self.0.lock().native_window;
-        unsafe {
-            window.orderOut_(nil);
-        }
+        let lock = self.0.lock();
+        let window = lock.native_window;
+        let closed = lock.closed.clone();
+        let executor = lock.foreground_executor.clone();
+        drop(lock);
+        let state = self.0.clone();
+        executor
+            .spawn(async move {
+                if !closed.load(Ordering::Acquire) {
+                    unsafe {
+                        window.orderOut_(nil);
+                    }
+                    state.lock().renderer.shrink_drawable_pool();
+                }
+            })
+            .detach();
     }
 
     fn zoom(&self) {

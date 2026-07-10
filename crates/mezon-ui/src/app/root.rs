@@ -127,6 +127,7 @@ impl RootView {
         });
 
         let applied_theme = settings.read(cx).theme.clone();
+        crate::image_cache::start_idle_trim(cx);
         let image_cache = cx.new(|cx| {
             LruImageCache::labeled(
                 "shared",
