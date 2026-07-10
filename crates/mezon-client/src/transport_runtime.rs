@@ -1309,6 +1309,54 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn list_friends(&self) -> Result<Vec<crate::transport::ApiFriend>> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.list_friends().await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_activity(&self) -> Result<mezon_proto::api::ListUserActivity> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.list_activity().await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn add_friends(&self, ids: Vec<i64>, usernames: Vec<String>) -> Result<Vec<i64>> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.add_friends(ids, usernames).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn delete_friends(&self, ids: Vec<i64>, usernames: Vec<String>) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.delete_friends(ids, usernames).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn block_friends(&self, ids: Vec<i64>) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.block_friends(ids).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn unblock_friends(&self, ids: Vec<i64>) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.unblock_friends(ids).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn create_category_desc(
         &self,
         category_name: &str,

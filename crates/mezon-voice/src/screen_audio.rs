@@ -42,9 +42,7 @@ mod macos {
 
     impl Drop for ScreenAudioCapture {
         fn drop(&mut self) {
-            if let Err(e) = self.stream.stop_capture() {
-                tracing::debug!("screen audio stop failed: {e}");
-            }
+            let _ = self.stream.stop_capture();
         }
     }
 
@@ -62,7 +60,6 @@ mod macos {
             })) {
                 Ok(buffers) => buffers,
                 Err(_) => {
-                    tracing::debug!("screen audio buffer extraction failed");
                     return;
                 }
             };

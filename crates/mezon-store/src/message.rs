@@ -31,6 +31,7 @@ pub struct MessageAttachment {
     pub tenor_mp4: Option<SharedString>,
     pub local_source: Option<std::path::PathBuf>,
     pub uploading: bool,
+    pub upload_failed: bool,
 }
 
 pub fn format_file_size(bytes: u64) -> String {
@@ -534,6 +535,14 @@ pub struct RichRun {
 pub struct RichLayout {
     pub text: SharedString,
     pub runs: Arc<[RichRun]>,
+    pub content_tokens: Option<Arc<[RichToken]>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RichToken {
+    Word(SharedString),
+    LineBreak,
+    Span(u32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1217,7 +1226,43 @@ pub fn build_rich_layout(spans: &[MessageSpan]) -> Option<Arc<RichLayout>> {
     Some(Arc::new(RichLayout {
         text: text.into(),
         runs: runs.into(),
+        content_tokens: build_content_tokens(spans),
     }))
+}
+
+fn build_content_tokens(spans: &[MessageSpan]) -> Option<Arc<[RichToken]>> {
+    let needs_chip_path = spans.iter().any(|span| {
+        matches!(
+            span,
+            MessageSpan::Hashtag { .. }
+                | MessageSpan::Canvas { .. }
+                | MessageSpan::Heading { .. }
+                | MessageSpan::CodeBlock { .. }
+        ) || matches!(span, MessageSpan::Link { kind, .. } if *kind != LinkKind::Plain)
+            || matches!(span, MessageSpan::Emoji { emoji_id, .. } if !emoji_id.is_empty())
+    });
+    if !needs_chip_path {
+        return None;
+    }
+    let mut tokens: Vec<RichToken> = Vec::new();
+    for (index, span) in spans.iter().enumerate() {
+        match span {
+            MessageSpan::Text(text) => {
+                let mut first_line = true;
+                for line in text.split('\n') {
+                    if !first_line {
+                        tokens.push(RichToken::LineBreak);
+                    }
+                    first_line = false;
+                    for word in line.split_whitespace() {
+                        tokens.push(RichToken::Word(SharedString::from(word.to_owned())));
+                    }
+                }
+            }
+            _ => tokens.push(RichToken::Span(index as u32)),
+        }
+    }
+    Some(tokens.into())
 }
 
 pub fn recompute_message_grouping(messages: &mut [Message]) {

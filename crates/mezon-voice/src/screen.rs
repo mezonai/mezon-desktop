@@ -13,7 +13,7 @@ use scap::frame::{BGRAFrame, Frame, FrameType};
 use crate::screen_picker::{PickedScreen, scap_target_for_pick};
 use crate::video::{VideoFrameStore, bgra_to_i420, local_screen_key};
 
-const CAPTURE_FPS: u32 = 30;
+const CAPTURE_FPS: u32 = 15;
 const PREVIEW_MAX_WIDTH: u32 = 1280;
 const PREVIEW_MAX_HEIGHT: u32 = 800;
 const SLOT_WAIT: Duration = Duration::from_millis(250);
@@ -128,7 +128,7 @@ pub fn start_screen(
                 show_highlight: false,
                 excluded_targets: None,
                 output_type: FrameType::BGRAFrame,
-                output_resolution: Resolution::_1440p,
+                output_resolution: Resolution::_1080p,
                 ..Default::default()
             };
 
@@ -155,7 +155,10 @@ pub fn start_screen(
                                     pump_slot.publish(bgra);
                                 }
                             }
-                            Err(_) => break,
+                            Err(e) => {
+                                pump_slot.fail(format!("screen capture failed: {e}"));
+                                break;
+                            }
                         }
                     }
                     capturer.stop_capture();
@@ -204,9 +207,6 @@ pub fn start_screen(
                 }
 
                 if width != src_w || height != src_h {
-                    tracing::debug!(
-                        "screen capture resolution changed: {src_w}x{src_h} -> {width}x{height}"
-                    );
                     src_w = width;
                     src_h = height;
                 }

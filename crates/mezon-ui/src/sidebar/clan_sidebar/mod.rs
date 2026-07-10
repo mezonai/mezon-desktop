@@ -30,6 +30,7 @@ pub struct ClanSidebar {
     home_logo: SharedString,
     discover_title: SharedString,
     create_clan_title: SharedString,
+    image_cache: Entity<crate::image_cache::LruImageCache>,
     _clan_sub: Subscription,
     _direct_sub: Subscription,
     _settings_sub: Subscription,
@@ -103,6 +104,15 @@ impl ClanSidebar {
             home_logo: SharedString::default(),
             discover_title: SharedString::default(),
             create_clan_title: SharedString::default(),
+            image_cache: cx.new(|cx| {
+                crate::image_cache::LruImageCache::avatar_thumbnail_small(
+                    "clan-rail",
+                    256,
+                    6 * 1024 * 1024,
+                    4 * 1024 * 1024,
+                    cx,
+                )
+            }),
             _clan_sub: clan_sub,
             _direct_sub: direct_sub,
             _settings_sub: settings_sub,
@@ -183,6 +193,7 @@ impl ClanSidebar {
 
 impl Render for ClanSidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let avatar_cache = self.image_cache.clone();
         let theme = cx.theme();
         let dm_active = self.dm_active;
         let pill_color = theme.tokens.text_theme_primary;
@@ -216,6 +227,7 @@ impl Render for ClanSidebar {
         let unread_list = self.direct_unread.render();
 
         div()
+            .image_cache(avatar_cache)
             .flex()
             .flex_col()
             .w_full()

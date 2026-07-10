@@ -6,11 +6,11 @@ use gpui::Size as GpuiSize;
 use gpui::http_client::HttpClient;
 use gpui::{
     App, AppContext, BackgroundExecutor, Bounds, Context, Corners, Entity, FocusHandle, Focusable,
-    FontWeight,
-    ImageCache, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels,
-    Point, Render, RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString, SharedUri,
-    Subscription, UniformListScrollHandle, Window, WindowBounds, WindowHandle, WindowKind,
-    WindowOptions, canvas, div, img, point, prelude::*, px, relative, size, uniform_list,
+    FontWeight, ImageCache, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit,
+    Pixels, Point, Render, RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString,
+    SharedUri, Subscription, UniformListScrollHandle, Window, WindowBounds, WindowHandle,
+    WindowKind, WindowOptions, canvas, div, img, point, prelude::*, px, relative, size,
+    uniform_list,
 };
 use mezon_store::{
     AppConfig, ChannelAttachment, ChannelId, ChannelList, ClanId, DirectMessageStore, GalleryStore,
@@ -86,15 +86,6 @@ pub(crate) fn trim_process_memory() {
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 pub(crate) fn trim_process_memory() {}
 
-fn close_image_viewer_window(handle: WindowHandle<ImageViewer>, cx: &mut App) {
-    let _ = handle.update(cx, |viewer, window, cx| {
-        viewer.release_resources(window, cx)
-    });
-    clear_image_viewer_global(cx);
-    let _ = handle.update(cx, |_, window, _| window.remove_window());
-    trim_process_memory();
-}
-
 fn prior_viewer_bounds(cx: &mut App) -> Option<Bounds<Pixels>> {
     let handle = cx.try_global::<GlobalImageViewer>().map(|g| g.0)?;
     match handle.update(cx, |_, window, _| window.window_bounds()) {
@@ -109,12 +100,23 @@ pub fn open_image_viewer(request: OpenViewerRequest, cx: &mut App) {
 }
 
 fn open_image_viewer_now(request: OpenViewerRequest, cx: &mut App) {
-    let prior_bounds = prior_viewer_bounds(cx);
+    let mut pending = Some(request);
     if let Some(handle) = cx.try_global::<GlobalImageViewer>().map(|g| g.0) {
-        close_image_viewer_window(handle, cx);
-        cx.defer(move |cx| spawn_image_viewer_window(request, prior_bounds, cx));
-        return;
+        let _ = handle.update(cx, |viewer, window, cx| {
+            if let Some(request) = pending.take() {
+                viewer.set_request(request, window, cx);
+                window.activate_window();
+            }
+        });
+        if pending.is_none() {
+            return;
+        }
+        clear_image_viewer_global(cx);
     }
+    let Some(request) = pending else {
+        return;
+    };
+    let prior_bounds = prior_viewer_bounds(cx);
     spawn_image_viewer_window(request, prior_bounds, cx);
 }
 
@@ -389,6 +391,7 @@ impl ImageViewer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.closing = false;
         self.session = self.session.wrapping_add(1);
         self.list_generation = self.list_generation.wrapping_add(1);
         self.clan_id = request.clan_id;
@@ -540,8 +543,7 @@ impl ImageViewer {
                             let selected_id = this.attachments.get(this.index).map(|a| a.id);
                             let mut merged = fresh;
                             merged.extend(std::mem::take(&mut this.attachments));
-                            merged
-                                .sort_by(|a, b| b.create_time_seconds.cmp(&a.create_time_seconds));
+                            merged.sort_by_key(|b| std::cmp::Reverse(b.create_time_seconds));
                             this.index = selected_id
                                 .and_then(|id| merged.iter().position(|a| a.id == id))
                                 .unwrap_or(this.index);
@@ -1496,8 +1498,8 @@ fn fit_contain(container: GpuiSize<Pixels>, content: GpuiSize<Pixels>) -> GpuiSi
 
 fn video_decode_max_size(window: &Window) -> (u32, u32) {
     let viewport = window.viewport_size();
-    let w = f32::from(viewport.width).min(VIEWER_VIDEO_MAX_W).max(1.0) as u32;
-    let h = f32::from(viewport.height).min(VIEWER_VIDEO_MAX_H).max(1.0) as u32;
+    let w = f32::from(viewport.width).clamp(1.0, VIEWER_VIDEO_MAX_W) as u32;
+    let h = f32::from(viewport.height).clamp(1.0, VIEWER_VIDEO_MAX_H) as u32;
     (w, h)
 }
 

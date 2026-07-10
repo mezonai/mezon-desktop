@@ -4,9 +4,8 @@ use gpui::{
 };
 use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, DirectChannel,
-    DirectKind, DirectMessageStore, GroupMembersStore, InboxStore, MessagesStore,
-    PinnedMessagesStore, Settings, ThreadsEvent, ThreadsStore, VoiceMember, VoiceModerationError,
-    VoiceStore,
+    DirectKind, DirectMessageStore, GroupMembersStore, InboxStore, MessagesStore, Settings,
+    ThreadsEvent, ThreadsStore, VoiceMember, VoiceModerationError, VoiceStore,
 };
 use ui::PopoverMenuHandle;
 use ui::utils::ROUNDED_BORDER_WINDOW;
@@ -32,6 +31,7 @@ pub struct ChatLayout {
     clan_sidebar: Entity<ClanSidebar>,
     channel_sidebar: Entity<ChannelSidebar>,
     direct_sidebar: Entity<DirectSidebar>,
+    friends_page: Entity<crate::chat::FriendsPage>,
     direct_store: Entity<DirectMessageStore>,
     user_info_bar: Entity<UserInfoBar>,
     clan_list: Entity<ClanList>,
@@ -150,6 +150,10 @@ impl ChatLayout {
         let settings_for_direct = settings.clone();
         let direct_sidebar = cx.new(move |cx| DirectSidebar::new(settings_for_direct, cx));
 
+        let settings_for_friends = settings.clone();
+        let friends_page =
+            cx.new(move |cx| crate::chat::FriendsPage::new(settings_for_friends, cx));
+
         let user_info_bar = cx.new(|cx| UserInfoBar::new(auth_state.clone(), cx));
 
         let direct_store = DirectMessageStore::global(cx);
@@ -262,6 +266,7 @@ impl ChatLayout {
             clan_sidebar,
             channel_sidebar,
             direct_sidebar,
+            friends_page,
             direct_store,
             user_info_bar,
             clan_list,
@@ -562,6 +567,14 @@ impl ChatLayout {
         changed
     }
 
+    fn drive_voice_video(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.voice_store
+            .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
+        if self.is_voice_frame_relevant(cx) && self.voice_store.read(cx).has_active_video() {
+            window.request_animation_frame();
+        }
+    }
+
     fn is_voice_frame_relevant(&self, cx: &Context<Self>) -> bool {
         if self.is_dm_route(cx) {
             return false;
@@ -670,6 +683,7 @@ impl Render for ChatLayout {
         self.chat_area.ensure_input(window, cx);
         self.chat_area.bind_window(window, cx);
         self.maybe_prefetch_voice_token(cx);
+        self.drive_voice_video(window, cx);
 
         if std::mem::take(&mut self.pending_open_threads_popover) {
             let handle = self.thread_popover_handle.clone();
@@ -1302,6 +1316,12 @@ impl ChatLayout {
         let pin_handle = self.pin_popover_handle.clone();
 
         if self.is_dm_route(cx) {
+            if matches!(
+                Router::global(cx).read(cx).route(),
+                Route::Friends | Route::Direct
+            ) {
+                return self.friends_page.clone().into_any_element();
+            }
             if let Some(dm) = self.current_dm(cx) {
                 let is_group = dm.kind == DirectKind::Group;
                 return self
@@ -1333,28 +1353,7 @@ impl ChatLayout {
                     )
                     .into_any_element();
             }
-            return div()
-                .flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .flex_col()
-                .gap_4()
-                .child(
-                    crate::components::primitives::Icon::new(
-                        crate::components::primitives::IconName::People,
-                    )
-                    .size_8()
-                    .text_color(theme.text_muted),
-                )
-                .child(
-                    div()
-                        .text_base()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text_primary)
-                        .child(mezon_i18n::t(&locale, "dm.emptyState")),
-                )
-                .into_any_element();
+            return self.friends_page.clone().into_any_element();
         }
 
         if let Some(ch) = self.channel_list.read(cx).active_channel() {

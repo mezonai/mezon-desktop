@@ -151,10 +151,8 @@ pub struct VoiceStore {
     pending_texture_drops: Mutex<Vec<Arc<RenderImage>>>,
     cached_meet_token: Option<CachedMeetToken>,
     meet_token_prefetching: Option<String>,
-    last_repaint_seq: Option<u64>,
     link_copied: bool,
     _events_task: Option<Task<()>>,
-    _repaint_task: Option<Task<()>>,
     _link_copied_reset: Option<Task<()>>,
 }
 
@@ -251,16 +249,10 @@ impl VoiceStore {
             pending_texture_drops: Mutex::new(Vec::new()),
             cached_meet_token: None,
             meet_token_prefetching: None,
-            last_repaint_seq: None,
             link_copied: false,
             _events_task: None,
-            _repaint_task: None,
             _link_copied_reset: None,
         }
-    }
-
-    fn current_max_frame_seq(&self) -> Option<u64> {
-        Some(self.frame_store.as_ref()?.publish_seq())
     }
 
     fn cached_token_for(&self, channel_id: &str) -> Option<String> {
@@ -427,7 +419,7 @@ impl VoiceStore {
         });
     }
 
-    fn flush_texture_drops(&self, mut window: Option<&mut Window>, cx: &mut App) {
+    pub fn flush_texture_drops(&self, mut window: Option<&mut Window>, cx: &mut App) {
         let drops: Vec<Arc<RenderImage>> = std::mem::take(&mut *self.pending_texture_drops.lock());
         for image in drops {
             cx.drop_image(image, window.as_deref_mut());
@@ -636,6 +628,8 @@ impl VoiceStore {
         {
             return;
         }
+        self.sound_throttle
+            .retain(|_, last| now.duration_since(*last) < SOUND_REACTION_THROTTLE);
         self.sound_throttle.insert(user_id.clone(), now);
 
         if let Some(pcm) = self
@@ -1297,8 +1291,7 @@ impl VoiceStore {
             ice_servers,
         );
         let events = session.events();
-        let frame_store = session.frame_store();
-        self.frame_store = Some(frame_store.clone());
+        self.frame_store = Some(session.frame_store());
         self.session = Some(session);
         self.sync_noise_suppression();
 
@@ -1313,27 +1306,6 @@ impl VoiceStore {
             }
         });
         self._events_task = Some(task);
-
-        let repaint = cx.spawn(async move |this, cx| {
-            loop {
-                frame_store.frame_changed().await;
-                let keep_going = this.update(cx, |this, cx| {
-                    this.flush_texture_drops(None, cx);
-                    if this.has_active_video() {
-                        let seq = this.current_max_frame_seq();
-                        if seq.is_some() && seq != this.last_repaint_seq {
-                            this.last_repaint_seq = seq;
-                            cx.notify();
-                        }
-                    }
-                    !matches!(this.connection, VoiceConnection::Idle)
-                });
-                if !matches!(keep_going, Ok(true)) {
-                    break;
-                }
-            }
-        });
-        self._repaint_task = Some(repaint);
         cx.notify();
     }
 
@@ -1358,7 +1330,7 @@ impl VoiceStore {
         }]
     }
 
-    fn has_active_video(&self) -> bool {
+    pub fn has_active_video(&self) -> bool {
         self.camera_enabled
             || self.screen_share_enabled
             || self
@@ -1511,7 +1483,6 @@ impl VoiceStore {
         }
         self.flush_texture_drops(window, cx);
         self._events_task = None;
-        self._repaint_task = None;
         self.connection = VoiceConnection::Idle;
         self.call_status = VoiceCallStatus::Stable;
         self.channel_label.clear();
@@ -1533,10 +1504,11 @@ impl VoiceStore {
         self.sound_throttle.clear();
         self.sound_cache.clear();
         self.sound_preview = None;
+        self.raising_hand_player = None;
+        self.raising_hand_sound_loading = false;
         self.displayed_reactions.clear();
         self.last_emoji_at = None;
         self.meet_token_prefetching = None;
-        self.last_repaint_seq = None;
         self.link_copied = false;
         self._link_copied_reset = None;
     }

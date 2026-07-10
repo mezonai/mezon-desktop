@@ -16,6 +16,7 @@ install_apt() {
     pkg-config
     cmake
     clang
+    libglib2.0-dev
     libgtk-3-dev
     libatk1.0-dev
     libpango1.0-dev
@@ -77,6 +78,7 @@ install_dnf() {
     pkg-config
     cmake
     clang
+    glib2-devel
     gtk3-devel
     atk-devel
     pango-devel

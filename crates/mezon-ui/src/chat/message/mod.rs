@@ -8,6 +8,7 @@ mod embed_card;
 mod embed_fields;
 mod forward_modal;
 mod gif_video;
+pub mod inline_content;
 mod invite_card;
 mod message_actions_panel;
 mod message_context_menu;

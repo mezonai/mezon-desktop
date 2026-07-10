@@ -9,7 +9,10 @@ use mezon_store::{
     MessageReference, MessagesStore, PlatformStore, Reaction, ViewerMedia, resolve_avatar_url,
 };
 
-use super::audio_player::{AudioActivation, audio_pill, audio_sending_pill, audio_time_label};
+use super::audio_player::{
+    AudioActivation, audio_failed_pill, audio_pill, audio_sending_pill, audio_time_label,
+};
+use super::content::profile_popover_trigger;
 use super::context::{REPLY_USERNAME_COLOR, RowCtx};
 use super::gif_video::GifVideoView;
 use super::reaction_detail::{UserReactionPanel, emoji_error_fallback};
@@ -102,19 +105,12 @@ fn profile_name_trigger(msg: &Message, ctx: &RowCtx, name: gpui::Div) -> AnyElem
         return name.into_any_element();
     };
     let key = user_id.get() as usize;
-    profile_popover_menu(
-        ("msg-head-popover", key),
+    profile_popover_trigger(
+        ("msg-head-trigger", key),
         user_id,
         profile_ctx,
-        ctx.settings.clone(),
-        ctx.avatar_cache.clone(),
-    )
-    .anchor(Anchor::TopLeft)
-    .attach(Anchor::TopRight)
-    .trigger(
-        ClickableContainer::new(("msg-head-trigger", key))
-            .cursor_pointer()
-            .child(name.into_any_element()),
+        ctx,
+        name.into_any_element(),
     )
     .into_any_element()
 }
@@ -391,6 +387,29 @@ fn attachment_sending_overlay(theme: &Theme) -> impl IntoElement {
         )
 }
 
+fn attachment_failed_overlay(theme: &Theme) -> impl IntoElement {
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(40.))
+                .rounded_full()
+                .bg(theme.bg_floating)
+                .child(
+                    Icon::new(IconName::TriangleAlert)
+                        .size(px(24.))
+                        .text_color(theme.status_dnd),
+                ),
+        )
+}
+
 fn render_audio(
     msg_id: MessageId,
     index: usize,
@@ -399,6 +418,9 @@ fn render_audio(
     sending: bool,
 ) -> AnyElement {
     let duration = att.duration.max(0) as f64;
+    if att.upload_failed {
+        return audio_failed_pill(duration);
+    }
     if sending {
         return audio_sending_pill(duration);
     }
@@ -448,6 +470,7 @@ fn render_album(
     msg: &Message,
     ctx: &RowCtx,
 ) -> AnyElement {
+    let cfg = AppConfig::try_global(ctx.app);
     let mut container = div()
         .relative()
         .w(px(layout.container_width))
@@ -471,18 +494,28 @@ fn render_album(
             .flex()
             .items_center()
             .justify_center()
+            .overflow_hidden()
             .bg(theme.bg_tertiary);
         if let Some(path) = att.local_source.clone() {
-            tile_element = tile_element.when(!att.uploading && !raw_url.is_empty(), |d| {
-                d.cursor_pointer().on_click(move |_, _window, cx| {
-                    open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
-                })
-            });
-            tile_element = tile_element.child(img(path).size_full().object_fit(ObjectFit::Cover));
+            tile_element = tile_element.when(
+                !att.uploading && !att.upload_failed && !raw_url.is_empty(),
+                |d| {
+                    d.cursor_pointer().on_click(move |_, _window, cx| {
+                        open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
+                    })
+                },
+            );
+            tile_element = tile_element.child(cover_tile_image(
+                img(path),
+                att.width,
+                att.height,
+                tile.width,
+                tile.height,
+            ));
         } else if att.presign_pending {
             tile_element = presign_child(tile_element, att, theme);
         } else {
-            let src = att.proxied_src.clone();
+            let src = album_tile_src(cfg, att, tile.width, tile.height);
             tile_element = tile_element
                 .cursor_pointer()
                 .when(!src.is_empty(), |d| {
@@ -492,12 +525,60 @@ fn render_album(
                     open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
                 });
         }
-        if att.uploading {
+        if att.upload_failed {
+            tile_element = tile_element.child(attachment_failed_overlay(theme));
+        } else if att.uploading {
             tile_element = tile_element.child(attachment_sending_overlay(theme));
         }
         container = container.child(tile_element);
     }
     container.into_any_element()
+}
+
+fn album_tile_src(
+    cfg: Option<&AppConfig>,
+    att: &MessageAttachment,
+    tile_width: f32,
+    tile_height: f32,
+) -> SharedString {
+    let tile_w = (tile_width.round() as u32).max(1);
+    let tile_h = (tile_height.round() as u32).max(1);
+    let resize = if att.width < tile_w || att.height < tile_h {
+        "fill-down"
+    } else {
+        "fill"
+    };
+    cfg.map(|c| c.imgproxy_url(&att.url, tile_w, tile_h, resize))
+        .filter(|src| !src.is_empty())
+        .map(SharedString::from)
+        .unwrap_or_else(|| att.proxied_src.clone())
+}
+
+fn cover_tile_image(
+    image: gpui::Img,
+    natural_width: u32,
+    natural_height: u32,
+    tile_width: f32,
+    tile_height: f32,
+) -> AnyElement {
+    if natural_width == 0 || natural_height == 0 {
+        return image
+            .size_full()
+            .object_fit(ObjectFit::Cover)
+            .into_any_element();
+    }
+    let iw = natural_width as f32;
+    let ih = natural_height as f32;
+    let scale = (tile_width / iw).max(tile_height / ih);
+    let rendered_w = iw * scale;
+    let rendered_h = ih * scale;
+    image
+        .absolute()
+        .left(px((tile_width - rendered_w) / 2.0))
+        .top(px((tile_height - rendered_h) / 2.0))
+        .w(px(rendered_w))
+        .h(px(rendered_h))
+        .into_any_element()
 }
 
 fn presign_child(
@@ -556,7 +637,7 @@ fn render_photo(
             .rounded_md()
             .overflow_hidden()
             .bg(theme.bg_tertiary);
-        el = el.when(!sending && !raw_url.is_empty(), |d| {
+        el = el.when(!sending && !att.upload_failed && !raw_url.is_empty(), |d| {
             d.cursor_pointer().on_click(move |_, _window, cx| {
                 open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
             })
@@ -580,7 +661,9 @@ fn render_photo(
                         .into_any_element()
                 }),
         );
-        if sending {
+        if att.upload_failed {
+            el = el.child(attachment_failed_overlay(theme));
+        } else if sending {
             el = el.child(attachment_sending_overlay(theme));
         }
         return el.into_any_element();
@@ -598,7 +681,9 @@ fn render_photo(
             .justify_center()
             .bg(theme.bg_tertiary);
         placeholder = presign_child(placeholder, att, theme);
-        if sending {
+        if att.upload_failed {
+            placeholder = placeholder.child(attachment_failed_overlay(theme));
+        } else if sending {
             placeholder = placeholder.child(attachment_sending_overlay(theme));
         }
         return placeholder.into_any_element();
@@ -626,7 +711,7 @@ fn render_photo(
         .rounded_md()
         .overflow_hidden()
         .bg(theme.bg_tertiary);
-    el = el.when(!is_sticker, |d| {
+    el = el.when(!is_sticker && !att.upload_failed, |d| {
         d.cursor_pointer().on_click(move |_, _window, cx| {
             open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
         })
@@ -650,7 +735,9 @@ fn render_photo(
                     .into_any_element()
             }),
     );
-    if sending {
+    if att.upload_failed {
+        el = el.child(attachment_failed_overlay(theme));
+    } else if sending {
         el = el.child(attachment_sending_overlay(theme));
     }
     el.into_any_element()
@@ -706,6 +793,11 @@ fn render_video_poster(
                     .object_fit(ObjectFit::Cover),
             )
         });
+    if att.upload_failed {
+        return container
+            .child(attachment_failed_overlay(theme))
+            .into_any_element();
+    }
     if sending {
         return container
             .child(attachment_sending_overlay(theme))
@@ -805,6 +897,7 @@ fn render_file_box(
 ) -> AnyElement {
     let theme = ctx.theme;
     let sending = att.uploading;
+    let failed = att.upload_failed;
     let is_owner = ctx.current_user_id == msg.sender_id.as_str();
     let filename = if att.filename.is_empty() {
         SharedString::from("Attachment")
@@ -850,7 +943,7 @@ fn render_file_box(
                 .justify_center()
                 .w(px(32.))
                 .h(px(40.))
-                .when(!sending, |d| {
+                .when(!sending && !failed, |d| {
                     d.child(
                         Icon::new(file_icon_for(&att.filetype))
                             .size(px(30.))
@@ -863,6 +956,13 @@ fn render_file_box(
                             .with_size(Size::Medium)
                             .color(theme.tokens.text_theme_primary.into()),
                     )
+                })
+                .when(failed, |d| {
+                    d.child(
+                        Icon::new(IconName::TriangleAlert)
+                            .size(px(28.))
+                            .text_color(theme.status_dnd),
+                    )
                 }),
         )
         .child(
@@ -873,7 +973,7 @@ fn render_file_box(
                 ))
                 .flex_1()
                 .min_w_0()
-                .when(!sending, |d| {
+                .when(!sending && !failed, |d| {
                     d.cursor_pointer()
                         .on_click(move |_, _, cx| open_external(&body_url, cx))
                 })
@@ -882,7 +982,7 @@ fn render_file_box(
                         .truncate()
                         .text_size(px(16.))
                         .text_color(gpui::rgb(FILE_NAME_COLOR))
-                        .when(!sending, |d| d.hover(|s| s.underline()))
+                        .when(!sending && !failed, |d| d.hover(|s| s.underline()))
                         .child(filename),
                 )
                 .child(
@@ -892,7 +992,7 @@ fn render_file_box(
                         .child(size_line),
                 ),
         )
-        .when(!sending, |row| {
+        .when(!sending && !failed, |row| {
             row.child(
                 div()
                     .absolute()
@@ -975,7 +1075,41 @@ pub fn render_reactions(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
     for (i, reaction) in msg.reactions.iter().enumerate() {
         row = row.child(reaction_pill(i, reaction, msg.id, ctx));
     }
+    row = row.child(add_reaction_button(msg.id, ctx));
     Some(row.into_any_element())
+}
+
+fn add_reaction_button(message_id: MessageId, ctx: &RowCtx) -> AnyElement {
+    let visible = !ctx.suppress_hover && ctx.hovered_row == Some(message_id);
+    let bg = ctx.theme.bg_tertiary;
+    let bg_hover = ctx.theme.bg_hover;
+    let icon_color = ctx.theme.text_muted;
+    let host = ctx.video_host.clone();
+    div()
+        .id("add-reaction")
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(24.))
+        .rounded_md()
+        .when(visible, move |d| {
+            d.cursor_pointer()
+                .bg(bg)
+                .hover(move |s| s.bg(bg_hover))
+                .child(
+                    Icon::new(IconName::Smile)
+                        .size(px(20.))
+                        .text_color(icon_color),
+                )
+                .on_click(move |_, window, cx| {
+                    let position = window.mouse_position();
+                    let _ = host.update(cx, |this, cx| {
+                        this.open_reaction_picker(message_id, position, window, cx);
+                    });
+                })
+        })
+        .into_any_element()
 }
 
 fn reaction_pill(

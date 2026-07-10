@@ -265,9 +265,8 @@ impl ChatArea {
             .child(div().flex_1().min_h_0().overflow_hidden().child(
                 AnyView::from(self.timeline.clone()).cached(StyleRefinement::default().size_full()),
             ))
-            .child(self.typing.clone())
             .child(input_bar.render(theme, locale))
-            // .child(LaunchAppButton::new().render(theme))
+            .child(self.typing.clone())
             .when_some(channel_type.as_ref(), |this, c_type| {
                 if matches!(c_type, ChannelType::App) {
                     this.child(LaunchAppButton::new().render(theme))

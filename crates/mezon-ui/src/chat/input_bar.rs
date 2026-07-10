@@ -88,7 +88,7 @@ impl InputBar {
             .flex()
             .flex_col()
             .px_3()
-            .pb_4()
+            .pb_1()
             .when_some(self.replying_to.as_ref(), |d, target| {
                 d.child(Self::reply_preview_bar(theme, locale, target))
             })

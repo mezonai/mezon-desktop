@@ -19,7 +19,7 @@ tracing = { workspace = true }
 futures = { workspace = true }
 
 scap = { workspace = true }
-nokhwa = { version = "0.10", default-features = false, features = ["input-avfoundation"] }
+nokhwa = { version = "0.10", default-features = false }
 
 image = { workspace = true }
 yuv = { workspace = true }
@@ -41,6 +41,7 @@ block = "0.1.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nokhwa = { version = "0.10", default-features = false, features = ["input-v4l"] }
+libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 nokhwa = { version = "0.10", default-features = false, features = ["input-msmf"] }

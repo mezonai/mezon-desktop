@@ -1,6 +1,9 @@
-use gpui::{Context, Entity, Render, SharedString, Subscription, Window, div, prelude::*, px};
+use gpui::{
+    Context, Entity, FontWeight, Render, SharedString, Subscription, Window, div, prelude::*, px,
+};
 use mezon_store::{ChannelId, PresenceEvent, PresenceStore, Settings};
 
+use crate::components::primitives::{Icon, IconName};
 use crate::theme::ActiveTheme;
 
 pub struct ChannelTyping {
@@ -8,6 +11,14 @@ pub struct ChannelTyping {
     settings: Entity<Settings>,
     _presence_sub: Subscription,
     _settings_sub: Subscription,
+}
+
+enum TypingContent {
+    One {
+        name: SharedString,
+        suffix: SharedString,
+    },
+    Several(SharedString),
 }
 
 impl ChannelTyping {
@@ -36,37 +47,67 @@ impl ChannelTyping {
         cx.notify();
     }
 
-    fn label(&self, cx: &Context<Self>) -> Option<SharedString> {
+    fn content(&self, cx: &Context<Self>) -> Option<TypingContent> {
         let channel_id = self.channel_id?;
         let presence = PresenceStore::global(cx);
         let presence = presence.read(cx);
         let users = presence.typing_users(channel_id);
         let locale = self.settings.read(cx).language.clone();
-        let label = match users.len() {
-            0 => return None,
-            1 => {
-                let name = users.first()?;
-                format!("{name} {}", mezon_i18n::t(&locale, "common.isTyping"))
-            }
-            _ => mezon_i18n::t(&locale, "common.severalPeopleTyping").to_string(),
-        };
-        Some(SharedString::from(label))
+        match users.len() {
+            0 => None,
+            1 => Some(TypingContent::One {
+                name: users.into_iter().next()?,
+                suffix: SharedString::from(
+                    mezon_i18n::t(&locale, "common.isTyping").trim_end_matches(['.', '…']),
+                ),
+            }),
+            _ => Some(TypingContent::Several(SharedString::from(mezon_i18n::t(
+                &locale,
+                "common.severalPeopleTyping",
+            )))),
+        }
     }
 }
 
 impl Render for ChannelTyping {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        div()
+        let (primary, active) = {
+            let theme = cx.theme();
+            (theme.tokens.text_theme_primary, theme.tokens.text_secondary)
+        };
+        let bar = div()
             .mx_3()
+            .mt(px(-2.))
             .h(px(16.))
             .flex()
             .flex_row()
             .items_center()
             .gap_1p5()
             .overflow_hidden()
+            .whitespace_nowrap()
+            .pr_1()
             .text_xs()
-            .text_color(theme.text_primary)
-            .when_some(self.label(cx), |d, label| d.child(label))
+            .text_color(primary);
+        match self.content(cx) {
+            Some(TypingContent::One { name, suffix }) => bar
+                .child(
+                    Icon::new(IconName::TypingIndicator)
+                        .w(px(20.))
+                        .h(px(10.))
+                        .flex_none()
+                        .text_color(primary),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .mr(px(2.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(active)
+                        .child(name),
+                )
+                .child(div().flex_none().text_color(primary).child(suffix)),
+            Some(TypingContent::Several(text)) => bar.child(text),
+            None => bar,
+        }
     }
 }

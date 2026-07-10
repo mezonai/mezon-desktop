@@ -5153,6 +5153,11 @@ impl Window {
         self.platform_window.minimize();
     }
 
+    /// Hide the current window at the platform level without closing it.
+    pub fn hide_window(&self) {
+        self.platform_window.hide();
+    }
+
     /// Toggle full screen status on the current window at the platform level.
     pub fn toggle_fullscreen(&self) {
         self.platform_window.toggle_fullscreen();

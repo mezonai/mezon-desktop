@@ -49,21 +49,10 @@ fn frame_to_scaled(
 
         let source: IWICBitmapSource = frame.cast().ok()?;
 
-        let scaler = factory.CreateBitmapScaler().ok()?;
-        scaler
-            .Initialize(
-                &source,
-                target_width,
-                target_height,
-                WICBitmapInterpolationModeFant,
-            )
-            .ok()?;
-        let scaled_source: IWICBitmapSource = scaler.cast().ok()?;
-
         let converter = factory.CreateFormatConverter().ok()?;
         converter
             .Initialize(
-                &scaled_source,
+                &source,
                 &GUID_WICPixelFormat32bppBGRA,
                 WICBitmapDitherTypeNone,
                 None,
@@ -71,11 +60,23 @@ fn frame_to_scaled(
                 WICBitmapPaletteTypeCustom,
             )
             .ok()?;
+        let converted: IWICBitmapSource = converter.cast().ok()?;
+
+        let scaler = factory.CreateBitmapScaler().ok()?;
+        scaler
+            .Initialize(
+                &converted,
+                target_width,
+                target_height,
+                WICBitmapInterpolationModeFant,
+            )
+            .ok()?;
+        let scaled_source: IWICBitmapSource = scaler.cast().ok()?;
 
         let stride = target_width.checked_mul(4)?;
         let size = (stride as usize).checked_mul(target_height as usize)?;
         let mut buffer = vec![0u8; size];
-        converter
+        scaled_source
             .CopyPixels(std::ptr::null(), stride, &mut buffer)
             .ok()?;
 

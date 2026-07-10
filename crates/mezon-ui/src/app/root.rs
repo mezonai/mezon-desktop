@@ -66,7 +66,13 @@ impl RootView {
         })
         .detach();
 
-        cx.observe(&auth_state, |_, _, cx| cx.notify()).detach();
+        cx.observe(&auth_state, |_, auth_state, cx| {
+            if matches!(*auth_state.read(cx), AuthState::NotAuthenticated) {
+                crate::image_cache::clear_shared_avatar_cache(cx);
+            }
+            cx.notify();
+        })
+        .detach();
 
         cx.observe(&ConnectionStore::global(cx), |_, _, cx| cx.notify())
             .detach();
@@ -121,6 +127,7 @@ impl RootView {
         });
 
         let applied_theme = settings.read(cx).theme.clone();
+        crate::image_cache::start_idle_trim(cx);
         let image_cache = cx.new(|cx| {
             LruImageCache::labeled(
                 "shared",

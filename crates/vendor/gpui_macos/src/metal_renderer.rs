@@ -378,6 +378,36 @@ impl MetalRenderer {
         }
     }
 
+    pub fn shrink_drawable_pool(&mut self) {
+        if let Some(layer) = &self.layer {
+            let ns_size = NSSize {
+                width: 1.0,
+                height: 1.0,
+            };
+            unsafe {
+                let _: () = msg_send![
+                    layer.as_ref(),
+                    setDrawableSize: ns_size
+                ];
+            }
+        }
+        self.path_intermediate_texture = None;
+        self.path_intermediate_msaa_texture = None;
+    }
+
+    pub fn restore_drawable_size_if_needed(&mut self, size: Size<DevicePixels>) {
+        let Some(layer) = &self.layer else {
+            return;
+        };
+        let current = layer.drawable_size();
+        let target_w = size.width.0 as f64;
+        let target_h = size.height.0 as f64;
+        if (current.width - target_w).abs() < 0.5 && (current.height - target_h).abs() < 0.5 {
+            return;
+        }
+        self.update_drawable_size(size);
+    }
+
     pub fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
         if let Some(layer) = &self.layer {
             let ns_size = NSSize {
@@ -439,8 +469,24 @@ impl MetalRenderer {
         }
     }
 
-    pub fn destroy(&self) {
-        // nothing to do
+    pub fn destroy(&mut self) {
+        if let Some(layer) = &self.layer {
+            let ns_size = NSSize {
+                width: 1.0,
+                height: 1.0,
+            };
+            unsafe {
+                let _: () = msg_send![
+                    layer.as_ref(),
+                    setDrawableSize: ns_size
+                ];
+                let _: () = msg_send![layer.as_ref(), setContents: ptr::null_mut::<std::ffi::c_void>()];
+            }
+        }
+        self.layer = None;
+        self.sprite_atlas.clear();
+        self.path_intermediate_texture = None;
+        self.path_intermediate_msaa_texture = None;
     }
 
     pub fn draw(&mut self, scene: &Scene) {
@@ -1342,7 +1388,9 @@ impl MetalRenderer {
             return false;
         }
 
-        let texture = self.sprite_atlas.metal_texture(texture_id);
+        let Some(texture) = self.sprite_atlas.metal_texture(texture_id) else {
+            return true;
+        };
         let texture_size = size(
             DevicePixels(texture.width() as i32),
             DevicePixels(texture.height() as i32),
@@ -1407,7 +1455,9 @@ impl MetalRenderer {
         }
         align_offset(instance_offset);
 
-        let texture = self.sprite_atlas.metal_texture(texture_id);
+        let Some(texture) = self.sprite_atlas.metal_texture(texture_id) else {
+            return true;
+        };
         let texture_size = size(
             DevicePixels(texture.width() as i32),
             DevicePixels(texture.height() as i32),
