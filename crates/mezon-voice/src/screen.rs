@@ -155,7 +155,10 @@ pub fn start_screen(
                                     pump_slot.publish(bgra);
                                 }
                             }
-                            Err(_) => break,
+                            Err(e) => {
+                                pump_slot.fail(format!("screen capture failed: {e}"));
+                                break;
+                            }
                         }
                     }
                     capturer.stop_capture();

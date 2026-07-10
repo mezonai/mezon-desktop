@@ -218,19 +218,19 @@ fn macos_display_name(display_id: core_graphics_helmer_fork::display::CGDirectDi
     use cocoa::appkit::NSScreen;
     use cocoa::base::{id, nil};
     use cocoa::foundation::NSString;
+    use objc::rc::{StrongPtr, autoreleasepool};
     use objc::{msg_send, sel, sel_impl};
 
-    unsafe {
+    autoreleasepool(|| unsafe {
+        let screen_number_key = StrongPtr::new(NSString::alloc(nil).init_str("NSScreenNumber"));
         let screens: id = NSScreen::screens(nil);
         let count: u64 = msg_send![screens, count];
 
         for index in 0..count {
             let screen: id = msg_send![screens, objectAtIndex: index];
             let device_description: id = msg_send![screen, deviceDescription];
-            let display_id_number: id = msg_send![
-                device_description,
-                objectForKey: NSString::alloc(nil).init_str("NSScreenNumber")
-            ];
+            let display_id_number: id =
+                msg_send![device_description, objectForKey: *screen_number_key];
             let display_id_number: u32 = msg_send![display_id_number, unsignedIntValue];
 
             if display_id_number == display_id {
@@ -241,7 +241,7 @@ fn macos_display_name(display_id: core_graphics_helmer_fork::display::CGDirectDi
                     .into_owned();
             }
         }
-    }
 
-    format!("Display {display_id}")
+        format!("Display {display_id}")
+    })
 }

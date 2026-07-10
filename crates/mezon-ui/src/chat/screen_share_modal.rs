@@ -2,11 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, ObjectFit, RenderImage, SharedString, Window,
-    div, img, prelude::*, px,
+    App, Context, Entity, FocusHandle, Focusable, ObjectFit, RenderImage, SharedString, Task,
+    Window, div, img, prelude::*, px,
 };
 use mezon_store::{
-    PlatformStore, ScreenShareKind, ScreenShareListError, ScreenShareOption, ScreenSharePreview,
+    ScreenShareKind, ScreenShareListError, ScreenShareOption, ScreenSharePreview,
     Settings, VoiceStore, capture_screen_share_preview, list_screen_share_options,
     peek_screen_share_options,
 };
@@ -49,6 +49,9 @@ pub struct ScreenShareModal {
     selected: Option<SelectedTarget>,
     share_audio: bool,
     load_started: bool,
+    list_task: Option<Task<()>>,
+    preview_task: Option<Task<()>>,
+    preview_loading: bool,
 }
 
 impl Focusable for ScreenShareModal {
@@ -89,6 +92,9 @@ impl ScreenShareModal {
             selected: None,
             share_audio: false,
             load_started: false,
+            list_task: None,
+            preview_task: None,
+            preview_loading: false,
         }
     }
 
@@ -103,18 +109,19 @@ impl ScreenShareModal {
             self.loading = false;
         }
 
-        let this = cx.entity().clone();
-        cx.spawn(async move |_, cx| {
+        self.list_task = Some(cx.spawn(async move |this, cx| {
             let (tx, rx) = flume::bounded(1);
             std::thread::spawn(move || {
                 let _ = tx.send(list_screen_share_options());
             });
             let result = rx.recv_async().await;
-            this.update(cx, |this, cx| {
+            let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(Ok(options)) => {
                         this.options = options;
                         this.loading = false;
+                        this.preview_task = None;
+                        this.preview_loading = false;
                         for (_, image) in this.previews.drain() {
                             cx.drop_image(image, None);
                         }
@@ -133,12 +140,11 @@ impl ScreenShareModal {
                 }
                 cx.notify();
             });
-        })
-        .detach();
+        }));
     }
 
     fn start_preview_loading(&mut self, cx: &mut Context<Self>) {
-        if self.loading || self.load_error.is_some() {
+        if self.loading || self.load_error.is_some() || self.preview_loading {
             return;
         }
 
@@ -168,15 +174,17 @@ impl ScreenShareModal {
                 .map(|(kind, id)| PreviewKey { kind, id }),
         );
 
-        let this = cx.entity().clone();
-        cx.spawn(async move |_, cx| {
+        self.preview_loading = true;
+        self.preview_task = Some(cx.spawn(async move |this, cx| {
             let (tx, rx) = flume::bounded(targets.len().max(1));
             std::thread::Builder::new()
                 .name("mezon-screen-previews".into())
                 .spawn(move || {
                     for (kind, id) in targets {
                         let preview = capture_screen_share_preview(kind, id);
-                        let _ = tx.send((kind, id, preview));
+                        if tx.send((kind, id, preview)).is_err() {
+                            break;
+                        }
                     }
                 })
                 .ok();
@@ -184,18 +192,27 @@ impl ScreenShareModal {
             while let Ok((kind, id, preview)) = rx.recv_async().await {
                 let key = PreviewKey { kind, id };
                 let image = preview.and_then(preview_to_render_image);
-                this.update(cx, |this, cx| match image {
+                let updated = this.update(cx, |this, cx| match image {
                     Some(image) => {
-                        this.previews.insert(key, image);
+                        if let Some(previous) = this.previews.insert(key, image) {
+                            cx.drop_image(previous, None);
+                        }
                         cx.notify();
                     }
                     None => {
                         this.preview_requests.remove(&key);
                     }
                 });
+                if updated.is_err() {
+                    return;
+                }
             }
-        })
-        .detach();
+
+            let _ = this.update(cx, |this, cx| {
+                this.preview_loading = false;
+                cx.notify();
+            });
+        }));
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
@@ -651,11 +668,7 @@ fn permission_denied_state(locale: &str, cx: &mut Context<ScreenShareModal>) -> 
                         .label(open_settings)
                         .primary()
                         .on_click(|_, _, cx| {
-                            if let Some(store) = PlatformStore::try_global(cx) {
-                                let _ = store
-                                    .read(cx)
-                                    .open_url_external(MACOS_SCREEN_CAPTURE_SETTINGS_URL);
-                            }
+                            cx.open_url(MACOS_SCREEN_CAPTURE_SETTINGS_URL);
                         }),
                 ),
             )

@@ -628,6 +628,8 @@ impl VoiceStore {
         {
             return;
         }
+        self.sound_throttle
+            .retain(|_, last| now.duration_since(*last) < SOUND_REACTION_THROTTLE);
         self.sound_throttle.insert(user_id.clone(), now);
 
         if let Some(pcm) = self
@@ -1502,6 +1504,8 @@ impl VoiceStore {
         self.sound_throttle.clear();
         self.sound_cache.clear();
         self.sound_preview = None;
+        self.raising_hand_player = None;
+        self.raising_hand_sound_loading = false;
         self.displayed_reactions.clear();
         self.last_emoji_at = None;
         self.meet_token_prefetching = None;

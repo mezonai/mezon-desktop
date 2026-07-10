@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use windows_capture::{
     capture::{CaptureControl, Context, GraphicsCaptureApiHandler},
     frame::Frame as WCFrame,
-    graphics_capture_api::InternalCaptureControl,
+    graphics_capture_api::{GraphicsCaptureApi, InternalCaptureControl},
     monitor::Monitor as WCMonitor,
     settings::{
         ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
@@ -33,6 +33,7 @@ enum Settings {
 pub struct WCStream {
     settings: Settings,
     capture_control: Option<CaptureControl<Capturer, Box<dyn std::error::Error + Send + Sync>>>,
+    error_tx: mpsc::Sender<anyhow::Result<Frame>>,
 }
 
 impl GraphicsCaptureApiHandler for Capturer {
@@ -116,16 +117,25 @@ impl GraphicsCaptureApiHandler for Capturer {
 impl WCStream {
     pub fn start_capture(&mut self) {
         let cc = match &self.settings {
-            Settings::Display(st) => Capturer::start_free_threaded(st.to_owned()).unwrap(),
-            Settings::Window(st) => Capturer::start_free_threaded(st.to_owned()).unwrap(),
+            Settings::Display(st) => Capturer::start_free_threaded(st.to_owned()),
+            Settings::Window(st) => Capturer::start_free_threaded(st.to_owned()),
         };
 
-        self.capture_control = Some(cc)
+        match cc {
+            Ok(cc) => self.capture_control = Some(cc),
+            Err(e) => {
+                log::error!("failed to start screen capture: {e}");
+                let _ = self
+                    .error_tx
+                    .send(Err(anyhow::anyhow!("start capture: {e}")));
+            }
+        }
     }
 
     pub fn stop_capture(&mut self) {
-        let capture_control = self.capture_control.take().unwrap();
-        let _ = capture_control.stop();
+        if let Some(capture_control) = self.capture_control.take() {
+            let _ = capture_control.stop();
+        }
     }
 }
 
@@ -145,10 +155,16 @@ pub fn create_capturer(options: &Options, tx: mpsc::Sender<anyhow::Result<Frame>
         _ => ColorFormat::Rgba8,
     };
 
-    let show_cursor = match options.show_cursor {
-        true => CursorCaptureSettings::WithCursor,
-        false => CursorCaptureSettings::WithoutCursor,
+    let show_cursor = if GraphicsCaptureApi::is_cursor_settings_supported().unwrap_or(false) {
+        match options.show_cursor {
+            true => CursorCaptureSettings::WithCursor,
+            false => CursorCaptureSettings::WithoutCursor,
+        }
+    } else {
+        CursorCaptureSettings::Default
     };
+
+    let error_tx = tx.clone();
 
     let settings = match target.clone() {
         Target::Display(display) => Settings::Display(WCSettings::new(
@@ -182,6 +198,7 @@ pub fn create_capturer(options: &Options, tx: mpsc::Sender<anyhow::Result<Frame>
     (WCStream {
         settings,
         capture_control: None,
+        error_tx,
     }, target)
 }
 
