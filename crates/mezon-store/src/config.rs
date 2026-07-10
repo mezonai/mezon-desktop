@@ -155,7 +155,7 @@ impl AppConfig {
             api_host: "api.mezon.ai".into(),
             api_port: 443,
             api_secure: true,
-            api_key: "HTTP3m3zonPr0dkey".into(),
+            api_key: String::new(),
             api_gw_host: "gw.mezon.ai".into(),
             api_gw_port: 443,
 
@@ -181,38 +181,36 @@ impl AppConfig {
             base_img_url: "https://cdn.mezon.ai".into(),
             profile_img_url: "https://profile.mezon.ai".into(),
             imgproxy_base_url: "https://imgproxy.mezon.ai".into(),
-            imgproxy_key: "K0YUZRIosDOcz5lY6qrgC6UIXmQgWzLjZv7VJ1RAA8c".into(),
+            imgproxy_key: String::new(),
 
-            tenor_key: "AIzaSyA7PmFsiGws1XF-t6jXsVuF6O2DQLa8BpE".into(),
+            tenor_key: String::new(),
             tenor_url_categories: "https://tenor.googleapis.com/v2/categories?key=".into(),
             tenor_url_search: "https://tenor.googleapis.com/v2/search?q=".into(),
             tenor_url_featured: "https://tenor.googleapis.com/v2/featured?key=".into(),
 
             mezon_treasury_url: "https://withdraw-api.nccsoft.vn".into(),
-            mezon_treasury_key: "WTGYB2AJSHUBPAXZULT2Y7LGR4GQ".into(),
+            mezon_treasury_key: String::new(),
             contract_address: "0x4F17a94dD6E1B2D6241C4D1956C6c7a07ba2Ec50".into(),
             mezon_treasury_url_network: "https://sepolia.etherscan.io".into(),
 
             webrtc_ice_servers_url: "turn:relay.mezon.ai:5349".into(),
             webrtc_ice_servers_username: "turnmezon".into(),
-            webrtc_ice_servers_credential: "QuTs4zUEcbylWemXL7MK".into(),
+            webrtc_ice_servers_credential: String::new(),
 
-            fcm_api_key: "AIzaSyAzgF6LfHVWzlr9gGHWU7emix2768wSGHg".into(),
+            fcm_api_key: String::new(),
             fcm_auth_domain: "mezon-772fa.firebaseapp.com".into(),
             fcm_project_id: "mezon-772fa".into(),
             fcm_storage_bucket: "mezon-772fa.appspot.com".into(),
             fcm_messaging_sender_id: "285548761692".into(),
             fcm_app_id: "1:285548761692:web:3ca531af1deecee74e0c99".into(),
             fcm_measurement_id: "G-0WNQTXVMT3".into(),
-            fcm_vapid_key:
-                "BLHZ5mS8qWRxw4Psmpq9QEavz1B8rYgmkWeJ9CCSDR-g-NjfYWpmfi_t2IV4dJLx2X76p2sApyISytUVtD64nfs"
-                    .into(),
+            fcm_vapid_key: String::new(),
 
             api_client_key_custom: "mezon.ai".into(),
-            sentry_dsn: "https://7aad12a70a52b6598fa5847153a13781@o4509763792404480.ingest.us.sentry.io/4509767257751552".into(),
+            sentry_dsn: String::new(),
             anonymous_user_id: "1767478432163172999".into(),
             max_length_name_allowed: 64,
-            update_url: "https://cdn.mezon.ai/release/".into()
+            update_url: "https://cdn.mezon.ai/release/".into(),
         }
     }
 
