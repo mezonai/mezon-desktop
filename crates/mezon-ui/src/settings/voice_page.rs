@@ -1,8 +1,8 @@
 use crate::components::primitives::{Label, Slider, SliderEvent, SliderState, h_flex, v_flex};
 use crate::theme::{ActiveTheme, Theme};
 use gpui::{
-    App, ClickEvent, Context, Entity, Subscription, Task, WeakEntity, Window, deferred,
-    div, prelude::*, px,
+    App, ClickEvent, Context, Entity, Subscription, Task, WeakEntity, Window, deferred, div,
+    prelude::*, px,
 };
 use mezon_store::{AudioDeviceInfo, AudioStore, Settings};
 

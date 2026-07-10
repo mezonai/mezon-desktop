@@ -492,20 +492,15 @@ impl Render for ClanSettingScreen {
                             .pl(px(20.0))
                             .pb(px(6.0))
                             .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .justify_end()
-                                    .w_full()
-                                    .child(
-                                        div()
-                                            .w(px(220.0))
-                                            .pl(px(10.0))
-                                            .text_base()
-                                            .font_weight(gpui::FontWeight::BOLD)
-                                            .text_color(theme.text_primary)
-                                            .child(sidebar_title),
-                                    ),
+                                div().flex().flex_row().justify_end().w_full().child(
+                                    div()
+                                        .w(px(220.0))
+                                        .pl(px(10.0))
+                                        .text_base()
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(theme.text_primary)
+                                        .child(sidebar_title),
+                                ),
                             ),
                     )
                     .child(

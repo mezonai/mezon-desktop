@@ -865,7 +865,6 @@ fn render_sidebar_item(
             voice_members,
         } => {
             let ch_id = id.clone();
-            let row_handle = channel_list_handle.clone();
             let clan_id_inner = active_clan_id_for_nav;
 
             let make_channel_element = || {
@@ -986,7 +985,7 @@ fn render_sidebar_item(
                 } else {
                     make_channel_element()
                 };
-                let click_handle = row_handle.clone();
+                let click_handle = channel_list_handle.clone();
                 let click_id = ch_id.clone();
                 let click_clan = clan_id_inner;
                 let menu_sidebar = sidebar.clone();
@@ -1087,11 +1086,9 @@ fn render_sidebar_item(
                 }
             });
 
-            channel_col.interactivity().on_click(on_channel_click(
-                row_handle,
-                ch_id,
-                clan_id_inner,
-            ));
+            channel_col
+                .interactivity()
+                .on_click(on_channel_click(ch_id, clan_id_inner));
 
             channel_col.into_any_element()
         }

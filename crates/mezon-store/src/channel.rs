@@ -2,6 +2,7 @@ use crate::ids::{ChannelId, ClanId, MessageId, UserId};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
 use mezon_client::transport::{ApiCategoryDesc, ApiChannelDesc};
@@ -13,6 +14,8 @@ use crate::messages::MessagesStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 pub const FAVOR_CATE_ID: &str = "favorCate";
+
+const PREVIOUS_CHANNELS_PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChannelType {
@@ -89,6 +92,7 @@ pub struct Channel {
     pub channel_type: ChannelType,
     pub private: bool,
     pub clan_id: ClanId,
+    pub clan_name: String,
     pub category_name: String,
     pub category_id: Option<String>,
     pub member_count: u32,
@@ -132,6 +136,13 @@ fn collapse_state_path() -> std::path::PathBuf {
         .join("collapse_state.json")
 }
 
+fn previous_channels_path() -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("mezon")
+        .join("previous_channels.json")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TopicParentBadge {
     clan_id: ClanId,
@@ -150,11 +161,13 @@ pub struct ChannelList {
     active_clan_id: Option<ClanId>,
     pub active_channel_id: Option<ChannelId>,
     remembered_channels: HashMap<ClanId, ChannelId>,
+    previous_channels: HashMap<ClanId, Vec<ChannelId>>,
     api: Arc<AppApi>,
     collapsed: HashSet<(String, String)>,
     show_empty_categories: HashSet<ClanId>,
     channel_index: RefCell<ChannelLocationCache>,
     reset_generation: u64,
+    _previous_channels_persist: Task<()>,
     _clan_sub: Subscription,
     _conn_watch: Task<()>,
 }
@@ -250,6 +263,8 @@ impl ChannelList {
         self.user_channels_loading = false;
         self.loading.clear();
         self.remembered_channels.clear();
+        self.previous_channels.clear();
+        self.persist_previous_channels(cx);
         self.invalidate_channel_index_all();
         self.active_clan_id = None;
         if self.active_channel_id.take().is_some() {
@@ -284,13 +299,21 @@ impl ChannelList {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
         cx.spawn(async move |this, cx| {
-            let collapsed = cx
+            let (collapsed, previous_channels) = cx
                 .background_executor()
-                .spawn(async { load_collapse_state() })
+                .spawn(async { (load_collapse_state(), load_previous_channels()) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                let mut changed = false;
                 if !collapsed.is_empty() {
                     this.collapsed = collapsed;
+                    changed = true;
+                }
+                if !previous_channels.is_empty() {
+                    this.previous_channels = previous_channels;
+                    changed = true;
+                }
+                if changed {
                     cx.notify();
                 }
             });
@@ -308,11 +331,13 @@ impl ChannelList {
             active_clan_id: None,
             active_channel_id: None,
             remembered_channels: HashMap::new(),
+            previous_channels: HashMap::new(),
             api,
             collapsed: HashSet::new(),
             show_empty_categories: HashSet::new(),
             channel_index: RefCell::new(ChannelLocationCache::default()),
             reset_generation: 0,
+            _previous_channels_persist: Task::ready(()),
             _clan_sub: clan_sub,
             _conn_watch: conn_watch,
         }
@@ -466,6 +491,16 @@ impl ChannelList {
 
     pub fn user_channel(&self, channel_id: ChannelId) -> Option<&Channel> {
         self.user_channels.get(&channel_id)
+    }
+
+    pub fn user_channels(&self) -> impl Iterator<Item = &Channel> + '_ {
+        self.user_channels.values()
+    }
+
+    pub fn ensure_user_channels_loaded(&mut self, cx: &mut Context<Self>) {
+        if self.user_channels.is_empty() && !self.user_channels_loading {
+            self.fetch_user_channels(cx);
+        }
     }
 
     async fn fetch_clan_data(
@@ -694,6 +729,7 @@ impl ChannelList {
     ) {
         let mut visible_changed = false;
         let mut found = false;
+        let mut updated_channel = None;
         if let Some(categories) = self.cache.get_mut(&clan_id) {
             for ch in categories
                 .iter_mut()
@@ -720,14 +756,140 @@ impl ChannelList {
                 }
                 visible_changed =
                     visible_changed || was_unread != ch.is_unread() || was_badge != ch.badge_count;
+                updated_channel = Some(ch.clone());
             }
         }
-        if !found && is_mention && !seen {
-            *self.pending_channel_badges.entry(channel_id).or_default() += 1;
+        if !found {
+            if is_mention && !seen {
+                *self.pending_channel_badges.entry(channel_id).or_default() += 1;
+            }
+            self.patch_user_channel_message(channel_id, is_mention, seen, ts, message_id, cx);
+        } else if let Some(channel) = updated_channel {
+            self.sync_user_channel_from(&channel, cx);
         }
         if visible_changed {
             self.notify_channel_list(clan_id, cx);
         }
+    }
+
+    pub fn palette_channel_unread(&self, channel: &Channel) -> (u32, i64, i64) {
+        if let Some(live) = self.channel(channel.clan_id, channel.id) {
+            return (
+                live.badge_count,
+                live.last_sent_timestamp,
+                live.last_seen_timestamp,
+            );
+        }
+        let pending = self
+            .pending_channel_badges
+            .get(&channel.id)
+            .copied()
+            .unwrap_or(0);
+        (
+            channel.badge_count.max(pending),
+            channel.last_sent_timestamp,
+            channel.last_seen_timestamp,
+        )
+    }
+
+    fn sync_user_channel_from(&mut self, source: &Channel, cx: &mut Context<Self>) {
+        let Some(user_channel) = self.user_channels.get_mut(&source.id) else {
+            return;
+        };
+        let was_unread = user_channel.is_unread();
+        let was_badge = user_channel.badge_count;
+        copy_channel_unread_fields(user_channel, source);
+        if was_unread != user_channel.is_unread() || was_badge != user_channel.badge_count {
+            cx.notify();
+        }
+    }
+
+    fn patch_user_channel_message(
+        &mut self,
+        channel_id: ChannelId,
+        is_mention: bool,
+        seen: bool,
+        ts: i64,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(user_channel) = self.user_channels.get_mut(&channel_id) else {
+            return;
+        };
+        let was_unread = user_channel.is_unread();
+        let was_badge = user_channel.badge_count;
+        if ts > 0 {
+            user_channel.last_sent_timestamp = ts;
+            if !message_id.is_zero() {
+                user_channel.last_sent_message_id = message_id;
+            }
+            if seen {
+                user_channel.last_seen_timestamp = ts;
+                if !message_id.is_zero() {
+                    user_channel.last_seen_message_id = message_id;
+                }
+            }
+        }
+        if is_mention && !seen {
+            user_channel.badge_count = user_channel.badge_count.saturating_add(1);
+        }
+        if was_unread != user_channel.is_unread() || was_badge != user_channel.badge_count {
+            cx.notify();
+        }
+    }
+
+    fn bump_user_channel_badge(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        let Some(user_channel) = self.user_channels.get_mut(&channel_id) else {
+            return;
+        };
+        user_channel.badge_count = user_channel.badge_count.saturating_add(1);
+        cx.notify();
+    }
+
+    pub fn note_user_channel_dm_message(
+        &mut self,
+        channel_id: ChannelId,
+        ts: i64,
+        from_me: bool,
+        increment_unread: bool,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(user_channel) = self.user_channels.get_mut(&channel_id) else {
+            return;
+        };
+        if !Self::is_user_channel_dm_type(user_channel.channel_type, user_channel.clan_id) {
+            return;
+        }
+        let was_unread = user_channel.is_unread();
+        let was_badge = user_channel.badge_count;
+        if ts > 0 {
+            user_channel.last_sent_timestamp = ts;
+            if !message_id.is_zero() {
+                user_channel.last_sent_message_id = message_id;
+            }
+        }
+        if from_me {
+            if ts > 0 {
+                user_channel.last_seen_timestamp = ts;
+                if !message_id.is_zero() {
+                    user_channel.last_seen_message_id = message_id;
+                }
+            }
+        } else if increment_unread {
+            user_channel.badge_count = user_channel.badge_count.saturating_add(1);
+        }
+        if was_unread != user_channel.is_unread() || was_badge != user_channel.badge_count {
+            cx.notify();
+        }
+    }
+
+    fn is_user_channel_dm_type(channel_type: ChannelType, clan_id: ClanId) -> bool {
+        clan_id.is_zero()
+            && matches!(
+                channel_type,
+                ChannelType::Unknown(2) | ChannelType::Unknown(3)
+            )
     }
 
     pub fn decrement_channel_on_delete(
@@ -774,6 +936,12 @@ impl ChannelList {
             cleared_badge = overlaid.unwrap_or(0);
         }
         clear_topic_badges_for_parent(&mut self.topic_parent_badges, channel_id);
+        if let Some(user_channel) = self.user_channels.get_mut(&channel_id) {
+            user_channel.badge_count = 0;
+            user_channel.last_seen_timestamp = user_channel.last_sent_timestamp;
+            user_channel.last_seen_message_id = user_channel.last_sent_message_id;
+            cx.notify();
+        }
         if should_notify {
             self.notify_channel_list(clan_id, cx);
         }
@@ -860,6 +1028,9 @@ impl ChannelList {
             }
         }
         clear_topic_badges_for_parent(&mut self.topic_parent_badges, channel_id);
+        if let Some(live) = self.channel(clan_id, channel_id).cloned() {
+            self.sync_user_channel_from(&live, cx);
+        }
         if visible_changed {
             self.notify_channel_list(clan_id, cx);
         }
@@ -885,6 +1056,11 @@ impl ChannelList {
         if changed {
             record_topic_parent_badge(&mut self.topic_parent_badges, clan_id, parent_id, topic_id);
             self.notify_channel_list(clan_id, cx);
+        }
+        if let Some(parent) = self.channel(clan_id, parent_id).cloned() {
+            self.sync_user_channel_from(&parent, cx);
+        } else {
+            self.bump_user_channel_badge(parent_id, cx);
         }
     }
 
@@ -915,6 +1091,7 @@ impl ChannelList {
                         channel_type: ChannelType::from_raw(e.channel_type as u32),
                         private: e.channel_private != 0,
                         clan_id,
+                        clan_name: String::new(),
                         category_name: String::new(),
                         category_id: Some(e.category_id.to_string())
                             .filter(|s| !s.is_empty() && s != "0"),
@@ -1049,6 +1226,7 @@ impl ChannelList {
                     channel_type: ChannelType::from_raw(channel_type),
                     private: desc.channel_private != 0,
                     clan_id,
+                    clan_name: desc.clan_name.clone(),
                     category_name: String::new(),
                     category_id: Some(desc.category_id.to_string())
                         .filter(|s| !s.is_empty() && s != "0"),
@@ -1132,6 +1310,72 @@ impl ChannelList {
 
     pub fn remembered_channel(&self, clan_id: ClanId) -> Option<ChannelId> {
         self.remembered_channels.get(&clan_id).copied()
+    }
+
+    pub fn previous_channels_for_clan(&self, clan_id: ClanId) -> &[ChannelId] {
+        self.previous_channels
+            .get(&clan_id)
+            .map(|channels| channels.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn channel_display_name(&self, clan_id: ClanId, channel_id: ChannelId) -> Option<String> {
+        self.user_channels
+            .get(&channel_id)
+            .map(|channel| channel.name.clone())
+            .or_else(|| {
+                self.channel(clan_id, channel_id)
+                    .map(|channel| channel.name.clone())
+            })
+    }
+
+    pub fn record_previous_channel(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        let entry = self.previous_channels.entry(clan_id).or_default();
+        entry.retain(|id| *id != channel_id);
+        entry.insert(0, channel_id);
+        entry.truncate(5);
+        self.schedule_persist_previous_channels(cx);
+    }
+
+    fn schedule_persist_previous_channels(&mut self, cx: &mut Context<Self>) {
+        self._previous_channels_persist = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(PREVIOUS_CHANNELS_PERSIST_DEBOUNCE)
+                .await;
+            let snapshot = this
+                .update(cx, |this, _cx| this.previous_channels.clone())
+                .ok();
+            if let Some(snapshot) = snapshot {
+                cx.background_executor()
+                    .spawn(async move { save_previous_channels(snapshot) })
+                    .await;
+            }
+        });
+    }
+
+    fn persist_previous_channels(&mut self, cx: &mut Context<Self>) {
+        self._previous_channels_persist = Task::ready(());
+        let snapshot = self.previous_channels.clone();
+        cx.background_executor()
+            .spawn(async move { save_previous_channels(snapshot) })
+            .detach();
+    }
+
+    pub fn reset_user_channel_unread(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        let Some(ch) = self.user_channels.get_mut(&channel_id) else {
+            return;
+        };
+        if ch.badge_count == 0 && ch.last_seen_timestamp >= ch.last_sent_timestamp {
+            return;
+        }
+        ch.badge_count = 0;
+        ch.last_seen_timestamp = ch.last_sent_timestamp;
+        cx.notify();
     }
 
     pub fn default_channel_id(&self, clan_id: ClanId) -> Option<ChannelId> {
@@ -1355,6 +1599,7 @@ fn thread_channel_from_context(
         channel_type: ChannelType::Thread,
         private: false,
         clan_id,
+        clan_name: String::new(),
         category_name: String::new(),
         category_id: None,
         member_count: 0,
@@ -1391,6 +1636,7 @@ fn channel_from_desc(
         channel_type: ChannelType::from_raw(c.channel_type),
         private: c.channel_private != 0,
         clan_id: ClanId(c.clan_id),
+        clan_name: c.clan_name,
         category_name: c.category_name,
         category_id: Some(c.category_id.to_string()).filter(|s| !s.is_empty() && s != "0"),
         member_count: c.member_count.max(0) as u32,
@@ -1618,6 +1864,14 @@ fn update_channel(
     found
 }
 
+fn copy_channel_unread_fields(target: &mut Channel, source: &Channel) {
+    target.badge_count = source.badge_count;
+    target.last_sent_timestamp = source.last_sent_timestamp;
+    target.last_seen_timestamp = source.last_seen_timestamp;
+    target.last_sent_message_id = source.last_sent_message_id;
+    target.last_seen_message_id = source.last_seen_message_id;
+}
+
 fn merge_pending_badges_into(pending: &mut HashMap<ChannelId, u32>, categories: &mut [Category]) {
     if pending.is_empty() {
         return;
@@ -1751,6 +2005,29 @@ fn save_collapse_state(pairs: Vec<(String, String)>) {
     }
 }
 
+fn load_previous_channels() -> HashMap<ClanId, Vec<ChannelId>> {
+    let path = previous_channels_path();
+    let Ok(data) = std::fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
+    serde_json::from_str(&data).unwrap_or_default()
+}
+
+fn save_previous_channels(channels: HashMap<ClanId, Vec<ChannelId>>) {
+    let path = previous_channels_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match serde_json::to_string(&channels) {
+        Ok(data) => {
+            if let Err(e) = std::fs::write(&path, data) {
+                tracing::warn!("Failed to save previous channels: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("Failed to serialize previous channels: {e}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1772,6 +2049,25 @@ mod tests {
     }
 
     #[test]
+    fn previous_channels_roundtrip() {
+        let mut channels: HashMap<ClanId, Vec<ChannelId>> = HashMap::new();
+        channels.insert(ClanId(1), vec![ChannelId(10), ChannelId(20), ChannelId(30)]);
+        channels.insert(ClanId(0), vec![ChannelId(99)]);
+
+        let json = serde_json::to_string(&channels).unwrap();
+        let restored: HashMap<ClanId, Vec<ChannelId>> = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            restored.get(&ClanId(1)).map(Vec::as_slice),
+            Some(&[ChannelId(10), ChannelId(20), ChannelId(30)][..])
+        );
+        assert_eq!(
+            restored.get(&ClanId(0)).map(Vec::as_slice),
+            Some(&[ChannelId(99)][..])
+        );
+    }
+
+    #[test]
     fn is_category_collapsed_defaults_to_false() {
         let collapsed: HashSet<(String, String)> = HashSet::new();
         let is_collapsed =
@@ -1786,6 +2082,7 @@ mod tests {
             channel_type: ChannelType::Text,
             private: false,
             clan_id: ClanId(1),
+            clan_name: String::new(),
             category_name: "General".into(),
             category_id: Some(cat_id.into()),
             member_count: 0,
@@ -2081,6 +2378,7 @@ mod tests {
             last_sent_timestamp: 0,
             badge_count: badge,
             creator_id: 0,
+            clan_name: String::new(),
         };
 
         let badge_descs = vec![
@@ -2191,6 +2489,7 @@ mod tests {
             channel_type: ChannelType::Text,
             private: false,
             clan_id: ClanId(1),
+            clan_name: String::new(),
             category_name: "General".into(),
             category_id: Some("c1".into()),
             member_count: 0,
@@ -2217,6 +2516,7 @@ mod tests {
                 channel_type: ChannelType::Text,
                 private: false,
                 clan_id: ClanId(1),
+                clan_name: String::new(),
                 category_name: "Main".into(),
                 category_id: Some("cat1".into()),
                 member_count: 0,
@@ -2237,6 +2537,7 @@ mod tests {
                 channel_type: ChannelType::Text,
                 private: false,
                 clan_id: ClanId(1),
+                clan_name: String::new(),
                 category_name: "Main".into(),
                 category_id: Some("cat1".into()),
                 member_count: 0,

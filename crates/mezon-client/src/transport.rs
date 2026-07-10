@@ -425,6 +425,8 @@ pub struct ApiChannelDesc {
     pub badge_count: i32,
     #[serde(default)]
     pub creator_id: i64,
+    #[serde(default)]
+    pub clan_name: String,
 }
 
 /// A direct-message / group conversation descriptor (clan_id = 0 namespace). Unlike
@@ -1833,6 +1835,7 @@ impl MezonTransport {
             last_sent_timestamp,
             badge_count: channel.count_mess_unread,
             creator_id: channel.creator_id,
+            clan_name: channel.clan_name,
         }
     }
 
