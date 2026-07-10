@@ -15,7 +15,7 @@ use indexmap::IndexMap;
 struct PendingAtlasDrops(Vec<Arc<RenderImage>>);
 impl Global for PendingAtlasDrops {}
 
-fn queue_atlas_drop(cx: &mut App, image: Arc<RenderImage>) {
+pub(crate) fn queue_atlas_drop(cx: &mut App, image: Arc<RenderImage>) {
     cx.default_global::<PendingAtlasDrops>().0.push(image);
 }
 
@@ -101,11 +101,20 @@ mod os_mem {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+mod os_mem {
+    pub fn release_freed_pages() {
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 static MEMORY_RELIEF_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 pub fn release_freed_memory_to_os(cx: &mut App) {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
     {
         if MEMORY_RELIEF_IN_FLIGHT.swap(true, Ordering::AcqRel) {
             return;
@@ -117,7 +126,7 @@ pub fn release_freed_memory_to_os(cx: &mut App) {
             })
             .detach();
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
     let _ = cx;
 }
 

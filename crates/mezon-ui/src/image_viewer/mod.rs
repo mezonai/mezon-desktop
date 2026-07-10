@@ -86,15 +86,6 @@ pub(crate) fn trim_process_memory() {
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 pub(crate) fn trim_process_memory() {}
 
-fn close_image_viewer_window(handle: WindowHandle<ImageViewer>, cx: &mut App) {
-    let _ = handle.update(cx, |viewer, window, cx| {
-        viewer.release_resources(window, cx)
-    });
-    clear_image_viewer_global(cx);
-    let _ = handle.update(cx, |_, window, _| window.remove_window());
-    trim_process_memory();
-}
-
 fn prior_viewer_bounds(cx: &mut App) -> Option<Bounds<Pixels>> {
     let handle = cx.try_global::<GlobalImageViewer>().map(|g| g.0)?;
     match handle.update(cx, |_, window, _| window.window_bounds()) {
@@ -109,12 +100,23 @@ pub fn open_image_viewer(request: OpenViewerRequest, cx: &mut App) {
 }
 
 fn open_image_viewer_now(request: OpenViewerRequest, cx: &mut App) {
-    let prior_bounds = prior_viewer_bounds(cx);
+    let mut pending = Some(request);
     if let Some(handle) = cx.try_global::<GlobalImageViewer>().map(|g| g.0) {
-        close_image_viewer_window(handle, cx);
-        cx.defer(move |cx| spawn_image_viewer_window(request, prior_bounds, cx));
-        return;
+        let _ = handle.update(cx, |viewer, window, cx| {
+            if let Some(request) = pending.take() {
+                viewer.set_request(request, window, cx);
+                window.activate_window();
+            }
+        });
+        if pending.is_none() {
+            return;
+        }
+        clear_image_viewer_global(cx);
     }
+    let Some(request) = pending else {
+        return;
+    };
+    let prior_bounds = prior_viewer_bounds(cx);
     spawn_image_viewer_window(request, prior_bounds, cx);
 }
 
@@ -196,9 +198,14 @@ impl ImageViewer {
             let _ = weak.update(app, |viewer, cx| {
                 viewer.release_resources(window, cx);
             });
-            clear_image_viewer_global(app);
             activate_main_window(app);
-            true
+            if cfg!(target_os = "macos") {
+                window.hide_window();
+                false
+            } else {
+                clear_image_viewer_global(app);
+                true
+            }
         });
         let image_cache = cx.new(|cx| {
             LruImageCache::viewer(
@@ -389,6 +396,7 @@ impl ImageViewer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.closing = false;
         self.session = self.session.wrapping_add(1);
         self.list_generation = self.list_generation.wrapping_add(1);
         self.clan_id = request.clan_id;
@@ -740,9 +748,13 @@ impl ImageViewer {
 
     fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.release_resources(window, cx);
-        clear_image_viewer_global(cx);
         activate_main_window(cx);
-        window.remove_window();
+        if cfg!(target_os = "macos") {
+            window.hide_window();
+        } else {
+            clear_image_viewer_global(cx);
+            window.remove_window();
+        }
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {

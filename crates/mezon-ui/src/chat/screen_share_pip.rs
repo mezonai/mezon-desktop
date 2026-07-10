@@ -28,7 +28,7 @@ impl Render for ScreenSharePipView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let image = self.voice.read(cx).render_image(self.key);
         self.voice
-            .update(cx, |store, cx| store.flush_texture_drops(None, cx));
+            .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
         if image.is_some() {
             window.request_animation_frame();
         }

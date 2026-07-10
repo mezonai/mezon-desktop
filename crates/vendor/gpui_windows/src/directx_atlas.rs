@@ -22,6 +22,8 @@ struct DirectXAtlasState {
     monochrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     polychrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     subpixel_textures: AtlasTextureList<DirectXAtlasTexture>,
+    image_textures: AtlasTextureList<DirectXAtlasTexture>,
+    image_small_textures: AtlasTextureList<DirectXAtlasTexture>,
     tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
 }
 
@@ -42,6 +44,8 @@ impl DirectXAtlas {
             monochrome_textures: Default::default(),
             polychrome_textures: Default::default(),
             subpixel_textures: Default::default(),
+            image_textures: Default::default(),
+            image_small_textures: Default::default(),
             tiles_by_key: Default::default(),
         }))
     }
@@ -66,6 +70,8 @@ impl DirectXAtlas {
         lock.monochrome_textures = AtlasTextureList::default();
         lock.polychrome_textures = AtlasTextureList::default();
         lock.subpixel_textures = AtlasTextureList::default();
+        lock.image_textures = AtlasTextureList::default();
+        lock.image_small_textures = AtlasTextureList::default();
         lock.tiles_by_key.clear();
     }
 }
@@ -106,6 +112,8 @@ impl PlatformAtlas for DirectXAtlas {
         let textures = match id.kind {
             AtlasTextureKind::Monochrome => &mut lock.monochrome_textures,
             AtlasTextureKind::Polychrome => &mut lock.polychrome_textures,
+            AtlasTextureKind::Image => &mut lock.image_textures,
+            AtlasTextureKind::ImageSmall => &mut lock.image_small_textures,
             AtlasTextureKind::Subpixel => &mut lock.subpixel_textures,
         };
 
@@ -131,10 +139,21 @@ impl DirectXAtlasState {
         size: Size<DevicePixels>,
         texture_kind: AtlasTextureKind,
     ) -> Option<AtlasTile> {
+        const SMALL_IMAGE_TILE_MAX: i32 = 256;
+        let texture_kind = if texture_kind == AtlasTextureKind::Image
+            && size.width.0 <= SMALL_IMAGE_TILE_MAX
+            && size.height.0 <= SMALL_IMAGE_TILE_MAX
+        {
+            AtlasTextureKind::ImageSmall
+        } else {
+            texture_kind
+        };
         {
             let textures = match texture_kind {
                 AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
                 AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
+                AtlasTextureKind::Image => &mut self.image_textures,
+                AtlasTextureKind::ImageSmall => &mut self.image_small_textures,
                 AtlasTextureKind::Subpixel => &mut self.subpixel_textures,
             };
 
@@ -160,13 +179,23 @@ impl DirectXAtlasState {
             width: DevicePixels(1024),
             height: DevicePixels(1024),
         };
+        const DEFAULT_COLOR_ATLAS_SIZE: Size<DevicePixels> = Size {
+            width: DevicePixels(512),
+            height: DevicePixels(512),
+        };
         // Max texture size for DirectX. See:
         // https://learn.microsoft.com/en-us/windows/win32/direct3d11/overviews-direct3d-11-resources-limits
         const MAX_ATLAS_SIZE: Size<DevicePixels> = Size {
             width: DevicePixels(16384),
             height: DevicePixels(16384),
         };
-        let size = min_size.min(&MAX_ATLAS_SIZE).max(&DEFAULT_ATLAS_SIZE);
+        let default_size = match kind {
+            AtlasTextureKind::Polychrome
+            | AtlasTextureKind::Image
+            | AtlasTextureKind::ImageSmall => DEFAULT_COLOR_ATLAS_SIZE,
+            AtlasTextureKind::Monochrome | AtlasTextureKind::Subpixel => DEFAULT_ATLAS_SIZE,
+        };
+        let size = min_size.min(&MAX_ATLAS_SIZE).max(&default_size);
         let pixel_format;
         let bind_flag;
         let bytes_per_pixel;
@@ -176,7 +205,7 @@ impl DirectXAtlasState {
                 bind_flag = D3D11_BIND_SHADER_RESOURCE;
                 bytes_per_pixel = 1;
             }
-            AtlasTextureKind::Polychrome => {
+            AtlasTextureKind::Polychrome | AtlasTextureKind::Image | AtlasTextureKind::ImageSmall => {
                 pixel_format = DXGI_FORMAT_B8G8R8A8_UNORM;
                 bind_flag = D3D11_BIND_SHADER_RESOURCE;
                 bytes_per_pixel = 4;
@@ -214,7 +243,9 @@ impl DirectXAtlasState {
 
         let texture_list = match kind {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
-            AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
+            AtlasTextureKind::Polychrome | AtlasTextureKind::Image | AtlasTextureKind::ImageSmall => {
+                &mut self.polychrome_textures
+            }
             AtlasTextureKind::Subpixel => &mut self.subpixel_textures,
         };
         let index = texture_list.free_list.pop();
@@ -250,9 +281,13 @@ impl DirectXAtlasState {
             AtlasTextureKind::Monochrome => &self.monochrome_textures[id.index as usize]
                 .as_ref()
                 .unwrap(),
-            AtlasTextureKind::Polychrome => &self.polychrome_textures[id.index as usize]
-                .as_ref()
-                .unwrap(),
+            AtlasTextureKind::Polychrome => {
+                &self.polychrome_textures[id.index as usize].as_ref().unwrap()
+            }
+            AtlasTextureKind::Image => &self.image_textures[id.index as usize].as_ref().unwrap(),
+            AtlasTextureKind::ImageSmall => {
+                &self.image_small_textures[id.index as usize].as_ref().unwrap()
+            }
             AtlasTextureKind::Subpixel => {
                 &self.subpixel_textures[id.index as usize].as_ref().unwrap()
             }

@@ -1071,6 +1071,7 @@ impl MacWindow {
 
 impl Drop for MacWindow {
     fn drop(&mut self) {
+        eprintln!("[gpui_window_lifecycle] MacWindow::drop");
         let mut this = self.0.lock();
         this.renderer.destroy();
         let window = this.native_window;
@@ -1517,6 +1518,13 @@ impl PlatformWindow for MacWindow {
         }
     }
 
+    fn hide(&self) {
+        let window = self.0.lock().native_window;
+        unsafe {
+            window.orderOut_(nil);
+        }
+    }
+
     fn zoom(&self) {
         let this = self.0.lock();
         let window = this.native_window;
@@ -1868,6 +1876,7 @@ extern "C" fn yes(_: &Object, _: Sel) -> BOOL {
 }
 
 extern "C" fn dealloc_window(this: &Object, _: Sel) {
+    eprintln!("[gpui_window_lifecycle] dealloc_window");
     unsafe {
         drop_window_state(this);
         let _: () = msg_send![super(this, class!(NSWindow)), dealloc];
@@ -1875,6 +1884,7 @@ extern "C" fn dealloc_window(this: &Object, _: Sel) {
 }
 
 extern "C" fn dealloc_view(this: &Object, _: Sel) {
+    eprintln!("[gpui_window_lifecycle] dealloc_view");
     unsafe {
         drop_window_state(this);
         let _: () = msg_send![super(this, class!(NSView)), dealloc];
@@ -2487,6 +2497,7 @@ extern "C" fn window_should_close(this: &Object, _: Sel, _: id) -> BOOL {
 }
 
 extern "C" fn close_window(this: &Object, _: Sel) {
+    eprintln!("[gpui_window_lifecycle] close_window override");
     unsafe {
         let close_callback = {
             let window_state = get_window_state(this);
