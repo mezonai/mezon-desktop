@@ -243,9 +243,9 @@ impl DirectXAtlasState {
 
         let texture_list = match kind {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
-            AtlasTextureKind::Polychrome | AtlasTextureKind::Image | AtlasTextureKind::ImageSmall => {
-                &mut self.polychrome_textures
-            }
+            AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
+            AtlasTextureKind::Image => &mut self.image_textures,
+            AtlasTextureKind::ImageSmall => &mut self.image_small_textures,
             AtlasTextureKind::Subpixel => &mut self.subpixel_textures,
         };
         let index = texture_list.free_list.pop();
