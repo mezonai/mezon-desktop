@@ -395,6 +395,16 @@ pub struct ApiSession {
     pub user_id: i64,
 }
 
+/// A friend relationship: the friend's account plus the relationship state and
+/// which side initiated it. `state` matches the proto `Friend.State` enum:
+/// 0 = Friend, 1 = InviteSent (outgoing), 2 = InviteReceived (incoming), 3 = Blocked.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiFriend {
+    pub account: ApiAccount,
+    pub state: i32,
+    pub source_id: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiChannelDesc {
     pub channel_id: i64,
@@ -1201,6 +1211,8 @@ pub struct ApiMessageContent {
     pub cvtt: HashMap<String, String>,
     #[serde(default)]
     pub lky: Vec<ContentToken>,
+    #[serde(default, skip_serializing)]
+    pub presign_finish: Option<Vec<String>>,
 }
 
 /// A reply/reference attached to a message (mezon `MessageRef`).
@@ -2773,8 +2785,8 @@ impl MezonTransport {
         })
     }
 
-    /// List user's friends.
-    pub async fn list_friends(&self) -> Result<Vec<ApiAccount>> {
+    /// List user's friends, preserving relationship state and initiator id.
+    pub async fn list_friends(&self) -> Result<Vec<ApiFriend>> {
         let cid = self.generate_cid();
 
         let api_name = "ListFriends";
@@ -2791,9 +2803,13 @@ impl MezonTransport {
             .friends
             .into_iter()
             .filter_map(|friend| {
-                friend
-                    .user
-                    .map(|user| Self::account_from_user(user, None, false, None))
+                let state = friend.state;
+                let source_id = friend.source_id;
+                friend.user.map(|user| ApiFriend {
+                    account: Self::account_from_user(user, None, false, None),
+                    state,
+                    source_id,
+                })
             })
             .collect())
     }
@@ -4212,33 +4228,29 @@ impl MezonTransport {
     }
 
     /// Add a friend.
-    pub async fn add_friend(&self, _user_id: i64) -> Result<()> {
+    /// Send or accept a friend request (by ids and/or usernames), matching the
+    /// React `addFriends(ids, usernames)` call. Returns the response ids; the
+    /// server signals a failed username lookup with a leading `0`.
+    pub async fn add_friends(&self, ids: Vec<i64>, usernames: Vec<String>) -> Result<Vec<i64>> {
         let cid = self.generate_cid();
 
-        let body = api::AddFriendsRequest {
-            ids: vec![_user_id],
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = api::AddFriendsRequest { ids, usernames }.encode_to_vec();
 
-        let (code, _response) = self.send_api_request(cid, "AddFriends", body).await?;
+        let (code, response) = self.send_api_request(cid, "AddFriends", body).await?;
 
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
 
-        Ok(())
+        let response = api::AddFriendsResponse::decode(response.as_slice())?;
+        Ok(response.ids)
     }
 
-    /// Delete a friend.
-    pub async fn delete_friend(&self, _user_id: i64) -> Result<()> {
+    /// Delete (or cancel/reject) a friend relationship by ids and/or usernames.
+    pub async fn delete_friends(&self, ids: Vec<i64>, usernames: Vec<String>) -> Result<()> {
         let cid = self.generate_cid();
 
-        let body = api::DeleteFriendsRequest {
-            ids: vec![_user_id],
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = api::DeleteFriendsRequest { ids, usernames }.encode_to_vec();
 
         let (code, _response) = self.send_api_request(cid, "DeleteFriends", body).await?;
 
@@ -4614,13 +4626,10 @@ impl MezonTransport {
     }
 
     /// Block friends.
-    pub async fn block_friends(&self, ids: &[&str]) -> Result<()> {
+    pub async fn block_friends(&self, ids: Vec<i64>) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::BlockFriendsRequest {
-            ids: ids
-                .iter()
-                .map(|s| parse_id(s))
-                .collect::<Result<Vec<_>>>()?,
+            ids,
             ..Default::default()
         }
         .encode_to_vec();
@@ -4631,14 +4640,12 @@ impl MezonTransport {
         Ok(())
     }
 
-    /// Unblock friends.
-    pub async fn unblock_friends(&self, ids: &[&str]) -> Result<()> {
+    /// Unblock friends. There is no dedicated `UnblockFriendsRequest`; the server
+    /// distinguishes block vs unblock by api-id, so reuse `BlockFriendsRequest`.
+    pub async fn unblock_friends(&self, ids: Vec<i64>) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::BlockFriendsRequest {
-            ids: ids
-                .iter()
-                .map(|s| parse_id(s))
-                .collect::<Result<Vec<_>>>()?,
+            ids,
             ..Default::default()
         }
         .encode_to_vec();
@@ -6957,6 +6964,32 @@ mod tests {
         };
         let parsed = MezonTransport::message_from_proto(&msg);
         assert_eq!(parsed.avatar, "user.png");
+    }
+
+    #[test]
+    fn message_from_proto_captures_presign_finish_from_content() {
+        let msg = api::ChannelMessage {
+            message_id: 1,
+            content: r#"{"t":"hi","presign_finish":["a/b/photo.png"]}"#.into(),
+            ..Default::default()
+        };
+        let parsed = MezonTransport::message_from_proto(&msg);
+        assert_eq!(parsed.content, "hi");
+        assert_eq!(
+            parsed.content_tokens.presign_finish,
+            Some(vec!["a/b/photo.png".to_string()])
+        );
+    }
+
+    #[test]
+    fn message_from_proto_presign_finish_absent_is_none() {
+        let msg = api::ChannelMessage {
+            message_id: 1,
+            content: r#"{"t":"hi"}"#.into(),
+            ..Default::default()
+        };
+        let parsed = MezonTransport::message_from_proto(&msg);
+        assert_eq!(parsed.content_tokens.presign_finish, None);
     }
 
     #[test]

@@ -540,8 +540,7 @@ impl ImageViewer {
                             let selected_id = this.attachments.get(this.index).map(|a| a.id);
                             let mut merged = fresh;
                             merged.extend(std::mem::take(&mut this.attachments));
-                            merged
-                                .sort_by(|a, b| b.create_time_seconds.cmp(&a.create_time_seconds));
+                            merged.sort_by_key(|b| std::cmp::Reverse(b.create_time_seconds));
                             this.index = selected_id
                                 .and_then(|id| merged.iter().position(|a| a.id == id))
                                 .unwrap_or(this.index);
@@ -1496,8 +1495,8 @@ fn fit_contain(container: GpuiSize<Pixels>, content: GpuiSize<Pixels>) -> GpuiSi
 
 fn video_decode_max_size(window: &Window) -> (u32, u32) {
     let viewport = window.viewport_size();
-    let w = f32::from(viewport.width).min(VIEWER_VIDEO_MAX_W).max(1.0) as u32;
-    let h = f32::from(viewport.height).min(VIEWER_VIDEO_MAX_H).max(1.0) as u32;
+    let w = f32::from(viewport.width).clamp(1.0, VIEWER_VIDEO_MAX_W) as u32;
+    let h = f32::from(viewport.height).clamp(1.0, VIEWER_VIDEO_MAX_H) as u32;
     (w, h)
 }
 

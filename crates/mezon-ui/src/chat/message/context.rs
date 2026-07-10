@@ -55,6 +55,7 @@ pub struct RowCtx<'a> {
     /// delay (fast mouse sweeps never latch it). `None` = no toolbar visible.
     pub hovered_row: Option<MessageId>,
     pub avatar_cache: Entity<LruImageCache>,
+    pub large_avatar_cache: Entity<LruImageCache>,
     pub unread_boundary_id: Option<MessageId>,
     pub highlight_id: Option<MessageId>,
     pub reply_highlight_id: Option<MessageId>,

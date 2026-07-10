@@ -6,9 +6,9 @@ use gpui::{
     div, img, prelude::*, px,
 };
 use mezon_store::{
-    PickedScreen, PlatformStore, ScreenShareKind, ScreenShareListError, ScreenShareOption,
-    ScreenSharePreview, Settings, VoiceStore, capture_screen_share_preview,
-    list_screen_share_options, peek_screen_share_options,
+    PlatformStore, ScreenShareKind, ScreenShareListError, ScreenShareOption, ScreenSharePreview,
+    Settings, VoiceStore, capture_screen_share_preview, list_screen_share_options,
+    peek_screen_share_options,
 };
 
 use crate::app::shell::Shell;
@@ -227,7 +227,7 @@ impl ScreenShareModal {
         else {
             return;
         };
-        let pick = PickedScreen::Target(option.target.clone());
+        let pick = option.pick.clone();
         let share_audio = self.share_audio;
         self.voice.update(cx, |store, cx| {
             store.start_screen_share(pick, share_audio, cx)
@@ -242,7 +242,7 @@ impl ScreenShareModal {
         };
         self.options
             .iter()
-            .filter(|option| option.kind == kind)
+            .filter(|option| option.is_portal() || option.kind == kind)
             .collect()
     }
 }
@@ -282,6 +282,8 @@ impl Render for ScreenShareModal {
         let share_label: SharedString = mezon_i18n::t(&locale, "screenShare.share").into();
         let loading_label: SharedString = mezon_i18n::t(&locale, "screenShare.loading").into();
         let empty_label: SharedString = mezon_i18n::t(&locale, "screenShare.selectScreen").into();
+        let portal_label: SharedString =
+            mezon_i18n::t(&locale, "screenShare.linuxPortalOption").into();
 
         let filtered = self.filtered_options();
         let can_share = self.selected.is_some();
@@ -416,6 +418,7 @@ impl Render for ScreenShareModal {
                                     text_primary,
                                     text_muted,
                                     tile_bg,
+                                    portal_label.clone(),
                                     cx,
                                 ))
                             })
@@ -519,6 +522,7 @@ fn target_grid(
     text_primary: gpui::Hsla,
     text_muted: gpui::Hsla,
     tile_bg: gpui::Hsla,
+    portal_label: SharedString,
     cx: &mut Context<ScreenShareModal>,
 ) -> impl IntoElement {
     div()
@@ -537,7 +541,11 @@ fn target_grid(
                     kind,
                     id: option.id,
                 });
-            let title = option.title.clone();
+            let title = if option.is_portal() {
+                portal_label.clone()
+            } else {
+                SharedString::from(option.title.clone())
+            };
             let id = option.id;
             let tile_id = SharedString::from(format!("screen-share-tile-{index}"));
             let preview = previews.get(&preview_key).cloned();

@@ -564,25 +564,6 @@ fn render_message_content(
         .into_any_element()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mention_byte_range_handles_vietnamese_utf16_offsets() {
-        let text = "Thứ tư, @Cù Mạnh Tuấn Tài";
-        let (start, end) = mention_byte_range(text, 8, 26).expect("valid range");
-        assert_eq!(&text[start..end], "@Cù Mạnh Tuấn Tài");
-    }
-
-    #[test]
-    fn mention_byte_range_handles_emoji_utf16_offsets() {
-        let text = "hello 📢 world";
-        let (start, end) = mention_byte_range(text, 6, 8).expect("valid range");
-        assert_eq!(&text[start..end], "📢");
-    }
-}
-
 fn render_attachment_preview(
     theme: &Theme,
     locale: &SharedString,
@@ -844,4 +825,23 @@ pub fn notification_copy_text(notification: &InboxNotification) -> Option<String
             None
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mention_byte_range_handles_vietnamese_utf16_offsets() {
+        let text = "Thứ tư, @Cù Mạnh Tuấn Tài";
+        let (start, end) = mention_byte_range(text, 8, 26).expect("valid range");
+        assert_eq!(&text[start..end], "@Cù Mạnh Tuấn Tài");
+    }
+
+    #[test]
+    fn mention_byte_range_handles_emoji_utf16_offsets() {
+        let text = "hello 📢 world";
+        let (start, end) = mention_byte_range(text, 6, 8).expect("valid range");
+        assert_eq!(&text[start..end], "📢");
+    }
 }

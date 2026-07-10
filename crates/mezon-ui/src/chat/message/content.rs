@@ -1,19 +1,20 @@
 use std::ops::Range;
 
 use gpui::{
-    Anchor, AnyElement, App, FontWeight, HighlightStyle, Hsla, InteractiveText, ObjectFit, Pixels,
+    AnyElement, App, FontWeight, HighlightStyle, Hsla, InteractiveText, ObjectFit, Pixels,
     SharedString, StyledText, UnderlineStyle, div, img, prelude::*, px, relative, rems, rgb,
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, LinkKind, Message, MessageCode, MessageSpan,
-    PlatformStore, RichClick, RichRunKind, UserId, is_here_user_id,
+    PlatformStore, ProfileContext, RichClick, RichRunKind, RichToken, UserId, is_here_user_id,
 };
 
+use ui::Clickable;
+
 use super::context::RowCtx;
+use super::inline_content::{ClickRegion, IconOverlay, InlineContent, StyledRun};
 use crate::app::shell::Shell;
-use crate::chat::user_profile_popover::{
-    ClickableContainer, UserProfilePopover, profile_popover_menu,
-};
+use crate::chat::user_profile_popover::{ClickableContainer, UserProfilePopover};
 use crate::components::primitives::{Icon, IconName};
 use crate::router::{Route, navigate};
 use crate::theme::Theme;
@@ -29,6 +30,7 @@ const FACEBOOK_ACCENT: u32 = 0x18_77_f2;
 const SOCIAL_CARD_BG: u32 = 0x2b_2d_31;
 const EMOJI_SIZE: f32 = 24.;
 const EMOJI_JUMBO_SIZE: f32 = 48.;
+const INLINE_ICON_PLACEHOLDER: char = '\u{2800}';
 
 struct ContentRenderOptions {
     body_color: gpui::Rgba,
@@ -175,9 +177,38 @@ fn render_message_content_with_options(
     } else {
         px(EMOJI_SIZE)
     };
+    if !options.inline
+        && !msg.is_edited
+        && let Some(inline) = build_inline_content(msg, ctx, body_color)
+    {
+        return inline;
+    }
     let mut row = rich_content_row(body_color, options.inline);
-    for span in &msg.spans {
-        row = append_span(row, span, ctx, body_color, emoji_size);
+    match msg
+        .rich_layout
+        .as_deref()
+        .and_then(|layout| layout.content_tokens.as_deref())
+    {
+        Some(tokens) => {
+            for token in tokens {
+                row = match token {
+                    RichToken::Word(word) => row.child(word.clone()),
+                    RichToken::LineBreak => row.child(div().w_full().h_0()),
+                    RichToken::Span(index) => append_span(
+                        row,
+                        &msg.spans[*index as usize],
+                        ctx,
+                        body_color,
+                        emoji_size,
+                    ),
+                };
+            }
+        }
+        None => {
+            for span in &msg.spans {
+                row = append_span(row, span, ctx, body_color, emoji_size);
+            }
+        }
     }
     if msg.is_edited {
         row = row.child(edited_marker(theme, ctx.locale));
@@ -309,7 +340,7 @@ fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> An
     let profile_context = ctx.profile_context;
     let settings = ctx.settings.clone();
     let host = ctx.video_host.clone();
-    let avatar_cache = ctx.avatar_cache.clone();
+    let avatar_cache = ctx.large_avatar_cache.clone();
     let locale = if actions.iter().any(|a| matches!(a, SpanAction::Channel(_))) {
         ctx.locale.to_string()
     } else {
@@ -339,7 +370,7 @@ fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> An
                         )
                     });
                     let _ = host.update(cx, move |this, cx| {
-                        this.set_mention_popover(popover, position, cx);
+                        this.set_mention_popover(popover, position, window, cx);
                     });
                 }
             }
@@ -430,7 +461,7 @@ fn append_span(
     let theme = ctx.theme;
     match span {
         MessageSpan::Text(text) => {
-            for child in text_to_words(text, body_color) {
+            for child in text_to_words(text) {
                 row = row.child(child);
             }
             row
@@ -680,24 +711,47 @@ fn render_mention_chip(
         return chip.cursor_pointer().into_any_element();
     };
 
-    let settings = ctx.settings.clone();
     let mention_key = user_id.get() as usize;
-    profile_popover_menu(
-        ("msg-mention-popover", mention_key),
+    profile_popover_trigger(
+        ("msg-mention", mention_key),
         user_id,
         profile_ctx,
-        settings,
-        ctx.avatar_cache.clone(),
+        ctx,
+        chip.into_any_element(),
     )
-    .anchor(Anchor::BottomLeft)
-    .attach(Anchor::TopLeft)
-    .trigger(
-        ClickableContainer::new(("msg-mention", mention_key))
-            .flex_none()
-            .cursor_pointer()
-            .child(chip),
-    )
+    .flex_none()
     .into_any_element()
+}
+
+pub(crate) fn profile_popover_trigger(
+    id: impl Into<gpui::ElementId>,
+    user_id: UserId,
+    profile_ctx: ProfileContext,
+    ctx: &RowCtx,
+    child: AnyElement,
+) -> ClickableContainer {
+    let settings = ctx.settings.clone();
+    let avatar_cache = ctx.large_avatar_cache.clone();
+    let host = ctx.video_host.clone();
+    ClickableContainer::new(id)
+        .cursor_pointer()
+        .child(child)
+        .on_click(move |_, window, cx| {
+            let position = window.mouse_position();
+            let popover = cx.new(|cx| {
+                UserProfilePopover::new(
+                    user_id,
+                    profile_ctx,
+                    settings.clone(),
+                    avatar_cache.clone(),
+                    window,
+                    cx,
+                )
+            });
+            let _ = host.update(cx, move |this, cx| {
+                this.set_mention_popover(popover, position, window, cx);
+            });
+        })
 }
 
 fn render_hashtag_chip(
@@ -757,6 +811,147 @@ fn render_hashtag_chip(
             .child(inner)
             .into_any_element(),
     }
+}
+
+fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> Option<AnyElement> {
+    let all_supported = msg.spans.iter().all(|span| {
+        matches!(
+            span,
+            MessageSpan::Text(_) | MessageSpan::Mention { .. } | MessageSpan::Hashtag { .. }
+        )
+    });
+    if !all_supported {
+        return None;
+    }
+
+    let theme = ctx.theme;
+    let mention_color: Hsla = theme.tokens.mention_color.into();
+    let mention_bg: Hsla = theme.tokens.mention_primary.into();
+    let role_color: Hsla = theme.tokens.color_mention_evryone.into();
+    let role_bg: Hsla = theme.tokens.bg_mention_evryone.into();
+    let body: Hsla = body_color.into();
+
+    let mut text = String::new();
+    let mut runs: Vec<StyledRun> = Vec::new();
+    let mut icons: Vec<IconOverlay> = Vec::new();
+    let mut clicks: Vec<ClickRegion> = Vec::new();
+
+    for span in &msg.spans {
+        match span {
+            MessageSpan::Text(chunk) => text.push_str(chunk),
+            MessageSpan::Mention {
+                display,
+                user_id,
+                role_id,
+            } => {
+                let start = text.len();
+                text.push_str(display);
+                let end = text.len();
+                let is_role = role_id.as_deref().is_some_and(|r| !r.is_empty());
+                runs.push(StyledRun {
+                    range: start..end,
+                    color: Some(if is_role { role_color } else { mention_color }),
+                    background: Some(if is_role { role_bg } else { mention_bg }),
+                });
+                if is_role {
+                    continue;
+                }
+                let Some(uid) = user_id
+                    .as_deref()
+                    .filter(|uid| !uid.is_empty() && *uid != "0" && !is_here_user_id(uid))
+                    .and_then(|uid| uid.parse::<i64>().ok())
+                    .map(UserId)
+                else {
+                    continue;
+                };
+                let Some(profile_ctx) = ctx.profile_context else {
+                    continue;
+                };
+                let settings = ctx.settings.clone();
+                let avatar_cache = ctx.large_avatar_cache.clone();
+                let host = ctx.video_host.clone();
+                clicks.push(ClickRegion {
+                    range: start..end,
+                    action: Box::new(move |window, cx| {
+                        let position = window.mouse_position();
+                        let popover = cx.new(|cx| {
+                            UserProfilePopover::new(
+                                uid,
+                                profile_ctx,
+                                settings.clone(),
+                                avatar_cache.clone(),
+                                window,
+                                cx,
+                            )
+                        });
+                        let _ = host.update(cx, move |this, cx| {
+                            this.set_mention_popover(popover, position, window, cx);
+                        });
+                    }),
+                });
+            }
+            MessageSpan::Hashtag {
+                display,
+                channel_id,
+            } => {
+                let label = display.strip_prefix('#').unwrap_or(display);
+                let parsed_channel = channel_id.as_deref().and_then(parse_channel_id);
+                let icon = parsed_channel
+                    .map(|cid| hashtag_icon(cid, ctx.app))
+                    .unwrap_or(IconName::Hashtag);
+                let icon_index = text.len();
+                text.push(INLINE_ICON_PLACEHOLDER);
+                let label_index = text.len();
+                text.push_str(label);
+                let end = text.len();
+                runs.push(StyledRun {
+                    range: icon_index..label_index,
+                    color: Some(Hsla {
+                        h: 0.,
+                        s: 0.,
+                        l: 0.,
+                        a: 0.,
+                    }),
+                    background: Some(mention_bg),
+                });
+                runs.push(StyledRun {
+                    range: label_index..end,
+                    color: Some(mention_color),
+                    background: Some(mention_bg),
+                });
+                icons.push(IconOverlay {
+                    byte_index: icon_index,
+                    end_index: label_index,
+                    icon,
+                    color: mention_color,
+                });
+                if let Some(cid) = parsed_channel {
+                    let locale = ctx.locale.to_string();
+                    clicks.push(ClickRegion {
+                        range: icon_index..end,
+                        action: Box::new(move |_, cx| navigate_to_channel(cid, &locale, cx)),
+                    });
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    if icons.is_empty() {
+        return None;
+    }
+
+    Some(
+        InlineContent::new(
+            ("msg-inline", msg.row_anchor_id.0 as usize),
+            text.into(),
+            runs,
+            icons,
+            clicks,
+            body,
+        )
+        .into_any_element(),
+    )
 }
 
 fn hashtag_icon(channel_id: ChannelId, cx: &App) -> IconName {
@@ -978,7 +1173,7 @@ fn link_segment(url: SharedString, display: String, color: gpui::Rgba, index: us
         .into_any_element()
 }
 
-fn text_to_words(text: &str, color: gpui::Rgba) -> Vec<AnyElement> {
+fn text_to_words(text: &str) -> Vec<AnyElement> {
     let mut out: Vec<AnyElement> = Vec::new();
     let mut first_line = true;
     for line in text.split('\n') {
@@ -987,12 +1182,7 @@ fn text_to_words(text: &str, color: gpui::Rgba) -> Vec<AnyElement> {
         }
         first_line = false;
         for word in line.split_whitespace() {
-            out.push(
-                div()
-                    .text_color(color)
-                    .child(word.to_string())
-                    .into_any_element(),
-            );
+            out.push(word.to_string().into_any_element());
         }
     }
     out

@@ -2,15 +2,16 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Context, DragMoveEvent, Empty, EntityId, FocusHandle,
-    KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, Pixels, Rgba, SharedString, Window,
-    canvas, div, img, prelude::*, px, relative,
+    AnyElement, App, Bounds, ClickEvent, Context, DragMoveEvent, Empty, Entity, EntityId,
+    FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, Pixels, Rgba, SharedString,
+    Window, canvas, div, img, prelude::*, px, relative,
 };
 use mezon_store::PlatformStore;
 use mezon_video::{VideoFrame, VideoPlayer};
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{Icon, IconName, h_flex};
+use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
 
 const SEEK_STEP_SECONDS: f64 = 5.0;
@@ -107,6 +108,7 @@ pub struct VideoPlayerView {
     track_bounds: Bounds<Pixels>,
     time_label: SharedString,
     last_label_seconds: (u64, u64),
+    image_cache: Entity<LruImageCache>,
 }
 
 impl VideoPlayerView {
@@ -145,6 +147,9 @@ impl VideoPlayerView {
             track_bounds: Bounds::default(),
             time_label: SharedString::new_static("00:00 / 00:00"),
             last_label_seconds: (0, 0),
+            image_cache: cx.new(|cx| {
+                LruImageCache::message("video-poster", 2, 16 * 1024 * 1024, 16 * 1024 * 1024, cx)
+            }),
         }
     }
 
@@ -169,6 +174,9 @@ impl VideoPlayerView {
             track_bounds: Bounds::default(),
             time_label: SharedString::new_static("00:00 / 00:00"),
             last_label_seconds: (0, 0),
+            image_cache: cx.new(|cx| {
+                LruImageCache::message("video-poster", 2, 16 * 1024 * 1024, 16 * 1024 * 1024, cx)
+            }),
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
@@ -618,6 +626,7 @@ impl Render for VideoPlayerView {
             (shared.playing, shared.failed)
         };
         let mut root = div()
+            .image_cache(self.image_cache.clone())
             .id("video-player")
             .group("video-player")
             .relative()

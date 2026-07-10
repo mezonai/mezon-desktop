@@ -25,8 +25,14 @@ impl ScreenSharePipView {
 }
 
 impl Render for ScreenSharePipView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let content = match self.voice.read(cx).render_image(self.key) {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let image = self.voice.read(cx).render_image(self.key);
+        self.voice
+            .update(cx, |store, cx| store.flush_texture_drops(None, cx));
+        if image.is_some() {
+            window.request_animation_frame();
+        }
+        let content = match image {
             Some(image) => img(image)
                 .size_full()
                 .object_fit(ObjectFit::Contain)

@@ -169,6 +169,14 @@ impl RenderOnce for Avatar {
         let image_size = self.custom_size.unwrap_or_else(|| diameter(self.size));
         let container_size = image_size + border_width * 2.;
 
+        let avatar_cache = self.image_cache.clone().unwrap_or_else(|| {
+            if image_size <= px(40.) {
+                crate::image_cache::shared_small_avatar_cache(cx)
+            } else {
+                crate::image_cache::shared_avatar_cache(cx)
+            }
+        });
+
         let name = self.name.clone().unwrap_or_default();
         let bg = avatar_color(name.as_ref());
         let text_color = Hsla::from(gpui::rgb(0xffffff));
@@ -183,9 +191,7 @@ impl RenderOnce for Avatar {
             .when_some(self.border_color, |this, color| {
                 this.border(border_width).border_color(color)
             })
-            .when_some(self.image_cache.clone(), |this, cache| {
-                this.image_cache(cache)
-            })
+            .image_cache(avatar_cache)
             .child(match self.src {
                 _ if is_anonymous => anonymous_circle(image_size),
                 Some(src) => {

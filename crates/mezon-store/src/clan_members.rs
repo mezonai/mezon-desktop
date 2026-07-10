@@ -198,16 +198,6 @@ impl ClanMembersStore {
         self.cache.get(&clan_id).map(|b| b.ids.len()).unwrap_or(0)
     }
 
-    pub fn debug_memory(&self) -> (usize, usize) {
-        let mut clans = 0;
-        let mut members = 0;
-        for (_, bucket) in self.cache.iter() {
-            clans += 1;
-            members += bucket.ids.len();
-        }
-        (clans, members)
-    }
-
     fn refresh_active(&mut self, cx: &mut Context<Self>) {
         if let Some(clan_id) = ClanList::global(cx).read(cx).active_clan_id {
             self.fetch(clan_id, cx);

@@ -33,6 +33,7 @@ pub struct DirectSidebar {
     pending_rebuild: bool,
     suppress_hover: bool,
     last_scroll_at: Option<Instant>,
+    image_cache: Entity<crate::image_cache::LruImageCache>,
 }
 
 fn is_dm_route(cx: &App) -> bool {
@@ -97,6 +98,15 @@ impl DirectSidebar {
             pending_rebuild: false,
             suppress_hover: false,
             last_scroll_at: None,
+            image_cache: cx.new(|cx| {
+                crate::image_cache::LruImageCache::avatar_thumbnail_small(
+                    "dm-list",
+                    512,
+                    12 * 1024 * 1024,
+                    4 * 1024 * 1024,
+                    cx,
+                )
+            }),
         }
     }
 
@@ -223,6 +233,7 @@ impl Render for DirectSidebar {
         };
         let items = self.dm_items.clone();
         let suppress_hover = self.suppress_hover;
+        let image_cache = self.image_cache.clone();
 
         let list = uniform_list("dm-list", count, move |range, _window, cx| {
             let theme = cx.theme().clone();
@@ -238,6 +249,7 @@ impl Render for DirectSidebar {
                             .avatar_src(item.avatar_src.clone())
                             .avatar_raw(item.avatar_raw.clone())
                             .suppress_hover(suppress_hover)
+                            .image_cache(image_cache.clone())
                             .render(&theme)
                             .into_any_element()
                     }

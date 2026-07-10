@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
-use tokio::sync::Notify;
 
 #[derive(Clone)]
 pub struct VideoFrameData {
@@ -19,7 +18,6 @@ pub struct VideoFrameData {
 pub struct VideoFrameStore {
     frames: Mutex<HashMap<u64, Arc<VideoFrameData>>>,
     seq: AtomicU64,
-    frame_notify: Notify,
 }
 
 impl VideoFrameStore {
@@ -32,11 +30,6 @@ impl VideoFrameStore {
             seq,
         });
         self.frames.lock().insert(key, frame);
-        self.frame_notify.notify_one();
-    }
-
-    pub async fn frame_changed(&self) {
-        self.frame_notify.notified().await;
     }
 
     pub fn get(&self, key: u64) -> Option<Arc<VideoFrameData>> {

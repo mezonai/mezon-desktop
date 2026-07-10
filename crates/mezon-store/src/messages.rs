@@ -14,8 +14,8 @@ use mezon_client::transport::{
     hashtag_content_tokens, markdown_content_tokens, mention_content_tokens,
 };
 use mezon_client::{
-    AppApi, ConnectionStatus, MezonTransport, RealtimeEvent, UploadFile, UploadThumbnail,
-    UrlAttachment,
+    AppApi, AttachmentUploadOutcome, ConnectionStatus, MezonTransport, RealtimeEvent, UploadFile,
+    UploadThumbnail, UrlAttachment,
 };
 
 use crate::AppConfig;
@@ -547,16 +547,6 @@ impl MessagesStore {
 
     pub fn try_global(cx: &App) -> Option<Entity<Self>> {
         cx.try_global::<GlobalMessagesStore>().map(|g| g.0.clone())
-    }
-
-    pub fn debug_memory(&self) -> (usize, usize) {
-        let mut channels = 0;
-        let mut messages = 0;
-        for (_, channel) in self.cache.iter() {
-            channels += 1;
-            messages += channel.messages.len();
-        }
-        (channels, messages)
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
@@ -1132,6 +1122,8 @@ impl MessagesStore {
         );
 
         let api = self.api.clone();
+        let cfg = AppConfig::try_global(cx).cloned();
+        let viewer_id = viewer_user_id(cx);
         cx.spawn(async move |this, cx| {
             if !backoff.is_zero() {
                 cx.background_executor().timer(backoff).await;
@@ -1145,31 +1137,39 @@ impl MessagesStore {
                     MESSAGE_PAGE_LIMIT,
                 )
                 .await;
+            let msgs = match result {
+                Ok(page) => page.messages,
+                Err(e) => {
+                    tracing::error!("Failed to load more messages for {channel_id}: {e}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.loading_more = false;
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            tracing::debug!(
+                channel_id = channel_id.get(),
+                fetched = msgs.len(),
+                "load_more: page received"
+            );
+            let parsed: Vec<Message> = cx
+                .background_executor()
+                .spawn(async move {
+                    msgs.into_iter()
+                        .map(|m| message_from_api(m, cfg.as_ref(), viewer_id))
+                        .collect()
+                })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.loading_more = false;
-                let msgs = match result {
-                    Ok(page) => page.messages,
-                    Err(e) => {
-                        tracing::error!("Failed to load more messages for {channel_id}: {e}");
-                        cx.notify();
-                        return;
-                    }
-                };
-                tracing::debug!(
-                    channel_id = channel_id.get(),
-                    fetched = msgs.len(),
-                    "load_more: page received"
-                );
-                let cfg = AppConfig::try_global(cx);
-                let viewer_id = viewer_user_id(cx);
                 let (prepended, dropped_bottom) = {
                     let Some(channel) = this.cache.get_mut(&channel_id) else {
                         return;
                     };
-                    let older: Vec<Message> = msgs
+                    let older: Vec<Message> = parsed
                         .into_iter()
-                        .filter(|m| !channel.messages.contains_id(MessageId(m.message_id)))
-                        .map(|m| message_from_api(m, cfg, viewer_id))
+                        .filter(|m| !channel.messages.contains_id(m.id))
                         .collect();
                     if older.is_empty() {
                         channel.has_more = false;
@@ -1255,6 +1255,8 @@ impl MessagesStore {
         );
 
         let api = self.api.clone();
+        let cfg = AppConfig::try_global(cx).cloned();
+        let viewer_id = viewer_user_id(cx);
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_channel_messages(
@@ -1265,36 +1267,44 @@ impl MessagesStore {
                     MESSAGE_PAGE_LIMIT,
                 )
                 .await;
+            let msgs = match result {
+                Ok(page) => page.messages,
+                Err(e) => {
+                    tracing::error!("Failed to load newer messages for {channel_id}: {e}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.loading_more = false;
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            tracing::debug!(
+                channel_id = channel_id.get(),
+                anchor_after = newest_id.get(),
+                fetched = msgs.len(),
+                raw_first = msgs.first().map(|m| m.message_id).unwrap_or(0),
+                raw_last = msgs.last().map(|m| m.message_id).unwrap_or(0),
+                raw_min = msgs.iter().map(|m| m.message_id).min().unwrap_or(0),
+                raw_max = msgs.iter().map(|m| m.message_id).max().unwrap_or(0),
+                "load_more_bottom: page received (raw server ids)"
+            );
+            let parsed: Vec<Message> = cx
+                .background_executor()
+                .spawn(async move {
+                    msgs.into_iter()
+                        .map(|m| message_from_api(m, cfg.as_ref(), viewer_id))
+                        .collect()
+                })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.loading_more = false;
-                let msgs = match result {
-                    Ok(page) => page.messages,
-                    Err(e) => {
-                        tracing::error!("Failed to load newer messages for {channel_id}: {e}");
-                        cx.notify();
-                        return;
-                    }
-                };
-                tracing::debug!(
-                    channel_id = channel_id.get(),
-                    anchor_after = newest_id.get(),
-                    fetched = msgs.len(),
-                    raw_first = msgs.first().map(|m| m.message_id).unwrap_or(0),
-                    raw_last = msgs.last().map(|m| m.message_id).unwrap_or(0),
-                    raw_min = msgs.iter().map(|m| m.message_id).min().unwrap_or(0),
-                    raw_max = msgs.iter().map(|m| m.message_id).max().unwrap_or(0),
-                    "load_more_bottom: page received (raw server ids)"
-                );
-                let cfg = AppConfig::try_global(cx);
-                let viewer_id = viewer_user_id(cx);
                 let (added, dropped) = {
                     let Some(channel) = this.cache.get_mut(&channel_id) else {
                         return;
                     };
-                    let newer: Vec<Message> = msgs
+                    let newer: Vec<Message> = parsed
                         .into_iter()
-                        .filter(|m| !channel.messages.contains_id(MessageId(m.message_id)))
-                        .map(|m| message_from_api(m, cfg, viewer_id))
+                        .filter(|m| !channel.messages.contains_id(m.id))
                         .collect();
                     if newer.is_empty() {
                         cx.emit(MessagesEvent::Updated { message_id: None });
@@ -1392,6 +1402,8 @@ impl MessagesStore {
         );
 
         let api = self.api.clone();
+        let cfg = AppConfig::try_global(cx).cloned();
+        let viewer_id = viewer_user_id(cx);
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_channel_messages(
@@ -1402,24 +1414,28 @@ impl MessagesStore {
                     MESSAGE_PAGE_LIMIT,
                 )
                 .await;
+            let msgs = match result {
+                Ok(page) => page.messages,
+                Err(e) => {
+                    tracing::error!("jump_to_message AROUND fetch failed for {channel_id}: {e}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.loading_more = false;
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let parsed: Vec<Message> = cx
+                .background_executor()
+                .spawn(async move {
+                    msgs.into_iter()
+                        .map(|m| message_from_api(m, cfg.as_ref(), viewer_id))
+                        .collect()
+                })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.loading_more = false;
-                let msgs = match result {
-                    Ok(page) => page.messages,
-                    Err(e) => {
-                        tracing::error!(
-                            "jump_to_message AROUND fetch failed for {channel_id}: {e}"
-                        );
-                        cx.notify();
-                        return;
-                    }
-                };
-                let cfg = AppConfig::try_global(cx);
-                let viewer_id = viewer_user_id(cx);
-                let mut window: Vec<Message> = msgs
-                    .into_iter()
-                    .map(|m| message_from_api(m, cfg, viewer_id))
-                    .collect();
+                let mut window: Vec<Message> = parsed;
                 sort_messages(&mut window);
                 // Centered trim if the window somehow exceeds the cap, keeping the
                 // target near the middle so both directions stay scrollable.
@@ -2137,17 +2153,20 @@ impl MessagesStore {
                     this.reconcile_temp(channel_id, temp_id, confirmed, cx);
                 });
                 let (on_complete, mut completions) =
-                    tokio::sync::mpsc::unbounded_channel::<String>();
+                    tokio::sync::mpsc::unbounded_channel::<AttachmentUploadOutcome>();
                 let drain_this = this.clone();
                 cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-                    while let Some(key) = completions.recv().await {
+                    while let Some(outcome) = completions.recv().await {
                         let _ = drain_this.update(cx, |this, cx| {
-                            this.mark_attachment_uploaded(
-                                channel_id,
-                                MessageId(real_message_id),
-                                &key,
-                                cx,
-                            );
+                            let message_id = MessageId(real_message_id);
+                            match outcome {
+                                AttachmentUploadOutcome::Uploaded(key) => {
+                                    this.mark_attachment_uploaded(channel_id, message_id, &key, cx);
+                                }
+                                AttachmentUploadOutcome::Failed(key) => {
+                                    this.mark_attachment_failed(channel_id, message_id, &key, cx);
+                                }
+                            }
                         });
                     }
                 })
@@ -2573,7 +2592,8 @@ impl MessagesStore {
         match code {
             MessageCode::ChatUpdate | MessageCode::UpdateEphemeralMsg => {
                 let incoming = message_from_channel_proto(m, message_id.get(), cfg, viewer_id);
-                self.apply_message_update(storage_id, message_id, incoming, cx);
+                let presign_keys = presign::parse_presign_finish_keys(&m.content);
+                self.apply_message_update(storage_id, message_id, incoming, presign_keys, cx);
             }
             MessageCode::ChatRemove | MessageCode::DeleteEphemeralMsg => {
                 self.apply_message_remove(storage_id, message_id, cx);
@@ -2660,8 +2680,12 @@ impl MessagesStore {
         storage_id: ChannelId,
         message_id: MessageId,
         incoming: Message,
+        presign_keys: Option<Vec<String>>,
         cx: &mut Context<Self>,
     ) {
+        let base_img = AppConfig::try_global(cx)
+            .map(|c| c.base_img_url.clone())
+            .unwrap_or_default();
         let is_active = self.active_channel_id == Some(storage_id);
         let preview = incoming.content.clone();
         let Some(channel) = self.cache.get_mut(&storage_id) else {
@@ -2671,6 +2695,14 @@ impl MessagesStore {
             return;
         };
         merge_message_update(existing, &incoming);
+        if let Some(keys) = &presign_keys {
+            apply_presign_gate(
+                &mut existing.attachments,
+                keys,
+                &base_img,
+                existing.create_time,
+            );
+        }
         patch_reply_previews_after_update(&mut channel.messages, message_id, &preview);
         if is_active {
             cx.emit(MessagesEvent::Updated {
@@ -3174,6 +3206,38 @@ impl MessagesStore {
         }
     }
 
+    fn mark_attachment_failed(
+        &mut self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        key: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = {
+            let Some(channel) = self.cache.get_mut(&channel_id) else {
+                return;
+            };
+            let Some(message) = channel.messages.get_mut_by_id(message_id) else {
+                return;
+            };
+            let mut changed = false;
+            for att in message.attachments.iter_mut() {
+                if att.uploading && presign::normalize_presign_key(&att.url) == key {
+                    att.uploading = false;
+                    att.upload_failed = true;
+                    changed = true;
+                }
+            }
+            changed
+        };
+        if changed && self.active_channel_id == Some(channel_id) {
+            cx.emit(MessagesEvent::Updated {
+                message_id: Some(message_id),
+            });
+            cx.notify();
+        }
+    }
+
     fn resync(&mut self, cx: &mut Context<Self>) {
         tracing::info!("MessagesStore resync — marking message cache stale");
         self.cache.mark_all_stale();
@@ -3357,6 +3421,7 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
                     att.local_source = prior_att.local_source.clone();
                 }
                 att.uploading = prior_att.uploading;
+                att.upload_failed = prior_att.upload_failed;
             }
         }
         existing.attachments = new_attachments;
@@ -3571,6 +3636,7 @@ fn carry_local_previews(prior: &Message, confirmed: &mut Message) {
             att.local_source = prior_att.local_source.clone();
         }
         att.uploading = prior_att.uploading;
+        att.upload_failed = prior_att.upload_failed;
     }
 }
 
@@ -3596,6 +3662,45 @@ fn merge_sparse_sender(prior: &Message, mut incoming: Message) -> Message {
     }
     carry_local_previews(prior, &mut incoming);
     incoming
+}
+
+fn apply_presign_gate(
+    attachments: &mut Vec<MessageAttachment>,
+    keys: &[String],
+    base_img: &str,
+    create_time: i64,
+) {
+    let presignable = attachments
+        .iter()
+        .filter(|a| presign::is_mezon_cdn(&a.url, base_img))
+        .count();
+    let all_finished = presign::all_presign_finished(presignable, keys.len());
+    if all_finished {
+        for a in attachments.iter_mut() {
+            a.presign_pending = false;
+        }
+    } else {
+        let now = now_unix_seconds();
+        attachments.retain(|a| {
+            !presign::is_expired_presign_attachment(&a.url, Some(keys), base_img, create_time, now)
+        });
+        for a in attachments.iter_mut() {
+            a.presign_pending = presign::presign_pending(&a.url, Some(keys), base_img);
+        }
+    }
+    #[cfg(debug_assertions)]
+    for a in attachments
+        .iter()
+        .filter(|a| presign::is_mezon_cdn(&a.url, base_img))
+    {
+        tracing::info!(
+            key = %presign::normalize_presign_key(&a.url),
+            finish_keys = keys.len(),
+            all_finished,
+            pending = a.presign_pending,
+            "presign gate"
+        );
+    }
 }
 
 /// Client send timestamp for an optimistic row (React `client_send_time / 1000`).
@@ -3665,21 +3770,14 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
         .into_iter()
         .map(|a| MessageAttachment::from_api(a, cfg))
         .collect();
-    if let Some(keys) = presign::parse_presign_finish_keys(&m.content) {
+    let presign_keys: Option<Vec<String>> = m.content_tokens.presign_finish.as_ref().map(|ks| {
+        ks.iter()
+            .map(|k| presign::normalize_presign_key(k))
+            .collect()
+    });
+    if let Some(keys) = presign_keys {
         let base_img = cfg.map(|c| c.base_img_url.as_str()).unwrap_or_default();
-        let now = now_unix_seconds();
-        attachments.retain(|a| {
-            !presign::is_expired_presign_attachment(
-                &a.url,
-                Some(&keys),
-                base_img,
-                m.create_time,
-                now,
-            )
-        });
-        for a in attachments.iter_mut() {
-            a.presign_pending = presign::presign_pending(&a.url, Some(&keys), base_img);
-        }
+        apply_presign_gate(&mut attachments, &keys, base_img, m.create_time);
     }
     let (album_layout, viewer_media) = build_media_presentation(&attachments, cfg);
     let is_forwarded = m.content_tokens.fwd;
@@ -4331,6 +4429,7 @@ impl MessageAttachment {
             tenor_mp4,
             local_source: None,
             uploading: false,
+            upload_failed: false,
         }
     }
 
@@ -4358,6 +4457,7 @@ impl MessageAttachment {
             tenor_mp4: None,
             local_source: is_image.then(|| att.path.clone()),
             uploading: true,
+            upload_failed: false,
         }
     }
 }
@@ -4721,6 +4821,86 @@ mod tests {
         assert_eq!(m.viewer_media.len(), 2);
         assert_eq!(m.viewer_media[0].url, "https://cdn/1.png");
         assert_eq!(m.viewer_media[0].viewer_src, "https://cdn/1.png");
+    }
+
+    #[test]
+    fn message_from_api_gates_cdn_attachment_until_presign_finished() {
+        let cfg = AppConfig {
+            base_img_url: "https://cdn.mezon.ai".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let msg = |finish: Option<Vec<String>>| ApiMessage {
+            message_id: 5,
+            content: "hi".into(),
+            content_tokens: mezon_client::transport::ApiMessageContent {
+                t: "hi".into(),
+                presign_finish: finish,
+                ..Default::default()
+            },
+            code: 0,
+            sender_id: 1,
+            sender_name: "Alice".into(),
+            avatar: String::new(),
+            create_time: 0,
+            update_time: 0,
+            hide_editted: false,
+            attachments: vec![mezon_client::transport::ApiAttachment {
+                url: "https://cdn.mezon.ai/uploads/photo.png".into(),
+                filename: "photo.png".into(),
+                filetype: "image/png".into(),
+                width: 800,
+                height: 600,
+                thumbnail: String::new(),
+                duration: 0,
+                size: 0,
+            }],
+            references: vec![],
+            reactions: vec![],
+            entity_mentions: vec![],
+        };
+
+        let pending = message_from_api(msg(Some(vec![])), Some(&cfg), None);
+        assert!(pending.attachments[0].presign_pending);
+
+        let finished = message_from_api(msg(Some(vec!["photo".into()])), Some(&cfg), None);
+        assert!(!finished.attachments[0].presign_pending);
+
+        let mismatched_key_but_count_reached =
+            message_from_api(msg(Some(vec!["some-other-key".into()])), Some(&cfg), None);
+        assert!(!mismatched_key_but_count_reached.attachments[0].presign_pending);
+
+        let no_field = message_from_api(msg(None), Some(&cfg), None);
+        assert!(!no_field.attachments[0].presign_pending);
+    }
+
+    #[test]
+    fn partial_update_recomputes_presign_pending_on_kept_attachments() {
+        let base = "https://cdn.mezon.ai";
+        let mut existing = Message::new(MessageId(1), "hi", "u1", "U1", 100);
+        existing.attachments = vec![MessageAttachment {
+            url: "https://cdn.mezon.ai/uploads/photo.png".into(),
+            presign_pending: true,
+            ..Default::default()
+        }];
+
+        let incoming = Message::new(MessageId(1), "hi", "u1", "U1", 100);
+        assert!(incoming.attachments.is_empty());
+        merge_message_update(&mut existing, &incoming);
+        assert!(
+            existing.attachments[0].presign_pending,
+            "partial update keeps the prior attachment with its stale flag"
+        );
+
+        apply_presign_gate(
+            &mut existing.attachments,
+            &["photo".to_string()],
+            base,
+            existing.create_time,
+        );
+        assert!(
+            !existing.attachments[0].presign_pending,
+            "recompute against the arrived presign_finish flips the gate"
+        );
     }
 
     fn plain_api_message(

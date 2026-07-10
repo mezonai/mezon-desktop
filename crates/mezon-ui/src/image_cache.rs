@@ -7,7 +7,7 @@ use futures::future::{AbortHandle, Abortable};
 use futures::{AsyncReadExt as _, FutureExt};
 use gpui::{
     App, AppContext, Asset, AssetLogger, Context, Entity, Global, ImageAssetLoader, ImageCache,
-    ImageCacheError, ImageCacheItem, RenderImage, Resource, WeakEntity, Window, hash,
+    ImageCacheError, ImageCacheItem, RenderImage, Resource, Window, hash,
 };
 use indexmap::IndexMap;
 
@@ -28,6 +28,7 @@ pub fn flush_atlas_drops(window: &mut Window, cx: &mut App) {
 
 const SHARED_AVATAR_CACHE_CAPACITY: usize = 512;
 const SHARED_AVATAR_CACHE_BYTES: u64 = 40 * 1024 * 1024;
+const SHARED_SMALL_AVATAR_CACHE_BYTES: u64 = 20 * 1024 * 1024;
 
 struct SharedAvatarCache(Entity<LruImageCache>);
 impl Global for SharedAvatarCache {}
@@ -49,38 +50,36 @@ pub fn shared_avatar_cache(cx: &mut App) -> Entity<LruImageCache> {
     cache
 }
 
-#[derive(Default)]
-struct CacheRegistry(Vec<WeakEntity<LruImageCache>>);
-impl Global for CacheRegistry {}
+struct SharedSmallAvatarCache(Entity<LruImageCache>);
+impl Global for SharedSmallAvatarCache {}
 
-pub fn log_cache_budgets(cx: &mut App) {
-    let entries = std::mem::take(&mut cx.default_global::<CacheRegistry>().0);
-    let mut alive = Vec::with_capacity(entries.len());
-    let mut total_mb = 0u64;
-    for weak in entries {
-        let Some(entity) = weak.upgrade() else {
-            continue;
-        };
-        let cache = entity.read(cx);
-        let stats = cache.stats();
-        total_mb += stats.current_bytes / (1024 * 1024);
-        tracing::info!(
-            label = cache.label,
-            instance = cache.instance,
-            used_mb = stats.current_bytes / (1024 * 1024),
-            budget_mb = cache.max_bytes / (1024 * 1024),
-            items = stats.items,
-            evictions = stats.evictions,
-            "img cache budget"
-        );
-        alive.push(weak);
+pub fn shared_small_avatar_cache(cx: &mut App) -> Entity<LruImageCache> {
+    if let Some(existing) = cx.try_global::<SharedSmallAvatarCache>() {
+        return existing.0.clone();
     }
-    tracing::info!(
-        total_used_mb = total_mb,
-        live_caches = alive.len(),
-        "img cache budgets total"
-    );
-    cx.default_global::<CacheRegistry>().0 = alive;
+    let cache = cx.new(|cx| {
+        LruImageCache::avatar_thumbnail_small(
+            "avatar-shared-small",
+            SHARED_AVATAR_CACHE_CAPACITY,
+            SHARED_SMALL_AVATAR_CACHE_BYTES,
+            AVATAR_ENTRY_MAX_BYTES,
+            cx,
+        )
+    });
+    cx.set_global(SharedSmallAvatarCache(cache.clone()));
+    cache
+}
+
+pub fn clear_shared_avatar_cache(cx: &mut App) {
+    if let Some(cache) = cx.try_global::<SharedAvatarCache>().map(|s| s.0.clone()) {
+        cache.update(cx, |cache, cx| cache.clear_app(cx));
+    }
+    if let Some(cache) = cx
+        .try_global::<SharedSmallAvatarCache>()
+        .map(|s| s.0.clone())
+    {
+        cache.update(cx, |cache, cx| cache.clear_app(cx));
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -216,6 +215,7 @@ enum LoaderKind {
     /// Decodes only the first frame and downscales to avatar size, so even an
     /// animated full-resolution source costs ~100 KB of RAM. Used for avatars.
     AvatarThumbnail,
+    AvatarThumbnailSmall,
     GalleryThumbnail,
     Message,
     /// Decodes only the first frame at full resolution. The image viewer paints
@@ -276,6 +276,23 @@ impl LruImageCache {
         Self::with_loader(
             label,
             LoaderKind::AvatarThumbnail,
+            max_items,
+            max_bytes,
+            max_entry_bytes,
+            cx,
+        )
+    }
+
+    pub fn avatar_thumbnail_small(
+        label: &'static str,
+        max_items: usize,
+        max_bytes: u64,
+        max_entry_bytes: u64,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_loader(
+            label,
+            LoaderKind::AvatarThumbnailSmall,
             max_items,
             max_bytes,
             max_entry_bytes,
@@ -355,9 +372,6 @@ impl LruImageCache {
             }
         })
         .detach();
-
-        let weak = cx.weak_entity();
-        cx.default_global::<CacheRegistry>().0.push(weak);
 
         let instance = CACHE_INSTANCE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Self {
@@ -564,6 +578,9 @@ impl LruImageCache {
             LoaderKind::AvatarThumbnail => {
                 AssetLogger::<AvatarImageLoader>::load(resource.clone(), cx).boxed()
             }
+            LoaderKind::AvatarThumbnailSmall => {
+                AssetLogger::<AvatarImageLoaderSmall>::load(resource.clone(), cx).boxed()
+            }
             LoaderKind::GalleryThumbnail => {
                 AssetLogger::<GalleryImageLoader>::load(resource.clone(), cx).boxed()
             }
@@ -619,6 +636,7 @@ impl ImageCache for LruImageCache {
 /// avatar is 80px logical, which is 160px on a 2x display. Decoding to this size
 /// keeps a single avatar at ~100 KB regardless of the source file.
 const AVATAR_DECODE_MAX_PX: u32 = 160;
+const AVATAR_SMALL_DECODE_MAX_PX: u32 = 80;
 const GALLERY_THUMB_DECODE_MAX_PX: u32 = 320;
 
 /// An [`Asset`] loader for avatars that, unlike GPUI's stock [`ImageAssetLoader`],
@@ -633,6 +651,67 @@ const GALLERY_THUMB_DECODE_MAX_PX: u32 = 320;
 /// [`AVATAR_DECODE_MAX_PX`]. The result is a tiny, static image that cannot blow
 /// up RAM even when the resizing image proxy is unavailable and we fall back to
 /// the raw source file.
+fn load_avatar_scaled(
+    source: Resource,
+    max_px: u32,
+    cx: &mut App,
+) -> impl Future<Output = Result<Arc<RenderImage>, ImageCacheError>> + Send + 'static {
+    let client = cx.http_client();
+    let svg_renderer = cx.svg_renderer();
+    let asset_source = cx.asset_source().clone();
+    async move {
+        let bytes = match source.clone() {
+            Resource::Path(uri) => {
+                if let Some(decoded) = decode_scaled_dynamic_path(uri.as_ref(), max_px) {
+                    return Ok(avatar_render_image(decoded, max_px));
+                }
+                std::fs::read(uri.as_ref())?
+            }
+            Resource::Uri(uri) => {
+                use anyhow::Context as _;
+
+                let mut response = client
+                    .get(uri.as_ref(), ().into(), true)
+                    .await
+                    .with_context(|| format!("loading avatar from {uri:?}"))?;
+                let mut body = Vec::new();
+                response.body_mut().read_to_end(&mut body).await?;
+                if !response.status().is_success() {
+                    let mut body = String::from_utf8_lossy(&body).into_owned();
+                    let first_line = body.lines().next().unwrap_or("").trim_end();
+                    body.truncate(first_line.len());
+                    return Err(ImageCacheError::BadStatus {
+                        uri,
+                        status: response.status(),
+                        body,
+                    });
+                }
+                body
+            }
+            Resource::Embedded(path) => match asset_source.load(&path).ok().flatten() {
+                Some(data) => data.to_vec(),
+                None => {
+                    return Err(ImageCacheError::Asset(
+                        format!("Embedded resource not found: {path}").into(),
+                    ));
+                }
+            },
+        };
+
+        if image::guess_format(&bytes).is_ok() {
+            let decoded = match decode_scaled_dynamic(&bytes, max_px) {
+                Some(image) => image,
+                None => image::load_from_memory(&bytes)?,
+            };
+            Ok(avatar_render_image(decoded, max_px))
+        } else {
+            svg_renderer
+                .render_single_frame(&bytes, 1.0)
+                .map_err(Into::into)
+        }
+    }
+}
+
 pub enum AvatarImageLoader {}
 
 impl Asset for AvatarImageLoader {
@@ -643,64 +722,21 @@ impl Asset for AvatarImageLoader {
         source: Self::Source,
         cx: &mut App,
     ) -> impl Future<Output = Self::Output> + Send + 'static {
-        let client = cx.http_client();
-        let svg_renderer = cx.svg_renderer();
-        let asset_source = cx.asset_source().clone();
-        async move {
-            let bytes = match source.clone() {
-                Resource::Path(uri) => {
-                    if let Some(decoded) =
-                        decode_scaled_dynamic_path(uri.as_ref(), AVATAR_DECODE_MAX_PX)
-                    {
-                        return Ok(avatar_render_image(decoded, AVATAR_DECODE_MAX_PX));
-                    }
-                    std::fs::read(uri.as_ref())?
-                }
-                Resource::Uri(uri) => {
-                    use anyhow::Context as _;
+        load_avatar_scaled(source, AVATAR_DECODE_MAX_PX, cx)
+    }
+}
 
-                    let mut response = client
-                        .get(uri.as_ref(), ().into(), true)
-                        .await
-                        .with_context(|| format!("loading avatar from {uri:?}"))?;
-                    let mut body = Vec::new();
-                    response.body_mut().read_to_end(&mut body).await?;
-                    if !response.status().is_success() {
-                        let mut body = String::from_utf8_lossy(&body).into_owned();
-                        let first_line = body.lines().next().unwrap_or("").trim_end();
-                        body.truncate(first_line.len());
-                        return Err(ImageCacheError::BadStatus {
-                            uri,
-                            status: response.status(),
-                            body,
-                        });
-                    }
-                    body
-                }
-                Resource::Embedded(path) => match asset_source.load(&path).ok().flatten() {
-                    Some(data) => data.to_vec(),
-                    None => {
-                        return Err(ImageCacheError::Asset(
-                            format!("Embedded resource not found: {path}").into(),
-                        ));
-                    }
-                },
-            };
+pub enum AvatarImageLoaderSmall {}
 
-            if image::guess_format(&bytes).is_ok() {
-                // `load_from_memory` decodes a single frame even for animated
-                // GIF/WebP, so this never expands the whole animation.
-                let decoded = match decode_scaled_dynamic(&bytes, AVATAR_DECODE_MAX_PX) {
-                    Some(image) => image,
-                    None => image::load_from_memory(&bytes)?,
-                };
-                Ok(avatar_render_image(decoded, AVATAR_DECODE_MAX_PX))
-            } else {
-                svg_renderer
-                    .render_single_frame(&bytes, 1.0)
-                    .map_err(Into::into)
-            }
-        }
+impl Asset for AvatarImageLoaderSmall {
+    type Source = Resource;
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn load(
+        source: Self::Source,
+        cx: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        load_avatar_scaled(source, AVATAR_SMALL_DECODE_MAX_PX, cx)
     }
 }
 
@@ -1131,6 +1167,6 @@ mod tests {
     #[test]
     fn message_static_cap_covers_two_x_inline_display() {
         const MAX_INLINE_LOGICAL_PX: u32 = 480;
-        assert!(MESSAGE_STATIC_MAX_PX >= MAX_INLINE_LOGICAL_PX * 2);
+        const _: () = assert!(MESSAGE_STATIC_MAX_PX >= MAX_INLINE_LOGICAL_PX * 2);
     }
 }

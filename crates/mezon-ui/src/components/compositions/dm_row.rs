@@ -18,6 +18,7 @@ pub struct DmRow {
     group_name: SharedString,
     close_id: SharedString,
     suppress_hover: bool,
+    image_cache: Option<gpui::Entity<crate::image_cache::LruImageCache>>,
 }
 
 impl DmRow {
@@ -44,7 +45,13 @@ impl DmRow {
             group_name,
             close_id,
             suppress_hover: false,
+            image_cache: None,
         }
+    }
+
+    pub fn image_cache(mut self, cache: gpui::Entity<crate::image_cache::LruImageCache>) -> Self {
+        self.image_cache = Some(cache);
+        self
     }
 
     pub fn selected(mut self, selected: bool) -> Self {
@@ -167,6 +174,9 @@ impl DmRow {
                 .into_any_element()
         } else {
             let mut avatar = Avatar::new().name(self.label.clone()).size_px(size);
+            if let Some(cache) = self.image_cache.clone() {
+                avatar = avatar.image_cache(cache);
+            }
             let src = self.avatar_src.clone();
             let raw = self.avatar_raw.clone();
             if !src.is_empty() {

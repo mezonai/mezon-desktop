@@ -19,6 +19,9 @@ pub(crate) const ACCENT_BLUE: u32 = 0x5865f2;
 
 const RAISE_HAND_GOLD: u32 = 0xefbc39;
 
+const LEAVE_RED: u32 = 0xda373c;
+const LEAVE_RED_HOVER: u32 = 0xa12829;
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_voice_channel(
     theme: &Theme,
@@ -211,11 +214,7 @@ pub fn render_mini_bar(
             },
             neutral_bg,
             neutral_hover,
-            if mic_enabled {
-                theme.text_primary
-            } else {
-                theme.status_dnd
-            },
+            theme.text_primary,
         )
         .tooltip(Tooltip::text(mezon_i18n::t(
             locale,
@@ -239,11 +238,7 @@ pub fn render_mini_bar(
             },
             neutral_bg,
             neutral_hover,
-            if camera_enabled {
-                theme.text_primary
-            } else {
-                theme.status_dnd
-            },
+            theme.text_primary,
         )
         .tooltip(Tooltip::text(mezon_i18n::t(
             locale,
@@ -305,9 +300,9 @@ pub fn render_mini_bar(
         let voice = voice.clone();
         panel_control_button(
             "voice-panel-leave",
-            IconName::CancelCall,
-            theme.status_dnd,
-            darken(theme.status_dnd, 0.12),
+            IconName::EndCall,
+            gpui::rgb(LEAVE_RED),
+            gpui::rgb(LEAVE_RED_HOVER),
             gpui::rgb(0xffffff),
         )
         .tooltip(Tooltip::text(mezon_i18n::t(
@@ -1441,7 +1436,7 @@ fn focus_main_tile(
         .bg(theme.bg_secondary)
         .cursor_pointer()
         .child(inner)
-        .child(tile_label(theme, locale, cell))
+        .child(tile_label(locale, cell))
         .child(tile_quality(cell))
         .children(tile_sound_overlay(store, cell))
         .on_mouse_down(
@@ -1488,7 +1483,7 @@ fn strip_tile(
         .border_2()
         .border_color(border_color)
         .child(inner)
-        .child(tile_label(theme, locale, cell))
+        .child(tile_label(locale, cell))
         .child(tile_quality(cell))
         .children(tile_sound_overlay(store, cell))
         .on_mouse_down(
@@ -1534,7 +1529,7 @@ fn video_tile(
         .border_2()
         .border_color(border_color)
         .child(inner)
-        .child(tile_label(theme, locale, cell))
+        .child(tile_label(locale, cell))
         .child(tile_quality(cell))
         .children(tile_sound_overlay(store, cell))
         .on_mouse_down(
@@ -1576,7 +1571,7 @@ fn tile_inner(theme: &Theme, store: &VoiceStore, cell: &VideoCell, large: bool) 
     avatar.into_any_element()
 }
 
-fn tile_label(theme: &Theme, locale: &str, cell: &VideoCell) -> AnyElement {
+fn tile_label(locale: &str, cell: &VideoCell) -> AnyElement {
     let label = if cell.is_screen {
         mezon_i18n::t(locale, "channelVoice.usernameScreen").replace("{{username}}", &cell.name)
     } else {
@@ -1599,7 +1594,7 @@ fn tile_label(theme: &Theme, locale: &str, cell: &VideoCell) -> AnyElement {
             this.child(
                 Icon::new(IconName::VoiceMicDisabledIcon)
                     .size(px(14.))
-                    .text_color(theme.status_dnd),
+                    .text_color(gpui::rgba(0xffffff80)),
             )
         })
         .when(cell.is_screen, |this| {
@@ -1719,11 +1714,7 @@ fn control_bar(
             } else {
                 IconName::VoiceMicDisabledIcon
             },
-            if mic_enabled {
-                theme.text_primary
-            } else {
-                theme.status_dnd
-            },
+            theme.text_primary,
         )
         .tooltip(Tooltip::text(mic_tooltip))
         .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.toggle_mic(cx)))
@@ -1740,11 +1731,7 @@ fn control_bar(
             } else {
                 IconName::VoiceCameraDisabledIcon
             },
-            if camera_enabled {
-                theme.text_primary
-            } else {
-                theme.status_dnd
-            },
+            theme.text_primary,
         )
         .tooltip(Tooltip::text(camera_tooltip))
         .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.toggle_camera(cx)))
@@ -1792,9 +1779,9 @@ fn control_bar(
         let voice = voice.clone();
         circle_button(
             "voice-leave-btn",
-            theme.status_dnd,
-            darken(theme.status_dnd, 0.12),
-            IconName::CancelCall,
+            gpui::rgb(LEAVE_RED),
+            gpui::rgb(LEAVE_RED_HOVER).into(),
+            IconName::EndCall,
             gpui::rgb(0xffffff),
         )
         .tooltip(Tooltip::text(leave_tooltip))
@@ -1939,7 +1926,6 @@ fn control_bar(
         .child(mic_button)
         .child(camera_button)
         .child(screen_button)
-        .child(decorative_circle(theme, IconName::ShadowBotIcon))
         .child(raise_hand_button)
         .child(leave_button);
 
@@ -1955,22 +1941,6 @@ fn control_bar(
         .child(left)
         .child(center)
         .child(right)
-        .into_any_element()
-}
-
-fn decorative_circle(theme: &Theme, icon: IconName) -> AnyElement {
-    // Purely decorative: same footprint as the real control buttons but with no
-    // id/on_click and an explicit default cursor so it never reads as clickable.
-    div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .w(px(44.))
-        .h(px(44.))
-        .rounded_full()
-        .cursor_default()
-        .bg(theme.bg_secondary)
-        .child(Icon::new(icon).size(px(20.)).text_color(theme.text_muted))
         .into_any_element()
 }
 

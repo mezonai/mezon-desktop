@@ -4,14 +4,14 @@ mod text_field;
 use std::path::PathBuf;
 
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, Focusable, FontWeight, Image, ImageFormat,
-    IntoElement, KeyBinding, PathPromptOptions, ScrollStrategy, SharedString, Subscription,
-    UniformListScrollHandle, Window, actions, deferred, div, img, prelude::*, px, uniform_list,
+    AnyElement, App, Context, DismissEvent, Entity, EventEmitter, Focusable, FontWeight, Image,
+    ImageFormat, IntoElement, KeyBinding, PathPromptOptions, ScrollStrategy, SharedString,
+    Subscription, UniformListScrollHandle, Window, actions, deferred, div, img, prelude::*, px,
+    uniform_list,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanList, EmojiEvent, EmojiStore, MENTION_HERE_ID,
-    MessageSpan, OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag,
-    OutgoingMention, Settings, StickerEvent, StickerStore,
+    ChannelId, ChannelList, ChannelType, ClanList, EmojiStore, MENTION_HERE_ID, MessageSpan,
+    OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention, Settings,
 };
 
 use attachments::{
@@ -20,6 +20,7 @@ use attachments::{
 };
 
 use crate::app::shell::Shell;
+use crate::chat::gif_sticker_emoji::{GifStickerEmojiEvent, GifStickerEmojiPopup, SubPanel};
 use crate::chat::member_list::{MentionMemberRaw, mention_member_pool};
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::image_cache::{
@@ -37,15 +38,6 @@ const CONVERT_TO_FILE_THRESHOLD: usize = 3700;
 const CONVERT_PREFIX_LEN: usize = 8;
 const MENTION_ROW_PX: f32 = 36.;
 const MENTION_POPUP_MAX_PX: f32 = MENTION_ROW_PX * 6.;
-const PICKER_EMOJI_PX: f32 = 28.;
-const PICKER_CELL_PX: f32 = 34.;
-const PICKER_ROW_PX: f32 = 40.;
-const PICKER_COLS: usize = 7;
-const STICKER_PANEL_PX: f32 = 320.;
-const STICKER_COLS: usize = 3;
-const STICKER_CELL_PX: f32 = 92.;
-const STICKER_ROW_PX: f32 = 100.;
-const STICKER_IMG_PX: f32 = 80.;
 
 actions!(mezon_mention, [MentionAccept, MentionDismiss]);
 
@@ -123,17 +115,6 @@ enum Suggestion {
     Emoji(EmojiSuggestRaw),
 }
 
-enum PickerRow {
-    Header(SharedString),
-    Emojis(Vec<EmojiSuggestRaw>),
-}
-
-#[derive(Clone)]
-struct StickerCellRaw {
-    id: String,
-    src: String,
-}
-
 #[derive(Clone, PartialEq, Eq)]
 pub enum MentionInputEvent {
     Submit,
@@ -154,12 +135,8 @@ pub struct MentionInput {
     session_members: Vec<MentionMemberRaw>,
     session_channels: Vec<ChannelSuggestRaw>,
     session_emojis: Vec<EmojiSuggestRaw>,
-    picker_open: bool,
-    picker_rows: Vec<PickerRow>,
-    picker_scroll: UniformListScrollHandle,
-    sticker_picker_open: bool,
-    sticker_rows: Vec<Vec<StickerCellRaw>>,
-    sticker_scroll: UniformListScrollHandle,
+    popup: Option<Entity<GifStickerEmojiPopup>>,
+    _popup_subs: Vec<Subscription>,
     avatar_cache: Entity<LruImageCache>,
     preview_cache: Entity<LruImageCache>,
     settings: Entity<Settings>,
@@ -167,8 +144,6 @@ pub struct MentionInput {
     compact: bool,
     overflow_to_file: bool,
     _input_sub: Subscription,
-    _emoji_sub: Option<Subscription>,
-    _sticker_sub: Option<Subscription>,
 }
 
 impl EventEmitter<MentionInputEvent> for MentionInput {}
@@ -281,22 +256,6 @@ impl MentionInput {
                 }
             },
         );
-        let emoji_sub = EmojiStore::try_global(cx).map(|store| {
-            cx.subscribe(&store, |this, _store, _event: &EmojiEvent, cx| {
-                if this.picker_open {
-                    this.rebuild_picker(cx);
-                    cx.notify();
-                }
-            })
-        });
-        let sticker_sub = StickerStore::try_global(cx).map(|store| {
-            cx.subscribe(&store, |this, _store, _event: &StickerEvent, cx| {
-                if this.sticker_picker_open {
-                    this.rebuild_sticker_picker(cx);
-                    cx.notify();
-                }
-            })
-        });
         let avatar_cache = crate::image_cache::shared_avatar_cache(cx);
         let preview_cache = cx.new(|cx| {
             LruImageCache::avatar_thumbnail(
@@ -320,12 +279,8 @@ impl MentionInput {
             session_members: Vec::new(),
             session_channels: Vec::new(),
             session_emojis: Vec::new(),
-            picker_open: false,
-            picker_rows: Vec::new(),
-            picker_scroll: UniformListScrollHandle::new(),
-            sticker_picker_open: false,
-            sticker_rows: Vec::new(),
-            sticker_scroll: UniformListScrollHandle::new(),
+            popup: None,
+            _popup_subs: Vec::new(),
             avatar_cache,
             preview_cache,
             settings,
@@ -333,8 +288,6 @@ impl MentionInput {
             compact,
             overflow_to_file: false,
             _input_sub: input_sub,
-            _emoji_sub: emoji_sub,
-            _sticker_sub: sticker_sub,
         }
     }
 
@@ -378,7 +331,7 @@ impl MentionInput {
             self.convert_text_to_file(text, window, cx);
             self.committed.clear();
             self.reset_popup();
-            self.picker_open = false;
+            self.close_popup();
             self.input.update(cx, |input, cx| {
                 input.set_mention_spans(Vec::new(), cx);
                 input.set_value("", window, cx);
@@ -423,7 +376,7 @@ impl MentionInput {
             .collect();
         self.committed.clear();
         self.reset_popup();
-        self.picker_open = false;
+        self.close_popup();
         self.input.update(cx, |input, cx| {
             input.set_mention_spans(Vec::new(), cx);
             input.set_value("", window, cx);
@@ -914,95 +867,62 @@ impl MentionInput {
         cx.notify();
     }
 
-    fn toggle_picker(&mut self, cx: &mut Context<Self>) {
-        self.picker_open = !self.picker_open;
-        if self.picker_open {
-            self.sticker_picker_open = false;
-            self.reset_popup();
-            if let Some(store) = EmojiStore::try_global(cx) {
-                store.update(cx, |store, cx| store.ensure_loaded(cx));
-            }
-            self.rebuild_picker(cx);
-        }
-        cx.notify();
+    fn toggle_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_tab(SubPanel::Emoji, window, cx);
     }
 
-    fn toggle_sticker_picker(&mut self, cx: &mut Context<Self>) {
-        self.sticker_picker_open = !self.sticker_picker_open;
-        if self.sticker_picker_open {
-            self.picker_open = false;
-            self.reset_popup();
-            if let Some(store) = StickerStore::try_global(cx) {
-                store.update(cx, |store, cx| store.ensure_loaded(cx));
+    fn toggle_tab(&mut self, tab: SubPanel, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(popup) = &self.popup {
+            if popup.read(cx).active_tab() == tab {
+                self.close_popup();
+            } else {
+                popup.update(cx, |popup, cx| popup.set_tab(tab, cx));
             }
-            self.rebuild_sticker_picker(cx);
-        }
-        cx.notify();
-    }
-
-    fn rebuild_sticker_picker(&mut self, cx: &mut Context<Self>) {
-        let active = ClanList::global(cx)
-            .read(cx)
-            .active_clan_id
-            .map(|id| id.to_string());
-        let Some(store) = StickerStore::try_global(cx) else {
-            self.sticker_rows = Vec::new();
+            cx.notify();
             return;
-        };
-        let store = store.read(cx);
-        let rows = store
-            .active_clan_first(active.as_deref())
-            .chunks(STICKER_COLS)
-            .map(|chunk| {
-                chunk
-                    .iter()
-                    .map(|s| StickerCellRaw {
-                        id: s.id.clone(),
-                        src: s.src.clone(),
-                    })
-                    .collect()
-            })
-            .collect();
-        self.sticker_rows = rows;
+        }
+        self.reset_popup();
+        self.open_popup(tab, window, cx);
+        cx.notify();
     }
 
-    fn send_sticker(&mut self, cell: StickerCellRaw, cx: &mut Context<Self>) {
-        self.sticker_picker_open = false;
-        cx.emit(MentionInputEvent::SendSticker {
-            url: cell.src,
-            filename: cell.id,
+    fn open_popup(&mut self, tab: SubPanel, window: &mut Window, cx: &mut Context<Self>) {
+        let popup = cx.new(|cx| GifStickerEmojiPopup::new(tab, window, cx));
+        let pick_sub = cx.subscribe_in(
+            &popup,
+            window,
+            |this, _popup, event, window, cx| match event {
+                GifStickerEmojiEvent::Emoji { emoji_id, emoji } => this.insert_emoji(
+                    EmojiSuggestRaw {
+                        emoji_id: emoji_id.clone(),
+                        shortname: emoji.clone(),
+                        shortname_lc: emoji.to_lowercase(),
+                        src: String::new(),
+                    },
+                    window,
+                    cx,
+                ),
+                GifStickerEmojiEvent::Sticker { url, filename } => {
+                    this.close_popup();
+                    cx.emit(MentionInputEvent::SendSticker {
+                        url: url.clone(),
+                        filename: filename.clone(),
+                    });
+                    cx.notify();
+                }
+            },
+        );
+        let dismiss_sub = cx.subscribe(&popup, |this, _popup, _: &DismissEvent, cx| {
+            this.close_popup();
+            cx.notify();
         });
-        cx.notify();
+        self._popup_subs = vec![pick_sub, dismiss_sub];
+        self.popup = Some(popup);
     }
 
-    fn rebuild_picker(&mut self, cx: &mut Context<Self>) {
-        let active = ClanList::global(cx)
-            .read(cx)
-            .active_clan_id
-            .map(|id| id.to_string());
-        let Some(store) = EmojiStore::try_global(cx) else {
-            self.picker_rows = Vec::new();
-            return;
-        };
-        let store = store.read(cx);
-        let mut rows = Vec::new();
-        for (category, emojis) in store.by_category(active.as_deref()) {
-            rows.push(PickerRow::Header(SharedString::from(category)));
-            for chunk in emojis.chunks(PICKER_COLS) {
-                rows.push(PickerRow::Emojis(
-                    chunk
-                        .iter()
-                        .map(|e| EmojiSuggestRaw {
-                            emoji_id: e.id.clone(),
-                            shortname: e.shortname.clone(),
-                            shortname_lc: e.shortname.to_lowercase(),
-                            src: e.src.clone(),
-                        })
-                        .collect(),
-                ));
-            }
-        }
-        self.picker_rows = rows;
+    fn close_popup(&mut self) {
+        self.popup = None;
+        self._popup_subs.clear();
     }
 
     fn insert_emoji(
@@ -1027,7 +947,6 @@ impl MentionInput {
             start: at,
             end,
         });
-        self.picker_open = false;
         self.sync_ranges(cx);
         let handle = self.input.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
@@ -1067,9 +986,8 @@ impl MentionInput {
     fn on_dismiss(&mut self, _: &MentionDismiss, _window: &mut Window, cx: &mut Context<Self>) {
         if self.popup_open() {
             self.hide(cx);
-        } else if self.picker_open || self.sticker_picker_open {
-            self.picker_open = false;
-            self.sticker_picker_open = false;
+        } else if self.popup.is_some() {
+            self.close_popup();
             cx.notify();
         } else {
             cx.emit(MentionInputEvent::Cancel);
@@ -1208,123 +1126,24 @@ impl MentionInput {
             .into_any_element()
     }
 
-    fn render_picker(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let border = theme.border;
-        let panel_bg = theme.bg_floating;
-        let text_muted = theme.text_muted;
-        let locale = self.locale(cx);
-
-        let panel = div()
-            .image_cache(self.avatar_cache.clone())
-            .id("emoji-picker")
-            .absolute()
-            .bottom_full()
-            .right_0()
-            .mb(px(8.))
-            .w(px(320.))
-            .rounded(px(8.))
-            .border_1()
-            .border_color(border)
-            .bg(panel_bg)
-            .shadow_lg()
-            .occlude()
-            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
-                this.picker_open = false;
-                cx.notify();
-            }));
-
-        if self.picker_rows.is_empty() {
-            return panel
-                .p(px(12.))
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(text_muted)
-                        .child(mezon_i18n::t(&locale, "common.searchModal.noResults")),
-                )
-                .into_any_element();
-        }
-
-        let entity = cx.entity();
-        let count = self.picker_rows.len();
-        let list_h = (count as f32 * PICKER_ROW_PX).min(264.);
-        let list = uniform_list("emoji-picker-list", count, move |range, _window, cx| {
-            let theme = cx.theme();
-            let this = entity.read(cx);
-            range
-                .map(|ix| match this.picker_rows.get(ix) {
-                    Some(PickerRow::Header(label)) => render_picker_header(theme, label),
-                    Some(PickerRow::Emojis(emojis)) => {
-                        render_picker_emoji_row(theme, emojis, &entity)
-                    }
-                    None => div().h(px(PICKER_ROW_PX)).into_any_element(),
-                })
-                .collect::<Vec<_>>()
-        })
-        .track_scroll(&self.picker_scroll)
-        .h(px(list_h))
-        .w_full();
-
-        panel.p(px(8.)).child(list).into_any_element()
-    }
-
-    fn render_sticker_picker(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let border = theme.border;
-        let panel_bg = theme.bg_floating;
-        let text_muted = theme.text_muted;
-        let locale = self.locale(cx);
-
-        let panel = div()
-            .image_cache(self.avatar_cache.clone())
-            .id("sticker-picker")
-            .absolute()
-            .bottom_full()
-            .right_0()
-            .mb(px(8.))
-            .w(px(STICKER_PANEL_PX))
-            .rounded(px(8.))
-            .border_1()
-            .border_color(border)
-            .bg(panel_bg)
-            .shadow_lg()
-            .occlude()
-            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
-                this.sticker_picker_open = false;
-                cx.notify();
-            }));
-
-        if self.sticker_rows.is_empty() {
-            return panel
-                .p(px(12.))
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(text_muted)
-                        .child(mezon_i18n::t(&locale, "common.searchModal.noResults")),
-                )
-                .into_any_element();
-        }
-
-        let entity = cx.entity();
-        let count = self.sticker_rows.len();
-        let list_h = (count as f32 * STICKER_ROW_PX).min(STICKER_ROW_PX * 3.);
-        let list = uniform_list("sticker-picker-list", count, move |range, _window, cx| {
-            let theme = cx.theme();
-            let this = entity.read(cx);
-            range
-                .map(|ix| match this.sticker_rows.get(ix) {
-                    Some(cells) => render_sticker_row(theme, cells, &entity),
-                    None => div().h(px(STICKER_ROW_PX)).into_any_element(),
-                })
-                .collect::<Vec<_>>()
-        })
-        .track_scroll(&self.sticker_scroll)
-        .h(px(list_h))
-        .w_full();
-
-        panel.p(px(8.)).child(list).into_any_element()
+    fn render_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let popup = self.popup.clone()?;
+        Some(
+            deferred(
+                div()
+                    .absolute()
+                    .bottom_full()
+                    .right_0()
+                    .mb(px(8.))
+                    .occlude()
+                    .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                        this.close_popup();
+                        cx.notify();
+                    }))
+                    .child(popup),
+            )
+            .into_any_element(),
+        )
     }
 
     fn locale(&self, cx: &App) -> String {
@@ -1496,89 +1315,6 @@ fn committed_from_spans(content: &str, spans: &[MessageSpan]) -> Vec<CommittedTo
     committed
 }
 
-fn render_picker_header(theme: &Theme, label: &SharedString) -> AnyElement {
-    div()
-        .h(px(PICKER_ROW_PX))
-        .flex()
-        .items_center()
-        .px_1()
-        .text_size(px(11.))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme.text_muted)
-        .child(label.to_uppercase())
-        .into_any_element()
-}
-
-fn render_picker_emoji_row(
-    theme: &Theme,
-    emojis: &[EmojiSuggestRaw],
-    entity: &Entity<MentionInput>,
-) -> AnyElement {
-    let hover_bg = theme.bg_hover;
-    let mut row = div()
-        .h(px(PICKER_ROW_PX))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_1();
-    for emoji in emojis {
-        let raw = emoji.clone();
-        let ent = entity.clone();
-        let cell = div()
-            .id(SharedString::from(format!("pick-{}", emoji.emoji_id)))
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(px(PICKER_CELL_PX))
-            .rounded(px(6.))
-            .cursor_pointer()
-            .hover(|s| s.bg(hover_bg))
-            .when(!emoji.src.is_empty(), |s| {
-                s.child(img(SharedString::from(emoji.src.clone())).size(px(PICKER_EMOJI_PX)))
-            })
-            .on_click(move |_event, window, cx| {
-                ent.update(cx, |this, cx| this.insert_emoji(raw.clone(), window, cx));
-            });
-        row = row.child(cell);
-    }
-    row.into_any_element()
-}
-
-fn render_sticker_row(
-    theme: &Theme,
-    cells: &[StickerCellRaw],
-    entity: &Entity<MentionInput>,
-) -> AnyElement {
-    let hover_bg = theme.bg_hover;
-    let mut row = div()
-        .h(px(STICKER_ROW_PX))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_2();
-    for cell in cells {
-        let raw = cell.clone();
-        let ent = entity.clone();
-        let item = div()
-            .id(SharedString::from(format!("sticker-{}", cell.id)))
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(px(STICKER_CELL_PX))
-            .rounded(px(8.))
-            .cursor_pointer()
-            .hover(|s| s.bg(hover_bg))
-            .when(!cell.src.is_empty(), |s| {
-                s.child(img(SharedString::from(cell.src.clone())).size(px(STICKER_IMG_PX)))
-            })
-            .on_click(move |_event, _window, cx| {
-                ent.update(cx, |this, cx| this.send_sticker(raw.clone(), cx));
-            });
-        row = row.child(item);
-    }
-    row.into_any_element()
-}
-
 impl Render for MentionInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.compact {
@@ -1586,12 +1322,18 @@ impl Render for MentionInput {
         }
         let open = self.popup_open();
         let theme = cx.theme();
-        let toggle_color = if self.picker_open {
+        let active_tab = self.popup.as_ref().map(|p| p.read(cx).active_tab());
+        let toggle_color = if active_tab == Some(SubPanel::Emoji) {
             theme.text_primary
         } else {
             theme.text_muted
         };
-        let sticker_color = if self.sticker_picker_open {
+        let sticker_color = if active_tab == Some(SubPanel::Stickers) {
+            theme.text_primary
+        } else {
+            theme.text_muted
+        };
+        let gif_color = if active_tab == Some(SubPanel::Gifs) {
             theme.text_primary
         } else {
             theme.text_muted
@@ -1611,10 +1353,7 @@ impl Render for MentionInput {
 
         let popup = open.then(|| self.build_suggestion_popup(cx));
 
-        let picker = self.picker_open.then(|| deferred(self.render_picker(cx)));
-        let sticker_picker = self
-            .sticker_picker_open
-            .then(|| deferred(self.render_sticker_picker(cx)));
+        let picker = self.render_popup(cx);
         let previews = has_pending.then(|| self.render_attachment_previews(cx));
 
         let input_area = div()
@@ -1673,7 +1412,11 @@ impl Render for MentionInput {
                     .justify_center()
                     .size(px(20.))
                     .rounded(px(4.))
-                    .child(Icon::new(IconName::Gif).size_5().text_color(plus_color)),
+                    .cursor_pointer()
+                    .child(Icon::new(IconName::Gif).size_5().text_color(gif_color))
+                    .on_click(cx.listener(|this, _event, window, cx| {
+                        this.toggle_tab(SubPanel::Gifs, window, cx)
+                    })),
             )
             .child(
                 div()
@@ -1692,9 +1435,9 @@ impl Render for MentionInput {
                             .size_5()
                             .text_color(sticker_color),
                     )
-                    .on_click(
-                        cx.listener(|this, _event, _window, cx| this.toggle_sticker_picker(cx)),
-                    ),
+                    .on_click(cx.listener(|this, _event, window, cx| {
+                        this.toggle_tab(SubPanel::Stickers, window, cx)
+                    })),
             )
             .child(
                 div()
@@ -1709,13 +1452,12 @@ impl Render for MentionInput {
                     .rounded(px(4.))
                     .cursor_pointer()
                     .child(Icon::new(IconName::Smile).size_5().text_color(toggle_color))
-                    .on_click(cx.listener(|this, _event, _window, cx| this.toggle_picker(cx))),
+                    .on_click(
+                        cx.listener(|this, _event, window, cx| this.toggle_picker(window, cx)),
+                    ),
             )
             .when_some(popup, |this, popup| this.child(popup))
             .when_some(picker, |this, picker| this.child(picker))
-            .when_some(sticker_picker, |this, sticker_picker| {
-                this.child(sticker_picker)
-            })
             .when_some(overflow_counter, |this, remaining| {
                 this.child(
                     div()
@@ -1769,7 +1511,7 @@ mod convert_tests {
     fn threshold_boundary_is_strict() {
         let text = "a".repeat(CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN);
         assert_eq!(content_payload_utf8_len(&text), CONVERT_TO_FILE_THRESHOLD);
-        assert!(!(content_payload_utf8_len(&text) > CONVERT_TO_FILE_THRESHOLD));
+        assert!(content_payload_utf8_len(&text) <= CONVERT_TO_FILE_THRESHOLD);
         let over = "a".repeat(CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN + 1);
         assert!(content_payload_utf8_len(&over) > CONVERT_TO_FILE_THRESHOLD);
     }

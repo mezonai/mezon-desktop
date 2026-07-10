@@ -40,6 +40,7 @@ const SCROLL_HOVER_RELEASE_MS: u64 = 150;
 const HOVER_SHOW_DELAY_MS: u64 = 200;
 const HOVER_HIDE_DELAY_MS: u64 = 100;
 const PAGINATE_THROTTLE: Duration = Duration::from_millis(250);
+const SCROLL_RELIEF_DELAY: Duration = Duration::from_millis(1500);
 const MAX_GIF_VIDEOS: usize = 6;
 const MAX_AUDIO_PLAYERS: usize = 8;
 
@@ -163,6 +164,7 @@ pub struct ChannelMessages {
     settings: Entity<Settings>,
     image_cache: Entity<LruImageCache>,
     avatar_image_cache: Entity<LruImageCache>,
+    small_avatar_image_cache: Entity<LruImageCache>,
     active_videos: HashMap<(MessageId, usize), Entity<VideoPlayerView>>,
     active_audios: HashMap<(MessageId, usize), Entity<AudioPlayerView>>,
     gif_videos: HashMap<(MessageId, usize), Entity<GifVideoView>>,
@@ -178,6 +180,7 @@ pub struct ChannelMessages {
     raw_hover: Option<MessageId>,
     _hover_show_task: Option<Task<()>>,
     _hover_hide_task: Option<Task<()>>,
+    _scroll_relief: Option<Task<()>>,
     last_paginate: Option<Instant>,
     last_scroll_at: Option<Instant>,
     at_bottom: bool,
@@ -468,6 +471,13 @@ impl ChannelMessages {
                         this._reaction_picker_dismiss_sub = None;
                         cx.notify();
                     }
+                    this._scroll_relief = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(SCROLL_RELIEF_DELAY).await;
+                        this.update(cx, |_this, cx| {
+                            crate::image_cache::release_freed_memory_to_os(cx);
+                        })
+                        .ok();
+                    }));
                 }
 
                 let store_entity = MessagesStore::global(cx);
@@ -536,6 +546,15 @@ impl ChannelMessages {
             )
         });
         let avatar_image_cache = crate::image_cache::shared_avatar_cache(cx);
+        let small_avatar_image_cache = cx.new(|cx| {
+            crate::image_cache::LruImageCache::avatar_thumbnail_small(
+                "message-authors",
+                512,
+                16 * 1024 * 1024,
+                4 * 1024 * 1024,
+                cx,
+            )
+        });
         let last_cold_inputs = Self::cold_inputs(cx);
         let (welcome, onboarding) = Self::compute_indicator_contexts(cx);
         let cached_unread_boundary = unread_boundary(&MessagesStore::global(cx), None, cx);
@@ -569,6 +588,7 @@ impl ChannelMessages {
             settings,
             image_cache,
             avatar_image_cache,
+            small_avatar_image_cache,
             active_videos: HashMap::new(),
             active_audios: HashMap::new(),
             gif_videos: HashMap::new(),
@@ -584,6 +604,7 @@ impl ChannelMessages {
             raw_hover: None,
             _hover_show_task: None,
             _hover_hide_task: None,
+            _scroll_relief: None,
             last_paginate: None,
             last_scroll_at: None,
             at_bottom: true,
@@ -626,8 +647,11 @@ impl ChannelMessages {
         &mut self,
         popover: Entity<UserProfilePopover>,
         position: Point<Pixels>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let focus_handle = popover.read(cx).focus_handle(cx);
+        window.focus(&focus_handle, cx);
         self._mention_popover_sub =
             Some(cx.subscribe(&popover, |this, _, _: &DismissEvent, cx| {
                 this.mention_popover = None;
@@ -857,8 +881,6 @@ impl ChannelMessages {
                 self.sync_channel_seen_when_focused(true, cx);
             }
         } else {
-            self.image_cache
-                .update(cx, |cache, cx| cache.shrink_to(0, window, cx));
             for view in self.gif_videos.values() {
                 view.update(cx, |gif, cx| gif.set_playing(false, cx));
             }
@@ -1188,12 +1210,6 @@ impl ChannelMessages {
         self.image_cache
             .update(cx, |cache, cx| cache.clear(window, cx));
         crate::image_cache::release_freed_memory_to_os(cx);
-        crate::image_cache::log_cache_budgets(cx);
-        let messages_store = MessagesStore::global(cx);
-        let (msg_channels, messages) = messages_store.read(cx).debug_memory();
-        let members_store = ClanMembersStore::global(cx);
-        let (member_clans, members) = members_store.read(cx).debug_memory();
-        tracing::info!(msg_channels, messages, member_clans, members, "store sizes");
         self.refresh_derived_state(cx);
     }
 
@@ -1497,6 +1513,7 @@ impl Render for ChannelMessages {
         let suppress_hover = self.suppress_hover;
         let hovered_row = self.hovered_row;
         let avatar_image_cache = self.avatar_image_cache.clone();
+        let small_avatar_image_cache = self.small_avatar_image_cache.clone();
         let unread_boundary_id = self.cached_unread_boundary;
         let highlight_id = self.highlight_id;
         let reply_highlight_id = store.read(cx).reply_target().map(|d| d.message_ref_id);
@@ -1547,7 +1564,8 @@ impl Render for ChannelMessages {
                         onboarding: onboarding.clone(),
                         suppress_hover,
                         hovered_row,
-                        avatar_cache: avatar_image_cache.clone(),
+                        avatar_cache: small_avatar_image_cache.clone(),
+                        large_avatar_cache: avatar_image_cache.clone(),
                         unread_boundary_id,
                         highlight_id,
                         reply_highlight_id,
@@ -1640,7 +1658,8 @@ impl Render for ChannelMessages {
                 el.child(context_menu_at(position, menu))
             })
             .custom_scrollbars(
-                Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(&self.list_state),
+                Scrollbars::always_visible(ScrollAxes::Vertical)
+                    .tracked_scroll_handle(&self.list_state),
                 window,
                 cx,
             )

@@ -228,21 +228,9 @@ fn camera_indices() -> Vec<CameraIndex> {
     let backend = native_api_backend().unwrap_or(ApiBackend::AVFoundation);
     match query(backend) {
         Ok(devices) if !devices.is_empty() => {
-            tracing::debug!(
-                "found {} camera(s): {}",
-                devices.len(),
-                devices
-                    .iter()
-                    .map(|d| d.human_name())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
             devices.into_iter().map(|d| d.index().clone()).collect()
         }
-        Ok(_) | Err(_) => {
-            tracing::debug!("camera query unavailable, using default index 0");
-            vec![CameraIndex::Index(0)]
-        }
+        Ok(_) | Err(_) => vec![CameraIndex::Index(0)],
     }
 }
 

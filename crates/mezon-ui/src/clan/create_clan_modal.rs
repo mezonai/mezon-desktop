@@ -9,6 +9,7 @@ use crate::clan::templates::{TEMPLATES, TemplateId};
 use crate::components::primitives::{
     Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, h_flex, v_flex,
 };
+use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -34,6 +35,7 @@ pub struct CreateClanModal {
     logo_url: Option<SharedString>,
     validation: Validation,
     creating: bool,
+    image_cache: Entity<LruImageCache>,
     _name_sub: Subscription,
     _logo_task: Option<Task<()>>,
     _create_task: Option<Task<()>>,
@@ -87,6 +89,15 @@ impl CreateClanModal {
             logo_url: None,
             validation: Validation::InvalidName,
             creating: false,
+            image_cache: cx.new(|cx| {
+                LruImageCache::avatar_thumbnail(
+                    "clan-logo-preview",
+                    2,
+                    4 * 1024 * 1024,
+                    4 * 1024 * 1024,
+                    cx,
+                )
+            }),
             _name_sub: name_sub,
             _logo_task: None,
             _create_task: None,
@@ -605,6 +616,7 @@ impl Render for CreateClanModal {
         v_flex()
             .track_focus(&self.focus_handle)
             .key_context("menu")
+            .image_cache(self.image_cache.clone())
             .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
             }))

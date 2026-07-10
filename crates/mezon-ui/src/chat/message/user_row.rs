@@ -1,6 +1,5 @@
 use gpui::{
-    Anchor, AnyElement, App, MouseButton, MouseDownEvent, SharedString, div, prelude::*, px, rgb,
-    rgba,
+    AnyElement, App, MouseButton, MouseDownEvent, SharedString, div, prelude::*, px, rgb, rgba,
 };
 use mezon_store::{Message, MessageCode};
 
@@ -21,7 +20,6 @@ use super::poll_card::render_poll_card;
 use super::token_transaction_card::render_token_transaction_card;
 use super::topic_view_button::render_topic_view_button;
 use crate::chat::mention_input::MentionInput;
-use crate::chat::user_profile_popover::{ClickableContainer, profile_popover_menu};
 use crate::components::primitives::{Icon, IconName};
 
 const GROUP_MARGIN_TOP: f32 = 10.;
@@ -400,22 +398,14 @@ fn build_avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
     let Some(user_id) = msg.sender_user_id else {
         return plain;
     };
-    let settings = ctx.settings.clone();
     let avatar_key = user_id.get() as usize;
-    profile_popover_menu(
-        ("msg-avatar-popover", avatar_key),
+    super::content::profile_popover_trigger(
+        ("msg-avatar-trigger", avatar_key),
         user_id,
         profile_ctx,
-        settings,
-        ctx.avatar_cache.clone(),
+        ctx,
+        plain,
     )
-    .anchor(Anchor::TopLeft)
-    .attach(Anchor::TopRight)
-    .trigger(
-        ClickableContainer::new(("msg-avatar-trigger", avatar_key))
-            .size_full()
-            .cursor_pointer()
-            .child(plain),
-    )
+    .size_full()
     .into_any_element()
 }

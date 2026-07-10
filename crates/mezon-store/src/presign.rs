@@ -45,6 +45,10 @@ pub fn presign_pending(url: &str, keys: Option<&[String]>, base_img_url: &str) -
     !keys.iter().any(|k| k == &key)
 }
 
+pub fn all_presign_finished(presignable_count: usize, finish_key_count: usize) -> bool {
+    presignable_count > 0 && finish_key_count >= presignable_count
+}
+
 pub fn is_expired_presign_attachment(
     url: &str,
     keys: Option<&[String]>,
@@ -138,6 +142,14 @@ mod tests {
             None,
             CDN
         ));
+    }
+
+    #[test]
+    fn all_finished_when_key_count_reaches_presignable_count() {
+        assert!(!all_presign_finished(0, 0));
+        assert!(!all_presign_finished(2, 1));
+        assert!(all_presign_finished(2, 2));
+        assert!(all_presign_finished(1, 3));
     }
 
     #[test]
