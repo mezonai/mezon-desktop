@@ -5707,6 +5707,7 @@ dependencies = [
  "flume",
  "futures",
  "image",
+ "libc",
  "livekit",
  "nokhwa",
  "objc",

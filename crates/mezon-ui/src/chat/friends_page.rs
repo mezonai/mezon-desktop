@@ -476,7 +476,9 @@ fn open_dm_with_user(user: UserId, error_message: SharedString, cx: &mut App) {
     let Some(store) = DirectMessageStore::try_global(cx) else {
         return;
     };
-    let task = store.update(cx, |store, cx| store.create_dm_with_user(user, cx));
+    let task = store.update(cx, |store, cx| {
+        store.create_dm_with_user(user, String::new(), String::new(), String::new(), cx)
+    });
     cx.spawn(async move |cx| match task.await {
         Ok((channel_id, channel_type)) => {
             cx.update(|cx| {

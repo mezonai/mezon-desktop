@@ -985,7 +985,7 @@ fn render_sidebar_item(
                 } else {
                     make_channel_element()
                 };
-                let click_handle = row_handle.clone();
+                let click_handle = channel_list_handle.clone();
                 let click_id = ch_id.clone();
                 let click_clan = clan_id_inner;
                 let menu_sidebar = sidebar.clone();
