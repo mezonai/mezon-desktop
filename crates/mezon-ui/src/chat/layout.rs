@@ -563,7 +563,7 @@ impl ChatLayout {
 
     fn drive_voice_video(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.voice_store
-            .update(cx, |store, cx| store.flush_texture_drops(None, cx));
+            .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
         if self.is_voice_frame_relevant(cx) && self.voice_store.read(cx).has_active_video() {
             window.request_animation_frame();
         }
