@@ -8,6 +8,7 @@ use gpui::{
 use mezon_store::{ChannelList, ClanId, PermissionStore};
 
 use crate::app::shell::Shell;
+use crate::clan::create_category_modal::CreateCategoryModal;
 use crate::components::primitives::{Icon, IconName, Switch, h_flex, v_flex};
 use crate::theme::ActiveTheme;
 
@@ -249,6 +250,7 @@ pub fn build_clan_menu(
     clan_id: ClanId,
     locale: &str,
     show_empty_categories: bool,
+    can_create_category: bool,
 ) -> ClanMenuDropdown {
     let t = |key: &'static str| mezon_i18n::t(locale, key).to_string();
     let locale_owned = locale.to_string();
@@ -258,6 +260,27 @@ pub fn build_clan_menu(
             view.update(cx, |this, cx| this.dismiss_clan_menu(cx));
         }
     });
+
+    if can_create_category {
+        let channel_list_create = channel_list.clone();
+        let modal_locale = locale_owned.clone();
+        menu = menu.item_icon(
+            t("clanMenu.modalPanel.createCategory"),
+            IconName::CreateCategoryIcon,
+            move |window, cx| {
+                let modal = cx.new(|cx| {
+                    CreateCategoryModal::new(
+                        clan_id,
+                        channel_list_create.clone(),
+                        modal_locale.clone(),
+                        window,
+                        cx,
+                    )
+                });
+                Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
+            },
+        );
+    }
 
     let channel_list_mark = channel_list.clone();
     menu = menu.item(t("clanMenu.modalPanel.markAsRead"), move |_window, cx| {

@@ -779,12 +779,21 @@ impl AppApi {
     }
 
     /// Create a category in a clan; returns its id.
-    pub async fn create_category(&self, clan_id: i64, category_name: &str) -> Result<String> {
+    pub async fn create_category(
+        &self,
+        clan_id: i64,
+        category_name: &str,
+    ) -> Result<ApiCategoryDesc> {
         let category = self
             .transport
             .create_category_desc(category_name, clan_id)
             .await?;
-        Ok(category.category_id.to_string())
+        Ok(ApiCategoryDesc {
+            category_id: category.category_id,
+            category_name: category.category_name,
+            clan_id: category.clan_id,
+            category_order: category.category_order,
+        })
     }
 
     pub async fn add_channel_users(&self, channel_id: i64, user_ids: Vec<String>) -> Result<()> {
