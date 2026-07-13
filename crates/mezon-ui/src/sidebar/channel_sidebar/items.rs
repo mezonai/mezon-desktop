@@ -18,15 +18,18 @@ impl From<&VoiceMember> for VoiceMemberSlot {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq,Debug)]
 pub(super) struct AppChannelSlot {
     pub(super) app_logo: Option<String>,
+    pub(super) app_url: String,
+
 }
 
 impl From<&AppChannel> for AppChannelSlot {
     fn from(a: &AppChannel) -> Self {
         Self {
             app_logo: a.app_logo.clone(),
+            app_url : a.app_url.clone(),
         }
     }
 }

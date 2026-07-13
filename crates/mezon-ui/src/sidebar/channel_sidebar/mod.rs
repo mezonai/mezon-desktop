@@ -760,6 +760,30 @@ fn truncate_channel_label(name: &str) -> String {
     }
 }
 
+ pub fn open_app_window(cx: &mut App,app_url:&str) {
+        let url = app_url;
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::process::Command;
+
+            Command::new("cmd")
+                .args(["/C", "start", "", url])
+                .spawn()
+                .unwrap();
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            Command::new("open").arg(url).spawn().unwrap();
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            Command::new("xdg-open").arg(url).spawn().unwrap();
+        }
+    }
+
 fn render_banner_and_events(
     banner_url: Option<&str>,
     app_channels: &[AppChannelSlot],
@@ -828,6 +852,7 @@ fn render_banner_and_events(
                     .text_color(theme.text_primary)
                     .into_any_element()
             };
+            let app_url: String = slot.app_url.clone();
             app_row = app_row.child(
                 div()
                     .id(SharedString::from(format!("app-channel-{ix}")))
@@ -840,7 +865,10 @@ fn render_banner_and_events(
                     .justify_center()
                     .cursor_pointer()
                     .hover(|s| s.bg(hover_bg))
-                    .child(icon_el),
+                    .child(icon_el)
+                    .on_click(move |_, _, cx| {
+                        open_app_window(cx,&app_url);
+                    }),
             );
         }
         if has_more {
