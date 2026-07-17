@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use gpui::{
-    Anchor, AnyElement, App, ClickEvent, Context, CursorStyle, Div, Entity, Hsla, IntoElement,
+    Anchor, AnyElement, App, ClickEvent, Context, CursorStyle, Div, Entity, IntoElement,
     Render, RenderOnce, SharedString, Stateful, Subscription, WeakEntity, Window, div, point,
     prelude::*, px,
 };
@@ -14,7 +14,7 @@ use crate::chat::layout::ChatLayout;
 use crate::chat::pinned_popover::{PinnedPopoverPanel, pin_popover_on_open};
 use crate::chat::threads_popover::{ThreadsPopoverPanel, thread_popover_on_open};
 use crate::components::primitives::{
-    Button, ButtonVariant, ButtonVariants, Icon, IconName, InputState, Sizable, Size,
+    Icon, IconName, InputState,
 };
 use crate::theme::{ActiveTheme, Theme};
 
@@ -237,6 +237,7 @@ impl ChannelHeader {
                     .flex_row()
                     .items_center()
                     .gap_1()
+                    .occlude()
                     .children(buttons)
                     .children(inbox_el.map(|inbox| {
                         div()
@@ -792,7 +793,10 @@ impl RenderOnce for ThreadPopoverTrigger {
 #[derive(IntoElement)]
 struct PinPopoverTrigger {
     open: bool,
-    icon_color: Hsla,
+    icon_color: gpui::Rgba,
+    icon_active: gpui::Rgba,
+    bg_hover: gpui::Rgba,
+    bg_active: gpui::Rgba,
     on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
 }
 
@@ -800,7 +804,10 @@ impl PinPopoverTrigger {
     fn new(theme: &Theme, open: bool) -> Self {
         Self {
             open,
-            icon_color: theme.text_muted.into(),
+            icon_color: theme.text_muted,
+            icon_active: theme.text_primary,
+            bg_hover: theme.bg_hover,
+            bg_active: theme.bg_tertiary,
             on_click: None,
         }
     }
@@ -826,16 +833,31 @@ impl Clickable for PinPopoverTrigger {
 
 impl RenderOnce for PinPopoverTrigger {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let mut button = Button::new("hdr-pin-trigger").with_size(Size::Small).icon(
-            Icon::new(IconName::PinRight)
-                .size(px(20.))
-                .text_color(self.icon_color),
-        );
-        button = if self.open {
-            button.with_variant(ButtonVariant::Secondary)
+        let tint = if self.open {
+            self.icon_active
         } else {
-            button.ghost()
+            self.icon_color
         };
+        let bg_hover = self.bg_hover;
+        let mut button = div()
+            .id("hdr-pin-trigger")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(32.))
+            .h(px(32.))
+            .rounded_md()
+            .cursor_pointer()
+            .hover(move |s| s.bg(bg_hover))
+            .occlude()
+            .child(
+                Icon::new(IconName::PinRight)
+                    .size(px(20.))
+                    .text_color(tint),
+            );
+        if self.open {
+            button = button.bg(self.bg_active);
+        }
         if let Some(handler) = self.on_click {
             button.on_click(handler)
         } else {
