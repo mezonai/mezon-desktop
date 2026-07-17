@@ -58,6 +58,9 @@ pub fn render_ogp_preview(
         .border_1()
         .border_color(hsla(0., 0., 1., 0.05))
         .bg(theme.tokens.theme_setting_primary)
+        .flex()
+        .items_center()
+        .justify_center()
         .child(ogp_image(ogp.image_proxied.clone(), theme.text_muted));
 
     Some(

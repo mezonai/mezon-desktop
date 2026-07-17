@@ -262,12 +262,12 @@ fn first_upper_char(name: &str) -> Option<char> {
     name.chars().next().and_then(|c| c.to_uppercase().next())
 }
 
-fn avatar_color(name: &str) -> Hsla {
+pub(crate) fn avatar_color(name: &str) -> Hsla {
     let code = first_upper_char(name).map(|c| c as u32).unwrap_or(0);
     Hsla::from(gpui::rgb(AVATAR_COLORS[(code % 7) as usize]))
 }
 
-fn name_initials(name: &str) -> String {
+pub(crate) fn name_initials(name: &str) -> String {
     first_upper_char(name)
         .map(|c| c.to_string())
         .unwrap_or_else(|| "?".to_string())

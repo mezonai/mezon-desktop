@@ -94,13 +94,22 @@ impl CommandPaletteModal {
             .into();
 
         let view = cx.new(|cx| {
-            let search_input =
-                cx.new(|cx| InputState::new(window, cx).placeholder(placeholder.clone()));
-            let search_sub = cx.subscribe(
+            let search_input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(placeholder.clone())
+                    .borderless()
+            });
+            let search_sub = cx.subscribe_in(
                 &search_input,
-                |this: &mut Self, _, event: &InputEvent, cx| match event {
+                window,
+                |this: &mut Self, _, event: &InputEvent, window, cx| match event {
                     InputEvent::Change => this.schedule_debounced_filter(cx),
-                    InputEvent::PressEnter => this.select_current(cx),
+                    InputEvent::PressEnter => {
+                        let entity = cx.entity();
+                        window.defer(cx, move |_window, cx| {
+                            entity.update(cx, |this, cx| this.select_current(cx));
+                        });
+                    }
                 },
             );
             let items = Rc::new(build_palette_items(cx));
@@ -334,7 +343,7 @@ impl CommandPaletteModal {
                 let Some(channel_id) = item.channel_id else {
                     return;
                 };
-                Self::close(cx);
+                ClanList::global(cx).update(cx, |list, cx| list.select_clan(clan_id, cx));
                 ChannelList::global(cx).update(cx, |store, cx| {
                     store.record_previous_channel(clan_id, channel_id, cx);
                     store.reset_user_channel_unread(channel_id, cx);
@@ -347,6 +356,7 @@ impl CommandPaletteModal {
                         channel_id,
                     },
                 );
+                Self::close(cx);
             }
             PaletteItemKind::Direct => {
                 let Some(direct_id) = item.channel_id else {
@@ -356,7 +366,6 @@ impl CommandPaletteModal {
                     .dm_channel_type
                     .map(|ty| ty.to_string())
                     .unwrap_or_else(|| DirectKind::Dm.channel_type().to_string());
-                Self::close(cx);
                 ChannelList::global(cx).update(cx, |store, cx| {
                     store.record_previous_channel(ClanId(0), direct_id, cx);
                 });
@@ -370,6 +379,7 @@ impl CommandPaletteModal {
                         message_type: channel_type,
                     },
                 );
+                Self::close(cx);
             }
             PaletteItemKind::Member => {
                 let Some(user_id) = item.user_id else {
@@ -378,7 +388,6 @@ impl CommandPaletteModal {
                 let member_label = item.label.to_string();
                 let member_avatar = item.avatar.to_string();
                 let member_username = item.subtext.to_string();
-                Self::close(cx);
                 if let Some((direct_id, channel_type)) = find_dm_for_user(user_id, cx) {
                     ChannelList::global(cx).update(cx, |store, cx| {
                         store.record_previous_channel(ClanId(0), direct_id, cx);
@@ -403,6 +412,7 @@ impl CommandPaletteModal {
                         cx,
                     );
                 }
+                Self::close(cx);
             }
         }
     }
@@ -435,7 +445,7 @@ impl Render for CommandPaletteModal {
             .rounded_lg()
             .bg(theme.tokens.bg_input_secondary)
             .border_1()
-            .border_color(theme.tokens.border_theme_primary)
+            .border_color(theme.tokens.border_primary)
             .px_3()
             .py(px(18.))
             .child(

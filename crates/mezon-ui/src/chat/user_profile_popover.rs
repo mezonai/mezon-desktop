@@ -120,6 +120,7 @@ impl Render for UserProfilePopover {
             .unwrap_or_default();
 
         div()
+            .occlude()
             .w(px(300.))
             .overflow_hidden()
             .rounded_lg()

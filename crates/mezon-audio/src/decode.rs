@@ -3,7 +3,7 @@ use std::io::Cursor;
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
 use symphonia::core::codecs::{CODEC_TYPE_NULL, CODEC_TYPE_OPUS, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
@@ -35,8 +35,47 @@ impl DecodedPcm {
 }
 
 pub fn decode_audio(bytes: Vec<u8>) -> Result<DecodedPcm, AudioError> {
-    let source = Cursor::new(bytes);
-    let mss = MediaSourceStream::new(Box::new(source), Default::default());
+    let mss = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
+    let mut samples: Vec<f32> = Vec::new();
+    let mut channels = 1usize;
+    let mut sample_rate = OPUS_SAMPLE_RATE;
+
+    decode_packets(
+        mss,
+        |_| {},
+        |pcm, spec| {
+            samples.extend_from_slice(pcm);
+            channels = spec.channels;
+            sample_rate = spec.sample_rate;
+        },
+    )?;
+
+    if samples.is_empty() {
+        return Err(AudioError::Decode("no samples produced".into()));
+    }
+
+    Ok(DecodedPcm {
+        samples: samples.into(),
+        channels,
+        sample_rate,
+    })
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct PcmSpec {
+    pub channels: usize,
+    pub sample_rate: u32,
+}
+
+pub(crate) fn decode_packets<T, F>(
+    mss: MediaSourceStream,
+    mut on_track: T,
+    mut emit: F,
+) -> Result<(), AudioError>
+where
+    T: FnMut(Option<f64>),
+    F: FnMut(&[f32], PcmSpec),
+{
     let probed = symphonia::default::get_probe()
         .format(
             &Hint::new(),
@@ -61,22 +100,40 @@ pub fn decode_audio(bytes: Vec<u8>) -> Result<DecodedPcm, AudioError> {
         .map(|c| c.count())
         .unwrap_or(1)
         .clamp(1, 2);
+    on_track(track_duration_secs(&track.codec_params));
 
     if codec == CODEC_TYPE_OPUS {
-        decode_opus(format.as_mut(), track_id, channels)
+        decode_opus(format.as_mut(), track_id, channels, &mut emit)
     } else {
-        decode_symphonia(format.as_mut(), track_id)
+        decode_symphonia(format.as_mut(), track_id, &mut emit)
     }
 }
 
-fn decode_opus(
-    format: &mut dyn symphonia::core::formats::FormatReader,
+fn track_duration_secs(params: &symphonia::core::codecs::CodecParameters) -> Option<f64> {
+    let frames = params.n_frames?;
+    let time_base = params.time_base?;
+    let time = time_base.calc_time(frames);
+    let seconds = time.seconds as f64 + time.frac;
+    (seconds > 0.0).then_some(seconds)
+}
+
+fn decode_opus<F>(
+    format: &mut dyn FormatReader,
     track_id: u32,
     channels: usize,
-) -> Result<DecodedPcm, AudioError> {
+    emit: &mut F,
+) -> Result<(), AudioError>
+where
+    F: FnMut(&[f32], PcmSpec),
+{
     let mut decoder = OpusDecoder::new(OPUS_SAMPLE_RATE as i32, channels as i32)?;
     let mut scratch = vec![0.0f32; OPUS_MAX_FRAME * channels];
-    let mut samples: Vec<f32> = Vec::new();
+    let spec = PcmSpec {
+        channels,
+        sample_rate: OPUS_SAMPLE_RATE,
+    };
+    let mut emitted_frames = 0usize;
+    let mut produced = false;
 
     loop {
         let packet = match format.next_packet() {
@@ -85,6 +142,10 @@ fn decode_opus(
                 break;
             }
             Err(SymphoniaError::ResetRequired) => break,
+            Err(e) if produced => {
+                tracing::warn!("audio stream ended early: {e}");
+                break;
+            }
             Err(e) => return Err(AudioError::Demux(e.to_string())),
         };
         if packet.track_id() != track_id {
@@ -92,28 +153,30 @@ fn decode_opus(
         }
         let decoded = decoder.decode_float(&packet.data, &mut scratch, OPUS_MAX_FRAME as i32);
         if decoded > 0 {
-            samples.extend_from_slice(&scratch[..decoded as usize * channels]);
-            if samples.len() / channels >= MAX_DECODED_FRAMES {
+            let frames = decoded as usize;
+            emit(&scratch[..frames * channels], spec);
+            produced = true;
+            emitted_frames += frames;
+            if emitted_frames >= MAX_DECODED_FRAMES {
                 break;
             }
         }
     }
 
-    if samples.is_empty() {
+    if !produced {
         return Err(AudioError::Decode("opus produced no samples".into()));
     }
-
-    Ok(DecodedPcm {
-        samples: samples.into(),
-        channels,
-        sample_rate: OPUS_SAMPLE_RATE,
-    })
+    Ok(())
 }
 
-fn decode_symphonia(
-    format: &mut dyn symphonia::core::formats::FormatReader,
+fn decode_symphonia<F>(
+    format: &mut dyn FormatReader,
     track_id: u32,
-) -> Result<DecodedPcm, AudioError> {
+    emit: &mut F,
+) -> Result<(), AudioError>
+where
+    F: FnMut(&[f32], PcmSpec),
+{
     let params = format
         .tracks()
         .iter()
@@ -125,10 +188,9 @@ fn decode_symphonia(
         .make(&params, &DecoderOptions::default())
         .map_err(|e| AudioError::Decode(e.to_string()))?;
 
-    let mut samples: Vec<f32> = Vec::new();
-    let mut sample_rate = params.sample_rate.unwrap_or(48_000);
-    let mut channels = params.channels.map(|c| c.count()).unwrap_or(1).max(1);
     let mut buffer: Option<SampleBuffer<f32>> = None;
+    let mut emitted_frames = 0usize;
+    let mut produced = false;
 
     loop {
         let packet = match format.next_packet() {
@@ -137,6 +199,10 @@ fn decode_symphonia(
                 break;
             }
             Err(SymphoniaError::ResetRequired) => break,
+            Err(e) if produced => {
+                tracing::warn!("audio stream ended early: {e}");
+                break;
+            }
             Err(e) => return Err(AudioError::Demux(e.to_string())),
         };
         if packet.track_id() != track_id {
@@ -145,45 +211,50 @@ fn decode_symphonia(
         let decoded = match decoder.decode(&packet) {
             Ok(d) => d,
             Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(e) if produced => {
+                tracing::warn!("audio stream ended early: {e}");
+                break;
+            }
             Err(e) => return Err(AudioError::Decode(e.to_string())),
         };
-        append_interleaved(
-            decoded,
-            &mut buffer,
-            &mut samples,
-            &mut sample_rate,
-            &mut channels,
-        );
-        if samples.len() / channels.max(1) >= MAX_DECODED_FRAMES {
-            break;
+        let frames = emit_interleaved(decoded, &mut buffer, emit);
+        if frames > 0 {
+            produced = true;
+            emitted_frames += frames;
+            if emitted_frames >= MAX_DECODED_FRAMES {
+                break;
+            }
         }
     }
 
-    if samples.is_empty() {
+    if !produced {
         return Err(AudioError::Decode("no samples produced".into()));
     }
-
-    Ok(DecodedPcm {
-        samples: samples.into(),
-        channels,
-        sample_rate,
-    })
+    Ok(())
 }
 
-fn append_interleaved(
+fn emit_interleaved<F>(
     decoded: AudioBufferRef<'_>,
     buffer: &mut Option<SampleBuffer<f32>>,
-    samples: &mut Vec<f32>,
-    sample_rate: &mut u32,
-    channels: &mut usize,
-) {
+    emit: &mut F,
+) -> usize
+where
+    F: FnMut(&[f32], PcmSpec),
+{
     let spec = *decoded.spec();
     let capacity = decoded.capacity() as u64;
-    *sample_rate = spec.rate;
-    *channels = spec.channels.count().max(1);
+    let channels = spec.channels.count().max(1);
     let buf = buffer.get_or_insert_with(|| SampleBuffer::new(capacity, spec));
     buf.copy_interleaved_ref(decoded);
-    samples.extend_from_slice(buf.samples());
+    let samples = buf.samples();
+    emit(
+        samples,
+        PcmSpec {
+            channels,
+            sample_rate: spec.rate,
+        },
+    );
+    samples.len() / channels
 }
 
 struct OpusDecoder {

@@ -79,6 +79,8 @@ pub enum RealtimeEvent {
     SessionRefreshed(api::Session),
     LastPinMessage(realtime::LastPinMessageEvent),
     UnpinMessage(realtime::UnpinMessageEvent),
+    SdTopicEvent(realtime::SdTopicEvent),
+    TopicInMessageEvent(realtime::TopicInMessageEvent),
     Unhandled(realtime::envelope::Message),
 }
 
@@ -128,6 +130,8 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::RefreshSessionEvent(s) => Ok(Self::SessionRefreshed(s)),
             realtime::envelope::Message::LastPinMessageEvent(m) => Ok(Self::LastPinMessage(m)),
             realtime::envelope::Message::UnpinMessageEvent(m) => Ok(Self::UnpinMessage(m)),
+            realtime::envelope::Message::SdTopicEvent(m) => Ok(Self::SdTopicEvent(m)),
+            realtime::envelope::Message::TopicInMessageEvent(m) => Ok(Self::TopicInMessageEvent(m)),
             other => Ok(Self::Unhandled(other)),
         }
     }
@@ -159,6 +163,26 @@ fn dispatch_realtime_push(
             }
         }
     }
+}
+
+fn push_varint(buf: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        buf.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    buf.push(value as u8);
+}
+
+fn encode_envelope_cid_last(mut envelope: realtime::Envelope) -> Vec<u8> {
+    let cid = envelope.cid;
+    if cid <= 0 {
+        return envelope.encode_to_vec();
+    }
+    envelope.cid = 0;
+    let mut bytes = envelope.encode_to_vec();
+    bytes.push(0x08);
+    push_varint(&mut bytes, cid as u64);
+    bytes
 }
 
 /// Main transport client.
@@ -2073,6 +2097,10 @@ fn with_create_time_seconds(content_json: String, create_time_seconds: u32) -> S
     serde_json::to_string(&value).unwrap_or(content_json)
 }
 
+fn presence_marker_bytes(present: bool) -> Vec<u8> {
+    if present { vec![0u8] } else { Vec::new() }
+}
+
 fn build_message_content_json(
     text: &str,
     mentions: &[OutgoingMention],
@@ -2236,7 +2264,7 @@ impl MezonTransport {
                 },
             )),
         };
-        Ok(envelope.encode_to_vec())
+        Ok(encode_envelope_cid_last(envelope))
     }
 
     /// Fingerprint of a request's arguments (its encoded body). Two calls with the
@@ -3023,6 +3051,49 @@ impl MezonTransport {
         })
     }
 
+    /// List messages belonging to a discussion topic. Mirrors mezon-js
+    /// `listChannelMessages(clanId, channelId, undefined, direction, limit, topicId)`:
+    /// the parent `channel_id` is passed with `message_id = 0` and the `topic_id` set.
+    pub async fn list_topic_messages(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        topic_id: i64,
+        direction: i32,
+        limit: u32,
+    ) -> Result<ListChannelMessagesResult> {
+        let cid = self.generate_cid();
+
+        let api_name = "ListChannelMessages";
+        let body = api::ListChannelMessagesRequest {
+            clan_id,
+            channel_id,
+            message_id: 0,
+            direction,
+            limit: limit as i32,
+            topic_id,
+        }
+        .encode_to_vec();
+
+        let (code, response) = self.send_api_request(cid, api_name, body).await?;
+
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+
+        let page = api::ChannelMessageList::decode(response.as_slice())?;
+        let last_seen_message_id = page.last_seen_message.as_ref().map(|h| h.id).unwrap_or(0);
+        let messages: Vec<ApiMessage> = page
+            .messages
+            .into_iter()
+            .map(|m| Self::message_from_proto(&m))
+            .collect();
+        Ok(ListChannelMessagesResult {
+            messages,
+            last_seen_message_id,
+        })
+    }
+
     /// Send a message to a channel.
     pub async fn join_chat(
         &self,
@@ -3044,7 +3115,7 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, envelope.encode_to_vec()).await?;
+        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
         if code != 0 {
             anyhow::bail!("join_chat error: code={code}");
         }
@@ -3065,7 +3136,7 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, envelope.encode_to_vec()).await?;
+        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
         if code != 0 {
             anyhow::bail!("write_voice_reaction error: code={code}");
         }
@@ -3101,7 +3172,7 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, envelope.encode_to_vec()).await?;
+        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
         if code != 0 {
             anyhow::bail!("write_last_seen_message error: code={code}");
         }
@@ -3117,7 +3188,7 @@ impl MezonTransport {
                 clan_id,
             })),
         };
-        let (code, _response) = self.send(cid, envelope.encode_to_vec()).await?;
+        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
         if code != 0 {
             anyhow::bail!("join_clan_chat error: code={code}");
         }
@@ -3149,6 +3220,7 @@ impl MezonTransport {
             emojis,
             None,
             false,
+            0,
         )
         .await
     }
@@ -3174,6 +3246,104 @@ impl MezonTransport {
             Vec::new(),
             None,
             true,
+            0,
+        )
+        .await
+    }
+
+    /// Send a message into a discussion topic (mezon-js `writeChatMessage(..., topicId)`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_topic_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        topic_id: i64,
+        mentions: Vec<OutgoingMention>,
+        hashtags: Vec<OutgoingHashtag>,
+        emojis: Vec<OutgoingEmoji>,
+        reply: Option<OutgoingReply>,
+    ) -> Result<ApiMessage> {
+        let references = reply
+            .map(|reply| api::MessageRef {
+                message_ref_id: reply.message_ref_id,
+                content: reply.content,
+                has_attachment: reply.has_attachment,
+                ref_type: 0,
+                message_sender_id: reply.message_sender_id,
+                message_sender_username: reply.message_sender_username,
+                message_sender_avatar: reply.message_sender_avatar,
+                message_sender_clan_nick: reply.message_sender_clan_nick,
+                message_sender_display_name: reply.message_sender_display_name,
+                ..Default::default()
+            })
+            .into_iter()
+            .collect();
+        self.send_channel_message_inner(
+            clan_id,
+            channel_id,
+            content,
+            is_public,
+            mode,
+            Vec::new(),
+            references,
+            mentions,
+            hashtags,
+            emojis,
+            None,
+            false,
+            topic_id,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_topic_message_with_attachments(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        topic_id: i64,
+        attachments: Vec<api::MessageAttachment>,
+        mentions: Vec<OutgoingMention>,
+        hashtags: Vec<OutgoingHashtag>,
+        emojis: Vec<OutgoingEmoji>,
+        presign_finish: Option<Vec<String>>,
+        reply: Option<OutgoingReply>,
+    ) -> Result<ApiMessage> {
+        let references = reply
+            .map(|reply| api::MessageRef {
+                message_ref_id: reply.message_ref_id,
+                content: reply.content,
+                has_attachment: reply.has_attachment,
+                ref_type: 0,
+                message_sender_id: reply.message_sender_id,
+                message_sender_username: reply.message_sender_username,
+                message_sender_avatar: reply.message_sender_avatar,
+                message_sender_clan_nick: reply.message_sender_clan_nick,
+                message_sender_display_name: reply.message_sender_display_name,
+                ..Default::default()
+            })
+            .into_iter()
+            .collect();
+        self.send_channel_message_inner(
+            clan_id,
+            channel_id,
+            content,
+            is_public,
+            mode,
+            attachments,
+            references,
+            mentions,
+            hashtags,
+            emojis,
+            presign_finish,
+            false,
+            topic_id,
         )
         .await
     }
@@ -3221,6 +3391,7 @@ impl MezonTransport {
             emojis,
             presign_finish,
             false,
+            0,
         )
         .await
     }
@@ -3264,6 +3435,7 @@ impl MezonTransport {
             emojis,
             None,
             false,
+            0,
         )
         .await
     }
@@ -3283,6 +3455,7 @@ impl MezonTransport {
         emojis: Vec<OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
         content_is_json: bool,
+        topic_id: i64,
     ) -> Result<ApiMessage> {
         let cid = self.generate_cid();
 
@@ -3336,6 +3509,7 @@ impl MezonTransport {
             mode,
             is_public,
             mention_everyone,
+            topic_id,
             ..Default::default()
         }
         .encode_to_vec();
@@ -3374,6 +3548,7 @@ impl MezonTransport {
                     .map(OutgoingEmoji::to_content_token)
                     .collect(),
                 mk: markdown_content_tokens(&sent.markdowns),
+                presign_finish: presign_finish.clone(),
                 ..Default::default()
             }
         };
@@ -4251,6 +4426,7 @@ impl MezonTransport {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_channel_message_with_attachments(
         &self,
         clan_id: i64,
@@ -4260,6 +4436,8 @@ impl MezonTransport {
         attachments: Vec<api::MessageAttachment>,
         mode: i32,
         is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let content_json = build_send_content(content, &[], &[], &[]).json;
@@ -4271,6 +4449,8 @@ impl MezonTransport {
             attachments,
             mode,
             is_public,
+            topic_id,
+            is_update_msg_topic,
             ..Default::default()
         }
         .encode_to_vec();
@@ -4295,6 +4475,8 @@ impl MezonTransport {
         create_time_seconds: u32,
         mode: i32,
         is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let sent = build_send_content(content, &mentions, &[], &[]);
@@ -4315,6 +4497,8 @@ impl MezonTransport {
             is_public,
             hide_editted: true,
             create_time_seconds,
+            topic_id,
+            is_update_msg_topic,
             ..Default::default()
         }
         .encode_to_vec();
@@ -6972,6 +7156,8 @@ impl MezonTransport {
         emojis: Vec<OutgoingEmoji>,
         mode: i32,
         is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let sent = build_send_content(content, &mentions, &hashtags, &emojis);
@@ -6989,6 +7175,8 @@ impl MezonTransport {
             mentions: proto_mentions,
             mode,
             is_public,
+            topic_id,
+            is_update_msg_topic,
             ..Default::default()
         }
         .encode_to_vec();
@@ -7001,19 +7189,30 @@ impl MezonTransport {
         Ok(())
     }
 
-    /// Delete channel message.
+    #[allow(clippy::too_many_arguments)]
     pub async fn delete_channel_message(
         &self,
         clan_id: i64,
         channel_id: i64,
         message_id: i64,
+        mode: i32,
+        is_public: bool,
+        has_attachment: bool,
+        topic_id: i64,
+        has_mentions: bool,
+        has_references: bool,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = realtime::ChannelMessageRemove {
             clan_id,
             channel_id,
             message_id,
-            ..Default::default()
+            mode,
+            is_public,
+            has_attachment,
+            topic_id,
+            mentions: presence_marker_bytes(has_mentions),
+            references: presence_marker_bytes(has_references),
         }
         .encode_to_vec();
         let (code, _) = self
@@ -7039,6 +7238,7 @@ impl MezonTransport {
         mode: i32,
         is_public: bool,
         remove: bool,
+        topic_id: i64,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::MessageReaction {
@@ -7052,6 +7252,7 @@ impl MezonTransport {
             mode,
             is_public,
             action: remove,
+            topic_id,
             ..Default::default()
         }
         .encode_to_vec();
@@ -7471,6 +7672,62 @@ impl MezonTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn envelope_cid_last_moves_cid_after_empty_submessage() {
+        let envelope = realtime::Envelope {
+            cid: 7,
+            message: Some(realtime::envelope::Message::ClanJoin(realtime::ClanJoin {
+                clan_id: 0,
+            })),
+        };
+        let bytes = encode_envelope_cid_last(envelope);
+        assert_eq!(bytes, vec![0x1a, 0x00, 0x08, 0x07]);
+        assert_ne!(*bytes.last().unwrap(), 0);
+        let decoded = realtime::Envelope::decode(bytes.as_slice()).unwrap();
+        assert_eq!(decoded.cid, 7);
+        assert!(matches!(
+            decoded.message,
+            Some(realtime::envelope::Message::ClanJoin(cj)) if cj.clan_id == 0
+        ));
+    }
+
+    #[test]
+    fn envelope_cid_last_protects_body_ending_in_zero() {
+        let envelope = realtime::Envelope {
+            cid: 300,
+            message: Some(realtime::envelope::Message::ApiRequestEvent(
+                realtime::ApiRequestEvent {
+                    api_index: 1,
+                    api_name: "X".to_string(),
+                    body: vec![0x08, 0x00],
+                },
+            )),
+        };
+        let bytes = encode_envelope_cid_last(envelope);
+        assert_ne!(*bytes.last().unwrap(), 0);
+        let decoded = realtime::Envelope::decode(bytes.as_slice()).unwrap();
+        assert_eq!(decoded.cid, 300);
+        match decoded.message {
+            Some(realtime::envelope::Message::ApiRequestEvent(e)) => {
+                assert_eq!(e.body, vec![0x08, 0x00]);
+                assert_eq!(e.api_name, "X");
+            }
+            _ => panic!("expected ApiRequestEvent"),
+        }
+    }
+
+    #[test]
+    fn envelope_cid_last_noop_when_cid_zero() {
+        let envelope = realtime::Envelope {
+            cid: 0,
+            message: Some(realtime::envelope::Message::ClanJoin(realtime::ClanJoin {
+                clan_id: 5,
+            })),
+        };
+        let expected = envelope.clone().encode_to_vec();
+        assert_eq!(encode_envelope_cid_last(envelope), expected);
+    }
 
     #[test]
     fn message_fields_parse_json_payloads() {

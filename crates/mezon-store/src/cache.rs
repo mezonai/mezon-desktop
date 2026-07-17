@@ -98,10 +98,23 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
         }
     }
 
+    pub fn remove(&mut self, key: &K) -> Option<V> {
+        self.order.retain(|k| k != key);
+        self.entries.remove(key).map(|e| e.value)
+    }
+
     /// Drop every entry (force a full refetch with an empty cache).
     pub fn clear(&mut self) {
         self.entries.clear();
         self.order.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
     }
 
     /// Force a refetch on next access **without** dropping values — `is_fresh` returns false for

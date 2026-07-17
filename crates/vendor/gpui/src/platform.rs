@@ -2008,6 +2008,14 @@ impl ClipboardItem {
         }
     }
 
+    /// If this item contains an image entry, returns the first one.
+    pub fn image(&self) -> Option<Image> {
+        self.entries.iter().find_map(|entry| match entry {
+            ClipboardEntry::Image(image) => Some(image.clone()),
+            _ => None,
+        })
+    }
+
     /// If this item is one ClipboardEntry::String, returns its metadata.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub fn metadata(&self) -> Option<&String> {

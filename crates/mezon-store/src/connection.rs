@@ -244,6 +244,16 @@ impl ConnectionStore {
                     consecutive_failures = 0;
                     api.set_status(ConnectionStatus::Connected);
                     tracing::info!("Connection confirmed — handshake accepted");
+                    let api_for_join = api.clone();
+                    exec.spawn(async move {
+                        match api_for_join.join_clan_chat(0).await {
+                            Ok(()) => tracing::info!("DM-space subscribed (clan_join clan_id=0)"),
+                            Err(e) => {
+                                tracing::warn!("DM-space join (clan_join clan_id=0) failed: {e}")
+                            }
+                        }
+                    })
+                    .detach();
                     cx.update(|cx| {
                         auth_state.update(cx, |state, cx| {
                             if let AuthState::Connecting(s) = state {

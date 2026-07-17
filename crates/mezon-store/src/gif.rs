@@ -160,10 +160,12 @@ pub struct GifStore {
     search_results: Vec<Gif>,
     loaded: bool,
     loading: bool,
+    featured_loading: bool,
     searching: bool,
     search_generation: u64,
     config: KlipyConfig,
     _base_task: Option<Task<()>>,
+    _featured_task: Option<Task<()>>,
     _search_task: Option<Task<()>>,
 }
 
@@ -194,10 +196,12 @@ impl GifStore {
             search_results: Vec::new(),
             loaded: false,
             loading: false,
+            featured_loading: false,
             searching: false,
             search_generation: 0,
             config: KlipyConfig::from_app(cx),
             _base_task: None,
+            _featured_task: None,
             _search_task: None,
         }
     }
@@ -206,6 +210,36 @@ impl GifStore {
         if !self.loaded && !self.loading {
             self.fetch_base(cx);
         }
+    }
+
+    pub fn ensure_featured(&mut self, cx: &mut Context<Self>) {
+        if !self.featured.is_empty() || self.loading || self.featured_loading {
+            return;
+        }
+        if self.config.key.is_empty() {
+            tracing::error!(
+                "klipy api key is empty: set NX_CHAT_APP_API_KLIPY_KEY at build time (.env or CI)"
+            );
+            return;
+        }
+        self.featured_loading = true;
+        cx.notify();
+        let featured_url = self.config.featured_url();
+        self._featured_task = Some(cx.spawn(async move |this, cx| {
+            let featured = fetch_gifs(&featured_url).await;
+            let _ = this.update(cx, |this, cx| {
+                this.featured_loading = false;
+                if let Some(featured) = featured {
+                    this.featured = featured;
+                }
+                cx.emit(GifEvent::Changed);
+                cx.notify();
+            });
+        }));
+    }
+
+    pub fn is_featured_loading(&self) -> bool {
+        self.loading || self.featured_loading
     }
 
     fn fetch_base(&mut self, cx: &mut Context<Self>) {
@@ -444,6 +478,49 @@ mod tests {
     fn encodes_reserved_query_characters() {
         assert_eq!(encode_query("a b&c"), "a%20b%26c");
         assert_eq!(encode_query("plain-text_1.0~"), "plain-text_1.0~");
+    }
+
+    #[test]
+    fn parses_a_klipy_trending_payload() {
+        let payload = br#"{
+            "result": true,
+            "data": {
+                "current_page": 1,
+                "per_page": 30,
+                "data": [
+                    {
+                        "id": 1,
+                        "slug": "naruto-sleep",
+                        "type": "gif",
+                        "file": {
+                            "xs": {"gif": {"url": "https://static.klipy.com/xs.gif", "width": 160, "height": 90}},
+                            "sm": {"gif": {"url": "https://static.klipy.com/sm.gif", "width": 220, "height": 124}}
+                        }
+                    },
+                    {
+                        "id": 2,
+                        "slug": "no-xs-variant",
+                        "type": "gif",
+                        "file": {
+                            "md": {"gif": {"url": "https://static.klipy.com/md.gif", "width": 320, "height": 180}}
+                        }
+                    },
+                    { "id": 3, "slug": "no-gif-at-all", "type": "gif", "file": {} }
+                ]
+            }
+        }"#;
+
+        let response: KlipyGifsResponse = serde_json::from_slice(payload).expect("klipy shape");
+        let gifs: Vec<Gif> = response
+            .data
+            .data
+            .into_iter()
+            .filter_map(gif_from_klipy)
+            .collect();
+
+        assert_eq!(gifs.len(), 2);
+        assert_eq!(gifs[0].url.as_ref(), "https://static.klipy.com/xs.gif");
+        assert_eq!(gifs[1].url.as_ref(), "https://static.klipy.com/md.gif");
     }
 
     #[test]

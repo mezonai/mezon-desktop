@@ -19,6 +19,7 @@ const NAME_LEFT_INSET: Pixels = px(40.);
 const NAME_RIGHT_RESERVE: Pixels = px(24.);
 const NAME_FONT_SIZE: Pixels = px(16.);
 const BG_CORNER_RADIUS: Pixels = px(8.);
+const BG_VERTICAL_INSET: Pixels = px(0.5);
 const NUB_TOP: Pixels = px(12.);
 const NUB_WIDTH: Pixels = px(4.);
 const NUB_HEIGHT: Pixels = px(8.);
@@ -34,7 +35,8 @@ const THREAD_CONNECTOR_X: Pixels = px(24.);
 const THREAD_ELBOW_TOP: Pixels = px(12.);
 const THREAD_ELBOW_SIZE: Pixels = px(10.);
 const THREAD_ELBOW_RADIUS: Pixels = px(2.);
-const THREAD_NAME_LEFT: Pixels = px(36.);
+const THREAD_NAME_LEFT: Pixels = px(48.);
+const THREAD_NAME_VERTICAL_NUDGE: Pixels = px(2.);
 
 type ClickHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 type RightClickHandler = Rc<dyn Fn(Point<Pixels>, &mut Window, &mut App)>;
@@ -252,7 +254,12 @@ impl Element for ChannelRowElement {
                     .or(if hovered { self.hover_bg } else { None });
                 if let Some(background) = background {
                     let (bg_left, bg_width, bg_radius) = if is_thread {
-                        (left, width, px(0.))
+                        let thread_bg_left = THREAD_NAME_LEFT - BG_HORIZONTAL_INSET;
+                        (
+                            left + thread_bg_left,
+                            width - thread_bg_left - BG_HORIZONTAL_INSET,
+                            BG_CORNER_RADIUS,
+                        )
                     } else {
                         (
                             left + BG_HORIZONTAL_INSET,
@@ -261,8 +268,8 @@ impl Element for ChannelRowElement {
                         )
                     };
                     let bg_bounds = Bounds {
-                        origin: point(bg_left, top),
-                        size: size(bg_width, row_height),
+                        origin: point(bg_left, top + BG_VERTICAL_INSET),
+                        size: size(bg_width, row_height - BG_VERTICAL_INSET * 2.),
                     };
                     window.paint_quad(
                         fill(bg_bounds, background).corner_radii(Corners::all(bg_radius)),
@@ -363,10 +370,14 @@ impl Element for ChannelRowElement {
                 name_run.font.weight = self.name_weight;
                 let name_line =
                     text_system.shape_line(self.name.clone(), NAME_FONT_SIZE, &[name_run], None);
-                let name_origin = point(
-                    left + name_left,
-                    top + (row_height - content_line_height) / 2.,
-                );
+                let name_top = top
+                    + (row_height - content_line_height) / 2.
+                    + if is_thread {
+                        THREAD_NAME_VERTICAL_NUDGE
+                    } else {
+                        px(0.)
+                    };
+                let name_origin = point(left + name_left, name_top);
                 let name_clip = ContentMask {
                     bounds: Bounds {
                         origin: point(left + name_left, top),

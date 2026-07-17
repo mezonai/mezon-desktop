@@ -1,18 +1,100 @@
-use gpui::{App, AppContext, Entity, Global, SharedString};
+use gpui::{App, AppContext, ClipboardItem, Entity, Global, Image, ImageFormat, SharedString};
 use std::sync::Arc;
 
-pub fn download_url_with_dialog(url: SharedString, filename: SharedString, cx: &mut App) {
+pub enum DownloadEvent {
+    Started,
+    Progress { written: u64, total: Option<u64> },
+    Finished,
+    Failed,
+}
+
+pub fn download_url_with_dialog(
+    url: SharedString,
+    filename: SharedString,
+    on_event: impl Fn(DownloadEvent, &mut App) + 'static,
+    cx: &mut App,
+) {
     let directory = dirs::download_dir()
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let suggested = filename.to_string();
     let receiver = cx.prompt_for_new_path(&directory, Some(suggested.as_str()));
-    cx.spawn(async move |_cx| {
-        if let Ok(Ok(Some(path))) = receiver.await
-            && let Err(error) = mezon_client::transport_runtime::download_to(&url, path).await
-        {
-            tracing::error!("attachment download failed: {error}");
+    let url = url.to_string();
+    cx.spawn(async move |cx| {
+        let path = match receiver.await {
+            Ok(Ok(Some(path))) => path,
+            _ => return,
+        };
+        cx.update(|cx| on_event(DownloadEvent::Started, cx));
+        let (tx, rx) = flume::unbounded::<(u64, Option<u64>)>();
+        let download = cx.background_executor().spawn(async move {
+            mezon_client::transport_runtime::download_to(&url, path, move |written, total| {
+                let _ = tx.send((written, total));
+            })
+            .await
+        });
+        while let Ok((written, total)) = rx.recv_async().await {
+            cx.update(|cx| on_event(DownloadEvent::Progress { written, total }, cx));
         }
+        let event = match download.await {
+            Ok(()) => DownloadEvent::Finished,
+            Err(error) => {
+                tracing::error!("attachment download failed: {error}");
+                DownloadEvent::Failed
+            }
+        };
+        cx.update(|cx| on_event(event, cx));
+    })
+    .detach();
+}
+
+const CLIPBOARD_IMAGE_MAX_DIMENSION: u32 = 16_384;
+const CLIPBOARD_IMAGE_MAX_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+
+pub fn copy_image_url_to_clipboard(
+    url: SharedString,
+    on_result: impl FnOnce(bool, &mut App) + 'static,
+    cx: &mut App,
+) {
+    let url = url.to_string();
+    if url.is_empty() {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        let png = cx
+            .background_executor()
+            .spawn(async move {
+                let (bytes, _content_type) =
+                    mezon_client::transport_runtime::fetch_bytes(&url).await?;
+                let mut reader =
+                    image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format()?;
+                let mut limits = image::Limits::default();
+                limits.max_image_width = Some(CLIPBOARD_IMAGE_MAX_DIMENSION);
+                limits.max_image_height = Some(CLIPBOARD_IMAGE_MAX_DIMENSION);
+                limits.max_alloc = Some(CLIPBOARD_IMAGE_MAX_ALLOC_BYTES);
+                reader.limits(limits);
+                let decoded = reader.decode()?;
+                let mut buffer = std::io::Cursor::new(Vec::new());
+                decoded.write_to(&mut buffer, image::ImageFormat::Png)?;
+                anyhow::Ok(buffer.into_inner())
+            })
+            .await;
+        let ok = match &png {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::error!("copy image to clipboard failed: {error}");
+                false
+            }
+        };
+        cx.update(|cx| {
+            if let Ok(png) = png {
+                cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
+                    ImageFormat::Png,
+                    png,
+                )));
+            }
+            on_result(ok, cx);
+        });
     })
     .detach();
 }

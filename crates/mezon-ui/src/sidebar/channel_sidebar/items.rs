@@ -56,6 +56,7 @@ pub(super) enum SidebarItem {
         badge_label: SharedString,
         muted: bool,
         is_thread: bool,
+        is_favorite: bool,
         line_above: bool,
         line_below: bool,
         voice_members: Vec<VoiceMemberSlot>,

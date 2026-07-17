@@ -190,7 +190,10 @@ impl ReactionPicker {
                                 emoji_id: e.id.clone().into(),
                                 emoji: e.shortname.clone().into(),
                                 src: crate::util::imgproxy::emoji_url(cx, &e.id).into(),
-                                cell_id: SharedString::from(format!("react-pick-{}", e.id)),
+                                cell_id: SharedString::from(format!(
+                                    "react-pick-{}-{}",
+                                    name, e.id
+                                )),
                             },
                             lower: e.shortname.to_lowercase(),
                         })
@@ -237,9 +240,13 @@ impl ReactionPicker {
                 });
             }
             let mut current: Vec<PickerEmoji> = Vec::new();
+            let mut seen: HashSet<SharedString> = HashSet::new();
             for cat in &self.snapshot {
                 for e in &cat.emojis {
                     if !e.lower.contains(&query) {
+                        continue;
+                    }
+                    if !seen.insert(e.emoji.emoji_id.clone()) {
                         continue;
                     }
                     current.push(e.emoji.clone());

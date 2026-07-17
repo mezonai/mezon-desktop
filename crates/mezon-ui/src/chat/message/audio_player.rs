@@ -1,15 +1,20 @@
+use std::sync::Arc;
 use std::time::Duration;
 
+use futures::AsyncReadExt;
 use gpui::{
-    App, ClickEvent, Context, ElementId, Rgba, SharedString, Task, Window, div, prelude::*, px,
+    App, ClickEvent, Context, ElementId, Rgba, SharedString, Task, Window, div,
+    http_client::HttpClient, prelude::*, px,
 };
-use mezon_audio::AudioPlayer;
+use mezon_audio::{AudioPlayer, DecodedPcm, PcmStream};
 use mezon_store::PlatformStore;
 
 use crate::components::primitives::{Icon, IconName, Sizable, Size, Spinner};
 
 const AUDIO_FETCH_MAX_BYTES: usize = 64 * 1024 * 1024;
 const AUDIO_TICK_INTERVAL: Duration = Duration::from_millis(250);
+const AUDIO_FETCH_CHUNK: usize = 64 * 1024;
+const AUDIO_FETCH_QUEUE: usize = 8;
 
 const PILL_BG: Rgba = Rgba {
     r: 0x50 as f32 / 255.,
@@ -87,24 +92,25 @@ impl AudioPlayerView {
         }
         let client = cx.http_client();
         self._load_task = Some(cx.spawn(async move |this, cx| {
-            let fetch = async {
-                let mut response = client.get(url.as_ref(), ().into(), true).await?;
-                if !response.status().is_success() {
-                    anyhow::bail!("audio fetch status {}", response.status());
+            let (byte_tx, byte_rx) = flume::bounded(AUDIO_FETCH_QUEUE);
+            let ready = mezon_audio::spawn_stream_decode(byte_rx);
+            let fetch = cx
+                .background_executor()
+                .spawn(async move { fetch_audio(client, url, byte_tx).await });
+
+            if let Ok(Ok(stream)) = ready.recv_async().await {
+                let _ = this.update(cx, |view, cx| view.on_stream_ready(stream, cx));
+                if let Err(err) = fetch.await {
+                    tracing::warn!("audio download failed: {err}");
                 }
-                let body =
-                    crate::image_cache::read_body_limited(&mut response, AUDIO_FETCH_MAX_BYTES)
-                        .await?;
-                anyhow::Ok(body)
-            };
+                return;
+            }
+
             let bytes = match fetch.await {
                 Ok(bytes) => bytes,
                 Err(err) => {
                     tracing::warn!("audio download failed: {err}");
-                    let _ = this.update(cx, |view, cx| {
-                        view.state = LoadState::Failed;
-                        cx.notify();
-                    });
+                    let _ = this.update(cx, |view, cx| view.on_load_failed(cx));
                     return;
                 }
             };
@@ -112,26 +118,43 @@ impl AudioPlayerView {
                 .background_executor()
                 .spawn(async move { mezon_audio::decode_audio(bytes) })
                 .await;
-            let _ = this.update(cx, |view, cx| {
-                match decoded {
-                    Ok(pcm) => {
-                        view.state = LoadState::Ready;
-                        if let Some(player) = &view.player {
-                            player.set_data(pcm);
-                            if view.want_play {
-                                player.play();
-                                view.restart_tick(cx);
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!("audio decode failed: {err}");
-                        view.state = LoadState::Failed;
-                    }
+            let _ = this.update(cx, |view, cx| match decoded {
+                Ok(pcm) => view.on_pcm_ready(pcm, cx),
+                Err(err) => {
+                    tracing::warn!("audio decode failed: {err}");
+                    view.on_load_failed(cx);
                 }
-                cx.notify();
             });
         }));
+    }
+
+    fn on_stream_ready(&mut self, stream: Arc<PcmStream>, cx: &mut Context<Self>) {
+        self.state = LoadState::Ready;
+        if let Some(player) = &self.player {
+            player.set_stream(stream);
+            if self.want_play {
+                player.play();
+                self.restart_tick(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn on_pcm_ready(&mut self, pcm: DecodedPcm, cx: &mut Context<Self>) {
+        self.state = LoadState::Ready;
+        if let Some(player) = &self.player {
+            player.set_data(pcm);
+            if self.want_play {
+                player.play();
+                self.restart_tick(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn on_load_failed(&mut self, cx: &mut Context<Self>) {
+        self.state = LoadState::Failed;
+        cx.notify();
     }
 
     fn is_ready(&self) -> bool {
@@ -222,7 +245,7 @@ impl Render for AudioPlayerView {
             self.time_label.clone(),
             cx.listener(|view, _, _window, cx| view.toggle_play(cx)),
             move |_, _, cx| {
-                mezon_store::download_url_with_dialog(
+                crate::util::download::save_with_progress_toast(
                     download_url.clone(),
                     download_name.clone(),
                     cx,
@@ -381,6 +404,43 @@ pub(crate) fn audio_failed_pill(duration: f64) -> gpui::AnyElement {
         .into_any_element()
 }
 
+async fn fetch_audio(
+    client: Arc<dyn HttpClient>,
+    url: SharedString,
+    byte_tx: flume::Sender<Vec<u8>>,
+) -> anyhow::Result<Vec<u8>> {
+    let mut response = client.get(url.as_ref(), ().into(), true).await?;
+    if !response.status().is_success() {
+        anyhow::bail!("audio fetch status {}", response.status());
+    }
+    if let Some(length) = response
+        .headers()
+        .get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        && length > AUDIO_FETCH_MAX_BYTES as u64
+    {
+        anyhow::bail!(
+            "response body of {length} bytes exceeds the {AUDIO_FETCH_MAX_BYTES} byte transfer limit"
+        );
+    }
+
+    let mut body = Vec::new();
+    let mut buffer = vec![0u8; AUDIO_FETCH_CHUNK];
+    loop {
+        let read = response.body_mut().read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        if body.len() + read > AUDIO_FETCH_MAX_BYTES {
+            anyhow::bail!("response body exceeds the {AUDIO_FETCH_MAX_BYTES} byte transfer limit");
+        }
+        body.extend_from_slice(&buffer[..read]);
+        let _ = byte_tx.send_async(buffer[..read].to_vec()).await;
+    }
+    Ok(body)
+}
+
 fn open_audio_external(url: &str, cx: &mut App) {
     if let Some(store) = PlatformStore::try_global(cx) {
         let _ = store.read(cx).open_url_external(url);
@@ -401,9 +461,24 @@ fn format_mmss(total: f64) -> String {
 }
 
 fn time_label(current: f64, duration: f64) -> String {
+    if whole_seconds(duration) == 0 {
+        return format_mmss(current);
+    }
     format!("{} / {}", format_mmss(current), format_mmss(duration))
 }
 
 pub(crate) fn audio_time_label(current: f64, duration: f64) -> SharedString {
     SharedString::from(time_label(current, duration))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::time_label;
+
+    #[test]
+    fn the_total_is_hidden_until_it_is_known() {
+        assert_eq!(time_label(0.0, 0.0), "0:00");
+        assert_eq!(time_label(5.0, 0.0), "0:05");
+        assert_eq!(time_label(5.0, 222.0), "0:05 / 3:42");
+    }
 }

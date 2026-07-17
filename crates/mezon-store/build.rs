@@ -113,10 +113,25 @@ fn main() {
         })
         .unwrap_or_default();
 
+    // Values are written to a generated source file rather than emitted as
+    // `cargo:rustc-env`: build-script stdout is persisted by cargo and replayed on
+    // `-vv` or on failure, so that route would echo every baked secret. Generating
+    // one `const` per variable also makes this list and the `config.rs` reads
+    // impossible to drift apart — a name that exists in only one of them no longer
+    // compiles.
+    let mut generated = String::new();
     for var in BAKED_ENV_VARS {
         println!("cargo:rerun-if-env-changed={var}");
-        if let Some(value) = baked_value(var, &dotenv) {
-            println!("cargo:rustc-env={var}={value}");
+        match baked_value(var, &dotenv) {
+            Some(value) => {
+                generated.push_str(&format!(
+                    "pub const {var}: Option<&str> = Some({value:?});\n"
+                ));
+            }
+            None => generated.push_str(&format!("pub const {var}: Option<&str> = None;\n")),
         }
     }
+    let out_dir = env::var("OUT_DIR").expect("OUT_DIR is always set for build scripts");
+    let dest = PathBuf::from(out_dir).join("baked_env.rs");
+    fs::write(&dest, generated).expect("failed to write the generated env constants");
 }

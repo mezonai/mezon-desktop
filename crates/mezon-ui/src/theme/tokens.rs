@@ -749,7 +749,7 @@ impl ThemeTokens {
                     r: 0.33956,
                     g: 0.38396,
                     b: 0.2133,
-                    a: 1.0,
+                    a: 0.13233,
                 },
                 bg_highlight_react_theme: Rgba {
                     r: 0.60392,
@@ -1869,7 +1869,7 @@ impl ThemeTokens {
                     r: 0.78585,
                     g: 0.49357,
                     b: 0.011355,
-                    a: 1.0,
+                    a: 0.08,
                 },
                 bg_highlight_react_theme: Rgba {
                     r: 0.60392,
@@ -2429,7 +2429,7 @@ impl ThemeTokens {
                     r: 0.87308,
                     g: 0.94726,
                     b: 0.37989,
-                    a: 1.0,
+                    a: 0.08,
                 },
                 bg_highlight_react_theme: Rgba {
                     r: 0.60392,
@@ -2989,7 +2989,7 @@ impl ThemeTokens {
                     r: 0.78585,
                     g: 0.49357,
                     b: 0.011355,
-                    a: 1.0,
+                    a: 0.08,
                 },
                 bg_highlight_react_theme: Rgba {
                     r: 0.60392,
@@ -3549,7 +3549,7 @@ impl ThemeTokens {
                     r: 0.33956,
                     g: 0.38396,
                     b: 0.2133,
-                    a: 1.0,
+                    a: 0.13233,
                 },
                 bg_highlight_react_theme: Rgba {
                     r: 0.60392,
@@ -4109,7 +4109,7 @@ impl ThemeTokens {
                     r: 0.78585,
                     g: 0.49357,
                     b: 0.011355,
-                    a: 1.0,
+                    a: 0.08,
                 },
                 bg_highlight_react_theme: Rgba {
                     r: 0.60392,

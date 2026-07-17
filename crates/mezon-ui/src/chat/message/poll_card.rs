@@ -140,7 +140,7 @@ pub fn render_poll_card(msg: &Message, ctx: &RowCtx) -> AnyElement {
                 .rounded(px(4.))
                 .p_3()
                 .border_1()
-                .border_color(theme.tokens.border_theme_primary)
+                .border_color(theme.tokens.border_primary)
                 .bg(theme.tokens.bg_active_member_channel)
                 .child(header)
                 .child(subtitle)
@@ -173,7 +173,7 @@ fn render_answer_row(
     let can_toggle = !should_show_results;
 
     let border_color = if should_show_results {
-        theme.tokens.border_theme_primary
+        theme.tokens.border_primary
     } else if is_selected {
         theme.tokens.text_theme_primary
     } else {
@@ -370,7 +370,7 @@ fn render_footer(
                 .font_weight(FontWeight::MEDIUM)
                 .rounded(px(4.))
                 .border_1()
-                .border_color(theme.tokens.border_theme_primary)
+                .border_color(theme.tokens.border_primary)
                 .text_color(theme.tokens.text_theme_primary)
                 .cursor_pointer()
                 .hover(|s| s.text_color(theme.tokens.text_secondary))
@@ -415,7 +415,7 @@ fn render_footer(
             .font_weight(FontWeight::MEDIUM)
             .rounded(px(4.))
             .border_1()
-            .border_color(theme.tokens.border_theme_primary)
+            .border_color(theme.tokens.border_primary)
             .bg(theme.tokens.bg_button_secondary)
             .text_color(theme.tokens.text_theme_primary)
             .child(mezon_i18n::t(ctx.locale, "message.poll.removeVote"));

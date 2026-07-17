@@ -58,6 +58,7 @@ pub struct ChannelSidebar {
     settings: Entity<Settings>,
     items: Rc<Vec<SidebarItem>>,
     list_state: ListState,
+    first_badged_index: Option<usize>,
     active_clan_name: String,
     active_clan_name_upper: String,
     active_clan_id: Option<ClanId>,
@@ -147,6 +148,7 @@ impl ChannelSidebar {
             settings,
             items: Rc::new(Vec::new()),
             list_state,
+            first_badged_index: None,
             active_clan_name: String::new(),
             active_clan_name_upper: String::new(),
             active_clan_id: None,
@@ -278,9 +280,9 @@ impl ChannelSidebar {
                                     &category.id, &ch.id
                                 )),
                                 row_elem_id: SharedString::from(if is_thread {
-                                    format!("thread-row-{}", ch.id)
+                                    format!("thread-row-{}-{}", &category.id, ch.id)
                                 } else {
-                                    format!("channel-row-{}", ch.id)
+                                    format!("channel-row-{}-{}", &category.id, ch.id)
                                 }),
                                 id: ch.id.to_string(),
                                 name: truncate_channel_label(&ch.name),
@@ -292,6 +294,7 @@ impl ChannelSidebar {
                                 badge_label,
                                 muted: ch.muted,
                                 is_thread,
+                                is_favorite: is_favorites,
                                 line_above,
                                 line_below,
                                 voice_members: ch
@@ -314,6 +317,13 @@ impl ChannelSidebar {
         let items_changed = *self.items != items;
         self.items = Rc::new(items);
 
+        self.first_badged_index = self.items.iter().position(|item| {
+            matches!(
+                item,
+                SidebarItem::Channel { badge_count, is_favorite: false, .. } if *badge_count > 0
+            )
+        });
+
         if clan_changed || old_count == 0 {
             self.list_state.reset(new_count);
         } else if new_count > old_count {
@@ -325,6 +335,31 @@ impl ChannelSidebar {
 
         let skeleton_changed = self.advance_skeleton(cold_loading, new_clan_id, cx);
         items_changed || name_changed || clan_changed || skeleton_changed
+    }
+
+    fn reveal_original_channel(&mut self, channel_id: &str, cx: &mut Context<Self>) {
+        let target = self.items.iter().position(|item| {
+            matches!(
+                item,
+                SidebarItem::Channel { id, is_favorite: false, .. } if id.as_str() == channel_id
+            )
+        });
+        if let Some(ix) = target {
+            self.list_state.scroll_to_center_item(ix);
+            cx.notify();
+        }
+    }
+
+    fn mention_target(&self) -> Option<usize> {
+        let ix = self.first_badged_index?;
+        (!self.list_state.visible_range().contains(&ix)).then_some(ix)
+    }
+
+    fn scroll_to_first_mention(&mut self, cx: &mut Context<Self>) {
+        if let Some(ix) = self.first_badged_index {
+            self.list_state.scroll_to_center_item(ix);
+            cx.notify();
+        }
     }
 
     fn advance_skeleton(
@@ -504,6 +539,41 @@ impl Render for ChannelSidebar {
             skeleton::Phase::Hidden | skeleton::Phase::Pending => None,
         };
 
+        let mention_button = self.mention_target().map(|_| {
+            let sidebar = sidebar.clone();
+            let label = mezon_i18n::t(&locale, "common.newMention").to_uppercase();
+            div()
+                .absolute()
+                .top(px(8.))
+                .left_0()
+                .w_full()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .id("mention-float-button")
+                        .occlude()
+                        .px_2()
+                        .py_1()
+                        .rounded_full()
+                        .bg(gpui::rgb(0xda_37_3c))
+                        .text_color(gpui::white())
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .shadow_lg()
+                        .cursor_pointer()
+                        .opacity(0.9)
+                        .hover(|s| s.opacity(0.95))
+                        .child(label)
+                        .on_click(move |_, _window, cx| {
+                            if let Some(view) = sidebar.upgrade() {
+                                view.update(cx, |this, cx| this.scroll_to_first_mention(cx));
+                            }
+                        }),
+                )
+                .into_any_element()
+        });
+
         div()
             .flex()
             .flex_col()
@@ -612,6 +682,7 @@ impl Render for ChannelSidebar {
                     .relative()
                     .child(list_element)
                     .children(skeleton_overlay)
+                    .children(mention_button)
                     .custom_scrollbars(
                         Scrollbars::always_visible(ScrollAxes::Vertical)
                             .tracked_scroll_handle(&self.list_state),
@@ -951,6 +1022,7 @@ fn render_sidebar_item(
             badge_label: _badge_label,
             muted,
             is_thread,
+            is_favorite,
             line_above,
             line_below,
             voice_members,
@@ -1072,6 +1144,8 @@ fn render_sidebar_item(
                 let click_id = ch_id.clone();
                 let click_clan = clan_id_inner;
                 let menu_sidebar = sidebar.clone();
+                let reveal_sidebar = sidebar.clone();
+                let reveal_favorite = *is_favorite;
                 let menu_channel_type = *channel_type;
                 let menu_is_thread = *is_thread;
                 return element
@@ -1087,6 +1161,11 @@ fn render_sidebar_item(
                                     channel_id: click_id.parse().unwrap_or_default(),
                                 },
                             );
+                        }
+                        if reveal_favorite {
+                            let _ = reveal_sidebar.update(cx, |this, cx| {
+                                this.reveal_original_channel(&click_id, cx);
+                            });
                         }
                     })
                     .on_right_click(move |position, _window, cx| {

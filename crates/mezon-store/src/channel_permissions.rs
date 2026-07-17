@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::{AppApi, ConnectionStatus};
@@ -9,8 +10,10 @@ use crate::KeyedCache;
 use crate::ids::{ChannelId, ClanId};
 
 const MAX_CACHED_CHANNEL_PERMISSIONS: usize = 64;
+const FAILED_FETCH_BACKOFF: Duration = Duration::from_secs(30);
 
 pub const PERMISSION_MANAGE_THREAD: &str = "manage-thread";
+pub const PERMISSION_DELETE_MESSAGE: &str = "delete-message";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ChannelPermissionKey {
@@ -29,6 +32,7 @@ pub enum ChannelPermissionsEvent {
 pub struct ChannelPermissionsStore {
     cache: KeyedCache<ChannelPermissionKey, HashMap<String, bool>>,
     loading: HashSet<ChannelPermissionKey>,
+    failed_at: HashMap<ChannelPermissionKey, Instant>,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
 }
@@ -54,6 +58,7 @@ impl ChannelPermissionsStore {
         Self {
             cache: KeyedCache::new(Some(MAX_CACHED_CHANNEL_PERMISSIONS)),
             loading: HashSet::new(),
+            failed_at: HashMap::new(),
             api,
             _conn_watch: conn_watch,
         }
@@ -82,9 +87,20 @@ impl ChannelPermissionsStore {
 
     fn invalidate(&mut self) {
         self.cache.mark_all_stale();
+        self.failed_at.clear();
     }
 
     pub fn has_permission(&self, slug: &str, clan_id: ClanId, channel_id: ChannelId) -> bool {
+        self.permission_value(slug, clan_id, channel_id)
+            .unwrap_or(false)
+    }
+
+    pub fn permission_value(
+        &self,
+        slug: &str,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+    ) -> Option<bool> {
         let key = ChannelPermissionKey {
             clan_id,
             channel_id,
@@ -92,7 +108,6 @@ impl ChannelPermissionsStore {
         self.cache
             .get(&key)
             .and_then(|perms| perms.get(slug).copied())
-            .unwrap_or(false)
     }
 
     pub fn ensure_loaded(
@@ -107,6 +122,13 @@ impl ChannelPermissionsStore {
         };
         self.cache.touch(&key);
         if self.cache.is_fresh(&key, crate::CACHE_TTL) {
+            return;
+        }
+        if self
+            .failed_at
+            .get(&key)
+            .is_some_and(|at| at.elapsed() < FAILED_FETCH_BACKOFF)
+        {
             return;
         }
         self.fetch(clan_id, channel_id, cx);
@@ -130,6 +152,7 @@ impl ChannelPermissionsStore {
                 this.loading.remove(&key);
                 match result {
                     Ok(resp) => {
+                        this.failed_at.remove(&key);
                         let perms = permissions_from_response(&resp);
                         this.cache.insert(key, perms, None);
                         cx.emit(ChannelPermissionsEvent::Changed {
@@ -139,6 +162,7 @@ impl ChannelPermissionsStore {
                         cx.notify();
                     }
                     Err(e) => {
+                        this.failed_at.insert(key, Instant::now());
                         tracing::error!(
                             "list_user_permission_in_channel failed for {channel_id}: {e}"
                         );

@@ -4,7 +4,11 @@ use gpui::{
     App, Context, Entity, FontWeight, SharedString, UniformListScrollHandle, Window, div, img,
     prelude::*, px, size, uniform_list,
 };
-use mezon_store::{ChannelId, DirectKind, DirectMessageStore, Settings};
+use mezon_store::{
+    ChannelEvent, ChannelId, ChannelList, DirectChannel, DirectKind, DirectMessageStore, FriendStore, Settings,
+};
+
+use super::friend_request_badge;
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::components::compositions::{DM_ROW_HEIGHT, DmRow};
@@ -23,6 +27,7 @@ struct DmItem {
     kind: DirectKind,
     unread: bool,
     online: bool,
+    in_voice: bool,
     avatar_src: SharedString,
     avatar_raw: SharedString,
 }
@@ -43,7 +48,14 @@ fn is_dm_route(cx: &App) -> bool {
     )
 }
 
-fn dm_items_fingerprint(store: &DirectMessageStore) -> u64 {
+fn dm_in_voice(ch: &DirectChannel, channels: &ChannelList) -> bool {
+    ch.kind == DirectKind::Dm
+        && ch
+            .peer_user_id
+            .is_some_and(|user_id| channels.in_voice_status(user_id).is_some())
+}
+
+fn dm_items_fingerprint(store: &DirectMessageStore, cx: &App) -> u64 {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
     fn fold(hash: u64, bytes: &[u8]) -> u64 {
@@ -51,11 +63,18 @@ fn dm_items_fingerprint(store: &DirectMessageStore) -> u64 {
             .iter()
             .fold(hash, |h, b| (h ^ u64::from(*b)).wrapping_mul(FNV_PRIME))
     }
+    let channel_list = ChannelList::global(cx);
+    let channels = channel_list.read(cx);
     store.channels().iter().fold(FNV_OFFSET, |h, ch| {
         let h = fold(h, &ch.id.0.to_le_bytes());
         let h = fold(
             h,
-            &[ch.kind as u8, u8::from(ch.is_unread()), u8::from(ch.online)],
+            &[
+                ch.kind as u8,
+                u8::from(ch.is_unread()),
+                u8::from(ch.online),
+                u8::from(dm_in_voice(ch, channels)),
+            ],
         );
         let h = fold(h, ch.label.as_bytes());
         fold(h, ch.avatar.as_bytes())
@@ -63,6 +82,8 @@ fn dm_items_fingerprint(store: &DirectMessageStore) -> u64 {
 }
 
 fn build_dm_items(store: &DirectMessageStore, cx: &App) -> Rc<Vec<DmItem>> {
+    let channel_list = ChannelList::global(cx);
+    let channels = channel_list.read(cx);
     Rc::new(
         store
             .channels()
@@ -77,6 +98,7 @@ fn build_dm_items(store: &DirectMessageStore, cx: &App) -> Rc<Vec<DmItem>> {
                 kind: ch.kind,
                 unread: ch.is_unread(),
                 online: ch.online,
+                in_voice: dm_in_voice(ch, channels),
                 avatar_src: SharedString::from(crate::util::imgproxy::avatar_url(cx, &ch.avatar)),
                 avatar_raw: SharedString::from(ch.avatar.clone()),
             })
@@ -88,20 +110,11 @@ impl DirectSidebar {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
         let direct_store = DirectMessageStore::global(cx);
 
-        cx.observe(&direct_store, |this, store, cx| {
-            if is_dm_route(cx) {
-                let fingerprint = dm_items_fingerprint(store.read(cx));
-                if fingerprint == this.dm_items_fingerprint {
-                    return;
-                }
-                this.dm_items_fingerprint = fingerprint;
-                let items = build_dm_items(store.read(cx), cx);
-                if this.dm_items != items {
-                    this.dm_items = items;
-                    cx.notify();
-                }
-            } else {
-                this.pending_rebuild = true;
+        cx.observe(&direct_store, |this, _, cx| this.refresh_dm_items(cx))
+            .detach();
+        cx.subscribe(&ChannelList::global(cx), |this, _, event, cx| {
+            if matches!(event, ChannelEvent::InVoiceChanged) {
+                this.refresh_dm_items(cx);
             }
         })
         .detach();
@@ -109,15 +122,17 @@ impl DirectSidebar {
             if this.pending_rebuild && is_dm_route(cx) {
                 this.pending_rebuild = false;
                 let store = DirectMessageStore::global(cx);
-                this.dm_items_fingerprint = dm_items_fingerprint(store.read(cx));
+                this.dm_items_fingerprint = dm_items_fingerprint(store.read(cx), cx);
                 this.dm_items = build_dm_items(store.read(cx), cx);
             }
             cx.notify();
         })
         .detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        cx.observe(&FriendStore::global(cx), |_, _, cx| cx.notify())
+            .detach();
 
-        let dm_items_fingerprint = dm_items_fingerprint(direct_store.read(cx));
+        let dm_items_fingerprint = dm_items_fingerprint(direct_store.read(cx), cx);
         let dm_items = build_dm_items(direct_store.read(cx), cx);
 
         Self {
@@ -135,6 +150,24 @@ impl DirectSidebar {
                     cx,
                 )
             }),
+        }
+    }
+
+    fn refresh_dm_items(&mut self, cx: &mut Context<Self>) {
+        if !is_dm_route(cx) {
+            self.pending_rebuild = true;
+            return;
+        }
+        let store = DirectMessageStore::global(cx);
+        let fingerprint = dm_items_fingerprint(store.read(cx), cx);
+        if fingerprint == self.dm_items_fingerprint {
+            return;
+        }
+        self.dm_items_fingerprint = fingerprint;
+        let items = build_dm_items(store.read(cx), cx);
+        if self.dm_items != items {
+            self.dm_items = items;
+            cx.notify();
         }
     }
 
@@ -165,7 +198,13 @@ impl DirectSidebar {
             )
     }
 
-    fn render_friends_button(&self, theme: &Theme, locale: &str, active: bool) -> impl IntoElement {
+    fn render_friends_button(
+        &self,
+        theme: &Theme,
+        locale: &str,
+        active: bool,
+        pending: usize,
+    ) -> impl IntoElement {
         let bg_hover = theme.bg_hover;
         div()
             .id("dm-friends")
@@ -189,6 +228,9 @@ impl DirectSidebar {
                     .text_color(theme.text_primary)
                     .child(mezon_i18n::t(locale, "directMessage.friends")),
             )
+            .when(pending > 0, |el| {
+                el.child(friend_request_badge(pending, px(11.)).ml_auto())
+            })
     }
 
     fn render_section_header(&self, theme: &Theme, locale: &str) -> impl IntoElement {
@@ -242,6 +284,7 @@ impl Render for DirectSidebar {
         let items = self.dm_items.clone();
         let suppress_hover = self.list_scroll.is_scroll_hover_suppressed();
         let image_cache = self.image_cache.clone();
+        let in_voice_label: SharedString = mezon_i18n::t(&locale, "memberPage.inVoice").into();
 
         let list = uniform_list("dm-list", count, move |range, _window, cx| {
             let theme = cx.theme().clone();
@@ -250,7 +293,7 @@ impl Render for DirectSidebar {
                 .map(|ix| match items.get(ix) {
                     Some(item) => {
                         let selected = active_id == Some(item.channel_id);
-                        DmRow::with_ids(
+                        let mut row = DmRow::with_ids(
                             item.id.clone(),
                             item.label.clone(),
                             item.kind,
@@ -264,9 +307,11 @@ impl Render for DirectSidebar {
                         .avatar_src(item.avatar_src.clone())
                         .avatar_raw(item.avatar_raw.clone())
                         .suppress_hover(suppress_hover)
-                        .image_cache(image_cache.clone())
-                        .render(&theme)
-                        .into_any_element()
+                        .image_cache(image_cache.clone());
+                        if item.in_voice {
+                            row = row.in_voice_label(in_voice_label.clone());
+                        }
+                        row.render(&theme).into_any_element()
                     }
                     None => div().into_any_element(),
                 })
@@ -282,6 +327,7 @@ impl Render for DirectSidebar {
         .px_2();
 
         let on_friends = matches!(Router::global(cx).read(cx).route(), Route::Friends);
+        let friend_pending = FriendStore::global(cx).read(cx).pending_incoming_count();
 
         div()
             .flex()
@@ -290,12 +336,12 @@ impl Render for DirectSidebar {
             .pb(px(68.))
             .bg(theme.bg_secondary)
             .child(self.render_search(theme, &locale))
-            .child(
-                div()
-                    .px_2()
-                    .pt_2()
-                    .child(self.render_friends_button(theme, &locale, on_friends)),
-            )
+            .child(div().px_2().pt_2().child(self.render_friends_button(
+                theme,
+                &locale,
+                on_friends,
+                friend_pending,
+            )))
             .child(self.render_section_header(theme, &locale))
             .child(
                 div()

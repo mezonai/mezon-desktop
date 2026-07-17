@@ -210,6 +210,13 @@ fn write_image(item: &Image) -> Result<()> {
             set_clipboard_bytes(&png_bytes, *CLIPBOARD_PNG_FORMAT)?;
         }
     }
+
+    // Also provide a CF_DIB copy so legacy apps (classic Paint, older Office) can paste.
+    if item.format != ImageFormat::Svg {
+        if let Some(dib_bytes) = convert_to_dib(item.bytes(), item.format) {
+            set_clipboard_bytes(&dib_bytes, CF_DIB.0 as u32)?;
+        }
+    }
     Ok(())
 }
 
@@ -224,6 +231,28 @@ fn convert_to_png(bytes: &[u8], format: ImageFormat) -> Option<Vec<u8>> {
         .map_err(|e| log::warn!("Failed to encode PNG: {e}"))
         .ok()?;
     Some(buf)
+}
+
+/// The `CF_DIB` clipboard payload is a packed DIB: a BMP file with its 14-byte
+/// `BITMAPFILEHEADER` stripped off. Legacy apps (classic Paint, older Office)
+/// paste from `CF_DIB` rather than the registered PNG format.
+const BMP_FILE_HEADER_LEN: usize = 14;
+
+fn convert_to_dib(bytes: &[u8], format: ImageFormat) -> Option<Vec<u8>> {
+    let img_format = gpui_to_image_format(format)?;
+    let image = image::load_from_memory_with_format(bytes, img_format)
+        .map_err(|e| log::warn!("Failed to decode image for DIB conversion: {e}"))
+        .ok()?;
+    let mut buf = Vec::new();
+    image::DynamicImage::ImageRgb8(image.to_rgb8())
+        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Bmp)
+        .map_err(|e| log::warn!("Failed to encode BMP: {e}"))
+        .ok()?;
+    if buf.len() > BMP_FILE_HEADER_LEN {
+        Some(buf.split_off(BMP_FILE_HEADER_LEN))
+    } else {
+        None
+    }
 }
 
 fn read_string() -> Option<ClipboardEntry> {

@@ -1,10 +1,7 @@
-use gpui::{
-    AnyElement, App, MouseButton, MouseDownEvent, SharedString, div, prelude::*, px, rgb, rgba,
-};
-use mezon_store::{Message, MessageCode};
+use gpui::{AnyElement, App, MouseButton, MouseDownEvent, div, prelude::*, px, rgb, rgba};
+use mezon_store::{Message, MessageCode, TopicsStore};
 
 use super::call_log_card::render_call_log_card;
-use super::coming_soon_toast;
 use super::content::render_message_content;
 use super::context::{
     AVATAR_LEFT, AVATAR_SIZE, CONTENT_INSET, CONTENT_RIGHT_PAD, DEFAULT_DISPLAY_NAME_COLOR, RowCtx,
@@ -126,7 +123,7 @@ pub fn render_user_message(
         body_column = body_column.child(render_embeds(msg, ctx));
     }
 
-    if msg.code == MessageCode::Topic {
+    if !ctx.is_topic_box && msg.code == MessageCode::Topic {
         body_column = body_column.child(render_topic_view_button(msg, ctx));
     }
 
@@ -175,13 +172,15 @@ pub fn render_user_message(
         .child(body_column);
 
     let hover_bg = theme.bg_hover;
+    let row_active = ctx.hovered_row == Some(msg.id) || ctx.context_menu_message == Some(msg.id);
     let highlighted = ctx.highlight_id.is_some_and(|id| id == msg.id);
     let reply_highlighted = !ephemeral && ctx.reply_highlight_id.is_some_and(|id| id == msg.id);
     let mentioned = !ephemeral
         && (msg.highlights_viewer_direct
             || mezon_store::message_row_highlight_roles(msg, ctx.current_role_ids));
     let mention_bg = theme.tokens.bg_highlight;
-    let show_combined_time = !show_head && ctx.hovered_row == Some(msg.id);
+    let show_combined_time =
+        !show_head && (ctx.hovered_row == Some(msg.id) || ctx.context_menu_message == Some(msg.id));
     let combined_time = msg.time_hhmm.clone();
     let context_menu_id = msg.id;
     let context_menu_host = ctx.video_host.clone();
@@ -219,7 +218,7 @@ pub fn render_user_message(
                 .p_3()
                 .rounded(px(8.))
                 .border_1()
-                .border_color(theme.tokens.border_theme_primary)
+                .border_color(theme.tokens.border_primary)
                 .bg(theme.tokens.bg_tertiary)
         })
         .when(ephemeral, |d| {
@@ -234,7 +233,8 @@ pub fn render_user_message(
             d.bg(rgba(REPLY_HIGHLIGHT_RGBA))
         })
         .when(highlighted, |d| d.bg(rgba(JUMP_HIGHLIGHT_RGBA)))
-        .when(interactive && !ctx.suppress_hover, |d| {
+        .when(row_active, |d| d.bg(hover_bg))
+        .when(interactive && !ctx.suppress_hover && !row_active, |d| {
             d.hover(move |s| s.bg(hover_bg))
         })
         .when(show_combined_time, |d| {
@@ -262,7 +262,7 @@ pub fn render_user_message(
             ))
         })
         .when(
-            msg.is_card && !ephemeral && msg.code != MessageCode::Topic,
+            !ctx.is_topic_box && msg.is_card && !ephemeral && msg.code != MessageCode::Topic,
             |d| d.child(render_go_to_topic_footer(msg, ctx)),
         )
         .into_any_element()
@@ -291,7 +291,7 @@ fn render_ephemeral_notice(ctx: &RowCtx) -> AnyElement {
 fn render_go_to_topic_footer(msg: &Message, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let hover_bg = theme.bg_hover;
-    let locale = SharedString::from(ctx.locale);
+    let message_id = msg.id;
     div()
         .id(("go-to-topic", msg.id.0 as usize))
         .flex()
@@ -308,7 +308,11 @@ fn render_go_to_topic_footer(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .border_color(theme.tokens.border_divider)
         .cursor_pointer()
         .hover(move |s| s.bg(hover_bg))
-        .on_click(move |_, _, cx| coming_soon_toast(&locale, cx))
+        .on_click(move |_, _, cx| {
+            TopicsStore::global(cx).update(cx, |store, cx| {
+                store.start_create_for_message(message_id, cx)
+            });
+        })
         .child(
             div()
                 .flex()
@@ -352,7 +356,7 @@ fn render_edit_box(
                 .mt(px(5.))
                 .rounded(px(8.))
                 .border_1()
-                .border_color(theme.tokens.border_theme_primary)
+                .border_color(theme.tokens.border_primary)
                 .bg(theme.tokens.bg_surface)
                 .child(input),
         )

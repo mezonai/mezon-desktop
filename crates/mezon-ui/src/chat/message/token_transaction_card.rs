@@ -85,7 +85,7 @@ pub fn render_token_transaction_card(msg: &Message, ctx: &RowCtx) -> AnyElement 
             div()
                 .w(px(CARD_WIDTH))
                 .border_1()
-                .border_color(theme.tokens.border_theme_primary)
+                .border_color(theme.tokens.border_primary)
                 .rounded(px(6.))
                 .bg(theme.tokens.theme_setting_primary)
                 .shadow_md()

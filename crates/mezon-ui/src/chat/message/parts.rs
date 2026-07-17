@@ -5,8 +5,9 @@ use gpui::{
     SharedString, Transformation, Window, div, img, prelude::*, px, radians, rems,
 };
 use mezon_store::{
-    AlbumLayout, AppConfig, ChannelType, Message, MessageAttachment, MessageCode, MessageId,
-    MessageReference, MessagesStore, PlatformStore, Reaction, ViewerMedia, resolve_avatar_url,
+    AlbumLayout, AppConfig, ChannelType, ClanMembersStore, Message, MessageAttachment, MessageCode,
+    MessageId, MessageReference, MessagesStore, PlatformStore, ProfileContext, Reaction,
+    TopicsStore, ViewerMedia, resolve_avatar_url,
 };
 use smallvec::SmallVec;
 
@@ -27,6 +28,40 @@ use crate::theme::Theme;
 const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
 const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 
+pub fn resolve_message_display_name(msg: &Message, ctx: &RowCtx, cx: &App) -> SharedString {
+    let user_id = msg
+        .sender_user_id
+        .or_else(|| msg.sender_id.parse().ok().map(mezon_store::UserId));
+    let clan_id = match ctx.profile_context {
+        Some(ProfileContext::Clan(clan_id)) => Some(clan_id),
+        _ => None,
+    };
+    if let Some(user_id) = user_id {
+        let key = (clan_id, user_id);
+        if let Some(cached) = ctx.row_memo.borrow().display_names.get(&key) {
+            return cached.clone();
+        }
+        let resolved = if let Some(clan_id) = clan_id {
+            ClanMembersStore::global(cx)
+                .read(cx)
+                .member(clan_id, user_id)
+                .map(|member| member.name())
+                .filter(|name| !name.is_empty())
+                .map(SharedString::from)
+                .unwrap_or_else(|| msg.sender_name.clone())
+        } else {
+            msg.sender_name.clone()
+        };
+        let mut memo = ctx.row_memo.borrow_mut();
+        if memo.display_names.len() >= 4096 {
+            memo.display_names.clear();
+        }
+        memo.display_names.insert(key, resolved.clone());
+        return resolved;
+    }
+    msg.sender_name.clone()
+}
+
 pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
     let is_anonymous = AppConfig::try_global(cx)
         .map(|config| {
@@ -34,8 +69,9 @@ pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
         })
         .unwrap_or(false);
     let (raw_url, proxied) = resolve_message_avatar_urls(msg, ctx, cx);
+    let display_name = resolve_message_display_name(msg, ctx, cx);
     let mut avatar = Avatar::new()
-        .name(msg.sender_name.clone())
+        .name(display_name)
         .with_size(Size::Small)
         .anonymous(is_anonymous)
         .image_cache(ctx.avatar_cache.clone());
@@ -99,23 +135,26 @@ pub fn render_head(msg: &Message, ctx: &RowCtx, name_color: u32) -> AnyElement {
     let time_label = {
         let mut memo = ctx.row_memo.borrow_mut();
         match memo.time_labels.get(&msg.id) {
-            Some(label) => label.clone(),
-            None => {
+            Some(label) if !label.is_empty() || msg.time_hhmm.is_empty() => label.clone(),
+            _ => {
                 let label =
                     format_message_time(&msg.time_hhmm, msg.local_date, ctx.locale, ctx.now);
-                if memo.time_labels.len() >= 4096 {
-                    memo.time_labels.clear();
+                if !label.is_empty() {
+                    if memo.time_labels.len() >= 4096 {
+                        memo.time_labels.clear();
+                    }
+                    memo.time_labels.insert(msg.id, label.clone());
                 }
-                memo.time_labels.insert(msg.id, label.clone());
                 label
             }
         }
     };
+    let display_name = resolve_message_display_name(msg, ctx, ctx.app);
     let name = div()
         .text_size(px(16.))
         .font_weight(FontWeight::MEDIUM)
         .text_color(gpui::rgb(name_color))
-        .child(msg.sender_name.clone());
+        .child(display_name);
     div()
         .flex()
         .flex_row()
@@ -491,7 +530,11 @@ fn render_audio(
             });
         },
         move |_, _, cx| {
-            mezon_store::download_url_with_dialog(download_url.clone(), download_name.clone(), cx)
+            crate::util::download::save_with_progress_toast(
+                download_url.clone(),
+                download_name.clone(),
+                cx,
+            )
         },
     )
 }
@@ -812,6 +855,7 @@ fn render_video_poster(
 ) -> AnyElement {
     let theme = ctx.theme;
     let url = SharedString::from(att.url.clone());
+    let filename = SharedString::from(att.filename.clone());
     let thumbnail = att.thumbnail_proxied.clone();
     let width = att.display_width;
     let height = att.display_height;
@@ -883,6 +927,7 @@ fn render_video_poster(
         .on_click(move |_, window, cx| {
             let activation = VideoActivation {
                 url: url.clone(),
+                filename: filename.clone(),
                 poster: thumbnail.clone(),
                 width,
                 height,
@@ -920,7 +965,7 @@ fn file_box_action(
         .rounded_md()
         .bg(theme.tokens.bg_theme_contexify)
         .border_1()
-        .border_color(theme.tokens.border_theme_primary)
+        .border_color(theme.tokens.border_primary)
         .cursor_pointer()
         .hover(|s| s.opacity(0.8))
         .on_click(on_click)
@@ -975,7 +1020,7 @@ fn render_file_box(
         .rounded_lg()
         .bg(theme.tokens.bg_item_theme_hover)
         .border_1()
-        .border_color(theme.tokens.border_theme_primary)
+        .border_color(theme.tokens.border_primary)
         .child(
             div()
                 .relative()
@@ -1051,7 +1096,7 @@ fn render_file_box(
                         IconName::Download,
                         theme,
                         move |_, _, cx| {
-                            mezon_store::download_url_with_dialog(
+                            crate::util::download::save_with_progress_toast(
                                 download_url.clone(),
                                 download_name.clone(),
                                 cx,
@@ -1122,7 +1167,9 @@ pub fn render_reactions(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
 }
 
 fn add_reaction_button(message_id: MessageId, ctx: &RowCtx) -> AnyElement {
-    let visible = !ctx.suppress_hover && ctx.hovered_row == Some(message_id);
+    let visible = !ctx.suppress_hover
+        && ctx.context_menu_message != Some(message_id)
+        && ctx.hovered_row == Some(message_id);
     let bg = ctx.theme.bg_tertiary;
     let bg_hover = ctx.theme.bg_hover;
     let icon_color = ctx.theme.text_muted;
@@ -1248,7 +1295,10 @@ pub fn render_hover_actions(
     is_different_day: bool,
     ctx: &RowCtx,
 ) -> AnyElement {
-    if ctx.suppress_hover || ctx.hovered_row != Some(msg.id) {
+    if ctx.suppress_hover
+        || ctx.context_menu_message == Some(msg.id)
+        || ctx.hovered_row != Some(msg.id)
+    {
         return div().into_any_element();
     }
     let theme = ctx.theme;
@@ -1289,13 +1339,19 @@ pub fn render_hover_actions(
     let sender_is_real = !msg.sender_id.is_empty() && msg.sender_id != "0";
     let is_own_message = ctx.current_user_id == msg.sender_id.as_str();
 
-    let show_topic = ctx.clan_id.is_some_and(|c| !c.is_zero()) && !is_topic_msg && !is_poll_msg;
+    let show_topic = !ctx.is_topic_box
+        && ctx.clan_id.is_some_and(|c| !c.is_zero())
+        && !is_topic_msg
+        && !is_poll_msg
+        && TopicsStore::can_create_topic(ctx.app)
+        && TopicsStore::message_allows_topic_discussion(msg);
     let show_edit = is_own_message
         && msg.code != MessageCode::SendToken
         && msg.code.is_user_timeline()
         && !is_poll_msg
         && !msg.is_forwarded;
-    let show_thread = ctx.channel_top_level
+    let show_thread = !ctx.is_topic_box
+        && ctx.channel_top_level
         && ctx.is_clan_owner
         && !is_poll_msg
         && ctx.channel_type != Some(ChannelType::Stream)
@@ -1367,11 +1423,12 @@ pub fn render_hover_actions(
         .bg(theme.tokens.bg_theme_contexify)
         .children(recent_emoji)
         .when(show_topic, |d| {
-            let coming_soon = coming_soon.clone();
+            let message_id = msg.id;
             d.child(
                 action("topic", IconName::TopicIcon, 24.).on_click(move |_, _, cx| {
-                    let coming_soon = coming_soon.clone();
-                    Shell::global(cx).update(cx, move |shell, cx| shell.info(coming_soon, cx));
+                    TopicsStore::global(cx).update(cx, |store, cx| {
+                        store.start_create_for_message(message_id, cx);
+                    });
                 }),
             )
         })
@@ -1384,10 +1441,16 @@ pub fn render_hover_actions(
             }),
         )
         .when(!is_own_message, |d| {
+            let is_topic = ctx.is_topic_box;
             d.child(
                 action("reply", IconName::Reply, 20.).on_click(move |_, _, cx| {
-                    MessagesStore::global(cx)
-                        .update(cx, |store, cx| store.set_reply_to(reply_id, cx));
+                    if is_topic {
+                        TopicsStore::global(cx)
+                            .update(cx, |store, cx| store.set_reply_to(reply_id, cx));
+                    } else {
+                        MessagesStore::global(cx)
+                            .update(cx, |store, cx| store.set_reply_to(reply_id, cx));
+                    }
                 }),
             )
         })

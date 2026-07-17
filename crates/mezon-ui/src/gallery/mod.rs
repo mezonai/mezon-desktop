@@ -17,6 +17,7 @@ use crate::theme::{ActiveTheme, Theme};
 
 const TILE: f32 = 144.0;
 const COLUMNS: usize = 3;
+const LIST_PAD_X: f32 = 16.;
 const LOAD_MORE_THRESHOLD: usize = 4;
 const DATE_FMT: &str = "%d/%m/%Y";
 const DATE_FILTER_TOP: f32 = 92.0;
@@ -536,8 +537,10 @@ impl Render for GalleryModal {
         } else {
             div()
                 .size_full()
-                .relative()
                 .overflow_hidden()
+                .pl(px(LIST_PAD_X))
+                .pr(px(LIST_PAD_X))
+                .pb(px(12.))
                 .image_cache(image_cache)
                 .child(
                     list(self.list_state.clone(), move |ix, _window, cx| {
@@ -613,8 +616,6 @@ impl Render for GalleryModal {
                     .flex()
                     .flex_col()
                     .overflow_hidden()
-                    .px_3()
-                    .pb_3()
                     .on_mouse_down(
                         MouseButton::Left,
                         move |_: &MouseDownEvent, _window, cx: &mut App| {

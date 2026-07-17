@@ -210,7 +210,7 @@ impl Render for ReportMessageModal {
                         .rounded_lg()
                         .bg(theme.tokens.bg_surface)
                         .border_1()
-                        .border_color(theme.tokens.border_theme_primary)
+                        .border_color(theme.tokens.border_primary)
                         .px_3()
                         .py_2()
                         .child(

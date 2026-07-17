@@ -180,7 +180,7 @@ pub fn render_invite_card(invite: &InvitePreview, ctx: &RowCtx) -> AnyElement {
         .overflow_hidden()
         .rounded_2xl()
         .border_1()
-        .border_color(theme.tokens.border_theme_primary)
+        .border_color(theme.tokens.border_primary)
         .bg(theme.tokens.bg_item_theme_hover)
         .child(banner)
         .child(
@@ -193,7 +193,7 @@ pub fn render_invite_card(invite: &InvitePreview, ctx: &RowCtx) -> AnyElement {
                 .overflow_hidden()
                 .rounded(px(22.))
                 .border_4()
-                .border_color(theme.tokens.border_theme_primary)
+                .border_color(theme.tokens.border_primary)
                 .bg(theme.tokens.theme_setting_primary)
                 .child(avatar_inner),
         )

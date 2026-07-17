@@ -400,6 +400,7 @@ pub struct ForwardMessageModal {
     locale: SharedString,
     message_ids: Vec<MessageId>,
     shared: SharedContent,
+    shared_summary: Option<SharedString>,
     options: Vec<ForwardOption>,
     filtered: Vec<usize>,
     scope: SearchScope,
@@ -467,20 +468,22 @@ impl ForwardMessageModal {
             });
             let search_sub = cx.subscribe(
                 &search_input,
-                |this: &mut Self, _input, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::Change) {
+                |this: &mut Self, _input, event: &InputEvent, cx| match event {
+                    InputEvent::Change => {
                         this.recompute_filtered(cx);
                         cx.notify();
                     }
+                    InputEvent::PressEnter => this.send(cx),
                 },
             );
             let note_sub = cx.subscribe(
                 &note_input,
-                |this: &mut Self, input, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::Change) {
+                |this: &mut Self, input, event: &InputEvent, cx| match event {
+                    InputEvent::Change => {
                         this.note_len = input.read(cx).value().trim().chars().count();
                         cx.notify();
                     }
+                    InputEvent::PressEnter => this.send(cx),
                 },
             );
             let channel_obs = cx.observe(&ChannelList::global(cx), |this: &mut Self, _, cx| {
@@ -511,10 +514,13 @@ impl ForwardMessageModal {
             let image_cache = crate::image_cache::shared_avatar_cache(cx);
             let options = build_options(cx);
             let filtered = (0..options.len().min(MAX_RESULTS)).collect();
+            let shared = build_shared_content(&message_ids, cx);
+            let shared_summary = shared.summary(&locale_for_labels);
             Self {
                 fingerprint: source_fingerprint(cx),
                 focus_handle: cx.focus_handle(),
-                shared: build_shared_content(&message_ids, cx),
+                shared,
+                shared_summary,
                 locale,
                 message_ids,
                 options,
@@ -814,7 +820,12 @@ impl Render for ForwardMessageModal {
             }));
 
         let shared = (!self.shared.is_empty()).then(|| {
-            render_shared_content(theme, &self.shared, &locale, self.label_shared.clone())
+            render_shared_content(
+                theme,
+                &self.shared,
+                self.shared_summary.clone(),
+                self.label_shared.clone(),
+            )
         });
 
         let note_label = div()
@@ -941,7 +952,7 @@ impl Render for ForwardMessageModal {
 fn render_shared_content(
     theme: &Theme,
     shared: &SharedContent,
-    locale: &str,
+    summary: Option<SharedString>,
     label: SharedString,
 ) -> AnyElement {
     let mut preview = div()
@@ -952,7 +963,7 @@ fn render_shared_content(
         .rounded_lg()
         .bg(theme.tokens.bg_surface)
         .border_1()
-        .border_color(theme.tokens.border_theme_primary)
+        .border_color(theme.tokens.border_primary)
         .p_3();
 
     if let Some(thumbnail) = shared.thumbnail.clone() {
@@ -1004,7 +1015,7 @@ fn render_shared_content(
                 .child(shared.text.clone()),
         );
     }
-    if let Some(summary) = shared.summary(locale) {
+    if let Some(summary) = summary {
         text_column = text_column.child(
             div()
                 .text_xs()

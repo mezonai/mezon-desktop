@@ -4,7 +4,7 @@ use gpui::{
     AnyElement, App, Context, Entity, ListState, SharedString, Subscription, Window, div, img,
     list, prelude::*, px,
 };
-use mezon_store::{AccountStore, ClanList, DirectMessageStore, Settings};
+use mezon_store::{AccountStore, ClanList, DirectMessageStore, FriendStore, Settings};
 use ui::Tooltip;
 
 use crate::app::shell::Shell;
@@ -16,6 +16,8 @@ use crate::theme::{ActiveTheme, Theme};
 mod clan_row;
 mod direct_unread_list;
 use clan_row::{ClanRow, render_clan_row, render_pill};
+
+use super::friend_request_badge;
 use direct_unread_list::{
     DirectUnreadListState, build_direct_unread_items, direct_unread_fingerprint,
 };
@@ -39,6 +41,7 @@ pub struct ClanSidebar {
     _settings_sub: Subscription,
     _router_sub: Subscription,
     _account_sub: Subscription,
+    _friend_sub: Subscription,
 }
 
 impl ClanSidebar {
@@ -74,6 +77,7 @@ impl ClanSidebar {
             this.sync_chrome(cx);
             cx.notify();
         });
+        let friend_sub = cx.observe(&FriendStore::global(cx), |_, _, cx| cx.notify());
         let router_sub = cx.observe(&Router::global(cx), |this, router, cx| {
             let router = router.read(cx);
             let new_dm_active = matches!(
@@ -131,6 +135,7 @@ impl ClanSidebar {
             _settings_sub: settings_sub,
             _router_sub: router_sub,
             _account_sub: account_sub,
+            _friend_sub: friend_sub,
         };
         let clan_list_handle = this.clan_list.clone();
         this.sync_rows(clan_list_handle.read(cx), cx);
@@ -225,6 +230,7 @@ impl Render for ClanSidebar {
         let clan_list_for_modal = self.clan_list.clone();
         let settings_for_modal = self.settings.clone();
         let home_logo = self.home_logo.clone();
+        let friend_pending = FriendStore::global(cx).read(cx).pending_incoming_count();
 
         let clan_count = rows.len();
         let list_element = list(list_state, move |ix, _window, cx| {
@@ -291,10 +297,24 @@ impl Render for ClanSidebar {
                             })
                             .child(render_pill(dm_active, "dm-group".into(), pill_color))
                             .child(
-                                img(home_logo)
+                                div()
+                                    .relative()
                                     .size(px(40.))
-                                    .rounded(px(8.))
-                                    .object_fit(gpui::ObjectFit::Cover),
+                                    .flex_none()
+                                    .child(
+                                        img(home_logo)
+                                            .size(px(40.))
+                                            .rounded(px(8.))
+                                            .object_fit(gpui::ObjectFit::Cover),
+                                    )
+                                    .when(friend_pending > 0, |el| {
+                                        el.child(
+                                            friend_request_badge(friend_pending, px(11.))
+                                                .absolute()
+                                                .bottom(px(-2.))
+                                                .right(px(-2.)),
+                                        )
+                                    }),
                             ),
                     )
                     .child(unread_list)

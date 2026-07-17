@@ -271,6 +271,7 @@ lsp-types            = { version = "0.97.0", features = ["proposed"] }
 profiling            = "1"
 chrono               = { version = "0.4", features = ["serde"] }
 cpal                 = "0.17.3"
+ogg                  = "0.9"
 rodio                = { git = "https://github.com/RustAudio/rodio", rev = "e50e726ddd0292f6ef9de0dda6b90af4ed1fb66a", default-features = false, features = ["playback"] }
 livekit              = { version = "0.7", features = ["rustls-tls-native-roots"] }
 flume                = "0.11"

@@ -21,6 +21,8 @@ const DOT_SIZE: Pixels = px(12.);
 const DOT_BORDER: Pixels = px(2.);
 const DOT_INNER: Pixels = px(8.);
 const STATUS_MAX_WIDTH: Pixels = px(100.);
+const STATUS_ICON_SIZE: Pixels = px(12.);
+const STATUS_ICON_GAP: Pixels = px(4.);
 const FALLBACK_WIDTH: Pixels = px(245.);
 
 type ClickHandler = Rc<dyn Fn(Point<Pixels>, &mut Window, &mut App)>;
@@ -35,6 +37,7 @@ pub struct MemberRowElement {
     dot_border: Hsla,
     owner_icon: Option<Hsla>,
     status: Option<(SharedString, Hsla)>,
+    status_icon: Option<(IconName, Hsla)>,
     on_click: Option<ClickHandler>,
     on_right_click: Option<RightClickHandler>,
 }
@@ -50,6 +53,7 @@ impl MemberRowElement {
             dot_border: gpui::black(),
             owner_icon: None,
             status: None,
+            status_icon: None,
             on_click: None,
             on_right_click: None,
         }
@@ -73,6 +77,11 @@ impl MemberRowElement {
 
     pub fn status(mut self, status: Option<(SharedString, Hsla)>) -> Self {
         self.status = status;
+        self
+    }
+
+    pub fn status_icon(mut self, icon: Option<(IconName, Hsla)>) -> Self {
+        self.status_icon = icon;
         self
     }
 
@@ -178,13 +187,14 @@ impl Element for MemberRowElement {
 
         if let Some(handler) = self.on_click.clone() {
             let hitbox_down = hitbox.clone();
+            let avatar_anchor = bounds.origin;
             window.on_mouse_event(
                 move |event: &MouseDownEvent, phase, window: &mut Window, cx: &mut App| {
                     if phase == DispatchPhase::Bubble
                         && hitbox_down.is_hovered(window)
                         && event.button == MouseButton::Left
                     {
-                        handler(event.position, window, cx);
+                        handler(avatar_anchor, window, cx);
                     }
                 },
             );
@@ -276,6 +286,25 @@ impl Element for MemberRowElement {
         }
 
         if let Some((text, color)) = self.status.clone() {
+            let mut status_text_x = left + text_x;
+            if let Some((icon, icon_color)) = self.status_icon {
+                let icon_bounds = Bounds {
+                    origin: point(
+                        status_text_x,
+                        status_y + (status_line_height - STATUS_ICON_SIZE) / 2.,
+                    ),
+                    size: size(STATUS_ICON_SIZE, STATUS_ICON_SIZE),
+                };
+                let _ = window.paint_svg(
+                    icon_bounds,
+                    icon.path().into(),
+                    None,
+                    TransformationMatrix::default(),
+                    icon_color,
+                    cx,
+                );
+                status_text_x += STATUS_ICON_SIZE + STATUS_ICON_GAP;
+            }
             let mut status_run = window.text_style().to_run(text.len());
             status_run.color = color;
             let status_line = text_system.shape_line(text, STATUS_FONT_SIZE, &[status_run], None);
@@ -287,7 +316,7 @@ impl Element for MemberRowElement {
             };
             window.with_content_mask(Some(status_clip), |window| {
                 let _ = status_line.paint(
-                    point(left + text_x, status_y),
+                    point(status_text_x, status_y),
                     status_line_height,
                     TextAlign::Left,
                     None,

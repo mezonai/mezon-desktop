@@ -87,7 +87,7 @@ pub fn render_embed_card(embed: &Embed, ctx: &RowCtx) -> AnyElement {
         .overflow_hidden()
         .bg(theme.tokens.theme_setting_primary)
         .border_1()
-        .border_color(theme.tokens.border_theme_primary)
+        .border_color(theme.tokens.border_primary)
         .text_color(theme.tokens.text_theme_message)
         .shadow_sm()
         .when_some(embed.accent, |d, accent| {

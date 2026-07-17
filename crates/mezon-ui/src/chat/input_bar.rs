@@ -2,12 +2,20 @@ use crate::chat::{MentionInput, ReplyTarget};
 use crate::components::primitives::{Icon, IconName};
 use crate::theme::{ActiveTheme, Theme};
 use gpui::{Context, Entity, Render, SharedString, Subscription, Window, div, prelude::*, px};
-use mezon_store::{MessagesStore, Settings};
+use mezon_store::{MessagesStore, Settings, TopicsStore};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReplyClearSource {
+    #[default]
+    Messages,
+    Topics,
+}
 
 pub struct InputBar {
     mention_input: Entity<MentionInput>,
     locale: SharedString,
     replying_to: Option<ReplyTarget>,
+    reply_clear: ReplyClearSource,
     _settings_observe: Subscription,
 }
 
@@ -23,20 +31,36 @@ impl InputBar {
             mention_input,
             locale,
             replying_to: None,
+            reply_clear: ReplyClearSource::Messages,
             _settings_observe: settings_observe,
         }
     }
 
-    pub fn sync(&mut self, locale: &str, replying_to: Option<ReplyTarget>, cx: &mut Context<Self>) {
-        if self.locale.as_ref() == locale && self.replying_to == replying_to {
+    pub fn sync(
+        &mut self,
+        locale: &str,
+        replying_to: Option<ReplyTarget>,
+        reply_clear: ReplyClearSource,
+        cx: &mut Context<Self>,
+    ) {
+        if self.locale.as_ref() == locale
+            && self.replying_to == replying_to
+            && self.reply_clear == reply_clear
+        {
             return;
         }
         self.locale = SharedString::from(locale.to_string());
         self.replying_to = replying_to;
+        self.reply_clear = reply_clear;
         cx.notify();
     }
 
-    fn reply_preview_bar(theme: &Theme, locale: &str, target: &ReplyTarget) -> impl IntoElement {
+    fn reply_preview_bar(
+        theme: &Theme,
+        locale: &str,
+        target: &ReplyTarget,
+        reply_clear: ReplyClearSource,
+    ) -> impl IntoElement {
         div()
             .id("reply-preview-bar")
             .flex()
@@ -74,8 +98,13 @@ impl InputBar {
                     .size_5()
                     .cursor_pointer()
                     .hover(|s| s.opacity(0.7))
-                    .on_click(|_, _window, cx| {
-                        MessagesStore::global(cx).update(cx, |store, cx| store.clear_reply(cx));
+                    .on_click(move |_, _window, cx| match reply_clear {
+                        ReplyClearSource::Messages => {
+                            MessagesStore::global(cx).update(cx, |store, cx| store.clear_reply(cx));
+                        }
+                        ReplyClearSource::Topics => {
+                            TopicsStore::global(cx).update(cx, |store, cx| store.clear_reply(cx));
+                        }
                     })
                     .child(
                         Icon::new(IconName::Close)
@@ -87,6 +116,7 @@ impl InputBar {
 
     fn render_bar(&self, theme: &Theme) -> impl IntoElement {
         let replying = self.replying_to.is_some();
+        let reply_clear = self.reply_clear;
         div()
             .flex()
             .flex_col()
@@ -95,7 +125,12 @@ impl InputBar {
             .px_3()
             .pb_1()
             .when_some(self.replying_to.as_ref(), |d, target| {
-                d.child(Self::reply_preview_bar(theme, &self.locale, target))
+                d.child(Self::reply_preview_bar(
+                    theme,
+                    &self.locale,
+                    target,
+                    reply_clear,
+                ))
             })
             .child(
                 div()

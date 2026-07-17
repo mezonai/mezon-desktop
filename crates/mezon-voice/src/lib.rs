@@ -242,6 +242,7 @@ fn room_options(ice_servers: Vec<IceServerConfig>) -> RoomOptions {
 
     let mut options = RoomOptions::default();
     options.rtc_config.ice_servers = ice_servers;
+    options.single_peer_connection = false;
     options
 }
 

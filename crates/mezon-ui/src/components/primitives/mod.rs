@@ -23,6 +23,7 @@ mod toast;
 mod tooltip;
 
 pub use avatar::Avatar;
+pub(crate) use avatar::{avatar_color, name_initials};
 pub use badge::Badge;
 pub use button::{Button, ButtonVariant, ButtonVariants};
 pub use checkbox::{Checkbox, Radio};

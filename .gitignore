@@ -38,9 +38,11 @@ scripts/*
 !scripts/perf-monitor-macos.sh
 !scripts/perf-monitor-windows.ps1
 !scripts/perf-compare.sh
+# Must be committed: the fmt scope lives here, and both the pre-commit hook and
 # the CI Format job execute it. If this is ignored, CI fails with "No such file".
 !scripts/fmt.sh
 
+# Must be committed: `just run`/`watch`/`tracy`/`release` source it under
 # `set -euo pipefail`. It holds no secrets — it only sources .env when present.
 !scripts/load-env.sh
 

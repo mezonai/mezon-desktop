@@ -184,7 +184,7 @@ impl Render for PollDetailModal {
             .gap_2()
             .p_4()
             .border_b_1()
-            .border_color(theme.tokens.border_theme_primary)
+            .border_color(theme.tokens.border_primary)
             .child(
                 div()
                     .flex()

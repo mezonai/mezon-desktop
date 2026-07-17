@@ -445,12 +445,7 @@ impl Render for MessageSearchPanel {
             .flex_row()
             .h_full()
             .flex_shrink_0()
-            .child(
-                div()
-                    .w(px(1.))
-                    .h_full()
-                    .bg(theme.tokens.border_theme_primary),
-            )
+            .child(div().w(px(1.)).h_full().bg(theme.tokens.border_primary))
             .child(
                 div()
                     .track_focus(&self.focus_handle)
@@ -474,7 +469,7 @@ impl Render for MessageSearchPanel {
                             .h(px(56.))
                             .px_4()
                             .border_b_1()
-                            .border_color(theme.tokens.border_theme_primary)
+                            .border_color(theme.tokens.border_primary)
                             .bg(theme.bg_secondary)
                             .child(
                                 div()
@@ -585,7 +580,7 @@ fn render_pagination_nav_button(
         .justify_center()
         .rounded_md()
         .border_1()
-        .border_color(theme.tokens.border_theme_primary)
+        .border_color(theme.tokens.border_primary)
         .when(disabled, |el| {
             el.bg(theme.tokens.bg_tertiary)
                 .opacity(50.)
@@ -615,7 +610,7 @@ fn render_pagination_page_button(
         .justify_center()
         .rounded_md()
         .border_1()
-        .border_color(theme.tokens.border_theme_primary)
+        .border_color(theme.tokens.border_primary)
         .when(active, |el| {
             el.bg(theme.tokens.bg_active_button)
                 .text_color(theme.tokens.color_text_active_button)
@@ -1313,7 +1308,7 @@ pub fn render_header_search_bar(
                 .flex_shrink_0()
                 .rounded_lg()
                 .border_1()
-                .border_color(theme.tokens.border_theme_primary)
+                .border_color(theme.tokens.border_primary)
                 .bg(theme.tokens.bg_surface)
                 .px_2()
                 .cursor_pointer()
@@ -1396,7 +1391,7 @@ fn render_search_options(
         div()
             .p_3()
             .border_b_1()
-            .border_color(theme.tokens.border_theme_primary)
+            .border_color(theme.tokens.border_primary)
             .child(
                 div()
                     .flex()
@@ -1516,7 +1511,7 @@ fn render_search_options(
         .overflow_hidden()
         .shadow_lg()
         .border_1()
-        .border_color(theme.tokens.border_theme_primary)
+        .border_color(theme.tokens.border_primary)
         .text_color(theme.tokens.text_theme_primary)
         .child(
             div()
@@ -1573,7 +1568,7 @@ fn render_default_search_options(
         .mx_3()
         .mt_3()
         .border_b_1()
-        .border_color(theme.tokens.border_theme_primary)
+        .border_color(theme.tokens.border_primary)
         .pb_3()
         .child(
             div().flex().items_center().pb_2().px_2().child(
@@ -1666,7 +1661,7 @@ fn render_member_suggestions(
         .mx_3()
         .mt_3()
         .border_b_1()
-        .border_color(theme.tokens.border_theme_primary)
+        .border_color(theme.tokens.border_primary)
         .pb_3()
         .child(
             div().flex().items_center().pb_2().px_2().child(
@@ -1754,7 +1749,7 @@ fn render_has_suggestions(
         .mx_3()
         .mt_3()
         .border_b_1()
-        .border_color(theme.tokens.border_theme_primary)
+        .border_color(theme.tokens.border_primary)
         .pb_3()
         .child(
             div().flex().items_center().pb_2().px_2().child(

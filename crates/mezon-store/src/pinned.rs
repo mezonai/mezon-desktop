@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use gpui::{App, AppContext, Context, Entity, Global, SharedString, Subscription, Task};
+use gpui::{
+    App, AppContext, Context, Entity, EventEmitter, Global, SharedString, Subscription, Task,
+};
 use mezon_client::AppApi;
 use mezon_client::ConnectionStatus;
 use mezon_client::RealtimeEvent;
@@ -8,11 +10,10 @@ use mezon_client::transport::ApiPinMessage;
 use mezon_proto::realtime::LastPinMessageEvent;
 
 use crate::AppConfig;
-use crate::channel::{ChannelEvent, ChannelList};
 use crate::ids::{ChannelId, ClanId};
+use crate::messages::{MessagesEvent, MessagesStore};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
-/// A pinned message for the active channel, ready for the UI.
 #[derive(Debug, Clone)]
 pub struct PinnedMessage {
     pub id: String,
@@ -25,6 +26,11 @@ pub struct PinnedMessage {
     pub create_time: i64,
 }
 
+#[derive(Debug, Clone)]
+pub enum PinnedEvent {
+    OpenPopoverRequested,
+}
+
 pub struct PinnedMessagesStore {
     channel_id: Option<String>,
     clan_id: Option<String>,
@@ -32,12 +38,14 @@ pub struct PinnedMessagesStore {
     loaded_channel: Option<String>,
     loading: bool,
     api: Arc<AppApi>,
-    _channel_sub: Subscription,
+    _messages_sub: Subscription,
     _conn_watch: Task<()>,
 }
 
 struct GlobalPinnedMessagesStore(Entity<PinnedMessagesStore>);
 impl Global for GlobalPinnedMessagesStore {}
+
+impl EventEmitter<PinnedEvent> for PinnedMessagesStore {}
 
 impl PinnedMessagesStore {
     pub fn init(api: Arc<AppApi>, cx: &mut App) -> Entity<Self> {
@@ -67,9 +75,9 @@ impl PinnedMessagesStore {
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
 
-        let channel_sub = cx.subscribe(&ChannelList::global(cx), |this, _list, event, cx| {
-            if let ChannelEvent::ActiveChannelChanged(channel_id) = event {
-                this.on_active_channel_changed(*channel_id, cx);
+        let messages_sub = cx.subscribe(&MessagesStore::global(cx), |this, store, event, cx| {
+            if matches!(event, MessagesEvent::Reset { .. }) {
+                this.sync_from_messages(&store, cx);
             }
         });
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
@@ -80,13 +88,10 @@ impl PinnedMessagesStore {
             loaded_channel: None,
             loading: false,
             api,
-            _channel_sub: channel_sub,
+            _messages_sub: messages_sub,
             _conn_watch: conn_watch,
         };
-        if let Some(channel) = ChannelList::global(cx).read(cx).active_channel() {
-            store.channel_id = Some(channel.id.to_string());
-            store.clan_id = Some(channel.clan_id.to_string());
-        }
+        store.sync_from_messages(&MessagesStore::global(cx), cx);
         store
     }
 
@@ -140,31 +145,32 @@ impl PinnedMessagesStore {
         self.clan_id
             .as_ref()
             .and_then(|id| id.parse::<ClanId>().ok())
+            .filter(|id| !id.is_zero())
     }
 
-    fn on_active_channel_changed(&mut self, channel_id: Option<ChannelId>, cx: &mut Context<Self>) {
-        match channel_id {
-            None => {
-                self.channel_id = None;
-                self.clan_id = None;
-            }
-            Some(id) => {
-                let clan_id = ChannelList::global(cx)
-                    .read(cx)
-                    .find_channel_in_active_clan(id)
-                    .map(|c| c.clan_id)
-                    .filter(|clan_id| !clan_id.is_zero())
-                    .unwrap_or(ClanId(0));
-                self.channel_id = Some(id.to_string());
-                self.clan_id = Some(clan_id.to_string());
-            }
+    pub fn channel_id(&self) -> Option<ChannelId> {
+        self.channel_id
+            .as_ref()
+            .and_then(|id| id.parse::<ChannelId>().ok())
+    }
+
+    fn sync_from_messages(&mut self, store: &Entity<MessagesStore>, cx: &mut Context<Self>) {
+        let (channel_id, clan_id) = {
+            let messages = store.read(cx);
+            context_from_active(messages.active_channel_id(), messages.active_clan_id())
+        };
+        if self.channel_id == channel_id && self.clan_id == clan_id {
+            return;
         }
+        self.channel_id = channel_id;
+        self.clan_id = clan_id;
         self.messages.clear();
         self.loaded_channel = None;
         cx.notify();
     }
 
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
+        self.sync_from_messages(&MessagesStore::global(cx), cx);
         let Some(channel_id) = self.channel_id.clone() else {
             return;
         };
@@ -172,6 +178,10 @@ impl PinnedMessagesStore {
             return;
         }
         self.fetch(cx);
+    }
+
+    pub fn request_open_popover(&mut self, cx: &mut Context<Self>) {
+        cx.emit(PinnedEvent::OpenPopoverRequested);
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -363,6 +373,16 @@ fn parse_pin_create_time(raw: &str) -> i64 {
         .unwrap_or_else(|_| chrono::Utc::now().timestamp())
 }
 
+fn context_from_active(
+    channel_id: Option<ChannelId>,
+    clan_id: Option<ClanId>,
+) -> (Option<String>, Option<String>) {
+    (
+        channel_id.map(|id| id.to_string()),
+        clan_id.map(|id| id.to_string()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,5 +390,26 @@ mod tests {
     #[test]
     fn parse_pin_create_time_unix() {
         assert_eq!(parse_pin_create_time("1710000000"), 1710000000);
+    }
+
+    #[test]
+    fn context_from_active_dm_keeps_clan_id_zero() {
+        assert_eq!(
+            context_from_active(Some(ChannelId(9)), Some(ClanId(0))),
+            (Some("9".into()), Some("0".into())),
+        );
+    }
+
+    #[test]
+    fn context_from_active_clan_channel() {
+        assert_eq!(
+            context_from_active(Some(ChannelId(3)), Some(ClanId(7))),
+            (Some("3".into()), Some("7".into())),
+        );
+    }
+
+    #[test]
+    fn context_from_active_cleared() {
+        assert_eq!(context_from_active(None, None), (None, None));
     }
 }

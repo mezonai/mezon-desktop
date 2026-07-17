@@ -528,7 +528,7 @@ fn append_span(
                 .p_3()
                 .rounded_lg()
                 .border_1()
-                .border_color(theme.tokens.border_theme_primary)
+                .border_color(theme.tokens.border_primary)
                 .bg(theme.tokens.bg_markdown_code)
                 .text_size(px(14.))
                 .text_color(theme.tokens.text_theme_message)
@@ -539,10 +539,16 @@ fn append_span(
         }
         MessageSpan::Link { text, url, .. } => {
             let resolved = SharedString::from(resolve_link_url(url, text));
-            for child in link_to_wrap_segments(text, resolved, theme.tokens.mention_color) {
-                row = row.child(child);
-            }
-            row
+            let segments = link_to_wrap_segments(text, resolved, theme.tokens.mention_color);
+            row.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_baseline()
+                    .min_w_0()
+                    .children(segments),
+            )
         }
         MessageSpan::Mention {
             display,
@@ -699,8 +705,8 @@ fn render_emoji_span(
             .into_any_element();
     }
     img(src)
-        .h(size)
-        .max_w(size)
+        .size(size)
+        .flex_none()
         .object_fit(ObjectFit::Contain)
         .with_fallback(super::reaction_detail::emoji_error_fallback(
             size,

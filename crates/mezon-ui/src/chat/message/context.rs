@@ -57,10 +57,13 @@ pub struct RowCtx<'a> {
     pub welcome: Option<WelcomeContext>,
     pub onboarding: Option<OnboardingContext>,
     pub suppress_hover: bool,
+    pub is_topic_box: bool,
     pub scroll_active: bool,
     /// Message whose hover toolbar should show, after the React-style hover-intent
     /// delay (fast mouse sweeps never latch it). `None` = no toolbar visible.
     pub hovered_row: Option<MessageId>,
+    /// Message with an open context menu — keeps row highlight/toolbar latched.
+    pub context_menu_message: Option<MessageId>,
     pub avatar_cache: Entity<LruImageCache>,
     pub large_avatar_cache: Entity<LruImageCache>,
     pub unread_boundary_id: Option<MessageId>,
@@ -100,6 +103,8 @@ pub struct RowMemo {
     /// failed resolution so the per-message fallback is used without a
     /// store lookup every frame.
     pub avatars: HashMap<UserId, Option<(SharedString, SharedString)>>,
+    /// (clan, sender) -> resolved display name for head/avatar rows.
+    pub display_names: HashMap<(Option<ClanId>, UserId), SharedString>,
     /// message -> formatted head time label ("14:03" / "Yesterday at 14:03").
     pub time_labels: HashMap<MessageId, SharedString>,
     pub rich_text: HashMap<MessageId, RichTextRenderPlan>,

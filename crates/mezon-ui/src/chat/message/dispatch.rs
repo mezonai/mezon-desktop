@@ -40,7 +40,7 @@ pub fn render_message_item(messages: &[Message], ix: usize, ctx: &RowCtx, cx: &A
         stack = stack.child(render_date_divider(ctx.theme, &label));
     }
     if show_unread_break {
-        stack = stack.child(render_unread_break(ctx.theme, ctx.locale));
+        stack = stack.child(render_unread_break(ctx.locale));
     }
     stack.child(row).into_any_element()
 }

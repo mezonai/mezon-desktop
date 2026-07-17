@@ -354,6 +354,7 @@ impl ImageViewer {
         let (width, height) = video_display_size(att);
         let activation = VideoActivation {
             url: url.clone().into(),
+            filename: SharedString::from(att.filename.clone()),
             poster: SharedString::default(),
             width,
             height,
@@ -803,7 +804,7 @@ impl ImageViewer {
         let Some(att) = self.current() else {
             return;
         };
-        mezon_store::download_url_with_dialog(
+        crate::util::download::save_with_progress_toast(
             SharedString::from(att.url.clone()),
             SharedString::from(att.filename.clone()),
             cx,

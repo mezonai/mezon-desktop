@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Context, DismissEvent, Entity, Focusable, FontWeight, Hsla, Pixels, Point,
-    SharedString, Subscription, Task, UniformListScrollHandle, WeakEntity, Window, anchored,
+    Anchor, AnyElement, App, Context, DismissEvent, Entity, Focusable, FontWeight, Hsla, Pixels,
+    Point, SharedString, Subscription, Task, UniformListScrollHandle, WeakEntity, Window, anchored,
     deferred, div, prelude::*, px, rgb, size, uniform_list,
 };
 use mezon_store::{
@@ -16,7 +16,7 @@ use ui::utils::ROUNDED_BORDER_WINDOW;
 use crate::app::shell::Shell;
 use crate::chat::member_row_element::MemberRowElement;
 use crate::chat::user_profile_popover::UserProfilePopover;
-use crate::components::primitives::{Avatar, ContextMenu, context_menu_at};
+use crate::components::primitives::{Avatar, ContextMenu, IconName, context_menu_at};
 use crate::image_cache::LruImageCache;
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
@@ -56,6 +56,7 @@ struct MemberRow {
     avatar_raw: SharedString,
     online: bool,
     user_status: SharedString,
+    in_voice: bool,
     is_owner: bool,
     rcm_id: SharedString,
 }
@@ -66,6 +67,7 @@ struct RawMember {
     avatar_raw: String,
     online: bool,
     user_status: String,
+    in_voice: bool,
 }
 
 struct ProfilePopoverState {
@@ -156,7 +158,10 @@ impl MemberListPanel {
                 );
                 subs.push(
                     cx.subscribe(&ChannelList::global(cx), |this, _, event, cx| {
-                        if let ChannelEvent::ActiveChannelChanged(_) = event {
+                        if matches!(
+                            event,
+                            ChannelEvent::ActiveChannelChanged(_) | ChannelEvent::InVoiceChanged
+                        ) {
                             this.rebuild(cx);
                         }
                     }),
@@ -478,6 +483,8 @@ fn channel_raw_members(cx: &App, ctx: ChannelContext) -> (Vec<RawMember>, Vec<Ra
     let online = &presence.user_online;
     let store = ClanMembersStore::global(cx);
     let store = store.read(cx);
+    let channel_list = ChannelList::global(cx);
+    let channels = channel_list.read(cx);
     let pool: Vec<&ClanMember> = match &ctx.filter_ids {
         Some(ids) => ids
             .iter()
@@ -495,6 +502,7 @@ fn channel_raw_members(cx: &App, ctx: ChannelContext) -> (Vec<RawMember>, Vec<Ra
                 avatar_raw: member.avatar().to_string(),
                 online: is_online,
                 user_status: presence.user_status(member.id()).unwrap_or("").to_string(),
+                in_voice: is_online && channels.in_voice_status(member.id()).is_some(),
             })
             .collect()
     };
@@ -517,6 +525,7 @@ fn group_raw_members(cx: &App, direct_id: ChannelId) -> Vec<RawMember> {
             avatar_raw: member.avatar().to_string(),
             online: member.online || presence_online.contains(&member.id()),
             user_status: presence.user_status(member.id()).unwrap_or("").to_string(),
+            in_voice: false,
         })
         .collect()
 }
@@ -730,6 +739,7 @@ fn make_member_row(cx: &App, raw: RawMember, owner_id: Option<UserId>) -> Row {
         avatar_raw: raw.avatar_raw.into(),
         online: raw.online,
         user_status: single_line(raw.user_status).into(),
+        in_voice: raw.in_voice,
         is_owner: owner_id == Some(raw.user_id),
     })
 }
@@ -784,6 +794,7 @@ fn render_member_skeleton(theme: &Theme, ix: usize) -> AnyElement {
 fn render_member(
     theme: &Theme,
     member: &MemberRow,
+    in_voice_label: &SharedString,
     avatar_image_cache: &Entity<LruImageCache>,
     small_avatar_image_cache: &Entity<LruImageCache>,
     context: Option<ProfileContext>,
@@ -820,10 +831,20 @@ fn render_member(
     let dot_border = dim(theme.bg_secondary.into());
     let name_color = dim(rgb(DEFAULT_ROLE_COLOR).into());
     let owner_icon = member.is_owner.then(|| dim(rgb(0xF0B132).into()));
-    let status = (!member.user_status.is_empty()).then(|| {
+    let status_color = {
         let mut color: Hsla = theme.text_primary.into();
         color.a *= 0.6;
-        (member.user_status.clone(), dim(color))
+        color
+    };
+    let status = if member.in_voice {
+        Some((in_voice_label.clone(), status_color))
+    } else {
+        (!member.user_status.is_empty()).then(|| (member.user_status.clone(), dim(status_color)))
+    };
+    let status_icon = member.in_voice.then(|| {
+        let mut green: Hsla = rgb(0x22c55e).into();
+        green.a *= 0.6;
+        (IconName::Speaker, green)
     });
 
     let user_id = member.user_id;
@@ -834,6 +855,7 @@ fn render_member(
         .dot(dot_fill, dot_border)
         .owner_icon(owner_icon)
         .status(status)
+        .status_icon(status_icon)
         .on_right_click({
             let panel = panel.clone();
             move |position, _window, cx| {
@@ -934,6 +956,7 @@ impl Render for MemberListPanel {
             .as_ref()
             .map(|state| (state.popover.clone(), state.position));
 
+        let in_voice_label: SharedString = mezon_i18n::t(&locale, "memberPage.inVoice").into();
         let list = uniform_list("member-list", count, move |range, _window, cx| {
             let theme = cx.theme().clone();
             let locale = locale.clone();
@@ -946,6 +969,7 @@ impl Render for MemberListPanel {
                     Some(Row::Member(member)) => render_member(
                         &theme,
                         member,
+                        &in_voice_label,
                         &avatar_image_cache,
                         &small_avatar_image_cache,
                         context,
@@ -987,7 +1011,11 @@ impl Render for MemberListPanel {
             )
             .when_some(profile_overlay, |el, (popover, pos)| {
                 el.child(deferred(
-                    anchored().position(pos).snap_to_window().child(popover),
+                    anchored()
+                        .position(pos)
+                        .anchor(Anchor::TopRight)
+                        .snap_to_window()
+                        .child(popover),
                 ))
             })
     }

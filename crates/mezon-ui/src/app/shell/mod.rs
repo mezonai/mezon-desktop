@@ -27,9 +27,11 @@ const TOAST_TTL: Duration = Duration::from_secs(4);
 
 struct ToastItem {
     id: usize,
+    key: Option<SharedString>,
     message: SharedString,
     kind: ToastKind,
-    _ttl: Task<()>,
+    progress: Option<f32>,
+    _ttl: Option<Task<()>>,
 }
 
 /// Owns the window-level overlay layers (toasts + active modal). Registered as a [`Global`].
@@ -77,11 +79,59 @@ impl Shell {
         });
         self.toasts.push(ToastItem {
             id,
+            key: None,
             message: message.into(),
             kind,
-            _ttl: ttl,
+            progress: None,
+            _ttl: Some(ttl),
         });
         cx.notify();
+    }
+
+    /// Show or update a keyed progress toast. It does not auto-dismiss; call
+    /// [`Shell::finish_toast`] with the same key when the operation completes.
+    pub fn progress_toast(
+        &mut self,
+        key: impl Into<SharedString>,
+        message: impl Into<SharedString>,
+        progress: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let key = key.into();
+        let message = message.into();
+        if let Some(item) = self
+            .toasts
+            .iter_mut()
+            .find(|t| t.key.as_ref() == Some(&key))
+        {
+            item.message = message;
+            item.progress = Some(progress.clamp(0., 1.));
+        } else {
+            let id = self.next_id;
+            self.next_id = self.next_id.wrapping_add(1);
+            self.toasts.push(ToastItem {
+                id,
+                key: Some(key),
+                message,
+                kind: ToastKind::Info,
+                progress: Some(progress.clamp(0., 1.)),
+                _ttl: None,
+            });
+        }
+        cx.notify();
+    }
+
+    /// Replace a keyed progress toast with a normal auto-dismissing toast.
+    pub fn finish_toast(
+        &mut self,
+        key: impl Into<SharedString>,
+        kind: ToastKind,
+        message: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let key = key.into();
+        self.toasts.retain(|t| t.key.as_ref() != Some(&key));
+        self.toast(kind, message, cx);
     }
 
     pub fn info(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
@@ -244,10 +294,10 @@ impl Shell {
     pub fn render_overlay(&self) -> impl IntoElement {
         let modal = self.modal.clone();
         let has_toasts = !self.toasts.is_empty();
-        let toasts: Vec<(SharedString, ToastKind)> = self
+        let toasts: Vec<(SharedString, ToastKind, Option<f32>)> = self
             .toasts
             .iter()
-            .map(|t| (t.message.clone(), t.kind))
+            .map(|t| (t.message.clone(), t.kind, t.progress))
             .collect();
 
         div()
@@ -285,11 +335,9 @@ impl Shell {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .children(
-                            toasts
-                                .into_iter()
-                                .map(|(message, kind)| Toast::new(message).kind(kind)),
-                        ),
+                        .children(toasts.into_iter().map(|(message, kind, progress)| {
+                            Toast::new(message).kind(kind).progress(progress)
+                        })),
                 ))
             })
     }

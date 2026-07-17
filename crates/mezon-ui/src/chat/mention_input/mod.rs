@@ -1,4 +1,5 @@
 mod attachments;
+mod recorder;
 mod text_field;
 
 use std::cell::Cell;
@@ -7,22 +8,23 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, Bounds, Context, DismissEvent, Div, Entity, EventEmitter, Focusable,
-    FontWeight, Image, ImageFormat, IntoElement, KeyBinding, PathPromptOptions, Pixels, Rgba,
-    ScrollStrategy, SharedString, Stateful, Subscription, UniformListScrollHandle, Window, actions,
-    canvas, deferred, div, img, prelude::*, px, uniform_list,
+    FontWeight, Image, ImageFormat, IntoElement, KeyBinding, MouseButton, PathPromptOptions,
+    Pixels, Rgba, ScrollStrategy, SharedString, Stateful, Subscription, UniformListScrollHandle,
+    Window, actions, canvas, deferred, div, img, prelude::*, px, uniform_list,
 };
 use mezon_store::{
-    AccountEvent, AccountStore, Channel, ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent,
-    ChannelMembersStore, ClanList, ClanMembersEvent, ClanMembersStore, DirectEvent,
-    DirectMessageStore, Emoji, EmojiEvent, EmojiStore, GroupMembersEvent, GroupMembersStore,
-    MENTION_HERE_ID, MessageSpan, OutgoingAttachment, OutgoingContent, OutgoingEmoji,
-    OutgoingHashtag, OutgoingMention, RolesEvent, RolesStore, Settings,
+    AccountEvent, AccountStore, AudioStore, Channel, ChannelEvent, ChannelId, ChannelList,
+    ChannelMembersEvent, ChannelMembersStore, ClanList, ClanMembersEvent, ClanMembersStore,
+    DirectEvent, DirectMessageStore, Emoji, EmojiEvent, EmojiStore, GroupMembersEvent,
+    GroupMembersStore, MENTION_HERE_ID, MessageSpan, OutgoingAttachment, OutgoingContent,
+    OutgoingEmoji, OutgoingHashtag, OutgoingMention, RolesEvent, RolesStore, Settings,
 };
 
 use attachments::{
     AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, build_pending, mime_from_extension,
     validate_batch,
 };
+use recorder::{ActiveRecording, MIN_RECORDING_MILLIS, RecordTask, encode_recording};
 
 use crate::app::shell::Shell;
 use crate::chat::gif_sticker_emoji::{GifStickerEmojiEvent, GifStickerEmojiPopup, SubPanel};
@@ -30,7 +32,7 @@ use crate::chat::member_list::{
     MentionMemberRaw, MentionScope, ensure_mention_members_loaded, mention_direct_id,
     mention_member_pool, mention_private_channel, mention_role_clan, mention_scope,
 };
-use crate::components::primitives::{Avatar, Icon, IconName};
+use crate::components::primitives::{Avatar, Icon, IconName, ToastKind};
 use crate::image_cache::{
     AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
 };
@@ -42,6 +44,12 @@ use text_field::{
 };
 
 const KEY_CONTEXT: &str = "MezonMention";
+const RECORDING_COLOR: Rgba = Rgba {
+    r: 0xdc as f32 / 255.,
+    g: 0x26 as f32 / 255.,
+    b: 0x26 as f32 / 255.,
+    a: 1.0,
+};
 const MAX_SUGGESTIONS: usize = 10;
 const MAX_EMOJI_CANDIDATES: usize = 20;
 const MENTION_HERE_DISPLAY: &str = "@here";
@@ -255,6 +263,10 @@ pub struct MentionInput {
     preview_cache: Entity<LruImageCache>,
     settings: Entity<Settings>,
     pending_attachments: Vec<PendingAttachment>,
+    recording: Option<ActiveRecording>,
+    record_generation: u64,
+    encoding_recording: bool,
+    _record_task: Option<RecordTask>,
     compact: bool,
     overflow_to_file: bool,
     overflow_counter: Option<isize>,
@@ -428,6 +440,10 @@ impl MentionInput {
             preview_cache,
             settings,
             pending_attachments: Vec::new(),
+            recording: None,
+            record_generation: 0,
+            encoding_recording: false,
+            _record_task: None,
             compact,
             overflow_to_file: false,
             overflow_counter: None,
@@ -517,6 +533,7 @@ impl MentionInput {
                 filetype: p.filetype,
                 width: i32::try_from(p.width).unwrap_or(0),
                 height: i32::try_from(p.height).unwrap_or(0),
+                duration: p.duration,
                 poster_jpeg: p.poster_jpeg,
             })
             .collect();
@@ -658,6 +675,92 @@ impl MentionInput {
             .filter(|path| mime_from_extension(path).starts_with("image/"))
             .collect();
         self.add_dropped_paths(images, window, cx);
+    }
+
+    fn start_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.recording.is_some() || self.encoding_recording {
+            return;
+        }
+        let Some(store) = AudioStore::try_global(cx) else {
+            return;
+        };
+        let Some(factory) = store.read(cx).mic_pcm_capture_factory.clone() else {
+            Self::show_recording_error(cx);
+            return;
+        };
+
+        self.record_generation = self.record_generation.wrapping_add(1);
+        let generation = self.record_generation;
+        let (sender, receiver) = flume::unbounded();
+
+        self._record_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let opened = cx
+                .background_executor()
+                .spawn(async move { factory(sender) })
+                .await;
+            let (capture, format) = match opened {
+                Ok(opened) => opened,
+                Err(err) => {
+                    tracing::warn!("voice recording unavailable: {err}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.recording = None;
+                        Self::show_recording_error(cx);
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+
+            let live = this
+                .update(cx, |this, cx| {
+                    let attached = this
+                        .recording
+                        .as_mut()
+                        .is_some_and(|recording| recording.attach(generation, capture));
+                    cx.notify();
+                    attached
+                })
+                .unwrap_or(false);
+            if !live {
+                return;
+            }
+
+            let built = cx
+                .background_executor()
+                .spawn(encode_recording(receiver, format))
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.encoding_recording = false;
+                match built {
+                    Ok(attachment) => this.add_pending(vec![attachment], window, cx),
+                    Err(err) => tracing::warn!("voice recording failed: {err}"),
+                }
+                cx.notify();
+            });
+        }));
+        self.recording = Some(ActiveRecording::opening(generation));
+        cx.notify();
+    }
+
+    fn stop_recording(&mut self, cx: &mut Context<Self>) {
+        let Some(recording) = self.recording.take() else {
+            return;
+        };
+        let keep = recording.is_live() && recording.elapsed_millis() >= MIN_RECORDING_MILLIS;
+        drop(recording);
+
+        if keep {
+            self.encoding_recording = true;
+        } else {
+            self._record_task = None;
+        }
+        cx.notify();
+    }
+
+    fn show_recording_error(cx: &mut Context<Self>) {
+        Shell::global(cx).update(cx, |shell, cx| {
+            shell.toast(ToastKind::Error, "Microphone unavailable", cx)
+        });
     }
 
     fn add_pending(
@@ -965,7 +1068,7 @@ impl MentionInput {
                     ChannelEvent::ClanChannelsLoaded(_) | ChannelEvent::UserChannelsLoaded => {
                         this.invalidate_pool(Sigil::Hash, cx);
                     }
-                    ChannelEvent::Unread(_) => {}
+                    ChannelEvent::Unread(_) | ChannelEvent::InVoiceChanged => {}
                 },
             ),
             cx.subscribe(
@@ -1222,7 +1325,14 @@ impl MentionInput {
         cx.notify();
     }
 
-    fn picker_toggle(&self, id: &'static str, icon: IconName, color: Rgba) -> Stateful<Div> {
+    fn picker_toggle(
+        &self,
+        id: &'static str,
+        icon: IconName,
+        color: Rgba,
+        hover_bg: Rgba,
+        hover_color: Rgba,
+    ) -> Stateful<Div> {
         div()
             .id(id)
             .flex()
@@ -1231,7 +1341,13 @@ impl MentionInput {
             .size(px(20.))
             .rounded(px(4.))
             .cursor_pointer()
-            .child(Icon::new(icon).size_5().text_color(color))
+            .hover(|s| s.bg(hover_bg))
+            .child(
+                Icon::new(icon)
+                    .size_5()
+                    .text_color(color)
+                    .hover(|s| s.text_color(hover_color)),
+            )
     }
 
     fn toggle_tab(&mut self, tab: SubPanel, window: &mut Window, cx: &mut Context<Self>) {
@@ -1779,8 +1895,8 @@ impl Render for MentionInput {
             return self.render_compact(cx);
         }
         let open = self.popup_open();
-        let theme = cx.theme();
         let active_tab = self.popup.as_ref().map(|p| p.read(cx).active_tab());
+        let theme = cx.theme().clone();
         let toggle_color = if active_tab == Some(SubPanel::Emoji) {
             theme.text_primary
         } else {
@@ -1796,7 +1912,8 @@ impl Render for MentionInput {
         } else {
             theme.text_muted
         };
-        let plus_color = theme.text_muted;
+        let icon_hover = theme.text_primary;
+        let icon_bg_hover = theme.bg_hover;
         let has_pending = !self.pending_attachments.is_empty();
         let overflow_counter = self.overflow_counter;
 
@@ -1824,10 +1941,12 @@ impl Render for MentionInput {
                     .size(px(24.))
                     .rounded(px(4.))
                     .cursor_pointer()
+                    .hover(|s| s.bg(icon_bg_hover))
                     .child(
                         Icon::new(IconName::AddCircle)
                             .size_5()
-                            .text_color(plus_color),
+                            .text_color(theme.text_muted)
+                            .hover(|s| s.text_color(icon_hover)),
                     )
                     .on_click(
                         cx.listener(|this, _event, window, cx| this.open_file_picker(window, cx)),
@@ -1844,11 +1963,30 @@ impl Render for MentionInput {
                     .justify_center()
                     .size(px(20.))
                     .rounded(px(4.))
-                    .child(
+                    .cursor_pointer()
+                    .hover(|s| s.bg(icon_bg_hover))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _event, window, cx| this.start_recording(window, cx)),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _event, _window, cx| this.stop_recording(cx)),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _event, _window, cx| this.stop_recording(cx)),
+                    )
+                    .child(if self.recording.is_some() {
                         Icon::new(IconName::MicEnable)
                             .size_5()
-                            .text_color(plus_color),
-                    ),
+                            .text_color(RECORDING_COLOR)
+                    } else {
+                        Icon::new(IconName::MicEnable)
+                            .size_5()
+                            .text_color(theme.text_muted)
+                            .hover(|s| s.text_color(icon_hover))
+                    }),
             )
             .child(
                 div()
@@ -1870,22 +2008,40 @@ impl Render for MentionInput {
                         .size_full(),
                     )
                     .child(
-                        self.picker_toggle("gif-toggle", IconName::Gif, gif_color)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_tab(SubPanel::Gifs, window, cx)
-                            })),
+                        self.picker_toggle(
+                            "gif-toggle",
+                            IconName::Gif,
+                            gif_color,
+                            icon_bg_hover,
+                            icon_hover,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_tab(SubPanel::Gifs, window, cx)
+                        })),
                     )
                     .child(
-                        self.picker_toggle("sticker-toggle", IconName::Sticker, sticker_color)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_tab(SubPanel::Stickers, window, cx)
-                            })),
+                        self.picker_toggle(
+                            "sticker-toggle",
+                            IconName::Sticker,
+                            sticker_color,
+                            icon_bg_hover,
+                            icon_hover,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_tab(SubPanel::Stickers, window, cx)
+                        })),
                     )
                     .child(
-                        self.picker_toggle("emoji-toggle", IconName::Smile, toggle_color)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_tab(SubPanel::Emoji, window, cx)
-                            })),
+                        self.picker_toggle(
+                            "emoji-toggle",
+                            IconName::Smile,
+                            toggle_color,
+                            icon_bg_hover,
+                            icon_hover,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_tab(SubPanel::Emoji, window, cx)
+                        })),
                     ),
             )
             .when_some(popup, |this, popup| this.child(popup))

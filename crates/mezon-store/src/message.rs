@@ -196,6 +196,8 @@ pub struct ReactionSender {
     pub count: u32,
 }
 
+const REACTION_EMOJI_PROXY_PX: u32 = 32;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reaction {
     pub key: String,
@@ -222,7 +224,7 @@ impl Reaction {
         self.count = self.senders.iter().map(|s| s.count).sum();
         self.count_label = format_reaction_count(self.count).into();
         self.emoji_proxied = cfg
-            .map(|c| c.emoji_src(&self.emoji_id))
+            .map(|c| c.emoji_src_sized(&self.emoji_id, REACTION_EMOJI_PROXY_PX))
             .unwrap_or_default()
             .into();
     }

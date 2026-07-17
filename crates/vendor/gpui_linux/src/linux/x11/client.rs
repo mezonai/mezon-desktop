@@ -1763,13 +1763,20 @@ impl LinuxClient for X11Client {
 
     fn write_to_clipboard(&self, item: gpui::ClipboardItem) {
         let mut state = self.0.borrow_mut();
-        state
-            .clipboard
-            .set_text(
+        let result = if let Some(image) = item.image() {
+            state.clipboard.set_image(
+                image,
+                clipboard::ClipboardKind::Clipboard,
+                clipboard::WaitConfig::None,
+            )
+        } else {
+            state.clipboard.set_text(
                 std::borrow::Cow::Owned(item.text().unwrap_or_default()),
                 clipboard::ClipboardKind::Clipboard,
                 clipboard::WaitConfig::None,
             )
+        };
+        result
             .context("X11: Failed to write to clipboard (clipboard)")
             .log_with_level(log::Level::Debug);
         state.clipboard_item.replace(item);

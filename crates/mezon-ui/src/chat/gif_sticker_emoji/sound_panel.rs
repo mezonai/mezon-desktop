@@ -362,7 +362,7 @@ impl Render for SoundPanel {
                         .rounded_lg()
                         .border_2()
                         .border_dashed()
-                        .border_color(theme.tokens.border_theme_primary)
+                        .border_color(theme.tokens.border_primary)
                         .opacity(0.5)
                         .child(
                             Icon::new(IconName::Speaker)
@@ -470,7 +470,7 @@ fn render_header(
                 .h(px(1.))
                 .flex_1()
                 .ml_2()
-                .bg(theme.tokens.border_theme_primary),
+                .bg(theme.tokens.border_primary),
         )
         .on_click(move |_, _, cx| {
             let clan_id = clan_id.to_string();

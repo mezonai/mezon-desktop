@@ -24,3 +24,5 @@ symphonia = { version = "0.5", default-features = false, features = [
     "wav",
 ] }
 unsafe-libopus = "0.2"
+ogg.workspace = true
+flume.workspace = true

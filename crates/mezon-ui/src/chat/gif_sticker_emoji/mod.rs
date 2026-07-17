@@ -321,7 +321,7 @@ impl Render for GifStickerEmojiPopup {
                     .flex_col()
                     .flex_shrink_0()
                     .border_b_1()
-                    .border_color(theme.tokens.border_theme_primary)
+                    .border_color(theme.tokens.border_primary)
                     .pb_4()
                     .child(tab_bar)
                     .child(search_row),

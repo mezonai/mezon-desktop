@@ -32,6 +32,7 @@ const MEMBER_AVATAR_SIZE: f32 = 24.;
 const MEMBER_AVATAR_MAX: usize = 5;
 const MEMBER_AVATAR_OVERLAP: f32 = -6.;
 const MEMBERS_COLUMN_WIDTH: f32 = 120.;
+const LIST_PAD_X: f32 = 16.;
 
 type ThreadPopoverOnOpen = Rc<dyn Fn(&mut Window, &mut App)>;
 
@@ -159,35 +160,48 @@ impl Render for ThreadsScrollBody {
                 .overflow_hidden()
                 .flex()
                 .flex_col()
-                .px_4()
-                .pb_4()
                 .bg(theme.tokens.theme_setting_primary)
                 .when(fetch_error, |this| {
-                    this.child(render_fetch_retry_banner(&locale, &theme))
+                    this.child(
+                        div()
+                            .px(px(LIST_PAD_X))
+                            .pt(px(8.))
+                            .child(render_fetch_retry_banner(&locale, &theme)),
+                    )
                 })
                 .child(
-                    list(self.list_state.clone(), {
-                        let theme = theme.clone();
-                        let locale = locale.to_string();
-                        let avatar_cache = avatar_cache.clone();
-                        move |ix, _window, cx| {
-                            render_row(
-                                &rows[ix],
-                                &theme,
-                                &locale,
-                                layout.clone(),
-                                avatar_cache.clone(),
-                                cx,
-                            )
-                        }
-                    })
-                    .size_full(),
-                )
-                .custom_scrollbars(
-                    Scrollbars::always_visible(ScrollAxes::Vertical)
-                        .tracked_scroll_handle(&self.list_state),
-                    _window,
-                    cx,
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .overflow_hidden()
+                        .pl(px(LIST_PAD_X))
+                        .pr(px(LIST_PAD_X))
+                        .py(px(8.))
+                        .child(
+                            list(self.list_state.clone(), {
+                                let theme = theme.clone();
+                                let locale = locale.to_string();
+                                let avatar_cache = avatar_cache.clone();
+                                move |ix, _window, cx| {
+                                    render_row(
+                                        &rows[ix],
+                                        &theme,
+                                        &locale,
+                                        layout.clone(),
+                                        avatar_cache.clone(),
+                                        cx,
+                                    )
+                                }
+                            })
+                            .size_full(),
+                        )
+                        .custom_scrollbars(
+                            Scrollbars::always_visible(ScrollAxes::Vertical)
+                                .tracked_scroll_handle(&self.list_state),
+                            _window,
+                            cx,
+                        ),
                 )
                 .into_any_element();
         }
@@ -619,7 +633,6 @@ fn render_row(
             };
             div()
                 .w_full()
-                .px_4()
                 .child(thread_card(thread, theme, locale, layout, avatar_cache, cx))
                 .into_any_element()
         }
@@ -638,7 +651,6 @@ fn section_header(title: &str, theme: &Theme) -> gpui::AnyElement {
     let tokens = &theme.tokens;
     div()
         .w_full()
-        .px_4()
         .pt_2()
         .pb_1()
         .child(

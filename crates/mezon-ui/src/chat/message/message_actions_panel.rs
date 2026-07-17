@@ -214,7 +214,7 @@ fn render_message_select(
         .p_3()
         .rounded_md()
         .border_1()
-        .border_color(theme.tokens.border_theme_primary)
+        .border_color(theme.tokens.border_primary)
         .text_size(px(14.))
         .cursor_pointer()
         .child(left.into_any_element())

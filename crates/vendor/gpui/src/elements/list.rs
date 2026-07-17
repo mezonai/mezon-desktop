@@ -1023,6 +1023,57 @@ impl ListState {
         state.logical_scroll_top = Some(scroll_top);
     }
 
+    /// Scroll the list so the given item is vertically centered in the viewport.
+    /// mezon vendor edit: added for the favorites "jump to original channel"
+    /// centered reveal; re-apply on snapshot bump.
+    pub fn scroll_to_center_item(&self, ix: usize) {
+        let state = &mut *self.0.borrow_mut();
+
+        let item_count = state.items.summary().count;
+        if ix >= item_count {
+            return;
+        }
+
+        let mut scroll_top = state.logical_scroll_top();
+        let height = state
+            .last_layout_bounds
+            .map_or(px(0.), |bounds| bounds.size.height);
+        let padding = state.last_padding.unwrap_or_default();
+
+        let (start_ix, start_item_top, goal_top) = {
+            let mut cursor = state.items.cursor::<ListItemSummary>(());
+            cursor.seek(&Count(ix), Bias::Right);
+            let item_top = cursor.start().height;
+            cursor.seek(&Count(ix + 1), Bias::Right);
+            let item_bottom = cursor.start().height;
+            let item_height = item_bottom - item_top;
+
+            let goal_top = px(0.).max(item_top + padding.top + item_height * 0.5 - height * 0.5);
+
+            cursor.seek(&Height(goal_top), Bias::Left);
+            (cursor.start().count, cursor.start().height, goal_top)
+        };
+
+        scroll_top.item_ix = start_ix;
+        scroll_top.offset_in_item = goal_top - start_item_top;
+
+        state.rebase_pending_scroll(scroll_top);
+        state.logical_scroll_top = Some(scroll_top);
+    }
+
+    /// The range of items currently visible, based on the last laid-out height
+    /// and current scroll position.
+    /// mezon vendor edit: exposed for the favorites new-mention float button;
+    /// re-apply on snapshot bump.
+    pub fn visible_range(&self) -> Range<usize> {
+        let state = self.0.borrow();
+        let height = state
+            .last_layout_bounds
+            .map_or(px(0.), |bounds| bounds.size.height);
+        let scroll_top = state.logical_scroll_top();
+        StateInner::visible_range(&state.items, height, &scroll_top)
+    }
+
     /// Get the bounds for the given item in window coordinates, if it's
     /// been rendered.
     pub fn bounds_for_item(&self, ix: usize) -> Option<Bounds<Pixels>> {

@@ -702,20 +702,10 @@ impl FriendsPage {
                         )
                         .when(show_badge, |el| {
                             el.child(
-                                div()
+                                crate::sidebar::friend_request_badge(pending, px(11.))
                                     .absolute()
                                     .top(px(2.))
-                                    .right(px(12.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .size(px(20.))
-                                    .rounded_full()
-                                    .bg(rgb(COLOR_DANGER))
-                                    .text_size(px(10.))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme.tokens.text_theme_primary)
-                                    .child(pending.to_string()),
+                                    .right(px(12.)),
                             )
                         })
                 }));

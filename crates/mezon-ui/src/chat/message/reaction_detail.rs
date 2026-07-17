@@ -217,6 +217,7 @@ impl Render for UserReactionPanel {
         }
 
         div()
+            .occlude()
             .image_cache(self.image_cache.clone())
             .w(px(288.))
             .max_h(px(400.))

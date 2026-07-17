@@ -32,6 +32,7 @@ struct GifCell {
 enum CatCell {
     Trending {
         label: SharedString,
+        image: SharedString,
     },
     Category {
         name: SharedString,
@@ -161,7 +162,14 @@ impl GifPanel {
         } else {
             let trending =
                 SharedString::new_static(mezon_i18n::t(&self.locale, "chat.gifPicker.trending"));
-            let mut items: Vec<CatCell> = vec![CatCell::Trending { label: trending }];
+            let mut items: Vec<CatCell> = vec![CatCell::Trending {
+                label: trending,
+                image: store
+                    .featured()
+                    .first()
+                    .map(|gif| gif.preview_url.clone())
+                    .unwrap_or_default(),
+            }];
             items.extend(store.categories().iter().map(|category| CatCell::Category {
                 name: category.name.clone(),
                 searchterm: category.searchterm.clone(),
@@ -185,9 +193,11 @@ impl Render for GifPanel {
         let searching = self.searching();
         let is_searching =
             GifStore::try_global(cx).is_some_and(|store| store.read(cx).is_searching());
+        let is_loading_featured =
+            GifStore::try_global(cx).is_some_and(|store| store.read(cx).is_featured_loading());
 
         let empty_label: Option<SharedString> = self.rows.is_empty().then(|| {
-            if searching && is_searching {
+            if (searching && is_searching) || (self.show_featured && is_loading_featured) {
                 self.searching_label.clone()
             } else {
                 self.no_gifs_label.clone()
@@ -361,9 +371,14 @@ type CatTile = (
 fn render_category_tile(theme: &Theme, cell: &CatCell, entity: &Entity<GifPanel>) -> AnyElement {
     let ent = entity.clone();
     let (label, image, id, action): CatTile = match cell {
-        CatCell::Trending { label } => (
+        CatCell::Trending { label, image } => (
             label.clone(),
-            None,
+            (!image.is_empty()).then(|| {
+                (
+                    SharedString::new_static("gse-gif-cat-img-trending"),
+                    image.clone(),
+                )
+            }),
             SharedString::new_static("gse-gif-cat-trending"),
             CatAction::Trending,
         ),
@@ -429,7 +444,10 @@ fn render_category_tile(theme: &Theme, cell: &CatCell, entity: &Entity<GifPanel>
             CatAction::Trending => {
                 this.show_featured = true;
                 if let Some(store) = GifStore::try_global(cx) {
-                    store.update(cx, |store, cx| store.ensure_loaded(cx));
+                    store.update(cx, |store, cx| {
+                        store.ensure_loaded(cx);
+                        store.ensure_featured(cx);
+                    });
                 }
                 this.rebuild(cx);
                 cx.notify();

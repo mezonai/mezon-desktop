@@ -7,8 +7,8 @@ use gpui::{
     prelude::*, px,
 };
 use mezon_store::{
-    ClanMembersStore, MessageId, MessagesStore, PinnedMessage, PinnedMessagesStore, ProfileContext,
-    Settings, UserId, resolve_user_profile,
+    ChannelId, ClanMembersStore, DirectMessageStore, MessageId, MessagesStore, PinnedMessage,
+    PinnedMessagesStore, ProfileContext, Settings, UserId, UsersByUserStore, resolve_user_profile,
 };
 use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -25,6 +25,7 @@ const MIN_BODY_HEIGHT: f32 = 144.;
 const LIST_BODY_HEIGHT: f32 = 520.;
 const LIST_OVERDRAW: f32 = 200.;
 const MAX_VH: f32 = 0.8;
+const LIST_PAD_X: f32 = 16.;
 
 #[derive(Clone)]
 struct PinCardVm {
@@ -38,8 +39,13 @@ struct PinCardVm {
 }
 
 impl PinCardVm {
-    fn resolve(msg: &PinnedMessage, clan_id: Option<mezon_store::ClanId>, cx: &App) -> Self {
-        let (sender_label, avatar_raw) = resolve_pin_sender(msg, clan_id, cx);
+    fn resolve(
+        msg: &PinnedMessage,
+        clan_id: Option<mezon_store::ClanId>,
+        channel_id: Option<ChannelId>,
+        cx: &App,
+    ) -> Self {
+        let (sender_label, avatar_raw) = resolve_pin_sender(msg, clan_id, channel_id, cx);
         let (avatar_src, avatar_fallback) = resolve_pin_avatar(msg, &avatar_raw, cx);
         Self {
             pin_id: msg.id.clone().into(),
@@ -83,6 +89,14 @@ impl PinnedPopoverPanel {
                 this.pin_cards = Self::compute_pin_cards(cx);
                 cx.notify();
             }),
+            cx.observe(&DirectMessageStore::global(cx), |this, _, cx| {
+                this.pin_cards = Self::compute_pin_cards(cx);
+                cx.notify();
+            }),
+            cx.observe(&UsersByUserStore::global(cx), |this, _, cx| {
+                this.pin_cards = Self::compute_pin_cards(cx);
+                cx.notify();
+            }),
             cx.observe(&settings, |_, _, cx| cx.notify()),
         ];
 
@@ -106,10 +120,11 @@ impl PinnedPopoverPanel {
         let store = PinnedMessagesStore::global(cx);
         let store = store.read(cx);
         let clan_id = store.clan_id();
+        let channel_id = store.channel_id();
         store
             .pinned()
             .iter()
-            .map(|msg| PinCardVm::resolve(msg, clan_id, cx))
+            .map(|msg| PinCardVm::resolve(msg, clan_id, channel_id, cx))
             .collect()
     }
 }
@@ -259,6 +274,9 @@ fn render_body(
         div()
             .size_full()
             .overflow_hidden()
+            .pl(px(LIST_PAD_X))
+            .pr(px(LIST_PAD_X))
+            .py(px(8.))
             .child(
                 list(list_state.clone(), move |ix, _window, _cx| {
                     let Some(vm) = cards_for_list.get(ix) else {
@@ -266,7 +284,6 @@ fn render_body(
                     };
                     div()
                         .w_full()
-                        .pt(if ix == 0 { px(8.) } else { px(0.) })
                         .pb(px(8.))
                         .child(pin_card(
                             ix,
@@ -299,15 +316,47 @@ fn render_body(
 fn resolve_pin_sender(
     msg: &PinnedMessage,
     clan_id: Option<mezon_store::ClanId>,
+    channel_id: Option<ChannelId>,
     cx: &App,
 ) -> (String, String) {
-    if let (Some(user_id), Some(clan_id)) = (msg.sender_id.parse::<UserId>().ok(), clan_id)
+    let user_id = msg.sender_id.parse::<UserId>().ok();
+
+    if let (Some(user_id), Some(clan_id)) = (user_id, clan_id)
         && let Some(profile) = resolve_user_profile(user_id, ProfileContext::Clan(clan_id), cx)
     {
         return (profile.display_name, profile.avatar_url);
     }
 
-    (msg.sender_name.clone(), msg.avatar_url.clone())
+    let mut name = msg.sender_name.clone();
+    let mut avatar = msg.avatar_url.clone();
+    if (avatar.is_empty() || name.is_empty())
+        && let (Some(user_id), Some(channel_id)) = (user_id, channel_id)
+        && let Some(profile) = resolve_user_profile(user_id, ProfileContext::Direct(channel_id), cx)
+    {
+        if avatar.is_empty() {
+            avatar = profile.avatar_url;
+        }
+        if name.is_empty() {
+            name = profile.display_name;
+        }
+    }
+
+    if avatar.is_empty()
+        && let (Ok(message_id), Some(channel_id)) =
+            (msg.message_id.parse::<MessageId>(), channel_id)
+        && let Some(message) = MessagesStore::global(cx)
+            .read(cx)
+            .message_in_channel(channel_id, message_id)
+    {
+        if !message.avatar_url.is_empty() {
+            avatar = message.avatar_url.to_string();
+        }
+        if name.is_empty() && !message.sender_name.is_empty() {
+            name = message.sender_name.to_string();
+        }
+    }
+
+    (name, avatar)
 }
 
 fn resolve_pin_avatar(
@@ -422,7 +471,7 @@ fn pin_card(
         .id(("pin-item", index))
         .group(group_name)
         .relative()
-        .mx(px(8.))
+        .w_full()
         .items_start()
         .gap_2()
         .px(px(12.))

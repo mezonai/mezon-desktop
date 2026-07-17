@@ -180,7 +180,13 @@ impl Clipboard {
         self.self_mime.clone()
     }
 
-    pub fn send(&self, _mime_type: String, fd: OwnedFd) {
+    pub fn send(&self, mime_type: String, fd: OwnedFd) {
+        if mime_type == ImageFormat::Png.mime_type()
+            && let Some(image) = self.contents.as_ref().and_then(|contents| contents.image())
+        {
+            self.send_internal(fd, image.bytes);
+            return;
+        }
         if let Some(text) = self.contents.as_ref().and_then(|contents| contents.text()) {
             self.send_internal(fd, text.as_bytes().to_owned());
         }

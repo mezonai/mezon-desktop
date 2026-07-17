@@ -1,7 +1,7 @@
-use gpui::{App, SharedString, Window, div, prelude::*, px};
+use gpui::{App, SharedString, Window, div, prelude::*, px, relative};
 
 use super::icon::{Icon, IconName};
-use super::stack::h_flex;
+use super::stack::{h_flex, v_flex};
 use crate::theme::ActiveTheme;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -16,6 +16,7 @@ pub enum ToastKind {
 pub struct Toast {
     message: SharedString,
     kind: ToastKind,
+    progress: Option<f32>,
 }
 
 impl Toast {
@@ -23,11 +24,17 @@ impl Toast {
         Self {
             message: message.into(),
             kind: ToastKind::Info,
+            progress: None,
         }
     }
 
     pub fn kind(mut self, kind: ToastKind) -> Self {
         self.kind = kind;
+        self
+    }
+
+    pub fn progress(mut self, progress: Option<f32>) -> Self {
+        self.progress = progress;
         self
     }
 
@@ -49,9 +56,10 @@ impl RenderOnce for Toast {
             ToastKind::Error => (theme.status_dnd, IconName::TriangleAlert),
         };
 
+        let track = theme.bg_tertiary;
         h_flex()
             .gap_2()
-            .items_center()
+            .items_start()
             .min_w(px(240.))
             .max_w(px(360.))
             .px(px(12.))
@@ -63,11 +71,33 @@ impl RenderOnce for Toast {
             .shadow_lg()
             .child(Icon::new(icon).size_4().text_color(accent))
             .child(
-                div()
+                v_flex()
                     .flex_1()
-                    .text_sm()
-                    .text_color(theme.text_primary)
-                    .child(self.message),
+                    .min_w_0()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.text_primary)
+                            .child(self.message),
+                    )
+                    .when_some(self.progress, |el, progress| {
+                        el.child(
+                            div()
+                                .w_full()
+                                .h(px(4.))
+                                .rounded_full()
+                                .overflow_hidden()
+                                .bg(track)
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .w(relative(progress.clamp(0., 1.)))
+                                        .rounded_full()
+                                        .bg(accent),
+                                ),
+                        )
+                    }),
             )
     }
 }

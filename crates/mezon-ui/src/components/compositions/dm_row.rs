@@ -1,7 +1,7 @@
 use gpui::{AnyElement, ElementId, SharedString, div, prelude::*, px};
 use mezon_store::DirectKind;
 
-use crate::components::primitives::Avatar;
+use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::router::{Route, navigate};
 use crate::theme::Theme;
 
@@ -20,6 +20,7 @@ pub struct DmRow {
     group_name: SharedString,
     close_id: SharedString,
     suppress_hover: bool,
+    in_voice_label: Option<SharedString>,
     image_cache: Option<gpui::Entity<crate::image_cache::LruImageCache>>,
 }
 
@@ -58,6 +59,7 @@ impl DmRow {
             group_name,
             close_id,
             suppress_hover: false,
+            in_voice_label: None,
             image_cache: None,
         }
     }
@@ -94,6 +96,11 @@ impl DmRow {
 
     pub fn avatar_raw(mut self, raw: impl Into<SharedString>) -> Self {
         self.avatar_raw = raw.into();
+        self
+    }
+
+    pub fn in_voice_label(mut self, label: SharedString) -> Self {
+        self.in_voice_label = Some(label);
         self
     }
 
@@ -137,7 +144,7 @@ impl DmRow {
             .flex_row()
             .items_center()
             .gap_2()
-            .h(px(DM_ROW_HEIGHT))
+            .h(px(DM_ROW_HEIGHT - 1.))
             .w_full()
             .px_2()
             .rounded_md()
@@ -156,15 +163,45 @@ impl DmRow {
                 );
             })
             .child(avatar_slot)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
+            .child({
+                let name_el = div()
                     .text_base()
                     .text_color(name_color)
                     .truncate()
-                    .child(self.label.clone()),
-            )
+                    .child(self.label.clone());
+                match self.in_voice_label.clone() {
+                    Some(label) => div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .gap(px(2.))
+                        .child(name_el.line_height(px(16.)))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(2.))
+                                .h(px(16.))
+                                .opacity(0.6)
+                                .child(
+                                    Icon::new(IconName::Speaker)
+                                        .size(px(10.))
+                                        .text_color(gpui::rgb(0x22c55e)),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.tokens.text_theme_primary)
+                                        .child(label),
+                                ),
+                        )
+                        .into_any_element(),
+                    None => name_el.flex_1().min_w_0().into_any_element(),
+                }
+            })
             .child(close_btn)
     }
 

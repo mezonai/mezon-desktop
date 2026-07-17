@@ -2211,7 +2211,7 @@ impl Interactivity {
                             let result = f(&style, scroll_offset, hitbox, window, cx);
                             if self.suppress_hover_while_scrolling
                                 && self.tracked_scroll_handle.as_ref().is_some_and(|handle| {
-                                    handle.0.borrow().is_scroll_hover_suppressed()
+                                    handle.0.borrow().is_scroll_hover_active()
                                 })
                             {
                                 window.insert_hitbox(

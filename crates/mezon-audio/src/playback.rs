@@ -8,6 +8,9 @@ use std::time::Duration;
 
 use crate::AudioError;
 use crate::decode::DecodedPcm;
+use crate::stream::{ChunkState, PcmStream};
+
+const STREAM_SPAN: usize = 32_768;
 
 thread_local! {
     static SHARED_SINK: RefCell<Weak<MixerDeviceSink>> = const { RefCell::new(Weak::new()) };
@@ -104,10 +107,112 @@ impl Source for SharedSamplesSource {
     }
 }
 
+struct PcmStreamSource {
+    stream: Arc<PcmStream>,
+    chunk: Option<Arc<[f32]>>,
+    next_chunk: usize,
+    offset: usize,
+    silence_debt: usize,
+    exhausted: bool,
+    channels: NonZeroU16,
+    sample_rate: NonZeroU32,
+}
+
+impl PcmStreamSource {
+    fn new(stream: Arc<PcmStream>) -> Self {
+        let channels =
+            NonZeroU16::new(stream.channels().clamp(1, 2) as u16).unwrap_or(NonZeroU16::MIN);
+        let sample_rate =
+            NonZeroU32::new(stream.sample_rate()).unwrap_or(NonZeroU32::new(48_000).unwrap());
+        Self {
+            stream,
+            chunk: None,
+            next_chunk: 0,
+            offset: 0,
+            silence_debt: 0,
+            exhausted: false,
+            channels,
+            sample_rate,
+        }
+    }
+
+    fn silence(&mut self) -> Option<f32> {
+        self.silence_debt += 1;
+        Some(0.0)
+    }
+}
+
+impl Iterator for PcmStreamSource {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        loop {
+            if let Some(chunk) = &self.chunk
+                && let Some(sample) = chunk.get(self.offset).copied()
+            {
+                self.offset += 1;
+                return Some(sample);
+            }
+            if !self
+                .silence_debt
+                .is_multiple_of(self.channels.get() as usize)
+            {
+                return self.silence();
+            }
+            match self.stream.chunk_at(self.next_chunk) {
+                ChunkState::Ready(chunk) => {
+                    self.chunk = Some(chunk);
+                    self.next_chunk += 1;
+                    self.offset = 0;
+                    self.silence_debt = 0;
+                }
+                ChunkState::Pending => return self.silence(),
+                ChunkState::Complete => {
+                    self.exhausted = true;
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+impl Source for PcmStreamSource {
+    fn current_span_len(&self) -> Option<usize> {
+        if self.exhausted {
+            Some(0)
+        } else {
+            Some(STREAM_SPAN)
+        }
+    }
+
+    fn channels(&self) -> NonZeroU16 {
+        self.channels
+    }
+
+    fn sample_rate(&self) -> NonZeroU32 {
+        self.sample_rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
+
+    fn try_seek(&mut self, _: Duration) -> Result<(), rodio::source::SeekError> {
+        Err(rodio::source::SeekError::NotSupported {
+            underlying_source: "PcmStreamSource",
+        })
+    }
+}
+
+enum Playable {
+    Pcm(PcmData),
+    Stream(Arc<PcmStream>),
+}
+
 pub struct AudioPlayer {
     _sink: Rc<MixerDeviceSink>,
     player: Player,
-    data: RefCell<Option<PcmData>>,
+    data: RefCell<Option<Playable>>,
     started: Cell<bool>,
 }
 
@@ -129,12 +234,16 @@ impl AudioPlayer {
         let duration = pcm.duration_secs();
         let (samples, channel_count) = downmix_to_playable(pcm.samples, pcm.channels);
         let channels = NonZeroU16::new(channel_count).unwrap_or(NonZeroU16::MIN);
-        *self.data.borrow_mut() = Some(PcmData {
+        *self.data.borrow_mut() = Some(Playable::Pcm(PcmData {
             samples,
             channels,
             sample_rate,
             duration,
-        });
+        }));
+    }
+
+    pub fn set_stream(&self, stream: Arc<PcmStream>) {
+        *self.data.borrow_mut() = Some(Playable::Stream(stream));
     }
 
     pub fn is_ready(&self) -> bool {
@@ -148,13 +257,18 @@ impl AudioPlayer {
     pub fn play(&self) {
         if let Some(data) = self.data.borrow().as_ref() {
             if self.player.empty() {
-                self.player.append(SharedSamplesSource {
-                    samples: Arc::clone(&data.samples),
-                    position: 0,
-                    channels: data.channels,
-                    sample_rate: data.sample_rate,
-                    duration: data.duration,
-                });
+                match data {
+                    Playable::Pcm(data) => self.player.append(SharedSamplesSource {
+                        samples: Arc::clone(&data.samples),
+                        position: 0,
+                        channels: data.channels,
+                        sample_rate: data.sample_rate,
+                        duration: data.duration,
+                    }),
+                    Playable::Stream(stream) => {
+                        self.player.append(PcmStreamSource::new(Arc::clone(stream)))
+                    }
+                }
             }
             self.started.set(true);
             self.player.play();
@@ -178,16 +292,58 @@ impl AudioPlayer {
     }
 
     pub fn duration_secs(&self) -> f64 {
-        self.data
-            .borrow()
-            .as_ref()
-            .map(|d| d.duration)
-            .unwrap_or(0.0)
+        match self.data.borrow().as_ref() {
+            Some(Playable::Pcm(data)) => data.duration,
+            Some(Playable::Stream(stream)) => stream.duration_secs(),
+            None => 0.0,
+        }
     }
 }
 
 impl Drop for AudioPlayer {
     fn drop(&mut self) {
         self.player.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_source_pads_underruns_to_whole_frames() {
+        let stream = Arc::new(PcmStream::new(2, 48_000, None));
+        stream.push(&[1.0, -1.0, 2.0, -2.0]);
+        let mut source = PcmStreamSource::new(Arc::clone(&stream));
+
+        assert_eq!(
+            (&mut source).take(4).collect::<Vec<_>>(),
+            vec![1.0, -1.0, 2.0, -2.0]
+        );
+
+        let starved: Vec<f32> = (&mut source).take(3).collect();
+        assert_eq!(starved, vec![0.0, 0.0, 0.0]);
+
+        stream.push(&[3.0, -3.0]);
+        let resumed: Vec<f32> = (&mut source).take(3).collect();
+        assert_eq!(resumed, vec![0.0, 3.0, -3.0]);
+
+        stream.finish();
+        assert_eq!(source.next(), None);
+        assert_eq!(source.current_span_len(), Some(0));
+    }
+
+    #[test]
+    fn stream_source_ends_only_when_the_stream_completes() {
+        let stream = Arc::new(PcmStream::new(1, 48_000, None));
+        stream.push(&[0.5]);
+        let mut source = PcmStreamSource::new(Arc::clone(&stream));
+
+        assert_eq!(source.next(), Some(0.5));
+        assert_eq!(source.next(), Some(0.0));
+        assert_eq!(source.current_span_len(), Some(STREAM_SPAN));
+
+        stream.finish();
+        assert_eq!(source.next(), None);
     }
 }

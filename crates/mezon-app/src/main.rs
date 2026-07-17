@@ -596,6 +596,7 @@ fn open_main_window(
     mezon_store::UsersByUserStore::init(api.clone(), cx);
     mezon_store::RolesStore::init(api.clone(), cx);
     mezon_store::GalleryStore::init(api.clone(), cx);
+    mezon_store::FilesStore::init(api.clone(), cx);
     mezon_store::PermissionStore::init(api.clone(), auth_state.clone(), cx);
     mezon_store::AccountStore::init(api, cx);
 
@@ -649,6 +650,23 @@ fn open_main_window(
         std::sync::Arc::new(|device_id: &str, sender: flume::Sender<f32>| {
             mezon_native::audio::MicCapture::start(device_id, sender)
                 .map(|capture| Box::new(capture) as Box<dyn Send>)
+                .map_err(|e| e.to_string())
+        }),
+        cx,
+    );
+    mezon_store::AudioStore::set_mic_pcm_capture_factory(
+        &audio_store,
+        std::sync::Arc::new(|sender: flume::Sender<Vec<f32>>| {
+            mezon_native::audio::MicPcmCapture::start(sender)
+                .map(|(capture, format)| {
+                    (
+                        Box::new(capture) as Box<dyn Send>,
+                        mezon_store::MicPcmFormat {
+                            sample_rate: format.sample_rate,
+                            channels: format.channels,
+                        },
+                    )
+                })
                 .map_err(|e| e.to_string())
         }),
         cx,

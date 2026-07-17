@@ -16,6 +16,7 @@ pub struct PendingAttachment {
     pub is_video: bool,
     pub width: u32,
     pub height: u32,
+    pub duration: i32,
     pub poster_jpeg: Option<Vec<u8>>,
 }
 
@@ -81,6 +82,7 @@ pub fn build_pending(path: PathBuf) -> Option<PendingAttachment> {
         is_video,
         width,
         height,
+        duration: 0,
         poster_jpeg,
     })
 }
@@ -142,6 +144,7 @@ mod tests {
             is_video: false,
             width: 0,
             height: 0,
+            duration: 0,
             poster_jpeg: None,
         };
         assert!(validate_batch(0, std::slice::from_ref(&img)).is_ok());

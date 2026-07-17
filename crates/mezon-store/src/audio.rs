@@ -12,6 +12,18 @@ pub type MicCaptureHandle = Box<dyn Send>;
 pub type MicCaptureFactory =
     Arc<dyn Fn(&str, flume::Sender<f32>) -> Result<MicCaptureHandle, String> + Send + Sync>;
 
+#[derive(Debug, Clone, Copy)]
+pub struct MicPcmFormat {
+    pub sample_rate: u32,
+    pub channels: u16,
+}
+
+pub type MicPcmCaptureFactory = Arc<
+    dyn Fn(flume::Sender<Vec<f32>>) -> Result<(MicCaptureHandle, MicPcmFormat), String>
+        + Send
+        + Sync,
+>;
+
 pub type DeviceEnumerator =
     Arc<dyn Fn() -> (Vec<AudioDeviceInfo>, Vec<AudioDeviceInfo>) + Send + Sync>;
 
@@ -19,6 +31,7 @@ pub struct AudioStore {
     pub input_devices: Vec<AudioDeviceInfo>,
     pub output_devices: Vec<AudioDeviceInfo>,
     pub mic_capture_factory: Option<MicCaptureFactory>,
+    pub mic_pcm_capture_factory: Option<MicPcmCaptureFactory>,
     device_enumerator: Option<DeviceEnumerator>,
     devices_requested: bool,
 }
@@ -29,6 +42,7 @@ impl AudioStore {
             input_devices: Vec::new(),
             output_devices: Vec::new(),
             mic_capture_factory: None,
+            mic_pcm_capture_factory: None,
             device_enumerator: None,
             devices_requested: false,
         });
@@ -104,6 +118,16 @@ impl AudioStore {
         .detach();
     }
 
+    pub fn set_mic_pcm_capture_factory(
+        entity: &Entity<Self>,
+        factory: MicPcmCaptureFactory,
+        cx: &mut App,
+    ) {
+        entity.update(cx, |store, _| {
+            store.mic_pcm_capture_factory = Some(factory);
+        });
+    }
+
     pub fn start_mic_capture(
         &self,
         device_id: &str,
@@ -111,6 +135,16 @@ impl AudioStore {
     ) -> Result<MicCaptureHandle, String> {
         match &self.mic_capture_factory {
             Some(factory) => factory(device_id, sender),
+            None => Err("Mic capture not available on this platform".to_string()),
+        }
+    }
+
+    pub fn start_mic_pcm_capture(
+        &self,
+        sender: flume::Sender<Vec<f32>>,
+    ) -> Result<(MicCaptureHandle, MicPcmFormat), String> {
+        match &self.mic_pcm_capture_factory {
+            Some(factory) => factory(sender),
             None => Err("Mic capture not available on this platform".to_string()),
         }
     }

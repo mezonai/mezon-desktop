@@ -65,6 +65,7 @@ pub enum VideoLayout {
 
 pub struct VideoActivation {
     pub url: SharedString,
+    pub filename: SharedString,
     pub poster: SharedString,
     pub width: f32,
     pub height: f32,
@@ -102,6 +103,7 @@ pub struct VideoPlayerView {
     layout: VideoLayout,
     focus_handle: FocusHandle,
     url: SharedString,
+    filename: SharedString,
     poster: SharedString,
     width: f32,
     height: f32,
@@ -117,6 +119,7 @@ impl VideoPlayerView {
     pub fn new(activation: VideoActivation, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let VideoActivation {
             url,
+            filename,
             poster,
             width,
             height,
@@ -141,6 +144,7 @@ impl VideoPlayerView {
             layout,
             focus_handle: cx.focus_handle(),
             url,
+            filename,
             poster,
             width,
             height,
@@ -168,6 +172,7 @@ impl VideoPlayerView {
             layout: VideoLayout::Fixed,
             focus_handle: cx.focus_handle(),
             url: SharedString::default(),
+            filename: SharedString::default(),
             poster,
             width: 0.0,
             height: 0.0,
@@ -242,6 +247,7 @@ impl VideoPlayerView {
         self.shutdown(Some(window), cx);
         let VideoActivation {
             url,
+            filename,
             poster,
             width,
             height,
@@ -250,6 +256,7 @@ impl VideoPlayerView {
             decode_max_size,
         } = activation;
         self.url = url;
+        self.filename = filename;
         self.poster = poster;
         self.width = width;
         self.height = height;
@@ -612,6 +619,39 @@ impl VideoPlayerView {
             })
     }
 
+    fn download_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (bg, icon_color) = {
+            let theme = cx.theme();
+            (theme.bg_secondary, theme.text_secondary)
+        };
+        div()
+            .id("video-download")
+            .absolute()
+            .top(px(8.))
+            .right(px(4.))
+            .size(px(24.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .bg(bg)
+            .cursor_pointer()
+            .opacity(0.0)
+            .group_hover("video-player", |s| s.opacity(1.0))
+            .on_click(cx.listener(|view, _, _window, cx| {
+                crate::util::download::save_with_progress_toast(
+                    view.url.clone(),
+                    view.filename.clone(),
+                    cx,
+                );
+            }))
+            .child(
+                Icon::new(IconName::Download)
+                    .size(px(16.))
+                    .text_color(icon_color),
+            )
+    }
+
     fn render_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theater = self.theater;
         let (playing, muted) = {
@@ -744,6 +784,7 @@ impl Render for VideoPlayerView {
                 d.child(img(self.poster.clone()).size_full().object_fit(poster_fit))
             })
             .child(self.render_controls(cx))
+            .child(self.download_button(cx))
             .into_any_element()
     }
 }

@@ -6,7 +6,26 @@
 
 use chrono::{Datelike, Local, TimeZone, Timelike};
 
+pub fn normalize_unix_seconds(ts: i64) -> i64 {
+    if ts <= 0 {
+        return 0;
+    }
+    if ts > 1_000_000_000_000 {
+        ts / 1000
+    } else {
+        ts
+    }
+}
+
+pub fn unix_now_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 pub fn local_datetime(ts: i64) -> Option<chrono::DateTime<Local>> {
+    let ts = normalize_unix_seconds(ts);
     if ts == 0 {
         return None;
     }
@@ -54,5 +73,11 @@ mod tests {
     fn zero_timestamp_returns_empty() {
         assert!(local_day_key(0).is_empty());
         assert!(format_local_time_hhmm(0).is_empty());
+    }
+
+    #[test]
+    fn normalize_unix_seconds_converts_millis() {
+        assert_eq!(normalize_unix_seconds(1_700_000_000_123), 1_700_000_000);
+        assert_eq!(normalize_unix_seconds(1_700_000_000), 1_700_000_000);
     }
 }

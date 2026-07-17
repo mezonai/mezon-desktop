@@ -392,21 +392,23 @@ impl BadgeService {
                             &mut self.processed_badge_order,
                             (channel_id, message_id),
                         );
-                    ChannelList::global(cx).update(cx, |cl, cx| {
-                        cl.note_channel_message(
-                            clan_id,
-                            channel_id,
-                            badge_mention,
-                            seen,
-                            ts,
-                            message_id,
-                            cx,
-                        )
-                    });
-                    if seen {
-                        MessagesStore::global(cx).update(cx, |store, _| {
-                            store.set_last_read_message(channel_id, message_id);
+                    if m.topic_id == 0 {
+                        ChannelList::global(cx).update(cx, |cl, cx| {
+                            cl.note_channel_message(
+                                clan_id,
+                                channel_id,
+                                badge_mention,
+                                seen,
+                                ts,
+                                message_id,
+                                cx,
+                            )
                         });
+                        if seen {
+                            MessagesStore::global(cx).update(cx, |store, _| {
+                                store.set_last_read_message(channel_id, message_id);
+                            });
+                        }
                     }
                     if !from_me && is_new_message {
                         ClanList::global(cx).update(cx, |cls, cx| {

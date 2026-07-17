@@ -56,7 +56,7 @@ pub fn render_call_log_card(
     let mut card = div()
         .max_w(px(CARD_MAX_WIDTH))
         .border_1()
-        .border_color(theme.tokens.border_theme_primary)
+        .border_color(theme.tokens.border_primary)
         .bg(theme.tokens.bg_active_member_channel)
         .rounded(px(8.))
         .shadow_lg()

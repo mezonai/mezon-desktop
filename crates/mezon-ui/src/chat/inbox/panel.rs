@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{
@@ -7,8 +8,9 @@ use gpui::{
 };
 use mezon_store::{
     ChannelId, ChannelList, ClanId, ClanList, ClanMembersEvent, ClanMembersStore, InboxCategory,
-    InboxEvent, InboxNotification, InboxStore, MessageId, MessagesStore, TopicBadgeEvent,
-    TopicBadgeStore, TopicDiscussion, TopicsEvent, TopicsStore, UsersByUserEvent, UsersByUserStore,
+    InboxEvent, InboxNotification, InboxStore, MessageId, MessagesEvent, MessagesStore,
+    TopicBadgeEvent, TopicBadgeStore, TopicDiscussion, TopicsEvent, TopicsStore, UsersByUserEvent,
+    UsersByUserStore,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -779,6 +781,33 @@ fn schedule_notification_jump(
     );
 }
 
+const PENDING_TOPIC_OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+thread_local! {
+    static PENDING_TOPIC_OPEN: RefCell<Option<Subscription>> = const { RefCell::new(None) };
+}
+
+fn open_topic_panel_when_jump_lands(cx: &mut App, origin_message_id: MessageId) {
+    let subscription = cx.subscribe(&MessagesStore::global(cx), move |_, event, cx| {
+        if !matches!(event, MessagesEvent::JumpTo { message_id } if *message_id == origin_message_id)
+        {
+            return;
+        }
+        PENDING_TOPIC_OPEN.with(|pending| pending.borrow_mut().take());
+        TopicsStore::global(cx).update(cx, |store, cx| {
+            store.start_create_for_message(origin_message_id, cx);
+        });
+    });
+    PENDING_TOPIC_OPEN.with(|pending| *pending.borrow_mut() = Some(subscription));
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(PENDING_TOPIC_OPEN_TIMEOUT)
+            .await;
+        PENDING_TOPIC_OPEN.with(|pending| pending.borrow_mut().take());
+    })
+    .detach();
+}
+
 fn schedule_topic_jump(
     cx: &mut App,
     inbox_handle: ui::PopoverMenuHandle<InboxPopoverPanel>,
@@ -793,6 +822,10 @@ fn schedule_topic_jump(
     let Ok(channel) = topic.channel_id.parse::<ChannelId>() else {
         return;
     };
+    let Ok(origin_message_id) = topic.message_id.parse::<MessageId>() else {
+        return;
+    };
+    open_topic_panel_when_jump_lands(cx, origin_message_id);
     schedule_inbox_jump(
         cx,
         inbox_handle,

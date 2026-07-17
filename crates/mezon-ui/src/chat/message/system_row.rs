@@ -1,7 +1,7 @@
 use gpui::{AnyElement, App, FontWeight, IntoElement, SharedString, div, prelude::*, px};
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelType, ClanMembersStore, Message, MessageCode,
-    MessageId, MessagesStore, ThreadsStore,
+    MessageId, MessagesStore, PinnedMessagesStore, ThreadsStore,
 };
 
 use super::content::{append_system_mention_spans, render_system_message_content};
@@ -9,7 +9,6 @@ use super::context::{CONTENT_INSET, OnboardingContext, RowCtx, WelcomeContext};
 use super::time::format_message_time;
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::router::{Route, navigate};
-use crate::theme::Theme;
 
 const SYSTEM_ARROW_ICON: f32 = 20.;
 const SYSTEM_SMALL_ICON: f32 = 18.;
@@ -249,7 +248,7 @@ fn append_system_suffix(msg: &Message, ctx: &RowCtx, mut row: gpui::Div) -> gpui
             row = row.child(system_link(
                 primary,
                 mezon_i18n::t(locale, "message.systemMessages.allPinned"),
-                |_, _, _| {},
+                open_pinned_popover,
             ));
             row.child(format!(
                 " {}",
@@ -339,6 +338,12 @@ fn jump_to_message(message_id: MessageId, cx: &mut App) {
 
 fn open_threads_popover(_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut App) {
     ThreadsStore::global(cx).update(cx, |store, cx| {
+        store.request_open_popover(cx);
+    });
+}
+
+fn open_pinned_popover(_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut App) {
+    PinnedMessagesStore::global(cx).update(cx, |store, cx| {
         store.request_open_popover(cx);
     });
 }
@@ -772,7 +777,8 @@ fn fmt_i18n(template: &str, vars: &[(&str, &str)]) -> String {
     out
 }
 
-pub fn render_unread_break(theme: &Theme, locale: &str) -> AnyElement {
+pub fn render_unread_break(locale: &str) -> AnyElement {
+    let red = gpui::rgb(0xef4444);
     div()
         .id("unread-break")
         .flex()
@@ -782,12 +788,17 @@ pub fn render_unread_break(theme: &Theme, locale: &str) -> AnyElement {
         .px_4()
         .py_0p5()
         .w_full()
-        .child(div().flex_1().h(px(1.)).bg(theme.mention_badge))
+        .child(div().flex_1().h(px(1.)).bg(red))
         .child(
             div()
-                .text_xs()
+                .flex_none()
+                .px(px(4.))
+                .py(px(2.))
+                .rounded(px(4.))
+                .bg(red)
+                .text_size(px(8.))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.mention_badge)
+                .text_color(gpui::rgb(0xffffff))
                 .child(mezon_i18n::t(locale, "chat.newMessages")),
         )
         .into_any_element()

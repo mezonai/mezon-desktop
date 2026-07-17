@@ -202,6 +202,18 @@ impl Router {
         self.current.clone()
     }
 
+    pub fn conversation_channel_id(&self) -> Option<ChannelId> {
+        match &self.current {
+            Route::Channel { channel_id, .. }
+            | Route::Thread { channel_id, .. }
+            | Route::DirectMessage {
+                direct_id: channel_id,
+                ..
+            } => Some(*channel_id),
+            _ => None,
+        }
+    }
+
     pub fn current_path(&self) -> String {
         self.current.to_path()
     }

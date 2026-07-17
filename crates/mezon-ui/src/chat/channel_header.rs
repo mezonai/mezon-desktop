@@ -5,10 +5,11 @@ use gpui::{
     Render, RenderOnce, SharedString, Stateful, Subscription, WeakEntity, Window, div, point,
     prelude::*, px,
 };
-use mezon_store::{Settings, ThreadsStore};
+use mezon_store::{InVoiceInfo, Settings, ThreadsStore};
 use ui::{ButtonLike, Clickable, PopoverMenu, PopoverMenuHandle, Toggleable};
 
 use crate::app::window_controls;
+use crate::chat::files_popover::{FilesPopoverPanel, files_popover_on_open};
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
 use crate::chat::layout::ChatLayout;
 use crate::chat::pinned_popover::{PinnedPopoverPanel, pin_popover_on_open};
@@ -22,9 +23,12 @@ type ToggleHandler = Arc<dyn Fn(&mut Window, &mut App)>;
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 type ThreadTriggerClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
+const HEADER_POPOVER_Y_OFFSET: f32 = 4.;
+
 pub struct ChannelHeader {
     name: String,
     dm: bool,
+    in_voice: Option<(SharedString, InVoiceInfo)>,
     members_action: bool,
     members_active: bool,
     on_toggle_members: Option<ToggleHandler>,
@@ -38,6 +42,7 @@ pub struct ChannelHeader {
     pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
     settings: Option<Entity<Settings>>,
     gallery_trigger: Option<AnyElement>,
+    files_trigger: Option<AnyElement>,
     search_bar: Option<AnyElement>,
 }
 
@@ -46,6 +51,7 @@ impl ChannelHeader {
         Self {
             name: name.into(),
             dm: false,
+            in_voice: None,
             members_action: true,
             members_active: false,
             on_toggle_members: None,
@@ -59,12 +65,18 @@ impl ChannelHeader {
             pin_handle: None,
             settings: None,
             gallery_trigger: None,
+            files_trigger: None,
             search_bar: None,
         }
     }
 
     pub fn dm(mut self, dm: bool) -> Self {
         self.dm = dm;
+        self
+    }
+
+    pub fn in_voice(mut self, label: SharedString, info: InVoiceInfo) -> Self {
+        self.in_voice = Some((label, info));
         self
     }
 
@@ -134,6 +146,11 @@ impl ChannelHeader {
         self
     }
 
+    pub fn files_trigger(mut self, trigger: AnyElement) -> Self {
+        self.files_trigger = Some(trigger);
+        self
+    }
+
     pub fn render(self, theme: &Theme, cx: &App) -> impl IntoElement {
         let bg_hover = theme.bg_hover;
         let bg_active = theme.bg_tertiary;
@@ -152,6 +169,7 @@ impl ChannelHeader {
         let ChannelHeader {
             name,
             dm,
+            in_voice,
             members_action,
             members_active,
             on_toggle_members,
@@ -165,6 +183,7 @@ impl ChannelHeader {
             pin_handle,
             settings,
             gallery_trigger,
+            files_trigger,
             search_bar,
         } = self;
         let inbox_el = if show_inbox && !dm {
@@ -194,6 +213,7 @@ impl ChannelHeader {
             pin_handle,
             settings,
             gallery_trigger,
+            files_trigger,
             cx,
         );
 
@@ -222,13 +242,53 @@ impl ChannelHeader {
                                 .text_color(theme.text_muted),
                         )
                     })
-                    .child(
-                        div()
+                    .child({
+                        let name_el = div()
                             .text_base()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.text_primary)
-                            .child(name),
-                    ),
+                            .child(name);
+                        match in_voice {
+                            Some((label, info)) => div()
+                                .flex()
+                                .flex_col()
+                                .justify_center()
+                                .gap(px(4.))
+                                .child(name_el.line_height(px(18.)))
+                                .child(
+                                    div()
+                                        .id("hdr-in-voice")
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_1()
+                                        .h(px(16.))
+                                        .cursor_pointer()
+                                        .on_click(move |_, _, cx| {
+                                            crate::router::navigate(
+                                                cx,
+                                                crate::router::Route::Channel {
+                                                    clan_id: info.clan_id,
+                                                    channel_id: info.channel_id,
+                                                },
+                                            )
+                                        })
+                                        .child(
+                                            Icon::new(IconName::Speaker)
+                                                .size(px(12.))
+                                                .text_color(gpui::rgb(0x22c55e)),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.text_primary)
+                                                .child(label),
+                                        ),
+                                )
+                                .into_any_element(),
+                            None => name_el.into_any_element(),
+                        }
+                    }),
             )
             .child(div().flex_1())
             .child(
@@ -245,7 +305,7 @@ impl ChannelHeader {
                             .items_center()
                             .pl_4()
                             .border_l_1()
-                            .border_color(theme.tokens.border_theme_primary)
+                            .border_color(theme.tokens.border_primary)
                             .child(inbox)
                             .into_any_element()
                     }))
@@ -263,6 +323,7 @@ impl ChannelHeader {
         let header = ChannelHeader {
             name: String::new(),
             dm: false,
+            in_voice: None,
             members_action: false,
             members_active: false,
             on_toggle_members: None,
@@ -276,6 +337,7 @@ impl ChannelHeader {
             pin_handle: None,
             settings: None,
             gallery_trigger: None,
+            files_trigger: None,
             search_bar: None,
         };
         header.render_inbox_button(theme, cx)
@@ -297,11 +359,13 @@ impl ChannelHeader {
         pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
         settings: Option<Entity<Settings>>,
         gallery_trigger: Option<AnyElement>,
+        files_trigger: Option<AnyElement>,
         cx: &App,
     ) -> Vec<AnyElement> {
         let header = ChannelHeader {
             name: String::new(),
             dm: false,
+            in_voice: None,
             members_action,
             members_active,
             on_toggle_members,
@@ -315,6 +379,7 @@ impl ChannelHeader {
             pin_handle,
             settings,
             gallery_trigger,
+            files_trigger,
             search_bar: None,
         };
         header.action_buttons(
@@ -347,6 +412,7 @@ impl ChannelHeader {
         let pin_handle = self.pin_handle;
         let settings = self.settings;
         let mut gallery_trigger = self.gallery_trigger;
+        let mut files_trigger = self.files_trigger;
         let mut buttons: Vec<AnyElement> = Vec::new();
         for (id, icon) in actions {
             if id == "hdr-members" && !members_action {
@@ -363,7 +429,7 @@ impl ChannelHeader {
                             .with_handle(handle)
                             .anchor(Anchor::TopRight)
                             .attach(Anchor::BottomRight)
-                            .offset(point(px(0.), px(9.)))
+                            .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
                             .on_open(thread_popover_on_open(layout.clone()))
                             .menu({
                                 let layout = layout.clone();
@@ -399,7 +465,7 @@ impl ChannelHeader {
                         .with_handle(handle)
                         .anchor(Anchor::TopRight)
                         .attach(Anchor::BottomRight)
-                        .offset(point(px(0.), px(9.)))
+                        .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
                         .on_open(pin_popover_on_open())
                         .menu({
                             let settings = settings.clone();
@@ -423,6 +489,12 @@ impl ChannelHeader {
                 && let Some(trigger) = gallery_trigger.take()
             {
                 buttons.push(trigger);
+                continue;
+            }
+            if id == "hdr-files" {
+                if let Some(trigger) = files_trigger.take() {
+                    buttons.push(trigger);
+                }
                 continue;
             }
             let is_members = id == "hdr-members";
@@ -535,6 +607,7 @@ impl ChannelHeader {
 pub struct ChatHeader {
     name: SharedString,
     dm: bool,
+    in_voice: Option<InVoiceInfo>,
     members_action: bool,
     members_active: bool,
     show_search_bar: bool,
@@ -562,6 +635,7 @@ impl ChatHeader {
         Self {
             name: SharedString::default(),
             dm: false,
+            in_voice: None,
             members_action: true,
             members_active: false,
             show_search_bar: false,
@@ -584,6 +658,7 @@ impl ChatHeader {
         &mut self,
         name: Option<&str>,
         dm: bool,
+        in_voice: Option<InVoiceInfo>,
         members_action: bool,
         members_active: bool,
         show_inbox: bool,
@@ -614,6 +689,7 @@ impl ChatHeader {
         };
         if self.name == name
             && self.dm == dm
+            && self.in_voice == in_voice
             && self.members_action == members_action
             && self.members_active == members_active
             && self.show_search_bar == show_search_bar
@@ -628,6 +704,7 @@ impl ChatHeader {
         }
         self.name = name;
         self.dm = dm;
+        self.in_voice = in_voice;
         self.members_action = members_action;
         self.members_active = members_active;
         self.show_search_bar = show_search_bar;
@@ -659,13 +736,44 @@ impl Render for ChatHeader {
         let gallery_trigger = PopoverMenu::new("hdr-gallery-popover")
             .anchor(Anchor::TopRight)
             .attach(Anchor::BottomRight)
-            .offset(point(px(0.), px(4.)))
+            .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
             .trigger(GalleryTrigger::new(&theme))
             .menu({
                 let settings = settings.clone();
                 move |window, cx| build_gallery_modal(settings.clone(), window, cx)
             })
             .into_any_element();
+
+        let files_trigger = if !self.dm {
+            Some(
+                PopoverMenu::new("hdr-files-popover")
+                    .anchor(Anchor::TopRight)
+                    .attach(Anchor::BottomRight)
+                    .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
+                    .on_open(files_popover_on_open())
+                    .menu({
+                        let settings = settings.clone();
+                        move |window, cx| {
+                            let (clan_id, channel_id) =
+                                crate::chat::files_popover::active_files_channel(cx)?;
+                            Some(cx.new(|cx| {
+                                FilesPopoverPanel::new(
+                                    settings.clone(),
+                                    clan_id,
+                                    channel_id,
+                                    PopoverMenuHandle::default(),
+                                    window,
+                                    cx,
+                                )
+                            }))
+                        }
+                    })
+                    .trigger(FilesPopoverTrigger::new(&theme))
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
 
         let members_toggle = Arc::new(move |_window: &mut Window, cx: &mut App| {
             let _ = layout_weak.update(cx, |this, cx| this.toggle_member_list(cx));
@@ -678,6 +786,15 @@ impl Render for ChatHeader {
             .show_inbox(self.show_inbox)
             .on_toggle_members(members_toggle)
             .show_threads(show_threads);
+        if let Some(files_trigger) = files_trigger {
+            header = header.files_trigger(files_trigger);
+        }
+        if self.dm
+            && let Some(info) = self.in_voice
+        {
+            let label: SharedString = mezon_i18n::t(&locale, "channelTopbar.invoice").into();
+            header = header.in_voice(label, info);
+        }
         if show_search_bar {
             let search_bar = crate::chat::message_search::render_header_search_bar(
                 &theme,
@@ -973,6 +1090,84 @@ impl IntoElement for GalleryTrigger {
                     .size(px(20.))
                     .text_color(tint),
             );
+        if self.selected {
+            button = button.bg(self.bg_active);
+        }
+        if let Some(cursor) = self.cursor {
+            button = button.cursor(cursor);
+        }
+        if let Some(handler) = self.on_click {
+            button = button.on_click(handler);
+        }
+        button
+    }
+}
+
+struct FilesPopoverTrigger {
+    icon_idle: gpui::Rgba,
+    icon_active: gpui::Rgba,
+    bg_hover: gpui::Rgba,
+    bg_active: gpui::Rgba,
+    selected: bool,
+    on_click: Option<ClickHandler>,
+    cursor: Option<CursorStyle>,
+}
+
+impl FilesPopoverTrigger {
+    fn new(theme: &Theme) -> Self {
+        Self {
+            icon_idle: theme.text_muted,
+            icon_active: theme.text_primary,
+            bg_hover: theme.bg_hover,
+            bg_active: theme.bg_tertiary,
+            selected: false,
+            on_click: None,
+            cursor: None,
+        }
+    }
+}
+
+impl Clickable for FilesPopoverTrigger {
+    fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+
+    fn cursor_style(mut self, cursor_style: CursorStyle) -> Self {
+        self.cursor = Some(cursor_style);
+        self
+    }
+}
+
+impl Toggleable for FilesPopoverTrigger {
+    fn toggle_state(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+}
+
+impl IntoElement for FilesPopoverTrigger {
+    type Element = Stateful<Div>;
+
+    fn into_element(self) -> Self::Element {
+        let bg_hover = self.bg_hover;
+        let tint = if self.selected {
+            self.icon_active
+        } else {
+            self.icon_idle
+        };
+        let mut button = div()
+            .id("hdr-files")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(32.))
+            .h(px(32.))
+            .rounded_md()
+            .cursor_pointer()
+            .hover(move |s| s.bg(bg_hover))
+            .occlude()
+            .child(Icon::new(IconName::FileIcon).size(px(20.)).text_color(tint));
         if self.selected {
             button = button.bg(self.bg_active);
         }

@@ -81,7 +81,7 @@ impl Render for ChannelTyping {
             (theme.tokens.text_theme_primary, theme.tokens.text_secondary)
         };
         let bar = div()
-            .mx_3()
+            .pl_3()
             .h(px(16.))
             .flex_none()
             .flex()

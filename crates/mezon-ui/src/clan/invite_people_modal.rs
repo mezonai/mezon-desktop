@@ -522,7 +522,7 @@ impl Render for InvitePeopleModal {
                     .px(px(20.))
                     .py(px(15.))
                     .border_b_1()
-                    .border_color(theme.tokens.border_theme_primary)
+                    .border_color(theme.tokens.border_primary)
                     .child(
                         div()
                             .min_w_0()
@@ -567,7 +567,7 @@ impl Render for InvitePeopleModal {
                 div().px(px(24.)).pb(px(20.)).child(
                     div()
                         .border_t_1()
-                        .border_color(theme.tokens.border_theme_primary)
+                        .border_color(theme.tokens.border_primary)
                         .pt(px(18.))
                         .child(
                             div()
@@ -714,7 +714,7 @@ fn render_qr_modal(
                         .h(px(40.))
                         .min_w(px(88.))
                         .border_1()
-                        .border_color(theme.tokens.border_theme_primary)
+                        .border_color(theme.tokens.border_primary)
                         .on_click(move |_, _window, cx| {
                             cancel_entity.update(cx, |this, cx| this.close_qr(cx));
                         }),
@@ -844,7 +844,7 @@ fn render_invite_action(
         .justify_center()
         .rounded_md()
         .border_1()
-        .border_color(theme.tokens.border_theme_primary)
+        .border_color(theme.tokens.border_primary)
         .text_size(px(13.))
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme.text_secondary)
@@ -896,7 +896,7 @@ fn render_copy_link(
         .overflow_hidden()
         .rounded_lg()
         .border_1()
-        .border_color(theme.tokens.border_theme_primary)
+        .border_color(theme.tokens.border_primary)
         .bg(theme.tokens.bg_input_secondary)
         .child(
             div()

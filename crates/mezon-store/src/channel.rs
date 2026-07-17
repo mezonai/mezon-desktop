@@ -68,6 +68,12 @@ pub struct VoiceMember {
     pub avatar_url: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InVoiceInfo {
+    pub clan_id: ClanId,
+    pub channel_id: ChannelId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppChannel {
     pub app_id: String,
@@ -131,6 +137,7 @@ pub struct Category {
 pub enum ChannelEvent {
     ActiveChannelChanged(Option<ChannelId>),
     Unread(ChannelId),
+    InVoiceChanged,
     ClanChannelsLoaded(ClanId),
     UserChannelsLoaded,
 }
@@ -199,6 +206,7 @@ pub struct ChannelList {
     user_channels: HashMap<ChannelId, Channel>,
     user_channels_order: Vec<ChannelId>,
     user_channels_loading: bool,
+    in_voice: HashMap<UserId, InVoiceInfo>,
     user_channels_loaded: bool,
     loading: HashSet<ClanId>,
     active_clan_id: Option<ClanId>,
@@ -305,6 +313,7 @@ impl ChannelList {
         self.user_channels.clear();
         self.user_channels_order.clear();
         self.user_channels_loading = false;
+        self.in_voice.clear();
         self.user_channels_loaded = false;
         self.loading.clear();
         self.show_empty_categories.clear();
@@ -374,6 +383,7 @@ impl ChannelList {
             user_channels: HashMap::new(),
             user_channels_order: Vec::new(),
             user_channels_loading: false,
+            in_voice: HashMap::new(),
             user_channels_loaded: false,
             loading: HashSet::new(),
             active_clan_id: None,
@@ -481,6 +491,9 @@ impl ChannelList {
                         this.loading.remove(&clan_id);
                         this.app_channels_cache.insert(clan_id, app_channels);
                         this.merge_pending_badges(&mut categories);
+                        if seed_in_voice_from_categories(&mut this.in_voice, clan_id, &categories) {
+                            cx.emit(ChannelEvent::InVoiceChanged);
+                        }
                         this.cache.insert(clan_id, categories, None);
                         this.invalidate_channel_index(clan_id);
                         if let Some(store) = MessagesStore::try_global(cx) {
@@ -545,6 +558,10 @@ impl ChannelList {
 
     pub fn user_channel(&self, channel_id: ChannelId) -> Option<&Channel> {
         self.user_channels.get(&channel_id)
+    }
+
+    pub fn in_voice_status(&self, user_id: UserId) -> Option<InVoiceInfo> {
+        self.in_voice.get(&user_id).copied()
     }
 
     pub fn user_channels(&self) -> impl Iterator<Item = &Channel> + '_ {
@@ -1288,14 +1305,15 @@ impl ChannelList {
                 for cats in self.cache.values_mut() {
                     removed |= remove_channel(cats, id);
                 }
+                let in_voice_changed = remove_in_voice_in_channel(&mut self.in_voice, id);
                 if removed {
                     self.invalidate_channel_index_all();
                     if self.active_channel_id == Some(id) {
                         self.active_channel_id = None;
                         cx.emit(ChannelEvent::ActiveChannelChanged(None));
                     }
-                    cx.notify();
                 }
+                notify_in_voice_change(removed, in_voice_changed, cx);
             }
             RealtimeEvent::VoiceJoined(e) => {
                 let clan_id = ClanId(e.clan_id);
@@ -1324,9 +1342,15 @@ impl ChannelList {
                         }
                     }
                 }
-                if changed {
-                    cx.notify();
-                }
+                let in_voice_changed = apply_in_voice_joined(
+                    &mut self.in_voice,
+                    user_id,
+                    InVoiceInfo {
+                        clan_id,
+                        channel_id,
+                    },
+                );
+                notify_in_voice_change(changed, in_voice_changed, cx);
             }
             RealtimeEvent::VoiceLeaved(e) => {
                 let clan_id = ClanId(e.clan_id);
@@ -1346,9 +1370,9 @@ impl ChannelList {
                         }
                     }
                 }
-                if changed {
-                    cx.notify();
-                }
+                let in_voice_changed =
+                    apply_in_voice_leaved(&mut self.in_voice, user_id, channel_id);
+                notify_in_voice_change(changed, in_voice_changed, cx);
             }
             RealtimeEvent::UserChannelAdded(e) => {
                 let Some(ref desc) = e.channel_desc else {
@@ -1408,14 +1432,15 @@ impl ChannelList {
                 for cats in self.cache.values_mut() {
                     removed |= remove_channel(cats, channel_id);
                 }
+                let in_voice_changed = remove_in_voice_in_channel(&mut self.in_voice, channel_id);
                 if removed {
                     self.invalidate_channel_index_all();
                     if self.active_channel_id == Some(channel_id) {
                         self.active_channel_id = None;
                         cx.emit(ChannelEvent::ActiveChannelChanged(None));
                     }
-                    cx.notify();
                 }
+                notify_in_voice_change(removed, in_voice_changed, cx);
             }
             _ => {}
         }
@@ -2030,6 +2055,90 @@ fn remove_channel(categories: &mut [Category], channel_id: ChannelId) -> bool {
         favor.channels.retain(|ch| ch.id != channel_id);
     }
     removed
+}
+
+fn notify_in_voice_change(
+    channels_changed: bool,
+    in_voice_changed: bool,
+    cx: &mut Context<ChannelList>,
+) {
+    if in_voice_changed {
+        cx.emit(ChannelEvent::InVoiceChanged);
+    }
+    if channels_changed || in_voice_changed {
+        cx.notify();
+    }
+}
+
+fn apply_in_voice_joined(
+    in_voice: &mut HashMap<UserId, InVoiceInfo>,
+    user_id: UserId,
+    info: InVoiceInfo,
+) -> bool {
+    if user_id.is_zero() {
+        return false;
+    }
+    in_voice.insert(user_id, info) != Some(info)
+}
+
+fn apply_in_voice_leaved(
+    in_voice: &mut HashMap<UserId, InVoiceInfo>,
+    user_id: UserId,
+    channel_id: ChannelId,
+) -> bool {
+    if in_voice
+        .get(&user_id)
+        .is_some_and(|info| info.channel_id == channel_id)
+    {
+        in_voice.remove(&user_id);
+        return true;
+    }
+    false
+}
+
+fn remove_in_voice_in_channel(
+    in_voice: &mut HashMap<UserId, InVoiceInfo>,
+    channel_id: ChannelId,
+) -> bool {
+    let before = in_voice.len();
+    in_voice.retain(|_, info| info.channel_id != channel_id);
+    in_voice.len() != before
+}
+
+fn seed_in_voice_from_categories(
+    in_voice: &mut HashMap<UserId, InVoiceInfo>,
+    clan_id: ClanId,
+    categories: &[Category],
+) -> bool {
+    let before = clan_in_voice_snapshot(in_voice, clan_id);
+
+    in_voice.retain(|_, info| info.clan_id != clan_id);
+
+    for channel in categories.iter().flat_map(|c| &c.channels) {
+        for member in &channel.voice_members {
+            apply_in_voice_joined(
+                in_voice,
+                member.user_id,
+                InVoiceInfo {
+                    clan_id,
+                    channel_id: channel.id,
+                },
+            );
+        }
+    }
+
+    clan_in_voice_snapshot(in_voice, clan_id) != before
+}
+
+fn clan_in_voice_snapshot(
+    in_voice: &HashMap<UserId, InVoiceInfo>,
+    clan_id: ClanId,
+) -> HashMap<UserId, InVoiceInfo> {
+    in_voice
+        .iter()
+        .filter(|(_, info)| info.clan_id == clan_id)
+        .map(|(user, info)| (*user, *info))
+        .collect()
 }
 
 fn update_channel(
@@ -3165,5 +3274,83 @@ mod tests {
         assert_eq!(cats[0].name, "Renamed");
         assert_eq!(cats[0].order, 42);
         assert_eq!(cats[0].channels.len(), 1);
+    }
+
+    fn in_voice(clan: i64, channel: i64) -> InVoiceInfo {
+        InVoiceInfo {
+            clan_id: ClanId(clan),
+            channel_id: ChannelId(channel),
+        }
+    }
+
+    #[test]
+    fn in_voice_joined_inserts_and_moves_between_channels() {
+        let mut map = HashMap::new();
+        assert!(apply_in_voice_joined(&mut map, UserId(7), in_voice(1, 10)));
+        assert_eq!(map.get(&UserId(7)), Some(&in_voice(1, 10)));
+
+        assert!(!apply_in_voice_joined(&mut map, UserId(7), in_voice(1, 10)));
+
+        assert!(apply_in_voice_joined(&mut map, UserId(7), in_voice(2, 20)));
+        assert_eq!(map.get(&UserId(7)), Some(&in_voice(2, 20)));
+    }
+
+    #[test]
+    fn in_voice_joined_ignores_zero_user_id() {
+        let mut map = HashMap::new();
+        assert!(!apply_in_voice_joined(&mut map, UserId(0), in_voice(1, 10)));
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn in_voice_leaved_removes_only_matching_channel() {
+        let mut map = HashMap::new();
+        apply_in_voice_joined(&mut map, UserId(7), in_voice(1, 10));
+
+        assert!(!apply_in_voice_leaved(&mut map, UserId(7), ChannelId(99)));
+        assert_eq!(map.get(&UserId(7)), Some(&in_voice(1, 10)));
+
+        assert!(apply_in_voice_leaved(&mut map, UserId(7), ChannelId(10)));
+        assert!(map.is_empty());
+
+        assert!(!apply_in_voice_leaved(&mut map, UserId(7), ChannelId(10)));
+    }
+
+    #[test]
+    fn remove_in_voice_in_channel_clears_all_users_of_channel() {
+        let mut map = HashMap::new();
+        apply_in_voice_joined(&mut map, UserId(7), in_voice(1, 10));
+        apply_in_voice_joined(&mut map, UserId(8), in_voice(1, 10));
+        apply_in_voice_joined(&mut map, UserId(9), in_voice(1, 11));
+
+        assert!(remove_in_voice_in_channel(&mut map, ChannelId(10)));
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get(&UserId(9)), Some(&in_voice(1, 11)));
+
+        assert!(!remove_in_voice_in_channel(&mut map, ChannelId(10)));
+    }
+
+    #[test]
+    fn seed_in_voice_from_categories_indexes_voice_members() {
+        let mut cats = categories();
+        cats[0].channels[0].voice_members = vec![
+            VoiceMember {
+                user_id: UserId(7),
+                display_name: "seven".into(),
+                avatar_url: String::new(),
+            },
+            VoiceMember {
+                user_id: UserId(0),
+                display_name: "zero".into(),
+                avatar_url: String::new(),
+            },
+        ];
+
+        let mut map = HashMap::new();
+        assert!(seed_in_voice_from_categories(&mut map, ClanId(1), &cats));
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get(&UserId(7)), Some(&in_voice(1, 10)));
+
+        assert!(!seed_in_voice_from_categories(&mut map, ClanId(1), &cats));
     }
 }

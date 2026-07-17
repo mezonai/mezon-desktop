@@ -1,6 +1,7 @@
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate};
 use gpui::SharedString;
 use mezon_store::message_time::local_datetime;
+use ui::utils::{DateTimeType, format_distance};
 
 const MONTH_KEYS: [&str; 12] = [
     "common.timeFormat.months.jan",
@@ -34,7 +35,7 @@ pub fn format_message_time(
     now: DateTime<Local>,
 ) -> SharedString {
     let Some(msg_date) = local_date else {
-        return SharedString::default();
+        return time_hhmm.clone();
     };
 
     let today = now.date_naive();
@@ -59,6 +60,31 @@ pub fn format_message_time(
         )
         .into()
     }
+}
+
+pub fn format_relative_time_from_seconds(
+    timestamp_sec: i64,
+    locale: &str,
+    now: DateTime<Local>,
+) -> String {
+    let timestamp_sec = mezon_store::message_time::normalize_unix_seconds(timestamp_sec);
+    if timestamp_sec <= 0 {
+        return String::new();
+    }
+    let Some(target) = local_datetime(timestamp_sec) else {
+        return String::new();
+    };
+    let diff = now.timestamp().saturating_sub(timestamp_sec);
+    if diff <= 1 {
+        return mezon_i18n::t(locale, "common.justNow").to_string();
+    }
+    format_distance(
+        DateTimeType::Naive(target.naive_local()),
+        now.naive_local(),
+        false,
+        true,
+        false,
+    )
 }
 
 pub fn format_date_divider(ts: i64, locale: &str, now: DateTime<Local>) -> String {

@@ -4,14 +4,14 @@ use gpui::{
     AnyView, App, Context, Entity, ExternalPaths, FontWeight, SharedString, StyleRefinement,
     Subscription, Window, div, prelude::*, px, rgb, rgba,
 };
-use mezon_store::{ChannelId, MessagesEvent, MessagesStore, Settings};
+use mezon_store::{ChannelId, InVoiceInfo, MessagesEvent, MessagesStore, Settings};
 use ui::PopoverMenuHandle;
 
 use crate::chat::ReplyTarget;
 use crate::chat::channel_header::ChatHeader;
 use crate::chat::channel_typing::ChannelTyping;
 use crate::chat::inbox::InboxPopoverPanel;
-use crate::chat::input_bar::InputBar;
+use crate::chat::input_bar::{InputBar, ReplyClearSource};
 use crate::chat::member_list::{MemberListPanel, MemberSource};
 use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::ChannelMessages;
@@ -170,6 +170,7 @@ impl ChatArea {
         locale: &str,
         channel_name: Option<&str>,
         is_dm: bool,
+        in_voice: Option<InVoiceInfo>,
         channel_id: Option<ChannelId>,
         show_members_button: bool,
         show_member_panel: bool,
@@ -202,6 +203,7 @@ impl ChatArea {
             header.sync(
                 channel_name,
                 is_dm,
+                in_voice,
                 show_members_button,
                 show_member_panel,
                 show_inbox,
@@ -221,7 +223,12 @@ impl ChatArea {
             .update(cx, |typing, cx| typing.sync(channel_id, cx));
 
         input_bar.update(cx, |input_bar, cx| {
-            input_bar.sync(locale, self.replying_to.clone(), cx)
+            input_bar.sync(
+                locale,
+                self.replying_to.clone(),
+                ReplyClearSource::Messages,
+                cx,
+            )
         });
 
         let header = AnyView::from(self.header.clone()).cached(
