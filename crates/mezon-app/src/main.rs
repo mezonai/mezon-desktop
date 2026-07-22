@@ -300,7 +300,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     }
 
     #[cfg(target_os = "macos")]
-    app.on_reopen(show_main_window);
+    app.on_reopen(activate_main_window);
 
     app.run(move |cx: &mut App| {
         tracing::debug!("App started");
@@ -513,6 +513,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                 _deep_link: deep_link_task,
                 _tray_tasks: tray_tasks,
             });
+            install_tray_bridge(cx);
         } else {
             deep_link_task.detach();
         }
@@ -661,7 +662,7 @@ fn open_main_window(
         }));
         let task = cx.spawn(async move |cx: &mut AsyncApp| {
             while let Some(target) = click_rx.next().await {
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     activate_main_window(cx);
                     tracing::debug!(
                         clan_id = ?target.clan_id,
@@ -800,10 +801,6 @@ fn update_native_badge(cx: &App) {
     }
 }
 
-fn show_main_window(cx: &mut App) {
-    activate_main_window(cx);
-}
-
 struct NotificationClickGlobal(#[allow(dead_code)] gpui::Task<()>);
 impl gpui::Global for NotificationClickGlobal {}
 
@@ -839,8 +836,15 @@ fn notification_route(
     }
 }
 
-struct TrayGlobal(#[allow(dead_code)] mezon_native::tray::MezonTray);
+struct TrayGlobal(mezon_native::tray::MezonTray);
 impl gpui::Global for TrayGlobal {}
+
+struct TrayBridgeGlobal {
+    _voice: gpui::Subscription,
+    _clan: gpui::Subscription,
+    _settings: Option<gpui::Subscription>,
+}
+impl gpui::Global for TrayBridgeGlobal {}
 
 struct TrayTasksGlobal {
     _deep_link: gpui::Task<()>,
@@ -851,6 +855,7 @@ impl gpui::Global for TrayTasksGlobal {}
 struct TrayTasks {
     _show: gpui::Task<()>,
     _quit: gpui::Task<()>,
+    _voice: gpui::Task<()>,
 }
 
 fn setup_tray(
@@ -859,10 +864,12 @@ fn setup_tray(
 ) -> Option<(mezon_native::tray::MezonTray, TrayTasks)> {
     let (show_tx, mut show_rx) = futures::channel::mpsc::unbounded::<()>();
     let (quit_tx, mut quit_rx) = futures::channel::mpsc::unbounded::<()>();
+    let (voice_tx, mut voice_rx) =
+        futures::channel::mpsc::unbounded::<mezon_native::tray::TrayVoiceAction>();
 
     let show_task = cx.spawn(async move |cx: &mut AsyncApp| {
         while show_rx.next().await.is_some() {
-            cx.update(show_main_window);
+            cx.update(activate_main_window);
         }
     });
 
@@ -872,7 +879,18 @@ fn setup_tray(
         }
     });
 
+    let voice_task = cx.spawn(async move |cx: &mut AsyncApp| {
+        while let Some(action) = voice_rx.next().await {
+            cx.update(|cx| handle_tray_voice_action(action, cx));
+        }
+    });
+
+    let locale = mezon_store::Settings::try_global(cx)
+        .map(|settings| settings.read(cx).language.clone())
+        .unwrap_or_else(|| "en".to_string());
+
     match mezon_native::tray::MezonTray::new(
+        locale,
         move || {
             tracing::debug!("Tray: Show Mezon");
             let _ = show_tx.unbounded_send(());
@@ -880,6 +898,10 @@ fn setup_tray(
         move || {
             tracing::info!("Tray: Quit requested");
             let _ = quit_tx.unbounded_send(());
+        },
+        move |action| {
+            tracing::debug!("Tray: voice action {action:?}");
+            let _ = voice_tx.unbounded_send(action);
         },
         rt_handle,
     ) {
@@ -890,6 +912,7 @@ fn setup_tray(
                 TrayTasks {
                     _show: show_task,
                     _quit: quit_task,
+                    _voice: voice_task,
                 },
             ))
         }
@@ -897,6 +920,111 @@ fn setup_tray(
             tracing::warn!("Failed to create system tray: {e}");
             None
         }
+    }
+}
+
+fn handle_tray_voice_action(action: mezon_native::tray::TrayVoiceAction, cx: &mut App) {
+    activate_main_window(cx);
+    let Some(handle) = mezon_ui::app::main_window::handle(cx) else {
+        return;
+    };
+    let _ = cx.update_window(handle, |_, window, cx| {
+        mezon_store::VoiceStore::global(cx).update(cx, |store, cx| match action {
+            mezon_native::tray::TrayVoiceAction::ToggleMic => store.toggle_mic(cx),
+            mezon_native::tray::TrayVoiceAction::ToggleCamera => store.toggle_camera(cx),
+            mezon_native::tray::TrayVoiceAction::ToggleScreen => {
+                if store.screen_share_enabled() {
+                    store.stop_screen_share(cx);
+                }
+            }
+            mezon_native::tray::TrayVoiceAction::Leave => store.leave(window, cx),
+        });
+    });
+}
+
+fn install_tray_bridge(cx: &mut App) {
+    if cx.try_global::<TrayGlobal>().is_none() {
+        return;
+    }
+
+    let voice = mezon_store::VoiceStore::global(cx);
+    let voice_sub = cx.observe(&voice, |_, cx| sync_tray_voice_state(cx));
+    let clan = mezon_store::ClanList::global(cx);
+    let clan_sub = cx.observe(&clan, |_, cx| sync_tray_voice_state(cx));
+
+    let settings_sub = mezon_store::Settings::try_global(cx)
+        .map(|settings| cx.observe(&settings, |_, cx| sync_tray_locale(cx)));
+    let observe_locale = settings_sub.is_some();
+
+    cx.set_global(TrayBridgeGlobal {
+        _voice: voice_sub,
+        _clan: clan_sub,
+        _settings: settings_sub,
+    });
+
+    sync_tray_voice_state(cx);
+    if observe_locale {
+        sync_tray_locale(cx);
+    }
+}
+
+fn sync_tray_voice_state(cx: &mut App) {
+    if cx.try_global::<TrayGlobal>().is_none() {
+        return;
+    }
+    let voice = mezon_store::VoiceStore::global(cx).read(cx);
+    let state = build_tray_voice_state(voice, cx);
+    cx.global_mut::<TrayGlobal>().0.update_voice_state(state);
+}
+
+fn sync_tray_locale(cx: &mut App) {
+    let Some(settings) = mezon_store::Settings::try_global(cx) else {
+        return;
+    };
+    if cx.try_global::<TrayGlobal>().is_none() {
+        return;
+    }
+    let locale = settings.read(cx).language.clone();
+    cx.global_mut::<TrayGlobal>().0.update_locale(locale);
+}
+
+fn build_tray_voice_state(
+    voice: &mezon_store::VoiceStore,
+    cx: &App,
+) -> mezon_native::tray::TrayVoiceState {
+    use mezon_store::{ClanList, VoiceConnection};
+
+    let connection = voice.connection();
+    let (in_call, channel_line) = match connection {
+        VoiceConnection::Connecting { clan_id, .. }
+        | VoiceConnection::Connected { clan_id, .. } => {
+            let channel_label = voice.channel_label();
+            let clan_name = clan_id
+                .parse::<mezon_store::ClanId>()
+                .ok()
+                .and_then(|id| {
+                    ClanList::global(cx)
+                        .read(cx)
+                        .clan(id)
+                        .map(|c| c.name.clone())
+                })
+                .unwrap_or_default();
+            let line = if clan_name.is_empty() {
+                channel_label.to_string()
+            } else {
+                format!("{channel_label} / {clan_name}")
+            };
+            (true, line)
+        }
+        _ => (false, String::new()),
+    };
+
+    mezon_native::tray::TrayVoiceState {
+        in_call,
+        channel_line,
+        mic_enabled: voice.mic_enabled(),
+        camera_enabled: voice.camera_enabled(),
+        screen_enabled: voice.screen_share_enabled(),
     }
 }
 

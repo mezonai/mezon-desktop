@@ -171,7 +171,51 @@ core-video           = { version = "0.5.2", features = ["metal"] }
 core-text            = "=21.0.0"
 metal                = "0.33"
 objc                 = "0.2"
-objc2-app-kit        = { version = "0.3", default-features = false, features = ["NSGraphics"] }
+objc2-app-kit        = { version = "0.3", default-features = false, features = [
+    "NSGraphics",
+    "std",
+    "block2",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "NSAppearance",
+    "NSButton",
+    "NSButtonCell",
+    "NSCell",
+    "NSColor",
+    "NSControl",
+    "NSEvent",
+    "NSFont",
+    "NSFontDescriptor",
+    "NSImage",
+    "NSImageView",
+    "NSPanel",
+    "NSScreen",
+    "NSTrackingArea",
+    "NSText",
+    "NSTextField",
+    "NSView",
+    "NSVisualEffectView",
+    "NSWindow",
+] }
+objc2                = { version = "=0.6.4", default-features = false, features = ["std"] }
+objc2-foundation     = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-core-foundation",
+    "NSString",
+    "NSThread",
+    "NSGeometry",
+] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "CFCGTypes",
+] }
+objc2-core-graphics  = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGDirectDisplay",
+] }
+block2               = "0.6"
+dispatch2            = "0.3"
 mach2                = "0.5"
 libc                 = "0.2"
 windows              = { version = "0.61.3", features = [
