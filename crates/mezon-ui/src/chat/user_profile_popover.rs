@@ -4,8 +4,8 @@ use gpui::{
     SharedString, Stateful, StyleRefinement, Styled, Window, div, prelude::*, px, svg,
 };
 use mezon_store::{
-    BadgeService, ChannelList, DirectMessageStore, FriendState, FriendStore, PresenceStore,
-    ProfileContext, RolesStore, Settings, UserId, resolve_user_profile,
+    BadgeService, ChannelList, DirectMessageBody, DirectMessageStore, FriendState, FriendStore,
+    PresenceStore, ProfileContext, RolesStore, Settings, UserId, resolve_user_profile,
 };
 use ui::{Clickable, PopoverMenu, Toggleable};
 
@@ -109,7 +109,14 @@ impl UserProfilePopover {
         let avatar = profile.avatar_url.clone();
         let username = profile.username.clone();
         let task = DirectMessageStore::global(cx).update(cx, |store, cx| {
-            store.create_dm_and_send_text(user_id, label, avatar, username.clone(), content, cx)
+            store.create_dm_and_send_text(
+                user_id,
+                label,
+                avatar,
+                username.clone(),
+                DirectMessageBody::Text(content),
+                cx,
+            )
         });
         cx.spawn(async move |this, cx| match task.await {
             Ok((channel_id, channel_type)) => {
@@ -117,7 +124,7 @@ impl UserProfilePopover {
                     this.sending_message = false;
                     cx.emit(DismissEvent);
                 });
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     navigate(
                         cx,
                         Route::DirectMessage {
@@ -296,17 +303,12 @@ impl Render for UserProfilePopover {
                     .p_2()
                     .children(
                         voice_info.map(|info| {
-                            render_voice_button(info.clan_id, info.channel_id, &theme, cx)
+                            render_voice_button(info.clan_id, info.channel_id, theme, cx)
                         }),
                     )
                     .children(banner_actions),
             )
-            .child(render_avatar_row(
-                avatar,
-                status_icon,
-                custom_status,
-                &theme,
-            ))
+            .child(render_avatar_row(avatar, status_icon, custom_status, theme))
             .child(
                 div().px(px(16.)).child(
                     div()

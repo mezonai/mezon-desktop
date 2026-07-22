@@ -60,7 +60,7 @@ impl InboxPopoverPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let list_state = ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW));
+        let list_state = ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW)).measure_all();
         let weak = cx.weak_entity();
         Self::attach_list_scroll_handler(&list_state, weak);
         let avatar_image_cache = crate::image_cache::shared_avatar_cache(cx);

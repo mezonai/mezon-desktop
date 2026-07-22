@@ -793,9 +793,9 @@ impl ChatLayout {
     }
 
     pub(crate) fn toggle_member_list(&mut self, cx: &mut Context<Self>) {
-        let dm_group = self.is_dm_group_chat(cx);
+        let dm = self.is_dm_route(cx);
         self.show_member_list = !self.show_member_list;
-        if dm_group {
+        if dm {
             self.ui_state.show_member_list_dm = self.show_member_list;
         } else {
             self.ui_state.show_member_list = self.show_member_list;
@@ -824,16 +824,11 @@ impl ChatLayout {
     }
 
     fn sync_member_list_visibility(&mut self, cx: &Context<Self>) {
-        self.show_member_list = if self.is_dm_group_chat(cx) {
+        self.show_member_list = if self.is_dm_route(cx) {
             self.ui_state.show_member_list_dm
         } else {
             self.ui_state.show_member_list
         };
-    }
-
-    fn is_dm_group_chat(&self, cx: &Context<Self>) -> bool {
-        self.current_dm(cx)
-            .is_some_and(|dm| dm.kind == DirectKind::Group)
     }
 
     fn channel_supports_timeline_view(&self, cx: &Context<Self>) -> bool {

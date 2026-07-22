@@ -5,7 +5,7 @@ use gpui::{
     Context, Entity, FontWeight, ObjectFit, Render, SharedString, Subscription, Window, div, img,
     prelude::*, px, radians,
 };
-use mezon_store::{MessagesStore, OgpResult, Settings, TopicsStore};
+use mezon_store::{MessagesEvent, MessagesStore, OgpResult, Settings, TopicsStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReplyClearSource {
@@ -21,7 +21,7 @@ pub struct InputBar {
     reply_clear: ReplyClearSource,
     _settings_observe: Subscription,
     _mention_observe: Subscription,
-    _messages_observe: Subscription,
+    _messages_sub: Subscription,
 }
 
 impl InputBar {
@@ -33,7 +33,14 @@ impl InputBar {
     ) -> Self {
         let settings_observe = cx.observe(settings, |_, _, cx| cx.notify());
         let mention_observe = cx.observe(&mention_input, |_, _, cx| cx.notify());
-        let messages_observe = cx.observe(&MessagesStore::global(cx), |_, _, cx| cx.notify());
+        let messages_sub = cx.subscribe(
+            &MessagesStore::global(cx),
+            |_, _, event: &MessagesEvent, cx| {
+                if matches!(event, MessagesEvent::AnonymousModeChanged) {
+                    cx.notify();
+                }
+            },
+        );
         Self {
             mention_input,
             locale,
@@ -41,7 +48,7 @@ impl InputBar {
             reply_clear: ReplyClearSource::Messages,
             _settings_observe: settings_observe,
             _mention_observe: mention_observe,
-            _messages_observe: messages_observe,
+            _messages_sub: messages_sub,
         }
     }
 

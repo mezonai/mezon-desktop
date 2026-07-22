@@ -95,8 +95,10 @@ impl MediaChannelPanel {
             detail_event_id: None,
             detail_start_time: 0,
             detail_view: None,
-            timeline_list_state: ListState::new(0, ListAlignment::Top, px(MEDIA_LIST_OVERDRAW)),
-            events_list_state: ListState::new(0, ListAlignment::Top, px(MEDIA_LIST_OVERDRAW)),
+            timeline_list_state: ListState::new(0, ListAlignment::Top, px(MEDIA_LIST_OVERDRAW))
+                .measure_all(),
+            events_list_state: ListState::new(0, ListAlignment::Top, px(MEDIA_LIST_OVERDRAW))
+                .measure_all(),
             _store_sub,
             _window_activation: None,
             last_fetch_error: None,

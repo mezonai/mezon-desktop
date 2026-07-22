@@ -4,9 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
-use mezon_client::transport::{
-    ApiChannelDesc, ApiDirectChannel, ApiMessageContent, build_send_content,
-};
+use mezon_client::transport::{ApiChannelDesc, ApiDirectChannel, build_send_content};
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 
 use crate::Freshness;
@@ -392,7 +390,7 @@ impl DirectMessageStore {
         member_label: String,
         member_avatar: String,
         member_username: String,
-        content: String,
+        body: DirectMessageBody,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<()>> {
         let api = self.api.clone();
@@ -435,7 +433,7 @@ impl DirectMessageStore {
                 }
             };
 
-            let content_json = direct_message_content_json(&content);
+            let content_json = body.into_content_json();
             let sent = api
                 .send_channel_message_structured(channel_id.get(), &content_json, mode)
                 .await?;
@@ -452,7 +450,7 @@ impl DirectMessageStore {
         member_label: String,
         member_avatar: String,
         member_username: String,
-        content: String,
+        body: DirectMessageBody,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<(ChannelId, i32)>> {
         let api = self.api.clone();
@@ -507,7 +505,7 @@ impl DirectMessageStore {
                 tracing::warn!("join_chat after create DM failed: {e}");
             }
 
-            let content_json = direct_message_content_json(&content);
+            let content_json = body.into_content_json();
             let sent = api
                 .send_channel_message_structured(channel_id.get(), &content_json, send_mode)
                 .await?;
@@ -706,11 +704,17 @@ impl DirectMessageStore {
     }
 }
 
-fn direct_message_content_json(content: &str) -> String {
-    if serde_json::from_str::<ApiMessageContent>(content).is_ok() {
-        content.to_string()
-    } else {
-        build_send_content(content, &[], &[], &[]).json
+pub enum DirectMessageBody {
+    Text(String),
+    ContentJson(String),
+}
+
+impl DirectMessageBody {
+    fn into_content_json(self) -> String {
+        match self {
+            Self::Text(text) => build_send_content(&text, &[], &[], &[]).json,
+            Self::ContentJson(json) => json,
+        }
     }
 }
 
@@ -878,6 +882,7 @@ fn direct_from_api(c: ApiDirectChannel) -> DirectChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mezon_client::transport::ApiMessageContent;
 
     fn api_dm(id: i64, label: &str, ty: u32) -> ApiDirectChannel {
         ApiDirectChannel {
@@ -1311,14 +1316,25 @@ mod tests {
     }
 
     #[test]
-    fn direct_message_content_json_wraps_plain_text() {
-        let json = direct_message_content_json("hello");
-        assert!(serde_json::from_str::<ApiMessageContent>(&json).is_ok());
+    fn direct_body_text_is_wrapped_into_content_json() {
+        let json = DirectMessageBody::Text("hello".into()).into_content_json();
+        let parsed: ApiMessageContent = serde_json::from_str(&json).expect("json");
+        assert_eq!(parsed.t, "hello");
     }
 
     #[test]
-    fn direct_message_content_json_passes_through_structured() {
+    fn direct_body_text_that_looks_like_json_is_still_wrapped() {
+        let json = DirectMessageBody::Text(r#"{"t":"","foo":1}"#.into()).into_content_json();
+        let parsed: ApiMessageContent = serde_json::from_str(&json).expect("json");
+        assert_eq!(parsed.t, r#"{"t":"","foo":1}"#);
+    }
+
+    #[test]
+    fn direct_body_content_json_passes_through() {
         let structured = build_send_content("hello", &[], &[], &[]).json;
-        assert_eq!(direct_message_content_json(&structured), structured);
+        assert_eq!(
+            DirectMessageBody::ContentJson(structured.clone()).into_content_json(),
+            structured
+        );
     }
 }

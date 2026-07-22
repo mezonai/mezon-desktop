@@ -1535,7 +1535,8 @@ impl ChannelMessages {
                 MessagesEvent::ReplyTargetChanged
                 | MessagesEvent::ForwardProgress { .. }
                 | MessagesEvent::ForwardFinished { .. }
-                | MessagesEvent::ShareContactFinished { .. } => return,
+                | MessagesEvent::ShareContactFinished { .. }
+                | MessagesEvent::AnonymousModeChanged => return,
                 MessagesEvent::TopicUpdated { .. } => {}
             }
             if structural {

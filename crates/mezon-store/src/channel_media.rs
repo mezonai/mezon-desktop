@@ -236,7 +236,7 @@ pub fn first_event_year(events: &[ChannelTimeline]) -> Option<String> {
 }
 
 pub fn timeline_card_position(index: usize) -> TimelineCardSide {
-    if index % 2 == 0 {
+    if index.is_multiple_of(2) {
         TimelineCardSide::Left
     } else {
         TimelineCardSide::Right
@@ -436,8 +436,10 @@ impl ChannelMediaStore {
             bucket.is_loading = true;
             bucket.error = None;
         } else {
-            let mut bucket = ChannelMediaBucket::default();
-            bucket.is_loading = true;
+            let bucket = ChannelMediaBucket {
+                is_loading: true,
+                ..Default::default()
+            };
             self.by_key
                 .insert(key.clone(), bucket, self.active_key.as_ref());
         }
@@ -739,10 +741,10 @@ impl ChannelMediaStore {
 
     fn update_event_in_lists(&mut self, channel_id: ChannelId, year: i32, event: &ChannelTimeline) {
         let key = CacheKey { channel_id, year };
-        if let Some(bucket) = self.by_key.get_mut(&key) {
-            if let Some(existing) = bucket.events.iter_mut().find(|e| e.id == event.id) {
-                *existing = merge_timeline_event(existing, event);
-            }
+        if let Some(bucket) = self.by_key.get_mut(&key)
+            && let Some(existing) = bucket.events.iter_mut().find(|e| e.id == event.id)
+        {
+            *existing = merge_timeline_event(existing, event);
         }
     }
 

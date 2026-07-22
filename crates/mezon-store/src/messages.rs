@@ -148,6 +148,7 @@ pub enum MessagesEvent {
         sent: usize,
         failed: Vec<SharedString>,
     },
+    AnonymousModeChanged,
 }
 
 /// The message currently being replied to (composer state), mirroring React's
@@ -531,7 +532,8 @@ pub struct MessagesStore {
     pending_send_payloads: HashMap<MessageId, PendingSendPayload>,
     anonymous_clans: HashSet<ClanId>,
     topic_anonymous_mode: bool,
-    last_typing_sent: Option<Instant>,
+    last_anonymous_mode: bool,
+    last_typing_sent: Option<(ChannelId, Instant)>,
     buzz_player: Option<AudioPlayer>,
     buzz_sound_loading: bool,
 }
@@ -887,6 +889,7 @@ impl MessagesStore {
         self.pending_send_payloads.clear();
         self.anonymous_clans.clear();
         self.topic_anonymous_mode = false;
+        self.sync_anonymous_mode(cx);
         self.last_typing_sent = None;
         self.buzz_player = None;
         self.buzz_sound_loading = false;
@@ -944,6 +947,7 @@ impl MessagesStore {
             pending_send_payloads: HashMap::new(),
             anonymous_clans: HashSet::new(),
             topic_anonymous_mode: false,
+            last_anonymous_mode: false,
             last_typing_sent: None,
             buzz_player: None,
             buzz_sound_loading: false,
@@ -1899,9 +1903,19 @@ impl MessagesStore {
             .is_some_and(|id| self.anonymous_clans.contains(&id))
     }
 
+    pub(crate) fn sync_anonymous_mode(&mut self, cx: &mut Context<Self>) {
+        let next = self.is_anonymous_mode();
+        if self.last_anonymous_mode == next {
+            return;
+        }
+        self.last_anonymous_mode = next;
+        cx.emit(MessagesEvent::AnonymousModeChanged);
+    }
+
     pub fn toggle_anonymous_mode(&mut self, cx: &mut Context<Self>) {
         if self.active_topic_id.is_some() {
             self.topic_anonymous_mode = !self.topic_anonymous_mode;
+            self.sync_anonymous_mode(cx);
             cx.notify();
             return;
         }
@@ -1913,6 +1927,7 @@ impl MessagesStore {
         } else {
             self.anonymous_clans.insert(clan_id);
         }
+        self.sync_anonymous_mode(cx);
         cx.notify();
     }
 
@@ -1920,20 +1935,18 @@ impl MessagesStore {
         if self.is_anonymous_mode() {
             return;
         }
-        let now = Instant::now();
-        if self
-            .last_typing_sent
-            .is_some_and(|last| now.duration_since(last) < TYPING_THROTTLE)
-        {
-            return;
-        }
-        self.last_typing_sent = Some(now);
         let Some(clan_id) = self.active_clan_id else {
             return;
         };
         let Some(channel_id) = self.active_channel_id else {
             return;
         };
+        let now = Instant::now();
+        if self.last_typing_sent.is_some_and(|(last_channel, last)| {
+            last_channel == channel_id && now.duration_since(last) < TYPING_THROTTLE
+        }) {
+            return;
+        }
         let display_name = AccountStore::global(cx)
             .read(cx)
             .account
@@ -1949,6 +1962,7 @@ impl MessagesStore {
         if display_name.is_empty() {
             return;
         }
+        self.last_typing_sent = Some((channel_id, now));
         let mode = self.mode;
         let is_public = self.is_public;
         let topic_id = self.active_topic_id.map(|t| t.get()).unwrap_or(0);
@@ -2201,7 +2215,7 @@ impl MessagesStore {
     pub fn remove_failed_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
         if self.active_channel_id.is_none() {
             return;
-        };
+        }
         let storage_id = self.reaction_storage_channel(message_id);
         let is_failed = self
             .cache
@@ -2636,6 +2650,7 @@ impl MessagesStore {
                 .retain(|(channel_id, _, _), _| *channel_id != prev);
         }
         self.active_topic_id = next;
+        self.sync_anonymous_mode(cx);
         cx.notify();
     }
 
@@ -3655,6 +3670,7 @@ impl MessagesStore {
             && self.poll_my_vote.is_empty()
             && self.select_ui.is_empty()
             && self.embed_form.is_empty()
+            && self.pending_send_payloads.is_empty()
         {
             return;
         }
@@ -3664,6 +3680,7 @@ impl MessagesStore {
             .chain(self.poll_my_vote.keys())
             .chain(self.select_ui.keys())
             .chain(self.embed_form.keys())
+            .chain(self.pending_send_payloads.keys())
             .copied()
             .filter(|id| !self.message_is_loaded(*id))
             .collect();
@@ -3672,6 +3689,7 @@ impl MessagesStore {
             self.poll_my_vote.remove(&id);
             self.select_ui.remove(&id);
             self.embed_form.remove(&id);
+            self.pending_send_payloads.remove(&id);
         }
     }
 
@@ -3688,6 +3706,7 @@ impl MessagesStore {
             if self.reply_target.take().is_some() {
                 cx.emit(MessagesEvent::ReplyTargetChanged);
             }
+            self.sync_anonymous_mode(cx);
             cx.emit(MessagesEvent::Reset { count: 0 });
             cx.notify();
             return;
@@ -3789,6 +3808,7 @@ impl MessagesStore {
         self.mode = mode;
         self.viewing_older_by_channel.insert(channel_id, false);
         self.loading_more = false;
+        self.sync_anonymous_mode(cx);
         if self.reply_target.take().is_some() {
             cx.emit(MessagesEvent::ReplyTargetChanged);
         }
@@ -4247,13 +4267,12 @@ impl MessagesStore {
         };
         let uid_str = current_uid.get().to_string();
         let key = reaction_key(&emoji_id, &emoji).to_string();
-        let cfg = AppConfig::try_global(cx);
         let applied = self
             .cache
             .get_mut(&storage_id)
             .and_then(|channel| channel.messages.get_mut_by_id(message_id))
             .map(|msg| {
-                apply_reaction_event(&mut msg.reactions, &emoji_id, &emoji, &uid_str, remove, cfg);
+                apply_reaction_event(&mut msg.reactions, &emoji_id, &emoji, &uid_str, remove);
             })
             .is_some();
         if applied {
@@ -4366,20 +4385,12 @@ impl MessagesStore {
         was_remove: bool,
         cx: &mut Context<Self>,
     ) {
-        let cfg = AppConfig::try_global(cx);
         if let Some(msg) = self
             .cache
             .get_mut(&channel_id)
             .and_then(|channel| channel.messages.get_mut_by_id(message_id))
         {
-            rollback_reaction(
-                &mut msg.reactions,
-                emoji_id,
-                emoji,
-                sender_id,
-                was_remove,
-                cfg,
-            );
+            rollback_reaction(&mut msg.reactions, emoji_id, emoji, sender_id, was_remove);
         }
         if !was_remove {
             let entry_key = (
@@ -4598,7 +4609,6 @@ impl MessagesStore {
             return;
         }
 
-        let cfg = AppConfig::try_global(cx);
         let Some(channel) = self.cache.get_mut(&storage_id) else {
             return;
         };
@@ -4611,7 +4621,6 @@ impl MessagesStore {
             &r.emoji,
             &sender_id,
             r.action,
-            cfg,
         );
         if is_active_topic {
             cx.emit(MessagesEvent::TopicUpdated {
@@ -5467,7 +5476,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
         .iter()
         .map(|r| message_reference_from_api(r, cfg))
         .collect();
-    let reactions = aggregate_reactions(&m.reactions, cfg);
+    let reactions = aggregate_reactions(&m.reactions);
     let mut attachments: Vec<MessageAttachment> = m
         .attachments
         .into_iter()

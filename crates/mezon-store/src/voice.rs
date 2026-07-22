@@ -1318,7 +1318,8 @@ impl VoiceStore {
         let Some((identity, _)) = self.pending_kick.take() else {
             return;
         };
-        self.pending_removals.insert(identity.clone(), Instant::now());
+        self.pending_removals
+            .insert(identity.clone(), Instant::now());
         self.participants.retain(|p| p.identity != identity);
         cx.notify();
         self.moderate_participant(identity, ModerationAction::Kick, cx);

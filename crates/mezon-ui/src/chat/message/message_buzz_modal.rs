@@ -25,6 +25,9 @@ impl Focusable for MessageBuzzModal {
 
 impl MessageBuzzModal {
     pub fn open(locale: SharedString, window: &mut Window, cx: &mut App) {
+        if Shell::global(cx).read(cx).has_modal() {
+            return;
+        }
         let view = cx.new(|cx| {
             let placeholder = mezon_i18n::t(&locale, "messageBuzz.enterMessage").to_string();
             let message = cx.new(|cx| {

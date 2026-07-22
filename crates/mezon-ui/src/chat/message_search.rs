@@ -211,7 +211,8 @@ impl MessageSearchPanel {
             clan_id,
             is_direct,
             locale,
-            list_state: ListState::new(0, ListAlignment::Top, px(SEARCH_LIST_OVERDRAW)),
+            list_state: ListState::new(0, ListAlignment::Top, px(SEARCH_LIST_OVERDRAW))
+                .measure_all(),
             last_results_page: 0,
             cached_rows: Rc::new(Vec::new()),
             cached_highlights: Rc::new(Vec::new()),

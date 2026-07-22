@@ -2484,6 +2484,7 @@ pub fn extract_canvas_ids_from_text(text: &str) -> Vec<String> {
     let mut search_from = 0usize;
     while let Some(rel) = text.get(search_from..).and_then(|hay| hay.find(marker)) {
         let base = search_from + rel + marker.len();
+        search_from = base;
         let Some(rest) = text.get(base..) else {
             break;
         };
@@ -2492,36 +2493,36 @@ pub fn extract_canvas_ids_from_text(text: &str) -> Vec<String> {
             break;
         };
         if clan_id.is_empty() || !clan_id.bytes().all(|b| b.is_ascii_digit()) {
-            search_from = base + 1;
             continue;
         }
         if parts.next() != Some("channels") {
-            search_from = base + 1;
             continue;
         }
         let Some(channel_id) = parts.next() else {
             break;
         };
         if channel_id.is_empty() || !channel_id.bytes().all(|b| b.is_ascii_digit()) {
-            search_from = base + 1;
             continue;
         }
         if parts.next() != Some("canvas") {
-            search_from = base + 1;
             continue;
         }
-        let Some(canvas_id) = parts.next() else {
+        let Some(canvas_segment) = parts.next() else {
             break;
         };
-        let canvas_id = canvas_id
-            .split(['?', '#'])
+        search_from = base
+            + clan_id.len()
+            + "/channels/".len()
+            + channel_id.len()
+            + "/canvas/".len()
+            + canvas_segment.len();
+        let canvas_id = canvas_segment
+            .split(|c: char| c.is_whitespace() || c == '?' || c == '#')
             .next()
-            .unwrap_or(canvas_id)
-            .trim();
+            .unwrap_or_default();
         if !canvas_id.is_empty() {
             ids.push(canvas_id.to_string());
         }
-        search_from = base + rest.len();
     }
     ids.sort();
     ids.dedup();
@@ -9497,6 +9498,23 @@ mod tests {
         let parsed = parse_search_attachment_field(raw);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].url, "https://cdn/b.png");
+    }
+
+    #[test]
+    fn extract_canvas_ids_finds_every_link() {
+        let text = "a https://mezon.ai/chat/clans/1/channels/2/canvas/aaa and \
+                    https://mezon.ai/chat/clans/1/channels/2/canvas/bbb?x=1 end";
+        assert_eq!(
+            extract_canvas_ids_from_text(text),
+            vec!["aaa".to_string(), "bbb".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_canvas_ids_skips_non_canvas_links_and_keeps_scanning() {
+        let text = "/chat/clans/1/channels/2/threads/9 — chào bạn 👋 \
+                    https://mezon.ai/chat/clans/3/channels/4/canvas/zzz";
+        assert_eq!(extract_canvas_ids_from_text(text), vec!["zzz".to_string()]);
     }
 
     #[test]
