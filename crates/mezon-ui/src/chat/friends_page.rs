@@ -11,6 +11,7 @@ use mezon_store::{
 
 use crate::app::shell::{FriendRemovalKind, Shell};
 use crate::app::window_controls::APP_HEADER_HEIGHT;
+use crate::chat::message::{ShareContactModal, share_contact_subject};
 use crate::components::primitives::{
     Avatar, ContextMenu, Icon, IconName, Input, InputEvent, InputState, ToastKind, context_menu_at,
 };
@@ -983,7 +984,28 @@ impl FriendsPage {
                 t("friendsPage.friendMenu.startVideoCall"),
                 coming_soon.clone(),
             )
-            .item(t("friendsPage.friendMenu.startVoiceCall"), coming_soon)
+            .item(
+                t("friendsPage.friendMenu.startVoiceCall"),
+                coming_soon.clone(),
+            )
+            .item(t("contextMenu.member.shareContact"), {
+                let panel = panel.clone();
+                let settings = self.settings.clone();
+                move |window, cx| {
+                    let Some(friend) = FriendStore::global(cx).read(cx).friend(user_id) else {
+                        return;
+                    };
+                    let contact = share_contact_subject(user_id, &friend.display_name, None, cx);
+                    let locale = settings.read(cx).language.clone().into();
+                    ShareContactModal::open(contact, locale, window, cx);
+                    if let Some(p) = panel.upgrade() {
+                        p.update(cx, |this, cx| {
+                            this.open_menu = None;
+                            cx.notify();
+                        });
+                    }
+                }
+            })
             .danger_item(t("friendsPage.friendMenu.removeFriend"), confirm_remove)
             .danger_item(t("friendsPage.friendMenu.block"), move |_window, cx| {
                 FriendStore::global(cx).update(cx, |s, cx| s.block_friend(user_id, cx));

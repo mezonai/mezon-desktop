@@ -21,12 +21,44 @@ pub struct ChannelNotificationSetting {
     pub mute_until_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationOverride {
+    pub id: i64,
+    pub label: String,
+    pub is_category: bool,
+    pub level: i32,
+    pub muted: bool,
+}
+
+impl NotificationOverride {
+    pub fn from_api(dto: &api::NotificationChannelCategorySetting) -> Self {
+        Self {
+            id: dto.id,
+            label: dto.channel_category_label.clone(),
+            is_category: dto.channel_category_title == "category",
+            level: dto.notification_setting_type,
+            muted: dto.action == 0,
+        }
+    }
+}
+
+fn client_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 impl ChannelNotificationSetting {
     pub fn from_api(dto: &api::NotificationUserChannel) -> Self {
+        Self::from_api_at(dto, client_now_ms())
+    }
+
+    pub fn from_api_at(dto: &api::NotificationUserChannel, now_ms: i64) -> Self {
         Self {
             id: dto.id,
             level: dto.notification_setting_type,
-            mute_until_ms: i64::from(dto.time_mute_seconds),
+            mute_until_ms: Self::expiry_from_duration(now_ms, dto.time_mute_seconds),
         }
     }
 
@@ -34,6 +66,10 @@ impl ChannelNotificationSetting {
     /// in milliseconds despite the wire name. `MUTE_INFINITY` never yields a date.
     pub fn muted_until_ms(&self, now_ms: i64) -> Option<i64> {
         (self.mute_until_ms > now_ms).then_some(self.mute_until_ms)
+    }
+
+    pub fn is_time_muted(&self, now_ms: i64) -> bool {
+        self.mute_until_ms == i64::from(MUTE_INFINITY) || self.mute_until_ms > now_ms
     }
 
     pub fn expiry_from_duration(now_ms: i64, mute_seconds: i32) -> i64 {
@@ -58,8 +94,8 @@ impl ChannelNotificationSetting {
             return false;
         }
         match category_default {
-            Some(level) => level == NOTIFICATION_NOTHING_MESSAGE,
-            None => clan_default == Some(NOTIFICATION_NOTHING_MESSAGE),
+            Some(level) if level != NOTIFICATION_DEFAULT => level == NOTIFICATION_NOTHING_MESSAGE,
+            _ => clan_default == Some(NOTIFICATION_NOTHING_MESSAGE),
         }
     }
 }
@@ -115,6 +151,15 @@ mod tests {
     }
 
     #[test]
+    fn is_time_muted_tracks_infinity_future_and_unmute() {
+        let now = 1_700_000_000_000;
+        assert!(setting(5, NOTIFICATION_DEFAULT, -1).is_time_muted(now));
+        assert!(setting(5, NOTIFICATION_DEFAULT, now + 60_000).is_time_muted(now));
+        assert!(!setting(5, NOTIFICATION_DEFAULT, now - 60_000).is_time_muted(now));
+        assert!(!setting(5, NOTIFICATION_DEFAULT, 0).is_time_muted(now));
+    }
+
+    #[test]
     fn nothing_message_without_mute_timer_is_muted() {
         assert!(setting(5, NOTIFICATION_NOTHING_MESSAGE, 0).is_muted(None, None));
     }
@@ -139,6 +184,17 @@ mod tests {
     }
 
     #[test]
+    fn category_default_of_zero_falls_through_to_clan() {
+        let s = setting(0, NOTIFICATION_DEFAULT, 0);
+        assert!(s.is_muted(
+            Some(NOTIFICATION_DEFAULT),
+            Some(NOTIFICATION_NOTHING_MESSAGE)
+        ));
+        assert!(!s.is_muted(Some(NOTIFICATION_DEFAULT), Some(NOTIFICATION_ALL_MESSAGE)));
+        assert!(!s.is_muted(Some(NOTIFICATION_DEFAULT), None));
+    }
+
+    #[test]
     fn without_override_or_category_clan_default_decides() {
         let s = setting(0, NOTIFICATION_DEFAULT, 0);
         assert!(s.is_muted(None, Some(NOTIFICATION_NOTHING_MESSAGE)));
@@ -147,7 +203,8 @@ mod tests {
     }
 
     #[test]
-    fn from_api_maps_every_field() {
+    fn from_api_converts_mute_duration_to_epoch_like_react() {
+        let now = 1_700_000_000_000;
         let dto = api::NotificationUserChannel {
             id: 7,
             notification_setting_type: NOTIFICATION_MENTION_MESSAGE,
@@ -155,8 +212,31 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            ChannelNotificationSetting::from_api(&dto),
-            setting(7, NOTIFICATION_MENTION_MESSAGE, 3600)
+            ChannelNotificationSetting::from_api_at(&dto, now),
+            setting(7, NOTIFICATION_MENTION_MESSAGE, now + 3_600_000)
+        );
+    }
+
+    #[test]
+    fn from_api_preserves_infinity_and_unmute_sentinels() {
+        let now = 1_700_000_000_000;
+        let inf = api::NotificationUserChannel {
+            id: 7,
+            time_mute_seconds: -1,
+            ..Default::default()
+        };
+        assert_eq!(
+            ChannelNotificationSetting::from_api_at(&inf, now).mute_until_ms,
+            -1
+        );
+        let unmuted = api::NotificationUserChannel {
+            id: 7,
+            time_mute_seconds: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            ChannelNotificationSetting::from_api_at(&unmuted, now).mute_until_ms,
+            0
         );
     }
 }

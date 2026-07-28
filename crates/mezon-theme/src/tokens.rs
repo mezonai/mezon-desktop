@@ -1270,10 +1270,10 @@ impl ThemeTokens {
                     a: 1.0,
                 },
                 bg_button_secondary: Rgba {
-                    r: 0.94118,
-                    g: 0.94902,
-                    b: 0.96078,
-                    a: 1.0,
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.0,
                 },
                 bg_click_highlight: Rgba {
                     r: 0.15921,
@@ -1830,10 +1830,10 @@ impl ThemeTokens {
                     a: 1.0,
                 },
                 bg_button_secondary: Rgba {
-                    r: 0.94118,
-                    g: 0.94902,
-                    b: 0.96078,
-                    a: 1.0,
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.0,
                 },
                 bg_click_highlight: Rgba {
                     r: 0.15921,
@@ -2390,10 +2390,10 @@ impl ThemeTokens {
                     a: 1.0,
                 },
                 bg_button_secondary: Rgba {
-                    r: 0.94118,
-                    g: 0.94902,
-                    b: 0.96078,
-                    a: 1.0,
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.0,
                 },
                 bg_click_highlight: Rgba {
                     r: 0.15921,
@@ -2950,10 +2950,10 @@ impl ThemeTokens {
                     a: 1.0,
                 },
                 bg_button_secondary: Rgba {
-                    r: 0.94118,
-                    g: 0.94902,
-                    b: 0.96078,
-                    a: 1.0,
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.0,
                 },
                 bg_click_highlight: Rgba {
                     r: 0.15921,
@@ -4070,10 +4070,10 @@ impl ThemeTokens {
                     a: 1.0,
                 },
                 bg_button_secondary: Rgba {
-                    r: 0.94118,
-                    g: 0.94902,
-                    b: 0.96078,
-                    a: 1.0,
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.0,
                 },
                 bg_click_highlight: Rgba {
                     r: 0.15921,
@@ -4630,10 +4630,10 @@ impl ThemeTokens {
                     a: 1.0,
                 },
                 bg_button_secondary: Rgba {
-                    r: 0.94118,
-                    g: 0.94902,
-                    b: 0.96078,
-                    a: 1.0,
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.0,
                 },
                 bg_click_highlight: Rgba {
                     r: 0.15921,

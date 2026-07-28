@@ -1,0 +1,15 @@
+[package]
+name = "mezon-widgets"
+version.workspace = true
+license.workspace = true
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+gpui.workspace = true
+mezon-theme.workspace = true
+mezon-store.workspace = true
+unicode-segmentation.workspace = true
+tracing.workspace = true

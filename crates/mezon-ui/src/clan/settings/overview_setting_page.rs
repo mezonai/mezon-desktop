@@ -170,7 +170,7 @@ impl OverviewSettingPage {
         this
     }
 
-    pub fn release(&mut self) {
+    pub fn release(&mut self, _cx: &mut Context<Self>) {
         self._fetch_task.take();
         self._logo_upload_task.take();
         self._banner_upload_task.take();

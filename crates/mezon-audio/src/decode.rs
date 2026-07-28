@@ -61,6 +61,36 @@ pub fn decode_audio(bytes: Vec<u8>) -> Result<DecodedPcm, AudioError> {
     })
 }
 
+pub fn sniff_sound_mime(bytes: &[u8]) -> Option<&'static str> {
+    if is_wav(bytes) {
+        return Some("audio/wav");
+    }
+    if is_mpeg_audio(skip_id3(bytes)) {
+        return Some("audio/mpeg");
+    }
+    None
+}
+
+fn is_wav(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && bytes.starts_with(b"RIFF") && bytes[8..12] == *b"WAVE"
+}
+
+fn skip_id3(bytes: &[u8]) -> &[u8] {
+    if bytes.len() < 10 || !bytes.starts_with(b"ID3") {
+        return bytes;
+    }
+    let size = u32::from(bytes[6] & 0x7F) << 21
+        | u32::from(bytes[7] & 0x7F) << 14
+        | u32::from(bytes[8] & 0x7F) << 7
+        | u32::from(bytes[9] & 0x7F);
+    let skip = 10usize.saturating_add(size as usize);
+    bytes.get(skip..).unwrap_or(&[])
+}
+
+fn is_mpeg_audio(bytes: &[u8]) -> bool {
+    bytes.len() >= 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct PcmSpec {
     pub channels: usize,
@@ -291,5 +321,39 @@ impl OpusDecoder {
 impl Drop for OpusDecoder {
     fn drop(&mut self) {
         unsafe { unsafe_libopus::opus_decoder_destroy(self.inner) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sniff_sound_mime_detects_wav() {
+        let wav = crate::stream::tests::wav_sine(0.01);
+        assert_eq!(sniff_sound_mime(&wav), Some("audio/wav"));
+    }
+
+    #[test]
+    fn sniff_sound_mime_detects_mp3_sync() {
+        assert_eq!(
+            sniff_sound_mime(&[0xFF, 0xFB, 0x90, 0x00]),
+            Some("audio/mpeg")
+        );
+    }
+
+    #[test]
+    fn sniff_sound_mime_detects_mp3_after_id3() {
+        let mut bytes = vec![0u8; 20];
+        bytes[0..3].copy_from_slice(b"ID3");
+        bytes[10] = 0xFF;
+        bytes[11] = 0xFB;
+        assert_eq!(sniff_sound_mime(&bytes), Some("audio/mpeg"));
+    }
+
+    #[test]
+    fn sniff_sound_mime_rejects_non_audio() {
+        assert_eq!(sniff_sound_mime(b"GIF89a"), None);
+        assert_eq!(sniff_sound_mime(b"PNG\r\n\x1a\n"), None);
     }
 }

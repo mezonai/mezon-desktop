@@ -87,7 +87,7 @@ impl ClanWebhookTab {
         }
         let base_img = AppConfig::try_global(cx)
             .map(|cfg| cfg.base_img_url.clone())
-            .unwrap_or_else(|| "https://cdn.komu.vn".to_string());
+            .unwrap_or_else(|| AppConfig::dev_defaults().base_img_url);
         let name = random_webhook_name();
         let avatar = random_webhook_avatar(&base_img);
         let clan_id = self.clan_id;

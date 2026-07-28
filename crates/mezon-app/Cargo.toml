@@ -32,6 +32,9 @@ tracy-client = { version = "0.18.2", features = ["enable", "ondemand"], optional
 dirs.workspace = true
 serde.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+mezon-webview.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
 
@@ -48,12 +51,13 @@ maintainer = "Mezon Team"
 copyright = "2026, Mezon Team"
 section = "net"
 priority = "optional"
-depends = "$auto, libva2, libva-drm2"
+depends = "$auto, libva2, libva-drm2, libwayland-client0, libwayland-egl1, libegl1, libvulkan1, libfontconfig1, libfreetype6, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good"
 extended-description = "Mezon desktop client (Rust/GPUI) for voice, video and text chat."
 maintainer-scripts = "../../packaging/linux/debian"
 assets = [
     ["target/release/mezon", "usr/bin/", "755"],
     ["../../packaging/linux/mezon.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/linux/mezon.metainfo.xml", "usr/share/metainfo/", "644"],
     ["../../packaging/linux/mezon.png", "usr/share/pixmaps/mezon.png", "644"],
     ["../../packaging/linux/mezon.png", "usr/share/icons/hicolor/48x48/apps/mezon.png", "644"],
     ["../../packaging/linux/mezon.png", "usr/share/icons/hicolor/128x128/apps/mezon.png", "644"],

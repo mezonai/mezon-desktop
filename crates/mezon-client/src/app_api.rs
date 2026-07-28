@@ -6,9 +6,9 @@ use anyhow::Result;
 use crate::{
     TransportClient,
     transport::{
-        ApiAccount, ApiAttachment, ApiCategoryDesc, ApiChannelApp, ApiChannelAttachment,
-        ApiChannelDesc, ApiClanDesc, ApiDirectChannel, ApiFriend, ApiMessage, ApiPinMessage,
-        ApiThreadDesc, ApiVoiceChannelUser, RealtimeEvent,
+        ApiAccount, ApiAttachment, ApiCanvas, ApiCanvasDetail, ApiCategoryDesc, ApiChannelApp,
+        ApiChannelAttachment, ApiChannelDesc, ApiClanDesc, ApiDirectChannel, ApiFriend, ApiMessage,
+        ApiPinMessage, ApiThreadDesc, ApiVoiceChannelUser, RealtimeEvent,
     },
 };
 
@@ -50,6 +50,12 @@ fn attachment_cdn_url(base_img_url: &str, filename: &str) -> Result<String> {
         base_img_url.trim_end_matches('/'),
         filename
     ))
+}
+
+fn emoticon_id_from_filename(filename: &str) -> Option<i64> {
+    let file_name = filename.rsplit('/').next().filter(|s| !s.is_empty())?;
+    let stem = file_name.rsplit_once('.').map(|(stem, _)| stem)?;
+    stem.parse().ok()
 }
 
 fn image_dimensions(data: &[u8]) -> (i32, i32) {
@@ -152,6 +158,18 @@ impl AppApi {
             .send_channel_message_structured(channel_id, content_json, mode)
             .await
     }
+
+    pub async fn send_channel_message_structured_with_code(
+        &self,
+        channel_id: i64,
+        content_json: &str,
+        mode: i32,
+        message_code: i32,
+    ) -> Result<ApiMessage> {
+        self.transport
+            .send_channel_message_structured_with_code(channel_id, content_json, mode, message_code)
+            .await
+    }
     pub fn new(transport: Arc<TransportClient>, base_img_url: String) -> Self {
         let (realtime_tx, _) = tokio::sync::broadcast::channel(1024);
         let (status_tx, _) = tokio::sync::watch::channel(ConnectionStatus::Disconnected);
@@ -215,6 +233,28 @@ impl AppApi {
     ) -> Result<()> {
         self.transport
             .mark_as_read(channel_id, category_id, clan_id)
+            .await
+    }
+
+    pub async fn update_user_status(
+        &self,
+        status: String,
+        minutes: i32,
+        until_turn_on: bool,
+    ) -> Result<()> {
+        self.transport
+            .update_user_status(status, minutes, until_turn_on)
+            .await
+    }
+
+    pub async fn update_user_custom_status(
+        &self,
+        status: String,
+        minutes: i32,
+        until_turn_on: bool,
+    ) -> Result<()> {
+        self.transport
+            .update_user_custom_status(status, minutes, until_turn_on)
             .await
     }
 
@@ -288,6 +328,18 @@ impl AppApi {
         request: mezon_proto::api::SystemMessageRequest,
     ) -> Result<()> {
         self.transport.update_system_message(request).await
+    }
+
+    pub async fn list_audit_log(
+        &self,
+        clan_id: i64,
+        action_log: &str,
+        user_id: Option<i64>,
+        date_log: &str,
+    ) -> Result<mezon_proto::api::ListAuditLog> {
+        self.transport
+            .list_audit_log(clan_id, action_log, user_id, date_log)
+            .await
     }
 
     pub async fn is_open(&self) -> bool {
@@ -388,6 +440,45 @@ impl AppApi {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub async fn list_channel_timeline(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        year: i32,
+        limit: i32,
+    ) -> Result<mezon_proto::api::ListChannelTimelineResponse> {
+        self.transport
+            .list_channel_timeline(clan_id, channel_id, year, limit)
+            .await
+    }
+
+    pub async fn create_channel_timeline(
+        &self,
+        req: mezon_proto::api::CreateChannelTimelineRequest,
+    ) -> Result<mezon_proto::api::CreateChannelTimelineResponse> {
+        self.transport.create_channel_timeline(req).await
+    }
+
+    pub async fn update_channel_timeline(
+        &self,
+        req: mezon_proto::api::UpdateChannelTimelineRequest,
+    ) -> Result<mezon_proto::api::UpdateChannelTimelineResponse> {
+        self.transport.update_channel_timeline(req).await
+    }
+
+    pub async fn detail_channel_timeline(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        id: i64,
+        start_time_seconds: u32,
+    ) -> Result<mezon_proto::api::ChannelTimelineDetailResponse> {
+        self.transport
+            .detail_channel_timeline(clan_id, channel_id, id, start_time_seconds)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn list_channel_attachments(
         &self,
         clan_id: i64,
@@ -423,6 +514,56 @@ impl AppApi {
         Ok(())
     }
 
+    pub async fn get_channel_canvas_list(
+        &self,
+        channel_id: i64,
+        clan_id: i64,
+        limit: i32,
+        page: i32,
+    ) -> Result<Vec<ApiCanvas>> {
+        self.transport
+            .get_channel_canvas_list(channel_id, clan_id, limit, page)
+            .await
+    }
+
+    pub async fn get_channel_canvas_detail(
+        &self,
+        id: i64,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<ApiCanvasDetail> {
+        self.transport
+            .get_channel_canvas_detail(id, clan_id, channel_id)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn edit_channel_canvas(
+        &self,
+        id: i64,
+        channel_id: i64,
+        clan_id: i64,
+        title: &str,
+        content: &str,
+        is_default: bool,
+        status: i32,
+    ) -> Result<String> {
+        self.transport
+            .edit_channel_canvas(id, channel_id, clan_id, title, content, is_default, status)
+            .await
+    }
+
+    pub async fn delete_channel_canvas(
+        &self,
+        canvas_id: i64,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .delete_channel_canvas(canvas_id, clan_id, channel_id)
+            .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn update_channel_message(
         &self,
@@ -437,6 +578,8 @@ impl AppApi {
         is_public: bool,
         topic_id: i64,
         is_update_msg_topic: bool,
+        hide_editted: bool,
+        create_time_seconds: u32,
     ) -> Result<()> {
         self.transport
             .update_channel_message(
@@ -451,6 +594,8 @@ impl AppApi {
                 is_public,
                 topic_id,
                 is_update_msg_topic,
+                hide_editted,
+                create_time_seconds,
             )
             .await
     }
@@ -832,6 +977,124 @@ impl AppApi {
             .await
     }
 
+    pub async fn write_message_typing(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        mode: i32,
+        is_public: bool,
+        sender_display_name: &str,
+        topic_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .write_message_typing(
+                clan_id,
+                channel_id,
+                mode,
+                is_public,
+                sender_display_name,
+                topic_id,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_quick_menu_event(
+        &self,
+        menu_name: &str,
+        clan_id: i64,
+        channel_id: i64,
+        mode: i32,
+        is_public: bool,
+        content_json: &str,
+        mentions: Vec<mezon_proto::api::MessageMention>,
+        attachments: Vec<mezon_proto::api::MessageAttachment>,
+        references: Vec<mezon_proto::api::MessageRef>,
+        anonymous_message: bool,
+        mention_everyone: bool,
+        avatar: &str,
+        message_code: i32,
+        topic_id: i64,
+        message_id: i64,
+        message_sender_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .write_quick_menu_event(
+                menu_name,
+                clan_id,
+                channel_id,
+                mode,
+                is_public,
+                content_json,
+                mentions,
+                attachments,
+                references,
+                anonymous_message,
+                mention_everyone,
+                avatar,
+                message_code,
+                topic_id,
+                message_id,
+                message_sender_id,
+            )
+            .await
+    }
+
+    pub async fn list_quick_menu_access(
+        &self,
+        channel_id: i64,
+        menu_type: i32,
+    ) -> Result<Vec<mezon_proto::api::QuickMenuAccess>> {
+        let list = self
+            .transport
+            .list_quick_menu_access(0, channel_id, menu_type)
+            .await?;
+        Ok(list.list_menus)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_channel_message_with_flags(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
+        ogp: Option<crate::transport::OutgoingOgp>,
+        flags: crate::transport::OutgoingMessageFlags,
+    ) -> Result<ApiMessage> {
+        self.transport
+            .send_channel_message_with_flags(
+                clan_id, channel_id, content, is_public, mode, mentions, hashtags, emojis, ogp,
+                flags,
+            )
+            .await
+    }
+
+    pub async fn send_channel_message_prebuilt(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content_json: &str,
+        is_public: bool,
+        mode: i32,
+        flags: crate::transport::OutgoingMessageFlags,
+    ) -> Result<ApiMessage> {
+        self.transport
+            .send_channel_message_prebuilt(
+                clan_id,
+                channel_id,
+                content_json,
+                is_public,
+                mode,
+                flags,
+            )
+            .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn forward_channel_message(
         &self,
@@ -884,6 +1147,7 @@ impl AppApi {
         is_public: bool,
         topic_id: i64,
         is_update_msg_topic: bool,
+        create_time_seconds: u32,
     ) -> Result<()> {
         let proto = attachments
             .into_iter()
@@ -909,6 +1173,7 @@ impl AppApi {
                 is_public,
                 topic_id,
                 is_update_msg_topic,
+                create_time_seconds,
             )
             .await
     }
@@ -923,6 +1188,104 @@ impl AppApi {
         Ok(resp.emoji_recents)
     }
 
+    pub async fn create_clan_emoji(
+        &self,
+        clan_id: i64,
+        source: &str,
+        shortname: &str,
+        category: &str,
+        id: i64,
+        is_for_sale: bool,
+    ) -> Result<()> {
+        self.transport
+            .create_clan_emoji(clan_id, source, shortname, category, id, is_for_sale)
+            .await
+    }
+
+    pub async fn update_clan_emoji_by_id(
+        &self,
+        id: i64,
+        shortname: &str,
+        clan_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .update_clan_emoji_by_id(id, shortname, clan_id)
+            .await
+    }
+
+    pub async fn delete_clan_emoji_by_id(&self, id: i64, clan_id: i64) -> Result<()> {
+        self.transport.delete_clan_emoji_by_id(id, clan_id).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_clan_sticker(
+        &self,
+        clan_id: i64,
+        source: &str,
+        shortname: &str,
+        category: &str,
+        id: i64,
+        media_type: i32,
+        is_for_sale: bool,
+    ) -> Result<()> {
+        self.transport
+            .add_clan_sticker(
+                clan_id,
+                source,
+                shortname,
+                category,
+                id,
+                media_type,
+                is_for_sale,
+            )
+            .await
+    }
+
+    pub async fn update_clan_sticker_by_id(
+        &self,
+        id: i64,
+        clan_id: i64,
+        source: &str,
+        shortname: &str,
+        category: &str,
+    ) -> Result<()> {
+        self.transport
+            .update_clan_sticker_by_id(id, clan_id, source, shortname, category)
+            .await
+    }
+
+    pub async fn delete_clan_sticker_by_id(&self, id: i64, clan_id: i64) -> Result<()> {
+        self.transport.delete_clan_sticker_by_id(id, clan_id).await
+    }
+
+    pub async fn upload_emoticon(
+        &self,
+        folder: &str,
+        id: i64,
+        extension: &str,
+        filetype: &str,
+        data: Vec<u8>,
+    ) -> Result<(i64, String)> {
+        let ext = extension.trim_start_matches('.');
+        let filename = format!("{}/{id}.{ext}", folder.trim_matches('/'));
+        let size = clamp_i32(data.len());
+        let (width, height) = if filetype.starts_with("image/") {
+            image_dimensions(&data)
+        } else {
+            (0, 0)
+        };
+        let upload = self
+            .transport
+            .upload_attachment_file(&filename, filetype, size, width, height)
+            .await?;
+        crate::transport_runtime::put_bytes_to_content_type(&upload.url, data, filetype).await?;
+        let resolved_id = emoticon_id_from_filename(&upload.filename).ok_or_else(|| {
+            anyhow::anyhow!("invalid emoticon upload filename: {}", upload.filename)
+        })?;
+        let url = attachment_cdn_url(&self.base_img_url, &upload.filename)?;
+        Ok((resolved_id, url))
+    }
+
     pub async fn list_roles(
         &self,
         clan_id: i64,
@@ -930,6 +1293,41 @@ impl AppApi {
         cursor: &str,
     ) -> Result<mezon_proto::api::RoleListEventResponse> {
         self.transport.list_roles(clan_id, limit, cursor).await
+    }
+
+    pub async fn create_role(
+        &self,
+        request: mezon_proto::api::CreateRoleRequest,
+    ) -> Result<mezon_proto::api::Role> {
+        self.transport.create_role(request).await
+    }
+
+    pub async fn update_role(&self, request: mezon_proto::api::UpdateRoleRequest) -> Result<()> {
+        self.transport.update_role(request).await
+    }
+
+    pub async fn list_role_users(
+        &self,
+        role_id: i64,
+        limit: i32,
+        cursor: &str,
+    ) -> Result<mezon_proto::api::RoleUserList> {
+        self.transport.list_role_users(role_id, limit, cursor).await
+    }
+
+    pub async fn delete_role(&self, role_id: i64, clan_id: i64) -> Result<()> {
+        self.transport.delete_role(role_id, clan_id).await
+    }
+
+    pub async fn update_role_order(&self, clan_id: i64, roles: &[(i32, i64)]) -> Result<()> {
+        self.transport.update_role_order(clan_id, roles).await
+    }
+
+    pub async fn list_role_permissions(
+        &self,
+        role_id: i64,
+    ) -> Result<mezon_proto::api::PermissionList> {
+        self.transport.list_role_permissions(role_id).await
     }
 
     pub async fn get_list_permission(&self) -> Result<mezon_proto::api::PermissionList> {
@@ -1738,6 +2136,78 @@ impl AppApi {
         self.transport.get_notification_clan(clan_id).await
     }
 
+    pub async fn get_notification_category(&self, category_id: i64) -> Result<i32> {
+        let dto = self
+            .transport
+            .get_notification_category(category_id)
+            .await?;
+        Ok(dto.notification_setting_type)
+    }
+
+    pub async fn get_notification_category_setting(
+        &self,
+        category_id: i64,
+    ) -> Result<crate::ChannelNotificationSetting> {
+        let dto = self
+            .transport
+            .get_notification_category(category_id)
+            .await?;
+        Ok(crate::ChannelNotificationSetting::from_api(&dto))
+    }
+
+    pub async fn set_notification_clan_setting(
+        &self,
+        clan_id: i64,
+        notification_type: i32,
+    ) -> Result<()> {
+        self.transport
+            .set_notification_clan_setting(clan_id, notification_type)
+            .await
+    }
+
+    pub async fn set_notification_category_setting(
+        &self,
+        category_id: i64,
+        notification_type: i32,
+        clan_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .set_notification_category_setting(category_id, notification_type, clan_id)
+            .await
+    }
+
+    pub async fn set_mute_category(
+        &self,
+        category_id: i64,
+        mute_seconds: i32,
+        clan_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .set_mute_category(category_id, mute_seconds, clan_id)
+            .await
+    }
+
+    pub async fn delete_notification_category_setting(&self, category_id: i64) -> Result<()> {
+        self.transport
+            .delete_notification_category_setting(category_id)
+            .await
+    }
+
+    pub async fn get_channel_category_noti_settings_list(
+        &self,
+        clan_id: i64,
+    ) -> Result<Vec<crate::NotificationOverride>> {
+        let list = self
+            .transport
+            .get_channel_category_noti_settings_list(clan_id)
+            .await?;
+        Ok(list
+            .notification_channel_category_settings_list
+            .iter()
+            .map(crate::NotificationOverride::from_api)
+            .collect())
+    }
+
     pub async fn get_notification_channel(
         &self,
         channel_id: i64,
@@ -1784,13 +2254,26 @@ impl AppApi {
         self.transport.spawn_gotify_stream(ws_base, token)
     }
 
-    /// Register a device token and return the Gotify notification-stream token.
+    /// Download a notification's sender avatar to a temp file for use as the OS
+    /// notification icon. Rejects non-https URLs; size/timeout are bounded by
+    /// [`crate::transport_runtime::fetch_bytes`].
+    pub async fn download_notification_icon(&self, url: &str) -> Result<std::path::PathBuf> {
+        if !url.starts_with("https://") {
+            anyhow::bail!("notification icon url must be https");
+        }
+        let (bytes, _) = crate::transport_runtime::fetch_bytes(url).await?;
+        crate::transport_runtime::write_temp_icon(bytes).await
+    }
+
+    /// Register a device token and return `(notify_token, device_id)`. The notify
+    /// token opens the Gotify stream; the device id is cached and reused as the
+    /// request token on the next registration, matching React.
     pub async fn regist_fcm_device_token(
         &self,
         token: &str,
         device_id: &str,
         platform: &str,
-    ) -> Result<String> {
+    ) -> Result<(String, String)> {
         self.transport
             .regist_fcm_device_token(
                 token.to_string(),
@@ -1871,6 +2354,16 @@ impl AppApi {
         self.transport
             .mute_participant_mezon_meet(channel_id, clan_id, room_name, username)
             .await
+    }
+
+    pub async fn add_agent_to_channel(&self, channel_id: i64, room_name: &str) -> Result<()> {
+        self.transport
+            .add_agent_to_channel(channel_id, room_name)
+            .await
+    }
+
+    pub async fn disconnect_agent(&self, channel_id: i64, room_name: &str) -> Result<()> {
+        self.transport.disconnect_agent(channel_id, room_name).await
     }
 
     pub async fn list_channel_apps(&self, clan_id: i64) -> Result<Vec<ApiChannelApp>> {
@@ -1986,24 +2479,24 @@ mod tests {
     fn attachment_url_uses_base_img_host_not_presigned() {
         assert_eq!(
             attachment_cdn_url(
-                "https://cdn.mezon.ai",
+                "https://cdn.example",
                 "mezon/1826814768338440192/2074336632294608896.png",
             )
             .unwrap(),
-            "https://cdn.mezon.ai/mezon/1826814768338440192/2074336632294608896.png"
+            "https://cdn.example/mezon/1826814768338440192/2074336632294608896.png"
         );
     }
 
     #[test]
     fn attachment_url_trims_trailing_slash_on_base() {
         assert_eq!(
-            attachment_cdn_url("https://cdn.mezon.ai/", "x.png").unwrap(),
-            "https://cdn.mezon.ai/x.png"
+            attachment_cdn_url("https://cdn.example/", "x.png").unwrap(),
+            "https://cdn.example/x.png"
         );
     }
 
     #[test]
     fn attachment_url_errors_when_filename_empty() {
-        assert!(attachment_cdn_url("https://cdn.mezon.ai", "").is_err());
+        assert!(attachment_cdn_url("https://cdn.example", "").is_err());
     }
 }

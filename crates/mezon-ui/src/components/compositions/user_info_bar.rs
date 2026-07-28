@@ -1,6 +1,10 @@
-use gpui::{App, ClickEvent, Context, Entity, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    App, ClickEvent, Context, DismissEvent, Entity, MouseButton, MouseDownEvent, Point,
+    SharedString, Subscription, Window, anchored, deferred, div, prelude::*, px,
+};
 
-use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size};
+use crate::components::compositions::footer_profile_popup::FooterProfilePopup;
+use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::theme::ActiveTheme;
 use mezon_store::{AccountStore, AuthState, PresenceStore};
 
@@ -15,8 +19,12 @@ pub struct UserInfoBar {
     account_store: Entity<AccountStore>,
     username: SharedString,
     presence: SharedString,
+    status: SharedString,
+    user_status: SharedString,
     avatar_src: SharedString,
     avatar_raw: SharedString,
+    profile_popup: Option<Entity<FooterProfilePopup>>,
+    _popup_sub: Option<Subscription>,
 }
 
 impl UserInfoBar {
@@ -35,7 +43,8 @@ impl UserInfoBar {
         })
         .detach();
         cx.observe(&account_store, |this, _, cx| {
-            if this.sync_avatar(cx) {
+            let changed = this.sync_avatar(cx) | this.sync_status(cx);
+            if changed {
                 cx.notify();
             }
         })
@@ -47,12 +56,45 @@ impl UserInfoBar {
             account_store,
             username,
             presence: SharedString::from("Offline"),
+            status: SharedString::default(),
+            user_status: SharedString::default(),
             avatar_src: SharedString::default(),
             avatar_raw: SharedString::default(),
+            profile_popup: None,
+            _popup_sub: None,
         };
         bar.sync_presence(cx);
         bar.sync_avatar(cx);
+        bar.sync_status(cx);
         bar
+    }
+
+    fn sync_status(&mut self, cx: &App) -> bool {
+        let prev_status = self.status.clone();
+        let prev_custom = self.user_status.clone();
+        let (status, custom) = match self.account_store.read(cx).account.as_ref() {
+            Some(account) => (account.status.clone(), account.user_status.clone()),
+            None => (String::new(), String::new()),
+        };
+        self.status = SharedString::from(status);
+        self.user_status = SharedString::from(custom);
+        self.status != prev_status || self.user_status != prev_custom
+    }
+
+    fn toggle_profile_popup(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.profile_popup.is_some() {
+            self.profile_popup = None;
+            self._popup_sub = None;
+            cx.notify();
+            return;
+        }
+        let popup = cx.new(FooterProfilePopup::new);
+        self._popup_sub = Some(cx.subscribe(&popup, |this, _, _: &DismissEvent, cx| {
+            this.profile_popup = None;
+            cx.notify();
+        }));
+        self.profile_popup = Some(popup);
+        cx.notify();
     }
 
     fn sync_avatar(&mut self, cx: &App) -> bool {
@@ -113,6 +155,18 @@ impl Render for UserInfoBar {
             "Dnd" => theme.status_dnd,
             _ => theme.status_offline,
         };
+        let status_dot_color = match self.status.as_ref() {
+            "Online" => theme.status_online,
+            "Idle" => theme.status_idle,
+            "Do Not Disturb" => theme.status_dnd,
+            "Invisible" => theme.status_offline,
+            _ => presence_color,
+        };
+        let subtitle = if self.user_status.is_empty() {
+            self.presence.clone()
+        } else {
+            self.user_status.clone()
+        };
 
         let mut settings_btn = div()
             .id(SharedString::from("settings-btn"))
@@ -127,9 +181,7 @@ impl Render for UserInfoBar {
             );
         settings_btn.interactivity().on_click(on_settings_click());
 
-        let mut avatar = Avatar::new()
-            .name(self.username.clone())
-            .with_size(Size::Small);
+        let mut avatar = Avatar::new().name(self.username.clone()).size_px(px(32.0));
         if !self.avatar_src.is_empty() {
             avatar = avatar.src(self.avatar_src.clone());
             if !self.avatar_raw.is_empty() && self.avatar_raw != self.avatar_src {
@@ -142,59 +194,93 @@ impl Render for UserInfoBar {
         // Positioning (absolute / insets) is applied by the cached wrapper in
         // the chat layout so this view can be `.cached()`; keep only the visual
         // box here.
-        div().w_full().min_h(px(56.0)).overflow_hidden().child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .w_full()
-                .gap_2()
-                .pl_2()
-                .pr_4()
-                .py_2()
-                .child(
+        div()
+            .relative()
+            .w_full()
+            .min_h(px(56.0))
+            .when_some(self.profile_popup.clone(), |bar, popup| {
+                bar.child(deferred(anchored().position(Point::default()).child(
+                    div().w(px(100000.)).h(px(100000.)).occlude().on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                            this.profile_popup = None;
+                            this._popup_sub = None;
+                            cx.notify();
+                        }),
+                    ),
+                )))
+                .child(deferred(
                     div()
-                        .flex()
-                        .flex_1()
-                        .h(px(40.0))
-                        .items_center()
-                        .gap_3()
-                        .pl_2()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.tokens.bg_item_hover))
-                        .child(
-                            div().relative().child(avatar).child(
-                                div()
-                                    .absolute()
-                                    .bottom_0()
-                                    .right_0()
-                                    .size_2()
-                                    .rounded_full()
-                                    .bg(presence_color),
-                            ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .overflow_hidden()
-                                .child(
+                        .absolute()
+                        .bottom_full()
+                        .left(px(8.))
+                        .mb_2()
+                        .child(popup),
+                ))
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .w_full()
+                    .gap_2()
+                    .pl_2()
+                    .pr_4()
+                    .py_2()
+                    .child(
+                        div()
+                            .id(SharedString::from("footer-profile-open"))
+                            .flex()
+                            .flex_1()
+                            .h(px(40.0))
+                            .items_center()
+                            .gap_3()
+                            .pl_2()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.tokens.bg_item_hover))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.toggle_profile_popup(window, cx);
+                            }))
+                            .child(
+                                div().relative().child(avatar).child(
                                     div()
-                                        .text_sm()
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(theme.text_primary)
-                                        .child(self.username.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(theme.text_muted)
-                                        .child(self.presence.clone()),
+                                        .absolute()
+                                        .bottom_0()
+                                        .right_0()
+                                        .size_2()
+                                        .rounded_full()
+                                        .bg(status_dot_color),
                                 ),
-                        ),
-                )
-                .child(settings_btn),
-        )
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .max_w(px(150.))
+                                            .truncate()
+                                            .text_sm()
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(theme.text_primary)
+                                            .child(self.username.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .max_w(px(150.))
+                                            .truncate()
+                                            .text_size(px(11.))
+                                            .text_color(theme.text_muted)
+                                            .child(subtitle),
+                                    ),
+                            ),
+                    )
+                    .child(settings_btn),
+            )
     }
 }

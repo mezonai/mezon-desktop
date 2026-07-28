@@ -15,6 +15,9 @@ theme.workspace = true
 icons.workspace = true
 menu.workspace = true
 mezon-store.workspace = true
+mezon-canvas.workspace = true
+mezon-theme.workspace = true
+mezon-widgets.workspace = true
 mezon-client.workspace = true
 mezon-video.workspace = true
 mezon-audio.workspace = true
@@ -32,6 +35,7 @@ unicode-segmentation.workspace = true
 unicode-normalization.workspace = true
 indexmap.workspace = true
 image.workspace = true
+base64.workspace = true
 qrcode.workspace = true
 smallvec.workspace = true
 

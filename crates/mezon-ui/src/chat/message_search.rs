@@ -274,6 +274,11 @@ impl MessageSearchPanel {
 
 impl Render for MessageSearchPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::image_cache::sweep_ogp_cache(window, cx);
+        self.avatar_image_cache
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
+        self.attachment_image_cache
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         let theme = cx.theme().clone();
         let locale = self.locale.clone();
         let channel_id = self.channel_id;
@@ -865,7 +870,8 @@ fn render_search_row(
                                     )
                                 })
                                 .children(ogp.as_ref().and_then(|ogp| {
-                                    let preview = render_ogp_preview(ogp, hit.message_id, theme)?;
+                                    let preview =
+                                        render_ogp_preview(ogp, hit.message_id, theme, cx)?;
                                     Some(
                                         div()
                                             .w_full()

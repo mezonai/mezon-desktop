@@ -1,5 +1,6 @@
 use gpui::{
-    AnyElement, App, Context, Entity, SharedString, Subscription, Window, div, img, prelude::*, px,
+    AnyElement, App, Context, Entity, ObjectFit, SharedString, Subscription, Window, div, img,
+    prelude::*, px,
 };
 use mezon_store::{
     AccountStore, BadgeService, ChannelId, ClanId, ClanList, ClanMembersStore, DirectKind,
@@ -99,6 +100,7 @@ impl Render for UserReactionPanel {
         } else {
             img(SharedString::from(emoji_src))
                 .size(px(20.))
+                .object_fit(ObjectFit::ScaleDown)
                 .with_fallback(emoji_error_fallback(px(20.), theme.text_muted))
                 .into_any_element()
         };

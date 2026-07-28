@@ -23,6 +23,8 @@ const CATEGORY_EVENT_CREATED: i32 = 1;
 const CATEGORY_EVENT_UPDATED: i32 = 2;
 
 const PREVIOUS_CHANNELS_PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
+const BADGE_SEED_MAX_ATTEMPTS: u32 = 3;
+const BADGE_SEED_RETRY_BACKOFF: Duration = Duration::from_millis(400);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChannelType {
@@ -201,11 +203,32 @@ struct TopicParentBadge {
     count: u32,
 }
 
+struct ClanExtras {
+    voice_map: HashMap<ChannelId, Vec<UserId>>,
+    favorite_ids: HashSet<ChannelId>,
+    app_channels: Vec<AppChannel>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ChannelUnreadSeed {
+    badge_count: u32,
+    last_seen_timestamp: i64,
+    last_seen_message_id: MessageId,
+    last_sent_timestamp: i64,
+    last_sent_message_id: MessageId,
+}
+
 pub struct ChannelList {
     cache: KeyedCache<ClanId, Vec<Category>>,
     app_channels_cache: HashMap<ClanId, Vec<AppChannel>>,
     topic_parent_badges: HashMap<ChannelId, TopicParentBadge>,
     pending_channel_badges: HashMap<ChannelId, u32>,
+    pending_badge_seed: HashMap<ClanId, HashMap<ChannelId, ChannelUnreadSeed>>,
+    want_extras: HashSet<ClanId>,
+    extras_loaded: HashSet<ClanId>,
+    extras_loading: HashSet<ClanId>,
+    badge_seeding: HashSet<ClanId>,
+    badge_seeded: HashSet<ClanId>,
     user_channels: HashMap<ChannelId, Channel>,
     user_channels_order: Vec<ChannelId>,
     user_channels_loading: bool,
@@ -351,6 +374,12 @@ impl ChannelList {
         self.app_channels_cache.clear();
         self.topic_parent_badges.clear();
         self.pending_channel_badges.clear();
+        self.pending_badge_seed.clear();
+        self.want_extras.clear();
+        self.extras_loaded.clear();
+        self.extras_loading.clear();
+        self.badge_seeding.clear();
+        self.badge_seeded.clear();
         self.user_channels.clear();
         self.user_channels_order.clear();
         self.user_channels_loading = false;
@@ -377,7 +406,6 @@ impl ChannelList {
                 match active {
                     Some(clan_id) => {
                         this.active_clan_id = Some(*clan_id);
-                        this.load_for_clan(*clan_id, cx);
                         cx.notify();
                     }
                     None => {
@@ -421,6 +449,12 @@ impl ChannelList {
             app_channels_cache: HashMap::new(),
             topic_parent_badges: HashMap::new(),
             pending_channel_badges: HashMap::new(),
+            pending_badge_seed: HashMap::new(),
+            want_extras: HashSet::new(),
+            extras_loaded: HashSet::new(),
+            extras_loading: HashSet::new(),
+            badge_seeding: HashSet::new(),
+            badge_seeded: HashSet::new(),
             user_channels: HashMap::new(),
             user_channels_order: Vec::new(),
             user_channels_loading: false,
@@ -459,6 +493,126 @@ impl ChannelList {
 
     fn merge_pending_badges(&mut self, categories: &mut [Category]) {
         merge_pending_badges_into(&mut self.pending_channel_badges, categories);
+    }
+
+    fn consume_badge_seed(&mut self, clan_id: ClanId, categories: &mut [Category]) {
+        if let Some(seed) = self.pending_badge_seed.remove(&clan_id) {
+            let applied = apply_unread_seed_into(&seed, categories);
+            tracing::debug!(
+                target: "clan_load",
+                clan_id = clan_id.get(),
+                seeded = seed.len(),
+                applied,
+                "consumed parked badge seed on structure insert"
+            );
+        }
+    }
+
+    fn drop_seeded_badge(&mut self, clan_id: ClanId, channel_id: ChannelId) {
+        if let Some(seed) = self.pending_badge_seed.get_mut(&clan_id) {
+            seed.remove(&channel_id);
+        }
+    }
+
+    pub fn cancel_badge_seed(&mut self, clan_id: ClanId) {
+        self.badge_seeding.remove(&clan_id);
+    }
+
+    pub fn seed_badges(&mut self, clan_id: ClanId, cx: &mut Context<Self>) -> Task<()> {
+        if self.badge_seeded.contains(&clan_id) || !self.badge_seeding.insert(clan_id) {
+            return Task::ready(());
+        }
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = api.join_clan_chat(clan_id.get()).await {
+                tracing::error!(target: "clan_load", "join_clan_chat failed for clan {clan_id}: {e}");
+            }
+            let mut attempt = 0u32;
+            let descs = loop {
+                match api.list_channel_badge_counts(clan_id.get()).await {
+                    Ok(descs) => break Some(descs),
+                    Err(e) => {
+                        attempt += 1;
+                        if attempt >= BADGE_SEED_MAX_ATTEMPTS {
+                            tracing::warn!(
+                                "list_channel_badge_counts failed for clan {clan_id} after {attempt} attempts: {e}"
+                            );
+                            break None;
+                        }
+                        tracing::warn!(
+                            "list_channel_badge_counts failed for clan {clan_id} (attempt {attempt}): {e}, retrying"
+                        );
+                        cx.background_executor()
+                            .timer(BADGE_SEED_RETRY_BACKOFF * attempt)
+                            .await;
+                    }
+                }
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.badge_seeding.remove(&clan_id);
+                if this.reset_generation != generation {
+                    return;
+                }
+                let Some(descs) = descs else {
+                    return;
+                };
+                this.badge_seeded.insert(clan_id);
+                let desc_count = descs.len();
+                let seed = unread_seed_from_descs(descs);
+                let last_messages: Vec<(ChannelId, MessageId)> = seed
+                    .iter()
+                    .filter(|(_, s)| !s.last_sent_message_id.is_zero())
+                    .map(|(id, s)| (*id, s.last_sent_message_id))
+                    .collect();
+                let applied = match this.cache.get_mut(&clan_id) {
+                    Some(categories) => apply_unread_seed_into(&seed, categories),
+                    None => false,
+                };
+                if tracing::enabled!(target: "clan_load", tracing::Level::DEBUG) {
+                    let badged_rows: Vec<String> = seed
+                        .iter()
+                        .filter(|(_, s)| s.badge_count > 0)
+                        .map(|(id, _)| match this.channel(clan_id, *id) {
+                            Some(ch) => format!(
+                                "{}#{} type={:?} badge={} muted={} thread={}",
+                                ch.name,
+                                id.get(),
+                                ch.channel_type,
+                                ch.badge_count,
+                                ch.muted,
+                                ch.parent_id.is_some()
+                            ),
+                            None => format!("MISSING#{}", id.get()),
+                        })
+                        .collect();
+                    tracing::debug!(
+                        target: "clan_load",
+                        clan_id = clan_id.get(),
+                        desc_count,
+                        seeded = seed.len(),
+                        with_badge = badged_rows.len(),
+                        cached = this.cache.contains(&clan_id),
+                        applied,
+                        active = this.active_clan_id == Some(clan_id),
+                        rows = ?badged_rows,
+                        "seeded badge counts"
+                    );
+                }
+                this.pending_badge_seed.insert(clan_id, seed);
+                if applied {
+                    this.notify_channel_list(clan_id, cx);
+                }
+                if !last_messages.is_empty()
+                    && let Some(store) = MessagesStore::try_global(cx)
+                {
+                    store.update(cx, |store, cx| {
+                        store.set_many_last_messages(last_messages);
+                        cx.notify();
+                    });
+                }
+            });
+        })
     }
 
     fn register_realtime(cx: &mut Context<Self>) {
@@ -504,13 +658,44 @@ impl ChannelList {
     }
 
     pub fn load_for_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.want_extras.insert(clan_id);
+        if self.cache.is_fresh(&clan_id, crate::CACHE_TTL) {
+            self.ensure_extras(clan_id, cx);
+            return;
+        }
+        self.fetch_clan(clan_id, cx);
+    }
+
+    pub fn load_structure_for_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         if self.cache.is_fresh(&clan_id, crate::CACHE_TTL) {
             return;
         }
         self.fetch_clan(clan_id, cx);
     }
 
+    fn ensure_extras(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        if self.extras_loaded.contains(&clan_id) || !self.extras_loading.insert(clan_id) {
+            return;
+        }
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        cx.spawn(async move |this, cx| {
+            let extras = Self::fetch_clan_extras(&api, clan_id).await;
+            let _ = this.update(cx, |this, cx| {
+                this.extras_loading.remove(&clan_id);
+                if this.reset_generation != generation {
+                    return;
+                }
+                this.extras_loaded.insert(clan_id);
+                this.apply_clan_extras(clan_id, extras, cx);
+            });
+        })
+        .detach();
+    }
+
     pub fn refresh_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.want_extras.insert(clan_id);
+        self.extras_loaded.remove(&clan_id);
         self.fetch_clan(clan_id, cx);
     }
 
@@ -522,29 +707,28 @@ impl ChannelList {
         let api = self.api.clone();
         let generation = self.reset_generation;
         cx.spawn(async move |this, cx| {
-            let result = Self::fetch_clan_data(&api, clan_id).await;
+            let result = Self::fetch_clan_structure(&api, clan_id).await;
             match result {
-                Ok((mut categories, app_channels, last_messages)) => {
+                Ok(mut categories) => {
                     let _ = this.update(cx, |this, cx| {
+                        this.loading.remove(&clan_id);
                         if this.reset_generation != generation {
                             return;
                         }
-                        this.loading.remove(&clan_id);
-                        this.app_channels_cache.insert(clan_id, app_channels);
+                        this.consume_badge_seed(clan_id, &mut categories);
                         this.merge_pending_badges(&mut categories);
+                        let previous_voice = collect_voice_members(&this.cache, clan_id);
+                        merge_previous_voice_members(&mut categories, &previous_voice);
                         if seed_in_voice_from_categories(&mut this.in_voice, clan_id, &categories) {
                             cx.emit(ChannelEvent::InVoiceChanged);
                         }
                         this.cache.insert(clan_id, categories, None);
                         this.invalidate_channel_index(clan_id);
-                        if let Some(store) = MessagesStore::try_global(cx) {
-                            store.update(cx, |store, cx| {
-                                store.set_many_last_messages(last_messages);
-                                cx.notify();
-                            });
-                        }
                         cx.emit(ChannelEvent::ClanChannelsLoaded(clan_id));
                         cx.notify();
+                        if this.want_extras.contains(&clan_id) {
+                            this.ensure_extras(clan_id, cx);
+                        }
                     });
                 }
                 Err(e) => {
@@ -617,25 +801,34 @@ impl ChannelList {
         }
     }
 
-    async fn fetch_clan_data(
-        api: &AppApi,
-        clan_id: ClanId,
-    ) -> anyhow::Result<(Vec<Category>, Vec<AppChannel>, Vec<(ChannelId, MessageId)>)> {
-        let (channels_res, categories_res, badges_res, voice_res, favorites_res, apps_res) = tokio::join!(
+    async fn fetch_clan_structure(api: &AppApi, clan_id: ClanId) -> anyhow::Result<Vec<Category>> {
+        let (channels_res, categories_res) = tokio::join!(
             api.list_channel_descs(clan_id.get(), 1),
             api.list_categories_typed(clan_id.get()),
-            api.list_channel_badge_counts(clan_id.get()),
+        );
+
+        let api_channels = channels_res?;
+        let api_categories = categories_res?;
+
+        let mut channels: Vec<Channel> = api_channels
+            .into_iter()
+            .map(|c| {
+                let badge = c.badge_count.max(0) as u32;
+                channel_from_desc(c, badge, Vec::new(), false)
+            })
+            .collect();
+
+        let categories = build_categories(api_categories, &mut channels);
+        Ok(assemble_with_favorites(categories, clan_id))
+    }
+
+    async fn fetch_clan_extras(api: &AppApi, clan_id: ClanId) -> ClanExtras {
+        let (voice_res, favorites_res, apps_res) = tokio::join!(
             api.list_voice_channel_users(clan_id.get()),
             api.list_favorite_channels(clan_id.get()),
             api.list_channel_apps(clan_id.get()),
         );
 
-        let api_channels = channels_res?;
-        let api_categories = categories_res?;
-        let badge_descs = badges_res.unwrap_or_else(|e| {
-            tracing::warn!("list_channel_badge_counts failed: {e}");
-            Vec::new()
-        });
         let voice_users = voice_res.unwrap_or_else(|e| {
             tracing::warn!("list_voice_channel_users failed: {e}");
             Vec::new()
@@ -657,17 +850,6 @@ impl ChannelList {
             .map(AppChannel::from)
             .collect();
 
-        let badge_map: HashMap<ChannelId, ApiChannelDesc> = badge_descs
-            .into_iter()
-            .filter(|d| {
-                !matches!(
-                    ChannelType::from_raw(d.channel_type),
-                    ChannelType::App | ChannelType::Voice
-                )
-            })
-            .map(|d| (ChannelId(d.channel_id), d))
-            .collect();
-
         let voice_map: HashMap<ChannelId, Vec<UserId>> = voice_users
             .into_iter()
             .map(|v| {
@@ -678,42 +860,76 @@ impl ChannelList {
             })
             .collect();
 
-        let mut channels: Vec<Channel> = api_channels
-            .into_iter()
-            .map(|mut c| {
-                let cid = ChannelId(c.channel_id);
-                let badge = if let Some(b) = badge_map.get(&cid) {
-                    if b.last_seen_timestamp > 0 {
-                        c.last_seen_timestamp = b.last_seen_timestamp;
-                        c.last_seen_message_id = b.last_seen_message_id;
-                    }
-                    if b.last_sent_timestamp > 0 {
-                        c.last_sent_timestamp = b.last_sent_timestamp;
-                        c.last_sent_message_id = b.last_sent_message_id;
-                    }
-                    b.badge_count
-                } else {
-                    c.badge_count
-                };
-                let badge = badge.max(0) as u32;
-                let voice_ids = voice_map.get(&cid).cloned().unwrap_or_default();
-                let is_favorite = favorite_ids.contains(&cid);
-                channel_from_desc(c, badge, voice_ids, is_favorite)
-            })
-            .collect();
-
-        let last_messages: Vec<(ChannelId, MessageId)> = channels
-            .iter()
-            .filter(|ch| !ch.last_sent_message_id.is_zero())
-            .map(|ch| (ch.id, ch.last_sent_message_id))
-            .collect();
-
-        let categories = build_categories(api_categories, &mut channels);
-        Ok((
-            assemble_with_favorites(categories, clan_id),
+        ClanExtras {
+            voice_map,
+            favorite_ids,
             app_channels,
-            last_messages,
-        ))
+        }
+    }
+
+    fn apply_clan_extras(&mut self, clan_id: ClanId, extras: ClanExtras, cx: &mut Context<Self>) {
+        let app_channels_changed =
+            self.app_channels_cache.get(&clan_id) != Some(&extras.app_channels);
+        self.app_channels_cache.insert(clan_id, extras.app_channels);
+
+        let Some(slot) = self.cache.get_mut(&clan_id) else {
+            cx.notify();
+            return;
+        };
+
+        let mut owned = std::mem::take(slot);
+        owned.retain(|category| category.id != FAVOR_CATE_ID);
+
+        let mut changed = app_channels_changed;
+        for ch in owned
+            .iter_mut()
+            .flat_map(|category| category.channels.iter_mut())
+        {
+            let is_favorite = extras.favorite_ids.contains(&ch.id);
+            if ch.is_favorite != is_favorite {
+                ch.is_favorite = is_favorite;
+                changed = true;
+            }
+            let members: Vec<VoiceMember> = extras
+                .voice_map
+                .get(&ch.id)
+                .map(|ids| {
+                    ids.iter()
+                        .map(|uid| VoiceMember {
+                            display_name: uid.to_string(),
+                            avatar_url: String::new(),
+                            user_id: *uid,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if ch.voice_members != members {
+                ch.voice_members = members;
+                changed = true;
+            }
+        }
+
+        let rebuilt = assemble_with_favorites(owned, clan_id);
+        let in_voice_changed = seed_in_voice_from_categories(&mut self.in_voice, clan_id, &rebuilt);
+        if let Some(slot) = self.cache.get_mut(&clan_id) {
+            *slot = rebuilt;
+        }
+        self.invalidate_channel_index(clan_id);
+
+        if in_voice_changed {
+            cx.emit(ChannelEvent::InVoiceChanged);
+        }
+        tracing::debug!(
+            target: "clan_load",
+            clan_id = clan_id.get(),
+            favorites = extras.favorite_ids.len(),
+            voice_channels = extras.voice_map.len(),
+            changed,
+            "extras patched into cached clan structure"
+        );
+        if changed || in_voice_changed {
+            cx.notify();
+        }
     }
 
     fn notify_channel_list(&self, clan_id: ClanId, cx: &mut Context<Self>) {
@@ -1068,6 +1284,7 @@ impl ChannelList {
             }
         }
         let overlaid = self.pending_channel_badges.remove(&channel_id);
+        self.drop_seeded_badge(clan_id, channel_id);
         if !found {
             cleared_badge = overlaid.unwrap_or(0);
         }
@@ -1086,6 +1303,7 @@ impl ChannelList {
 
     pub fn apply_clan_read(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         let mut changed = false;
+        self.pending_badge_seed.remove(&clan_id);
         if let Some(categories) = self.cache.get_mut(&clan_id) {
             for category in categories.iter_mut() {
                 for ch in &category.channels {
@@ -1163,6 +1381,61 @@ impl ChannelList {
             self.show_empty_categories.insert(clan_id);
         }
         cx.notify();
+    }
+
+    pub fn muted(&self, clan_id: ClanId, channel_id: ChannelId) -> bool {
+        self.channel(clan_id, channel_id)
+            .map(|ch| ch.muted)
+            .unwrap_or(false)
+    }
+
+    pub fn set_channel_muted(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        muted: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = false;
+        if let Some(categories) = self.cache.get_mut(&clan_id) {
+            for ch in categories
+                .iter_mut()
+                .flat_map(|c| c.channels.iter_mut())
+                .filter(|ch| ch.id == channel_id)
+            {
+                if ch.muted != muted {
+                    ch.muted = muted;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    pub fn set_channel_muted_any_clan(
+        &mut self,
+        channel_id: ChannelId,
+        muted: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = false;
+        for categories in self.cache.values_mut() {
+            for ch in categories
+                .iter_mut()
+                .flat_map(|c| c.channels.iter_mut())
+                .filter(|ch| ch.id == channel_id)
+            {
+                if ch.muted != muted {
+                    ch.muted = muted;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            cx.notify();
+        }
     }
 
     pub fn apply_last_seen(
@@ -1360,16 +1633,13 @@ impl ChannelList {
                 let clan_id = ClanId(e.clan_id);
                 let channel_id = ChannelId(e.voice_channel_id);
                 let user_id = UserId(e.user_id);
-                let display_name = if !e.participant.is_empty() {
-                    e.participant.clone()
-                } else {
-                    user_id.to_string()
-                };
                 let member = VoiceMember {
                     user_id,
-                    display_name,
+                    display_name: e.participant.clone(),
                     avatar_url: String::new(),
                 };
+                let clan_cached = self.cache.contains(&clan_id);
+                let mut channel_found = false;
                 let mut changed = false;
                 if let Some(cats) = self.cache.get_mut(&clan_id) {
                     for ch in cats
@@ -1377,12 +1647,22 @@ impl ChannelList {
                         .flat_map(|c| c.channels.iter_mut())
                         .filter(|ch| ch.id == channel_id)
                     {
+                        channel_found = true;
                         if !ch.voice_members.iter().any(|m| m.user_id == user_id) {
                             ch.voice_members.push(member.clone());
                             changed = true;
                         }
                     }
                 }
+                tracing::debug!(
+                    %clan_id,
+                    %channel_id,
+                    %user_id,
+                    clan_cached,
+                    channel_found,
+                    added = changed,
+                    "realtime VoiceJoined"
+                );
                 let in_voice_changed = apply_in_voice_joined(
                     &mut self.in_voice,
                     user_id,
@@ -1397,6 +1677,8 @@ impl ChannelList {
                 let clan_id = ClanId(e.clan_id);
                 let channel_id = ChannelId(e.voice_channel_id);
                 let user_id = UserId(e.voice_user_id);
+                let clan_cached = self.cache.contains(&clan_id);
+                let mut channel_found = false;
                 let mut changed = false;
                 if let Some(cats) = self.cache.get_mut(&clan_id) {
                     for ch in cats
@@ -1404,6 +1686,7 @@ impl ChannelList {
                         .flat_map(|c| c.channels.iter_mut())
                         .filter(|ch| ch.id == channel_id)
                     {
+                        channel_found = true;
                         let before = ch.voice_members.len();
                         ch.voice_members.retain(|m| m.user_id != user_id);
                         if ch.voice_members.len() != before {
@@ -1411,6 +1694,15 @@ impl ChannelList {
                         }
                     }
                 }
+                tracing::debug!(
+                    %clan_id,
+                    %channel_id,
+                    %user_id,
+                    clan_cached,
+                    channel_found,
+                    removed = changed,
+                    "realtime VoiceLeaved"
+                );
                 let in_voice_changed =
                     apply_in_voice_leaved(&mut self.in_voice, user_id, channel_id);
                 notify_in_voice_change(changed, in_voice_changed, cx);
@@ -1491,9 +1783,12 @@ impl ChannelList {
         tracing::info!("ChannelList resync — invalidating channel cache");
         self.cache.mark_all_stale();
         self.invalidate_channel_index_all();
+        self.badge_seeded.clear();
+        self.extras_loaded.clear();
         self.fetch_user_channels(cx);
         if let Some(clan_id) = self.active_clan_id {
             self.load_for_clan(clan_id, cx);
+            self.seed_badges(clan_id, cx).detach();
         }
     }
 
@@ -1852,7 +2147,7 @@ fn channel_from_desc(
     let voice_members = voice_ids
         .into_iter()
         .map(|uid| VoiceMember {
-            display_name: uid.to_string(),
+            display_name: String::new(),
             avatar_url: String::new(),
             user_id: uid,
         })
@@ -2157,6 +2452,39 @@ fn remove_in_voice_in_channel(
     in_voice.len() != before
 }
 
+fn collect_voice_members(
+    cache: &KeyedCache<ClanId, Vec<Category>>,
+    clan_id: ClanId,
+) -> HashMap<ChannelId, Vec<VoiceMember>> {
+    cache
+        .get(&clan_id)
+        .map(|categories| {
+            categories
+                .iter()
+                .flat_map(|c| &c.channels)
+                .filter(|ch| !ch.voice_members.is_empty())
+                .map(|ch| (ch.id, ch.voice_members.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn merge_previous_voice_members(
+    categories: &mut [Category],
+    previous: &HashMap<ChannelId, Vec<VoiceMember>>,
+) {
+    for ch in categories.iter_mut().flat_map(|c| c.channels.iter_mut()) {
+        let Some(prev) = previous.get(&ch.id) else {
+            continue;
+        };
+        for member in prev {
+            if !ch.voice_members.iter().any(|m| m.user_id == member.user_id) {
+                ch.voice_members.push(member.clone());
+            }
+        }
+    }
+}
+
 fn seed_in_voice_from_categories(
     in_voice: &mut HashMap<UserId, InVoiceInfo>,
     clan_id: ClanId,
@@ -2220,6 +2548,58 @@ fn copy_channel_unread_fields(target: &mut Channel, source: &Channel) {
     target.last_seen_timestamp = source.last_seen_timestamp;
     target.last_sent_message_id = source.last_sent_message_id;
     target.last_seen_message_id = source.last_seen_message_id;
+}
+
+fn unread_seed_from_descs(descs: Vec<ApiChannelDesc>) -> HashMap<ChannelId, ChannelUnreadSeed> {
+    descs
+        .into_iter()
+        .filter(|d| {
+            !matches!(
+                ChannelType::from_raw(d.channel_type),
+                ChannelType::App | ChannelType::Voice
+            )
+        })
+        .map(|d| {
+            (
+                ChannelId(d.channel_id),
+                ChannelUnreadSeed {
+                    badge_count: d.badge_count.max(0) as u32,
+                    last_seen_timestamp: d.last_seen_timestamp,
+                    last_seen_message_id: MessageId(d.last_seen_message_id),
+                    last_sent_timestamp: d.last_sent_timestamp,
+                    last_sent_message_id: MessageId(d.last_sent_message_id),
+                },
+            )
+        })
+        .collect()
+}
+
+fn apply_unread_seed_into(
+    seed: &HashMap<ChannelId, ChannelUnreadSeed>,
+    categories: &mut [Category],
+) -> bool {
+    let mut changed = false;
+    for ch in categories
+        .iter_mut()
+        .flat_map(|category| category.channels.iter_mut())
+    {
+        let Some(s) = seed.get(&ch.id) else {
+            continue;
+        };
+        let was_unread = ch.is_unread();
+        let was_badge = ch.badge_count;
+        ch.badge_count = s.badge_count;
+        if s.last_seen_timestamp > 0 {
+            ch.last_seen_timestamp = s.last_seen_timestamp;
+            ch.last_seen_message_id = s.last_seen_message_id;
+        }
+        if s.last_sent_timestamp > 0 {
+            ch.last_sent_timestamp = s.last_sent_timestamp;
+            ch.last_sent_message_id = s.last_sent_message_id;
+        }
+        changed = changed || was_badge != ch.badge_count || was_unread != ch.is_unread();
+    }
+    changed
 }
 
 fn merge_pending_badges_into(pending: &mut HashMap<ChannelId, u32>, categories: &mut [Category]) {
@@ -2466,6 +2846,40 @@ mod tests {
                 make_channel(11, "beta", "cat1"),
             ],
         }]
+    }
+
+    #[test]
+    fn merge_previous_voice_members_preserves_realtime_join() {
+        let mut fresh = categories();
+        fresh[0].channels[0].voice_members = vec![VoiceMember {
+            user_id: UserId(1),
+            display_name: "u1".into(),
+            avatar_url: String::new(),
+        }];
+
+        let mut previous: HashMap<ChannelId, Vec<VoiceMember>> = HashMap::new();
+        previous.insert(
+            ChannelId(10),
+            vec![
+                VoiceMember {
+                    user_id: UserId(1),
+                    display_name: "u1".into(),
+                    avatar_url: String::new(),
+                },
+                VoiceMember {
+                    user_id: UserId(2),
+                    display_name: "u2".into(),
+                    avatar_url: String::new(),
+                },
+            ],
+        );
+
+        merge_previous_voice_members(&mut fresh, &previous);
+
+        let members = &fresh[0].channels[0].voice_members;
+        assert_eq!(members.len(), 2);
+        assert!(members.iter().any(|m| m.user_id == UserId(2)));
+        assert_eq!(members.iter().filter(|m| m.user_id == UserId(1)).count(), 1);
     }
 
     #[test]
@@ -2938,13 +3352,31 @@ mod tests {
     }
 
     #[test]
-    fn voice_member_resolution_fallback_to_user_id() {
-        let vm = VoiceMember {
-            user_id: UserId(42),
-            display_name: "42".into(),
-            avatar_url: String::new(),
+    fn channel_from_desc_leaves_voice_member_name_unresolved() {
+        let desc = ApiChannelDesc {
+            channel_id: 10,
+            channel_label: "voice".into(),
+            channel_type: 10,
+            clan_id: 1,
+            category_name: String::new(),
+            category_id: 0,
+            channel_private: 0,
+            count_mess_unread: 0,
+            member_count: 0,
+            parent_id: 0,
+            is_mute: false,
+            last_seen_message_id: 0,
+            last_seen_timestamp: 0,
+            last_sent_message_id: 0,
+            last_sent_timestamp: 0,
+            badge_count: 0,
+            creator_id: 0,
+            clan_name: String::new(),
         };
-        assert_eq!(vm.display_name, vm.user_id.to_string());
+        let channel = channel_from_desc(desc, 0, vec![UserId(42)], false);
+        let vm = &channel.voice_members[0];
+        assert_eq!(vm.user_id, UserId(42));
+        assert!(vm.display_name.is_empty());
         assert!(vm.avatar_url.is_empty());
     }
 
@@ -3049,6 +3481,112 @@ mod tests {
         categories[0].channels[0].badge_count = 0;
         merge_pending_badges_into(&mut pending, &mut categories);
         assert_eq!(categories[0].channels[0].badge_count, 0);
+    }
+
+    fn seed_entry(badge: u32, last_seen: i64, last_sent: i64) -> ChannelUnreadSeed {
+        ChannelUnreadSeed {
+            badge_count: badge,
+            last_seen_timestamp: last_seen,
+            last_seen_message_id: MessageId(if last_seen > 0 { 100 } else { 0 }),
+            last_sent_timestamp: last_sent,
+            last_sent_message_id: MessageId(if last_sent > 0 { 200 } else { 0 }),
+        }
+    }
+
+    #[test]
+    fn favorites_rebuild_survives_a_later_extras_patch() {
+        let mut categories = assemble_with_favorites(categories(), ClanId(1));
+        assert_eq!(categories[0].id, FAVOR_CATE_ID);
+        assert!(categories[0].channels.is_empty());
+
+        let seed = HashMap::from([(ChannelId(10), seed_entry(4, 0, 0))]);
+        apply_unread_seed_into(&seed, &mut categories);
+
+        categories.retain(|category| category.id != FAVOR_CATE_ID);
+        for ch in categories
+            .iter_mut()
+            .flat_map(|category| category.channels.iter_mut())
+        {
+            ch.is_favorite = ch.id == ChannelId(10);
+        }
+        let rebuilt = assemble_with_favorites(categories, ClanId(1));
+
+        assert_eq!(rebuilt[0].id, FAVOR_CATE_ID);
+        assert_eq!(rebuilt[0].channels.len(), 1);
+        assert_eq!(rebuilt[0].channels[0].id, ChannelId(10));
+        assert_eq!(rebuilt[0].channels[0].badge_count, 4);
+        let original = rebuilt[1].channels.iter().find(|c| c.id == ChannelId(10));
+        assert_eq!(original.map(|c| c.badge_count), Some(4));
+    }
+
+    #[test]
+    fn unread_seed_applies_badge_and_timestamps() {
+        let mut categories = categories();
+        let seed = HashMap::from([(ChannelId(10), seed_entry(3, 50, 90))]);
+        assert!(apply_unread_seed_into(&seed, &mut categories));
+
+        let ch = &categories[0].channels[0];
+        assert_eq!(ch.badge_count, 3);
+        assert_eq!(ch.last_seen_timestamp, 50);
+        assert_eq!(ch.last_seen_message_id, MessageId(100));
+        assert_eq!(ch.last_sent_timestamp, 90);
+        assert_eq!(ch.last_sent_message_id, MessageId(200));
+        assert!(ch.is_unread());
+    }
+
+    #[test]
+    fn unread_seed_marks_white_unread_without_mention() {
+        let mut categories = categories();
+        let seed = HashMap::from([(ChannelId(10), seed_entry(0, 50, 90))]);
+        apply_unread_seed_into(&seed, &mut categories);
+
+        let ch = &categories[0].channels[0];
+        assert_eq!(ch.badge_count, 0);
+        assert!(ch.is_unread());
+    }
+
+    #[test]
+    fn unread_seed_ignores_zero_timestamps() {
+        let mut categories = categories();
+        categories[0].channels[0].last_seen_timestamp = 42;
+        categories[0].channels[0].last_sent_timestamp = 77;
+        let seed = HashMap::from([(ChannelId(10), seed_entry(1, 0, 0))]);
+        apply_unread_seed_into(&seed, &mut categories);
+
+        let ch = &categories[0].channels[0];
+        assert_eq!(ch.badge_count, 1);
+        assert_eq!(ch.last_seen_timestamp, 42);
+        assert_eq!(ch.last_sent_timestamp, 77);
+    }
+
+    #[test]
+    fn unread_seed_from_descs_drops_app_and_voice_channels() {
+        let desc = |id: i64, channel_type: u32| ApiChannelDesc {
+            channel_id: id,
+            channel_label: String::new(),
+            channel_type,
+            clan_id: 1,
+            category_name: String::new(),
+            category_id: 0,
+            channel_private: 0,
+            count_mess_unread: 2,
+            member_count: 0,
+            parent_id: 0,
+            is_mute: false,
+            last_seen_message_id: 0,
+            last_seen_timestamp: 0,
+            last_sent_message_id: 0,
+            last_sent_timestamp: 0,
+            badge_count: 2,
+            creator_id: 0,
+            clan_name: String::new(),
+        };
+        let seed = unread_seed_from_descs(vec![desc(10, 1), desc(11, 8), desc(12, 10)]);
+
+        assert_eq!(seed.len(), 1);
+        assert_eq!(seed[&ChannelId(10)].badge_count, 2);
+        assert!(!seed.contains_key(&ChannelId(11)));
+        assert!(!seed.contains_key(&ChannelId(12)));
     }
 
     #[test]

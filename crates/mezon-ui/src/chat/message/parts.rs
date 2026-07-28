@@ -9,7 +9,7 @@ use gpui::{
 use mezon_store::{
     AlbumLayout, AppConfig, ChannelType, ClanMembersStore, Message, MessageAttachment, MessageCode,
     MessageId, MessageReference, MessagesStore, PlatformStore, ProfileContext, Reaction,
-    TopicsStore, ViewerMedia, resolve_avatar_url,
+    ThreadsStore, TopicsStore, ViewerMedia, resolve_avatar_url,
 };
 use smallvec::SmallVec;
 
@@ -23,7 +23,6 @@ use super::reaction_detail::{UserReactionPanel, emoji_error_fallback};
 use super::selection::{SelectableRegion, TextSegment};
 use super::time::format_message_time;
 use super::video_player::{VideoActivation, VideoFullscreenMode, VideoLayout};
-use crate::app::shell::Shell;
 use crate::chat::user_profile_popover::{ClickableContainer, profile_popover_menu};
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, Spinner};
 use crate::theme::Theme;
@@ -1271,11 +1270,21 @@ fn add_reaction_button(message_id: MessageId, ctx: &RowCtx) -> AnyElement {
         .into_any_element()
 }
 
+const REACTION_EMOJI_PX: f32 = 16.;
+const REACTION_EMOJI_SOURCE_PX: u32 = 32;
+
+fn reaction_emoji_src(reaction: &Reaction, app: &gpui::App) -> SharedString {
+    if reaction.emoji_id.is_empty() || reaction.emoji_id.as_ref() == "0" {
+        return SharedString::default();
+    }
+    crate::util::imgproxy::emoji_url_sized(app, &reaction.emoji_id, REACTION_EMOJI_SOURCE_PX).into()
+}
+
 fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let reacted = !ctx.current_user_id.is_empty() && reaction.has_sender(ctx.current_user_id);
     let count_label = reaction.count_label.clone();
-    let src = reaction.emoji_proxied.clone();
+    let src = reaction_emoji_src(reaction, ctx.app);
 
     let mut pill = div()
         .id(super::content::hashed_element_id(
@@ -1346,12 +1355,20 @@ fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> An
             .child(glyph)
             .into_any_element()
     } else {
-        img(src)
+        div()
             .absolute()
             .left(px(5.))
-            .size(px(16.))
-            .object_fit(ObjectFit::ScaleDown)
-            .with_fallback(emoji_error_fallback(px(16.), theme.text_muted))
+            .top(px(4.))
+            .image_cache(ctx.icon_cache.clone())
+            .child(
+                img(src)
+                    .size(px(REACTION_EMOJI_PX))
+                    .object_fit(ObjectFit::ScaleDown)
+                    .with_fallback(emoji_error_fallback(
+                        px(REACTION_EMOJI_PX),
+                        theme.text_muted,
+                    )),
+            )
             .into_any_element()
     };
 
@@ -1428,8 +1445,6 @@ pub fn render_hover_actions(
         && ctx.channel_type != Some(ChannelType::App);
     let show_coffee = !is_own_message && sender_is_real;
 
-    let coming_soon = ctx.coming_soon.clone();
-
     let msg_id = msg.id;
     let edit_host = ctx.video_host.clone();
     let option_host = ctx.video_host.clone();
@@ -1460,6 +1475,7 @@ pub fn render_hover_actions(
                 cell = cell.child(
                     img(src)
                         .size(px(20.))
+                        .object_fit(ObjectFit::ScaleDown)
                         .with_fallback(emoji_error_fallback(px(20.), theme.text_secondary)),
                 );
             }
@@ -1534,21 +1550,20 @@ pub fn render_hover_actions(
             )
         })
         .when(show_thread, |d| {
-            let coming_soon = coming_soon.clone();
             d.child(
-                action("thread", IconName::ThreadIcon, 20.).on_click(move |_, _, cx| {
-                    let coming_soon = coming_soon.clone();
-                    Shell::global(cx).update(cx, move |shell, cx| shell.info(coming_soon, cx));
+                action("thread", IconName::ThreadIcon, 24.).on_click(move |_, _, cx| {
+                    ThreadsStore::global(cx).update(cx, |store, cx| store.start_create(cx));
                 }),
             )
         })
         .when(show_coffee, |d| {
-            let coming_soon = coming_soon.clone();
+            let message_id = msg.id;
             d.child(
                 action("give-coffee", IconName::DollarIconRightClick, 20.).on_click(
                     move |_, _, cx| {
-                        let coming_soon = coming_soon.clone();
-                        Shell::global(cx).update(cx, move |shell, cx| shell.info(coming_soon, cx));
+                        MessagesStore::global(cx).update(cx, |store, cx| {
+                            store.give_coffee_reaction(message_id, cx);
+                        });
                     },
                 ),
             )

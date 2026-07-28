@@ -7,8 +7,14 @@ use mezon_store::{
     ChannelList, ClanId, ClanList, ClanSettingsPermissions, PermissionStore, Settings,
 };
 
+use super::audit_log_setting_page::AuditLogSettingPage;
+use super::emoji_setting_page::EmojiSettingPage;
 use super::integration_setting_page::IntegrationSettingPage;
 use super::overview_setting_page::{OverviewSettingPage, render_clan_overview_save_bar};
+use super::role_icon_picker::render_role_icon_picker_modal;
+use super::role_setting_page::{RoleSettingPage, render_role_save_bar};
+use super::sound_setting_page::SoundSettingPage;
+use super::sticker_setting_page::StickerSettingPage;
 use crate::theme::{ActiveTheme, Theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +162,11 @@ pub struct ClanSettingScreen {
     channel_list: Entity<ChannelList>,
     current_page: ClanSettingsPage,
     overview_page: Option<Entity<OverviewSettingPage>>,
+    audit_log_page: Option<Entity<AuditLogSettingPage>>,
+    emoji_page: Option<Entity<EmojiSettingPage>>,
+    sticker_page: Option<Entity<StickerSettingPage>>,
+    sound_page: Option<Entity<SoundSettingPage>>,
+    roles_page: Option<Entity<RoleSettingPage>>,
     integrations_page: Option<Entity<IntegrationSettingPage>>,
     scroll: ScrollHandle,
     nav_scroll: ScrollHandle,
@@ -186,6 +197,11 @@ impl ClanSettingScreen {
             channel_list,
             current_page: page,
             overview_page: None,
+            audit_log_page: None,
+            emoji_page: None,
+            sticker_page: None,
+            sound_page: None,
+            roles_page: None,
             integrations_page: None,
             scroll: ScrollHandle::new(),
             nav_scroll: ScrollHandle::new(),
@@ -265,6 +281,12 @@ impl ClanSettingScreen {
             self.release_page(self.current_page, cx);
             if clan_changed {
                 self.release_page(ClanSettingsPage::Overview, cx);
+                self.release_page(ClanSettingsPage::AuditLog, cx);
+                self.release_page(ClanSettingsPage::Emoji, cx);
+                self.release_page(ClanSettingsPage::ImageStickers, cx);
+                self.release_page(ClanSettingsPage::VoiceStickers, cx);
+                self.release_page(ClanSettingsPage::Roles, cx);
+                self.release_page(ClanSettingsPage::Integrations, cx);
             }
             self.reset_content_scroll();
         }
@@ -275,8 +297,36 @@ impl ClanSettingScreen {
     }
 
     fn release_page(&mut self, page: ClanSettingsPage, cx: &mut Context<Self>) {
-        if page == ClanSettingsPage::Overview
-            && let Some(entity) = self.overview_page.take()
+        match page {
+            ClanSettingsPage::Overview => {
+                if let Some(entity) = self.overview_page.take() {
+                    entity.update(cx, |page, cx| page.release(cx));
+                }
+            }
+            ClanSettingsPage::AuditLog => {
+                if let Some(entity) = self.audit_log_page.take() {
+                    entity.update(cx, |page, cx| page.release(cx));
+                }
+            }
+            ClanSettingsPage::Emoji => {
+                if let Some(entity) = self.emoji_page.take() {
+                    entity.update(cx, |page, cx| page.release(cx));
+                }
+            }
+            ClanSettingsPage::ImageStickers => {
+                if let Some(entity) = self.sticker_page.take() {
+                    entity.update(cx, |page, cx| page.release(cx));
+                }
+            }
+            ClanSettingsPage::VoiceStickers => {
+                if let Some(entity) = self.sound_page.take() {
+                    entity.update(cx, |page, cx| page.release(cx));
+                }
+            }
+            _ => {}
+        }
+        if page == ClanSettingsPage::Roles
+            && let Some(entity) = self.roles_page.take()
         {
             entity.update(cx, |page, _| page.release());
         }
@@ -292,16 +342,50 @@ impl ClanSettingScreen {
     }
 
     fn activate_page(&mut self, page: ClanSettingsPage, cx: &mut Context<Self>) {
-        if page == ClanSettingsPage::Overview && self.overview_page.is_none() {
-            let clan_list = self.clan_list.clone();
-            let channel_list = self.channel_list.clone();
+        let settings = self.settings.clone();
+        let clan_id = self.clan_id;
+        match page {
+            ClanSettingsPage::Overview if self.overview_page.is_none() => {
+                let clan_list = self.clan_list.clone();
+                let channel_list = self.channel_list.clone();
+                self.overview_page = Some(cx.new(|cx| {
+                    OverviewSettingPage::new(clan_id, clan_list, channel_list, settings, cx)
+                }));
+                if let Some(overview) = &self.overview_page {
+                    cx.observe(overview, |_, _, cx| cx.notify()).detach();
+                }
+            }
+            ClanSettingsPage::AuditLog if self.audit_log_page.is_none() => {
+                self.audit_log_page =
+                    Some(cx.new(|cx| AuditLogSettingPage::new(clan_id, settings, cx)));
+                if let Some(audit_log) = &self.audit_log_page {
+                    cx.observe(audit_log, |_, _, cx| cx.notify()).detach();
+                }
+            }
+            ClanSettingsPage::Emoji if self.emoji_page.is_none() => {
+                self.emoji_page = Some(cx.new(|cx| EmojiSettingPage::new(clan_id, settings, cx)));
+                if let Some(page) = &self.emoji_page {
+                    cx.observe(page, |_, _, cx| cx.notify()).detach();
+                }
+            }
+            ClanSettingsPage::ImageStickers if self.sticker_page.is_none() => {
+                self.sticker_page =
+                    Some(cx.new(|cx| StickerSettingPage::new(clan_id, settings, cx)));
+            }
+            ClanSettingsPage::VoiceStickers if self.sound_page.is_none() => {
+                self.sound_page = Some(cx.new(|cx| SoundSettingPage::new(clan_id, settings, cx)));
+                if let Some(page) = &self.sound_page {
+                    cx.observe(page, |_, _, cx| cx.notify()).detach();
+                }
+            }
+            _ => {}
+        }
+        if page == ClanSettingsPage::Roles && self.roles_page.is_none() {
             let settings = self.settings.clone();
             let clan_id = self.clan_id;
-            self.overview_page = Some(cx.new(|cx| {
-                OverviewSettingPage::new(clan_id, clan_list, channel_list, settings, cx)
-            }));
-            if let Some(overview) = &self.overview_page {
-                cx.observe(overview, |_, _, cx| cx.notify()).detach();
+            self.roles_page = Some(cx.new(|cx| RoleSettingPage::new(clan_id, settings, cx)));
+            if let Some(roles) = &self.roles_page {
+                cx.observe(roles, |_, _, cx| cx.notify()).detach();
             }
         }
         if page == ClanSettingsPage::Integrations && self.integrations_page.is_none() {
@@ -338,6 +422,26 @@ impl ClanSettingScreen {
                 .overview_page
                 .as_ref()
                 .map(|p| p.clone().into_any_element()),
+            ClanSettingsPage::AuditLog => self
+                .audit_log_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            ClanSettingsPage::Emoji => self
+                .emoji_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            ClanSettingsPage::ImageStickers => self
+                .sticker_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            ClanSettingsPage::VoiceStickers => self
+                .sound_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            ClanSettingsPage::Roles => self
+                .roles_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
             ClanSettingsPage::Integrations => self
                 .integrations_page
                 .as_ref()
@@ -368,8 +472,7 @@ impl Render for ClanSettingScreen {
         let perms = PermissionStore::global(cx)
             .read(cx)
             .clan_settings_permissions(clan_id, cx);
-        let hide_page_title = matches!(page, ClanSettingsPage::AuditLog);
-
+        let audit_log_layout = page == ClanSettingsPage::AuditLog;
         let content = self.current_page_view().unwrap_or_else(|| {
             div()
                 .flex_1()
@@ -389,6 +492,23 @@ impl Render for ClanSettingScreen {
                 .as_ref()
                 .is_some_and(|overview| overview.read(cx).should_show_save_bar(cx));
         let overview_save_bar = self.overview_page.clone().filter(|_| show_overview_save);
+        let roles_edit_mode = page == ClanSettingsPage::Roles
+            && self
+                .roles_page
+                .as_ref()
+                .is_some_and(|roles| roles.read(cx).is_in_edit_mode());
+        let show_role_save = page == ClanSettingsPage::Roles
+            && self
+                .roles_page
+                .as_ref()
+                .is_some_and(|roles| roles.read(cx).should_show_save_bar(cx));
+        let role_save_bar = self.roles_page.clone().filter(|_| show_role_save);
+        let show_role_icon_picker = page == ClanSettingsPage::Roles
+            && self
+                .roles_page
+                .as_ref()
+                .is_some_and(|roles| roles.read(cx).is_role_icon_picker_open());
+        let role_icon_picker = self.roles_page.clone().filter(|_| show_role_icon_picker);
 
         fn nav_item(
             id: &str,
@@ -572,45 +692,96 @@ impl Render for ClanSettingScreen {
                                     .h_full()
                                     .min_h_0()
                                     .w(px(SETTINGS_CONTENT_WIDTH))
-                                    .when(!hide_page_title, |panel| {
-                                        panel.child(
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .w_full()
+                                            .pl(px(40.0))
+                                            .pr(px(28.0))
+                                            .pt(px(60.0))
+                                            .child(
+                                                div()
+                                                    .max_w(px(740.0))
+                                                    .text_xl()
+                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                    .mb_5()
+                                                    .text_color(theme.text_primary)
+                                                    .child(self.page_title(page, &locale)),
+                                            ),
+                                    )
+                                    .child(
+                                        if matches!(
+                                            page,
+                                            ClanSettingsPage::Emoji
+                                                | ClanSettingsPage::ImageStickers
+                                                | ClanSettingsPage::VoiceStickers
+                                        ) {
                                             div()
-                                                .flex_shrink_0()
+                                                .flex_1()
+                                                .min_h_0()
                                                 .w_full()
                                                 .pl(px(40.0))
                                                 .pr(px(28.0))
-                                                .pt(px(60.0))
                                                 .child(
                                                     div()
+                                                        .w_full()
+                                                        .h_full()
                                                         .max_w(px(740.0))
-                                                        .text_xl()
-                                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                        .mb_5()
-                                                        .text_color(theme.text_primary)
-                                                        .child(self.page_title(page, &locale)),
-                                                ),
-                                        )
-                                    })
-                                    .child(
-                                        div()
-                                            .id("clan-settings-scroll")
-                                            .flex_1()
-                                            .min_h_0()
-                                            .overflow_y_scroll()
-                                            .track_scroll(&self.scroll)
-                                            .pb(px(28.0))
-                                            .pl(px(40.0))
-                                            .pr(px(28.0))
-                                            .when(hide_page_title, |el| el.pt(px(60.0)))
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .w_full()
-                                                    .max_w(px(740.0))
-                                                    .items_stretch()
-                                                    .child(content),
-                                            ),
+                                                        .min_w(px(0.0))
+                                                        .child(content),
+                                                )
+                                                .into_any_element()
+                                        } else if audit_log_layout {
+                                            div()
+                                                .id("clan-settings-scroll")
+                                                .flex_1()
+                                                .min_h_0()
+                                                .overflow_hidden()
+                                                .flex()
+                                                .flex_col()
+                                                .pb(px(28.0))
+                                                .pl(px(40.0))
+                                                .pr(px(28.0))
+                                                .child(
+                                                    v_flex()
+                                                        .max_w(px(740.0))
+                                                        .w_full()
+                                                        .h_full()
+                                                        .min_h_0()
+                                                        .flex_1()
+                                                        .child(content),
+                                                )
+                                                .into_any_element()
+                                        } else {
+                                            let mut scroll = div()
+                                                .id("clan-settings-scroll")
+                                                .flex_1()
+                                                .min_h_0()
+                                                .pb(px(28.0))
+                                                .pl(px(40.0))
+                                                .pr(px(28.0));
+                                            if roles_edit_mode {
+                                                scroll = scroll.overflow_hidden();
+                                            } else {
+                                                scroll = scroll
+                                                    .overflow_y_scroll()
+                                                    .track_scroll(&self.scroll);
+                                            }
+                                            scroll
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .w_full()
+                                                        .max_w(px(740.0))
+                                                        .items_stretch()
+                                                        .when(roles_edit_mode, |el| {
+                                                            el.h_full().min_h_0()
+                                                        })
+                                                        .child(content),
+                                                )
+                                                .into_any_element()
+                                        },
                                     ),
                             )
                             .child(
@@ -654,6 +825,14 @@ impl Render for ClanSettingScreen {
                 panel.child(deferred(render_clan_overview_save_bar(
                     overview, &locale, &theme, cx,
                 )))
+            })
+            .when_some(role_save_bar, |panel, roles| {
+                panel.child(deferred(render_role_save_bar(roles, &locale, &theme, cx)))
+            })
+            .when_some(role_icon_picker, |panel, roles| {
+                panel.child(render_role_icon_picker_modal(
+                    roles, &locale, &theme, window, cx,
+                ))
             })
     }
 }

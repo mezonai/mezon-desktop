@@ -438,6 +438,11 @@ mod selection_copy_tests {
     }
 }
 
+const FAB_SIZE: f32 = 32.;
+const FAB_HOVER_GROW: f32 = 4.;
+const FAB_HOVER_SIZE: f32 = FAB_SIZE + FAB_HOVER_GROW;
+const FAB_BOTTOM: f32 = 20.;
+const FAB_RIGHT: f32 = 12.;
 const LOAD_MORE_ITEM_THRESHOLD: usize = 12;
 const LIST_OVERDRAW: f32 = 1024.;
 const LIST_BOTTOM_PADDING: f32 = 20.;
@@ -1101,6 +1106,7 @@ pub struct ChannelMessages {
     image_cache: Entity<LruImageCache>,
     avatar_image_cache: Entity<LruImageCache>,
     small_avatar_image_cache: Entity<LruImageCache>,
+    icon_image_cache: Entity<LruImageCache>,
     active_videos: Rc<HashMap<(MessageId, usize), Entity<VideoPlayerView>>>,
     active_audios: Rc<indexmap::IndexMap<(MessageId, usize), Entity<AudioPlayerView>>>,
     gif_videos: Rc<HashMap<(MessageId, usize), Entity<GifVideoView>>>,
@@ -1465,6 +1471,9 @@ impl ChannelMessages {
                     if following_new {
                         this.list_state.scroll_to_end();
                         this.at_bottom = true;
+                        if let Some(last) = _store.read(cx).viewport_messages().last() {
+                            this.last_seen_at_bottom = Some(last.id);
+                        }
                         this.sync_channel_seen(cx);
                     } else if *added_top > 0 || *removed_top > 0 {
                         let anchor = preserved_message_anchor.or_else(|| {
@@ -1531,7 +1540,9 @@ impl ChannelMessages {
                 }
                 MessagesEvent::ReplyTargetChanged
                 | MessagesEvent::ForwardProgress { .. }
-                | MessagesEvent::ForwardFinished { .. } => return,
+                | MessagesEvent::ForwardFinished { .. }
+                | MessagesEvent::ShareContactFinished { .. }
+                | MessagesEvent::AnonymousModeChanged => return,
                 MessagesEvent::TopicUpdated { .. } => {}
             }
             if structural {
@@ -1635,6 +1646,15 @@ impl ChannelMessages {
             )
         });
         let avatar_image_cache = crate::image_cache::shared_avatar_cache(cx);
+        let icon_image_cache = cx.new(|cx| {
+            crate::image_cache::LruImageCache::icon_thumbnail(
+                "message-icons",
+                1024,
+                8 * 1024 * 1024,
+                256 * 1024,
+                cx,
+            )
+        });
         let small_avatar_image_cache = cx.new(|cx| {
             crate::image_cache::LruImageCache::avatar_thumbnail_small(
                 "message-authors",
@@ -1710,6 +1730,7 @@ impl ChannelMessages {
             image_cache,
             avatar_image_cache,
             small_avatar_image_cache,
+            icon_image_cache,
             active_videos: Rc::new(HashMap::new()),
             active_audios: Rc::new(indexmap::IndexMap::new()),
             gif_videos: Rc::new(HashMap::new()),
@@ -3107,9 +3128,9 @@ impl ChannelMessages {
         div()
             .id("scroll-down-fab")
             .absolute()
-            .bottom(px(20.))
-            .right(px(12.))
-            .size(px(32.))
+            .bottom(px(FAB_BOTTOM))
+            .right(px(FAB_RIGHT))
+            .size(px(FAB_SIZE))
             .rounded_full()
             .bg(theme.bg_tertiary)
             .border_1()
@@ -3121,6 +3142,13 @@ impl ChannelMessages {
             .when(visible, |el| {
                 el.cursor_pointer()
                     .occlude()
+                    .hover(|style| {
+                        style
+                            .size(px(FAB_HOVER_SIZE))
+                            .bottom(px(FAB_BOTTOM - FAB_HOVER_GROW / 2.))
+                            .right(px(FAB_RIGHT - FAB_HOVER_GROW / 2.))
+                            .bg(theme.bg_hover)
+                    })
                     .on_click(cx.listener(|this, _event, _window, cx| {
                         this.scroll_down_clicked(cx);
                     }))
@@ -3876,6 +3904,7 @@ impl ChannelMessages {
         let context_menu_message = self.context_menu_target.map(|(id, _)| id);
         let avatar_image_cache = self.avatar_image_cache.clone();
         let small_avatar_image_cache = self.small_avatar_image_cache.clone();
+        let icon_image_cache = self.icon_image_cache.clone();
         let reply_highlight_id = TopicsStore::global(cx)
             .read(cx)
             .reply_target()
@@ -3935,6 +3964,7 @@ impl ChannelMessages {
                         context_menu_message,
                         avatar_cache: small_avatar_image_cache.clone(),
                         large_avatar_cache: avatar_image_cache.clone(),
+                        icon_cache: icon_image_cache.clone(),
                         unread_boundary_id: None,
                         highlight_id: None,
                         reply_highlight_id,
@@ -4000,6 +4030,16 @@ impl ChannelMessages {
                 let Some(target_msg) = self.find_local_message(message_id, cx) else {
                     return el;
                 };
+                let selected_text = {
+                    let state = self.selection.borrow();
+                    selected_text_for_messages(
+                        &state,
+                        &self.topic_messages,
+                        &self.cached_locale,
+                        &self.cached_current_user_id,
+                        cx,
+                    )
+                };
                 let menu = message_context_menu::build(
                     &target_msg,
                     &self.cached_current_user_id,
@@ -4008,6 +4048,7 @@ impl ChannelMessages {
                     self.context_menu_forward_all,
                     true,
                     self.reaction_submenu_open,
+                    selected_text,
                     cx.entity().downgrade(),
                     cx,
                 );
@@ -4026,6 +4067,7 @@ impl ChannelMessages {
 
 impl Render for ChannelMessages {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::image_cache::sweep_ogp_cache(window, cx);
         {
             let mut selection = self.selection.borrow_mut();
             selection.begin_render();
@@ -4050,7 +4092,7 @@ impl Render for ChannelMessages {
                 .is_none_or(|at| at.elapsed() >= IDLE_CACHE_SWEEP_INTERVAL)
         {
             self.image_cache
-                .update(cx, |cache, cx| cache.sweep(window, cx));
+                .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
             self.last_image_cache_sweep = Some(Instant::now());
         }
         if !scroll_active {
@@ -4107,6 +4149,7 @@ impl Render for ChannelMessages {
         let context_menu_message = self.context_menu_target.map(|(id, _)| id);
         let avatar_image_cache = self.avatar_image_cache.clone();
         let small_avatar_image_cache = self.small_avatar_image_cache.clone();
+        let icon_image_cache = self.icon_image_cache.clone();
         let unread_boundary_id = self.cached_unread_boundary;
         let highlight_id = self.highlight_id;
         let reply_highlight_id = store.read(cx).reply_target().map(|d| d.message_ref_id);
@@ -4173,6 +4216,7 @@ impl Render for ChannelMessages {
                         context_menu_message,
                         avatar_cache: small_avatar_image_cache.clone(),
                         large_avatar_cache: avatar_image_cache.clone(),
+                        icon_cache: icon_image_cache.clone(),
                         unread_boundary_id,
                         highlight_id,
                         reply_highlight_id,
@@ -4242,6 +4286,16 @@ impl Render for ChannelMessages {
                 let Some(target_msg) = store_ref.viewport_message_by_id(message_id) else {
                     return el;
                 };
+                let selected_text = {
+                    let state = self.selection.borrow();
+                    selected_text_for_messages(
+                        &state,
+                        store_ref.viewport_messages(),
+                        &self.cached_locale,
+                        &self.cached_current_user_id,
+                        cx,
+                    )
+                };
                 let menu = message_context_menu::build(
                     target_msg,
                     &self.cached_current_user_id,
@@ -4250,6 +4304,7 @@ impl Render for ChannelMessages {
                     self.context_menu_forward_all,
                     false,
                     self.reaction_submenu_open,
+                    selected_text,
                     cx.entity().downgrade(),
                     cx,
                 );
@@ -4307,6 +4362,9 @@ pub(crate) fn unread_boundary_for_messages(
     for i in 1..messages.len() {
         let prev = &messages[i - 1];
         let curr = &messages[i];
+        if curr.id.is_optimistic() {
+            continue;
+        }
         if prev.id != last_read {
             continue;
         }

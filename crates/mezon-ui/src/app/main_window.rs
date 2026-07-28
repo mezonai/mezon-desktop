@@ -23,5 +23,9 @@ pub fn activate_main_window(cx: &mut App) {
     let Some(handle) = handle(cx) else {
         return;
     };
+    // Bring the whole app to the foreground (over other apps), not just raise the
+    // window within the app — required when activating from a background trigger
+    // like a notification click.
+    cx.activate(true);
     let _ = cx.update_window(handle, |_, window, _| window.activate_window());
 }

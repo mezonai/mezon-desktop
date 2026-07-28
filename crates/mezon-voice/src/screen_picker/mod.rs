@@ -10,6 +10,14 @@ pub enum PickedScreen {
     LinuxPortal(ScreenShareKind),
 }
 
+pub(crate) fn pick_is_window(pick: &PickedScreen) -> bool {
+    #[cfg(target_os = "linux")]
+    if let PickedScreen::LinuxPortal(kind) = pick {
+        return matches!(kind, ScreenShareKind::Window);
+    }
+    matches!(pick, PickedScreen::Target(Target::Window(_)))
+}
+
 pub(crate) fn portal_source_types_for_pick(pick: &PickedScreen) -> Option<u32> {
     match pick {
         PickedScreen::Target(Target::Window(_)) => Some(2),

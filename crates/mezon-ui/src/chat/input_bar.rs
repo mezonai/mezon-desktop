@@ -1,15 +1,11 @@
 use crate::chat::{MentionInput, ReplyTarget};
 use crate::components::primitives::{Icon, IconName};
-use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme};
 use gpui::{
     Context, Entity, FontWeight, ObjectFit, Render, SharedString, Subscription, Window, div, img,
-    prelude::*, px,
+    prelude::*, px, radians,
 };
-use mezon_store::{MessagesStore, OgpResult, Settings, TopicsStore};
-
-const OGP_PREVIEW_CACHE_ITEMS: usize = 4;
-const OGP_PREVIEW_CACHE_BYTES: u64 = 8 * 1024 * 1024;
+use mezon_store::{MessagesEvent, MessagesStore, OgpResult, Settings, TopicsStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReplyClearSource {
@@ -23,9 +19,9 @@ pub struct InputBar {
     locale: SharedString,
     replying_to: Option<ReplyTarget>,
     reply_clear: ReplyClearSource,
-    ogp_image_cache: Entity<LruImageCache>,
     _settings_observe: Subscription,
     _mention_observe: Subscription,
+    _messages_sub: Subscription,
 }
 
 impl InputBar {
@@ -37,23 +33,22 @@ impl InputBar {
     ) -> Self {
         let settings_observe = cx.observe(settings, |_, _, cx| cx.notify());
         let mention_observe = cx.observe(&mention_input, |_, _, cx| cx.notify());
-        let ogp_image_cache = cx.new(|cx| {
-            LruImageCache::avatar_thumbnail(
-                "ogp-composer-preview",
-                OGP_PREVIEW_CACHE_ITEMS,
-                OGP_PREVIEW_CACHE_BYTES,
-                OGP_PREVIEW_CACHE_BYTES,
-                cx,
-            )
-        });
+        let messages_sub = cx.subscribe(
+            &MessagesStore::global(cx),
+            |_, _, event: &MessagesEvent, cx| {
+                if matches!(event, MessagesEvent::AnonymousModeChanged) {
+                    cx.notify();
+                }
+            },
+        );
         Self {
             mention_input,
             locale,
             replying_to: None,
             reply_clear: ReplyClearSource::Messages,
-            ogp_image_cache,
             _settings_observe: settings_observe,
             _mention_observe: mention_observe,
+            _messages_sub: messages_sub,
         }
     }
 
@@ -141,6 +136,7 @@ impl InputBar {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let ogp_image_cache = crate::image_cache::shared_ogp_cache(cx);
         let mut text_col = div()
             .flex()
             .flex_col()
@@ -189,7 +185,7 @@ impl InputBar {
                         .overflow_hidden()
                         .rounded(px(4.))
                         .bg(theme.tokens.theme_setting_primary)
-                        .image_cache(self.ogp_image_cache.clone())
+                        .image_cache(ogp_image_cache)
                         .child(
                             img(SharedString::from(preview.image.clone()))
                                 .size_full()
@@ -225,6 +221,7 @@ impl InputBar {
         let replying = self.replying_to.is_some();
         let reply_clear = self.reply_clear;
         let ogp_preview = self.mention_input.read(cx).ogp_preview().cloned();
+        let anonymous = MessagesStore::global(cx).read(cx).is_anonymous_mode();
         div()
             .flex()
             .flex_col()
@@ -245,6 +242,7 @@ impl InputBar {
             })
             .child(
                 div()
+                    .relative()
                     .flex()
                     .flex_row()
                     .items_center()
@@ -254,13 +252,26 @@ impl InputBar {
                     .border_color(theme.tokens.border_primary)
                     .bg(theme.tokens.bg_surface)
                     .shadow_md()
-                    .child(div().flex_1().child(self.mention_input.clone())),
+                    .child(div().flex_1().child(self.mention_input.clone()))
+                    .when(anonymous, |composer| {
+                        composer.child(
+                            div().absolute().top(px(-12.)).right(px(-12.)).child(
+                                Icon::new(IconName::HatIcon)
+                                    .size(px(28.))
+                                    .text_color(theme.tokens.text_theme_primary)
+                                    .with_transformation(gpui::Transformation::rotate(radians(
+                                        std::f32::consts::FRAC_PI_4,
+                                    ))),
+                            ),
+                        )
+                    }),
             )
     }
 }
 
 impl Render for InputBar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::image_cache::sweep_ogp_cache(window, cx);
         self.render_bar(cx.theme().clone(), cx)
     }
 }

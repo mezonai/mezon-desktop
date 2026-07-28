@@ -86,4 +86,20 @@ impl ChatSending {
             store.send_sound(url, filename, uid, uname, cx);
         });
     }
+
+    pub fn send_buzz(content: impl Into<String>, cx: &mut App) {
+        let content = content.into();
+        if content.trim().is_empty() {
+            return;
+        }
+        MessagesStore::global(cx).update(cx, |store, cx| {
+            store.send_buzz_message(content, cx);
+        });
+    }
+
+    pub fn send_location(latitude: f64, longitude: f64, cx: &mut App) {
+        MessagesStore::global(cx).update(cx, |store, cx| {
+            store.send_location_message(latitude, longitude, cx);
+        });
+    }
 }

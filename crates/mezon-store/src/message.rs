@@ -8,7 +8,6 @@ use mezon_client::transport::{
 };
 
 use crate::album_layout::AlbumLayout;
-use crate::config::AppConfig;
 use crate::ids::{ChannelId, MessageId, UserId};
 use crate::message_time::{format_local_time_hhmm, local_datetime, local_day_key};
 
@@ -62,10 +61,14 @@ impl MessageAttachment {
             )
     }
 
+    pub fn media_is_video(filetype: &str, url: &str) -> bool {
+        ((filetype.contains("video/mp4") || filetype.contains("video/quicktime"))
+            && !url.contains("tenor.com"))
+            || (filetype.starts_with("video") && !filetype.ends_with("vnd.dlna.mpeg-tts"))
+    }
+
     pub fn is_video(&self) -> bool {
-        ((self.filetype.contains("video/mp4") || self.filetype.contains("video/quicktime"))
-            && !self.url.contains("tenor.com"))
-            || (self.filetype.starts_with("video") && !self.filetype.ends_with("vnd.dlna.mpeg-tts"))
+        Self::media_is_video(&self.filetype, &self.url)
     }
 
     pub fn is_unsupported_media(&self) -> bool {
@@ -196,14 +199,11 @@ pub struct ReactionSender {
     pub count: u32,
 }
 
-const REACTION_EMOJI_PROXY_PX: u32 = 32;
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reaction {
     pub key: String,
     pub emoji: SharedString,
     pub emoji_id: SharedString,
-    pub emoji_proxied: SharedString,
     pub count: u32,
     pub count_label: SharedString,
     pub senders: Vec<ReactionSender>,
@@ -220,13 +220,9 @@ impl Reaction {
             .any(|s| s.sender_id == sender_id && s.count > 0)
     }
 
-    fn refresh(&mut self, cfg: Option<&AppConfig>) {
+    fn refresh(&mut self) {
         self.count = self.senders.iter().map(|s| s.count).sum();
         self.count_label = format_reaction_count(self.count).into();
-        self.emoji_proxied = cfg
-            .map(|c| c.emoji_src_sized(&self.emoji_id, REACTION_EMOJI_PROXY_PX))
-            .unwrap_or_default()
-            .into();
     }
 }
 
@@ -740,7 +736,7 @@ fn mention_user_id_targets_viewer(uid: &str, viewer_id: UserId) -> bool {
             || uid.parse::<i64>().ok().map(UserId) == Some(viewer_id))
 }
 
-pub fn aggregate_reactions(raw: &[ApiMessageReaction], cfg: Option<&AppConfig>) -> Vec<Reaction> {
+pub fn aggregate_reactions(raw: &[ApiMessageReaction]) -> Vec<Reaction> {
     let mut out: Vec<Reaction> = Vec::new();
     for r in raw {
         if r.action {
@@ -766,7 +762,7 @@ pub fn aggregate_reactions(raw: &[ApiMessageReaction], cfg: Option<&AppConfig>) 
         upsert_sender(&mut out[idx].senders, &r.sender_id, count, true);
     }
     for r in out.iter_mut() {
-        r.refresh(cfg);
+        r.refresh();
     }
     out.retain(|r| r.count > 0);
     out
@@ -778,7 +774,6 @@ pub fn apply_reaction_event(
     emoji: &str,
     sender_id: &str,
     removed: bool,
-    cfg: Option<&AppConfig>,
 ) {
     let key = reaction_key(emoji_id, emoji);
     if key.is_empty() {
@@ -787,14 +782,14 @@ pub fn apply_reaction_event(
     if removed {
         if let Some(pos) = reactions.iter().position(|x| x.key == key) {
             reactions[pos].senders.retain(|s| s.sender_id != sender_id);
-            reactions[pos].refresh(cfg);
+            reactions[pos].refresh();
             if reactions[pos].count == 0 {
                 reactions.remove(pos);
             }
         }
     } else if let Some(rec) = reactions.iter_mut().find(|x| x.key == key) {
         upsert_sender(&mut rec.senders, sender_id, 1, false);
-        rec.refresh(cfg);
+        rec.refresh();
     } else {
         let mut rec = Reaction {
             key: key.to_string(),
@@ -806,7 +801,7 @@ pub fn apply_reaction_event(
             }],
             ..Default::default()
         };
-        rec.refresh(cfg);
+        rec.refresh();
         reactions.push(rec);
     }
 }
@@ -817,10 +812,9 @@ pub fn rollback_reaction(
     emoji: &str,
     sender_id: &str,
     was_remove: bool,
-    cfg: Option<&AppConfig>,
 ) {
     if was_remove {
-        apply_reaction_event(reactions, emoji_id, emoji, sender_id, false, cfg);
+        apply_reaction_event(reactions, emoji_id, emoji, sender_id, false);
         return;
     }
     let key = reaction_key(emoji_id, emoji);
@@ -835,7 +829,7 @@ pub fn rollback_reaction(
         s.count = s.count.saturating_sub(1);
     }
     reactions[pos].senders.retain(|s| s.count > 0);
-    reactions[pos].refresh(cfg);
+    reactions[pos].refresh();
     if reactions[pos].count == 0 {
         reactions.remove(pos);
     }
@@ -1840,7 +1834,7 @@ mod tests {
                 action: true,
             },
         ];
-        let agg = aggregate_reactions(&raw, None);
+        let agg = aggregate_reactions(&raw);
         assert_eq!(agg.len(), 1);
         assert_eq!(agg[0].key, "10");
         assert_eq!(agg[0].count(), 2);
@@ -1866,27 +1860,27 @@ mod tests {
             }],
             ..Default::default()
         }];
-        apply_reaction_event(&mut reactions, "10", ":a:", "u2", false, None);
+        apply_reaction_event(&mut reactions, "10", ":a:", "u2", false);
         assert_eq!(reactions[0].count(), 2);
-        apply_reaction_event(&mut reactions, "10", ":a:", "u1", false, None);
+        apply_reaction_event(&mut reactions, "10", ":a:", "u1", false);
         assert_eq!(reactions[0].count(), 3);
         assert!(reactions[0].has_sender("u1"));
-        apply_reaction_event(&mut reactions, "10", ":a:", "u1", true, None);
+        apply_reaction_event(&mut reactions, "10", ":a:", "u1", true);
         assert_eq!(reactions[0].count(), 1);
         assert!(!reactions[0].has_sender("u1"));
-        apply_reaction_event(&mut reactions, "10", ":a:", "u2", true, None);
+        apply_reaction_event(&mut reactions, "10", ":a:", "u2", true);
         assert!(reactions.is_empty());
     }
 
     #[test]
     fn rollback_reaction_undoes_optimistic_add() {
         let mut reactions = Vec::new();
-        apply_reaction_event(&mut reactions, "10", ":a:", "u1", false, None);
-        apply_reaction_event(&mut reactions, "10", ":a:", "u1", false, None);
+        apply_reaction_event(&mut reactions, "10", ":a:", "u1", false);
+        apply_reaction_event(&mut reactions, "10", ":a:", "u1", false);
         assert_eq!(reactions[0].count(), 2);
-        rollback_reaction(&mut reactions, "10", ":a:", "u1", false, None);
+        rollback_reaction(&mut reactions, "10", ":a:", "u1", false);
         assert_eq!(reactions[0].count(), 1);
-        rollback_reaction(&mut reactions, "10", ":a:", "u1", false, None);
+        rollback_reaction(&mut reactions, "10", ":a:", "u1", false);
         assert!(reactions.is_empty());
     }
 
@@ -1966,24 +1960,24 @@ mod tests {
 
     #[test]
     fn is_video_detects_mp4_and_quicktime() {
-        assert!(attachment("video/mp4", "https://cdn.mezon.ai/clip.mp4").is_video());
-        assert!(attachment("video/quicktime", "https://cdn.mezon.ai/clip.mov").is_video());
+        assert!(attachment("video/mp4", "https://cdn.example/clip.mp4").is_video());
+        assert!(attachment("video/quicktime", "https://cdn.example/clip.mov").is_video());
     }
 
     #[test]
     fn is_video_matches_video_prefix() {
-        assert!(attachment("video/webm", "https://cdn.mezon.ai/clip.webm").is_video());
+        assert!(attachment("video/webm", "https://cdn.example/clip.webm").is_video());
     }
 
     #[test]
     fn is_video_excludes_mpeg_ts_stream() {
-        assert!(!attachment("video/vnd.dlna.mpeg-tts", "https://cdn.mezon.ai/x.ts").is_video());
+        assert!(!attachment("video/vnd.dlna.mpeg-tts", "https://cdn.example/x.ts").is_video());
     }
 
     #[test]
     fn is_video_false_for_image_and_bare_url() {
-        assert!(!attachment("image/png", "https://cdn.mezon.ai/x.png").is_video());
-        assert!(!attachment("", "https://cdn.mezon.ai/x.mp4").is_video());
+        assert!(!attachment("image/png", "https://cdn.example/x.png").is_video());
+        assert!(!attachment("", "https://cdn.example/x.mp4").is_video());
     }
 
     #[test]
@@ -2003,7 +1997,7 @@ mod tests {
 
     #[test]
     fn tenor_mp4_url_rejects_non_tenor_and_malformed() {
-        assert_eq!(tenor_mp4_url("https://cdn.mezon.ai/uploaded.gif"), None);
+        assert_eq!(tenor_mp4_url("https://cdn.example/uploaded.gif"), None);
         assert_eq!(
             tenor_mp4_url("https://media.tenor.com/rmtqGXO15tYAAAAC/clip.mp4"),
             None
@@ -2027,9 +2021,9 @@ mod tests {
 
     #[test]
     fn is_audio_true_for_audio_mime_false_for_unsupported_and_others() {
-        assert!(attachment("audio/mpeg", "https://cdn.mezon.ai/x.mp3").is_audio());
-        assert!(!attachment("audio/wma", "https://cdn.mezon.ai/x.wma").is_audio());
-        assert!(!attachment("image/png", "https://cdn.mezon.ai/x.png").is_audio());
+        assert!(attachment("audio/mpeg", "https://cdn.example/x.mp3").is_audio());
+        assert!(!attachment("audio/wma", "https://cdn.example/x.wma").is_audio());
+        assert!(!attachment("image/png", "https://cdn.example/x.png").is_audio());
     }
 
     #[test]
@@ -2111,22 +2105,22 @@ mod tests {
 
     #[test]
     fn unsupported_media_takes_precedence_over_video_and_image() {
-        let avi = attachment("video/avi", "https://cdn.mezon.ai/x.avi");
+        let avi = attachment("video/avi", "https://cdn.example/x.avi");
         assert!(avi.is_unsupported_media());
         assert!(avi.is_video());
 
-        let bmp = attachment("image/bmp", "https://cdn.mezon.ai/x.bmp");
+        let bmp = attachment("image/bmp", "https://cdn.example/x.bmp");
         assert!(bmp.is_unsupported_media());
         assert!(bmp.is_image());
     }
 
     #[test]
     fn supported_video_and_image_are_not_unsupported() {
-        let mp4 = attachment("video/mp4", "https://cdn.mezon.ai/x.mp4");
+        let mp4 = attachment("video/mp4", "https://cdn.example/x.mp4");
         assert!(!mp4.is_unsupported_media());
         assert!(mp4.is_video());
 
-        let png = attachment("image/png", "https://cdn.mezon.ai/x.png");
+        let png = attachment("image/png", "https://cdn.example/x.png");
         assert!(!png.is_unsupported_media());
         assert!(png.is_image());
     }

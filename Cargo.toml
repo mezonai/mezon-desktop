@@ -13,6 +13,10 @@ members = [
     "crates/mezon-updater",
     "crates/mezon-proto",
     "crates/mezon-i18n",
+    "crates/mezon-theme",
+    "crates/mezon-widgets",
+    "crates/mezon-canvas",
+    "crates/mmn-client",
     # "crates/mezon-active-windows" excluded: orphan (unused) + does not compile (Rust 2024
     # `unsafe extern` + core_foundation API mismatch). Re-add once fixed & wired for rich-presence.
     # Vendored GPUI crates
@@ -52,7 +56,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.27"
 edition = "2024"
 authors = ["Mezon Team"]
 license = "GPL-3.0-or-later"
@@ -119,6 +123,10 @@ mezon-webview = { path = "crates/mezon-webview" }
 mezon-proto   = { path = "crates/mezon-proto" }
 mezon-updater = { path = "crates/mezon-updater" }
 mezon-i18n    = { path = "crates/mezon-i18n" }
+mezon-theme   = { path = "crates/mezon-theme" }
+mezon-widgets = { path = "crates/mezon-widgets" }
+mezon-canvas  = { path = "crates/mezon-canvas" }
+mmn-client    = { path = "crates/mmn-client" }
 # mezon-active-windows = { path = "crates/mezon-active-windows" }  # excluded — see [workspace.members]
 
 # ---------- Async runtime ----------
@@ -146,6 +154,11 @@ serde_urlencoded    = "0.7"
 bytes               = "1.0"
 sha2                = "0.10"
 url                 = "2.2"
+
+# ---------- MMN blockchain SDK crypto ----------
+ed25519-dalek       = "2"
+bs58                = "0.5"
+hex                 = "0.4"
 
 # ---------- Protobuf ----------
 prost                = "0.13"
@@ -321,6 +334,7 @@ cpal                 = "0.17.3"
 ogg                  = "0.9"
 rodio                = { git = "https://github.com/RustAudio/rodio", rev = "e50e726ddd0292f6ef9de0dda6b90af4ed1fb66a", default-features = false, features = ["playback"] }
 livekit              = { version = "0.7", features = ["rustls-tls-native-roots"] }
+livekit-protocol     = "0.7"
 flume                = "0.11"
 rayon                = "1.8"
 heapless             = "0.9.2"
@@ -389,6 +403,7 @@ cbindgen              = "0.28.0"
 
 [patch.crates-io]
 gpui = { path = "crates/vendor/gpui" }
+libspa = { path = "crates/vendor/libspa" }
 
 [patch."https://github.com/zed-industries/scap"]
 zed-scap = { path = "crates/vendor/zed-scap" }

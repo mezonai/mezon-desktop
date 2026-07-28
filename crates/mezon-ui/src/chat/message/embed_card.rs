@@ -79,20 +79,17 @@ pub fn render_embed_card(
     if !embed.description_spans.is_empty() {
         let description = selectable_spans_text(&embed.description_spans, ctx.locale, ctx.app);
         if let Some(range) = selection_cursor.section(&description) {
-            left = left.child(
-                div()
-                    .mt_2()
-                    .w_full()
-                    .child(render_selectable_embed_description(
-                        &embed.description_spans,
-                        msg,
-                        range.start,
-                        selection_context,
-                        ctx,
-                        theme.tokens.text_theme_primary,
-                        px(14.),
-                    )),
-            );
+            left = left.child(div().mt_2().w_full().min_w_0().overflow_hidden().child(
+                render_selectable_embed_description(
+                    &embed.description_spans,
+                    msg,
+                    range.start,
+                    selection_context,
+                    ctx,
+                    theme.tokens.text_theme_primary,
+                    px(14.),
+                ),
+            ));
         }
     }
     if !embed.fields.is_empty() {
@@ -133,6 +130,7 @@ pub fn render_embed_card(
 
     div()
         .relative()
+        .w_full()
         .max_w(px(CARD_MAX_WIDTH))
         .mt_2()
         .rounded(px(CARD_RADIUS))
@@ -157,26 +155,41 @@ pub fn render_embed_card(
         .into_any_element()
 }
 
+fn render_embed_circle_icon(url: SharedString, size: f32, ctx: &RowCtx) -> AnyElement {
+    let size = px(size);
+    div()
+        .size(size)
+        .flex_shrink_0()
+        .rounded_full()
+        .overflow_hidden()
+        .image_cache(ctx.avatar_cache.clone())
+        .child(
+            img(url)
+                .size(size)
+                .rounded_full()
+                .object_fit(ObjectFit::Cover),
+        )
+        .into_any_element()
+}
+
 fn render_embed_author(
     author: &EmbedAuthor,
     name: Option<gpui::StyledText>,
     ctx: &RowCtx,
 ) -> AnyElement {
-    let mut row = div().flex().items_center().gap_2().mt_2();
+    let mut row = div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .mt_2()
+        .min_w_0()
+        .w_full();
     if !author.icon_proxied.is_empty() {
-        row = row.child(
-            div()
-                .size(px(AUTHOR_ICON_SIZE))
-                .flex_shrink_0()
-                .rounded_full()
-                .overflow_hidden()
-                .image_cache(ctx.avatar_cache.clone())
-                .child(
-                    img(author.icon_proxied.clone())
-                        .size(px(AUTHOR_ICON_SIZE))
-                        .object_fit(ObjectFit::Cover),
-                ),
-        );
+        row = row.child(render_embed_circle_icon(
+            author.icon_proxied.clone(),
+            AUTHOR_ICON_SIZE,
+            ctx,
+        ));
     }
     row.child(
         div()
@@ -191,6 +204,8 @@ fn render_embed_author(
 fn render_embed_title(title: gpui::StyledText, ctx: &RowCtx) -> AnyElement {
     div()
         .mt_2()
+        .min_w_0()
+        .w_full()
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(ctx.theme.tokens.text_theme_message)
         .child(title)
@@ -263,19 +278,7 @@ fn render_embed_footer(
         .gap_2()
         .w_full();
     if let Some(icon_url) = icon {
-        row = row.child(
-            div()
-                .size(px(FOOTER_ICON_SIZE))
-                .flex_shrink_0()
-                .rounded_full()
-                .overflow_hidden()
-                .image_cache(ctx.avatar_cache.clone())
-                .child(
-                    img(icon_url)
-                        .size(px(FOOTER_ICON_SIZE))
-                        .object_fit(ObjectFit::Cover),
-                ),
-        );
+        row = row.child(render_embed_circle_icon(icon_url, FOOTER_ICON_SIZE, ctx));
     }
 
     let mut inner = div()

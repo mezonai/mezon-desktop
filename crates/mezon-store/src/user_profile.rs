@@ -1,7 +1,8 @@
 use gpui::App;
 use mezon_client::transport::prioritize_avatar;
 
-use crate::account::AccountStore;
+use crate::account::{AccountStore, UserAccount};
+use crate::badge::BadgeService;
 use crate::clan::ClanList;
 use crate::clan_members::{ClanMember, ClanMembersStore, User};
 use crate::direct::{DirectChannel, DirectKind, DirectMessageStore};
@@ -77,12 +78,29 @@ impl UserProfileView {
         Self {
             user_id: channel.peer_user_id.unwrap_or_default(),
             display_name: channel.label.clone(),
-            username: String::new(),
+            username: channel.peer_username.clone(),
             avatar_url: channel.avatar.clone(),
             about_me: String::new(),
             role_ids: Vec::new(),
             create_time_seconds: 0,
             online: online || channel.online,
+        }
+    }
+
+    pub fn from_account(user_id: UserId, account: &UserAccount, online: bool) -> Self {
+        Self {
+            user_id,
+            display_name: if account.display_name.is_empty() {
+                account.username.clone()
+            } else {
+                account.display_name.clone()
+            },
+            username: account.username.clone(),
+            avatar_url: account.avatar_url.clone().unwrap_or_default(),
+            about_me: account.about_me.clone().unwrap_or_default(),
+            role_ids: Vec::new(),
+            create_time_seconds: 0,
+            online,
         }
     }
 }
@@ -152,6 +170,16 @@ pub fn resolve_avatar_url(user_id: UserId, context: ProfileContext, cx: &App) ->
                     {
                         return Some(url);
                     }
+                    if is_current_user(user_id, cx)
+                        && let Some(url) = AccountStore::global(cx)
+                            .read(cx)
+                            .account
+                            .as_ref()
+                            .and_then(|acct| acct.avatar_url.clone())
+                            .filter(|url| !url.is_empty())
+                    {
+                        return Some(url);
+                    }
                     let store = DirectMessageStore::global(cx);
                     let dm = store.read(cx).find(channel_id)?;
                     (dm.peer_user_id == Some(user_id)).then(|| dm.avatar.clone())
@@ -184,12 +212,24 @@ fn resolve_direct(
             {
                 return Some(view);
             }
+            if is_current_user(user_id, cx)
+                && let Some(account) = AccountStore::global(cx).read(cx).account.as_ref()
+            {
+                return Some(UserProfileView::from_account(user_id, account, online));
+            }
             let store = DirectMessageStore::global(cx);
             let dm = store.read(cx).find(channel_id)?;
             (dm.peer_user_id == Some(user_id))
                 .then(|| UserProfileView::from_direct_peer(dm, online))
         }
     }
+}
+
+fn is_current_user(user_id: UserId, cx: &App) -> bool {
+    BadgeService::global(cx)
+        .read(cx)
+        .current_user_id(cx)
+        .is_some_and(|me| me == user_id)
 }
 
 #[cfg(test)]
@@ -245,6 +285,28 @@ mod tests {
     }
 
     #[test]
+    fn account_profile_maps_signed_in_user() {
+        let account = crate::account::UserAccount {
+            username: "me".into(),
+            display_name: "Hello Me".into(),
+            email: None,
+            avatar_url: Some("me.png".into()),
+            phone_number: None,
+            about_me: Some("about".into()),
+            password_setted: false,
+            logo: None,
+            status: String::new(),
+            user_status: String::new(),
+        };
+        let view = UserProfileView::from_account(UserId(1), &account, true);
+        assert_eq!(view.display_name, "Hello Me");
+        assert_eq!(view.username, "me");
+        assert_eq!(view.avatar_url, "me.png");
+        assert_eq!(view.about_me, "about");
+        assert!(view.online);
+    }
+
+    #[test]
     fn direct_peer_resolves_from_channel_without_api() {
         let channel = DirectChannel {
             id: ChannelId(100),
@@ -263,7 +325,7 @@ mod tests {
         let view = UserProfileView::from_direct_peer(&channel, false);
         assert_eq!(view.user_id, UserId(5));
         assert_eq!(view.display_name, "Alice");
-        assert!(view.username.is_empty());
+        assert_eq!(view.username, "alice");
         assert_eq!(view.avatar_url, "alice.png");
         assert!(view.online);
     }

@@ -27,6 +27,7 @@ const BAKED_ENV_VARS: &[&str] = &[
     "NX_CHAT_APP_REDIRECT_URI",
     "NX_LOGO_MEZON",
     "NX_BASE_IMG_URL",
+    "NX_UPLOAD_IMG_URL",
     "NX_PROFILE_IMG_URL",
     "NX_IMGPROXY_BASE_URL",
     "NX_IMGPROXY_KEY",
@@ -36,6 +37,10 @@ const BAKED_ENV_VARS: &[&str] = &[
     "NX_CHAT_APP_API_MEZONTREASURY_KEY",
     "NX_CHAT_APP_CONTRACT_ADDRESS",
     "NX_CHAT_APP_MEZON_TREASURY_URL_NETWORK",
+    "NX_CHAT_APP_MMN_API_URL",
+    "NX_CHAT_APP_INDEXER_API_URL",
+    "NX_CHAT_APP_ZK_API_URL",
+    "NX_CHAT_APP_DONG_SERVICE_API_URL",
     "NX_WEBRTC_ICESERVERS_URL",
     "NX_WEBRTC_ICESERVERS_USERNAME",
     "NX_WEBRTC_ICESERVERS_CREDENTIAL",
@@ -59,8 +64,7 @@ fn workspace_dotenv() -> Option<PathBuf> {
     let manifest = env::var("CARGO_MANIFEST_DIR").ok()?;
     let manifest_dir = PathBuf::from(manifest);
     let root = manifest_dir.parent()?.parent()?;
-    let dotenv = root.join(".env");
-    dotenv.is_file().then_some(dotenv)
+    Some(root.join(".env"))
 }
 
 fn parse_dotenv(path: &Path) -> HashMap<String, String> {

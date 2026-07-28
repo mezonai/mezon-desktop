@@ -132,7 +132,8 @@ pub(crate) fn ensure_palette_clans_loaded(store: &mut ChannelList, cx: &mut Cont
         .filter(|clan_id| !clan_id.is_zero())
         .collect();
     for clan_id in clan_ids {
-        store.load_for_clan(clan_id, cx);
+        store.load_structure_for_clan(clan_id, cx);
+        store.seed_badges(clan_id, cx).detach();
     }
 }
 

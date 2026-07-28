@@ -6,7 +6,7 @@ use gpui::{
     Animation, AnimationExt as _, AnyElement, App, ClickEvent, Context, SharedString, Task, Window,
     div, img, prelude::*, px, rgb,
 };
-use mezon_store::{ChannelId, DirectKind, DirectMessageStore};
+use mezon_store::{ChannelId, DirectKind, DirectMessageStore, NotificationSettingStore};
 
 use crate::components::primitives::Avatar;
 use crate::router::{Route, navigate};
@@ -119,7 +119,7 @@ impl DirectUnreadListState {
     }
 }
 
-pub(super) fn direct_unread_fingerprint(store: &DirectMessageStore) -> u64 {
+pub(super) fn direct_unread_fingerprint(store: &DirectMessageStore, cx: &App) -> u64 {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
     fn fold(hash: u64, bytes: &[u8]) -> u64 {
@@ -127,10 +127,12 @@ pub(super) fn direct_unread_fingerprint(store: &DirectMessageStore) -> u64 {
             .iter()
             .fold(hash, |h, b| (h ^ u64::from(*b)).wrapping_mul(FNV_PRIME))
     }
+    let noti = NotificationSettingStore::try_global(cx);
+    let muted = noti.as_ref().map(|s| s.read(cx));
     store
         .channels()
         .iter()
-        .filter(|ch| ch.unread_count > 0)
+        .filter(|ch| ch.counts_toward_unread_badge(muted.is_some_and(|s| s.is_time_muted(ch.id))))
         .fold(FNV_OFFSET, |h, ch| {
             let h = fold(h, &ch.id.0.to_le_bytes());
             let h = fold(h, &ch.unread_count.to_le_bytes());
@@ -144,10 +146,12 @@ pub(super) fn build_direct_unread_items(
     store: &DirectMessageStore,
     cx: &App,
 ) -> Vec<DirectUnreadItem> {
+    let noti = NotificationSettingStore::try_global(cx);
+    let muted = noti.as_ref().map(|s| s.read(cx));
     store
         .channels()
         .iter()
-        .filter(|ch| ch.unread_count > 0)
+        .filter(|ch| ch.counts_toward_unread_badge(muted.is_some_and(|s| s.is_time_muted(ch.id))))
         .map(|ch| DirectUnreadItem {
             channel_id: ch.id,
             label: SharedString::from(ch.label.clone()),

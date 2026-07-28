@@ -40,6 +40,8 @@ pub const DEFAULT_SERVER_KEY: &str = "defaultkey";
 struct ApiSession {
     token: String,
     refresh_token: String,
+    #[serde(default)]
+    id_token: String,
     #[allow(dead_code)]
     #[serde(default)]
     created: bool,
@@ -272,6 +274,7 @@ impl MezonClient {
         Session {
             token: api.token,
             refresh_token: api.refresh_token,
+            id_token: api.id_token,
             session_id: api.session_id.unwrap_or_default(),
             expires_at: expires_at.unwrap_or(0),
             api_url: api.api_url,

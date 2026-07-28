@@ -132,25 +132,25 @@ pub fn render_system_message(msg: &Message, ctx: &RowCtx) -> AnyElement {
     col.into_any_element()
 }
 
-const WAVE_STICKERS: &[&str] = &[
-    "https://cdn.mezon.ai/stickers/hellomezon.gif",
-    "https://cdn.mezon.ai/stickers/music_boy.gif",
-    "https://cdn.mezon.ai/stickers/music_girl.gif",
-    "https://cdn.mezon.ai/stickers/d1.gif",
-    "https://cdn.mezon.ai/stickers/d2.gif",
-    "https://cdn.mezon.ai/stickers/d3.gif",
-    "https://cdn.mezon.ai/stickers/d4.gif",
-    "https://cdn.mezon.ai/stickers/d5.gif",
-    "https://cdn.mezon.ai/stickers/whatsapp.gif",
-    "https://cdn.mezon.ai/stickers/zalo.gif",
-    "https://cdn.mezon.ai/stickers/mezon.gif",
-    "https://cdn.mezon.ai/stickers/telegram.gif",
-    "https://cdn.mezon.ai/stickers/mezon.gif",
-    "https://cdn.mezon.ai/stickers/slack.gif",
-    "https://cdn.mezon.ai/stickers/mezon.gif",
-    "https://cdn.mezon.ai/stickers/discord.gif",
-    "https://cdn.mezon.ai/stickers/mezon.gif",
-    "http://cdn.mezon.ai/landing-page-mezon/2021919345600368640.gif",
+const WAVE_STICKER_PATHS: &[&str] = &[
+    "stickers/hellomezon.gif",
+    "stickers/music_boy.gif",
+    "stickers/music_girl.gif",
+    "stickers/d1.gif",
+    "stickers/d2.gif",
+    "stickers/d3.gif",
+    "stickers/d4.gif",
+    "stickers/d5.gif",
+    "stickers/whatsapp.gif",
+    "stickers/zalo.gif",
+    "stickers/mezon.gif",
+    "stickers/telegram.gif",
+    "stickers/mezon.gif",
+    "stickers/slack.gif",
+    "stickers/mezon.gif",
+    "stickers/discord.gif",
+    "stickers/mezon.gif",
+    "landing-page-mezon/2021919345600368640.gif",
 ];
 const WAVE_STICKER_NAME: &str = "hello";
 
@@ -159,9 +159,10 @@ fn render_wave_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
     let sticker_idx = if msg.create_time == 0 {
         0
     } else {
-        (msg.create_time as usize) % WAVE_STICKERS.len()
+        (msg.create_time as usize) % WAVE_STICKER_PATHS.len()
     };
-    let sticker_url = WAVE_STICKERS[sticker_idx].to_string();
+    let sticker_url =
+        crate::util::imgproxy::cdn_asset_url(ctx.app, WAVE_STICKER_PATHS[sticker_idx]);
     let label = mezon_i18n::t(ctx.locale, "dmMessage.waveWelcome");
     let selection = ctx.selection.clone();
 

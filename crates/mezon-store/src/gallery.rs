@@ -58,6 +58,7 @@ pub struct ChannelAttachment {
     pub is_video: bool,
     /// Proxied square thumbnail for the gallery grid.
     pub thumb_src: SharedString,
+    pub viewer_thumb_src: SharedString,
     /// Proxied full-size url for the image viewer.
     pub viewer_src: SharedString,
     /// Calendar-day label ("January 01, 2021") for date grouping headers.
@@ -76,19 +77,23 @@ pub struct ChannelAttachment {
 
 impl ChannelAttachment {
     pub fn from_api(
-        api: ApiChannelAttachment,
+        mut api: ApiChannelAttachment,
         channel_id: ChannelId,
         clan_id: ClanId,
         cfg: &AppConfig,
     ) -> Self {
+        if let std::borrow::Cow::Owned(url) = cfg.read_media_url(&api.url) {
+            api.url = url;
+        }
         let is_video = is_video_type(&api.filetype, &api.url);
         let is_image = !is_video && is_image_type(&api.filetype, &api.url);
-        let (thumb_src, viewer_src) = if is_video {
+        let (thumb_src, viewer_thumb_src, viewer_src) = if is_video {
             let url = api.url.clone();
-            (url.clone().into(), url.into())
+            (url.clone().into(), url.clone().into(), url.into())
         } else {
             (
                 cfg.gallery_thumb_proxy(&api.url).into(),
+                cfg.viewer_thumb_proxy(&api.url).into(),
                 cfg.viewer_proxy(&api.url, api.width.max(0) as u32, api.height.max(0) as u32)
                     .into(),
             )
@@ -111,6 +116,7 @@ impl ChannelAttachment {
             is_image,
             is_video,
             thumb_src,
+            viewer_thumb_src,
             viewer_src,
             day_label,
             day_index,
@@ -757,7 +763,7 @@ mod tests {
             clan_id: ClanId(1),
             message_id: MessageId(id),
             uploader_id: UserId(7),
-            url: format!("https://cdn.mezon.ai/{id}.png"),
+            url: format!("https://cdn.example/{id}.png"),
             filename: format!("{id}.png"),
             filetype: filetype.to_string(),
             width: 100,
@@ -766,6 +772,7 @@ mod tests {
             is_image: filetype.starts_with("image/"),
             is_video: filetype.starts_with("video/"),
             thumb_src: SharedString::default(),
+            viewer_thumb_src: SharedString::default(),
             viewer_src: SharedString::default(),
             day_label: SharedString::default(),
             day_index: 0,
@@ -781,7 +788,7 @@ mod tests {
         use mezon_client::transport::ApiChannelAttachment;
 
         let cfg = AppConfig::dev_defaults();
-        let url = "https://cdn.mezon.ai/2016174228608389120/2072236531032002560.mov";
+        let url = "https://cdn.example/2016174228608389120/2072236531032002560.mov";
         let api = ApiChannelAttachment {
             url: url.into(),
             filetype: "video/quicktime".into(),
@@ -791,6 +798,7 @@ mod tests {
         assert!(att.is_video);
         assert_eq!(att.thumb_src.as_ref(), url);
         assert!(!att.thumb_src.contains("imgproxy"));
+        assert_eq!(att.viewer_thumb_src.as_ref(), url);
         assert_eq!(att.viewer_src.as_ref(), url);
     }
 
@@ -800,7 +808,7 @@ mod tests {
 
         let cfg = AppConfig::dev_defaults();
         let api = ApiChannelAttachment {
-            url: "https://cdn.mezon.ai/photo.png".into(),
+            url: format!("{}/photo.png", cfg.base_img_url),
             filetype: "image/png".into(),
             width: 800,
             height: 600,
@@ -808,8 +816,29 @@ mod tests {
         };
         let att = ChannelAttachment::from_api(api, ChannelId(1), ClanId(1), &cfg);
         assert!(att.is_image);
-        assert!(att.thumb_src.contains("dev-imgproxy"));
-        assert!(att.viewer_src.contains("dev-imgproxy"));
+        assert!(att.thumb_src.starts_with(&cfg.imgproxy_base_url));
+        assert!(att.thumb_src.contains("rs:fill:120:120:1/"));
+        assert!(att.viewer_thumb_src.starts_with(&cfg.imgproxy_base_url));
+        assert!(att.viewer_thumb_src.contains("rs:fill:80:80:1/"));
+        assert!(att.viewer_src.starts_with(&cfg.imgproxy_base_url));
+    }
+
+    #[test]
+    fn attachment_get_url_uses_the_read_cdn() {
+        use mezon_client::transport::ApiChannelAttachment;
+
+        let cfg = AppConfig::dev_defaults();
+        let api = ApiChannelAttachment {
+            url: format!("{}/clip.mp4", cfg.upload_img_url),
+            filetype: "video/mp4".into(),
+            ..ApiChannelAttachment::default()
+        };
+        let att = ChannelAttachment::from_api(api, ChannelId(1), ClanId(1), &cfg);
+        let expected = format!("{}/clip.mp4", cfg.base_img_url);
+        assert_eq!(att.url, expected);
+        assert_eq!(att.thumb_src.as_ref(), expected);
+        assert_eq!(att.viewer_thumb_src.as_ref(), expected);
+        assert_eq!(att.viewer_src.as_ref(), expected);
     }
 
     #[test]
@@ -895,12 +924,12 @@ mod tests {
     #[test]
     fn detects_video_and_image_types() {
         assert!(is_video_type("video/mp4", ""));
-        assert!(is_video_type("", "https://cdn.mezon.ai/clip.mov"));
+        assert!(is_video_type("", "https://cdn.example/clip.mov"));
         assert!(is_image_type("image/png", ""));
-        assert!(is_image_type("", "https://cdn.mezon.ai/pic.JPG"));
+        assert!(is_image_type("", "https://cdn.example/pic.JPG"));
         assert!(!is_image_type(
             "application/pdf",
-            "https://cdn.mezon.ai/a.pdf"
+            "https://cdn.example/a.pdf"
         ));
     }
 

@@ -11,10 +11,10 @@ use mezon_store::{
     DirectEvent, DirectKind, DirectMessageStore, GroupMember, GroupMembersEvent, GroupMembersStore,
     PresenceEvent, PresenceStore, ProfileContext, Settings, UserId, split_members_by_status,
 };
-use ui::utils::ROUNDED_BORDER_WINDOW;
 
 use crate::app::shell::Shell;
 use crate::chat::member_row_element::MemberRowElement;
+use crate::chat::message::{ShareContactModal, share_contact_subject};
 use crate::chat::user_profile_popover::UserProfilePopover;
 use crate::components::primitives::{Avatar, ContextMenu, IconName, context_menu_at};
 use crate::image_cache::LruImageCache;
@@ -996,16 +996,15 @@ impl Render for MemberListPanel {
             .h_full()
             .flex_shrink_0()
             .bg(theme.bg_secondary)
-            .rounded_br(px(ROUNDED_BORDER_WINDOW))
             .border_l_1()
             .border_color(theme.border)
             .child(list)
             .when_some(
                 menu_overlay,
-                |el, (_user_id, display_name, pos, ctx, settings, locale, panel)| {
+                |el, (user_id, display_name, pos, ctx, settings, locale, panel)| {
                     el.child(context_menu_at(
                         pos,
-                        build_member_menu(display_name, ctx, settings, panel, &locale),
+                        build_member_menu(user_id, display_name, ctx, settings, panel, &locale),
                     ))
                 },
             )
@@ -1030,6 +1029,7 @@ fn toast_coming_soon(settings: Entity<Settings>) -> impl Fn(&mut Window, &mut Ap
 }
 
 fn build_member_menu(
+    user_id: UserId,
     display_name: SharedString,
     context: Option<ProfileContext>,
     settings: Entity<Settings>,
@@ -1064,10 +1064,22 @@ fn build_member_menu(
             t("contextMenu.member.message"),
             toast_coming_soon(settings.clone()),
         )
-        .item(
-            t("contextMenu.member.shareContact"),
-            toast_coming_soon(settings.clone()),
-        )
+        .item(t("contextMenu.member.shareContact"), {
+            let settings = settings.clone();
+            let display_name = display_name.clone();
+            let panel = panel.clone();
+            move |window, cx| {
+                let contact = share_contact_subject(user_id, display_name.as_ref(), context, cx);
+                let locale = settings.read(cx).language.clone().into();
+                ShareContactModal::open(contact, locale, window, cx);
+                if let Some(p) = panel.upgrade() {
+                    p.update(cx, |this, cx| {
+                        this.open_menu = None;
+                        cx.notify();
+                    });
+                }
+            }
+        })
         .item(
             t("contextMenu.member.addFriend"),
             toast_coming_soon(settings.clone()),

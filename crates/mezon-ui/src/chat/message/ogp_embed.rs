@@ -34,8 +34,16 @@ pub fn render_ogp_preview(
     ogp: &OgpPreview,
     message_id: MessageId,
     theme: &Theme,
+    app: &gpui::App,
 ) -> Option<AnyElement> {
-    render_ogp_preview_impl(ogp, message_id, theme, false, None, None)
+    render_ogp_preview_impl(
+        ogp,
+        message_id,
+        theme,
+        false,
+        crate::image_cache::ogp_image_cache(app),
+        None,
+    )
 }
 
 fn render_ogp_preview_impl(

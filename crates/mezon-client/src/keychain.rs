@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::session::Session;
 
@@ -15,6 +15,8 @@ fn parse_session(json: &str) -> Option<Session> {
 #[cfg(debug_assertions)]
 mod dev_file {
     use std::path::{Path, PathBuf};
+
+    use anyhow::Context;
 
     use super::*;
 

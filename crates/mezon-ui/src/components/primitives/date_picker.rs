@@ -7,7 +7,7 @@ use gpui::{
 use super::icon::{Icon, IconName};
 use crate::theme::{ActiveTheme, Theme};
 
-const FIELD_HEIGHT: f32 = 32.0;
+const DEFAULT_FIELD_HEIGHT: f32 = 32.0;
 const CALENDAR_WIDTH: f32 = 280.0;
 const MIN_GALLERY_DATE: (i32, u32, u32) = (2020, 1, 1);
 
@@ -29,6 +29,7 @@ pub struct DatePicker {
     min_date: Option<NaiveDate>,
     max_date: Option<NaiveDate>,
     locale: SharedString,
+    field_height: f32,
 }
 
 impl EventEmitter<DatePickerEvent> for DatePicker {}
@@ -47,7 +48,13 @@ impl DatePicker {
             ),
             max_date: None,
             locale: SharedString::default(),
+            field_height: DEFAULT_FIELD_HEIGHT,
         }
+    }
+
+    pub fn set_field_height(&mut self, height: f32, cx: &mut Context<Self>) {
+        self.field_height = height.max(1.0);
+        cx.notify();
     }
 
     pub fn selected(&self) -> Option<NaiveDate> {
@@ -182,6 +189,7 @@ impl Render for DatePicker {
         let locale = self.locale.clone();
         let display = format_date(self.display_date());
         let entity = cx.entity();
+        let field_height = self.field_height;
 
         div()
             .relative()
@@ -190,7 +198,7 @@ impl Render for DatePicker {
                 div()
                     .id(("date-picker-field", entity.entity_id()))
                     .w_full()
-                    .h(px(FIELD_HEIGHT))
+                    .h(px(field_height))
                     .px_3()
                     .flex()
                     .flex_row()
@@ -235,6 +243,7 @@ impl Render for DatePicker {
                         self.selected,
                         self.min_date,
                         self.max_date,
+                        field_height,
                         entity,
                     ))
                     .with_priority(1),
@@ -251,6 +260,7 @@ fn render_calendar(
     selected: Option<NaiveDate>,
     min_date: Option<NaiveDate>,
     max_date: Option<NaiveDate>,
+    field_height: f32,
     entity: Entity<DatePicker>,
 ) -> impl IntoElement {
     let month_label = month_title(year, month);
@@ -261,7 +271,7 @@ fn render_calendar(
     div()
         .occlude()
         .absolute()
-        .top(px(FIELD_HEIGHT + 4.))
+        .top(px(field_height + 4.))
         .left_0()
         .w(px(CALENDAR_WIDTH))
         .p_3()

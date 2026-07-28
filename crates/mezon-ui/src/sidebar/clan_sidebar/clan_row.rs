@@ -1,14 +1,121 @@
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, ClickEvent, Entity, Rgba, SharedString, Window,
-    div, img, prelude::*, px,
+    Animation, AnimationExt as _, AnyElement, App, ClickEvent, Entity, MouseButton, MouseDownEvent,
+    Rgba, SharedString, WeakEntity, Window, div, img, prelude::*, px,
 };
-use mezon_store::{ChannelList, ClanId, ClanList};
+use mezon_store::notification_setting::{
+    NOTIFICATION_ALL_MESSAGE, NOTIFICATION_MENTION_MESSAGE, NOTIFICATION_NOTHING_MESSAGE,
+};
+use mezon_store::{ChannelList, ClanId, ClanList, NotificationSettingStore};
 
-use crate::components::primitives::mention_count_badge;
+use super::ClanSidebar;
+use crate::app::shell::Shell;
+use crate::components::primitives::{ContextMenu, SubmenuOption, mention_count_badge};
 use crate::router::{Route, Router};
 use crate::theme::ActiveTheme;
+
+pub(super) const CLAN_ROW_HEIGHT: f32 = 56.;
+
+const CLAN_NOTI_LEVELS: [(i32, &str); 3] = [
+    (
+        NOTIFICATION_ALL_MESSAGE,
+        "channelMenu.menu.notification.all",
+    ),
+    (
+        NOTIFICATION_MENTION_MESSAGE,
+        "channelMenu.menu.notification.onlyMention",
+    ),
+    (
+        NOTIFICATION_NOTHING_MESSAGE,
+        "channelMenu.menu.notification.nothing",
+    ),
+];
+
+fn clan_menu_coming_soon(
+    title: String,
+    locale: String,
+) -> impl Fn(&mut Window, &mut App) + 'static {
+    move |window: &mut Window, cx: &mut App| {
+        let title = title.clone();
+        let locale = locale.clone();
+        Shell::global(cx).update(cx, |shell, cx| {
+            shell.show_coming_soon(title, &locale, window, cx);
+        });
+    }
+}
+
+pub(super) fn build_clan_rail_menu(
+    sidebar: WeakEntity<ClanSidebar>,
+    clan_id: ClanId,
+    clan_default: Option<i32>,
+    noti_sub_open: bool,
+    locale: &str,
+) -> ContextMenu {
+    let t = |key: &'static str| mezon_i18n::t(locale, key).to_string();
+    let locale_owned = locale.to_string();
+    let sidebar_dismiss = sidebar.clone();
+
+    let mut menu = ContextMenu::new().on_dismiss(move |_window, cx| {
+        if let Some(view) = sidebar_dismiss.upgrade() {
+            view.update(cx, |this, cx| {
+                this.clan_menu = None;
+                cx.notify();
+            });
+        }
+    });
+
+    menu = menu
+        .item(t("contextMenu.markAsRead"), move |_window, cx| {
+            ChannelList::global(cx).update(cx, |channels, cx| {
+                channels.mark_clan_as_read(clan_id, cx);
+            });
+        })
+        .separator();
+
+    let level = clan_default.unwrap_or(NOTIFICATION_ALL_MESSAGE);
+    let options: Vec<SubmenuOption> = CLAN_NOTI_LEVELS
+        .iter()
+        .map(|(value, key)| SubmenuOption {
+            value: *value,
+            label: mezon_i18n::t(locale, key).into(),
+            selected: *value == level,
+        })
+        .collect();
+    let sub_text = CLAN_NOTI_LEVELS
+        .iter()
+        .find(|(value, _)| *value == level)
+        .map(|(_, key)| mezon_i18n::t(locale, key).into());
+    let sidebar_open = sidebar.clone();
+    menu = menu.submenu(
+        t("contextMenu.notificationSettings"),
+        sub_text,
+        options,
+        noti_sub_open,
+        move |_window, cx| {
+            let _ = sidebar_open.update(cx, |this, cx| this.set_clan_noti_sub_open(cx));
+        },
+        move |lvl, _window, cx| {
+            if let Some(store) = NotificationSettingStore::try_global(cx) {
+                store.update(cx, |store, cx| store.set_clan_level(clan_id, lvl, cx));
+            }
+        },
+    );
+
+    let edit_label = t("contextMenu.editClanProfile");
+    let leave_label = t("contextMenu.leaveClan");
+    menu = menu
+        .item(
+            edit_label.clone(),
+            clan_menu_coming_soon(edit_label, locale_owned.clone()),
+        )
+        .danger_item(
+            leave_label.clone(),
+            clan_menu_coming_soon(leave_label, locale_owned),
+        );
+
+    menu
+}
 
 #[derive(Clone, PartialEq)]
 pub(super) struct ClanRow {
@@ -81,6 +188,7 @@ pub(super) fn render_clan_row(
     cx: &App,
     clan_list_handle: Entity<ClanList>,
     suppress_hover: bool,
+    sidebar: WeakEntity<ClanSidebar>,
 ) -> AnyElement {
     let theme = cx.theme();
     let dm_active = matches!(
@@ -155,7 +263,7 @@ pub(super) fn render_clan_row(
         .group(clan.group_name.clone())
         .relative()
         .w_full()
-        .h(px(56.))
+        .h(px(CLAN_ROW_HEIGHT))
         .flex()
         .items_center()
         .justify_center()
@@ -179,16 +287,18 @@ pub(super) fn render_clan_row(
                     ),
             )
         })
-        .when(!suppress_hover, |row| {
-            row.on_hover(move |hovered, _window, cx| {
-                if *hovered {
-                    ChannelList::global(cx).update(cx, |channels, cx| {
-                        channels.load_for_clan(prefetch_clan_id, cx)
+        .on_click(on_clan_click(clan_list_handle, clan_id))
+        .on_mouse_down(MouseButton::Right, {
+            let clan_num = prefetch_clan_id;
+            move |event: &MouseDownEvent, _window, cx| {
+                let position = event.position;
+                if let Some(view) = sidebar.upgrade() {
+                    view.update(cx, |this, cx| {
+                        this.open_clan_menu(clan_num, position, cx);
                     });
                 }
-            })
+            }
         })
-        .on_click(on_clan_click(clan_list_handle, clan_id))
         .child(avatar_with_badge)
         .into_any_element()
 }

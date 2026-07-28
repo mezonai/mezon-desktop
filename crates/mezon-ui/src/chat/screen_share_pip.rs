@@ -1,6 +1,6 @@
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, Entity, MouseButton, ObjectFit, Window, WindowBounds,
-    WindowKind, WindowOptions, div, img, prelude::*, px, rgb, rgba, size,
+    WindowControlArea, WindowKind, WindowOptions, div, img, prelude::*, px, rgb, rgba, size,
 };
 use mezon_store::{VoiceRenderFrame, VoiceStore};
 
@@ -31,25 +31,31 @@ impl ScreenSharePipView {
     }
 
     fn start_frame_pump(&mut self, cx: &mut Context<Self>) {
-        const PIP_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
+        const PIP_FRAME_FALLBACK: std::time::Duration = std::time::Duration::from_millis(200);
         self._frame_pump = Some(cx.spawn(async move |this, cx| {
             let mut last_seq = 0u64;
             loop {
-                cx.background_executor().timer(PIP_FRAME_INTERVAL).await;
-                let stepped = this.update(cx, |this, cx| {
-                    let seq = this
-                        .voice
-                        .read(cx)
-                        .frame_store()
-                        .map(|store| store.publish_seq())
-                        .unwrap_or(0);
-                    if seq != last_seq {
-                        last_seq = seq;
-                        cx.notify();
+                let store = match this.update(cx, |this, cx| this.voice.read(cx).frame_store()) {
+                    Ok(store) => store,
+                    Err(_) => break,
+                };
+                let Some(store) = store else {
+                    cx.background_executor().timer(PIP_FRAME_FALLBACK).await;
+                    continue;
+                };
+                {
+                    let mut rx = store.frame_watch();
+                    let changed = std::pin::pin!(rx.changed());
+                    let fallback =
+                        std::pin::pin!(cx.background_executor().timer(PIP_FRAME_FALLBACK));
+                    let _ = futures::future::select(changed, fallback).await;
+                }
+                let seq = store.publish_seq();
+                if seq != last_seq {
+                    last_seq = seq;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
                     }
-                });
-                if stepped.is_err() {
-                    break;
                 }
             }
         }));
@@ -91,12 +97,18 @@ impl Render for ScreenSharePipView {
             .bg(rgba(0x00000099))
             .cursor_pointer()
             .hover(|s| s.bg(rgba(0x000000cc)))
+            .when(cfg!(target_os = "windows"), |el| {
+                el.window_control_area(WindowControlArea::Close)
+            })
             .child(
                 Icon::new(IconName::Close)
                     .size(px(14.))
                     .text_color(rgb(0xffffff)),
             )
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.remove_window());
+            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                cx.stop_propagation();
+                window.remove_window();
+            });
 
         div()
             .relative()
@@ -105,6 +117,14 @@ impl Render for ScreenSharePipView {
             .items_center()
             .justify_center()
             .bg(rgb(0x000000))
+            .when(cfg!(target_os = "windows"), |el| {
+                el.window_control_area(WindowControlArea::Drag)
+            })
+            .when(cfg!(not(target_os = "windows")), |el| {
+                el.on_mouse_down(MouseButton::Left, |_, window, _| {
+                    window.start_window_move();
+                })
+            })
             .child(content)
             .child(close)
     }

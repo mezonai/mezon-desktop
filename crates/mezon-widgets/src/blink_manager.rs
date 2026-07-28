@@ -5,15 +5,20 @@ use gpui::Context;
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const BLINK_PAUSE: Duration = Duration::from_millis(500);
 
-pub(crate) trait HasCaretBlink: 'static {
+pub trait HasCaretBlink: 'static {
     fn caret_blink_mut(&mut self) -> &mut CaretBlink;
 }
 
-/// Caret blink state — simplified from Zed's `editor::BlinkManager`.
-pub(crate) struct CaretBlink {
+pub struct CaretBlink {
     blink_epoch: usize,
     visible: bool,
     enabled: bool,
+}
+
+impl Default for CaretBlink {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CaretBlink {

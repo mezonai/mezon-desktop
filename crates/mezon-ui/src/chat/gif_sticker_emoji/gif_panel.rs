@@ -16,7 +16,7 @@ const CAT_COLS: usize = 2;
 const CAT_TILE_PX: f32 = 128.;
 const CAT_ROW_PX: f32 = 136.;
 const GIF_CACHE_CAPACITY: usize = 64;
-const GIF_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+const GIF_CACHE_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Clone)]
 struct GifCell {
@@ -187,7 +187,9 @@ impl GifPanel {
 }
 
 impl Render for GifPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.image_cache
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         let theme = cx.theme();
         let entity = cx.entity();
         let searching = self.searching();

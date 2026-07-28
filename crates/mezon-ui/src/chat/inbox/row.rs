@@ -8,8 +8,8 @@ use gpui::{
 use mezon_store::{
     Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
     InboxCategory, InboxMentionSpan, InboxNotification, MessageSpan, ProfileContext, RolesStore,
-    TopicDiscussion, UserId, UsersByUserStore, attachment_link_is_image, inbox_spans_from_raw,
-    message_content_is_attachment, resolve_user_profile,
+    TopicDiscussion, TopicReplyPreview, UserId, UsersByUserStore, attachment_link_is_image,
+    inbox_spans_from_raw, message_content_is_attachment, resolve_user_profile,
 };
 
 use crate::components::primitives::{Avatar, Sizable, Size, h_flex, v_flex};
@@ -20,7 +20,7 @@ const DEFAULT_ROLE_COLOR: u32 = 0x99_aab5;
 pub const FOR_YOU_ROW_HEIGHT: f32 = 76.;
 pub const MENTION_ROW_HEIGHT: f32 = 120.;
 pub const MESSAGE_ROW_HEIGHT: f32 = 128.;
-pub const TOPIC_ROW_HEIGHT: f32 = 96.;
+pub const TOPIC_ROW_HEIGHT: f32 = 150.;
 pub const ROW_HEIGHT: f32 = MENTION_ROW_HEIGHT;
 
 #[derive(Clone)]
@@ -68,8 +68,7 @@ pub(crate) struct NotificationRowView {
 pub(crate) struct TopicRowView {
     avatar_name: SharedString,
     avatar_url: Option<SharedString>,
-    reply_preview: SharedString,
-    reply_is_attachment: bool,
+    reply_preview: TopicReplyPreview,
 }
 
 fn format_inbox_time(ts: u32, locale: &SharedString) -> String {
@@ -498,17 +497,10 @@ pub(crate) fn build_topic_row_view(topic: &TopicDiscussion, cx: &App) -> TopicRo
     let (avatar_name, avatar_url, _) = clan_id
         .map(|clan| resolve_sender(clan, sender_id, "", "", cx))
         .unwrap_or((SharedString::default(), None, false));
-    let reply_is_attachment = topic.reply_is_attachment();
-    let reply_preview = if reply_is_attachment {
-        SharedString::default()
-    } else {
-        topic.reply_preview_text().into()
-    };
     TopicRowView {
         avatar_name,
         avatar_url,
-        reply_preview,
-        reply_is_attachment,
+        reply_preview: topic.reply_preview(),
     }
 }
 
@@ -531,45 +523,39 @@ fn render_avatar(
 fn render_mention_breadcrumb(theme: &Theme, breadcrumb: &MentionBreadcrumb) -> impl IntoElement {
     let has_category = !breadcrumb.category_name.is_empty();
     let has_channel = !breadcrumb.channel_label.is_empty();
+    let clan_line = if has_category {
+        format!("{} > {}", breadcrumb.clan_name, breadcrumb.category_name)
+    } else {
+        breadcrumb.clan_name.to_string()
+    };
+    let channel_line = if !has_channel {
+        None
+    } else if let Some(thread) = breadcrumb.thread_label.as_ref() {
+        Some(format!("{} > {}", breadcrumb.channel_label, thread))
+    } else {
+        Some(breadcrumb.channel_label.to_string())
+    };
     v_flex()
+        .w_full()
+        .min_w_0()
         .gap(px(2.))
         .child(
-            h_flex()
-                .gap_1()
+            div()
+                .w_full()
+                .min_w_0()
                 .text_xs()
                 .font_weight(FontWeight::BOLD)
                 .text_color(theme.text_primary)
-                .child(
-                    div()
-                        .max_w(px(120.))
-                        .overflow_hidden()
-                        .child(breadcrumb.clan_name.clone()),
-                )
-                .when(has_category, |row| {
-                    row.child(">").child(
-                        div()
-                            .max_w(px(130.))
-                            .overflow_hidden()
-                            .child(breadcrumb.category_name.clone()),
-                    )
-                }),
+                .child(clan_line),
         )
-        .when(has_channel, |col| {
+        .when_some(channel_line, |col, line| {
             col.child(
-                h_flex()
-                    .gap_1()
+                div()
+                    .w_full()
+                    .min_w_0()
                     .text_sm()
                     .text_color(theme.text_primary)
-                    .child(
-                        div()
-                            .max_w(px(120.))
-                            .overflow_hidden()
-                            .child(breadcrumb.channel_label.clone()),
-                    )
-                    .when_some(breadcrumb.thread_label.clone(), |row, thread| {
-                        row.child(">")
-                            .child(div().max_w(px(130.)).overflow_hidden().child(thread))
-                    }),
+                    .child(line),
             )
         })
 }
@@ -1310,30 +1296,43 @@ fn render_message_head(
     time_label: &SharedString,
     sender_name_color: Hsla,
 ) -> impl IntoElement {
-    h_flex()
+    if time_label.is_empty() {
+        return div()
+            .w_full()
+            .min_w_0()
+            .text_size(px(16.))
+            .line_height(px(20.))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(sender_name_color)
+            .child(sender_name.clone())
+            .into_any_element();
+    }
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
         .w_full()
         .min_w_0()
-        .items_baseline()
-        .gap_1()
         .child(
             div()
-                .max_w_full()
-                .min_w_0()
-                .text_sm()
+                .flex_none()
+                .text_size(px(16.))
+                .line_height(px(20.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(sender_name_color)
                 .child(sender_name.clone()),
         )
-        .when(!time_label.is_empty(), |row| {
-            row.child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.tokens.text_secondary)
-                    .child(time_label.clone()),
-            )
-        })
+        .child(
+            div()
+                .flex_none()
+                .ml_1()
+                .pt(px(4.))
+                .text_size(px(10.))
+                .line_height(px(20.))
+                .text_color(theme.tokens.text_secondary)
+                .child(time_label.clone()),
+        )
+        .into_any_element()
 }
 
 pub fn render_notification_body(
@@ -1480,15 +1479,36 @@ pub fn render_topic_body(
 ) -> impl IntoElement {
     let topic_title = mezon_i18n::t(locale, "notification.topicAndYou");
     let replied_label = mezon_i18n::t(locale, "notification.repliedTo");
-    let attachment_label: SharedString =
-        mezon_i18n::t(locale, "message.clickToSeeAttachment").into();
-    let reply_text = if view.reply_is_attachment {
-        attachment_label
-    } else if view.reply_preview.is_empty() {
-        SharedString::from("—")
-    } else {
-        view.reply_preview.clone()
+    let reply_text: SharedString = match &view.reply_preview {
+        TopicReplyPreview::Text(text) => text.clone().into(),
+        TopicReplyPreview::Contact => mezon_i18n::t(locale, "notification.contactMessage").into(),
+        TopicReplyPreview::Attachment => {
+            mezon_i18n::t(locale, "notification.attachmentMessage").into()
+        }
+        TopicReplyPreview::Interactive => {
+            mezon_i18n::t(locale, "notification.interactiveMessage").into()
+        }
     };
+    let combined = format!("{replied_label}{reply_text}");
+    let label_end = replied_label.len();
+    let muted: Hsla = theme.text_muted.into();
+    let highlights = vec![
+        (
+            0..label_end,
+            HighlightStyle {
+                color: Some(muted),
+                font_weight: Some(FontWeight::SEMIBOLD),
+                ..Default::default()
+            },
+        ),
+        (
+            label_end..combined.len(),
+            HighlightStyle {
+                color: Some(muted),
+                ..Default::default()
+            },
+        ),
+    ];
 
     h_flex()
         .gap_4()
@@ -1514,14 +1534,13 @@ pub fn render_topic_body(
                         .child(topic_title),
                 )
                 .child(
-                    div().text_xs().text_color(theme.text_muted).child(
-                        h_flex()
-                            .w_full()
-                            .min_w_0()
-                            .flex_wrap()
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child(replied_label))
-                            .child(div().max_w_full().min_w_0().child(reply_text)),
-                    ),
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .text_xs()
+                        .line_clamp(5)
+                        .text_ellipsis()
+                        .child(StyledText::new(combined).with_highlights(highlights)),
                 ),
         )
 }

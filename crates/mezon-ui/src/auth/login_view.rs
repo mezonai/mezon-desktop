@@ -6,7 +6,7 @@ use gpui::{
     Subscription, Task, Window, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
     rgba, svg, white,
 };
-use mezon_store::{AuthState, LoginMethod, LoginStore, Session, Settings};
+use mezon_store::{AuthState, LoginMethod, LoginStore, Session, Settings, WalletStore};
 
 use crate::app::window_controls;
 use crate::components::compositions::OtpInput;
@@ -488,10 +488,16 @@ impl LoginView {
             .detach();
 
         auth_state.update(cx, |state, cx| {
-            *state = AuthState::Connecting(session);
+            *state = AuthState::Connecting(session.clone());
             tracing::debug!("User authenticated, connecting transport.");
             cx.notify();
         });
+
+        if !session.id_token.is_empty() {
+            WalletStore::global(cx).update(cx, |wallet, cx| {
+                wallet.fetch_zk_proofs_after_login(&session, cx);
+            });
+        }
     }
 
     fn start_countdown(&mut self, cx: &mut Context<Self>) {

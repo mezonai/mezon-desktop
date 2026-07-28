@@ -1,7 +1,8 @@
 use gpui::{App, ClipboardItem, SharedString, WeakEntity, Window};
+use mezon_client::transport::QUICK_MENU_TYPE_QUICK;
 use mezon_store::{
     AppConfig, ChannelPermissionsStore, EmojiStore, Message, MessageCode, MessageId, MessagesStore,
-    PERMISSION_DELETE_MESSAGE, PinnedMessagesStore, ThreadsStore, TopicsStore,
+    PERMISSION_DELETE_MESSAGE, PinnedMessagesStore, QuickMenuStore, ThreadsStore, TopicsStore,
 };
 
 use super::channel_messages::ChannelMessages;
@@ -40,11 +41,52 @@ pub(crate) fn resolve_forward_group(
     resolve_forward_group_in(store.messages(), message_id, sender_id)
 }
 
-fn coming_soon_click(message: SharedString) -> impl Fn(&mut Window, &mut App) + 'static {
-    move |_window: &mut Window, cx: &mut App| {
-        let message = message.clone();
-        Shell::global(cx).update(cx, move |shell, cx| shell.info(message, cx));
+fn append_quick_menus(
+    menu: ContextMenu,
+    message_id: MessageId,
+    locale: &str,
+    cx: &App,
+) -> ContextMenu {
+    let Some(channel_id) = MessagesStore::global(cx).read(cx).active_channel_id() else {
+        return menu;
+    };
+    let items: Vec<_> = QuickMenuStore::global(cx)
+        .read(cx)
+        .items(channel_id, QUICK_MENU_TYPE_QUICK)
+        .iter()
+        .map(|item| item.menu_name.clone())
+        .collect();
+    if items.is_empty() {
+        return menu;
     }
+    let options: Vec<crate::components::primitives::SubmenuOption> = items
+        .iter()
+        .enumerate()
+        .map(
+            |(index, label)| crate::components::primitives::SubmenuOption {
+                value: index as i32,
+                label: label.clone(),
+                selected: false,
+            },
+        )
+        .collect();
+    let menu_names = items;
+    let label: SharedString = mezon_i18n::t(locale, "contextMenu.quickMenus").into();
+    menu.submenu(
+        label,
+        None,
+        options,
+        false,
+        |_window, _cx| {},
+        move |index, _window, cx| {
+            let Some(name) = menu_names.get(index as usize) else {
+                return;
+            };
+            MessagesStore::global(cx).update(cx, |store, cx| {
+                store.execute_quick_menu(name.as_ref(), message_id, cx);
+            });
+        },
+    )
 }
 
 fn is_first_topic_message(message_id: MessageId, cx: &App) -> bool {
@@ -121,9 +163,13 @@ pub(crate) fn build(
     show_forward_all: bool,
     is_topic_box: bool,
     reaction_submenu_open: bool,
+    selected_text: Option<String>,
     host: WeakEntity<ChannelMessages>,
     cx: &App,
 ) -> ContextMenu {
+    if msg.send_failed {
+        return build_failed_menu(msg, locale, host, cx);
+    }
     if is_topic_box {
         return build_topic_menu(
             msg,
@@ -132,6 +178,7 @@ pub(crate) fn build(
             locale,
             show_forward_all,
             reaction_submenu_open,
+            selected_text,
             host,
             cx,
         );
@@ -143,9 +190,57 @@ pub(crate) fn build(
         locale,
         show_forward_all,
         reaction_submenu_open,
+        selected_text,
         host,
         cx,
     )
+}
+
+fn build_failed_menu(
+    msg: &Message,
+    locale: &str,
+    host: WeakEntity<ChannelMessages>,
+    _cx: &App,
+) -> ContextMenu {
+    let t = |key: &'static str| mezon_i18n::t(locale, key);
+    let dismiss = {
+        let host = host.clone();
+        move |_window: &mut Window, cx: &mut App| {
+            if let Some(view) = host.upgrade() {
+                view.update(cx, |this, cx| this.close_context_menu(cx));
+            }
+        }
+    };
+    let message_id = msg.id;
+    let locale_owned = locale.to_string();
+    ContextMenu::new()
+        .on_dismiss(dismiss)
+        .item_trailing_icon(
+            SharedString::from(t("contextMenu.resendMessage")),
+            IconName::ResendMessageRightClick,
+            move |_, cx| {
+                MessagesStore::global(cx).update(cx, |store, cx| {
+                    store.resend_message(message_id, cx);
+                });
+                Shell::global(cx).update(cx, |shell, cx| {
+                    shell.info(
+                        SharedString::from(mezon_i18n::t(
+                            &locale_owned,
+                            "contextMenu.messageResent",
+                        )),
+                        cx,
+                    );
+                });
+            },
+        )
+        .danger_item_trailing_icon(
+            SharedString::from(t("contextMenu.deleteMessage")),
+            IconName::DeleteMessageRightClick,
+            move |_, cx| {
+                MessagesStore::global(cx)
+                    .update(cx, |store, cx| store.remove_failed_message(message_id, cx));
+            },
+        )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -213,11 +308,11 @@ fn build_topic_menu(
     locale: &str,
     show_forward_all: bool,
     reaction_submenu_open: bool,
+    selected_text: Option<String>,
     host: WeakEntity<ChannelMessages>,
     cx: &App,
 ) -> ContextMenu {
     let t = |key: &'static str| mezon_i18n::t(locale, key);
-    let coming_soon_msg: SharedString = t("common.comingSoon").into();
     let is_own_message = current_user_id == msg.sender_id.as_str();
     let is_poll = msg.code == MessageCode::Poll;
 
@@ -248,10 +343,15 @@ fn build_topic_menu(
     );
 
     if sender_allows_give_coffee(msg, current_user_id, cx) {
+        let message_id = msg.id;
         menu = menu.item_trailing_icon(
             t("contextMenu.giveACoffee"),
             IconName::DollarIconRightClick,
-            coming_soon_click(coming_soon_msg.clone()),
+            move |_, cx| {
+                MessagesStore::global(cx).update(cx, |store, cx| {
+                    store.give_coffee_reaction(message_id, cx);
+                });
+            },
         );
     }
 
@@ -329,6 +429,16 @@ fn build_topic_menu(
         );
     }
 
+    if let Some(selected) = selected_text.filter(|text| !text.is_empty()) {
+        menu = menu.item_trailing_icon(
+            t("contextMenu.copyTextSelected"),
+            IconName::CopyTextRightClick,
+            move |_, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(selected.clone()));
+            },
+        );
+    }
+
     {
         let message_id = msg.id;
         menu = menu.item_trailing_icon(
@@ -379,11 +489,11 @@ fn build_channel_menu(
     locale: &str,
     show_forward_all: bool,
     reaction_submenu_open: bool,
+    selected_text: Option<String>,
     host: WeakEntity<ChannelMessages>,
     cx: &App,
 ) -> ContextMenu {
     let t = |key: &'static str| mezon_i18n::t(locale, key);
-    let coming_soon_msg: SharedString = t("common.comingSoon").into();
     let is_own_message = current_user_id == msg.sender_id.as_str();
     let is_poll = msg.code == MessageCode::Poll;
     let is_pinned = PinnedMessagesStore::global(cx)
@@ -418,10 +528,15 @@ fn build_channel_menu(
     );
 
     if !is_own_message && sender_allows_give_coffee(msg, current_user_id, cx) {
+        let message_id = msg.id;
         menu = menu.item_trailing_icon(
             t("contextMenu.giveACoffee"),
             IconName::DollarIconRightClick,
-            coming_soon_click(coming_soon_msg.clone()),
+            move |_, cx| {
+                MessagesStore::global(cx).update(cx, |store, cx| {
+                    store.give_coffee_reaction(message_id, cx);
+                });
+            },
         );
     }
 
@@ -531,6 +646,16 @@ fn build_channel_menu(
         );
     }
 
+    if let Some(selected) = selected_text.filter(|text| !text.is_empty()) {
+        menu = menu.item_trailing_icon(
+            t("contextMenu.copyTextSelected"),
+            IconName::CopyTextRightClick,
+            move |_, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(selected.clone()));
+            },
+        );
+    }
+
     if !is_pinned {
         let message_id = msg.id;
         menu = menu.item_trailing_icon(
@@ -592,11 +717,7 @@ fn build_channel_menu(
             },
         );
     }
-    menu = menu.item_trailing_icon(
-        t("contextMenu.quickMenus"),
-        IconName::QuickMenusIcon,
-        coming_soon_click(coming_soon_msg.clone()),
-    );
+    menu = append_quick_menus(menu, msg.id, locale, cx);
 
     let link = first_link(msg);
     let image = msg

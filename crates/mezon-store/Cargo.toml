@@ -10,10 +10,13 @@ workspace = true
 [dependencies]
 mezon-client.workspace = true
 mezon-proto.workspace = true
+mezon-i18n.workspace = true
+mmn-client.workspace = true
+mezon-updater.workspace = true
 mezon-voice.workspace = true
 mezon-audio.workspace = true
 gpui.workspace = true
-image.workspace = true
+image = { workspace = true, features = ["webp"] }
 smallvec.workspace = true
 parking_lot.workspace = true
 chrono.workspace = true
@@ -22,6 +25,7 @@ serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 dirs.workspace = true
+keyring.workspace = true
 flume.workspace = true
 url.workspace = true
 tokio.workspace = true

@@ -17,7 +17,9 @@ type CapturedScreenFrame = scap::capturer::engine::mac::PixelBuffer;
 #[cfg(not(target_os = "macos"))]
 type CapturedScreenFrame = BGRAFrame;
 
-use crate::screen_picker::{PickedScreen, portal_source_types_for_pick, scap_target_for_pick};
+use crate::screen_picker::{
+    PickedScreen, pick_is_window, portal_source_types_for_pick, scap_target_for_pick,
+};
 #[cfg(not(target_os = "macos"))]
 use crate::video::bgra_to_i420;
 #[cfg(target_os = "macos")]
@@ -136,6 +138,7 @@ pub fn start_screen(
                 return;
             }
 
+            let is_window_share = pick_is_window(&pick);
             let portal_source_types = portal_source_types_for_pick(&pick);
             let capture_target = match scap_target_for_pick(pick) {
                 Ok(target) => target,
@@ -232,6 +235,29 @@ pub fn start_screen(
                     captured.data.len() / captured.height.max(1) as usize,
                 );
                 if width < 2 || height < 2 {
+                    continue;
+                }
+
+                #[cfg(not(target_os = "macos"))]
+                if source.is_some()
+                    && is_window_share
+                    && bgra_frame_is_uniform(
+                        &captured.data,
+                        width as usize,
+                        height as usize,
+                        row_stride,
+                    )
+                {
+                    continue;
+                }
+                #[cfg(target_os = "macos")]
+                if source.is_some()
+                    && is_window_share
+                    && captured
+                        .planes()
+                        .first()
+                        .is_some_and(|plane| plane_is_uniform(&plane.data()))
+                {
                     continue;
                 }
 
@@ -498,6 +524,35 @@ fn downscale_bgra_into(
                 dst[d..d + 4].copy_from_slice(&src[s..s + 4]);
             }
         }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn bgra_frame_is_uniform(data: &[u8], width: usize, height: usize, row_stride: usize) -> bool {
+    let row_bytes = width * 4;
+    if row_bytes == 0 || height == 0 || row_stride < row_bytes || data.len() < row_bytes {
+        return true;
+    }
+    let first = &data[..4];
+    for y in 0..height {
+        let start = y * row_stride;
+        let Some(row) = data.get(start..start + row_bytes) else {
+            break;
+        };
+        for px in row.chunks_exact(4) {
+            if px != first {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn plane_is_uniform(data: &[u8]) -> bool {
+    match data.split_first() {
+        Some((first, rest)) => rest.iter().all(|b| b == first),
+        None => true,
     }
 }
 

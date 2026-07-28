@@ -97,6 +97,7 @@ impl CommandPaletteModal {
             let search_input = cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder(placeholder.clone())
+                    .embedded(true)
                     .borderless()
             });
             let search_sub = cx.subscribe_in(

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
+use tokio::sync::watch;
 
 #[cfg(target_os = "macos")]
 #[derive(Clone)]
@@ -33,10 +34,20 @@ pub struct VideoFrameData {
     pub seq: u64,
 }
 
-#[derive(Default)]
 pub struct VideoFrameStore {
     state: Mutex<VideoFrameState>,
     seq: AtomicU64,
+    frame_tx: watch::Sender<u64>,
+}
+
+impl Default for VideoFrameStore {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(VideoFrameState::default()),
+            seq: AtomicU64::new(0),
+            frame_tx: watch::channel(0).0,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -58,16 +69,21 @@ impl VideoFrameStore {
             surface: None,
             seq,
         });
-        let mut state = self.state.lock();
-        state.active.insert(key);
-        let previous = state.frames.insert(key, frame);
-        if let Some(buffer) = previous
-            .and_then(|frame| Arc::try_unwrap(frame).ok())
-            .map(|frame| frame.bgra)
-        {
-            return Some(buffer);
-        }
-        take_recycled(&mut state, key, required)
+        let recycled = {
+            let mut state = self.state.lock();
+            state.active.insert(key);
+            let previous = state.frames.insert(key, frame);
+            if let Some(buffer) = previous
+                .and_then(|frame| Arc::try_unwrap(frame).ok())
+                .map(|frame| frame.bgra)
+            {
+                Some(buffer)
+            } else {
+                take_recycled(&mut state, key, required)
+            }
+        };
+        self.frame_tx.send_replace(seq.wrapping_add(1));
+        recycled
     }
 
     #[cfg(target_os = "macos")]
@@ -86,9 +102,12 @@ impl VideoFrameStore {
             surface: Some(VideoSurface(surface)),
             seq,
         });
-        let mut state = self.state.lock();
-        state.active.insert(key);
-        state.frames.insert(key, frame);
+        {
+            let mut state = self.state.lock();
+            state.active.insert(key);
+            state.frames.insert(key, frame);
+        }
+        self.frame_tx.send_replace(seq.wrapping_add(1));
     }
 
     pub fn get(&self, key: u64) -> Option<Arc<VideoFrameData>> {
@@ -97,6 +116,10 @@ impl VideoFrameStore {
 
     pub fn publish_seq(&self) -> u64 {
         self.seq.load(Ordering::Relaxed)
+    }
+
+    pub fn frame_watch(&self) -> watch::Receiver<u64> {
+        self.frame_tx.subscribe()
     }
 
     pub fn take_new(&self, key: u64, since: Option<u64>) -> Option<VideoFrameData> {

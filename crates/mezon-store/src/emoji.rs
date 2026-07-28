@@ -1,20 +1,31 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
+use image::ImageEncoder as _;
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 use mezon_proto::{api, realtime};
 
 use crate::Freshness;
 use crate::badge::BadgeService;
-use crate::clan::{ClanEvent, ClanList};
+use crate::ids::ClanId;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const RECENT_EMOJI_CAP: usize = 20;
-
 const EMOJI_ACTION_CREATED: i32 = 1;
 const EMOJI_ACTION_UPDATE: i32 = 2;
 const EMOJI_ACTION_DELETE: i32 = 3;
+
+pub const MAX_EMOJI_BYTES: u64 = 256 * 1024;
+pub const MAX_STICKER_BYTES: u64 = 512 * 1024;
+pub const EMOJI_UPLOAD_MAX_PX: u32 = 128;
+pub const STICKER_UPLOAD_MAX_PX: u32 = 320;
+pub const EMOTICON_SHORTNAME_MIN: usize = 3;
+pub const EMOTICON_SHORTNAME_MAX: usize = 64;
+pub const EMOTICON_ALLOWED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif"];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Emoji {
@@ -24,6 +35,7 @@ pub struct Emoji {
     pub category: String,
     pub clan_id: String,
     pub clan_logo: String,
+    pub creator_id: String,
     pub is_for_sale: bool,
 }
 
@@ -39,7 +51,6 @@ pub struct EmojiStore {
     freshness: Freshness,
     loading: bool,
     api: Arc<AppApi>,
-    _clan_sub: Subscription,
     _conn_watch: Task<()>,
 }
 
@@ -75,12 +86,6 @@ impl EmojiStore {
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
 
-        let clan_sub = cx.subscribe(&ClanList::global(cx), |this, _clan, event, cx| {
-            if let ClanEvent::ActiveClanChanged(Some(_)) = event {
-                this.ensure_loaded(cx);
-            }
-        });
-
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
         let mut store = Self {
@@ -90,7 +95,6 @@ impl EmojiStore {
             freshness: Freshness::new(),
             loading: false,
             api,
-            _clan_sub: clan_sub,
             _conn_watch: conn_watch,
         };
         store.fetch_recent(cx);
@@ -132,18 +136,23 @@ impl EmojiStore {
     }
 
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
-        if !self.freshness.is_fresh(crate::CACHE_TTL) {
-            self.fetch(cx);
+        self.ensure_loaded_task(cx).detach();
+    }
+
+    pub fn ensure_loaded_task(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        if self.freshness.is_fresh(crate::CACHE_TTL) {
+            return Task::ready(());
         }
+        self.fetch(cx)
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.fetch(cx);
+        self.fetch(cx).detach();
     }
 
-    fn fetch(&mut self, cx: &mut Context<Self>) {
+    fn fetch(&mut self, cx: &mut Context<Self>) -> Task<()> {
         if self.loading {
-            return;
+            return Task::ready(());
         }
         self.loading = true;
         let api = self.api.clone();
@@ -172,7 +181,6 @@ impl EmojiStore {
                 }
             });
         })
-        .detach();
     }
 
     fn fetch_recent(&mut self, cx: &mut Context<Self>) {
@@ -243,8 +251,107 @@ impl EmojiStore {
         ordered_emojis(&self.by_id, &self.order).collect()
     }
 
+    pub fn for_clan(&self, clan_id: &str) -> Vec<&Emoji> {
+        ordered_emojis(&self.by_id, &self.order)
+            .filter(|emoji| emoji.clan_id == clan_id)
+            .collect()
+    }
+
+    pub fn get(&self, id: &str) -> Option<&Emoji> {
+        self.by_id.get(id)
+    }
+
     pub fn suggest(&self, query: &str, clan_id: &str, limit: usize) -> Vec<&Emoji> {
         suggest_in(&self.by_id, &self.order, query, clan_id, limit)
+    }
+
+    pub fn create_emoji(
+        &self,
+        clan_id: ClanId,
+        path: &Path,
+        shortname: &str,
+        is_for_sale: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let api = self.api.clone();
+        let path = path.to_path_buf();
+        let raw_name = strip_emoji_colons(shortname);
+        if !is_valid_emoticon_shortname(&raw_name) {
+            return cx.spawn(async move |_, _| Err("invalid_name".into()));
+        }
+        let shortname = normalize_emoji_shortname(&raw_name);
+        if let Err(err) = validate_emoji_create_shortname(&shortname) {
+            return cx.spawn(async move |_, _| Err(err));
+        }
+        let clan = clan_id.get();
+        cx.spawn(async move |this, cx| {
+            let (id, url) =
+                upload_emoticon_file(&api, &path, "emojis", MAX_EMOJI_BYTES, is_for_sale).await?;
+            tracing::debug!(clan, %url, %shortname, id, is_for_sale, "CreateClanEmoji");
+            api.create_clan_emoji(clan, &url, &shortname, "Custom", id, is_for_sale)
+                .await
+                .map_err(|e| e.to_string())?;
+            this.update(cx, |this, cx| this.refresh(cx))
+                .map_err(|_| "store dropped".to_string())?;
+            Ok(())
+        })
+    }
+
+    pub fn update_emoji(
+        &self,
+        emoji_id: &str,
+        clan_id: ClanId,
+        shortname: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let api = self.api.clone();
+        let id: i64 = match emoji_id.parse() {
+            Ok(id) => id,
+            Err(_) => return cx.spawn(async move |_, _| Err("invalid emoji id".into())),
+        };
+        let raw_name = strip_emoji_colons(shortname);
+        if !is_valid_emoticon_shortname(&raw_name) {
+            return cx.spawn(async move |_, _| Err("invalid_name".into()));
+        }
+        let shortname = normalize_emoji_shortname(&raw_name);
+        if let Err(err) = validate_emoji_create_shortname(&shortname) {
+            return cx.spawn(async move |_, _| Err(err));
+        }
+        let clan = clan_id.get();
+        cx.spawn(async move |this, cx| {
+            api.update_clan_emoji_by_id(id, &shortname, clan)
+                .await
+                .map_err(|e| e.to_string())?;
+            this.update(cx, |this, cx| this.refresh(cx))
+                .map_err(|_| "store dropped".to_string())?;
+            Ok(())
+        })
+    }
+
+    pub fn delete_emoji(
+        &self,
+        emoji_id: &str,
+        clan_id: ClanId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let api = self.api.clone();
+        let id: i64 = match emoji_id.parse() {
+            Ok(id) => id,
+            Err(_) => return cx.spawn(async move |_, _| Err("invalid emoji id".into())),
+        };
+        let clan = clan_id.get();
+        cx.spawn(async move |this, cx| {
+            api.delete_clan_emoji_by_id(id, clan)
+                .await
+                .map_err(|e| e.to_string())?;
+            this.update(cx, |this, cx| {
+                this.remove(&id.to_string());
+                cx.emit(EmojiEvent::Changed);
+                cx.notify();
+            })
+            .map_err(|_| "store dropped".to_string())?;
+            Ok(())
+        })
     }
 
     pub fn by_category(&self, active_clan_id: Option<&str>) -> Vec<(String, Vec<&Emoji>)> {
@@ -364,6 +471,7 @@ fn emoji_from_proto(e: api::ClanEmoji) -> Option<Emoji> {
         category,
         clan_id: e.clan_id.to_string(),
         clan_logo: e.logo,
+        creator_id: e.creator_id.to_string(),
         is_for_sale: e.is_for_sale,
     })
 }
@@ -384,8 +492,301 @@ fn emoji_from_event(e: &realtime::EventEmoji) -> Option<Emoji> {
         category,
         clan_id: e.clan_id.to_string(),
         clan_logo: e.logo.clone(),
+        creator_id: e.user_id.to_string(),
         is_for_sale: e.is_for_sale,
     })
+}
+
+pub fn is_valid_emoticon_shortname(name: &str) -> bool {
+    let len = name.chars().count();
+    (EMOTICON_SHORTNAME_MIN..=EMOTICON_SHORTNAME_MAX).contains(&len)
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+pub fn normalize_emoji_shortname(name: &str) -> String {
+    let trimmed = name.trim().trim_matches(':');
+    format!(":{trimmed}:")
+}
+
+pub fn validate_emoji_create_shortname(shortname: &str) -> Result<(), String> {
+    let runes: Vec<char> = shortname.chars().collect();
+    let len = runes.len();
+    if !(3..=64).contains(&len) {
+        return Err("invalid_name".into());
+    }
+    if len >= 2 && runes[0] == ':' && runes[1] == ':' {
+        return Err("invalid_name".into());
+    }
+    if len >= 2 && runes[len - 2] == ':' && runes[len - 1] == ':' {
+        return Err("invalid_name".into());
+    }
+    if shortname.contains([' ', '\n', '\t', '\r']) {
+        return Err("invalid_name".into());
+    }
+    Ok(())
+}
+
+pub fn strip_emoji_colons(name: &str) -> String {
+    name.trim().trim_matches(':').to_string()
+}
+
+pub fn validate_emoticon_file(path: &Path, max_bytes: u64, max_px: u32) -> Result<(), String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !EMOTICON_ALLOWED_EXTENSIONS.contains(&ext.as_str()) {
+        return Err("unsupported_type".into());
+    }
+    let len = std::fs::metadata(path)
+        .map_err(|_| "invalid_image".to_string())?
+        .len();
+    if len == 0 {
+        return Err("empty".into());
+    }
+    if len > max_bytes {
+        return Err("size_limit".into());
+    }
+    let data = std::fs::read(path).map_err(|_| "invalid_image".to_string())?;
+    decode_emoticon_image(&data, max_px)?;
+    Ok(())
+}
+
+pub fn generate_snowflake_id() -> i64 {
+    static SEQUENCE: AtomicU16 = AtomicU16::new(0);
+    const SHARD_ID: u64 = 1;
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let seq = u64::from(SEQUENCE.fetch_add(1, Ordering::Relaxed) % 4096);
+    let shard = SHARD_ID % 1024;
+    let id = (ts << 22) | (shard << 12) | seq;
+    i64::try_from(id).unwrap_or(i64::MAX)
+}
+
+#[derive(Clone)]
+struct PreparedEmoticon {
+    bytes: Vec<u8>,
+    filetype: &'static str,
+}
+
+fn prepare_emoticon_from_path(
+    path: &Path,
+    max_bytes: u64,
+    max_px: u32,
+) -> Result<PreparedEmoticon, String> {
+    validate_emoticon_file(path, max_bytes, max_px)?;
+    let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("png")
+        .to_ascii_lowercase();
+    let (bytes, filetype) = prepare_emoticon_upload_bytes(&data, &ext, max_px)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err("size_limit".into());
+    }
+    Ok(PreparedEmoticon { bytes, filetype })
+}
+
+fn blend_channel(base: u8, overlay: u8, alpha: f32) -> u8 {
+    let blended = f32::from(base) * (1.0 - alpha) + f32::from(overlay) * alpha;
+    blended.round().clamp(0.0, 255.0) as u8
+}
+
+fn box_blur_rgba(img: &mut image::RgbaImage, radius: u32) {
+    if radius == 0 {
+        return;
+    }
+    let (width, height) = img.dimensions();
+    let src = img.clone();
+    let radius = i32::try_from(radius).unwrap_or(i32::MAX);
+    for y in 0..height {
+        for x in 0..width {
+            let mut channels = [0u32; 4];
+            let mut count = 0u32;
+            for dy in -radius..=radius {
+                for dx in -radius..=radius {
+                    let nx = i32::try_from(x).unwrap_or(i32::MAX) + dx;
+                    let ny = i32::try_from(y).unwrap_or(i32::MAX) + dy;
+                    if nx >= 0
+                        && ny >= 0
+                        && nx < i32::try_from(width).unwrap_or(i32::MAX)
+                        && ny < i32::try_from(height).unwrap_or(i32::MAX)
+                    {
+                        let pixel = src.get_pixel(nx as u32, ny as u32);
+                        for (idx, value) in channels.iter_mut().zip(pixel.0) {
+                            *idx += u32::from(value);
+                        }
+                        count += 1;
+                    }
+                }
+            }
+            if count > 0 {
+                img.put_pixel(
+                    x,
+                    y,
+                    image::Rgba([
+                        (channels[0].checked_div(count).unwrap_or(0)) as u8,
+                        (channels[1].checked_div(count).unwrap_or(0)) as u8,
+                        (channels[2].checked_div(count).unwrap_or(0)) as u8,
+                        (channels[3].checked_div(count).unwrap_or(0)) as u8,
+                    ]),
+                );
+            }
+        }
+    }
+}
+
+fn emoticon_image_limits(max_px: u32) -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(max_px);
+    limits.max_image_height = Some(max_px);
+    limits.max_alloc = Some(max_px as u64 * max_px as u64 * 4);
+    limits
+}
+
+fn decode_emoticon_image(data: &[u8], max_px: u32) -> Result<image::DynamicImage, String> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    reader.limits(emoticon_image_limits(max_px));
+    reader.decode().map_err(emoticon_decode_error)
+}
+
+fn emoticon_decode_error(err: image::ImageError) -> String {
+    match err {
+        image::ImageError::Limits(_) => "image_too_large".into(),
+        image::ImageError::Decoding(_) | image::ImageError::Parameter(_) => "invalid_image".into(),
+        _ => "invalid_image".into(),
+    }
+}
+
+fn create_blurred_watermarked_webp(data: &[u8], filetype: &str) -> Result<Vec<u8>, String> {
+    let img = decode_emoticon_image(data, STICKER_UPLOAD_MAX_PX)?;
+    let mut rgba = img.to_rgba8();
+    box_blur_rgba(&mut rgba, 2);
+
+    let (width, height) = rgba.dimensions();
+    let center_x = width as f32 / 2.0;
+    let center_y = height as f32 / 2.0;
+    let font_size = (width as f32 / 2.0).max(8.0);
+    let cos = 0.707_106_77;
+    let sin = 0.707_106_77;
+    for y in 0..height {
+        for x in 0..width {
+            let dx = x as f32 - center_x;
+            let dy = y as f32 - center_y;
+            let rotated_x = dx * cos + dy * sin;
+            let rotated_y = -dx * sin + dy * cos;
+            if rotated_y.abs() <= font_size * 0.35 && rotated_x.abs() <= font_size * 1.1 {
+                let pixel = rgba.get_pixel_mut(x, y);
+                for channel in 0..3 {
+                    pixel.0[channel] = blend_channel(pixel.0[channel], 128, 0.35);
+                }
+            }
+        }
+    }
+
+    let (width, height) = rgba.dimensions();
+    let mut out = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut out)
+        .write_image(
+            rgba.as_raw(),
+            width,
+            height,
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|e| e.to_string())?;
+    let _ = filetype;
+    Ok(out)
+}
+
+async fn upload_prepared_emoticon(
+    api: &AppApi,
+    folder: &str,
+    prepared: PreparedEmoticon,
+) -> Result<(i64, String), String> {
+    let id = generate_snowflake_id();
+    api.upload_emoticon(folder, id, "webp", prepared.filetype, prepared.bytes)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn upload_emoticon_sale_preview(
+    api: &AppApi,
+    folder: &str,
+    prepared: &PreparedEmoticon,
+) -> Result<(), String> {
+    let prepared = prepared.clone();
+    let blurred = mezon_client::transport_runtime::handle()
+        .spawn_blocking(move || create_blurred_watermarked_webp(&prepared.bytes, prepared.filetype))
+        .await
+        .map_err(|e| e.to_string())??;
+    let preview_id = generate_snowflake_id();
+    api.upload_emoticon(folder, preview_id, "webp", "image/webp", blurred)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn max_upload_px_for_folder(folder: &str) -> u32 {
+    if folder.trim_matches('/') == "emojis" {
+        EMOJI_UPLOAD_MAX_PX
+    } else {
+        STICKER_UPLOAD_MAX_PX
+    }
+}
+
+fn prepare_emoticon_upload_bytes(
+    data: &[u8],
+    ext: &str,
+    max_px: u32,
+) -> Result<(Vec<u8>, &'static str), String> {
+    if ext == "gif" {
+        return Ok((data.to_vec(), "image/gif"));
+    }
+
+    let img = decode_emoticon_image(data, max_px)?;
+    let thumb = img.thumbnail(max_px, max_px);
+    let rgba = thumb.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let mut out = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut out)
+        .write_image(
+            rgba.as_raw(),
+            width,
+            height,
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok((out, "image/webp"))
+}
+
+pub async fn upload_emoticon_file(
+    api: &AppApi,
+    path: &Path,
+    folder: &str,
+    max_bytes: u64,
+    upload_sale_preview: bool,
+) -> Result<(i64, String), String> {
+    let path_buf = path.to_path_buf();
+    let max = max_bytes;
+    let max_px = max_upload_px_for_folder(folder);
+    let prepared = mezon_client::transport_runtime::handle()
+        .spawn_blocking(move || prepare_emoticon_from_path(&path_buf, max, max_px))
+        .await
+        .map_err(|e| e.to_string())??;
+
+    let (id, url) = upload_prepared_emoticon(api, folder, prepared.clone()).await?;
+    if upload_sale_preview {
+        upload_emoticon_sale_preview(api, folder, &prepared).await?;
+    }
+    Ok((id, url))
 }
 
 #[cfg(test)]
@@ -430,6 +831,7 @@ mod tests {
             category: category.into(),
             clan_id: clan_id.into(),
             clan_logo: String::new(),
+            creator_id: String::new(),
             is_for_sale: false,
         }
     }
@@ -528,5 +930,57 @@ mod tests {
         assert_eq!(ids(groups[0].1.clone()), vec!["2"]);
         assert_eq!(groups[1].0, "ClanB");
         assert_eq!(ids(groups[1].1.clone()), vec!["1", "3"]);
+    }
+
+    #[test]
+    fn prepare_emoticon_upload_bytes_encodes_png_as_webp() {
+        let mut img = image::RgbaImage::new(64, 64);
+        for (x, y, pixel) in img.enumerate_pixels_mut() {
+            *pixel = image::Rgba([x as u8, y as u8, 128, 255]);
+        }
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let (out, mime) = prepare_emoticon_upload_bytes(&png, "png", EMOJI_UPLOAD_MAX_PX).unwrap();
+        assert_eq!(mime, "image/webp");
+        assert_eq!(image::guess_format(&out).unwrap(), image::ImageFormat::WebP);
+    }
+
+    #[test]
+    fn validate_emoji_create_shortname_matches_server_rules() {
+        assert!(validate_emoji_create_shortname(":wave:").is_ok());
+        assert!(validate_emoji_create_shortname("::bad::").is_err());
+        assert!(validate_emoji_create_shortname(":x:").is_ok());
+        assert!(validate_emoji_create_shortname(":a").is_err());
+        assert!(validate_emoji_create_shortname(":has space:").is_err());
+    }
+
+    #[test]
+    fn snowflake_id_is_nineteen_digits() {
+        let id = generate_snowflake_id();
+        assert_eq!(id.to_string().len(), 19, "id={id}");
+    }
+
+    #[test]
+    fn create_blurred_watermarked_webp_encodes_webp() {
+        let mut img = image::RgbaImage::new(32, 32);
+        for (x, y, pixel) in img.enumerate_pixels_mut() {
+            *pixel = image::Rgba([x as u8, y as u8, 200, 255]);
+        }
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let out = create_blurred_watermarked_webp(&png, "image/png").unwrap();
+        assert_eq!(image::guess_format(&out).unwrap(), image::ImageFormat::WebP);
+    }
+
+    #[test]
+    fn prepare_emoticon_upload_bytes_keeps_gif() {
+        let data = b"GIF89a";
+        let (out, mime) = prepare_emoticon_upload_bytes(data, "gif", EMOJI_UPLOAD_MAX_PX).unwrap();
+        assert_eq!(mime, "image/gif");
+        assert_eq!(out, data);
     }
 }

@@ -1,15 +1,18 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::{AppApi, ConnectionStatus};
 use mezon_proto::api;
 
 use crate::Freshness;
-use crate::clan::{ClanEvent, ClanList};
+use crate::emoji::{MAX_STICKER_BYTES, is_valid_emoticon_shortname, upload_emoticon_file};
+use crate::ids::ClanId;
+use crate::voice::{MAX_SOUND_BYTES, upload_sound_file};
 
-const STICKER_MEDIA_TYPE: i32 = 0;
-const AUDIO_MEDIA_TYPE: i32 = 1;
+pub const STICKER_MEDIA_TYPE: i32 = 0;
+pub const AUDIO_MEDIA_TYPE: i32 = 1;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Sticker {
@@ -20,6 +23,8 @@ pub struct Sticker {
     pub clan_id: String,
     pub clan_name: String,
     pub logo: String,
+    pub creator_id: String,
+    pub is_for_sale: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -30,6 +35,7 @@ pub struct ClanSound {
     pub clan_id: String,
     pub clan_name: String,
     pub logo: String,
+    pub creator_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -44,7 +50,6 @@ pub struct StickerStore {
     freshness: Freshness,
     loading: bool,
     api: Arc<AppApi>,
-    _clan_sub: Subscription,
     _conn_watch: Task<()>,
 }
 
@@ -78,12 +83,6 @@ impl StickerStore {
     }
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
-        let clan_sub = cx.subscribe(&ClanList::global(cx), |this, _clan, event, cx| {
-            if let ClanEvent::ActiveClanChanged(Some(_)) = event {
-                this.ensure_loaded(cx);
-            }
-        });
-
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
         Self {
@@ -93,7 +92,6 @@ impl StickerStore {
             freshness: Freshness::new(),
             loading: false,
             api,
-            _clan_sub: clan_sub,
             _conn_watch: conn_watch,
         }
     }
@@ -120,18 +118,23 @@ impl StickerStore {
     }
 
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
-        if !self.freshness.is_fresh(crate::CACHE_TTL) {
-            self.fetch(cx);
+        self.ensure_loaded_task(cx).detach();
+    }
+
+    pub fn ensure_loaded_task(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        if self.freshness.is_fresh(crate::CACHE_TTL) {
+            return Task::ready(());
         }
+        self.fetch(cx)
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.fetch(cx);
+        self.fetch(cx).detach();
     }
 
-    fn fetch(&mut self, cx: &mut Context<Self>) {
+    fn fetch(&mut self, cx: &mut Context<Self>) -> Task<()> {
         if self.loading {
-            return;
+            return Task::ready(());
         }
         self.loading = true;
         let api = self.api.clone();
@@ -173,7 +176,6 @@ impl StickerStore {
                 }
             });
         })
-        .detach();
     }
 
     fn insert(&mut self, sticker: Sticker) {
@@ -191,6 +193,21 @@ impl StickerStore {
         &self.sounds
     }
 
+    pub fn sounds_for_clan(&self, clan_id: &str) -> Vec<&ClanSound> {
+        self.sounds
+            .iter()
+            .filter(|sound| sound.clan_id == clan_id)
+            .collect()
+    }
+
+    pub fn get(&self, id: &str) -> Option<&Sticker> {
+        self.by_id.get(id)
+    }
+
+    pub fn get_sound(&self, id: &str) -> Option<&ClanSound> {
+        self.sounds.iter().find(|sound| sound.id == id)
+    }
+
     pub fn for_clan(&self, clan_id: &str) -> Vec<&Sticker> {
         ordered_stickers(&self.by_id, &self.order)
             .filter(|sticker| sticker.clan_id == clan_id)
@@ -199,6 +216,152 @@ impl StickerStore {
 
     pub fn active_clan_first(&self, active_clan_id: Option<&str>) -> Vec<&Sticker> {
         active_clan_first_in(&self.by_id, &self.order, active_clan_id)
+    }
+
+    pub fn create_sticker(
+        &self,
+        clan_id: ClanId,
+        path: &Path,
+        shortname: &str,
+        is_for_sale: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let api = self.api.clone();
+        let path = path.to_path_buf();
+        let shortname = shortname.trim().to_string();
+        let clan = clan_id.get();
+        cx.spawn(async move |this, cx| {
+            if !is_valid_emoticon_shortname(&shortname) {
+                return Err("invalid_name".into());
+            }
+            let (id, url) =
+                upload_emoticon_file(&api, &path, "stickers", MAX_STICKER_BYTES, is_for_sale)
+                    .await?;
+            api.add_clan_sticker(
+                clan,
+                &url,
+                &shortname,
+                "Among Us",
+                id,
+                STICKER_MEDIA_TYPE,
+                is_for_sale,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            this.update(cx, |this, cx| this.refresh(cx))
+                .map_err(|_| "store dropped".to_string())?;
+            Ok(())
+        })
+    }
+
+    pub fn update_sticker(
+        &self,
+        sticker_id: &str,
+        clan_id: ClanId,
+        source: &str,
+        shortname: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let api = self.api.clone();
+        let id: i64 = match sticker_id.parse() {
+            Ok(id) => id,
+            Err(_) => return cx.spawn(async move |_, _| Err("invalid sticker id".into())),
+        };
+        let shortname = shortname.trim().to_string();
+        let source = source.to_string();
+        let clan = clan_id.get();
+        cx.spawn(async move |this, cx| {
+            if !is_valid_emoticon_shortname(&shortname) {
+                return Err("invalid_name".into());
+            }
+            api.update_clan_sticker_by_id(id, clan, &source, &shortname, "Among Us")
+                .await
+                .map_err(|e| e.to_string())?;
+            this.update(cx, |this, cx| this.refresh(cx))
+                .map_err(|_| "store dropped".to_string())?;
+            Ok(())
+        })
+    }
+
+    pub fn delete_sticker(
+        &self,
+        sticker_id: &str,
+        clan_id: ClanId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let api = self.api.clone();
+        let id: i64 = match sticker_id.parse() {
+            Ok(id) => id,
+            Err(_) => return cx.spawn(async move |_, _| Err("invalid sticker id".into())),
+        };
+        let clan = clan_id.get();
+        cx.spawn(async move |this, cx| {
+            api.delete_clan_sticker_by_id(id, clan)
+                .await
+                .map_err(|e| e.to_string())?;
+            this.update(cx, |this, cx| {
+                this.by_id.remove(&id.to_string());
+                this.order.retain(|existing| existing != &id.to_string());
+                this.sounds.retain(|sound| sound.id != id.to_string());
+                cx.emit(StickerEvent::Changed);
+                cx.notify();
+            })
+            .map_err(|_| "store dropped".to_string())?;
+            Ok(())
+        })
+    }
+
+    pub fn create_sound(
+        &self,
+        clan_id: ClanId,
+        path: &Path,
+        shortname: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let api = self.api.clone();
+        let path = path.to_path_buf();
+        let shortname = shortname.trim().to_string();
+        let clan = clan_id.get();
+        cx.spawn(async move |this, cx| {
+            if !is_valid_emoticon_shortname(&shortname) {
+                return Err("invalid_name".into());
+            }
+            let (id, url) = upload_sound_file(&api, &path, MAX_SOUND_BYTES).await?;
+            api.add_clan_sticker(
+                clan,
+                &url,
+                &shortname,
+                "Among Us",
+                id,
+                AUDIO_MEDIA_TYPE,
+                false,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            this.update(cx, |this, cx| this.refresh(cx))
+                .map_err(|_| "store dropped".to_string())?;
+            Ok(())
+        })
+    }
+
+    pub fn update_sound(
+        &self,
+        sound_id: &str,
+        clan_id: ClanId,
+        source: &str,
+        shortname: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        self.update_sticker(sound_id, clan_id, source, shortname, cx)
+    }
+
+    pub fn delete_sound(
+        &self,
+        sound_id: &str,
+        clan_id: ClanId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        self.delete_sticker(sound_id, clan_id, cx)
     }
 }
 
@@ -239,6 +402,8 @@ fn sticker_from_proto(s: api::ClanSticker) -> Option<Sticker> {
         clan_id: s.clan_id.to_string(),
         clan_name,
         logo: s.logo,
+        creator_id: s.creator_id.to_string(),
+        is_for_sale: s.is_for_sale,
     })
 }
 
@@ -263,6 +428,7 @@ fn sound_from_proto(s: api::ClanSticker) -> Option<ClanSound> {
         clan_id: s.clan_id.to_string(),
         clan_name,
         logo: s.logo,
+        creator_id: s.creator_id.to_string(),
     })
 }
 
@@ -304,6 +470,8 @@ mod tests {
             clan_id: clan_id.into(),
             clan_name: String::new(),
             logo: String::new(),
+            creator_id: String::new(),
+            is_for_sale: false,
         }
     }
 

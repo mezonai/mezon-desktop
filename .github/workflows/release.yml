@@ -1,0 +1,383 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  NX_CHAT_APP_API_HOST: ${{ secrets.NX_CHAT_APP_API_HOST || 'api.mezon.ai' }}
+  NX_CHAT_APP_API_PORT: "443"
+  NX_CHAT_APP_API_SECURE: ${{ secrets.NX_CHAT_APP_API_SECURE || 'true' }}
+  NX_CHAT_APP_API_KEY: ${{ secrets.NX_CHAT_APP_API_KEY }}
+  NX_CHAT_APP_API_GW_HOST: ${{ secrets.NX_CHAT_APP_API_GW_HOST || 'gw.mezon.ai' }}
+  NX_CHAT_APP_API_GW_PORT: ${{ secrets.NX_CHAT_APP_API_GW_PORT || '443' }}
+  NX_CHAT_APP_TCP_PORT: ${{ secrets.NX_CHAT_APP_TCP_PORT }}
+  NX_CHAT_APP_STREAM_WS_URL: ${{ secrets.NX_CHAT_APP_STREAM_WS_URL || 'wss://stn.mezon.ai' }}
+  NX_CHAT_APP_MEET_WS_URL: ${{ secrets.NX_CHAT_APP_MEET_WS_URL || 'wss://meet.mezon.ai' }}
+  NX_CHAT_APP_NOTIFICATION_WS_URL: ${{ secrets.NX_CHAT_APP_NOTIFICATION_WS_URL || 'wss://gotify.mezon.ai' }}
+  NX_CHAT_APP_OAUTH2_AUTHORIZE_URL: https://oauth2.mezon.ai/oauth2/auth
+  NX_CHAT_APP_OAUTH2_CLIENT_ID: ${{ secrets.NX_CHAT_APP_OAUTH2_CLIENT_ID || '25f63a1f-16b8-488b-8b14-68520eeab77f' }}
+  NX_CHAT_APP_OAUTH2_REDIRECT_URI: ${{ secrets.NX_CHAT_APP_OAUTH2_REDIRECT_URI || 'http://127.0.0.1:4200/login/callback' }}
+  NX_CHAT_APP_OAUTH2_RESPONSE_TYPE: code
+  NX_CHAT_APP_OAUTH2_SCOPE: openid+offline
+  NX_CHAT_APP_OAUTH2_CODE_CHALLENGE_METHOD: S256
+  NX_CHAT_APP_OAUTH2_LOG_OUT: https://oauth2.mezon.ai/oauth2/sessions/logout
+  NX_CHAT_APP_OAUTH2_LOG_OUT_CALLBACK: https://mezon.ai/logout/callback
+  NX_CHAT_APP_GOOGLE_CLIENT_ID: 391688022389-1k9kb377ea6dccpqii7m5pifjj0agsjc.apps.googleusercontent.com
+  NX_DOMAIN_URL: https://mezon.ai
+  NX_CHAT_APP_REDIRECT_URI: https://mezon.ai
+  NX_LOGO_MEZON: https://cdn.mezon.ai/images/mezon_logo.png
+  NX_BASE_IMG_URL: ${{ secrets.NX_BASE_IMG_URL || 'https://cdn.komu.vn' }}
+  NX_PROFILE_IMG_URL: https://profile.mezon.ai
+  NX_IMGPROXY_BASE_URL: ${{ secrets.NX_IMGPROXY_BASE_URL || 'https://imgproxy.komu.vn' }}
+  NX_IMGPROXY_KEY: ${{ secrets.NX_IMGPROXY_KEY }}
+  NX_CHAT_APP_API_KLIPY_KEY: ${{ secrets.NX_CHAT_APP_API_KLIPY_KEY }}
+  NX_CHAT_APP_API_KLIPY_URL: ${{ secrets.NX_CHAT_APP_API_KLIPY_URL || 'https://api.klipy.com/api/v1' }}
+  NX_CHAT_APP_MEZON_TREASURY_URL: https://withdraw-api.nccsoft.vn
+  NX_CHAT_APP_API_MEZONTREASURY_KEY: ${{ secrets.NX_CHAT_APP_API_MEZONTREASURY_KEY }}
+  NX_CHAT_APP_CONTRACT_ADDRESS: "0x4F17a94dD6E1B2D6241C4D1956C6c7a07ba2Ec50"
+  NX_CHAT_APP_MEZON_TREASURY_URL_NETWORK: https://sepolia.etherscan.io
+  NX_WEBRTC_ICESERVERS_URL: ${{ secrets.NX_WEBRTC_ICESERVERS_URL || 'turn:relay.mezon.ai:5349' }}
+  NX_WEBRTC_ICESERVERS_USERNAME: turnmezon
+  NX_WEBRTC_ICESERVERS_CREDENTIAL: ${{ secrets.NX_WEBRTC_ICESERVERS_CREDENTIAL }}
+  NX_CHAT_APP_FCM_API_KEY: ${{ secrets.NX_CHAT_APP_FCM_API_KEY }}
+  NX_CHAT_APP_FCM_AUTH_DOMAIN: mezon-772fa.firebaseapp.com
+  NX_CHAT_APP_FCM_PROJECT_ID: mezon-772fa
+  NX_CHAT_APP_FCM_STORAGE_BUCKET: mezon-772fa.appspot.com
+  NX_CHAT_APP_FCM_MESSAGING_SENDER_ID: "285548761692"
+  NX_CHAT_APP_FCM_APP_ID: "1:285548761692:web:3ca531af1deecee74e0c99"
+  NX_CHAT_APP_FCM_MEASUREMENT_ID: G-0WNQTXVMT3
+  NX_CHAT_APP_FCM_VAPID_KEY: ${{ secrets.NX_CHAT_APP_FCM_VAPID_KEY }}
+  NX_CHAT_APP_API_CLIENT_KEY_CUSTOM: mezon.ai
+  NX_CHAT_SENTRY_DSN: ${{ secrets.NX_CHAT_SENTRY_DSN }}
+  NX_CHAT_APP_ANNONYMOUS_USER_ID: "1767478432163172999"
+  NX_MAX_LENGTH_NAME_ALLOWED: "64"
+  NX_UPDATE_URL: ${{ secrets.NX_UPDATE_URL }}
+
+jobs:
+  linux:
+    name: Linux artifacts
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    steps:
+      - name: Install container prerequisites
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git ca-certificates curl openssl zstd
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master @ 2026-07-12
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Install Linux build dependencies
+        run: bash scripts/linux-deps
+
+      - name: Build release binary
+        run: cargo build --release -p mezon-app --locked
+
+      - name: Build .deb package
+        run: |
+          cargo install cargo-deb --locked
+          cargo deb -p mezon-app --locked
+
+      - name: Package update feed
+        run: |
+          bash scripts/make-update-feed.sh linux target/release/mezon \
+            "$(ls target/debian/mezon_*.deb | head -n1)"
+
+      - name: Upload feed
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: update-feed-linux
+          path: target/update-feed/*
+          if-no-files-found: error
+
+  windows:
+    name: Windows artifacts
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master @ 2026-07-12
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Build release binary
+        run: cargo build --release -p mezon-app --locked
+
+      - name: Detect signing configuration
+        id: signing
+        shell: bash
+        env:
+          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+        run: |
+          if [ -n "$WINDOWS_CERT_PFX" ]; then
+            echo "has_cert=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_cert=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Sign mezon.exe
+        if: steps.signing.outputs.has_cert == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
+          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName | Select-Object -Last 1).FullName
+          & $signtool sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 /td SHA256 `
+            /tr http://timestamp.digicert.com target\release\mezon.exe
+          $code = $LASTEXITCODE
+          Remove-Item $pfx
+          if ($code -ne 0) { exit 1 }
+          & $signtool verify /pa target\release\mezon.exe
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Package update feed
+        shell: bash
+        run: bash scripts/make-update-feed.sh windows
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+            /DMyAppVersion=$version `
+            /DSourceExe="$PWD\target\release\mezon.exe" `
+            /DSetupIcon="$PWD\crates\mezon-app\resources\windows\app.ico" `
+            /O"$PWD\target\installer" `
+            packaging\windows\mezon.iss
+
+      - name: Sign installer
+        if: steps.signing.outputs.has_cert == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
+          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName | Select-Object -Last 1).FullName
+          $setup = (Get-ChildItem target\installer\*.exe).FullName
+          & $signtool sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 /td SHA256 `
+            /tr http://timestamp.digicert.com $setup
+          $code = $LASTEXITCODE
+          Remove-Item $pfx
+          if ($code -ne 0) { exit 1 }
+
+      - name: Collect installer
+        shell: pwsh
+        run: Copy-Item target\installer\*.exe target\update-feed\
+
+      - name: Upload feed
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: update-feed-windows
+          path: target/update-feed/*
+          if-no-files-found: error
+
+  macos:
+    name: macOS artifacts
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master @ 2026-07-12
+        with:
+          toolchain: 1.95.0
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Build universal binary
+        run: |
+          cargo build --release -p mezon-app --locked --target aarch64-apple-darwin
+          cargo build --release -p mezon-app --locked --target x86_64-apple-darwin
+
+      - name: Detect signing configuration
+        id: signing
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          if [ -n "$MACOS_CERT_P12" ]; then
+            echo "has_cert=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_cert=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "$APPLE_API_KEY_P8" ]; then
+            echo "has_notary=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_notary=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Import Developer ID certificate
+        if: steps.signing.outputs.has_cert == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          KEYCHAIN="build.keychain"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain
+          printf '%s' "$MACOS_CERT_P12" | base64 --decode > /tmp/cert.p12
+          security import /tmp/cert.p12 -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm -f /tmp/cert.p12
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          IDENTITY="${MACOS_SIGN_IDENTITY:-}"
+          if [ -z "$IDENTITY" ]; then
+            IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk -F'"' '/Developer ID Application/{print $2; exit}')"
+          fi
+          if [ -z "$IDENTITY" ]; then
+            echo "No 'Developer ID Application' identity found in MACOS_CERT_P12 (set MACOS_SIGN_IDENTITY to override)" >&2
+            exit 1
+          fi
+          echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Assemble Mezon.app and DMG
+        run: |
+          VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          APP="target/dist-ci/Mezon.app"
+          rm -rf "$APP"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          lipo -create -output "$APP/Contents/MacOS/mezon" \
+            target/aarch64-apple-darwin/release/mezon \
+            target/x86_64-apple-darwin/release/mezon
+          chmod +x "$APP/Contents/MacOS/mezon"
+          rm -rf target/aarch64-apple-darwin target/x86_64-apple-darwin
+          df -h /
+          cp assets/icons/app.icns "$APP/Contents/Resources/app.icns"
+          cp crates/mezon-app/Info.plist "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${GITHUB_RUN_NUMBER}" "$APP/Contents/Info.plist"
+          if [ -n "${SIGN_IDENTITY:-}" ]; then
+            codesign --force --timestamp --options runtime \
+              --entitlements packaging/macos/entitlements.plist \
+              --sign "$SIGN_IDENTITY" "$APP"
+            codesign --verify --deep --strict "$APP"
+          else
+            codesign --force --deep --sign - "$APP"
+          fi
+          STAGE="target/dist-ci/stage"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          cp -R "$APP" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          for attempt in 1 2 3; do
+            if hdiutil create -volname "Mezon" -srcfolder "$STAGE" -ov -format UDZO -size 1g target/dist-ci/Mezon.dmg; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "hdiutil create failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "hdiutil create failed (attempt $attempt); retrying in 10s..." >&2
+            sleep 10
+          done
+
+      - name: Notarize DMG
+        if: steps.signing.outputs.has_cert == 'true' && steps.signing.outputs.has_notary == 'true'
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          printf '%s' "$APPLE_API_KEY_P8" > /tmp/notary-key.p8
+          xcrun notarytool submit target/dist-ci/Mezon.dmg \
+            --key /tmp/notary-key.p8 \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait
+          rm -f /tmp/notary-key.p8
+          xcrun stapler staple target/dist-ci/Mezon.dmg
+
+      - name: Package update feed
+        run: bash scripts/make-update-feed.sh macos target/dist-ci/Mezon.dmg
+
+      - name: Upload feed
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: update-feed-macos
+          path: target/update-feed/*
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Verify tag matches Cargo.toml version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "tag v${TAG} does not match Cargo.toml version ${VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Download feeds
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: update-feed-*
+          merge-multiple: true
+          path: feed
+
+      - name: Include installer scripts
+        run: cp scripts/install-linux.sh scripts/install-windows.ps1 feed/
+
+      - name: List feed
+        run: ls -la feed/
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2
+        with:
+          files: feed/*
+          draft: true
+          generate_release_notes: true
+
+      - name: Upload combined feed artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: update-feed-all
+          path: feed/*
+          if-no-files-found: error

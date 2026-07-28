@@ -263,6 +263,8 @@ pub(crate) struct WaylandClientState {
     primary_data_offer: Option<DataOffer<ZwpPrimarySelectionOfferV1>>,
     cursor: Cursor,
     pending_activation: Option<PendingActivation>,
+    activation_context: ActivationContext,
+    press_activation: ActivationContext,
     event_loop: Option<EventLoop<'static, WaylandClientStatePtr>>,
     pub common: LinuxCommon,
     ime_enabled: Option<bool>,
@@ -297,6 +299,12 @@ pub(crate) enum PendingActivation {
     Window(ObjectId),
 }
 
+#[derive(Default)]
+struct ActivationContext {
+    serial: u32,
+    surface_window: Option<WaylandWindowStatePtr>,
+}
+
 /// This struct is required to conform to Rust's orphan rules, so we can dispatch on the state but hand the
 /// window to GPUI.
 #[derive(Clone)]
@@ -316,6 +324,45 @@ impl WaylandClientStatePtr {
     pub fn set_pending_activation(&self, window: ObjectId) {
         self.0.upgrade().unwrap().borrow_mut().pending_activation =
             Some(PendingActivation::Window(window));
+    }
+
+    pub(crate) fn activation_token_for_raise(
+        &self,
+        exclude: ObjectId,
+    ) -> (u32, Option<wl_surface::WlSurface>) {
+        let client = self.get_client();
+        let state = client.borrow();
+        if let Some(ref window) = state.press_activation.surface_window {
+            if window.surface().id() != exclude && state.press_activation.serial != 0 {
+                return (state.press_activation.serial, Some(window.surface()));
+            }
+        }
+        let serial = if state.activation_context.serial != 0 {
+            state.activation_context.serial
+        } else {
+            state.serial_tracker.get_latest()
+        };
+        let surface = state
+            .activation_context
+            .surface_window
+            .as_ref()
+            .filter(|window| window.surface().id() != exclude)
+            .map(WaylandWindowStatePtr::surface)
+            .or_else(|| {
+                state
+                    .mouse_focused_window
+                    .as_ref()
+                    .filter(|window| window.surface().id() != exclude)
+                    .map(WaylandWindowStatePtr::surface)
+            })
+            .or_else(|| {
+                state
+                    .keyboard_focused_window
+                    .as_ref()
+                    .filter(|window| window.surface().id() != exclude)
+                    .map(WaylandWindowStatePtr::surface)
+            });
+        (serial, surface)
     }
 
     pub fn enable_ime(&self) {
@@ -731,6 +778,8 @@ impl WaylandClient {
             primary_data_offer: None,
             cursor,
             pending_activation: None,
+            activation_context: ActivationContext::default(),
+            press_activation: ActivationContext::default(),
             event_loop: Some(event_loop),
             ime_enabled: None,
         }));
@@ -1555,6 +1604,10 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                 state.serial_tracker.update(SerialKind::KeyPress, serial);
 
                 let focused_window = state.keyboard_focused_window.clone();
+                if let Some(window) = focused_window.clone() {
+                    state.activation_context.serial = serial;
+                    state.activation_context.surface_window = Some(window);
+                }
                 let Some(focused_window) = focused_window else {
                     return;
                 };
@@ -1898,6 +1951,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                 ..
             } => {
                 state.serial_tracker.update(SerialKind::MousePress, serial);
+                if let Some(window) = state.mouse_focused_window.clone() {
+                    state.activation_context.serial = serial;
+                    state.activation_context.surface_window = Some(window);
+                }
                 let button = linux_button_to_gpui(button);
                 let Some(button) = button else { return };
                 if state.mouse_focused_window.is_none() {
@@ -1946,6 +2003,8 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                         state.button_pressed = Some(button);
 
                         if let Some(window) = state.mouse_focused_window.clone() {
+                            state.press_activation.serial = serial;
+                            state.press_activation.surface_window = Some(window.clone());
                             let input = PlatformInput::MouseDown(MouseDownEvent {
                                 button,
                                 position: state.mouse_location.unwrap(),

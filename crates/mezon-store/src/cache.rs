@@ -125,6 +125,26 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
         }
     }
 
+    pub fn mark_stale<Q>(&mut self, key: &Q)
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.fetched_at = None;
+        }
+    }
+
+    pub fn mark_fetched<Q>(&mut self, key: &Q)
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.fetched_at = Some(Instant::now());
+        }
+    }
+
     fn evict(&mut self, protect: Option<&K>) {
         let Some(max) = self.max else {
             return;
@@ -190,6 +210,17 @@ mod tests {
 
         f.mark_stale();
         assert!(!f.is_fresh(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn mark_stale_single_key_keeps_value() {
+        let mut c: KeyedCache<String, i32> = KeyedCache::new(None);
+        c.insert("a".into(), 1, None);
+        assert!(c.is_fresh("a", Duration::from_secs(60)));
+
+        c.mark_stale("a");
+        assert!(!c.is_fresh("a", Duration::from_secs(60)));
+        assert_eq!(c.get("a"), Some(&1));
     }
 
     #[test]

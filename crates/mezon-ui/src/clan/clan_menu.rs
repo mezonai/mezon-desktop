@@ -245,6 +245,7 @@ fn coming_soon_modal(title: String, locale: String) -> impl Fn(&mut Window, &mut
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_clan_menu(
     sidebar: WeakEntity<crate::sidebar::channel_sidebar::ChannelSidebar>,
     channel_list: Entity<ChannelList>,
@@ -257,6 +258,7 @@ pub fn build_clan_menu(
 ) -> ClanMenuDropdown {
     let t = |key: &'static str| mezon_i18n::t(locale, key).to_string();
     let locale_owned = locale.to_string();
+    let clan_name_for_noti = clan_name.clone();
 
     let mut menu = ClanMenuDropdown::new().on_dismiss(move |_window, cx| {
         if let Some(view) = sidebar.upgrade() {
@@ -345,11 +347,26 @@ pub fn build_clan_menu(
     );
 
     let notification_label = t("clanMenu.modalPanel.notificationSettings");
-    menu = menu.item_icon(
-        notification_label.clone(),
-        IconName::Bell,
-        coming_soon_modal(notification_label, locale_owned.clone()),
-    );
+    let notif_clan_name = clan_name_for_noti;
+    let notif_channel_list = channel_list.clone();
+    menu = menu.item_icon(notification_label, IconName::Bell, move |window, cx| {
+        let Some(settings) = mezon_store::Settings::try_global(cx) else {
+            return;
+        };
+        let clan_name = notif_clan_name.clone();
+        let channel_list = notif_channel_list.clone();
+        let modal = cx.new(|cx| {
+            crate::chat::notification_setting_modal::NotificationSettingModal::new(
+                clan_id,
+                clan_name,
+                settings,
+                channel_list,
+                window,
+                cx,
+            )
+        });
+        Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
+    });
 
     let channel_list_toggle = channel_list.clone();
     menu = menu.toggle(

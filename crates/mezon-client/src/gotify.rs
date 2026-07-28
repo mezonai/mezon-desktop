@@ -72,7 +72,7 @@ pub async fn run_stream(
         if tx.is_closed() {
             return;
         }
-        match connect_once(&url, &tx).await {
+        match connect_once(&url, &token, &tx).await {
             ConnectOutcome::StopClean => return,
             ConnectOutcome::Opened => {
                 attempts = 0;
@@ -101,11 +101,19 @@ enum ConnectOutcome {
     StopClean,
 }
 
-async fn connect_once(url: &str, tx: &mpsc::UnboundedSender<GotifyNotification>) -> ConnectOutcome {
+async fn connect_once(
+    url: &str,
+    token: &str,
+    tx: &mpsc::UnboundedSender<GotifyNotification>,
+) -> ConnectOutcome {
     let stream = match tokio_tungstenite::connect_async(url).await {
         Ok((stream, _)) => stream,
         Err(e) => {
-            tracing::warn!("gotify: connect failed: {e}");
+            // The error may embed the URL, which carries the auth token — redact it.
+            tracing::warn!(
+                "gotify: connect failed: {}",
+                e.to_string().replace(token, "***")
+            );
             return ConnectOutcome::FailedBeforeOpen;
         }
     };
@@ -152,7 +160,6 @@ async fn connect_once(url: &str, tx: &mpsc::UnboundedSender<GotifyNotification>)
             deadline = tokio::time::Instant::now() + PING_TIMEOUT;
             continue;
         }
-        tracing::debug!("gotify: raw frame: {trimmed}");
 
         match serde_json::from_str::<GotifyNotification>(trimmed) {
             Ok(notification) => {

@@ -176,7 +176,13 @@ impl PresenceStore {
             RealtimeEvent::StatusPresence(e) => {
                 let joins: Vec<UserId> = e.joins.iter().map(|u| UserId(u.user_id)).collect();
                 let leaves: Vec<UserId> = e.leaves.iter().map(|u| UserId(u.user_id)).collect();
+                let statuses: Vec<(UserId, String)> = e
+                    .joins
+                    .iter()
+                    .map(|u| (UserId(u.user_id), u.status.clone().unwrap_or_default()))
+                    .collect();
                 self.apply_status_presence(&joins, &leaves);
+                self.apply_seed_user_status(&statuses);
                 self.schedule_status_notify(cx);
             }
             _ => {}

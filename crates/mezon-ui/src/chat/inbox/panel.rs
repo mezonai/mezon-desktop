@@ -333,6 +333,8 @@ impl Focusable for InboxPopoverPanel {
 
 impl Render for InboxPopoverPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.message_image_cache
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         let theme = cx.theme().clone();
         let theme_ref = theme.as_ref();
         let items = self.cached_items.clone();
@@ -1064,12 +1066,13 @@ fn render_topic_item(
                 .p_2()
                 .rounded(px(8.))
                 .bg(theme.bg_secondary)
+                .max_h(px(150.))
+                .overflow_hidden()
                 .child(
                     div()
                         .relative()
                         .w_full()
                         .min_w_0()
-                        .pr(px(56.))
                         .child(render_topic_body(
                             theme,
                             locale,

@@ -87,12 +87,12 @@ fn url_host(url: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    const CDN: &str = "https://cdn.mezon.ai";
+    const CDN: &str = "https://cdn.example";
 
     #[test]
     fn normalize_strips_query_path_and_extension() {
         assert_eq!(
-            normalize_presign_key("https://cdn.mezon.ai/a/b/photo.png?x=1"),
+            normalize_presign_key("https://cdn.example/a/b/photo.png?x=1"),
             "photo"
         );
         assert_eq!(normalize_presign_key("photo.tar.gz"), "photo.tar");
@@ -111,17 +111,17 @@ mod tests {
 
     #[test]
     fn is_mezon_cdn_matches_host_and_subdomain_only() {
-        assert!(is_mezon_cdn("https://cdn.mezon.ai/x/photo.png", CDN));
-        assert!(is_mezon_cdn("https://media.cdn.mezon.ai/x/photo.png", CDN));
+        assert!(is_mezon_cdn("https://cdn.example/x/photo.png", CDN));
+        assert!(is_mezon_cdn("https://media.cdn.example/x/photo.png", CDN));
         assert!(!is_mezon_cdn("https://example.com/x/photo.png", CDN));
-        assert!(!is_mezon_cdn("blob:https://cdn.mezon.ai/uuid", CDN));
+        assert!(!is_mezon_cdn("blob:https://cdn.example/uuid", CDN));
     }
 
     #[test]
     fn cdn_url_absent_from_finish_keys_is_pending_but_non_cdn_is_not() {
         let keys = vec!["other".to_string()];
         assert!(presign_pending(
-            "https://cdn.mezon.ai/uploads/photo.png",
+            "https://cdn.example/uploads/photo.png",
             Some(&keys),
             CDN
         ));
@@ -133,12 +133,12 @@ mod tests {
 
         let finished = vec!["photo".to_string()];
         assert!(!presign_pending(
-            "https://cdn.mezon.ai/uploads/photo.png",
+            "https://cdn.example/uploads/photo.png",
             Some(&finished),
             CDN
         ));
         assert!(!presign_pending(
-            "https://cdn.mezon.ai/uploads/photo.png",
+            "https://cdn.example/uploads/photo.png",
             None,
             CDN
         ));
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn pending_attachment_expires_after_ten_minutes() {
         let keys = vec!["other".to_string()];
-        let url = "https://cdn.mezon.ai/uploads/photo.png";
+        let url = "https://cdn.example/uploads/photo.png";
         assert!(!is_expired_presign_attachment(
             url,
             Some(&keys),

@@ -20,6 +20,8 @@ pub struct UserAccount {
     pub about_me: Option<String>,
     pub password_setted: bool,
     pub logo: Option<String>,
+    pub status: String,
+    pub user_status: String,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +58,7 @@ pub enum AccountEvent {
     ClanProfileSaved,
     ClanProfileSaveFailed(String),
     NicknameDuplicateChecked(bool),
+    StatusUpdated,
 }
 
 pub struct AccountStore {
@@ -335,6 +338,64 @@ impl AccountStore {
         .detach();
     }
 
+    pub fn set_status(
+        &mut self,
+        status: String,
+        minutes: i32,
+        until_turn_on: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(account) = &mut self.account {
+            if account.status == status {
+                return;
+            }
+            account.status = status.clone();
+        } else {
+            return;
+        }
+        if let Some(account) = &self.account {
+            Self::spawn_persist_cache(account, cx);
+        }
+        cx.emit(AccountEvent::StatusUpdated);
+        cx.notify();
+        let api = self.api.clone();
+        cx.spawn(async move |_this, _cx| {
+            if let Err(e) = api.update_user_status(status, minutes, until_turn_on).await {
+                tracing::warn!("Failed to update user status: {e}");
+            }
+        })
+        .detach();
+    }
+
+    pub fn set_custom_status(
+        &mut self,
+        text: String,
+        minutes: i32,
+        until_turn_on: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(account) = &mut self.account {
+            account.user_status = text.clone();
+        } else {
+            return;
+        }
+        if let Some(account) = &self.account {
+            Self::spawn_persist_cache(account, cx);
+        }
+        cx.emit(AccountEvent::StatusUpdated);
+        cx.notify();
+        let api = self.api.clone();
+        cx.spawn(async move |_this, _cx| {
+            if let Err(e) = api
+                .update_user_custom_status(text, minutes, until_turn_on)
+                .await
+            {
+                tracing::warn!("Failed to update custom status: {e}");
+            }
+        })
+        .detach();
+    }
+
     pub fn upload_avatar(&mut self, path: &Path, cx: &mut Context<Self>) {
         let api = self.api.clone();
         let path = path.to_path_buf();
@@ -510,6 +571,10 @@ struct PersistedAccount {
     avatar_url: Option<String>,
     #[serde(default)]
     logo: Option<String>,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    user_status: String,
 }
 
 impl PersistedAccount {
@@ -519,6 +584,8 @@ impl PersistedAccount {
             display_name: account.display_name.clone(),
             avatar_url: account.avatar_url.clone(),
             logo: account.logo.clone(),
+            status: account.status.clone(),
+            user_status: account.user_status.clone(),
         }
     }
 
@@ -532,6 +599,8 @@ impl PersistedAccount {
             about_me: None,
             password_setted: false,
             logo: self.logo,
+            status: self.status,
+            user_status: self.user_status,
         }
     }
 }
@@ -590,6 +659,8 @@ fn user_account_from_api(acct: ApiAccount) -> UserAccount {
         about_me: acct.about_me,
         password_setted: acct.password_setted,
         logo: acct.logo,
+        status: acct.status,
+        user_status: acct.user_status,
     }
 }
 
@@ -641,6 +712,8 @@ mod tests {
             about_me: Some("hi".into()),
             password_setted: true,
             logo: Some("https://cdn/logo.webp".into()),
+            status: String::new(),
+            user_status: String::new(),
         };
         let json = serde_json::to_string(&PersistedAccount::from_account(&account)).unwrap();
         let restored = serde_json::from_str::<PersistedAccount>(&json)
@@ -669,6 +742,8 @@ mod tests {
             phone_number: None,
             password_setted: true,
             logo: None,
+            status: String::new(),
+            user_status: String::new(),
         });
         assert_eq!(acct.display_name, "alice");
     }

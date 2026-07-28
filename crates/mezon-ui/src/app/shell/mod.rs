@@ -14,12 +14,22 @@ use gpui::{
 use crate::components::primitives::{Toast, ToastKind};
 
 mod coming_soon_modal;
+mod confirm_delete_canvas_modal;
+mod confirm_delete_emoji_modal;
 mod confirm_delete_message_modal;
+mod confirm_delete_role_modal;
+mod confirm_delete_sound_modal;
+mod confirm_delete_sticker_modal;
 mod confirm_delete_webhook_modal;
 mod confirm_remove_friend_modal;
 mod upload_limit_modal;
 use coming_soon_modal::ComingSoonModal;
+use confirm_delete_canvas_modal::ConfirmDeleteCanvasModal;
+use confirm_delete_emoji_modal::ConfirmDeleteEmojiModal;
 use confirm_delete_message_modal::ConfirmDeleteMessageModal;
+use confirm_delete_role_modal::ConfirmDeleteRoleModal;
+use confirm_delete_sound_modal::ConfirmDeleteSoundModal;
+use confirm_delete_sticker_modal::ConfirmDeleteStickerModal;
 use confirm_delete_webhook_modal::{ConfirmDeleteWebhookModal, WebhookDeleteTarget};
 pub use confirm_remove_friend_modal::FriendRemovalKind;
 use confirm_remove_friend_modal::{ConfirmRemoveFriendModal, interpolate_username};
@@ -40,6 +50,7 @@ struct ToastItem {
 pub struct Shell {
     toasts: Vec<ToastItem>,
     modal: Option<AnyView>,
+    modal_fullscreen: bool,
     command_palette_open: bool,
     next_id: usize,
 }
@@ -52,6 +63,7 @@ impl Shell {
         let entity = cx.new(|_| Self {
             toasts: Vec::new(),
             modal: None,
+            modal_fullscreen: false,
             command_palette_open: false,
             next_id: 0,
         });
@@ -151,6 +163,16 @@ impl Shell {
     /// Show `view` as the active modal (backdrop click dismisses). The view renders its own card.
     pub fn show_modal(&mut self, view: AnyView, cx: &mut Context<Self>) {
         self.command_palette_open = false;
+        self.modal_fullscreen = false;
+        self.modal = Some(view);
+        cx.notify();
+    }
+
+    /// Show `view` as a fullscreen modal (e.g. an image/media viewer): it renders its own
+    /// full-viewport backdrop, so the overlay skips the centered card treatment and dim layer.
+    pub fn show_fullscreen_modal(&mut self, view: AnyView, cx: &mut Context<Self>) {
+        self.command_palette_open = false;
+        self.modal_fullscreen = true;
         self.modal = Some(view);
         cx.notify();
     }
@@ -227,6 +249,142 @@ impl Shell {
         self.show_modal(view.into(), cx);
     }
 
+    pub fn confirm_delete_canvas(
+        &mut self,
+        canvas_id: String,
+        canvas_title: String,
+        clan_id: mezon_store::ClanId,
+        channel_id: mezon_store::ChannelId,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let display_title = if canvas_title.trim().is_empty() {
+            mezon_i18n::t(locale, "common.canvas.untitled").to_string()
+        } else {
+            canvas_title
+        };
+        let title: SharedString = mezon_i18n::t(locale, "common.canvas.deleteTitle")
+            .replace("{{name}}", &display_title)
+            .into();
+        let description: SharedString = mezon_i18n::t(locale, "common.canvas.deleteMessage")
+            .to_string()
+            .into();
+        let cancel_label: SharedString = mezon_i18n::t(locale, "common.cancel").to_string().into();
+        let delete_label: SharedString = mezon_i18n::t(locale, "message.deleteMessageModal.delete")
+            .to_string()
+            .into();
+        let view = cx.new(|cx| ConfirmDeleteCanvasModal {
+            focus_handle: cx.focus_handle(),
+            canvas_id,
+            clan_id,
+            channel_id,
+            title,
+            description,
+            cancel_label,
+            delete_label,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_delete_emoji(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        emoji_id: SharedString,
+        shortname: SharedString,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let description = mezon_i18n::t(locale, "clanEmojiSetting.deleteModal.description")
+            .replace("{{shortname}}", shortname.as_ref());
+        let view = cx.new(|cx| ConfirmDeleteEmojiModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            emoji_id,
+            title: mezon_i18n::t(locale, "clanEmojiSetting.deleteModal.title")
+                .to_string()
+                .into(),
+            description: description.into(),
+            cancel_label: mezon_i18n::t(locale, "clanEmojiSetting.deleteModal.cancel")
+                .to_string()
+                .into(),
+            delete_label: mezon_i18n::t(locale, "clanEmojiSetting.deleteModal.confirm")
+                .to_string()
+                .into(),
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_delete_role(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        role_id: mezon_store::RoleId,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title: SharedString = mezon_i18n::t(locale, "confirmations.deleteRole.title")
+            .to_string()
+            .into();
+        let description: SharedString = mezon_i18n::t(locale, "confirmations.deleteRole.message")
+            .to_string()
+            .into();
+        let cancel_label: SharedString = mezon_i18n::t(locale, "confirmations.deleteRole.cancel")
+            .to_string()
+            .into();
+        let delete_label: SharedString = mezon_i18n::t(locale, "confirmations.deleteRole.confirm")
+            .to_string()
+            .into();
+        let view = cx.new(|cx| ConfirmDeleteRoleModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            role_id,
+            title,
+            description,
+            cancel_label,
+            delete_label,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_delete_sticker(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        sticker_id: SharedString,
+        shortname: SharedString,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let description = mezon_i18n::t(locale, "clanStickerSetting.deleteModal.description")
+            .replace("{{shortname}}", shortname.as_ref());
+        let view = cx.new(|cx| ConfirmDeleteStickerModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            sticker_id,
+            title: mezon_i18n::t(locale, "clanStickerSetting.deleteModal.title")
+                .to_string()
+                .into(),
+            description: description.into(),
+            cancel_label: mezon_i18n::t(locale, "clanStickerSetting.deleteModal.cancel")
+                .to_string()
+                .into(),
+            delete_label: mezon_i18n::t(locale, "clanStickerSetting.deleteModal.confirm")
+                .to_string()
+                .into(),
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
     fn confirm_delete_webhook(
         &mut self,
         target: WebhookDeleteTarget,
@@ -260,6 +418,37 @@ impl Shell {
             description,
             cancel_label,
             delete_label,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_delete_sound(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        sound_id: SharedString,
+        shortname: SharedString,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let description = mezon_i18n::t(locale, "clanSoundSetting.deleteModal.description")
+            .replace("{{shortname}}", shortname.as_ref());
+        let view = cx.new(|cx| ConfirmDeleteSoundModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            sound_id,
+            title: mezon_i18n::t(locale, "clanSoundSetting.deleteModal.title")
+                .to_string()
+                .into(),
+            description: description.into(),
+            cancel_label: mezon_i18n::t(locale, "clanSoundSetting.deleteModal.cancel")
+                .to_string()
+                .into(),
+            delete_label: mezon_i18n::t(locale, "clanSoundSetting.deleteModal.confirm")
+                .to_string()
+                .into(),
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
@@ -343,6 +532,7 @@ impl Shell {
     pub fn close_modal(&mut self, cx: &mut Context<Self>) {
         if self.modal.take().is_some() {
             self.command_palette_open = false;
+            self.modal_fullscreen = false;
             cx.notify();
         }
     }
@@ -354,6 +544,7 @@ impl Shell {
     /// The overlay (modal backdrop + toast stack), rendered on top by `RootView`.
     pub fn render_overlay(&self) -> impl IntoElement {
         let modal = self.modal.clone();
+        let fullscreen = self.modal_fullscreen;
         let has_toasts = !self.toasts.is_empty();
         let toasts: Vec<(SharedString, ToastKind, Option<f32>)> = self
             .toasts
@@ -367,7 +558,19 @@ impl Shell {
             .left_0()
             .size_full()
             .when_some(modal, |el, view| {
-                el.child(deferred(
+                el.child(deferred(if fullscreen {
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .key_context("modal_backdrop")
+                        .on_action(|_: &::menu::Cancel, _window, cx| {
+                            Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+                        })
+                        .child(div().occlude().size_full().child(view))
+                        .into_any_element()
+                } else {
                     div()
                         .absolute()
                         .top_0()
@@ -384,8 +587,9 @@ impl Shell {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| {
                             Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
                         })
-                        .child(div().occlude().child(view)),
-                ))
+                        .child(div().occlude().child(view))
+                        .into_any_element()
+                }))
             })
             .when(has_toasts, |el| {
                 el.child(deferred(

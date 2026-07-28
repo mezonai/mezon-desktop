@@ -3,7 +3,7 @@ mod encode;
 mod playback;
 mod stream;
 
-pub use decode::{DecodedPcm, decode_audio};
+pub use decode::{DecodedPcm, decode_audio, sniff_sound_mime};
 pub use encode::{VoiceEncoder, VoiceRecording};
 pub use playback::AudioPlayer;
 pub use stream::{PcmStream, spawn_stream_decode};

@@ -23,6 +23,7 @@ pub struct CreateCategoryModal {
     locale: String,
     name_input: Entity<InputState>,
     validation: Validation,
+    validation_visible: bool,
     creating: bool,
     _input_sub: Subscription,
     _create_task: Option<Task<()>>,
@@ -49,7 +50,7 @@ impl CreateCategoryModal {
         let name_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(placeholder)
-                .height(px(48.))
+                .height(px(40.))
         });
         let input_sub = cx.subscribe(&name_input, |this, _, event: &InputEvent, cx| match event {
             InputEvent::Change => this.revalidate(cx),
@@ -64,6 +65,7 @@ impl CreateCategoryModal {
             locale,
             name_input,
             validation: Validation::InvalidName,
+            validation_visible: false,
             creating: false,
             _input_sub: input_sub,
             _create_task: None,
@@ -72,6 +74,7 @@ impl CreateCategoryModal {
 
     fn revalidate(&mut self, cx: &mut Context<Self>) {
         let value = self.name_input.read(cx).value();
+        self.validation_visible = !value.is_empty();
         self.validation = match validate_category_name(value) {
             Ok(name)
                 if self
@@ -89,6 +92,8 @@ impl CreateCategoryModal {
 
     fn create_category(&mut self, cx: &mut Context<Self>) {
         if self.validation != Validation::Validated || self.creating {
+            self.validation_visible = true;
+            cx.notify();
             return;
         }
         let name = self.name_input.read(cx).value().to_string();
@@ -107,6 +112,7 @@ impl CreateCategoryModal {
             Err(CreateCategoryError::InvalidName) => {
                 let _ = this.update(cx, |this, cx| {
                     this.validation = Validation::InvalidName;
+                    this.validation_visible = true;
                     this.creating = false;
                     cx.notify();
                 });
@@ -114,6 +120,7 @@ impl CreateCategoryModal {
             Err(CreateCategoryError::DuplicateName) => {
                 let _ = this.update(cx, |this, cx| {
                     this.validation = Validation::DuplicateName;
+                    this.validation_visible = true;
                     this.creating = false;
                     cx.notify();
                 });
@@ -162,8 +169,9 @@ impl Render for CreateCategoryModal {
                 .into();
 
         let name_input = self.name_input.clone();
-        let show_invalid = self.validation == Validation::InvalidName;
-        let show_duplicate = self.validation == Validation::DuplicateName;
+        let show_invalid = self.validation_visible && self.validation == Validation::InvalidName;
+        let show_duplicate =
+            self.validation_visible && self.validation == Validation::DuplicateName;
         let can_create = self.validation == Validation::Validated && !self.creating;
 
         v_flex()
@@ -172,21 +180,21 @@ impl Render for CreateCategoryModal {
             .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
             }))
-            .w(px(600.))
-            .max_w(px(600.))
+            .w(px(455.))
+            .max_w(px(455.))
             .rounded(px(12.))
             .bg(theme_setting_primary)
             .shadow_lg()
-            .p(px(30.))
+            .p(px(20.))
             .child(
                 h_flex()
                     .w_full()
                     .justify_between()
                     .items_center()
-                    .mb(px(28.))
+                    .mb(px(20.))
                     .child(
                         div()
-                            .text_size(px(24.))
+                            .text_size(px(18.))
                             .font_weight(gpui::FontWeight::BOLD)
                             .text_color(theme.tokens.text_theme_primary)
                             .child(title),
@@ -218,7 +226,7 @@ impl Render for CreateCategoryModal {
                     .w_full()
                     .child(
                         div()
-                            .mb(px(12.))
+                            .mb(px(8.))
                             .text_sm()
                             .font_weight(gpui::FontWeight::BOLD)
                             .text_color(theme.tokens.text_theme_primary)
@@ -231,6 +239,7 @@ impl Render for CreateCategoryModal {
                             .h(px(18.))
                             .text_xs()
                             .italic()
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.status_dnd)
                             .when(show_invalid, |el| el.child(invalid_msg))
                             .when(show_duplicate, |el| el.child(duplicate_msg)),
@@ -241,7 +250,7 @@ impl Render for CreateCategoryModal {
                     .w_full()
                     .justify_end()
                     .gap_3()
-                    .mt(px(28.))
+                    .mt(px(20.))
                     .font_weight(FontWeight(900.))
                     .child(
                         Button::new("create-category-cancel")

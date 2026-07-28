@@ -1,7 +1,6 @@
 use gpui::{AnyElement, FontWeight, SharedString, div, prelude::*, px, rgb};
 use mezon_store::Message;
 
-use super::coming_soon_toast;
 use super::content::{SelectableSectionCursor, SelectableTextContext};
 use super::context::RowCtx;
 use crate::components::primitives::{Icon, IconName};
@@ -77,8 +76,8 @@ pub fn render_token_transaction_card(
                 ),
         );
 
-    let locale = SharedString::from(ctx.locale);
     let selection = ctx.selection.clone();
+    let history_locale = SharedString::from(ctx.locale);
     let footer = div()
         .p_3()
         .flex()
@@ -93,9 +92,9 @@ pub fn render_token_transaction_card(
                 .text_size(px(15.))
                 .text_color(rgb(BLUE_500))
                 .child("Mezon transfer")
-                .on_click(move |_, _, cx| {
+                .on_click(move |_, window, cx| {
                     if !selection.borrow().has_selection() {
-                        coming_soon_toast(&locale, cx);
+                        super::TransactionHistoryModal::open(history_locale.clone(), window, cx);
                     }
                 }),
         );

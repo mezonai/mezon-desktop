@@ -1,6 +1,5 @@
 use gpui::{App, FontWeight, div, prelude::*, px};
 
-use crate::app::shell::Shell;
 use crate::channel_app::{
     is_channel_app_open_id, launch_channel_app_from_store, reset_channel_app_from_store,
 };
@@ -30,10 +29,10 @@ pub fn render_channel_app_bar(
         mezon_i18n::t(locale, "common.launchApp")
     };
     let help_label = mezon_i18n::t(locale, "common.help");
-    let locale_owned = locale.to_string();
 
     let launch_target = target;
-    let help_locale = locale_owned.clone();
+    let icon_color = theme.tokens.text_theme_primary;
+    let icon_hover_color = theme.tokens.text_theme_primary_hover;
 
     div()
         .flex()
@@ -46,6 +45,7 @@ pub fn render_channel_app_bar(
         .child(
             div()
                 .id("channel-app-launch")
+                .group("channel-app-launch")
                 .flex_1()
                 .flex()
                 .flex_row()
@@ -56,8 +56,12 @@ pub fn render_channel_app_bar(
                 .px_2()
                 .rounded_md()
                 .cursor_pointer()
-                .bg(theme.bg_hover)
-                .hover(|s| s.bg(theme.bg_primary))
+                .bg(theme.tokens.bg_active_member_channel)
+                .text_color(theme.tokens.text_theme_primary)
+                .hover(|s| {
+                    s.bg(theme.tokens.bg_item_theme_hover)
+                        .text_color(theme.tokens.text_theme_primary_hover)
+                })
                 .on_click(move |_, _, cx| {
                     if app_open {
                         reset_channel_app_from_store(
@@ -84,19 +88,20 @@ pub fn render_channel_app_bar(
                 .child(
                     Icon::new(IconName::Joystick)
                         .size(px(24.))
-                        .text_color(theme.text_primary),
+                        .text_color(icon_color)
+                        .group_hover("channel-app-launch", |s| s.text_color(icon_hover_color)),
                 )
                 .child(
                     div()
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text_primary)
                         .child(launch_label),
                 ),
         )
         .child(
             div()
                 .id("channel-app-help")
+                .group("channel-app-help")
                 .flex_1()
                 .flex()
                 .flex_row()
@@ -107,23 +112,22 @@ pub fn render_channel_app_bar(
                 .px_2()
                 .rounded_md()
                 .cursor_pointer()
-                .bg(theme.bg_hover)
-                .hover(|s| s.bg(theme.bg_primary))
-                .on_click(move |_, window, cx| {
-                    Shell::global(cx).update(cx, |shell, cx| {
-                        shell.show_coming_soon(help_label, &help_locale, window, cx);
-                    });
+                .hover(|s| {
+                    s.bg(theme.tokens.bg_item_theme_hover)
+                        .text_color(theme.tokens.text_theme_primary_hover)
                 })
+                .bg(theme.tokens.bg_active_member_channel)
+                .text_color(theme.tokens.text_theme_primary)
                 .child(
                     Icon::new(IconName::AppHelpIcon)
                         .size(px(24.))
-                        .text_color(theme.text_primary),
+                        .text_color(icon_color)
+                        .group_hover("channel-app-help", |s| s.text_color(icon_hover_color)),
                 )
                 .child(
                     div()
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text_primary)
                         .child(help_label),
                 ),
         )

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -46,7 +47,11 @@ const EMOJI_REACTION_RATE_LIMIT: Duration = Duration::from_millis(150);
 const EMOJI_REACTION_TAIL: Duration = Duration::from_millis(500);
 const MAX_DISPLAYED_REACTIONS: usize = 20;
 const DEFAULT_NOISE_SUPPRESSION_LEVEL: u8 = 20;
+pub const MAX_SOUND_BYTES: u64 = 1024 * 1024;
+pub const SOUND_ALLOWED_EXTENSIONS: &[&str] = &["mp3", "wav", "mpeg"];
+const KICK_SUPPRESS_TIMEOUT: Duration = Duration::from_secs(5);
 static RAISE_HAND_SOUND: &[u8] = include_bytes!("../assets/audio/raising-hand.mp3");
+static JOIN_VOICE_SOUND: &[u8] = include_bytes!("../assets/audio/joincallsound.mp3");
 
 fn parse_raise_token(token: &str) -> Option<bool> {
     if token.starts_with("raising-up:") {
@@ -100,6 +105,7 @@ pub enum VoiceCallStatus {
 pub enum VoiceModerationError {
     MuteFailed,
     KickFailed,
+    AgentFailed,
 }
 
 #[derive(Clone, Copy)]
@@ -155,7 +161,9 @@ pub struct VoiceStore {
     room_name: String,
     participant_menu: Option<(String, gpui::Point<gpui::Pixels>)>,
     pending_kick: Option<(String, String)>,
+    pending_removals: HashMap<String, Instant>,
     moderation_error: Option<VoiceModerationError>,
+    agent_pending: bool,
     participants: Vec<VoiceParticipant>,
     join_ranks: Vec<String>,
     speak_ranks: HashMap<String, u64>,
@@ -164,6 +172,9 @@ pub struct VoiceStore {
     raised_hand_timers: HashMap<String, Task<()>>,
     raising_hand_player: Option<AudioPlayer>,
     raising_hand_sound_loading: bool,
+    join_voice_player: Option<AudioPlayer>,
+    join_voice_sound_loading: bool,
+    join_sound_baseline_set: bool,
     last_reaction_send: Option<Instant>,
     active_sounds: HashMap<String, ActiveSound>,
     sound_throttle: HashMap<String, Instant>,
@@ -205,6 +216,7 @@ struct SoundPreview {
     _player: Option<AudioPlayer>,
     _end_timer: Option<Task<()>>,
     _fetch_task: Option<Task<()>>,
+    _tick_task: Option<Task<()>>,
 }
 
 pub struct DisplayedReaction {
@@ -293,7 +305,9 @@ impl VoiceStore {
             room_name: String::new(),
             participant_menu: None,
             pending_kick: None,
+            pending_removals: HashMap::new(),
             moderation_error: None,
+            agent_pending: false,
             participants: Vec::new(),
             join_ranks: Vec::new(),
             speak_ranks: HashMap::new(),
@@ -302,6 +316,9 @@ impl VoiceStore {
             raised_hand_timers: HashMap::new(),
             raising_hand_player: None,
             raising_hand_sound_loading: false,
+            join_voice_player: None,
+            join_voice_sound_loading: false,
+            join_sound_baseline_set: false,
             last_reaction_send: None,
             active_sounds: HashMap::new(),
             sound_throttle: HashMap::new(),
@@ -786,6 +803,37 @@ impl VoiceStore {
         .detach();
     }
 
+    fn play_join_sound(&mut self, cx: &mut Context<Self>) {
+        if let Some(player) = &self.join_voice_player {
+            player.play();
+            return;
+        }
+        if self.join_voice_sound_loading {
+            return;
+        }
+        self.join_voice_sound_loading = true;
+        cx.spawn(async move |this, cx| {
+            let decoded = cx
+                .background_executor()
+                .spawn(async move { mezon_audio::decode_audio(JOIN_VOICE_SOUND.to_vec()) })
+                .await;
+            this.update(cx, |this, _| {
+                this.join_voice_sound_loading = false;
+                let Ok(pcm) = decoded else {
+                    return;
+                };
+                let Ok(player) = AudioPlayer::new() else {
+                    return;
+                };
+                player.set_data(pcm);
+                player.play();
+                this.join_voice_player = Some(player);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub fn is_sound_active(&self, user_id: &str) -> bool {
         self.active_sounds.contains_key(user_id)
     }
@@ -1034,6 +1082,19 @@ impl VoiceStore {
         self.sound_preview.as_ref().map(|p| p.url.as_str())
     }
 
+    pub fn cached_sound_duration(&self, url: &str) -> Option<f64> {
+        self.sound_cache
+            .iter()
+            .find(|(u, _)| u == url)
+            .map(|(_, pcm)| pcm.duration_secs())
+    }
+
+    pub fn sound_preview_timeline(&self, url: &str) -> Option<(f64, f64)> {
+        let preview = self.sound_preview.as_ref().filter(|p| p.url == url)?;
+        let player = preview._player.as_ref()?;
+        Some((player.position_secs(), player.duration_secs()))
+    }
+
     pub fn stop_sound_preview(&mut self, cx: &mut Context<Self>) {
         if self.sound_preview.take().is_some() {
             cx.notify();
@@ -1056,6 +1117,7 @@ impl VoiceStore {
                 _player: None,
                 _end_timer: None,
                 _fetch_task: None,
+                _tick_task: None,
             });
             self.start_sound_preview(&url, &pcm, cx);
             cx.notify();
@@ -1099,6 +1161,7 @@ impl VoiceStore {
             _player: None,
             _end_timer: None,
             _fetch_task: Some(fetch_task),
+            _tick_task: None,
         });
         cx.notify();
     }
@@ -1114,15 +1177,42 @@ impl VoiceStore {
             player.play();
         });
         let key = url.to_string();
-        let end_timer = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(delay).await;
-            this.update(cx, |this, cx| this.clear_sound_preview(&key, cx))
-                .ok();
+        let end_timer = cx.spawn({
+            let key = key.clone();
+            async move |this, cx| {
+                cx.background_executor().timer(delay).await;
+                this.update(cx, |this, cx| this.clear_sound_preview(&key, cx))
+                    .ok();
+            }
         });
         if let Some(preview) = self.sound_preview.as_mut().filter(|p| p.url == url) {
             preview._player = player;
             preview._end_timer = Some(end_timer);
+            preview._tick_task = Some(Self::spawn_sound_preview_tick(key, cx));
         }
+    }
+
+    fn spawn_sound_preview_tick(url: String, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(250))
+                    .await;
+                let still_previewing = this
+                    .update(cx, |this, cx| {
+                        let active = this.previewing_sound() == Some(url.as_str());
+                        if active {
+                            cx.notify();
+                        }
+                        active
+                    })
+                    .ok()
+                    .unwrap_or(false);
+                if !still_previewing {
+                    break;
+                }
+            }
+        })
     }
 
     fn clear_sound_preview(&mut self, url: &str, cx: &mut Context<Self>) {
@@ -1315,8 +1405,52 @@ impl VoiceStore {
         let Some((identity, _)) = self.pending_kick.take() else {
             return;
         };
+        self.pending_removals
+            .insert(identity.clone(), Instant::now());
+        self.participants.retain(|p| p.identity != identity);
         cx.notify();
         self.moderate_participant(identity, ModerationAction::Kick, cx);
+    }
+
+    pub fn agent_active(&self) -> bool {
+        self.participants.iter().any(|p| p.is_agent)
+    }
+
+    pub fn toggle_agent(&mut self, cx: &mut Context<Self>) {
+        if self.agent_pending {
+            return;
+        }
+        let Some((channel_id, _clan_id)) = self.connection.connected_channel() else {
+            return;
+        };
+        let Ok(channel_id) = channel_id.parse::<i64>() else {
+            return;
+        };
+        if self.room_name.is_empty() {
+            return;
+        }
+        let room_name = self.room_name.clone();
+        let on_agent = self.agent_active();
+        let api = self.api.clone();
+        self.agent_pending = true;
+        cx.spawn(async move |this, cx| {
+            let result = if on_agent {
+                api.disconnect_agent(channel_id, &room_name).await
+            } else {
+                api.add_agent_to_channel(channel_id, &room_name).await
+            };
+            if let Err(e) = &result {
+                tracing::warn!("toggle agent failed: {e:#}");
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.agent_pending = false;
+                if result.is_err() {
+                    this.moderation_error = Some(VoiceModerationError::AgentFailed);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn moderate_participant(
@@ -1349,6 +1483,9 @@ impl VoiceStore {
             if let Err(e) = result {
                 tracing::warn!("participant moderation failed: {e:#}");
                 let _ = this.update(cx, |this, cx| {
+                    if matches!(action, ModerationAction::Kick) {
+                        this.pending_removals.remove(&identity);
+                    }
                     this.moderation_error = Some(action.error());
                     cx.notify();
                 });
@@ -1576,6 +1713,7 @@ impl VoiceStore {
                         channel_id: channel_id.clone(),
                         clan_id: clan_id.clone(),
                     };
+                    self.play_join_sound(cx);
                 }
                 self.call_status = VoiceCallStatus::Stable;
             }
@@ -1595,12 +1733,33 @@ impl VoiceStore {
                     self.call_status = VoiceCallStatus::Stable;
                 }
             }
-            VoiceEvent::Participants(list) => {
+            VoiceEvent::Participants(mut list) => {
+                if !self.pending_removals.is_empty() {
+                    let now = Instant::now();
+                    self.pending_removals.retain(|identity, issued_at| {
+                        list.iter().any(|p| &p.identity == identity)
+                            && now.duration_since(*issued_at) < KICK_SUPPRESS_TIMEOUT
+                    });
+                    list.retain(|p| !self.pending_removals.contains_key(&p.identity));
+                }
                 if self.participants == list {
                     return;
                 }
+                let remote_joined = self.join_sound_baseline_set
+                    && list.iter().any(|p| {
+                        !p.is_local
+                            && !p.is_agent
+                            && !self
+                                .participants
+                                .iter()
+                                .any(|old| old.identity == p.identity)
+                    });
+                self.join_sound_baseline_set = true;
                 self.track_visual_ranks(&list);
                 self.participants = list;
+                if remote_joined {
+                    self.play_join_sound(cx);
+                }
                 if let Some(local) = self.participants.iter().find(|p| p.is_local) {
                     self.mic_enabled = !local.muted;
                     self.camera_enabled = local.camera.is_some();
@@ -1837,7 +1996,9 @@ impl VoiceStore {
         self.device_submenu = None;
         self.participant_menu = None;
         self.pending_kick = None;
+        self.pending_removals.clear();
         self.moderation_error = None;
+        self.agent_pending = false;
         self.participants.clear();
         self.join_ranks.clear();
         self.speak_ranks.clear();
@@ -1849,6 +2010,9 @@ impl VoiceStore {
         self.sound_preview = None;
         self.raising_hand_player = None;
         self.raising_hand_sound_loading = false;
+        self.join_voice_player = None;
+        self.join_voice_sound_loading = false;
+        self.join_sound_baseline_set = false;
         self.displayed_reactions.clear();
         self.last_emoji_at = None;
         self.meet_token_prefetching = None;
@@ -1857,14 +2021,122 @@ impl VoiceStore {
     }
 }
 
+pub fn validate_sound_file(path: &Path, max_bytes: u64) -> Result<(), String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !SOUND_ALLOWED_EXTENSIONS.contains(&ext.as_str()) {
+        return Err("unsupported_type".into());
+    }
+    let len = std::fs::metadata(path)
+        .map_err(|_| "invalid_file".to_string())?
+        .len();
+    if len == 0 {
+        return Err("empty".into());
+    }
+    if len > max_bytes {
+        return Err("size_limit".into());
+    }
+    let data = std::fs::read(path).map_err(|_| "invalid_file".to_string())?;
+    let mime =
+        mezon_audio::sniff_sound_mime(&data).ok_or_else(|| "unsupported_type".to_string())?;
+    let ext_matches = match ext.as_str() {
+        "wav" => mime == "audio/wav",
+        "mp3" | "mpeg" => mime == "audio/mpeg",
+        _ => false,
+    };
+    if !ext_matches {
+        return Err("unsupported_type".into());
+    }
+    Ok(())
+}
+
+pub async fn upload_sound_file(
+    api: &AppApi,
+    path: &Path,
+    max_bytes: u64,
+) -> Result<(i64, String), String> {
+    let path_buf = path.to_path_buf();
+    let max = max_bytes;
+    let data = mezon_client::transport_runtime::handle()
+        .spawn_blocking(move || {
+            validate_sound_file(&path_buf, max)?;
+            std::fs::read(&path_buf).map_err(|_| "invalid_file".to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("mp3")
+        .to_ascii_lowercase();
+    let filetype = match ext.as_str() {
+        "wav" => "audio/wav",
+        "mp3" | "mpeg" => "audio/mpeg",
+        _ => return Err("unsupported_type".into()),
+    };
+    let id = crate::emoji::generate_snowflake_id();
+    api.upload_emoticon("sounds", id, &ext, filetype, data)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
+    use super::parse_raise_token;
+    use super::{MAX_SOUND_BYTES, validate_sound_file};
     use gpui::RenderImage;
     use parking_lot::Mutex;
 
-    use super::{ScreenAutoFocus, parse_raise_token, screen_auto_focus_transition, screen_tile_id};
+    #[test]
+    fn validate_sound_file_rejects_mismatched_extension() {
+        let dir = std::env::temp_dir().join(format!("mezon-sound-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let wav_path = dir.join("fake.mp3");
+        let mut wav = vec![0u8; 44];
+        wav[0..4].copy_from_slice(b"RIFF");
+        wav[8..12].copy_from_slice(b"WAVE");
+        std::fs::write(&wav_path, wav).unwrap();
+        assert_eq!(
+            validate_sound_file(&wav_path, MAX_SOUND_BYTES).unwrap_err(),
+            "unsupported_type"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_sound_file_accepts_wav() {
+        let dir = std::env::temp_dir().join(format!("mezon-sound-wav-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let wav_path = dir.join("tone.wav");
+        let mut wav = vec![0u8; 44];
+        wav[0..4].copy_from_slice(b"RIFF");
+        wav[8..12].copy_from_slice(b"WAVE");
+        std::fs::write(&wav_path, wav).unwrap();
+        assert!(validate_sound_file(&wav_path, MAX_SOUND_BYTES).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_sound_file_accepts_mp3_with_id3_tag() {
+        let dir = std::env::temp_dir().join(format!("mezon-sound-id3-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mp3_path = dir.join("tagged.mp3");
+        let mut bytes = vec![0u8; 128];
+        bytes[0..3].copy_from_slice(b"ID3");
+        bytes[6..10].copy_from_slice(&[0, 0, 0, 100]);
+        bytes[110..112].copy_from_slice(&[0xFF, 0xFB]);
+        std::fs::write(&mp3_path, bytes).unwrap();
+        assert!(validate_sound_file(&mp3_path, MAX_SOUND_BYTES).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    use super::{ScreenAutoFocus, screen_auto_focus_transition, screen_tile_id};
     use crate::{NetworkQuality, VoiceParticipant};
 
     fn voice_participant(identity: &str, screenshare: Option<u64>) -> VoiceParticipant {

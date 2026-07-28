@@ -67,6 +67,7 @@ pub struct RowCtx<'a> {
     pub context_menu_message: Option<MessageId>,
     pub avatar_cache: Entity<LruImageCache>,
     pub large_avatar_cache: Entity<LruImageCache>,
+    pub icon_cache: Entity<LruImageCache>,
     pub unread_boundary_id: Option<MessageId>,
     pub highlight_id: Option<MessageId>,
     pub reply_highlight_id: Option<MessageId>,
@@ -114,9 +115,6 @@ pub struct RowMemo {
     pub selection_layouts: HashMap<MessageId, super::content::SelectableMessageLayoutCacheEntry>,
     pub selection_text_pieces:
         HashMap<SharedString, Rc<[super::content::CachedSelectableTextPiece]>>,
-    /// message -> scroll handle for its poll answer list, kept across frames so
-    /// the wheel handler can tell whether the inner list still has room to move
-    /// and only then swallow the event (browser-style scroll chaining).
     pub poll_scrolls: HashMap<MessageId, gpui::ScrollHandle>,
 }
 

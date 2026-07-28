@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, Context, Entity, FontWeight, ListAlignment, ListOffset, ListState, MouseButton,
-    Render, Subscription, Window, deferred, div, img, list, prelude::*, px,
+    Render, Subscription, Window, deferred, div, img, list, prelude::*, px, size,
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelSetting, ChannelSettingsStore, ChannelType, ClanId,
@@ -20,6 +20,7 @@ use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, I
 use crate::theme::ActiveTheme;
 
 const PAGE_SIZES: [usize; 3] = [10, 50, 100];
+const CHANNEL_ROW_HEIGHT: f32 = 60.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SortField {
@@ -102,7 +103,6 @@ impl ClanChannelsPage {
             rows_dirty: true,
             visible_row_keys: Vec::new(),
             list_state: ListState::new(0, ListAlignment::Top, px(60.))
-                .measure_all()
                 .smooth_line_scroll()
                 .suppress_hover_while_scrolling(),
         }
@@ -238,6 +238,11 @@ impl ClanChannelsPage {
         cx: &Context<Self>,
     ) -> AnyElement {
         let active = self.sort_field == Some(field);
+        let direction = if active && !self.sort_descending {
+            std::f32::consts::PI
+        } else {
+            0.
+        };
         div()
             .id(format!("channel-sort-{field:?}"))
             .flex_basis(px(0.))
@@ -254,16 +259,14 @@ impl ClanChannelsPage {
             })
             .child(label)
             .child(
-                Icon::new(IconName::FiltersIcon)
+                Icon::new(IconName::ArrowDown)
                     .size(px(13.))
                     .text_color(if active {
                         cx.theme().text_primary
                     } else {
                         cx.theme().text_secondary
                     })
-                    .with_transformation(gpui::Transformation::rotate(gpui::radians(
-                        std::f32::consts::FRAC_PI_2,
-                    ))),
+                    .with_transformation(gpui::Transformation::rotate(gpui::radians(direction))),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select_sort(field);
@@ -560,54 +563,60 @@ impl ClanChannelsPage {
 
     fn page_size_control(&self, locale: &str, cx: &Context<Self>) -> AnyElement {
         let open = self.page_size_picker_open;
-        let mut control = div()
-            .id("channel-page-size-control")
-            .relative()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(tr(locale, "channelSetting.table.pagination.show"))
-            .child(
-                div()
-                    .id("channel-page-size")
-                    .cursor_pointer()
-                    .px_2()
-                    .py_1()
-                    .rounded(px(4.))
-                    .hover(|style| style.bg(cx.theme().bg_hover))
-                    .child(self.page_size.to_string())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.page_size_picker_open = !open;
-                        cx.notify();
-                    })),
-            )
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                if this.page_size_picker_open {
-                    this.page_size_picker_open = false;
+        let chevron_angle = if open { std::f32::consts::PI } else { 0. };
+        let mut control = div().relative().w(px(68.)).child(
+            div()
+                .id("channel-page-size")
+                .w_full()
+                .h(px(32.))
+                .px_2()
+                .flex()
+                .items_center()
+                .justify_between()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(cx.theme().border)
+                .cursor_pointer()
+                .hover(|style| style.bg(cx.theme().bg_hover))
+                .child(self.page_size.to_string())
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(14.))
+                        .text_color(cx.theme().text_secondary)
+                        .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                            chevron_angle,
+                        ))),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.page_size_picker_open = !open;
                     cx.notify();
-                }
-            }));
+                })),
+        );
         if open {
             let mut menu = div()
                 .absolute()
-                .bottom(px(34.))
-                .left(px(38.))
-                .w(px(64.))
+                .bottom(px(36.))
+                .left_0()
+                .w(px(68.))
                 .p_1()
-                .rounded(px(5.))
+                .rounded(px(6.))
                 .bg(cx.theme().bg_floating)
                 .border_1()
                 .border_color(cx.theme().border)
                 .shadow_lg()
                 .occlude();
             for size in PAGE_SIZES {
+                let selected = size == self.page_size;
                 menu = menu.child(
                     div()
                         .id(format!("channel-page-size-{size}"))
-                        .cursor_pointer()
+                        .h(px(28.))
                         .px_2()
-                        .py_1()
-                        .rounded(px(3.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .when(selected, |style| style.bg(cx.theme().bg_hover))
                         .hover(|style| style.bg(cx.theme().bg_hover))
                         .child(size.to_string())
                         .on_mouse_down(
@@ -624,7 +633,20 @@ impl ClanChannelsPage {
             }
             control = control.child(deferred(menu));
         }
-        control.into_any_element()
+        div()
+            .id("channel-page-size-control")
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(tr(locale, "channelSetting.table.pagination.show"))
+            .child(control)
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                if this.page_size_picker_open {
+                    this.page_size_picker_open = false;
+                    cx.notify();
+                }
+            }))
+            .into_any_element()
     }
 
     fn pagination(&self, pages: usize, cx: &Context<Self>) -> AnyElement {
@@ -710,7 +732,11 @@ impl Render for ClanChannelsPage {
         let visible_row_keys = visible.iter().map(VisibleRow::key).collect::<Vec<_>>();
         if self.visible_row_keys != visible_row_keys {
             let (old_range, new_count) = changed_range(&self.visible_row_keys, &visible_row_keys);
-            self.list_state.splice(old_range, new_count);
+            self.list_state.splice_with_size_hint(
+                old_range,
+                new_count,
+                size(px(0.), px(CHANNEL_ROW_HEIGHT)),
+            );
             self.visible_row_keys = visible_row_keys;
         }
         let entity = cx.entity();

@@ -4,8 +4,8 @@ use chrono::NaiveDate;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, SharedString, Task};
 use mezon_client::AppApi;
 use mezon_client::transport::{
-    ApiMessageContent, ContentToken, detect_markdown, enrich_content_tokens,
-    markdown_content_tokens,
+    ApiMessageContent, detect_markdown, enrich_content_tokens, extract_message_text_content,
+    markdown_content_tokens, parse_message_content_tokens,
 };
 use mezon_client::{
     build_clan_channel_content_search, build_direct_content_search, parse_search_attachment_field,
@@ -480,7 +480,7 @@ fn parse_search_hit_content(
     cfg: Option<&AppConfig>,
 ) -> ParsedSearchContent {
     let trimmed = content_raw.trim();
-    let mut tokens = parse_search_content_tokens(trimmed);
+    let mut tokens = parse_message_content_tokens(trimmed);
     if tokens.t.is_empty()
         && let Some(text) = extract_message_text_content(trimmed)
     {
@@ -507,64 +507,6 @@ fn parse_search_hit_content(
         ogp,
         embeds,
     }
-}
-
-fn parse_search_content_tokens(trimmed: &str) -> ApiMessageContent {
-    if trimmed.is_empty() {
-        return ApiMessageContent::default();
-    }
-    if let Ok(tokens) = serde_json::from_str::<ApiMessageContent>(trimmed) {
-        return tokens;
-    }
-    if let Ok(serde_json::Value::String(inner)) = serde_json::from_str::<serde_json::Value>(trimmed)
-        && let Ok(tokens) = serde_json::from_str::<ApiMessageContent>(&inner)
-    {
-        return tokens;
-    }
-    recover_search_content_tokens(trimmed)
-}
-
-fn recover_search_content_tokens(trimmed: &str) -> ApiMessageContent {
-    let mut fallback = ApiMessageContent::default();
-    let root = match serde_json::from_str::<serde_json::Value>(trimmed) {
-        Ok(serde_json::Value::String(inner)) => {
-            serde_json::from_str::<serde_json::Value>(&inner).ok()
-        }
-        Ok(value) => Some(value),
-        Err(_) => None,
-    };
-    if let Some(serde_json::Value::Object(map)) = root {
-        if let Some(text) = map.get("t").and_then(|v| match v {
-            serde_json::Value::String(s) => Some(s.clone()),
-            serde_json::Value::Number(n) => Some(n.to_string()),
-            _ => None,
-        }) {
-            fallback.t = text;
-        }
-        fallback.mentions = recover_content_token_array(map.get("mentions"));
-        fallback.mk = recover_content_token_array(map.get("mk"));
-        fallback.lk = recover_content_token_array(map.get("lk"));
-        fallback.vk = recover_content_token_array(map.get("vk"));
-        fallback.lky = recover_content_token_array(map.get("lky"));
-    }
-    if fallback.t.is_empty() {
-        if let Some(text) = extract_message_text_content(trimmed) {
-            fallback.t = text;
-        } else if !trimmed.starts_with('{') && !trimmed.starts_with('"') {
-            fallback.t = trimmed.to_string();
-        }
-    }
-    fallback
-}
-
-fn recover_content_token_array(value: Option<&serde_json::Value>) -> Vec<ContentToken> {
-    let Some(serde_json::Value::Array(items)) = value else {
-        return Vec::new();
-    };
-    items
-        .iter()
-        .filter_map(|item| serde_json::from_value::<ContentToken>(item.clone()).ok())
-        .collect()
 }
 
 fn merge_detected_markdown_links(tokens: &mut ApiMessageContent) {
@@ -696,56 +638,6 @@ fn content_preview_from_raw(raw: &str) -> String {
         return String::new();
     }
     crate::message::reply_preview_line(trimmed)
-}
-
-fn extract_message_text_content(trimmed: &str) -> Option<String> {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        return value
-            .get("t")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-    }
-    extract_json_t_field_loose(trimmed)
-}
-
-fn extract_json_t_field_loose(raw: &str) -> Option<String> {
-    const MARKERS: &[&str] = &[r#"{"t":""#, r#"{"t": ""#, r#"{"t" : ""#];
-    for marker in MARKERS {
-        if let Some(pos) = raw.find(marker) {
-            let text = parse_json_string_tail(&raw[pos + marker.len()..]);
-            if !text.is_empty() {
-                return Some(text);
-            }
-        }
-    }
-    None
-}
-
-fn parse_json_string_tail(rest: &str) -> String {
-    let mut out = String::new();
-    let mut chars = rest.chars();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\\' => {
-                if let Some(next) = chars.next() {
-                    match next {
-                        'n' => out.push('\n'),
-                        't' => out.push('\t'),
-                        'r' => out.push('\r'),
-                        '"' => out.push('"'),
-                        '\\' => out.push('\\'),
-                        other => {
-                            out.push('\\');
-                            out.push(other);
-                        }
-                    }
-                }
-            }
-            '"' => break,
-            other => out.push(other),
-        }
-    }
-    out
 }
 
 #[cfg(test)]

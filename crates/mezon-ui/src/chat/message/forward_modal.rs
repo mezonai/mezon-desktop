@@ -1,13 +1,15 @@
 use std::collections::HashSet;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, SharedString,
-    Subscription, UniformListScrollHandle, Window, div, img, prelude::*, px, uniform_list,
+    AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, Render,
+    SharedString, Subscription, UniformListScrollHandle, Window, div, img, prelude::*, px,
+    uniform_list,
 };
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelType, ClanId, ClanList, DirectKind,
     DirectMessageStore, ForwardTarget, FriendState, FriendStore, MAX_FORWARD_MESSAGE_LENGTH,
-    Message, MessageId, MessagesEvent, MessagesStore, UserId,
+    Message, MessageId, MessagesEvent, MessagesStore, ProfileContext, ShareContactSubject, UserId,
+    UsersByUserStore, resolve_avatar_url, resolve_user_profile,
 };
 
 use crate::app::shell::Shell;
@@ -38,6 +40,7 @@ impl TargetKey {
     }
 }
 
+#[derive(Clone)]
 enum OptionKind {
     Channel {
         clan_name: SharedString,
@@ -103,6 +106,7 @@ struct RowStyle {
     icon_active: gpui::Rgba,
 }
 
+#[derive(Clone)]
 struct ForwardOption {
     key: TargetKey,
     label: SharedString,
@@ -1176,6 +1180,652 @@ fn render_option_row(
                 Checkbox::new(("forward-check", element_id))
                     .checked(selected)
                     .on_click(move |_checked, _window, cx| {
+                        ent.update(cx, |this, cx| {
+                            this.toggle(key);
+                            cx.notify();
+                        });
+                    }),
+            ),
+        )
+        .into_any_element()
+}
+
+fn share_option_excluded(option: &ForwardOption, exclude: UserId, cx: &App) -> bool {
+    match &option.target {
+        ForwardTarget::Friend { user_id, .. } => *user_id == exclude,
+        ForwardTarget::Channel { channel_id, .. } => DirectMessageStore::global(cx)
+            .read(cx)
+            .channels()
+            .iter()
+            .find(|dm| dm.id == *channel_id)
+            .is_some_and(|dm| {
+                matches!(dm.kind, DirectKind::Dm) && dm.peer_user_id == Some(exclude)
+            }),
+    }
+}
+
+fn build_share_options(cx: &App, exclude: UserId) -> Vec<ForwardOption> {
+    build_options(cx)
+        .into_iter()
+        .filter(|opt| !share_option_excluded(opt, exclude, cx))
+        .collect()
+}
+
+pub fn share_contact_subject(
+    user_id: UserId,
+    fallback_name: &str,
+    context: Option<ProfileContext>,
+    cx: &App,
+) -> ShareContactSubject {
+    if let Some(ctx) = context
+        && let Some(profile) = resolve_user_profile(user_id, ctx, cx)
+    {
+        let avatar = if profile.avatar_url.is_empty() {
+            resolve_avatar_url(user_id, ctx, cx).unwrap_or_default()
+        } else {
+            profile.avatar_url
+        };
+        let mut username = profile.username;
+        if username.is_empty() {
+            username = friend_or_user_username(user_id, cx);
+        }
+        if !username.is_empty() {
+            return ShareContactSubject {
+                user_id,
+                username,
+                display_name: profile.display_name,
+                avatar,
+            };
+        }
+    }
+    if let Some(friend) = FriendStore::global(cx).read(cx).friend(user_id) {
+        let display_name = if friend.display_name.is_empty() {
+            friend.username.clone()
+        } else {
+            friend.display_name.clone()
+        };
+        return ShareContactSubject {
+            user_id,
+            username: friend.username.clone(),
+            display_name,
+            avatar: friend.avatar_url.clone(),
+        };
+    }
+    if let Some(user) = UsersByUserStore::global(cx).read(cx).user(user_id) {
+        let display_name = if user.display_name.is_empty() {
+            user.username.clone()
+        } else {
+            user.display_name.clone()
+        };
+        return ShareContactSubject {
+            user_id,
+            username: user.username.clone(),
+            display_name,
+            avatar: user.avatar_url.clone(),
+        };
+    }
+    ShareContactSubject {
+        user_id,
+        username: String::new(),
+        display_name: fallback_name.to_string(),
+        avatar: String::new(),
+    }
+}
+
+fn friend_or_user_username(user_id: UserId, cx: &App) -> String {
+    if let Some(friend) = FriendStore::global(cx).read(cx).friend(user_id) {
+        return friend.username.clone();
+    }
+    UsersByUserStore::global(cx)
+        .read(cx)
+        .user(user_id)
+        .map(|user| user.username.clone())
+        .unwrap_or_default()
+}
+
+pub struct ShareContactModal {
+    contact: ShareContactSubject,
+    fingerprint: u64,
+    focus_handle: FocusHandle,
+    locale: SharedString,
+    options: Vec<ForwardOption>,
+    filtered: Vec<usize>,
+    selected: HashSet<TargetKey>,
+    search_input: Entity<InputState>,
+    submitting: bool,
+    scroll: UniformListScrollHandle,
+    image_cache: Entity<LruImageCache>,
+    _search_sub: Subscription,
+    _channel_obs: Subscription,
+    _dm_obs: Subscription,
+    _friend_obs: Subscription,
+    _clan_obs: Subscription,
+    _messages_sub: Subscription,
+}
+
+impl Focusable for ShareContactModal {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl ShareContactModal {
+    pub fn open(
+        contact: ShareContactSubject,
+        locale: SharedString,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        DirectMessageStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
+        ChannelList::global(cx).update(cx, |store, cx| store.ensure_user_channels_loaded(cx));
+        FriendStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
+
+        let search_ph = mezon_i18n::t(&locale, "shareContact.modal.searchPlaceholder").to_string();
+        let exclude = contact.user_id;
+        let view = cx.new(|cx| {
+            let search_input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(search_ph.clone())
+                    .height(px(40.))
+            });
+            let search_sub = cx.subscribe(
+                &search_input,
+                |this: &mut Self, _input, event: &InputEvent, cx| match event {
+                    InputEvent::Change => {
+                        this.recompute_filtered(cx);
+                        cx.notify();
+                    }
+                    InputEvent::PressEnter => this.send(cx),
+                },
+            );
+            let channel_obs = cx.observe(&ChannelList::global(cx), |this: &mut Self, _, cx| {
+                this.refresh_options(cx);
+            });
+            let dm_obs = cx.observe(&DirectMessageStore::global(cx), |this: &mut Self, _, cx| {
+                this.refresh_options(cx);
+            });
+            let friend_obs = cx.observe(&FriendStore::global(cx), |this: &mut Self, _, cx| {
+                this.refresh_options(cx);
+            });
+            let clan_obs = cx.observe(&ClanList::global(cx), |this: &mut Self, _, cx| {
+                this.refresh_options(cx);
+            });
+            let messages_sub = cx.subscribe(
+                &MessagesStore::global(cx),
+                |this: &mut Self, _, event: &MessagesEvent, cx| {
+                    if let MessagesEvent::ShareContactFinished { sent, failed } = event {
+                        this.finish(*sent, failed.clone(), cx);
+                    }
+                },
+            );
+            let image_cache = crate::image_cache::shared_avatar_cache(cx);
+            let options = build_share_options(cx, exclude);
+            let filtered = (0..options.len().min(MAX_RESULTS)).collect();
+            Self {
+                contact,
+                fingerprint: source_fingerprint(cx),
+                focus_handle: cx.focus_handle(),
+                locale,
+                options,
+                filtered,
+                selected: HashSet::new(),
+                search_input,
+                submitting: false,
+                scroll: UniformListScrollHandle::new(),
+                image_cache,
+                _search_sub: search_sub,
+                _channel_obs: channel_obs,
+                _dm_obs: dm_obs,
+                _friend_obs: friend_obs,
+                _clan_obs: clan_obs,
+                _messages_sub: messages_sub,
+            }
+        });
+        let focus_handle = view.read(cx).search_input.read(cx).focus_handle(cx);
+        window.focus(&focus_handle, cx);
+        Shell::global(cx).update(cx, |shell, cx| shell.show_modal(view.into(), cx));
+    }
+
+    fn close(cx: &mut App) {
+        Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+    }
+
+    fn finish(&mut self, sent: usize, failed: Vec<SharedString>, cx: &mut Context<Self>) {
+        if !self.submitting {
+            return;
+        }
+        self.submitting = false;
+        let locale = self.locale.clone();
+        cx.defer(move |cx| {
+            Shell::global(cx).update(cx, |shell, cx| {
+                if failed.is_empty() && sent > 0 {
+                    shell.success(
+                        mezon_i18n::t(&locale, "shareContact.contactSharedSuccess"),
+                        cx,
+                    );
+                } else {
+                    shell.error(
+                        mezon_i18n::t(&locale, "shareContact.contactSharedError"),
+                        cx,
+                    );
+                }
+                shell.close_modal(cx);
+            });
+        });
+    }
+
+    fn refresh_options(&mut self, cx: &mut Context<Self>) {
+        let fingerprint = source_fingerprint(cx);
+        if fingerprint == self.fingerprint {
+            return;
+        }
+        self.fingerprint = fingerprint;
+        let exclude = self.contact.user_id;
+        self.options = build_share_options(cx, exclude);
+        self.selected
+            .retain(|key| self.options.iter().any(|o| o.key == *key));
+        self.recompute_filtered(cx);
+        cx.notify();
+    }
+
+    fn recompute_filtered(&mut self, cx: &App) {
+        let value = self.search_input.read(cx).value();
+        let needle = value.trim().to_lowercase();
+        let options = &self.options;
+        let mut hits: Vec<usize> = options
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| {
+                needle.is_empty()
+                    || o.filter_key.contains(&needle)
+                    || o.label.to_lowercase().contains(&needle)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        hits.sort_by_key(|&i| options[i].sort_key);
+        hits.truncate(MAX_RESULTS);
+        self.filtered = hits;
+    }
+
+    fn toggle(&mut self, key: TargetKey) {
+        if self.selected.contains(&key) {
+            self.selected.remove(&key);
+        } else {
+            self.selected.insert(key);
+        }
+    }
+
+    fn send(&mut self, cx: &mut Context<Self>) {
+        if self.submitting || self.selected.is_empty() {
+            return;
+        }
+        let targets: Vec<ForwardTarget> = self
+            .options
+            .iter()
+            .filter(|o| self.selected.contains(&o.key))
+            .map(|o| o.target.clone())
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        let contact = self.contact.clone();
+        let started = MessagesStore::global(cx)
+            .update(cx, |store, cx| store.share_contact(contact, targets, cx));
+        if !started {
+            let locale = self.locale.clone();
+            cx.defer(move |cx| {
+                Shell::global(cx).update(cx, |shell, cx| {
+                    shell.error(
+                        mezon_i18n::t(&locale, "shareContact.contactSharedError"),
+                        cx,
+                    );
+                });
+            });
+            return;
+        }
+        self.submitting = true;
+        cx.notify();
+    }
+}
+
+impl Render for ShareContactModal {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let locale = self.locale.clone();
+        let send_entity = cx.entity().clone();
+        let send_disabled = self.selected.is_empty() || self.submitting;
+        let list_entity = cx.entity();
+
+        let search_focused = self
+            .search_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(_window);
+        let search = div().px_4().pt_4().child(
+            div()
+                .rounded_lg()
+                .bg(theme.tokens.theme_input)
+                .border_1()
+                .border_color(if search_focused {
+                    theme.brand
+                } else {
+                    theme.tokens.theme_border_input
+                })
+                .child(Input::new(&self.search_input).w_full()),
+        );
+
+        let row_style = RowStyle {
+            text: theme.tokens.text_theme_primary,
+            sub: theme.tokens.text_theme_primary,
+            hover_bg: theme.tokens.bg_item_hover,
+            icon: theme.tokens.bg_icon_theme,
+            icon_active: theme.tokens.bg_icon_theme_active,
+        };
+        let count = self.filtered.len();
+        let list = uniform_list("share-contact-list", count, move |range, _window, cx| {
+            let this = list_entity.read(cx);
+            range
+                .map(|ix| match this.filtered.get(ix) {
+                    Some(&option_ix) => match this.options.get(option_ix) {
+                        Some(option) => {
+                            let selected = this.selected.contains(&option.key);
+                            let element_id = option.key.element_id() as usize;
+                            render_share_option_row(
+                                &row_style,
+                                &this.image_cache,
+                                option,
+                                selected,
+                                &list_entity,
+                                option.key,
+                                element_id,
+                            )
+                        }
+                        None => div().h(px(ROW_PX)).into_any_element(),
+                    },
+                    None => div().h(px(ROW_PX)).into_any_element(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .track_scroll(&self.scroll)
+        .size_full();
+
+        let body = div()
+            .h(px(LIST_PX))
+            .mt_4()
+            .mb_2()
+            .px_4()
+            .overflow_hidden()
+            .child(list);
+
+        let avatar_raw = self.contact.avatar.clone();
+        let avatar_proxied = if avatar_raw.is_empty() {
+            SharedString::default()
+        } else {
+            SharedString::from(crate::util::imgproxy::avatar_url(cx, &avatar_raw))
+        };
+        let mut preview_avatar = Avatar::new()
+            .name(SharedString::from(self.contact.display_name.clone()))
+            .size_px(px(40.))
+            .image_cache(self.image_cache.clone());
+        if !avatar_proxied.is_empty() {
+            preview_avatar = preview_avatar.src(avatar_proxied);
+            if !avatar_raw.is_empty() {
+                preview_avatar = preview_avatar.fallback_src(SharedString::from(avatar_raw));
+            }
+        } else if !avatar_raw.is_empty() {
+            preview_avatar = preview_avatar.src(SharedString::from(avatar_raw));
+        }
+
+        let preview = div()
+            .px_4()
+            .child(
+                div()
+                    .mb_2()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.tokens.text_theme_primary)
+                    .child(
+                        mezon_i18n::t(&locale, "shareContact.modal.contactPreview").to_uppercase(),
+                    ),
+            )
+            .child(
+                div()
+                    .p_3()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .bg(theme.tokens.bg_active_member_channel)
+                    .border_l(px(4.))
+                    .border_color(theme.brand)
+                    .child(preview_avatar)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.tokens.text_theme_primary)
+                                    .truncate()
+                                    .child(self.contact.display_name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.tokens.text_secondary)
+                                    .truncate()
+                                    .child(format!("@{}", self.contact.username)),
+                            ),
+                    ),
+            );
+
+        let footer = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_end()
+            .gap_4()
+            .p_4()
+            .child(
+                div()
+                    .id("share-contact-cancel")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(40.))
+                    .px_4()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme.tokens.theme_border_input)
+                    .text_size(px(16.))
+                    .text_color(theme.tokens.text_theme_primary)
+                    .child(mezon_i18n::t(&locale, "shareContact.modal.cancel"))
+                    .when(!self.submitting, |el| {
+                        el.cursor_pointer()
+                            .hover(|s| s.text_color(theme.tokens.text_secondary))
+                            .on_click(|_: &ClickEvent, _window, cx| ShareContactModal::close(cx))
+                    })
+                    .when(self.submitting, |el| el.opacity(0.5)),
+            )
+            .child(
+                Button::new("share-contact-send")
+                    .primary()
+                    .label(mezon_i18n::t(&locale, "shareContact.modal.share"))
+                    .loading(self.submitting)
+                    .disabled(send_disabled)
+                    .h(px(40.))
+                    .on_click(move |_: &ClickEvent, _window, cx| {
+                        send_entity.update(cx, |this, cx| this.send(cx));
+                    }),
+            );
+
+        div()
+            .track_focus(&self.focus_handle)
+            .key_context("menu")
+            .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| {
+                if this.submitting {
+                    return;
+                }
+                ShareContactModal::close(cx);
+            }))
+            .occlude()
+            .image_cache(self.image_cache.clone())
+            .w(px(550.))
+            .max_h(gpui::relative(0.9))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .rounded(px(4.))
+            .bg(theme.tokens.theme_setting_primary)
+            .shadow_lg()
+            .child(
+                div()
+                    .pt_4()
+                    .text_center()
+                    .text_xl()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.tokens.text_theme_primary)
+                    .child(mezon_i18n::t(&locale, "shareContact.modal.title")),
+            )
+            .child(search)
+            .child(body)
+            .child(preview)
+            .child(footer)
+    }
+}
+
+fn render_share_option_row(
+    style: &RowStyle,
+    image_cache: &Entity<LruImageCache>,
+    option: &ForwardOption,
+    selected: bool,
+    ent: &Entity<ShareContactModal>,
+    key: TargetKey,
+    element_id: usize,
+) -> AnyElement {
+    let ent = ent.clone();
+    let is_channel = matches!(option.kind, OptionKind::Channel { .. });
+
+    let leading: Option<AnyElement> = if let OptionKind::Channel { icon, lock, .. } = option.kind {
+        let glyph_color = if lock.is_some() {
+            style.icon
+        } else {
+            style.text
+        };
+        Some(
+            div()
+                .relative()
+                .size(px(20.))
+                .flex_shrink_0()
+                .child(Icon::new(icon).size(px(20.)).text_color(glyph_color))
+                .children(lock.map(|lock| {
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .child(Icon::new(lock).size(px(20.)).text_color(style.icon_active))
+                }))
+                .into_any_element(),
+        )
+    } else {
+        let mut avatar = Avatar::new()
+            .name(option.label.clone())
+            .size_px(px(16.))
+            .image_cache(image_cache.clone());
+        if !option.avatar.is_empty() {
+            avatar = avatar.src(option.avatar.clone());
+            if !option.avatar_raw.is_empty() && option.avatar_raw != option.avatar {
+                avatar = avatar.fallback_src(option.avatar_raw.clone());
+            }
+        } else if !option.avatar_raw.is_empty() {
+            avatar = avatar.src(option.avatar_raw.clone());
+        }
+        Some(div().flex_shrink_0().child(avatar).into_any_element())
+    };
+
+    let sub_text: Option<SharedString> = match &option.kind {
+        OptionKind::Channel { clan_name, .. } => (!clan_name.is_empty()).then(|| clan_name.clone()),
+        OptionKind::Member { username } => (!username.is_empty()).then(|| username.clone()),
+        OptionKind::Group => None,
+    };
+
+    let mut suggest = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(24.))
+        .w_full()
+        .when(is_channel, |el| el.justify_between())
+        .when(!is_channel, |el| el.gap_1())
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .min_w_0()
+                .children(leading)
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(15.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(style.text)
+                        .child(option.label.clone()),
+                ),
+        );
+    if let Some(sub_text) = sub_text {
+        let size = if is_channel { px(10.) } else { px(13.) };
+        suggest = suggest.child(
+            div()
+                .truncate()
+                .text_size(size)
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(style.sub)
+                .child(sub_text),
+        );
+    }
+
+    let content = div()
+        .id(("share-contact-option", element_id))
+        .flex_1()
+        .min_w_0()
+        .mr_1()
+        .cursor_pointer()
+        .child(suggest)
+        .on_click({
+            let ent = ent.clone();
+            move |_: &ClickEvent, _window, cx| {
+                ent.update(cx, |this, cx| {
+                    this.toggle(key);
+                    cx.notify();
+                });
+            }
+        });
+
+    let hover_bg = style.hover_bg;
+    div()
+        .id(("share-contact-row", element_id))
+        .h(px(ROW_PX))
+        .w_full()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .px_4()
+        .rounded(px(4.))
+        .hover(move |s| s.bg(hover_bg))
+        .child(content)
+        .child(
+            div().flex_shrink_0().child(
+                Checkbox::new(("share-contact-check", element_id))
+                    .checked(selected)
+                    .on_click(move |_, _window, cx| {
                         ent.update(cx, |this, cx| {
                             this.toggle(key);
                             cx.notify();

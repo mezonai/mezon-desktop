@@ -76,11 +76,10 @@ impl PollDetailModal {
                         modal.voters_by_answer =
                             Some(detail.voters_by_answer.into_iter().map(Arc::from).collect());
                     }
-                    modal.apply_mock_voters();
                     cx.notify();
                 });
             });
-            let mut this = Self {
+            Self {
                 focus_handle: cx.focus_handle(),
                 locale,
                 question,
@@ -93,9 +92,7 @@ impl PollDetailModal {
                 voter_scroll: UniformListScrollHandle::new(),
                 image_cache,
                 _fetch: fetch,
-            };
-            this.apply_mock_voters();
-            this
+            }
         });
 
         let focus_handle = view.read(cx).focus_handle.clone();
@@ -106,60 +103,6 @@ impl PollDetailModal {
     fn close(cx: &mut App) {
         Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
     }
-
-    #[cfg(debug_assertions)]
-    fn apply_mock_voters(&mut self) {
-        let raw = std::env::var("MEZON_MOCK_POLL_VOTERS").ok();
-        let Some(per_answer) = raw
-            .as_deref()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|value| *value > 0)
-        else {
-            tracing::info!(target: "poll_perf", "mock_voters disabled raw={raw:?}");
-            return;
-        };
-        let answer_count = self.answers.len().max(1);
-        tracing::info!(
-            target: "poll_perf",
-            "mock_voters applied per_answer={per_answer} answers={answer_count}"
-        );
-        self.loading = false;
-        self.voters_by_answer = Some(
-            (0..answer_count)
-                .map(|answer| {
-                    let rows: Vec<PollVoter> = (0..per_answer)
-                        .map(|i| {
-                            let long = i % 3 == 0;
-                            PollVoter {
-                                user_id: mezon_store::UserId(i as i64 + 1),
-                                display_name: if long {
-                                    format!(
-                                        "[A{answer}] Voter {i} extremely long display name that must be truncated instead of pushing the layout {}",
-                                        "x".repeat(60)
-                                    )
-                                    .into()
-                                } else {
-                                    format!("[A{answer}] Voter {i}").into()
-                                },
-                                username: if long {
-                                    format!("[A{answer}] mock_user_{i}_{}", "y".repeat(80)).into()
-                                } else {
-                                    format!("[A{answer}] mock_user_{i}").into()
-                                },
-                                avatar_proxied: SharedString::from("icons/add-person.svg"),
-                            }
-                        })
-                        .collect();
-                    Arc::from(rows)
-                })
-                .collect(),
-        );
-        self.answer_counts = vec![per_answer as i32; answer_count];
-        self.total_votes = (per_answer * answer_count) as i32;
-    }
-
-    #[cfg(not(debug_assertions))]
-    fn apply_mock_voters(&mut self) {}
 }
 
 impl Render for PollDetailModal {

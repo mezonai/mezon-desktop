@@ -50,6 +50,27 @@ impl ClanImageMimeType {
     }
 }
 
+fn clan_image_extension(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+}
+
+pub fn validate_clan_image_file(path: &Path, max_bytes: u64) -> Result<ClanImageMimeType, String> {
+    let ext =
+        clan_image_extension(path).ok_or_else(|| "Unsupported image file type".to_string())?;
+    let mime_type = ClanImageMimeType::from_extension(&ext)
+        .ok_or_else(|| "Unsupported image file type".to_string())?;
+    let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if len == 0 {
+        return Err("File is empty".into());
+    }
+    if len > max_bytes {
+        return Err(format!("File exceeds {max_bytes}-byte limit ({len} bytes)"));
+    }
+    Ok(mime_type)
+}
+
 #[derive(Debug, Clone)]
 pub struct Clan {
     pub id: ClanId,
@@ -72,6 +93,7 @@ pub struct ClanInviteLink {
     pub id: i64,
     pub invite_link: String,
 }
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClanSystemMessage {
     pub channel_id: ChannelId,
@@ -145,6 +167,22 @@ impl ClanOverviewDraft {
     }
 }
 
+fn carry_live_badges(previous: &[Clan], next: &mut [Clan]) {
+    if previous.is_empty() {
+        return;
+    }
+    let live: std::collections::HashMap<ClanId, (u32, bool)> = previous
+        .iter()
+        .map(|clan| (clan.id, (clan.badge_count, clan.has_unread)))
+        .collect();
+    for clan in next {
+        if let Some(&(badge_count, has_unread)) = live.get(&clan.id) {
+            clan.badge_count = badge_count;
+            clan.has_unread = has_unread;
+        }
+    }
+}
+
 fn proto_channel_id(id: Option<ChannelId>) -> i64 {
     id.map(|id| id.get())
         .filter(|id| *id != 0)
@@ -200,6 +238,7 @@ pub struct ClanList {
     pub active_clan_id: Option<ClanId>,
     api: Arc<AppApi>,
     loading: bool,
+    badges_loaded: bool,
     reset_generation: u64,
     _connection_watch: Task<()>,
 }
@@ -231,6 +270,7 @@ impl ClanList {
         self.reset_generation = self.reset_generation.wrapping_add(1);
         self.clans.clear();
         self.loading = false;
+        self.badges_loaded = false;
         if self.active_clan_id.take().is_some() {
             cx.emit(ClanEvent::ActiveClanChanged(None));
         }
@@ -245,6 +285,7 @@ impl ClanList {
             active_clan_id: None,
             api,
             loading: false,
+            badges_loaded: false,
             reset_generation: 0,
             _connection_watch: connection_watch,
         }
@@ -300,12 +341,18 @@ impl ClanList {
         self.loading = true;
         let api = self.api.clone();
         let generation = self.reset_generation;
+        let fetch_badges = !self.badges_loaded;
         cx.spawn(async move |this, cx| {
             const MAX_RETRIES: u32 = 3;
             let mut attempt = 0u32;
             let (clans, badges_result) = loop {
-                let (clans_result, badges_result) =
-                    tokio::join!(api.list_clan_descs(), api.list_clan_badge_count());
+                let (clans_result, badges_result) = if fetch_badges {
+                    let (clans, badges) =
+                        tokio::join!(api.list_clan_descs(), api.list_clan_badge_count());
+                    (clans, Some(badges))
+                } else {
+                    (api.list_clan_descs().await, None)
+                };
                 match clans_result {
                     Ok(c) => break (c, badges_result),
                     Err(e) if attempt < MAX_RETRIES => {
@@ -326,14 +373,20 @@ impl ClanList {
                     }
                 }
             };
-            let badge_map: std::collections::HashMap<String, (i32, bool)> = badges_result
-                .unwrap_or_else(|e| {
+            let mut badges_fetched = false;
+            let badge_map: std::collections::HashMap<String, (i32, bool)> = match badges_result {
+                Some(Ok(list)) => {
+                    badges_fetched = true;
+                    list.into_iter()
+                        .map(|(id, badge, has_unread)| (id, (badge, has_unread)))
+                        .collect()
+                }
+                Some(Err(e)) => {
                     tracing::warn!("clan badge count fetch failed: {e}");
-                    Vec::new()
-                })
-                .into_iter()
-                .map(|(id, badge, has_unread)| (id, (badge, has_unread)))
-                .collect();
+                    std::collections::HashMap::new()
+                }
+                None => std::collections::HashMap::new(),
+            };
             let mapped: Vec<Clan> = clans
                 .into_iter()
                 .map(|c| {
@@ -350,6 +403,7 @@ impl ClanList {
                     return;
                 }
                 this.loading = false;
+                this.badges_loaded = this.badges_loaded || badges_fetched;
                 this.update_clans(mapped, cx);
                 if let Some(clan_id) = this.active_clan_id {
                     this.fire_join_clan_chat(clan_id, cx);
@@ -535,13 +589,13 @@ impl ClanList {
             return;
         }
         self.active_clan_id = Some(id);
-        self.fire_join_clan_chat(id, cx);
         cx.emit(ClanEvent::ActiveClanChanged(self.active_clan_id));
         cx.notify();
     }
 
-    pub fn update_clans(&mut self, clans: Vec<Clan>, cx: &mut Context<Self>) {
+    pub fn update_clans(&mut self, mut clans: Vec<Clan>, cx: &mut Context<Self>) {
         let prev_active = self.active_clan_id;
+        carry_live_badges(&self.clans, &mut clans);
         self.clans = clans;
         let active_missing = self
             .active_clan_id
@@ -790,13 +844,10 @@ pub(crate) async fn upload_image_to_cdn(
         .and_then(|n| n.to_str())
         .unwrap_or("avatar");
     let filename = timestamped_upload_filename(raw_filename);
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let ext =
+        clan_image_extension(path).ok_or_else(|| "Unsupported image file type".to_string())?;
     let filetype = ClanImageMimeType::from_extension(&ext)
-        .ok_or_else(|| format!("Unsupported image extension: .{ext}"))?
+        .ok_or_else(|| "Unsupported image file type".to_string())?
         .as_str();
     let size = i32::try_from(data.len()).map_err(|_| "Image file is too large".to_string())?;
     let (width, height) = image_dimensions(&data);
@@ -1013,6 +1064,33 @@ mod tests {
     }
 
     #[test]
+    fn validate_clan_image_file_rejects_unsupported_extension() {
+        let dir =
+            std::env::temp_dir().join(format!("mezon-clan-image-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("bad.bmp");
+        std::fs::write(&path, b"data").expect("write temp file");
+        let err = validate_clan_image_file(&path, MAX_CLAN_LOGO_BYTES)
+            .expect_err("unsupported extension must fail");
+        assert_eq!(err, "Unsupported image file type");
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn validate_clan_image_file_rejects_oversized_file() {
+        let dir =
+            std::env::temp_dir().join(format!("mezon-clan-image-size-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("large.png");
+        std::fs::write(&path, vec![0_u8; 32]).expect("write temp file");
+        let err = validate_clan_image_file(&path, 16).expect_err("size limit must fail");
+        assert!(err.contains("byte limit"));
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
     fn clan_from_api_desc_maps_creator_id() {
         use mezon_client::transport::ApiClanDesc;
         let desc = ApiClanDesc {
@@ -1028,6 +1106,38 @@ mod tests {
             prevent_anonymous: false,
         };
         assert_eq!(Clan::from(desc).creator_id, UserId(7));
+    }
+
+    #[test]
+    fn refetched_clans_keep_live_badges() {
+        let mut previous = clans();
+        previous[0].badge_count = 4;
+        previous[0].has_unread = true;
+        let mut refetched = clans();
+        carry_live_badges(&previous, &mut refetched);
+        assert_eq!(refetched[0].badge_count, 4);
+        assert!(refetched[0].has_unread);
+        assert_eq!(refetched[1].badge_count, 0);
+    }
+
+    #[test]
+    fn first_load_takes_server_badges() {
+        let mut fresh = clans();
+        fresh[0].badge_count = 7;
+        fresh[0].has_unread = true;
+        carry_live_badges(&[], &mut fresh);
+        assert_eq!(fresh[0].badge_count, 7);
+        assert!(fresh[0].has_unread);
+    }
+
+    #[test]
+    fn newly_joined_clan_takes_server_badge() {
+        let previous = vec![make_clan(1, "One", None)];
+        let mut refetched = clans();
+        refetched[1].badge_count = 9;
+        carry_live_badges(&previous, &mut refetched);
+        assert_eq!(refetched[0].badge_count, 0);
+        assert_eq!(refetched[1].badge_count, 9);
     }
 
     #[test]

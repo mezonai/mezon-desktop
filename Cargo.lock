@@ -808,6 +808,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64ct"
+version = "1.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
+
+[[package]]
 name = "bindgen"
 version = "0.65.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -840,7 +846,7 @@ dependencies = [
  "bitflags 2.13.0",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools 0.11.0",
  "lazy_static",
  "lazycell",
  "proc-macro2",
@@ -1037,6 +1043,15 @@ checksum = "a334ef7c9e23abf0ce748e8cd309037da93e606ad52eb372e4ce327a0dcfbdfd"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
+]
+
+[[package]]
+name = "bs58"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4"
+dependencies = [
+ "tinyvec",
 ]
 
 [[package]]
@@ -1511,6 +1526,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "const-oid"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
+
+[[package]]
 name = "const-random"
 version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1973,6 +1994,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "curve25519-dalek"
+version = "4.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97fb8b7c4503de7d6ae7b42ab72a5a59857b4c937ec27a3d4539dba95b5ab2be"
+dependencies = [
+ "cfg-if 1.0.4",
+ "cpufeatures",
+ "curve25519-dalek-derive",
+ "digest",
+ "fiat-crypto",
+ "rustc_version",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "curve25519-dalek-derive"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
 name = "cxx"
 version = "1.0.194"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2155,6 +2203,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "der"
+version = "0.7.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
+dependencies = [
+ "const-oid",
+ "zeroize",
+]
+
+[[package]]
 name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2334,7 +2392,7 @@ version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
- "libloading 0.8.9",
+ "libloading 0.7.4",
 ]
 
 [[package]]
@@ -2422,6 +2480,30 @@ name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
+
+[[package]]
+name = "ed25519"
+version = "2.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
+dependencies = [
+ "pkcs8",
+ "signature",
+]
+
+[[package]]
+name = "ed25519-dalek"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
+dependencies = [
+ "curve25519-dalek",
+ "ed25519",
+ "serde",
+ "sha2",
+ "subtle",
+ "zeroize",
+]
 
 [[package]]
 name = "either"
@@ -2661,6 +2743,12 @@ checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
 ]
+
+[[package]]
+name = "fiat-crypto"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "field-offset"
@@ -3302,7 +3390,7 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.2.1",
+ "windows-link 0.1.3",
  "windows-result 0.4.1",
 ]
 
@@ -4760,15 +4848,6 @@ dependencies = [
 
 [[package]]
 name = "itertools"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
@@ -5150,8 +5229,6 @@ dependencies = [
 [[package]]
 name = "libspa"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65f3a4b81b2a2d8c7f300643676202debd1b7c929dbf5c9bb89402ea11d19810"
 dependencies = [
  "bitflags 2.13.0",
  "cc",
@@ -5701,7 +5778,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-app"
-version = "0.1.0"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -5715,6 +5792,7 @@ dependencies = [
  "mezon-store",
  "mezon-ui",
  "mezon-updater",
+ "mezon-webview",
  "raw-window-handle",
  "reqwest_client",
  "serde",
@@ -5729,7 +5807,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-audio"
-version = "0.1.0"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "flume",
@@ -5743,8 +5821,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "mezon-canvas"
+version = "0.1.27"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "futures",
+ "gpui",
+ "image",
+ "menu",
+ "mezon-i18n",
+ "mezon-store",
+ "mezon-theme",
+ "mezon-widgets",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "tracing",
+ "ui",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "mezon-client"
-version = "0.1.0"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5779,14 +5879,14 @@ dependencies = [
 
 [[package]]
 name = "mezon-i18n"
-version = "0.1.0"
+version = "0.1.27"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "mezon-native"
-version = "0.1.0"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "auto-launch",
@@ -5800,7 +5900,6 @@ dependencies = [
  "gtk",
  "image",
  "mezon-i18n",
- "mezon-updater",
  "notify-rust",
  "objc",
  "objc2 0.6.4",
@@ -5811,15 +5910,15 @@ dependencies = [
  "open",
  "serde",
  "thiserror 2.0.18",
- "tokio",
  "tracing",
  "tray-icon",
  "windows 0.61.3",
+ "zbus 4.4.0",
 ]
 
 [[package]]
 name = "mezon-proto"
-version = "0.1.0"
+version = "0.1.27"
 dependencies = [
  "prost 0.13.5",
  "prost-build 0.13.5",
@@ -5830,7 +5929,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-store"
-version = "0.1.0"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5838,10 +5937,14 @@ dependencies = [
  "flume",
  "gpui",
  "image",
+ "keyring",
  "mezon-audio",
  "mezon-client",
+ "mezon-i18n",
  "mezon-proto",
+ "mezon-updater",
  "mezon-voice",
+ "mmn-client",
  "parking_lot",
  "prost 0.13.5",
  "regex",
@@ -5854,10 +5957,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mezon-theme"
+version = "0.1.27"
+dependencies = [
+ "gpui",
+ "theme",
+]
+
+[[package]]
 name = "mezon-ui"
-version = "0.1.0"
+version = "0.1.27"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "block",
  "chrono",
  "flume",
@@ -5869,11 +5981,14 @@ dependencies = [
  "libc",
  "menu",
  "mezon-audio",
+ "mezon-canvas",
  "mezon-client",
  "mezon-i18n",
  "mezon-store",
+ "mezon-theme",
  "mezon-video",
  "mezon-webview",
+ "mezon-widgets",
  "objc",
  "qrcode",
  "raw-window-handle",
@@ -5891,7 +6006,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-updater"
-version = "0.1.0"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5899,15 +6014,17 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
  "tracing",
  "url",
+ "which 6.0.3",
  "zed-reqwest",
 ]
 
 [[package]]
 name = "mezon-video"
-version = "0.1.0"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -5929,7 +6046,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-voice"
-version = "0.1.0"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "block",
@@ -5942,6 +6059,7 @@ dependencies = [
  "image",
  "libc",
  "livekit",
+ "livekit-protocol",
  "nokhwa",
  "objc",
  "parking_lot",
@@ -5957,12 +6075,26 @@ dependencies = [
 
 [[package]]
 name = "mezon-webview"
-version = "0.1.0"
+version = "0.1.27"
 dependencies = [
  "anyhow",
+ "gtk",
  "raw-window-handle",
+ "tracing",
  "url",
+ "webkit2gtk",
  "wry",
+]
+
+[[package]]
+name = "mezon-widgets"
+version = "0.1.27"
+dependencies = [
+ "gpui",
+ "mezon-store",
+ "mezon-theme",
+ "tracing",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -6016,6 +6148,28 @@ checksum = "2c46b5adfb7a3ae4996d327a5bdc90e78fec025806dd312bdbe6f07a755e0ec9"
 dependencies = [
  "itertools 0.15.0",
  "parking_lot",
+]
+
+[[package]]
+name = "mmn-client"
+version = "0.1.27"
+dependencies = [
+ "base64 0.22.1",
+ "bs58",
+ "bytes",
+ "ed25519-dalek",
+ "futures",
+ "hex",
+ "http_client",
+ "rand 0.9.4",
+ "reqwest_client",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -7587,6 +7741,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkcs8"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
+dependencies = [
+ "der",
+ "spki",
+]
+
+[[package]]
 name = "pkg-config"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7897,8 +8061,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
- "heck 0.5.0",
- "itertools 0.12.1",
+ "heck 0.4.1",
+ "itertools 0.11.0",
  "log",
  "multimap",
  "once_cell",
@@ -7917,7 +8081,7 @@ version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools 0.14.0",
  "log",
  "multimap",
@@ -7938,7 +8102,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81bddcdb20abf9501610992b6759a4c888aef7d1a7247ef75e2404275ac24af1"
 dependencies = [
  "anyhow",
- "itertools 0.12.1",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
@@ -9453,6 +9617,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9571ea910ebd84c86af4b3ed27f9dbdc6ad06f17c5f96146b2b671e2976744f"
 dependencies = [
  "bitflags 2.13.0",
+]
+
+[[package]]
+name = "spki"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
+dependencies = [
+ "base64ct",
+ "der",
 ]
 
 [[package]]
@@ -12707,9 +12881,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bb97012beadd29e654708a0fdb4c84bc046f537aecfde2c3ee0a9e4b4d48c725"
 dependencies = [
  "async-broadcast",
+ "async-executor",
+ "async-fs",
+ "async-io",
+ "async-lock",
  "async-process",
  "async-recursion",
+ "async-task",
  "async-trait",
+ "blocking",
  "enumflags2",
  "event-listener 5.4.1",
  "futures-core",

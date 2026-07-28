@@ -843,6 +843,10 @@ impl ListState {
         new_items.append(old_items.suffix(), ());
         drop(old_items);
         state.items = new_items;
+        // Upstream re-arms full measurement in `reset` but not here, so a
+        // `measure_all` list keeps spliced-in items unmeasured and reports a wrong
+        // content height. No-op for `Visible`; re-apply on snapshot bump.
+        state.measuring_behavior.reset();
 
         if let Some(ListOffset {
             item_ix,

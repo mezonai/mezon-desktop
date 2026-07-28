@@ -18,9 +18,14 @@ PKGS=(
     -p mezon-native
     -p mezon-proto
     -p mezon-i18n
+    -p mezon-theme
+    -p mezon-widgets
+    -p mezon-canvas
     -p mezon-updater
     -p mezon-audio
+    -p mezon-webview
     -p mezon-voice
+    -p mmn-client
 )
 
 case "${1:-check}" in

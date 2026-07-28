@@ -115,6 +115,10 @@ fn run_apm(
                 let _ = apm.process_reverse_stream(&mut chunk.data, chunk.rate, chunk.channels);
             }
             Event::Capture(mut chunk) => {
+                while let Ok(mut render) = reverse_rx.try_recv() {
+                    let _ =
+                        apm.process_reverse_stream(&mut render.data, render.rate, render.channels);
+                }
                 let _ = apm.set_stream_delay_ms(chunk.delay_ms);
                 let _ = apm.process_stream(&mut chunk.data, chunk.rate, chunk.channels);
                 let level = ns_level.load(Ordering::Relaxed).min(100);
@@ -496,6 +500,15 @@ fn select_output(host: &cpal::Host, id: Option<&str>) -> Result<cpal::Device> {
         .ok_or_else(|| anyhow!("no audio output device available"))
 }
 
+fn low_latency_buffer(supported: &cpal::SupportedStreamConfig) -> cpal::BufferSize {
+    match supported.buffer_size() {
+        cpal::SupportedBufferSize::Range { min, max } => {
+            cpal::BufferSize::Fixed((supported.sample_rate() / 100).clamp(*min, *max))
+        }
+        cpal::SupportedBufferSize::Unknown => cpal::BufferSize::Default,
+    }
+}
+
 fn build_input(
     host: &cpal::Host,
     id: Option<&str>,
@@ -508,7 +521,8 @@ fn build_input(
         sample_rate: supported.sample_rate(),
         channels: supported.channels() as u32,
     };
-    let config: cpal::StreamConfig = supported.config();
+    let mut config: cpal::StreamConfig = supported.config();
+    config.buffer_size = low_latency_buffer(&supported);
     let rate = in_fmt.sample_rate as i32;
     let channels = in_fmt.channels.max(1) as i32;
     let frame = (in_fmt.sample_rate as usize / 100) * in_fmt.channels.max(1) as usize;
@@ -567,7 +581,8 @@ fn build_output(
     reverse_tx: flume::Sender<ReverseChunk>,
     out_latency_ms: Arc<AtomicU32>,
 ) -> Result<cpal::Stream> {
-    let config: cpal::StreamConfig = supported.config();
+    let mut config: cpal::StreamConfig = supported.config();
+    config.buffer_size = low_latency_buffer(supported);
     let rate = supported.sample_rate() as i32;
     let channels = supported.channels().max(1) as i32;
     let frame = (supported.sample_rate() as usize / 100) * supported.channels().max(1) as usize;

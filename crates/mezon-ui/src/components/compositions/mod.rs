@@ -1,6 +1,7 @@
 pub mod channel_row;
 pub mod channel_row_element;
 pub mod dm_row;
+pub mod footer_profile_popup;
 pub mod form_field;
 pub mod otp_input;
 pub mod user_info_bar;

@@ -50,6 +50,7 @@ install_apt() {
     libx11-dev
     libx11-xcb-dev
     libayatana-appindicator3-dev
+    libunwind-dev
     protobuf-compiler
     xdg-desktop-portal
     libgstreamer1.0-dev

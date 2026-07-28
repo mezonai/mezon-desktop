@@ -2,7 +2,7 @@
 mod macos;
 
 use anyhow::Result;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 #[cfg(not(target_os = "macos"))]
 use tray_icon::menu::MenuEvent;
 #[cfg(not(target_os = "macos"))]
@@ -75,7 +75,6 @@ pub struct MezonTray {
     _icon: TrayIcon,
     voice_state: TrayVoiceState,
     locale: String,
-    update_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     stop_tx: crossbeam_channel::Sender<()>,
 }
 
@@ -83,18 +82,16 @@ impl MezonTray {
     pub fn new(
         locale: impl Into<String>,
         on_show: impl Fn() + Send + Sync + 'static,
+        on_check_updates: impl Fn() + Send + Sync + 'static,
         on_quit: impl Fn() + Send + Sync + 'static,
         on_voice_action: impl Fn(TrayVoiceAction) + Send + Sync + 'static,
-        rt_handle: Arc<tokio::runtime::Handle>,
     ) -> Result<Self> {
         let locale = locale.into();
         let on_show: Arc<dyn Fn() + Send + Sync> = Arc::new(on_show);
+        let on_check_updates: Arc<dyn Fn() + Send + Sync> = Arc::new(on_check_updates);
         let on_quit: Arc<dyn Fn() + Send + Sync> = Arc::new(on_quit);
         let on_voice_action: Arc<dyn Fn(TrayVoiceAction) + Send + Sync> = Arc::new(on_voice_action);
 
-        let update_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> =
-            Arc::new(Mutex::new(None));
-        let update_task_thread = Arc::clone(&update_task);
         let voice_state = TrayVoiceState::default();
 
         let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
@@ -107,10 +104,9 @@ impl MezonTray {
         spawn_tray_event_loop(
             stop_rx,
             Arc::clone(&on_show),
+            Arc::clone(&on_check_updates),
             Arc::clone(&on_quit),
             on_voice_action,
-            rt_handle,
-            update_task_thread,
             #[cfg(target_os = "macos")]
             panel_action_rx,
         );
@@ -158,7 +154,6 @@ impl MezonTray {
             _icon: icon,
             voice_state,
             locale,
-            update_task,
             stop_tx,
         })
     }
@@ -201,10 +196,9 @@ impl MezonTray {
 fn spawn_tray_event_loop(
     stop_rx: crossbeam_channel::Receiver<()>,
     on_show: Arc<dyn Fn() + Send + Sync>,
+    on_check_updates: Arc<dyn Fn() + Send + Sync>,
     on_quit: Arc<dyn Fn() + Send + Sync>,
     on_voice_action: Arc<dyn Fn(TrayVoiceAction) + Send + Sync>,
-    rt_handle: Arc<tokio::runtime::Handle>,
-    update_task_thread: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     #[cfg(target_os = "macos")] panel_action_rx: crossbeam_channel::Receiver<TrayUiAction>,
 ) {
     #[cfg(not(target_os = "macos"))]
@@ -217,10 +211,9 @@ fn spawn_tray_event_loop(
                         Ok(event) => dispatch_tray_action(
                             event.id().0.as_str(),
                             &on_show,
+                            &on_check_updates,
                             &on_quit,
                             &on_voice_action,
-                            &rt_handle,
-                            &update_task_thread,
                         ),
                         Err(_) => break,
                     },
@@ -254,10 +247,9 @@ fn spawn_tray_event_loop(
                         Ok(action) => dispatch_tray_action_from_ui(
                             action,
                             &on_show,
+                            &on_check_updates,
                             &on_quit,
                             &on_voice_action,
-                            &rt_handle,
-                            &update_task_thread,
                         ),
                         Err(_) => break,
                     },
@@ -273,64 +265,29 @@ fn spawn_tray_event_loop(
 fn dispatch_tray_action_from_ui(
     action: TrayUiAction,
     on_show: &Arc<dyn Fn() + Send + Sync>,
+    on_check_updates: &Arc<dyn Fn() + Send + Sync>,
     on_quit: &Arc<dyn Fn() + Send + Sync>,
     on_voice_action: &Arc<dyn Fn(TrayVoiceAction) + Send + Sync>,
-    rt_handle: &Arc<tokio::runtime::Handle>,
-    update_task_thread: &Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 ) {
     match action {
         TrayUiAction::Show => (on_show)(),
-        TrayUiAction::Update => dispatch_tray_action(
-            UPDATE_ID,
-            on_show,
-            on_quit,
-            on_voice_action,
-            rt_handle,
-            update_task_thread,
-        ),
+        TrayUiAction::Update => (on_check_updates)(),
         TrayUiAction::Quit => (on_quit)(),
         TrayUiAction::Voice(voice_action) => (on_voice_action)(voice_action),
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn dispatch_tray_action(
     action_id: &str,
     on_show: &Arc<dyn Fn() + Send + Sync>,
+    on_check_updates: &Arc<dyn Fn() + Send + Sync>,
     on_quit: &Arc<dyn Fn() + Send + Sync>,
     on_voice_action: &Arc<dyn Fn(TrayVoiceAction) + Send + Sync>,
-    rt_handle: &Arc<tokio::runtime::Handle>,
-    update_task_thread: &Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 ) {
     match action_id {
         SHOW_ID => (on_show)(),
-        UPDATE_ID => {
-            let handle = rt_handle.clone();
-            let join = handle.spawn(async {
-                match mezon_updater::check_for_updates(env!("CARGO_PKG_VERSION")).await {
-                    Ok(Some(version)) => {
-                        let download_url = "https://mezon.ai/download";
-                        tracing::info!(
-                            "Update available: v{version} — download from {download_url}"
-                        );
-                        match mezon_updater::validate_update_url(download_url) {
-                            Ok(()) => {
-                                let _ = open::that_detached(download_url);
-                            }
-                            Err(e) => {
-                                tracing::warn!("Blocked open of update URL: {e}");
-                            }
-                        }
-                    }
-                    Ok(None) => tracing::info!("Mezon is up to date"),
-                    Err(e) => tracing::warn!("Update check failed: {e}"),
-                }
-            });
-            if let Ok(mut guard) = update_task_thread.lock()
-                && let Some(prior) = guard.replace(join)
-            {
-                prior.abort();
-            }
-        }
+        UPDATE_ID => (on_check_updates)(),
         QUIT_ID => (on_quit)(),
         id => {
             if let Some(action) = TrayVoiceAction::from_menu_id(id) {
@@ -473,12 +430,6 @@ fn run_on_gtk_main_thread(f: impl FnOnce() + Send + 'static) {
 impl Drop for MezonTray {
     fn drop(&mut self) {
         let _ = self.stop_tx.send(());
-        if let Ok(mut guard) = self.update_task.lock()
-            && let Some(handle) = guard.take()
-        {
-            handle.abort();
-            tracing::debug!("Aborted tray update-check task on drop");
-        }
     }
 }
 

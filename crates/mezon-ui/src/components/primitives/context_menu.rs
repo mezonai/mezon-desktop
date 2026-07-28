@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, ClickEvent, MouseDownEvent, Pixels, Point, SharedString, Window, anchored, deferred, div,
-    img, prelude::*, px, relative,
+    App, ClickEvent, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Window, anchored,
+    deferred, div, img, prelude::*, px, relative,
 };
 
 use super::icon::{Icon, IconName};
@@ -43,6 +43,12 @@ enum Item {
         open: bool,
         on_open: MenuHandler,
         on_select: SubmenuHandler,
+        on_parent_click: Option<MenuHandler>,
+    },
+    Checkbox {
+        label: SharedString,
+        checked: bool,
+        on_click: MenuHandler,
     },
     Separator,
 }
@@ -262,6 +268,46 @@ impl ContextMenu {
             open,
             on_open: Rc::new(on_open),
             on_select: Rc::new(on_select),
+            on_parent_click: None,
+        });
+        self
+    }
+
+    /// A submenu whose parent row is itself clickable (mirrors React's "Mute
+    /// Channel/Category" row: click = act now, hover = pick a duration).
+    #[allow(clippy::too_many_arguments)]
+    pub fn submenu_clickable(
+        mut self,
+        label: impl Into<SharedString>,
+        sub_text: Option<SharedString>,
+        options: Vec<SubmenuOption>,
+        open: bool,
+        on_open: impl Fn(&mut Window, &mut App) + 'static,
+        on_select: impl Fn(i32, &mut Window, &mut App) + 'static,
+        on_parent_click: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.items.push(Item::Submenu {
+            label: label.into(),
+            sub_text,
+            options,
+            open,
+            on_open: Rc::new(on_open),
+            on_select: Rc::new(on_select),
+            on_parent_click: Some(Rc::new(on_parent_click)),
+        });
+        self
+    }
+
+    pub fn checkbox_item(
+        mut self,
+        label: impl Into<SharedString>,
+        checked: bool,
+        on_click: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.items.push(Item::Checkbox {
+            label: label.into(),
+            checked,
+            on_click: Rc::new(on_click),
         });
         self
     }
@@ -275,7 +321,9 @@ impl RenderOnce for ContextMenu {
         let text = theme.tokens.text_theme_primary;
         let muted = theme.text_secondary;
         let hover = theme.bg_hover;
-        let danger = theme.status_dnd;
+        let danger_text = theme.danger_text;
+        let danger_hover_bg = theme.danger_hover_bg;
+        let brand = theme.brand;
         let dismiss = self.on_dismiss.clone();
         let on_reaction_close = self.on_reaction_close;
         let on_quick_reaction = self.on_quick_reaction;
@@ -293,12 +341,6 @@ impl RenderOnce for ContextMenu {
             .bg(bg)
             .shadow_lg()
             .occlude();
-
-        if let Some(dismiss) = dismiss.clone() {
-            panel = panel.on_mouse_down_out(move |_: &MouseDownEvent, window, cx| {
-                dismiss(window, cx);
-            });
-        }
 
         if !self.quick_reactions.is_empty() {
             let mut reaction_row = h_flex().gap_1().px(px(6.)).pt(px(4.)).pb(px(6.));
@@ -364,8 +406,8 @@ impl RenderOnce for ContextMenu {
                     on_click,
                 } => {
                     let dismiss = dismiss.clone();
-                    let label_color = if is_danger { danger } else { text };
-                    let icon_color = if is_danger { danger } else { muted };
+                    let label_color = if is_danger { danger_text } else { text };
+                    let icon_color = if is_danger { danger_text } else { muted };
                     panel = panel.child(
                         h_flex()
                             .id(("context-menu-item", index))
@@ -377,7 +419,13 @@ impl RenderOnce for ContextMenu {
                             .text_sm()
                             .text_color(label_color)
                             .cursor_pointer()
-                            .hover(|s| s.bg(hover))
+                            .hover(|s| {
+                                if is_danger {
+                                    s.bg(danger_hover_bg)
+                                } else {
+                                    s.bg(hover)
+                                }
+                            })
                             .when_some(on_reaction_close.clone(), |row, close| {
                                 row.on_hover(move |hovered, window, cx| {
                                     if *hovered {
@@ -408,6 +456,7 @@ impl RenderOnce for ContextMenu {
                     open,
                     on_open,
                     on_select,
+                    on_parent_click,
                 } => {
                     let dismiss = dismiss.clone();
                     let submenu = if open {
@@ -475,6 +524,7 @@ impl RenderOnce for ContextMenu {
                                 .child(sub_text),
                         );
                     }
+                    let parent_dismiss = dismiss.clone();
                     panel = panel.child(
                         h_flex()
                             .id(("context-menu-item", index))
@@ -493,9 +543,64 @@ impl RenderOnce for ContextMenu {
                                     on_open(window, cx);
                                 }
                             })
+                            .when_some(on_parent_click, |row, on_parent_click| {
+                                row.on_click(move |_: &ClickEvent, window, cx| {
+                                    on_parent_click(window, cx);
+                                    if let Some(dismiss) = &parent_dismiss {
+                                        dismiss(window, cx);
+                                    }
+                                })
+                            })
                             .child(label_col)
                             .child(Icon::new(IconName::ChevronRight).size_4().text_color(muted))
                             .children(submenu),
+                    );
+                }
+                Item::Checkbox {
+                    label,
+                    checked,
+                    on_click,
+                } => {
+                    let dismiss = dismiss.clone();
+                    panel = panel.child(
+                        h_flex()
+                            .id(("context-menu-item", index))
+                            .w_full()
+                            .items_center()
+                            .gap_2()
+                            .px(px(10.))
+                            .py(px(8.))
+                            .rounded(px(4.))
+                            .text_sm()
+                            .text_color(text)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(hover))
+                            .child(
+                                div()
+                                    .w(px(16.))
+                                    .h(px(16.))
+                                    .rounded(px(4.))
+                                    .border_1()
+                                    .border_color(if checked { brand } else { border })
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .when(checked, |d| d.bg(brand))
+                                    .when(checked, |d| {
+                                        d.child(
+                                            Icon::new(IconName::Check)
+                                                .size(px(11.))
+                                                .text_color(gpui::white()),
+                                        )
+                                    }),
+                            )
+                            .child(div().flex_1().child(label))
+                            .on_click(move |_: &ClickEvent, window, cx| {
+                                on_click(window, cx);
+                                if let Some(dismiss) = &dismiss {
+                                    dismiss(window, cx);
+                                }
+                            }),
                     );
                 }
                 Item::ReactionSubmenu {
@@ -631,10 +736,36 @@ impl RenderOnce for ContextMenu {
 }
 
 pub fn context_menu_at(position: Point<Pixels>, menu: ContextMenu) -> impl IntoElement {
+    // A window-wide backdrop catches a left-click anywhere outside the menu (and its
+    // absolute submenu flyouts) and dismisses — independent of geometry or focus, so
+    // menu items can use plain `on_click`. It must cover the WHOLE window, not just the
+    // view that opened the menu, so it is anchored at the window origin with an oversized
+    // surface (a plain `.inset_0()` here would size to the parent view, e.g. only the
+    // channel list). It is deliberately NOT `.occlude()`: an occluding backdrop would
+    // also swallow a RIGHT-click meant to open another item's context menu (right-click
+    // passes through to the item, which just replaces `open_menu`). The menu panel and
+    // its flyouts have their OWN `.occlude()`, so a click landing on them blocks this
+    // backdrop (it never fires for menu items); a click anywhere else still hits this
+    // topmost non-blocking hitbox → dismiss, while the underlying element also receives
+    // the click (pass-through), matching the previous `on_mouse_down_out` behaviour.
+    let dismiss = menu.on_dismiss.clone();
     deferred(
-        anchored()
-            .position(position)
-            .snap_to_window()
-            .child(menu.anchor(position)),
+        div()
+            .when_some(dismiss, |el, dismiss| {
+                el.child(anchored().position(Point::default()).child(
+                    div().w(px(100000.)).h(px(100000.)).on_mouse_down(
+                        MouseButton::Left,
+                        move |_: &MouseDownEvent, window, cx| {
+                            dismiss(window, cx);
+                        },
+                    ),
+                ))
+            })
+            .child(
+                anchored()
+                    .position(position)
+                    .snap_to_window()
+                    .child(menu.anchor(position)),
+            ),
     )
 }

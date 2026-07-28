@@ -419,6 +419,8 @@ impl WindowsWindow {
             directx_devices,
             invalidate_devices,
         } = creation_info;
+        let disable_direct_composition =
+            disable_direct_composition || params.disable_direct_composition;
         register_window_class(icon);
         let parent_hwnd = if params.kind == WindowKind::Dialog {
             let parent_window = unsafe { GetActiveWindow() };

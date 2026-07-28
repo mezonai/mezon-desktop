@@ -6,7 +6,7 @@ use gpui::{
 };
 
 use super::sizing::{Sizable, Size};
-use crate::theme::ActiveTheme;
+use mezon_theme::ActiveTheme;
 
 #[derive(IntoElement)]
 pub struct Spinner {

@@ -16,6 +16,8 @@ pub struct Notification {
     pub clan_id: Option<String>,
     /// Server-rendered navigation path (React `extras.link`); the click target.
     pub link: Option<String>,
+    /// Local file path to the sender-avatar image, shown as the notification icon.
+    pub icon_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +146,29 @@ fn replacement_key(n: &Notification) -> Option<String> {
 static NOTIFICATION_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(target_os = "macos")]
+const AUTH_UNKNOWN: u8 = 0;
+#[cfg(target_os = "macos")]
+const AUTH_GRANTED: u8 = 1;
+#[cfg(target_os = "macos")]
+const AUTH_DENIED: u8 = 2;
+#[cfg(target_os = "macos")]
+static NOTIFICATION_AUTH: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(AUTH_UNKNOWN);
+
+/// Whether the OS permits notifications. Returns `false` only when authorisation was
+/// explicitly denied; an as-yet-undetermined state (async grant pending) returns `true`.
+pub fn notifications_permitted() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        NOTIFICATION_AUTH.load(std::sync::atomic::Ordering::Relaxed) != AUTH_DENIED
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn leak_for_async_objc_callback<T>(block: T) {
     std::mem::forget(block);
 }
@@ -270,8 +295,10 @@ fn init_macos() {
         let handler = ConcreteBlock::new(move |granted: BOOL, _error: *mut Object| {
             if granted == YES {
                 tracing::info!("notification authorisation granted");
+                NOTIFICATION_AUTH.store(AUTH_GRANTED, std::sync::atomic::Ordering::Relaxed);
             } else {
                 tracing::warn!("notification authorisation denied; notifications will not appear");
+                NOTIFICATION_AUTH.store(AUTH_DENIED, std::sync::atomic::Ordering::Relaxed);
             }
         });
         let handler = handler.copy();
@@ -308,6 +335,16 @@ fn show_macos(n: &Notification) {
         let ns_body = nsstring(&n.body);
         let _: () = msg_send![content, setBody: ns_body];
         let _: () = msg_send![ns_body, release];
+
+        // Default alert sound, matching React's `sound: 'default'`; without this a
+        // UNUserNotificationCenter notification is delivered silently.
+        let sound_cls = class!(UNNotificationSound);
+        let sound: *mut Object = msg_send![sound_cls, defaultSound];
+        let _: () = msg_send![content, setSound: sound];
+
+        if let Some(icon_path) = n.icon_path.as_deref() {
+            attach_icon_macos(content, icon_path);
+        }
 
         let key = replacement_key(n);
         if let Some(key) = key.as_deref() {
@@ -353,6 +390,43 @@ unsafe fn nsstring(s: &str) -> *mut objc::runtime::Object {
         length: s.len()
         encoding: 4u64 // NSUTF8StringEncoding
     ]
+}
+
+/// Attach a local image file to the notification content as its icon. The system
+/// copies the file into its own store, so the caller's temp file may be deleted.
+#[cfg(target_os = "macos")]
+unsafe fn attach_icon_macos(content: *mut objc::runtime::Object, path: &str) {
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+
+    unsafe {
+        let ns_path = nsstring(path);
+        let url_cls = class!(NSURL);
+        let file_url: *mut Object = msg_send![url_cls, fileURLWithPath: ns_path];
+        let _: () = msg_send![ns_path, release];
+        if file_url.is_null() {
+            return;
+        }
+
+        let ns_id = nsstring("");
+        let attachment_cls = class!(UNNotificationAttachment);
+        let mut error: *mut Object = std::ptr::null_mut();
+        let attachment: *mut Object = msg_send![
+            attachment_cls,
+            attachmentWithIdentifier: ns_id
+            URL: file_url
+            options: std::ptr::null::<Object>()
+            error: &mut error
+        ];
+        let _: () = msg_send![ns_id, release];
+        if attachment.is_null() {
+            return;
+        }
+
+        let array_cls = class!(NSArray);
+        let array: *mut Object = msg_send![array_cls, arrayWithObject: attachment];
+        let _: () = msg_send![content, setAttachments: array];
+    }
 }
 
 // ─── Windows ──────────────────────────────────────────────────────────────────
@@ -433,24 +507,38 @@ fn show_windows(n: &Notification) {
     let title = n.title.clone();
     let body = n.body.clone();
     let tag = replacement_key(n);
+    let icon_path = n.icon_path.clone();
 
     std::thread::spawn(move || {
-        if let Err(e) = try_show_toast(&title, &body, tag.as_deref()) {
+        if let Err(e) = try_show_toast(&title, &body, tag.as_deref(), icon_path.as_deref()) {
             tracing::warn!("Windows toast notification failed: {e}");
         }
     });
 }
 
 #[cfg(target_os = "windows")]
-fn try_show_toast(title: &str, body: &str, tag: Option<&str>) -> windows::core::Result<()> {
+fn try_show_toast(
+    title: &str,
+    body: &str,
+    tag: Option<&str>,
+    icon_path: Option<&str>,
+) -> windows::core::Result<()> {
     use windows::Data::Xml::Dom::XmlDocument;
     use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
     use windows::core::HSTRING;
 
+    let image_xml = match icon_path {
+        Some(path) => format!(
+            r#"<image placement="appLogoOverride" hint-crop="circle" src="file:///{}"/>"#,
+            escape_xml(&path.replace('\\', "/"))
+        ),
+        None => String::new(),
+    };
     let xml_str = format!(
         r#"<toast>
   <visual>
     <binding template="ToastGeneric">
+      {image_xml}
       <text>{}</text>
       <text>{}</text>
     </binding>
@@ -518,6 +606,11 @@ fn show_linux(n: &Notification) {
     let key = replacement_key(n);
     let replace_id = key.as_deref().map(linux_replace_id);
     let activation_target = key.as_deref().and_then(build_target);
+    // Prefer the downloaded sender avatar; fall back to the installed app icon.
+    let icon = n
+        .icon_path
+        .clone()
+        .unwrap_or_else(|| LINUX_DESKTOP_ENTRY.to_owned());
 
     std::thread::spawn(move || {
         let mut notification = notify_rust::Notification::new();
@@ -525,7 +618,8 @@ fn show_linux(n: &Notification) {
             .appname("Mezon")
             .summary(&title)
             .body(&body)
-            .icon(LINUX_DESKTOP_ENTRY)
+            .icon(&icon)
+            .sound_name("message-new-instant")
             .hint(notify_rust::Hint::DesktopEntry(
                 LINUX_DESKTOP_ENTRY.to_owned(),
             ));
@@ -561,6 +655,7 @@ mod tests {
             channel_id: channel_id.map(str::to_owned),
             clan_id: clan_id.map(str::to_owned),
             link: None,
+            icon_path: None,
         }
     }
 

@@ -14,10 +14,10 @@ use reqwest_client::ReqwestClient;
 
 use crate::transport_runtime::handle;
 
-const MEMORY_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+const MEMORY_BUDGET_BYTES: usize = 4 * 1024 * 1024;
 const DISK_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 const MAX_ENTRY_BYTES: usize = 16 * 1024 * 1024;
-const MAX_TRANSFER_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_TRANSFER_BYTES: u64 = 32 * 1024 * 1024;
 const STATS_LOG_INTERVAL: u64 = 256;
 
 type ImageHybridCache = HybridCache<u64, Vec<u8>>;
@@ -25,6 +25,9 @@ type ImageHybridCache = HybridCache<u64, Vec<u8>>;
 pub struct DiskImageCacheClient {
     inner: ReqwestClient,
     dir: Option<PathBuf>,
+    media_origins: Arc<[String]>,
+    upload_origin: String,
+    read_origin: String,
     cache: Arc<tokio::sync::OnceCell<Option<ImageHybridCache>>>,
     hits: Arc<AtomicU64>,
     misses: Arc<AtomicU64>,
@@ -39,11 +42,19 @@ pub struct DiskImageCacheStats {
 }
 
 impl DiskImageCacheClient {
-    pub fn new(inner: ReqwestClient) -> Self {
+    pub fn new(
+        inner: ReqwestClient,
+        media_origins: Vec<String>,
+        upload_origin: String,
+        read_origin: String,
+    ) -> Self {
         let dir = dirs::cache_dir().map(|base| base.join("mezon").join("images"));
         Self {
             inner,
             dir,
+            media_origins: media_origins.into(),
+            upload_origin,
+            read_origin,
             cache: Arc::new(tokio::sync::OnceCell::new()),
             hits: Arc::new(AtomicU64::new(0)),
             misses: Arc::new(AtomicU64::new(0)),
@@ -87,12 +98,35 @@ fn has_image_extension(path: &str) -> bool {
     })
 }
 
-fn is_cacheable_image_url(url: &str) -> bool {
+fn url_has_origin(url: &str, origin: &str) -> bool {
+    let origin = origin.trim_end_matches('/');
+    !origin.is_empty()
+        && url
+            .strip_prefix(origin)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+fn rewrite_url_origin(url: &str, source_origin: &str, target_origin: &str) -> Option<String> {
+    let source_origin = source_origin.trim_end_matches('/');
+    let target_origin = target_origin.trim_end_matches('/');
+    if source_origin.is_empty() || target_origin.is_empty() {
+        return None;
+    }
+    let suffix = url.strip_prefix(source_origin)?;
+    if !suffix.is_empty() && !suffix.starts_with('/') {
+        return None;
+    }
+    Some(format!("{target_origin}{suffix}"))
+}
+
+fn is_cacheable_image_url(url: &str, media_origins: &[String]) -> bool {
     let path = image_path(url);
     if (path.contains("/rs:fill:") || path.contains("/rs:fit:")) && path.ends_with("@webp") {
         return true;
     }
-    (url.starts_with("https://cdn.mezon.") || url.starts_with("https://profile.mezon."))
+    media_origins
+        .iter()
+        .any(|origin| url_has_origin(url, origin))
         && has_image_extension(path)
 }
 
@@ -188,10 +222,22 @@ impl HttpClient for DiskImageCacheClient {
 
     fn send(
         &self,
-        req: Request<AsyncBody>,
+        mut req: Request<AsyncBody>,
     ) -> BoxFuture<'static, anyhow::Result<Response<AsyncBody>>> {
+        if *req.method() == Method::GET {
+            let url = req.uri().to_string();
+            let read_url = rewrite_url_origin(&url, &self.upload_origin, &self.read_origin)
+                .or_else(|| {
+                    rewrite_url_origin(&url, "http://cdn.mezon.ai", "https://cdn.mezon.ai")
+                });
+            if let Some(read_url) = read_url
+                && let Ok(read_uri) = read_url.parse()
+            {
+                *req.uri_mut() = read_uri;
+            }
+        }
         let uri = req.uri().to_string();
-        if *req.method() != Method::GET || !is_cacheable_image_url(&uri) {
+        if *req.method() != Method::GET || !is_cacheable_image_url(&uri, &self.media_origins) {
             return self.inner.send(req);
         }
         let key = stable_key(&uri);
@@ -289,40 +335,112 @@ impl HttpClient for DiskImageCacheClient {
 mod tests {
     use super::*;
 
-    const AVATAR: &str = "https://dev-imgproxy.nccsoft.vn/k/rs:fill:100:100:1/mb:2097152/plain/https://cdn.mezon.ai/a.png@webp";
-    const PROFILE: &str = "https://dev-imgproxy.nccsoft.vn/k/rs:fit:300:300:1/mb:2097152/plain/https://cdn.mezon.ai/a.png@webp";
-    const MESSAGE_RENDITION: &str = "https://imgproxy.mezon.ai/k/rs:fill:800:600:1/mb:2097152/plain/https://cdn.mezon.ai/x.jpg@webp";
-    const RAW_CDN: &str = "https://cdn.mezon.ai/1700000000_0photo.png";
+    const AVATAR: &str = "https://dev-imgproxy.nccsoft.vn/k/rs:fill:100:100:1/mb:2097152/plain/https://cdn.komu.vn/a.png@webp";
+    const PROFILE: &str = "https://dev-imgproxy.nccsoft.vn/k/rs:fit:300:300:1/mb:2097152/plain/https://cdn.komu.vn/a.png@webp";
+    const MESSAGE_RENDITION: &str = "https://imgproxy.komu.vn/k/rs:fill:800:600:1/mb:2097152/plain/https://cdn.komu.vn/x.jpg@webp";
+    const RAW_CDN: &str = "https://cdn.komu.vn/1700000000_0photo.png";
+    const RAW_LEGACY_CDN: &str = "https://cdn.mezon.ai/stickers/hellomezon.gif";
+    const RAW_LEGACY_HTTP_CDN: &str = "http://cdn.mezon.ai/landing-page-mezon/legacy.gif";
+    const RAW_UPLOAD: &str = "https://cdn-api.mezon.ai/1700000000_0photo.png";
     const RAW_PROFILE: &str = "https://profile.mezon.ai/1700000000_0avatar.jpg";
-    const VIDEO: &str = "https://cdn.mezon.ai/1700000000_0clip.mp4";
-    const PDF: &str = "https://cdn.mezon.ai/1700000000_0doc.pdf";
+    const VIDEO: &str = "https://cdn.komu.vn/1700000000_0clip.mp4";
+    const PDF: &str = "https://cdn.komu.vn/1700000000_0doc.pdf";
     const API: &str = "https://api.mezon.ai/v2/account";
     const TENOR: &str = "https://media.tenor.com/abc.gif";
 
+    fn media_origins() -> Vec<String> {
+        vec![
+            "https://cdn.komu.vn".into(),
+            "https://profile.mezon.ai".into(),
+            "https://cdn.mezon.ai".into(),
+            "http://cdn.mezon.ai".into(),
+        ]
+    }
+
+    #[test]
+    fn disk_cache_keeps_only_a_small_memory_front() {
+        assert_eq!(MEMORY_BUDGET_BYTES, 4 * 1024 * 1024);
+        assert_eq!(DISK_BUDGET_BYTES, 256 * 1024 * 1024);
+        assert_eq!(MAX_TRANSFER_BYTES, 32 * 1024 * 1024);
+    }
+
     #[test]
     fn predicate_matches_renditions_avatars_profile_and_raw_cdn_images() {
-        assert!(is_cacheable_image_url(AVATAR));
-        assert!(is_cacheable_image_url(PROFILE));
-        assert!(is_cacheable_image_url(MESSAGE_RENDITION));
-        assert!(is_cacheable_image_url(RAW_CDN));
-        assert!(is_cacheable_image_url(RAW_PROFILE));
+        let origins = media_origins();
+        assert!(is_cacheable_image_url(AVATAR, &origins));
+        assert!(is_cacheable_image_url(PROFILE, &origins));
+        assert!(is_cacheable_image_url(MESSAGE_RENDITION, &origins));
+        assert!(is_cacheable_image_url(RAW_CDN, &origins));
+        assert!(is_cacheable_image_url(RAW_LEGACY_CDN, &origins));
+        assert!(is_cacheable_image_url(RAW_LEGACY_HTTP_CDN, &origins));
+        assert!(is_cacheable_image_url(RAW_PROFILE, &origins));
+        assert!(!is_cacheable_image_url(RAW_UPLOAD, &origins));
     }
 
     #[test]
     fn predicate_excludes_video_pdf_api_and_third_party() {
-        assert!(!is_cacheable_image_url(VIDEO));
-        assert!(!is_cacheable_image_url(PDF));
-        assert!(!is_cacheable_image_url(API));
-        assert!(!is_cacheable_image_url(TENOR));
+        let origins = media_origins();
+        assert!(!is_cacheable_image_url(VIDEO, &origins));
+        assert!(!is_cacheable_image_url(PDF, &origins));
+        assert!(!is_cacheable_image_url(API, &origins));
+        assert!(!is_cacheable_image_url(TENOR, &origins));
     }
 
     #[test]
     fn predicate_excludes_lookalike_hosts() {
-        assert!(!is_cacheable_image_url("https://cdn.mezon-evil.com/x.png"));
+        let origins = media_origins();
         assert!(!is_cacheable_image_url(
-            "https://profile.mezon-evil.com/x.jpg"
+            "https://cdn.komu.vn.attacker.com/x.png",
+            &origins
         ));
-        assert!(!is_cacheable_image_url("https://cdn.mezonai.example/x.png"));
+        assert!(!is_cacheable_image_url(
+            "https://profile.mezon.ai.attacker.com/x.jpg",
+            &origins
+        ));
+        assert!(!is_cacheable_image_url(
+            "https://cdn-api.mezon.ai.attacker.com/x.png",
+            &origins
+        ));
+    }
+
+    #[test]
+    fn upload_get_url_is_rewritten_to_the_read_cdn() {
+        assert_eq!(
+            rewrite_url_origin(
+                "https://cdn-api.mezon.ai/a/photo.png?version=1",
+                "https://cdn-api.mezon.ai",
+                "https://cdn.komu.vn",
+            ),
+            Some("https://cdn.komu.vn/a/photo.png?version=1".into())
+        );
+        assert_eq!(
+            rewrite_url_origin(
+                "https://cdn-api.mezon.ai.attacker.com/a.png",
+                "https://cdn-api.mezon.ai",
+                "https://cdn.komu.vn",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_http_cdn_is_upgraded_to_https() {
+        assert_eq!(
+            rewrite_url_origin(
+                "http://cdn.mezon.ai/landing-page-mezon/legacy.gif",
+                "http://cdn.mezon.ai",
+                "https://cdn.mezon.ai",
+            ),
+            Some("https://cdn.mezon.ai/landing-page-mezon/legacy.gif".into())
+        );
+        assert_eq!(
+            rewrite_url_origin(
+                "http://cdn.mezon.ai.attacker.com/legacy.gif",
+                "http://cdn.mezon.ai",
+                "https://cdn.mezon.ai",
+            ),
+            None
+        );
     }
 
     #[test]

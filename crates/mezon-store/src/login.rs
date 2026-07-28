@@ -105,6 +105,9 @@ impl LoginStore {
     }
 
     pub fn reset_all_user_stores(cx: &mut App) {
+        if let Some(e) = crate::clan_load::ClanLoadScheduler::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
         if let Some(e) = crate::account::AccountStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }
@@ -171,11 +174,20 @@ impl LoginStore {
         if let Some(e) = crate::channel::ChannelList::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }
+        if let Some(e) = crate::canvas::CanvasStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
         if let Some(e) = crate::webhook::WebhookStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }
         if let Some(e) = crate::voice::VoiceStore::try_global(cx) {
             e.update(cx, |s, cx| s.logout_teardown(cx));
+        }
+        if let Some(e) = crate::wallet::WalletStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::audit_log::AuditLogStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
         }
     }
 }

@@ -1541,6 +1541,10 @@ pub struct WindowOptions {
 
     /// Tab group name, allows opening the window as a native tab on macOS 10.12+. Windows with the same tabbing identifier will be grouped together.
     pub tabbing_identifier: Option<String>,
+
+    /// When true, GPUI renders without a topmost DirectComposition target so native
+    #[cfg(target_os = "windows")]
+    pub disable_direct_composition: bool,
 }
 
 /// The variables that can be configured when creating a new window
@@ -1595,6 +1599,8 @@ pub struct WindowParams {
     pub window_min_size: Option<Size<Pixels>>,
     #[cfg(target_os = "macos")]
     pub tabbing_identifier: Option<String>,
+    #[cfg(target_os = "windows")]
+    pub disable_direct_composition: bool,
 }
 
 /// Represents the status of how a window should be opened.
@@ -1654,6 +1660,8 @@ impl Default for WindowOptions {
             window_min_size: None,
             window_decorations: None,
             tabbing_identifier: None,
+            #[cfg(target_os = "windows")]
+            disable_direct_composition: false,
         }
     }
 }

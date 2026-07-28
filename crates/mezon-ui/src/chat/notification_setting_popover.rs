@@ -1,6 +1,6 @@
 use gpui::{
     Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    MouseDownEvent, ParentElement, Render, Styled, Window, div, prelude::*, px, relative,
+    ParentElement, Render, Styled, Subscription, Window, div, prelude::*, px, relative,
 };
 use mezon_store::notification_setting::{
     MUTE_FOR_1_HOUR_SEC, MUTE_FOR_3_HOURS_SEC, MUTE_FOR_8_HOURS_SEC, MUTE_FOR_15_MINUTES_SEC,
@@ -64,6 +64,7 @@ pub struct NotificationSettingPanel {
     settings: Entity<Settings>,
     focus_handle: FocusHandle,
     mute_submenu_open: bool,
+    _blur_sub: Subscription,
 }
 
 impl EventEmitter<DismissEvent> for NotificationSettingPanel {}
@@ -79,17 +80,23 @@ impl NotificationSettingPanel {
         clan_id: ClanId,
         channel_id: ChannelId,
         settings: Entity<Settings>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let store = NotificationSettingStore::global(cx);
-        store.update(cx, |store, cx| store.ensure_loaded(channel_id, cx));
+        store.update(cx, |store, cx| {
+            store.ensure_channel(clan_id, channel_id, cx)
+        });
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
+        let focus_handle = cx.focus_handle();
+        let blur_sub = cx.on_blur(&focus_handle, window, |_, _, cx| cx.emit(DismissEvent));
         Self {
             clan_id,
             channel_id,
             settings,
-            focus_handle: cx.focus_handle(),
+            focus_handle,
             mute_submenu_open: false,
+            _blur_sub: blur_sub,
         }
     }
 }
@@ -103,7 +110,7 @@ impl Render for NotificationSettingPanel {
         let (muted, level, muted_until) = {
             let store = store.read(cx);
             (
-                store.is_muted(self.channel_id, self.clan_id),
+                store.is_time_muted(self.channel_id),
                 store.level(self.channel_id),
                 store.muted_until_ms(self.channel_id),
             )
@@ -164,7 +171,7 @@ impl Render for NotificationSettingPanel {
             }))
             .on_click(cx.listener(move |_, _, _, cx| {
                 NotificationSettingStore::global(cx).update(cx, |store, cx| {
-                    if store.is_muted(channel_id, clan_id) {
+                    if store.is_time_muted(channel_id) {
                         store.unmute(channel_id, clan_id, cx);
                     } else {
                         store.mute_forever(channel_id, clan_id, cx);
@@ -218,14 +225,6 @@ impl Render for NotificationSettingPanel {
             .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
                 cx.emit(DismissEvent);
             }))
-            .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _window, cx| {
-                if this.mute_submenu_open {
-                    this.mute_submenu_open = false;
-                    cx.notify();
-                    return;
-                }
-                cx.emit(DismissEvent);
-            }))
             .w(px(202.))
             .py(px(6.))
             .px(px(8.))
@@ -257,15 +256,11 @@ impl Render for NotificationSettingPanel {
                     .rounded(px(4.))
                     .cursor_pointer()
                     .hover(|s| s.bg(tokens.bg_item_hover))
-                    .child(
-                        div()
-                            .w(px(12.))
-                            .h(px(12.))
-                            .rounded(px(6.))
-                            .border_1()
-                            .border_color(tokens.border_primary)
-                            .when(selected, |d| d.bg(tokens.text_theme_primary)),
-                    )
+                    .child(crate::chat::notification_setting_modal::radio_dot(
+                        selected,
+                        tokens.border_primary.into(),
+                        theme.brand.into(),
+                    ))
                     .child(
                         Label::new(t(key))
                             .text_sm()

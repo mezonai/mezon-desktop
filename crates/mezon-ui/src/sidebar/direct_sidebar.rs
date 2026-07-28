@@ -1,21 +1,27 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, Context, Entity, FontWeight, SharedString, UniformListScrollHandle, Window, div, img,
-    prelude::*, px, size, uniform_list,
+    App, Context, Entity, FontWeight, MouseButton, MouseDownEvent, Pixels, Point, SharedString,
+    UniformListScrollHandle, WeakEntity, Window, div, img, prelude::*, px, size, uniform_list,
 };
 use mezon_store::{
-    ChannelEvent, ChannelId, ChannelList, DirectChannel, DirectKind, DirectMessageStore,
-    FriendStore, Settings,
+    ChannelEvent, ChannelId, ChannelList, ClanId, DirectChannel, DirectKind, DirectMessageStore,
+    FriendStore, NotificationSettingStore, Settings,
 };
 
-use super::friend_request_badge;
+use super::channel_sidebar::menu::{MUTE_DURATIONS, apply_mute, mute_label, submenu_options};
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::components::compositions::{DM_ROW_HEIGHT, DmRow};
-use crate::components::primitives::{Icon, IconName};
+use crate::components::primitives::{ContextMenu, Icon, IconName, context_menu_at};
 use crate::router::{Route, Router, navigate};
 use crate::theme::{ActiveTheme, Theme};
+
+struct DmMenu {
+    position: Point<Pixels>,
+    channel_id: ChannelId,
+    mute_sub_open: bool,
+}
 
 #[derive(PartialEq)]
 struct DmItem {
@@ -29,6 +35,7 @@ struct DmItem {
     unread: bool,
     online: bool,
     in_voice: bool,
+    muted: bool,
     avatar_src: SharedString,
     avatar_raw: SharedString,
 }
@@ -39,6 +46,7 @@ pub struct DirectSidebar {
     dm_items: Rc<Vec<DmItem>>,
     dm_items_fingerprint: u64,
     pending_rebuild: bool,
+    open_menu: Option<DmMenu>,
     image_cache: Entity<crate::image_cache::LruImageCache>,
 }
 
@@ -75,6 +83,7 @@ fn dm_items_fingerprint(store: &DirectMessageStore, cx: &App) -> u64 {
                 u8::from(ch.is_unread()),
                 u8::from(ch.online),
                 u8::from(dm_in_voice(ch, channels)),
+                u8::from(super::dm_muted(ch.id, cx)),
             ],
         );
         let h = fold(h, ch.label.as_bytes());
@@ -100,11 +109,77 @@ fn build_dm_items(store: &DirectMessageStore, cx: &App) -> Rc<Vec<DmItem>> {
                 unread: ch.is_unread(),
                 online: ch.online,
                 in_voice: dm_in_voice(ch, channels),
+                muted: super::dm_muted(ch.id, cx),
                 avatar_src: SharedString::from(crate::util::imgproxy::avatar_url(cx, &ch.avatar)),
                 avatar_raw: SharedString::from(ch.avatar.clone()),
             })
             .collect(),
     )
+}
+
+fn dm_set_mute_submenu_open(
+    sidebar: WeakEntity<DirectSidebar>,
+) -> impl Fn(&mut Window, &mut App) + 'static {
+    move |_window: &mut Window, cx: &mut App| {
+        let _ = sidebar.update(cx, |this, cx| {
+            if let Some(menu) = this.open_menu.as_mut()
+                && !menu.mute_sub_open
+            {
+                menu.mute_sub_open = true;
+                cx.notify();
+            }
+        });
+    }
+}
+
+fn build_dm_menu(
+    sidebar: WeakEntity<DirectSidebar>,
+    locale: &str,
+    channel_id: ChannelId,
+    muted: bool,
+    muted_until: Option<String>,
+    mute_sub_open: bool,
+) -> ContextMenu {
+    let t = |key: &'static str| mezon_i18n::t(locale, key).to_string();
+    let coming_soon = t("common.comingSoon");
+    let sidebar_dismiss = sidebar.clone();
+    let mut menu = ContextMenu::new()
+        .on_dismiss(move |_window, cx| {
+            let _ = sidebar_dismiss.update(cx, |this, cx| {
+                this.open_menu = None;
+                cx.notify();
+            });
+        })
+        .item(t("channelMenu.menu.watchMenu.markAsRead"), {
+            let message = coming_soon.clone();
+            move |_window: &mut Window, cx: &mut App| {
+                let message = message.clone();
+                crate::app::shell::Shell::global(cx)
+                    .update(cx, move |shell, cx| shell.info(message, cx));
+            }
+        })
+        .separator();
+    if muted {
+        let label = match muted_until {
+            Some(until) => format!("{} · {until}", mute_label(locale, false, true)),
+            None => mute_label(locale, false, true),
+        };
+        menu = menu.item(label, move |_window: &mut Window, cx: &mut App| {
+            if let Some(store) = NotificationSettingStore::try_global(cx) {
+                store.update(cx, |store, cx| store.unmute(channel_id, ClanId(0), cx));
+            }
+        });
+    } else {
+        menu = menu.submenu(
+            mute_label(locale, false, false),
+            None,
+            submenu_options(locale, MUTE_DURATIONS, -2),
+            mute_sub_open,
+            dm_set_mute_submenu_open(sidebar),
+            apply_mute(channel_id, ClanId(0)),
+        );
+    }
+    menu
 }
 
 impl DirectSidebar {
@@ -132,6 +207,10 @@ impl DirectSidebar {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         cx.observe(&FriendStore::global(cx), |_, _, cx| cx.notify())
             .detach();
+        cx.observe(&NotificationSettingStore::global(cx), |this, _, cx| {
+            this.refresh_dm_items(cx)
+        })
+        .detach();
 
         let dm_items_fingerprint = dm_items_fingerprint(direct_store.read(cx), cx);
         let dm_items = build_dm_items(direct_store.read(cx), cx);
@@ -142,6 +221,7 @@ impl DirectSidebar {
             dm_items,
             dm_items_fingerprint,
             pending_rebuild: false,
+            open_menu: None,
             image_cache: cx.new(|cx| {
                 crate::image_cache::LruImageCache::avatar_thumbnail_small(
                     "dm-list",
@@ -209,6 +289,7 @@ impl DirectSidebar {
         let bg_hover = theme.bg_hover;
         div()
             .id("dm-friends")
+            .relative()
             .w_full()
             .flex()
             .flex_row()
@@ -230,7 +311,22 @@ impl DirectSidebar {
                     .child(mezon_i18n::t(locale, "directMessage.friends")),
             )
             .when(pending > 0, |el| {
-                el.child(friend_request_badge(pending, px(11.)).ml_auto())
+                el.child(
+                    div()
+                        .absolute()
+                        .right(px(25.))
+                        .size(px(16.))
+                        .rounded_full()
+                        .bg(gpui::rgb(0xda_37_3c))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(9.))
+                        .line_height(px(9.))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(gpui::white())
+                        .child(SharedString::from(pending.to_string())),
+                )
             })
     }
 
@@ -286,6 +382,7 @@ impl Render for DirectSidebar {
         let suppress_hover = self.list_scroll.is_scroll_hover_suppressed();
         let image_cache = self.image_cache.clone();
         let in_voice_label: SharedString = mezon_i18n::t(&locale, "memberPage.inVoice").into();
+        let menu_sidebar = cx.entity().downgrade();
 
         let list = uniform_list("dm-list", count, move |range, _window, cx| {
             let theme = cx.theme().clone();
@@ -312,7 +409,36 @@ impl Render for DirectSidebar {
                         if item.in_voice {
                             row = row.in_voice_label(in_voice_label.clone());
                         }
-                        row.render(&theme).into_any_element()
+                        let channel_id = item.channel_id;
+                        let sidebar = menu_sidebar.clone();
+                        div()
+                            .w_full()
+                            .when(item.muted, |d| d.opacity(0.7))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                move |event: &MouseDownEvent, _window, cx| {
+                                    let position = event.position;
+                                    if let Some(view) = sidebar.upgrade() {
+                                        view.update(cx, |this, cx| {
+                                            this.open_menu = Some(DmMenu {
+                                                position,
+                                                channel_id,
+                                                mute_sub_open: false,
+                                            });
+                                            if let Some(store) =
+                                                NotificationSettingStore::try_global(cx)
+                                            {
+                                                store.update(cx, |store, cx| {
+                                                    store.ensure_channel(ClanId(0), channel_id, cx);
+                                                });
+                                            }
+                                            cx.notify();
+                                        });
+                                    }
+                                },
+                            )
+                            .child(row.render(&theme))
+                            .into_any_element()
                     }
                     None => div().into_any_element(),
                 })
@@ -329,6 +455,32 @@ impl Render for DirectSidebar {
 
         let on_friends = matches!(Router::global(cx).read(cx).route(), Route::Friends);
         let friend_pending = FriendStore::global(cx).read(cx).pending_incoming_count();
+
+        let overlay_sidebar = cx.entity().downgrade();
+        let overlay_locale = locale.clone();
+        let menu_overlay = self.open_menu.as_ref().map(|menu| {
+            let store = NotificationSettingStore::try_global(cx);
+            let muted = store
+                .as_ref()
+                .is_some_and(|s| s.read(cx).is_time_muted(menu.channel_id));
+            let muted_until = store
+                .as_ref()
+                .and_then(|s| s.read(cx).muted_until_ms(menu.channel_id))
+                .map(|ms| {
+                    format!(
+                        "{} {}",
+                        mezon_i18n::t(&locale, "channelMenu.menu.notification.mutedUntil"),
+                        crate::chat::notification_setting_popover::format_muted_until(ms)
+                    )
+                });
+            (
+                menu.position,
+                menu.channel_id,
+                muted,
+                muted_until,
+                menu.mute_sub_open,
+            )
+        });
 
         div()
             .flex()
@@ -356,6 +508,22 @@ impl Render for DirectSidebar {
                         window,
                         cx,
                     ),
+            )
+            .when_some(
+                menu_overlay,
+                move |el, (position, channel_id, muted, muted_until, mute_open)| {
+                    el.child(context_menu_at(
+                        position,
+                        build_dm_menu(
+                            overlay_sidebar.clone(),
+                            &overlay_locale,
+                            channel_id,
+                            muted,
+                            muted_until,
+                            mute_open,
+                        ),
+                    ))
+                },
             )
     }
 }

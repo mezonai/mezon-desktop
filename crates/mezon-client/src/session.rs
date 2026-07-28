@@ -10,6 +10,9 @@ pub struct Session {
     pub token: String,
     /// Refresh token for obtaining a new token
     pub refresh_token: String,
+    /// OpenID id_token (JWT) used for MMN zk-proof generation
+    #[serde(default)]
+    pub id_token: String,
     /// Socket credential (`AAA…`) — preferred for WebSocket connect (mezon-js uses this over JWT).
     #[serde(default)]
     pub session_id: String,

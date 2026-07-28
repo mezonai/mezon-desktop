@@ -22,8 +22,9 @@ fn shared_sink() -> Result<Rc<MixerDeviceSink>, AudioError> {
         if let Some(existing) = slot.upgrade() {
             return Ok(existing);
         }
-        let sink = DeviceSinkBuilder::open_default_sink()
+        let mut sink = DeviceSinkBuilder::open_default_sink()
             .map_err(|e| AudioError::Output(e.to_string()))?;
+        sink.log_on_drop(false);
         let sink = Rc::new(sink);
         *slot = Rc::downgrade(&sink);
         Ok(sink)

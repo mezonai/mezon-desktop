@@ -405,6 +405,82 @@ impl FriendStore {
         .detach();
     }
 
+    pub fn add_friend(
+        &mut self,
+        user_id: UserId,
+        username: String,
+        display_name: String,
+        avatar_url: String,
+        cx: &mut Context<Self>,
+    ) {
+        if username.is_empty() || self.adding {
+            return;
+        }
+        if self
+            .friends
+            .iter()
+            .any(|f| f.id == user_id && f.state != FriendState::Blocked)
+        {
+            return;
+        }
+        self.adding = true;
+        cx.emit(FriendEvent::AddingChanged);
+        cx.notify();
+        let me = self.current_user_id(cx);
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .add_friends(vec![user_id.0], vec![username.clone()])
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != generation {
+                    return;
+                }
+                this.adding = false;
+                cx.emit(FriendEvent::AddingChanged);
+                match result {
+                    Ok(ids) => match ids.first() {
+                        Some(&id) if id != 0 => {
+                            let uid = UserId(id);
+                            if let Some(existing) = this.friends.iter_mut().find(|f| f.id == uid) {
+                                existing.state = FriendState::InviteSent;
+                                existing.username = username;
+                                if !display_name.is_empty() {
+                                    existing.display_name = display_name;
+                                }
+                                if !avatar_url.is_empty() {
+                                    existing.avatar_url = avatar_url;
+                                }
+                            } else {
+                                this.friends.push(Friend {
+                                    id: uid,
+                                    username,
+                                    display_name,
+                                    avatar_url,
+                                    state: FriendState::InviteSent,
+                                    source_id: me,
+                                });
+                            }
+                            cx.emit(FriendEvent::Changed);
+                            cx.emit(FriendEvent::AddSucceeded);
+                        }
+                        _ => {
+                            tracing::warn!("add_friend: server returned no id");
+                            cx.emit(FriendEvent::AddFailed);
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!("add_friend failed: {e}");
+                        cx.emit(FriendEvent::AddFailed);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Accept an incoming friend request (React accept). Optimistically flips to `Friend`.
     pub fn accept_friend(&mut self, friend_id: UserId, cx: &mut Context<Self>) {
         if !self.set_state(friend_id, FriendState::Friend, cx) {
@@ -557,6 +633,8 @@ mod tests {
             phone_number: None,
             password_setted: false,
             logo: None,
+            status: String::new(),
+            user_status: String::new(),
         }
     }
 

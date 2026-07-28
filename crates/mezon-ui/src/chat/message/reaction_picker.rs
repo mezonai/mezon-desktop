@@ -85,6 +85,7 @@ pub struct ReactionPicker {
     selected: Option<String>,
     hover_emoji: Option<(SharedString, SharedString)>,
     embedded_search: bool,
+    fill_container: bool,
     scroll: UniformListScrollHandle,
     image_cache: Entity<LruImageCache>,
     _emoji_sub: Option<Subscription>,
@@ -102,11 +103,15 @@ impl Focusable for ReactionPicker {
 
 impl ReactionPicker {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::build(true, window, cx)
+        Self::build(true, false, window, cx)
+    }
+
+    pub fn new_in_container(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::build(true, true, window, cx)
     }
 
     pub fn new_hosted(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::build(false, window, cx)
+        Self::build(false, false, window, cx)
     }
 
     pub fn set_query(&mut self, query: String, cx: &mut Context<Self>) {
@@ -117,7 +122,12 @@ impl ReactionPicker {
         }
     }
 
-    fn build(embedded_search: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn build(
+        embedded_search: bool,
+        fill_container: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
         let search = cx.new(|cx| {
             InputState::new(window, cx)
@@ -157,6 +167,7 @@ impl ReactionPicker {
             selected: None,
             hover_emoji: None,
             embedded_search,
+            fill_container,
             scroll: UniformListScrollHandle::new(),
             image_cache,
             _emoji_sub: emoji_sub,
@@ -486,15 +497,15 @@ impl Render for ReactionPicker {
                 cx.emit(DismissEvent);
             }))
             .image_cache(self.image_cache.clone())
-            .w(px(PANEL_W))
-            .h(panel_h)
+            .when(self.fill_container, |el| el.w_full().h_full())
+            .when(!self.fill_container, |el| el.w(px(PANEL_W)).h(panel_h))
             .flex()
             .flex_col()
             .rounded_lg()
             .border_1()
             .border_color(border_color)
             .bg(bg_contexify)
-            .shadow_lg()
+            .when(!self.fill_container, |el| el.shadow_lg())
             .p_2()
             .child(div().w_full().pb_2().child(Input::new(&self.search)))
             .child(body)

@@ -9,17 +9,26 @@ use anyhow::Result;
 use futures::AsyncReadExt as _;
 use http_client::{AsyncBody, HttpClient, http};
 use reqwest_client::ReqwestClient;
+use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::io::AsyncWriteExt as _;
 use tokio::runtime::Runtime;
 
 static TRANSPORT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
-static HTTP_CLIENT: OnceLock<ReqwestClient> = OnceLock::new();
+static HTTP_CLIENT: OnceLock<Arc<ReqwestClient>> = OnceLock::new();
 
 const HTTP_TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
+fn shared_http_client() -> &'static Arc<ReqwestClient> {
+    HTTP_CLIENT.get_or_init(|| Arc::new(new_http_client()))
+}
+
 pub(crate) fn http_client() -> &'static ReqwestClient {
-    HTTP_CLIENT.get_or_init(new_http_client)
+    shared_http_client()
+}
+
+pub fn http_client_arc() -> Arc<dyn HttpClient> {
+    shared_http_client().clone()
 }
 
 pub fn new_http_client() -> ReqwestClient {
@@ -138,6 +147,24 @@ pub async fn fetch_bytes(url: &str) -> Result<(Vec<u8>, Option<String>)> {
         })
         .await
         .map_err(|e| anyhow::anyhow!("fetch task failed: {e}"))?
+}
+
+/// Write bytes to a uniquely-named temp file for use as a notification icon
+/// attachment. The OS notification system copies the file into its own store, so
+/// the returned path is safe to delete afterwards.
+pub async fn write_temp_icon(bytes: Vec<u8>) -> Result<std::path::PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let path =
+        std::env::temp_dir().join(format!("mezon-noti-icon-{}-{seq}.img", std::process::id()));
+    runtime()
+        .spawn_blocking(move || {
+            std::fs::write(&path, &bytes)?;
+            Ok(path)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("icon write task failed: {e}"))?
 }
 
 pub async fn read_file(path: std::path::PathBuf) -> Result<Vec<u8>> {
@@ -311,6 +338,30 @@ impl TransportClient {
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
+
+    pub async fn send_channel_message_structured_with_code(
+        &self,
+        channel_id: i64,
+        content_json: &str,
+        mode: i32,
+        message_code: i32,
+    ) -> Result<crate::transport::ApiMessage> {
+        let transport = self.inner.clone();
+        let content_json = content_json.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .send_channel_message_structured_with_code(
+                        channel_id,
+                        &content_json,
+                        mode,
+                        message_code,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
     pub fn new(base_path: String) -> Self {
         let adapter = Box::new(AbridgedTcpAdapter::new());
         let transport = MezonTransport::new(adapter, base_path);
@@ -429,6 +480,40 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn update_user_status(
+        &self,
+        status: String,
+        minutes: i32,
+        until_turn_on: bool,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .update_user_status(&status, minutes, until_turn_on)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_user_custom_status(
+        &self,
+        status: String,
+        minutes: i32,
+        until_turn_on: bool,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .update_user_custom_status(&status, minutes, until_turn_on)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_categories_typed(
         &self,
         clan_id: i64,
@@ -495,6 +580,118 @@ impl TransportClient {
         let transport = self.inner.clone();
         runtime()
             .spawn(async move { transport.list_stickers_by_user_id().await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn create_clan_emoji(
+        &self,
+        clan_id: i64,
+        source: &str,
+        shortname: &str,
+        category: &str,
+        id: i64,
+        is_for_sale: bool,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let source = source.to_string();
+        let shortname = shortname.to_string();
+        let category = category.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .create_clan_emoji(clan_id, &source, &shortname, &category, id, is_for_sale)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_clan_emoji_by_id(
+        &self,
+        id: i64,
+        shortname: &str,
+        clan_id: i64,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let shortname = shortname.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .update_clan_emoji_by_id(id, &shortname, clan_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn delete_clan_emoji_by_id(&self, id: i64, clan_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.delete_clan_emoji_by_id(id, clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_clan_sticker(
+        &self,
+        clan_id: i64,
+        source: &str,
+        shortname: &str,
+        category: &str,
+        id: i64,
+        media_type: i32,
+        is_for_sale: bool,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let source = source.to_string();
+        let shortname = shortname.to_string();
+        let category = category.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .add_clan_sticker(
+                        clan_id,
+                        &source,
+                        &shortname,
+                        &category,
+                        id,
+                        media_type,
+                        is_for_sale,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_clan_sticker_by_id(
+        &self,
+        id: i64,
+        clan_id: i64,
+        source: &str,
+        shortname: &str,
+        category: &str,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let source = source.to_string();
+        let shortname = shortname.to_string();
+        let category = category.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .update_clan_sticker_by_id(id, clan_id, &source, &shortname, &category)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn delete_clan_sticker_by_id(&self, id: i64, clan_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.delete_clan_sticker_by_id(id, clan_id).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
@@ -609,6 +806,24 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn add_agent_to_channel(&self, channel_id: i64, room_name: &str) -> Result<()> {
+        let transport = self.inner.clone();
+        let room_name = room_name.to_string();
+        runtime()
+            .spawn(async move { transport.add_agent_to_channel(channel_id, &room_name).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn disconnect_agent(&self, channel_id: i64, room_name: &str) -> Result<()> {
+        let transport = self.inner.clone();
+        let room_name = room_name.to_string();
+        runtime()
+            .spawn(async move { transport.disconnect_agent(channel_id, &room_name).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_clan_badge_count(&self) -> Result<Vec<(String, i32, bool)>> {
         let transport = self.inner.clone();
         runtime()
@@ -621,6 +836,17 @@ impl TransportClient {
         let transport = self.inner.clone();
         runtime()
             .spawn(async move { transport.get_notification_clan(clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn get_notification_category(
+        &self,
+        category_id: i64,
+    ) -> Result<mezon_proto::api::NotificationUserChannel> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.get_notification_category(category_id).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
@@ -678,6 +904,83 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn set_notification_clan_setting(
+        &self,
+        clan_id: i64,
+        notification_type: i32,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .set_notification_clan_setting(clan_id, notification_type)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn set_notification_category_setting(
+        &self,
+        category_id: i64,
+        notification_type: i32,
+        clan_id: i64,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .set_notification_category_setting(category_id, notification_type, clan_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn set_mute_category(
+        &self,
+        category_id: i64,
+        mute_seconds: i32,
+        clan_id: i64,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .set_mute_category(category_id, mute_seconds, clan_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn delete_notification_category_setting(&self, category_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .delete_notification_category_setting(category_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn get_channel_category_noti_settings_list(
+        &self,
+        clan_id: i64,
+    ) -> Result<mezon_proto::api::NotificationChannelCategorySettingList> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .get_channel_category_noti_settings_list(clan_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub fn spawn_gotify_stream(
         &self,
         ws_base: String,
@@ -693,14 +996,14 @@ impl TransportClient {
         token: String,
         device_id: String,
         platform: String,
-    ) -> Result<String> {
+    ) -> Result<(String, String)> {
         let transport = self.inner.clone();
         runtime()
             .spawn(async move {
                 transport
                     .regist_fcm_device_token(&token, &device_id, &platform)
                     .await
-                    .map(|resp| resp.token)
+                    .map(|resp| (resp.token, resp.device_id))
             })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
@@ -774,6 +1077,26 @@ impl TransportClient {
         let transport = self.inner.clone();
         runtime()
             .spawn(async move { transport.update_system_message(request).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_audit_log(
+        &self,
+        clan_id: i64,
+        action_log: &str,
+        user_id: Option<i64>,
+        date_log: &str,
+    ) -> Result<mezon_proto::api::ListAuditLog> {
+        let transport = self.inner.clone();
+        let action_log = action_log.to_string();
+        let date_log = date_log.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .list_audit_log(clan_id, &action_log, user_id, &date_log)
+                    .await
+            })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
@@ -871,6 +1194,84 @@ impl TransportClient {
 
         runtime()
             .spawn(async move { transport.get_pin_messages_list(&channel_id, &clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn get_channel_canvas_list(
+        &self,
+        channel_id: i64,
+        clan_id: i64,
+        limit: i32,
+        page: i32,
+    ) -> Result<Vec<crate::transport::ApiCanvas>> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .get_channel_canvas_list(channel_id, clan_id, limit, page)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn get_channel_canvas_detail(
+        &self,
+        id: i64,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<crate::transport::ApiCanvasDetail> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .get_channel_canvas_detail(id, clan_id, channel_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn edit_channel_canvas(
+        &self,
+        id: i64,
+        channel_id: i64,
+        clan_id: i64,
+        title: &str,
+        content: &str,
+        is_default: bool,
+        status: i32,
+    ) -> Result<String> {
+        let transport = self.inner.clone();
+        let title = title.to_string();
+        let content = content.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .edit_channel_canvases(
+                        id, channel_id, clan_id, &title, &content, is_default, status,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn delete_channel_canvas(
+        &self,
+        canvas_id: i64,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .delete_channel_canvas(canvas_id, clan_id, channel_id)
+                    .await
+            })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
@@ -1023,6 +1424,8 @@ impl TransportClient {
         is_public: bool,
         topic_id: i64,
         is_update_msg_topic: bool,
+        hide_editted: bool,
+        create_time_seconds: u32,
     ) -> Result<()> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -1041,6 +1444,8 @@ impl TransportClient {
                         is_public,
                         topic_id,
                         is_update_msg_topic,
+                        hide_editted,
+                        create_time_seconds,
                     )
                     .await
             })
@@ -1248,6 +1653,159 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn write_message_typing(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        mode: i32,
+        is_public: bool,
+        sender_display_name: &str,
+        topic_id: i64,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let sender_display_name = sender_display_name.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .write_message_typing(
+                        clan_id,
+                        channel_id,
+                        mode,
+                        is_public,
+                        &sender_display_name,
+                        topic_id,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_quick_menu_event(
+        &self,
+        menu_name: &str,
+        clan_id: i64,
+        channel_id: i64,
+        mode: i32,
+        is_public: bool,
+        content_json: &str,
+        mentions: Vec<mezon_proto::api::MessageMention>,
+        attachments: Vec<mezon_proto::api::MessageAttachment>,
+        references: Vec<mezon_proto::api::MessageRef>,
+        anonymous_message: bool,
+        mention_everyone: bool,
+        avatar: &str,
+        message_code: i32,
+        topic_id: i64,
+        message_id: i64,
+        message_sender_id: i64,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let menu_name = menu_name.to_string();
+        let content_json = content_json.to_string();
+        let avatar = avatar.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .write_quick_menu_event(
+                        &menu_name,
+                        clan_id,
+                        channel_id,
+                        mode,
+                        is_public,
+                        &content_json,
+                        mentions,
+                        attachments,
+                        references,
+                        anonymous_message,
+                        mention_everyone,
+                        &avatar,
+                        message_code,
+                        topic_id,
+                        message_id,
+                        message_sender_id,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_quick_menu_access(
+        &self,
+        bot_id: i64,
+        channel_id: i64,
+        menu_type: i32,
+    ) -> Result<mezon_proto::api::QuickMenuAccessList> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .list_quick_menu_access(bot_id, channel_id, menu_type)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_channel_message_with_flags(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
+        ogp: Option<crate::transport::OutgoingOgp>,
+        flags: crate::transport::OutgoingMessageFlags,
+    ) -> Result<crate::transport::ApiMessage> {
+        let transport = self.inner.clone();
+        let content = content.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .send_channel_message_with_flags(
+                        clan_id, channel_id, &content, is_public, mode, mentions, hashtags, emojis,
+                        ogp, flags,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn send_channel_message_prebuilt(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content_json: &str,
+        is_public: bool,
+        mode: i32,
+        flags: crate::transport::OutgoingMessageFlags,
+    ) -> Result<crate::transport::ApiMessage> {
+        let transport = self.inner.clone();
+        let content_json = content_json.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .send_channel_message_prebuilt(
+                        clan_id,
+                        channel_id,
+                        &content_json,
+                        is_public,
+                        mode,
+                        flags,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn forward_channel_message(
         &self,
@@ -1294,6 +1852,7 @@ impl TransportClient {
         is_public: bool,
         topic_id: i64,
         is_update_msg_topic: bool,
+        create_time_seconds: u32,
     ) -> Result<()> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -1310,6 +1869,7 @@ impl TransportClient {
                         is_public,
                         topic_id,
                         is_update_msg_topic,
+                        create_time_seconds,
                     )
                     .await
             })
@@ -1351,6 +1911,67 @@ impl TransportClient {
         let cursor = cursor.to_string();
         runtime()
             .spawn(async move { transport.list_roles(clan_id, limit, &cursor).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_role_users(
+        &self,
+        role_id: i64,
+        limit: i32,
+        cursor: &str,
+    ) -> Result<mezon_proto::api::RoleUserList> {
+        let transport = self.inner.clone();
+        let cursor = cursor.to_string();
+        runtime()
+            .spawn(async move { transport.list_role_users(role_id, limit, &cursor).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn create_role(
+        &self,
+        request: mezon_proto::api::CreateRoleRequest,
+    ) -> Result<mezon_proto::api::Role> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.create_role(request).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_role(&self, request: mezon_proto::api::UpdateRoleRequest) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.update_role(request).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn delete_role(&self, role_id: i64, clan_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.delete_role(role_id, clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_role_order(&self, clan_id: i64, roles: &[(i32, i64)]) -> Result<()> {
+        let transport = self.inner.clone();
+        let roles = roles.to_vec();
+        runtime()
+            .spawn(async move { transport.update_role_order(clan_id, &roles).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_role_permissions(
+        &self,
+        role_id: i64,
+    ) -> Result<mezon_proto::api::PermissionList> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.list_role_permissions(role_id).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
@@ -2083,6 +2704,64 @@ impl TransportClient {
                     .list_channel_attachment(
                         clan_id, channel_id, file_type, state, limit, before, after,
                     )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_channel_timeline(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        year: i32,
+        limit: i32,
+    ) -> Result<mezon_proto::api::ListChannelTimelineResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .list_channel_timeline(clan_id, channel_id, year, limit)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn create_channel_timeline(
+        &self,
+        req: mezon_proto::api::CreateChannelTimelineRequest,
+    ) -> Result<mezon_proto::api::CreateChannelTimelineResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.create_channel_timeline(req).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_channel_timeline(
+        &self,
+        req: mezon_proto::api::UpdateChannelTimelineRequest,
+    ) -> Result<mezon_proto::api::UpdateChannelTimelineResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.update_channel_timeline(req).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn detail_channel_timeline(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        id: i64,
+        start_time_seconds: u32,
+    ) -> Result<mezon_proto::api::ChannelTimelineDetailResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .detail_channel_timeline(clan_id, channel_id, id, start_time_seconds)
                     .await
             })
             .await

@@ -29,6 +29,16 @@ fn poll_ease_out(delta: f32) -> f32 {
     1.0 - (1.0 - delta).powi(5)
 }
 
+fn inner_scroll_has_room(before_offset_y: Pixels, max_offset_y: Pixels, delta_y: Pixels) -> bool {
+    if delta_y < px(0.) {
+        before_offset_y > -max_offset_y
+    } else if delta_y > px(0.) {
+        before_offset_y < px(0.)
+    } else {
+        false
+    }
+}
+
 pub fn render_poll_card(
     msg: &Message,
     ctx: &RowCtx,
@@ -153,17 +163,8 @@ pub fn render_poll_card(
             .track_scroll(&scroll_handle)
             .on_scroll_wheel(move |event, window, cx| {
                 let delta_y = event.delta.pixel_delta(window.line_height()).y;
-                if delta_y == px(0.) {
-                    return;
-                }
-                let before = chain_handle.offset().y - delta_y;
-                let max = chain_handle.max_offset().y;
-                let has_room = if delta_y < px(0.) {
-                    before > -max
-                } else {
-                    before < px(0.)
-                };
-                if has_room {
+                let before_offset_y = chain_handle.offset().y - delta_y;
+                if inner_scroll_has_room(before_offset_y, chain_handle.max_offset().y, delta_y) {
                     cx.stop_propagation();
                 }
             })
@@ -652,4 +653,35 @@ fn time_remaining_label(expire_at: Option<i64>, now_secs: i64, locale: &str) -> 
 
 fn fmt_count(template: &str, count: i64) -> String {
     template.replace("{{count}}", &count.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inner_scroll_has_room;
+    use gpui::px;
+
+    #[test]
+    fn holds_scroll_while_inner_list_can_move_down() {
+        assert!(inner_scroll_has_room(px(-100.), px(200.), px(-40.)));
+    }
+
+    #[test]
+    fn releases_scroll_at_inner_bottom() {
+        assert!(!inner_scroll_has_room(px(-200.), px(200.), px(-40.)));
+    }
+
+    #[test]
+    fn holds_scroll_while_inner_list_can_move_up() {
+        assert!(inner_scroll_has_room(px(-100.), px(200.), px(40.)));
+    }
+
+    #[test]
+    fn releases_scroll_at_inner_top() {
+        assert!(!inner_scroll_has_room(px(0.), px(200.), px(40.)));
+    }
+
+    #[test]
+    fn zero_delta_never_holds() {
+        assert!(!inner_scroll_has_room(px(-50.), px(200.), px(0.)));
+    }
 }

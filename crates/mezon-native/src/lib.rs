@@ -3,6 +3,7 @@ pub mod autostart;
 pub mod badge;
 pub mod deep_link;
 pub mod instance;
+pub mod location;
 pub mod notifications;
 pub mod power;
 pub mod tray;

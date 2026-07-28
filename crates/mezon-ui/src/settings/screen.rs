@@ -3,7 +3,7 @@ use gpui::{
     App, Context, Entity, FocusHandle, Focusable, ScrollHandle, SharedString, Window, div,
     prelude::*, px,
 };
-use mezon_store::{AuthState, ClanList, LoginStore, Settings};
+use mezon_store::{AuthState, AutoUpdateStatus, AutoUpdateStore, ClanList, LoginStore, Settings};
 
 use super::account_page::AccountPage;
 use super::activity_page::ActivityPage;
@@ -231,6 +231,8 @@ impl Render for SettingsScreen {
         const SETTINGS_CONTENT_WIDTH: f32 = 808.0;
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
+        let update_status =
+            AutoUpdateStore::try_global(cx).map(|store| store.read(cx).status().clone());
         let page = self.current_page;
 
         let just_switched_to_device =
@@ -296,6 +298,99 @@ impl Render for SettingsScreen {
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme.text_secondary)
                 .child(text.to_uppercase())
+        }
+
+        fn auto_update_row(
+            status: Option<AutoUpdateStatus>,
+            locale: &str,
+            theme: &Theme,
+        ) -> gpui::Stateful<gpui::Div> {
+            let status = status.unwrap_or(AutoUpdateStatus::Idle);
+            let (label, color): (String, gpui::Rgba) = match &status {
+                AutoUpdateStatus::Idle => (
+                    mezon_i18n::t(locale, "setting.update.check").to_string(),
+                    theme.text_muted,
+                ),
+                AutoUpdateStatus::Checking => (
+                    mezon_i18n::t(locale, "setting.update.checking").to_string(),
+                    theme.text_muted,
+                ),
+                AutoUpdateStatus::UpdateAvailable { version } => (
+                    format!(
+                        "{} (v{version})",
+                        mezon_i18n::t(locale, "setting.update.available")
+                    ),
+                    gpui::rgb(0x22c55e),
+                ),
+                AutoUpdateStatus::Downloading { progress, .. } => (
+                    match progress {
+                        Some(fraction) => format!(
+                            "{} {:.0}%",
+                            mezon_i18n::t(locale, "setting.update.downloading"),
+                            fraction * 100.0
+                        ),
+                        None => {
+                            format!("{}…", mezon_i18n::t(locale, "setting.update.downloading"))
+                        }
+                    },
+                    theme.text_muted,
+                ),
+                AutoUpdateStatus::Installing { .. } => (
+                    mezon_i18n::t(locale, "setting.update.installing").to_string(),
+                    theme.text_muted,
+                ),
+                AutoUpdateStatus::Updated { version } => (
+                    format!(
+                        "{} (v{version})",
+                        mezon_i18n::t(locale, "setting.update.restart")
+                    ),
+                    gpui::rgb(0x22c55e),
+                ),
+                AutoUpdateStatus::UpToDate => (
+                    mezon_i18n::t(locale, "setting.update.upToDate").to_string(),
+                    theme.text_muted,
+                ),
+                AutoUpdateStatus::Errored { .. } => (
+                    mezon_i18n::t(locale, "setting.update.failed").to_string(),
+                    gpui::rgb(0xef4444),
+                ),
+            };
+
+            let bg_hover = theme.bg_hover;
+            let mut row = div()
+                .id("check-updates-btn")
+                .mt(px(4.0))
+                .w_full()
+                .px(px(10.0))
+                .py(px(4.0))
+                .rounded(px(4.0))
+                .text_base()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(color)
+                .child(label);
+            match &status {
+                AutoUpdateStatus::Idle
+                | AutoUpdateStatus::UpToDate
+                | AutoUpdateStatus::UpdateAvailable { .. }
+                | AutoUpdateStatus::Errored { .. } => {
+                    row = row
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(bg_hover))
+                        .on_click(|_, _, cx| {
+                            if let Some(store) = AutoUpdateStore::try_global(cx) {
+                                store.update(cx, |store, cx| store.check(true, cx));
+                            }
+                        });
+                }
+                AutoUpdateStatus::Updated { .. } => {
+                    row = row
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(bg_hover))
+                        .on_click(|_, _, cx| cx.restart());
+                }
+                _ => {}
+            }
+            row
         }
 
         let settings_title = mezon_i18n::t(&locale, "common.settings").to_uppercase();
@@ -415,6 +510,7 @@ impl Render for SettingsScreen {
                         cx.quit();
                     }),
             )
+            .child(auto_update_row(update_status, &locale, &theme))
             .child(
                 div()
                     .mt(px(4.0))

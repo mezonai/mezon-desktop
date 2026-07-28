@@ -70,6 +70,13 @@ fn answer_change_sub(
     })
 }
 
+fn format_answer_label(text: &str, emoji_id: Option<&str>) -> String {
+    match emoji_id {
+        Some(emoji_id) => format!("[e:{emoji_id}] {text}"),
+        None => text.to_string(),
+    }
+}
+
 impl CreatePollModal {
     pub fn open(locale: SharedString, window: &mut Window, cx: &mut App) {
         if Shell::global(cx).read(cx).has_modal() {
@@ -193,16 +200,15 @@ impl CreatePollModal {
             .iter()
             .enumerate()
             .filter_map(|(index, input)| {
-                let text = input.read(cx).value().trim().to_string();
+                let text = input.read(cx).value().trim();
                 if text.is_empty() {
                     return None;
                 }
-                Some(
-                    match self.answer_emoji_ids.get(index).and_then(Option::as_ref) {
-                        Some(emoji_id) => format!("[e:{emoji_id}] {text}"),
-                        None => text,
-                    },
-                )
+                let emoji_id = self.answer_emoji_ids.get(index).and_then(Option::as_ref);
+                Some(format_answer_label(
+                    text,
+                    emoji_id.map(SharedString::as_ref),
+                ))
             })
             .collect()
     }
@@ -628,5 +634,23 @@ impl Render for CreatePollModal {
                     .child(body),
             )
             .child(footer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_answer_label;
+
+    #[test]
+    fn answer_label_plain_when_no_emoji() {
+        assert_eq!(format_answer_label("Yes", None), "Yes");
+    }
+
+    #[test]
+    fn answer_label_prefixes_emoji_token_like_react() {
+        assert_eq!(
+            format_answer_label("Yes", Some("1234567890")),
+            "[e:1234567890] Yes"
+        );
     }
 }

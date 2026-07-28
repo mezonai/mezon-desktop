@@ -35,6 +35,10 @@ profile.json.gz
 scripts/*
 !scripts/linux-deps
 !scripts/build-deb.sh
+!scripts/make-update-feed.sh
+!scripts/make-update-manifest.sh
+!scripts/install-linux.sh
+!scripts/install-windows.ps1
 !scripts/perf-monitor-macos.sh
 !scripts/perf-monitor-windows.ps1
 !scripts/perf-compare.sh

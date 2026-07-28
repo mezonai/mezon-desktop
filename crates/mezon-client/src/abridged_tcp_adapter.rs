@@ -131,6 +131,7 @@ const PREFIX_RAW: u8 = 0xff;
 const PREFIX_EXTENDED: u8 = 0x7f;
 const RAW_HEADER_LENGTH: usize = 11;
 const MAX_REALTIME_FRAME_LEN: usize = 1 << 20;
+const MAX_API_RESPONSE_LEN: usize = 16 << 20;
 const RESPONSE_CODE_TOO_LARGE: u32 = u16::MAX as u32;
 const ENVELOPE_CID_TAG: u8 = 0x08;
 
@@ -375,7 +376,7 @@ fn decode_frame(buf: &[u8]) -> FrameStep {
             let cid = u16::from_be_bytes([buf[1], buf[2]]);
             let code = u32::from_be_bytes([buf[3], buf[4], buf[5], buf[6]]);
             let len = u32::from_be_bytes([buf[7], buf[8], buf[9], buf[10]]) as usize;
-            if len > MAX_REALTIME_FRAME_LEN {
+            if len > MAX_API_RESPONSE_LEN {
                 return FrameStep::Reset("raw frame length too large");
             }
             let total = RAW_HEADER_LENGTH + len;
@@ -488,10 +489,15 @@ impl IoLoopState {
                         return Ok(());
                     }
                     FrameStep::Reset(reason) => {
-                        tracing::warn!("frame desync ({reason}), resetting read buffer");
+                        let abandoned: Vec<u16> = self.streams.keys().copied().collect();
+                        tracing::error!(
+                            "frame desync ({reason}); dropping {} buffered bytes and {} partial response(s) {abandoned:?} — forcing reconnect",
+                            self.read_buffer.len(),
+                            abandoned.len(),
+                        );
                         self.read_buffer.clear();
                         self.streams.clear();
-                        return Ok(());
+                        return Err(anyhow::anyhow!("frame desync: {reason}"));
                     }
                     FrameStep::Frame { consumed, frame } => {
                         start += consumed;
@@ -529,10 +535,10 @@ impl IoLoopState {
                         let chunks = self.streams.entry(cid).or_default();
                         chunks.push(payload);
                         let buffered: usize = chunks.iter().map(Vec::len).sum();
-                        if buffered > MAX_REALTIME_FRAME_LEN {
+                        if buffered > MAX_API_RESPONSE_LEN {
                             self.streams.remove(&cid);
                             tracing::warn!(
-                                "cid={cid} response exceeds {MAX_REALTIME_FRAME_LEN}-byte cap, failing request"
+                                "cid={cid} response exceeds {MAX_API_RESPONSE_LEN}-byte cap, failing request"
                             );
                             handlers.trigger_message(cid, RESPONSE_CODE_TOO_LARGE, vec![]);
                         }
@@ -619,6 +625,7 @@ impl AbridgedTcpAdapter {
 
                             if let Err(e) = state.handle_data(&handlers, &read_buf[..n]) {
                                 tracing::error!("handle_data error: {}", e);
+                                break LoopExit::Error(e.to_string());
                             }
                         }
                         Err(e) => {

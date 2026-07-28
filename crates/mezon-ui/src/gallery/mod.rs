@@ -510,7 +510,7 @@ impl EventEmitter<DismissEvent> for GalleryModal {}
 impl Render for GalleryModal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.image_cache
-            .update(cx, |cache, cx| cache.sweep(window, cx));
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         let theme = cx.theme().clone();
         let locale = self.locale(cx);
         let t = |key: &'static str| mezon_i18n::t(&locale, key).to_string();

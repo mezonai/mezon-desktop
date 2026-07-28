@@ -10,8 +10,13 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::blink_manager::{CaretBlink, HasCaretBlink};
-use crate::theme::ActiveTheme;
+use mezon_theme::ActiveTheme;
+use mezon_widgets::blink_manager::{CaretBlink, HasCaretBlink};
+
+use crate::util::text_edit::{
+    EditKind, HistoryEntry, MAX_UNDO_HISTORY, home_target, line_end, line_start,
+    next_word_boundary, previous_word_boundary, should_coalesce,
+};
 
 const KEY_CONTEXT: &str = "MezonTextArea";
 const DEFAULT_MAX_VISIBLE_LINES: usize = 8;
@@ -31,6 +36,22 @@ actions!(
         SelectAll,
         Home,
         End,
+        MoveToPreviousWordStart,
+        MoveToNextWordEnd,
+        SelectToPreviousWordStart,
+        SelectToNextWordEnd,
+        DeleteToPreviousWordStart,
+        DeleteToNextWordEnd,
+        SelectToLineStart,
+        SelectToLineEnd,
+        MoveToDocStart,
+        MoveToDocEnd,
+        SelectToDocStart,
+        SelectToDocEnd,
+        DeleteToLineStart,
+        DeleteToLineEnd,
+        Undo,
+        Redo,
         ShowCharacterPalette,
         Paste,
         Cut,
@@ -39,7 +60,7 @@ actions!(
 );
 
 pub fn init(cx: &mut App) {
-    cx.bind_keys([
+    let mut bindings = vec![
         KeyBinding::new("backspace", Backspace, Some(KEY_CONTEXT)),
         KeyBinding::new("delete", Delete, Some(KEY_CONTEXT)),
         KeyBinding::new("enter", Enter, Some(KEY_CONTEXT)),
@@ -49,14 +70,71 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("right", Right, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-left", SelectLeft, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-right", SelectRight, Some(KEY_CONTEXT)),
+        KeyBinding::new("home", Home, Some(KEY_CONTEXT)),
+        KeyBinding::new("end", End, Some(KEY_CONTEXT)),
+        KeyBinding::new("shift-home", SelectToLineStart, Some(KEY_CONTEXT)),
+        KeyBinding::new("shift-end", SelectToLineEnd, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-a", SelectAll, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-v", Paste, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-c", Copy, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-x", Cut, Some(KEY_CONTEXT)),
-        KeyBinding::new("home", Home, Some(KEY_CONTEXT)),
-        KeyBinding::new("end", End, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-z", Undo, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-shift-z", Redo, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some(KEY_CONTEXT)),
+    ];
+
+    #[cfg(target_os = "macos")]
+    bindings.extend([
+        KeyBinding::new("alt-left", MoveToPreviousWordStart, Some(KEY_CONTEXT)),
+        KeyBinding::new("alt-right", MoveToNextWordEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new(
+            "alt-shift-left",
+            SelectToPreviousWordStart,
+            Some(KEY_CONTEXT),
+        ),
+        KeyBinding::new("alt-shift-right", SelectToNextWordEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new(
+            "alt-backspace",
+            DeleteToPreviousWordStart,
+            Some(KEY_CONTEXT),
+        ),
+        KeyBinding::new("alt-delete", DeleteToNextWordEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-left", Home, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-right", End, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-left", SelectToLineStart, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-right", SelectToLineEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-up", MoveToDocStart, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-down", MoveToDocEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-up", SelectToDocStart, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-down", SelectToDocEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-backspace", DeleteToLineStart, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-delete", DeleteToLineEnd, Some(KEY_CONTEXT)),
     ]);
+
+    #[cfg(not(target_os = "macos"))]
+    bindings.extend([
+        KeyBinding::new("ctrl-left", MoveToPreviousWordStart, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-right", MoveToNextWordEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new(
+            "ctrl-shift-left",
+            SelectToPreviousWordStart,
+            Some(KEY_CONTEXT),
+        ),
+        KeyBinding::new("ctrl-shift-right", SelectToNextWordEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new(
+            "ctrl-backspace",
+            DeleteToPreviousWordStart,
+            Some(KEY_CONTEXT),
+        ),
+        KeyBinding::new("ctrl-delete", DeleteToNextWordEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-home", MoveToDocStart, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-end", MoveToDocEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-shift-home", SelectToDocStart, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-shift-end", SelectToDocEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-y", Redo, Some(KEY_CONTEXT)),
+    ]);
+
+    cx.bind_keys(bindings);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -142,6 +220,9 @@ pub struct TextArea {
     min_height: Pixels,
     max_visible_lines: usize,
     caret_blink: CaretBlink,
+    undo_stack: Vec<HistoryEntry>,
+    redo_stack: Vec<HistoryEntry>,
+    last_edit_kind: Option<EditKind>,
 }
 
 impl EventEmitter<TextAreaEvent> for TextArea {}
@@ -186,6 +267,9 @@ impl TextArea {
             min_height: px(36.),
             max_visible_lines: DEFAULT_MAX_VISIBLE_LINES,
             caret_blink: CaretBlink::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            last_edit_kind: None,
         };
 
         cx.on_focus(&focus_handle, window, |this, _window, cx| {
@@ -259,6 +343,7 @@ impl TextArea {
         let end = self.content.len();
         self.selected_range = end..end;
         self.marked_range = None;
+        self.clear_history();
         cx.notify();
         cx.emit(TextAreaEvent::Change);
     }
@@ -305,12 +390,18 @@ impl TextArea {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
+        self.last_edit_kind = None;
         self.pending_caret_reveal = true;
         self.caret_blink.pause_blinking(cx);
         cx.notify();
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.last_edit_kind = None;
+        self.extend_selection(offset, cx);
+    }
+
+    fn extend_selection(&mut self, offset: usize, cx: &mut Context<Self>) {
         if self.selection_reversed {
             self.selected_range.start = offset;
         } else {
@@ -438,11 +529,206 @@ impl TextArea {
     }
 
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(0, cx);
+        self.move_to(home_target(&self.content, self.cursor_offset()), cx);
     }
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(line_end(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn select_to_line_start(
+        &mut self,
+        _: &SelectToLineStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(home_target(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn select_to_line_end(&mut self, _: &SelectToLineEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(line_end(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn move_to_doc_start(&mut self, _: &MoveToDocStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
+    }
+
+    fn move_to_doc_end(&mut self, _: &MoveToDocEnd, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(self.content.len(), cx);
+    }
+
+    fn select_to_doc_start(
+        &mut self,
+        _: &SelectToDocStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(0, cx);
+    }
+
+    fn select_to_doc_end(&mut self, _: &SelectToDocEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.content.len(), cx);
+    }
+
+    fn move_to_previous_word_start(
+        &mut self,
+        _: &MoveToPreviousWordStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_to(
+            previous_word_boundary(&self.content, self.cursor_offset()),
+            cx,
+        );
+    }
+
+    fn move_to_next_word_end(
+        &mut self,
+        _: &MoveToNextWordEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_to(next_word_boundary(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn select_to_previous_word_start(
+        &mut self,
+        _: &SelectToPreviousWordStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(
+            previous_word_boundary(&self.content, self.cursor_offset()),
+            cx,
+        );
+    }
+
+    fn select_to_next_word_end(
+        &mut self,
+        _: &SelectToNextWordEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(next_word_boundary(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn delete_to_previous_word_start(
+        &mut self,
+        _: &DeleteToPreviousWordStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let prev = previous_word_boundary(&self.content, self.cursor_offset());
+            if prev == self.cursor_offset() {
+                return;
+            }
+            self.extend_selection(prev, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_to_next_word_end(
+        &mut self,
+        _: &DeleteToNextWordEnd,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let next = next_word_boundary(&self.content, self.cursor_offset());
+            if next == self.cursor_offset() {
+                return;
+            }
+            self.extend_selection(next, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_to_line_start(
+        &mut self,
+        _: &DeleteToLineStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let target = line_start(&self.content, self.cursor_offset());
+            if target == self.cursor_offset() {
+                return;
+            }
+            self.extend_selection(target, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_to_line_end(
+        &mut self,
+        _: &DeleteToLineEnd,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let target = line_end(&self.content, self.cursor_offset());
+            if target == self.cursor_offset() {
+                return;
+            }
+            self.extend_selection(target, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(entry) = self.undo_stack.pop() {
+            self.redo_stack.push(self.history_snapshot());
+            self.restore_history(entry, cx);
+        }
+    }
+
+    fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(entry) = self.redo_stack.pop() {
+            self.undo_stack.push(self.history_snapshot());
+            self.restore_history(entry, cx);
+        }
+    }
+
+    fn history_snapshot(&self) -> HistoryEntry {
+        HistoryEntry {
+            content: self.content.clone(),
+            selected_range: self.selected_range.clone(),
+            selection_reversed: self.selection_reversed,
+            payload: None,
+        }
+    }
+
+    fn record_history(&mut self, kind: EditKind) {
+        let coalesce = should_coalesce(self.last_edit_kind, kind);
+        self.redo_stack.clear();
+        if !coalesce {
+            self.undo_stack.push(self.history_snapshot());
+            if self.undo_stack.len() > MAX_UNDO_HISTORY {
+                let overflow = self.undo_stack.len() - MAX_UNDO_HISTORY;
+                self.undo_stack.drain(..overflow);
+            }
+        }
+        self.last_edit_kind = Some(kind);
+    }
+
+    fn restore_history(&mut self, entry: HistoryEntry, cx: &mut Context<Self>) {
+        self.content = entry.content;
+        self.line_count = self.content.split('\n').count().max(1);
+        self.selected_range = entry.selected_range;
+        self.selection_reversed = entry.selection_reversed;
+        self.marked_range = None;
+        self.last_edit_kind = None;
+        self.pending_caret_reveal = true;
+        self.caret_blink.pause_blinking(cx);
+        cx.notify();
+        cx.emit(TextAreaEvent::Change);
+    }
+
+    fn clear_history(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.last_edit_kind = None;
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -451,7 +737,7 @@ impl TextArea {
             if self.cursor_offset() == prev {
                 return;
             }
-            self.select_to(prev, cx);
+            self.extend_selection(prev, cx);
         }
         self.replace_text_in_range(None, "", window, cx);
     }
@@ -462,7 +748,7 @@ impl TextArea {
             if self.cursor_offset() == next {
                 return;
             }
-            self.select_to(next, cx);
+            self.extend_selection(next, cx);
         }
         self.replace_text_in_range(None, "", window, cx);
     }
@@ -618,6 +904,16 @@ impl EntityInputHandler for TextArea {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
         let range = self.clamp_range(range);
+        let kind = if self.marked_range.is_some() {
+            EditKind::Insert
+        } else if new_text.is_empty() {
+            EditKind::Delete
+        } else if range.is_empty() && !new_text.contains('\n') {
+            EditKind::Insert
+        } else {
+            EditKind::Other
+        };
+        self.record_history(kind);
         let next = self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
         self.set_content(next);
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
@@ -641,6 +937,9 @@ impl EntityInputHandler for TextArea {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
         let range = self.clamp_range(range);
+        if self.marked_range.is_none() {
+            self.record_history(EditKind::Insert);
+        }
         let next = self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
         self.set_content(next);
         if new_text.is_empty() {
@@ -739,6 +1038,22 @@ impl Render for TextArea {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::select_to_line_start))
+            .on_action(cx.listener(Self::select_to_line_end))
+            .on_action(cx.listener(Self::move_to_doc_start))
+            .on_action(cx.listener(Self::move_to_doc_end))
+            .on_action(cx.listener(Self::select_to_doc_start))
+            .on_action(cx.listener(Self::select_to_doc_end))
+            .on_action(cx.listener(Self::move_to_previous_word_start))
+            .on_action(cx.listener(Self::move_to_next_word_end))
+            .on_action(cx.listener(Self::select_to_previous_word_start))
+            .on_action(cx.listener(Self::select_to_next_word_end))
+            .on_action(cx.listener(Self::delete_to_previous_word_start))
+            .on_action(cx.listener(Self::delete_to_next_word_end))
+            .on_action(cx.listener(Self::delete_to_line_start))
+            .on_action(cx.listener(Self::delete_to_line_end))
+            .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
