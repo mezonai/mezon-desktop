@@ -210,7 +210,7 @@ objc2-app-kit        = { version = "0.3", default-features = false, features = [
     "NSVisualEffectView",
     "NSWindow",
 ] }
-objc2                = { version = "=0.6.4", default-features = false, features = ["std"] }
+objc2                = { version = "0.6", default-features = false, features = ["std"] }
 objc2-foundation     = { version = "0.3", default-features = false, features = [
     "std",
     "block2",

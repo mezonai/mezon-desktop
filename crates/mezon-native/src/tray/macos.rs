@@ -110,6 +110,8 @@ fn panel_action_sel() -> objc2::runtime::Sel {
 thread_local! {
     static TRAY_PANEL: RefCell<Option<TrayPanel>> = const { RefCell::new(None) };
     static TRAY_ICON: RefCell<Option<TrayIcon>> = const { RefCell::new(None) };
+    static PENDING_MONITOR_REMOVAL: RefCell<Vec<Retained<AnyObject>>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 struct TrayPanel {
@@ -169,9 +171,7 @@ define_class!(
                 action_tag::LEAVE => TrayUiAction::Voice(super::TrayVoiceAction::Leave),
                 _ => return,
             };
-            if let Some(tx) = ACTION_TX.get() {
-                let _ = tx.send(action);
-            }
+            send_tray_action(action);
             if action_tag::dismisses_panel(tag) {
                 with_panel(|panel| panel.hide());
             }
@@ -179,8 +179,17 @@ define_class!(
     }
 );
 
-static ACTION_TX: std::sync::OnceLock<crossbeam_channel::Sender<TrayUiAction>> =
-    std::sync::OnceLock::new();
+static ACTION_TX: std::sync::Mutex<Option<crossbeam_channel::Sender<TrayUiAction>>> =
+    std::sync::Mutex::new(None);
+
+fn send_tray_action(action: TrayUiAction) {
+    let Ok(guard) = ACTION_TX.lock() else {
+        return;
+    };
+    if let Some(tx) = guard.as_ref() {
+        let _ = tx.send(action);
+    }
+}
 
 fn with_panel<R>(f: impl FnOnce(&mut TrayPanel) -> R) -> Option<R> {
     TRAY_PANEL.with(|cell| cell.borrow_mut().as_mut().map(f))
@@ -217,7 +226,10 @@ impl MacosTray {
         locale: String,
         action_tx: crossbeam_channel::Sender<TrayUiAction>,
     ) -> Result<Self> {
-        let _ = ACTION_TX.set(action_tx);
+        match ACTION_TX.lock() {
+            Ok(mut guard) => *guard = Some(action_tx),
+            Err(poisoned) => *poisoned.into_inner() = Some(action_tx),
+        }
 
         let mtm = MainThreadMarker::new().context("tray must be created on the main thread")?;
         let base_icon = load_base_icon_rgba(TRAY_ICON_BYTES)?;
@@ -351,11 +363,20 @@ impl TrayPanel {
     }
 
     fn remove_dismiss_monitor(&mut self) {
-        for monitor in self.dismiss_monitors.drain(..) {
-            unsafe {
-                NSEvent::removeMonitor(&monitor);
-            }
+        let monitors = std::mem::take(&mut self.dismiss_monitors);
+        if monitors.is_empty() {
+            return;
         }
+        PENDING_MONITOR_REMOVAL.with(|cell| cell.borrow_mut().extend(monitors));
+        DispatchQueue::main().exec_async(|| {
+            PENDING_MONITOR_REMOVAL.with(|cell| {
+                for monitor in cell.borrow_mut().drain(..) {
+                    unsafe {
+                        NSEvent::removeMonitor(&monitor);
+                    }
+                }
+            });
+        });
     }
 }
 
@@ -625,8 +646,14 @@ fn voice_control_style(
     theme: &VoiceTheme,
     enabled: bool,
     disconnect: bool,
+    interactive: bool,
 ) -> (Retained<NSColor>, Retained<NSColor>) {
-    if disconnect {
+    if !interactive {
+        (
+            theme.control_off_background(),
+            NSColor::tertiaryLabelColor(),
+        )
+    } else if disconnect {
         (NSColor::systemRedColor(), NSColor::whiteColor())
     } else if enabled {
         (NSColor::systemGreenColor(), NSColor::whiteColor())
@@ -827,7 +854,12 @@ fn place_voice_card(
     if state.in_call {
         let mut inner_y = card_height - VOICE_CARD_PADDING;
 
-        let voice_section = mezon_i18n::t(locale, "tray.voiceSection").to_uppercase();
+        let section_key = if state.is_stream {
+            "tray.streamSection"
+        } else {
+            "tray.voiceSection"
+        };
+        let voice_section = mezon_i18n::t(locale, section_key).to_uppercase();
         inner_y = place_section_label(
             mtm,
             &card,
@@ -836,7 +868,9 @@ fn place_voice_card(
             content_width,
             content_x,
         );
-        let status = if state.camera_enabled {
+        let status = if state.is_stream {
+            mezon_i18n::t(locale, "tray.streamConnected")
+        } else if state.camera_enabled {
             mezon_i18n::t(locale, "channelVoice.videoConnected")
         } else {
             mezon_i18n::t(locale, "channelVoice.voiceConnected")
@@ -1083,6 +1117,7 @@ fn place_voice_controls(
             action_tag::MIC,
             state.mic_enabled,
             false,
+            !state.is_stream,
         ),
         (
             if state.camera_enabled {
@@ -1094,6 +1129,7 @@ fn place_voice_controls(
             action_tag::CAMERA,
             state.camera_enabled,
             false,
+            !state.is_stream,
         ),
         (
             if state.screen_enabled {
@@ -1105,18 +1141,29 @@ fn place_voice_controls(
             action_tag::SCREEN,
             state.screen_enabled,
             false,
+            !state.is_stream,
         ),
         (
             "phone.down.fill",
-            mezon_i18n::t(locale, "tray.tooltip.leave"),
+            mezon_i18n::t(
+                locale,
+                if state.is_stream {
+                    "tray.leaveStream"
+                } else {
+                    "tray.leaveVoice"
+                },
+            ),
             action_tag::LEAVE,
             false,
+            true,
             true,
         ),
     ];
     let button_width =
         (width - VOICE_CONTROL_GAP * (VOICE_CONTROL_COUNT - 1.0)) / VOICE_CONTROL_COUNT;
-    for (index, (symbol, tooltip, tag, enabled, disconnect)) in controls.into_iter().enumerate() {
+    for (index, (symbol, tooltip, tag, enabled, disconnect, interactive)) in
+        controls.into_iter().enumerate()
+    {
         let button_x = x + (button_width + VOICE_CONTROL_GAP) * index as f64;
         let Some(image) = system_symbol(symbol) else {
             continue;
@@ -1134,7 +1181,8 @@ fn place_voice_controls(
         button.setBordered(false);
         button.setImageScaling(NSImageScaling::ScaleNone);
         button.setToolTip(Some(&NSString::from_str(tooltip)));
-        let (background, icon_color) = voice_control_style(theme, enabled, disconnect);
+        button.setEnabled(interactive);
+        let (background, icon_color) = voice_control_style(theme, enabled, disconnect, interactive);
         apply_layer_style(&button, &background, VOICE_CONTROL_SIZE / 2.0);
         button.setSymbolConfiguration(Some(&voice_control_symbol_configuration(&icon_color)));
         button.setContentTintColor(Some(&icon_color));

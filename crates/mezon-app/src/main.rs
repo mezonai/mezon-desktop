@@ -967,7 +967,6 @@ impl gpui::Global for TrayGlobal {}
 
 struct TrayBridgeGlobal {
     _voice: gpui::Subscription,
-    _clan: gpui::Subscription,
     _settings: Option<gpui::Subscription>,
 }
 impl gpui::Global for TrayBridgeGlobal {}
@@ -1067,22 +1066,105 @@ fn setup_tray(cx: &mut App) -> Option<(mezon_native::tray::MezonTray, TrayTasks)
 }
 
 fn handle_tray_voice_action(action: mezon_native::tray::TrayVoiceAction, cx: &mut App) {
-    activate_main_window(cx);
     let Some(handle) = mezon_ui::app::main_window::handle(cx) else {
         return;
     };
-    let _ = cx.update_window(handle, |_, window, cx| {
-        mezon_store::VoiceStore::global(cx).update(cx, |store, cx| match action {
-            mezon_native::tray::TrayVoiceAction::ToggleMic => store.toggle_mic(cx),
-            mezon_native::tray::TrayVoiceAction::ToggleCamera => store.toggle_camera(cx),
-            mezon_native::tray::TrayVoiceAction::ToggleScreen => {
-                if store.screen_share_enabled() {
-                    store.stop_screen_share(cx);
-                }
+
+    match action {
+        mezon_native::tray::TrayVoiceAction::Leave => {
+            activate_main_window(cx);
+            let _ = cx.update_window(handle, |_, window, cx| {
+                mezon_store::VoiceStore::global(cx).update(cx, |store, cx| store.leave(window, cx));
+            });
+        }
+        mezon_native::tray::TrayVoiceAction::ToggleScreen => {
+            let voice = mezon_store::VoiceStore::global(cx);
+            let (screen_enabled, is_stream, channel_ids) = {
+                let store = voice.read(cx);
+                let is_stream = active_voice_is_stream(store, cx);
+                let channel_ids = active_voice_channel_ids(store);
+                (store.screen_share_enabled(), is_stream, channel_ids)
+            };
+            if is_stream {
+                return;
             }
-            mezon_native::tray::TrayVoiceAction::Leave => store.leave(window, cx),
-        });
-    });
+            if screen_enabled {
+                let _ = cx.update_window(handle, |_, _, cx| {
+                    voice.update(cx, |store, cx| store.stop_screen_share(cx));
+                });
+                return;
+            }
+            let Some((channel_id, clan_id)) = channel_ids else {
+                return;
+            };
+            let (Ok(channel_id), Ok(clan_id)) = (
+                channel_id.parse::<mezon_store::ChannelId>(),
+                clan_id.parse::<mezon_store::ClanId>(),
+            ) else {
+                return;
+            };
+            activate_main_window(cx);
+            mezon_ui::router::navigate(
+                cx,
+                mezon_ui::Route::Channel {
+                    clan_id,
+                    channel_id,
+                },
+            );
+            let Some(settings) = mezon_store::Settings::try_global(cx) else {
+                return;
+            };
+            let _ = cx.update_window(handle, |_, window, cx| {
+                mezon_ui::chat::screen_share_modal::open_screen_share_modal(
+                    voice, settings, window, cx,
+                );
+            });
+        }
+        mezon_native::tray::TrayVoiceAction::ToggleMic
+        | mezon_native::tray::TrayVoiceAction::ToggleCamera => {
+            let voice = mezon_store::VoiceStore::global(cx);
+            if active_voice_is_stream(voice.read(cx), cx) {
+                return;
+            }
+            let _ = cx.update_window(handle, |_, _, cx| {
+                voice.update(cx, |store, cx| match action {
+                    mezon_native::tray::TrayVoiceAction::ToggleMic => store.toggle_mic(cx),
+                    mezon_native::tray::TrayVoiceAction::ToggleCamera => store.toggle_camera(cx),
+                    _ => {}
+                });
+            });
+        }
+    }
+}
+
+fn active_voice_channel_ids(voice: &mezon_store::VoiceStore) -> Option<(String, String)> {
+    match voice.connection() {
+        mezon_store::VoiceConnection::Connecting {
+            channel_id,
+            clan_id,
+        }
+        | mezon_store::VoiceConnection::Connected {
+            channel_id,
+            clan_id,
+        } => Some((channel_id.clone(), clan_id.clone())),
+        _ => None,
+    }
+}
+
+fn active_voice_is_stream(voice: &mezon_store::VoiceStore, cx: &App) -> bool {
+    let Some(channel_id) = voice.connection().active_channel_id() else {
+        return false;
+    };
+    let Ok(channel_id) = channel_id.parse::<mezon_store::ChannelId>() else {
+        return false;
+    };
+    let channels = mezon_store::ChannelList::global(cx).read(cx);
+    let Some(clan_id) = channels.clan_id_for_channel(channel_id) else {
+        return false;
+    };
+    channels
+        .channel(clan_id, channel_id)
+        .is_some_and(|channel| channel.channel_type == mezon_store::ChannelType::Stream)
 }
 
 fn install_tray_bridge(cx: &mut App) {
@@ -1092,8 +1174,6 @@ fn install_tray_bridge(cx: &mut App) {
 
     let voice = mezon_store::VoiceStore::global(cx);
     let voice_sub = cx.observe(&voice, |_, cx| sync_tray_voice_state(cx));
-    let clan = mezon_store::ClanList::global(cx);
-    let clan_sub = cx.observe(&clan, |_, cx| sync_tray_voice_state(cx));
 
     let settings_sub = mezon_store::Settings::try_global(cx)
         .map(|settings| cx.observe(&settings, |_, cx| sync_tray_locale(cx)));
@@ -1101,7 +1181,6 @@ fn install_tray_bridge(cx: &mut App) {
 
     cx.set_global(TrayBridgeGlobal {
         _voice: voice_sub,
-        _clan: clan_sub,
         _settings: settings_sub,
     });
 
@@ -1168,6 +1247,7 @@ fn build_tray_voice_state(
         mic_enabled: voice.mic_enabled(),
         camera_enabled: voice.camera_enabled(),
         screen_enabled: voice.screen_share_enabled(),
+        is_stream: active_voice_is_stream(voice, cx),
     }
 }
 

@@ -26,6 +26,7 @@ pub struct TrayVoiceState {
     pub mic_enabled: bool,
     pub camera_enabled: bool,
     pub screen_enabled: bool,
+    pub is_stream: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,7 +316,9 @@ fn build_voice_menu(state: &TrayVoiceState, locale: &str) -> Result<Menu> {
     let menu = Menu::new();
 
     if state.in_call {
-        let status = if state.camera_enabled {
+        let status = if state.is_stream {
+            mezon_i18n::t(locale, "tray.streamConnected")
+        } else if state.camera_enabled {
             mezon_i18n::t(locale, "channelVoice.videoConnected")
         } else {
             mezon_i18n::t(locale, "channelVoice.voiceConnected")
@@ -333,12 +336,19 @@ fn build_voice_menu(state: &TrayVoiceState, locale: &str) -> Result<Menu> {
 
         menu.append(&tray_icon::menu::PredefinedMenuItem::separator())?;
 
+        let voice_actions_enabled = !state.is_stream;
+
         let mic_label = if state.mic_enabled {
             mezon_i18n::t(locale, "channelVoice.turnOffMicrophone")
         } else {
             mezon_i18n::t(locale, "channelVoice.turnOnMicrophone")
         };
-        menu.append(&MenuItem::with_id(VOICE_MIC_ID, mic_label, true, None))?;
+        menu.append(&MenuItem::with_id(
+            VOICE_MIC_ID,
+            mic_label,
+            voice_actions_enabled,
+            None,
+        ))?;
 
         let camera_label = if state.camera_enabled {
             mezon_i18n::t(locale, "channelVoice.turnOffCamera")
@@ -348,7 +358,7 @@ fn build_voice_menu(state: &TrayVoiceState, locale: &str) -> Result<Menu> {
         menu.append(&MenuItem::with_id(
             VOICE_CAMERA_ID,
             camera_label,
-            true,
+            voice_actions_enabled,
             None,
         ))?;
 
@@ -360,12 +370,19 @@ fn build_voice_menu(state: &TrayVoiceState, locale: &str) -> Result<Menu> {
         menu.append(&MenuItem::with_id(
             VOICE_SCREEN_ID,
             screen_label,
-            true,
+            voice_actions_enabled,
             None,
         ))?;
         menu.append(&MenuItem::with_id(
             VOICE_LEAVE_ID,
-            mezon_i18n::t(locale, "tray.leaveVoice"),
+            mezon_i18n::t(
+                locale,
+                if state.is_stream {
+                    "tray.leaveStream"
+                } else {
+                    "tray.leaveVoice"
+                },
+            ),
             true,
             None,
         ))?;
