@@ -403,18 +403,36 @@ impl ChannelSidebar {
                             });
                         }
                     } else {
+                        let ch_slice: Vec<_> = category
+                            .channels
+                            .iter()
+                            .filter(|ch| ch.visible_in_sidebar())
+                            .collect();
                         let active_parent_id = active_channel_id.and_then(|id| {
-                            category
-                                .channels
+                            ch_slice
                                 .iter()
                                 .find(|ch| ch.id == id)
                                 .and_then(|ch| ch.parent_id)
                         });
-                        for ch in category
-                            .channels
-                            .iter()
-                            .filter(|ch| ch.visible_in_sidebar())
-                        {
+                        let mut parents_with_unread_thread: HashSet<ChannelId> = HashSet::new();
+                        for ch in &ch_slice {
+                            if let Some(pid) = ch.parent_id
+                                && ch.is_unread()
+                                && !ch.muted
+                            {
+                                parents_with_unread_thread.insert(pid);
+                            }
+                        }
+                        let mut kept = Vec::new();
+                        for ch in ch_slice {
+                            let is_thread = !is_favorites && ch.parent_id.is_some();
+                            if is_thread {
+                                if (ch.is_unread() && !ch.muted) || active_channel_id == Some(ch.id)
+                                {
+                                    kept.push((ch, Vec::new(), true));
+                                }
+                                continue;
+                            }
                             let sidebar_members = channel_sidebar_members(cx, new_clan_id, ch);
                             let is_voice_or_streaming = matches!(
                                 ch.channel_type,
@@ -425,10 +443,28 @@ impl ChannelSidebar {
                             let should_show = (ch.is_unread() && !is_voice_or_streaming)
                                 || active_channel_id == Some(ch.id)
                                 || active_parent_id == Some(ch.id)
+                                || parents_with_unread_thread.contains(&ch.id)
                                 || has_members_in_voice;
-                            if !should_show {
-                                continue;
+                            if should_show {
+                                kept.push((ch, sidebar_members, false));
                             }
+                        }
+                        let mut seen_parents: HashSet<ChannelId> = HashSet::new();
+                        let mut has_prev_sibling = vec![false; kept.len()];
+                        for (idx, (ch, _, is_thread)) in kept.iter().enumerate() {
+                            if *is_thread && let Some(pid) = ch.parent_id {
+                                has_prev_sibling[idx] = !seen_parents.insert(pid);
+                            }
+                        }
+                        let mut remaining_parents: HashSet<ChannelId> = HashSet::new();
+                        let mut has_next_sibling = vec![false; kept.len()];
+                        for (idx, (ch, _, is_thread)) in kept.iter().enumerate().rev() {
+                            if *is_thread && let Some(pid) = ch.parent_id {
+                                has_next_sibling[idx] = !remaining_parents.insert(pid);
+                            }
+                        }
+                        for (idx, (ch, sidebar_members, is_thread)) in kept.into_iter().enumerate()
+                        {
                             let badge_count = ch.badge_count;
                             let badge_label = if badge_count > 99 {
                                 SharedString::from("99+")
@@ -442,10 +478,11 @@ impl ChannelSidebar {
                                     "ch-{}-{}",
                                     &category.id, &ch.id
                                 )),
-                                row_elem_id: SharedString::from(format!(
-                                    "channel-row-{}-{}",
-                                    &category.id, ch.id
-                                )),
+                                row_elem_id: SharedString::from(if is_thread {
+                                    format!("thread-row-{}-{}", &category.id, ch.id)
+                                } else {
+                                    format!("channel-row-{}-{}", &category.id, ch.id)
+                                }),
                                 id: ch.id.to_string(),
                                 name: truncate_channel_label(&ch.name),
                                 channel_type: ch.channel_type,
@@ -455,10 +492,10 @@ impl ChannelSidebar {
                                 badge_count,
                                 badge_label,
                                 muted: ch.muted,
-                                is_thread: false,
+                                is_thread,
                                 is_favorite: is_favorites,
-                                line_above: false,
-                                line_below: false,
+                                line_above: has_prev_sibling[idx],
+                                line_below: has_next_sibling[idx],
                                 voice_members: sidebar_members,
                                 voice_compact: true,
                             });

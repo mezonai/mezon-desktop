@@ -21,6 +21,7 @@ mod confirm_delete_role_modal;
 mod confirm_delete_sound_modal;
 mod confirm_delete_sticker_modal;
 mod confirm_delete_webhook_modal;
+mod confirm_leave_thread_modal;
 mod confirm_remove_friend_modal;
 mod disable_clan_community_modal;
 mod upload_limit_modal;
@@ -32,6 +33,7 @@ use confirm_delete_role_modal::ConfirmDeleteRoleModal;
 use confirm_delete_sound_modal::ConfirmDeleteSoundModal;
 use confirm_delete_sticker_modal::ConfirmDeleteStickerModal;
 use confirm_delete_webhook_modal::{ConfirmDeleteWebhookModal, WebhookDeleteTarget};
+use confirm_leave_thread_modal::ConfirmLeaveThreadModal;
 pub use confirm_remove_friend_modal::FriendRemovalKind;
 use confirm_remove_friend_modal::{ConfirmRemoveFriendModal, interpolate_username};
 use disable_clan_community_modal::DisableClanCommunityModal;
@@ -245,6 +247,41 @@ impl Shell {
             description,
             cancel_label,
             delete_label,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_leave_thread(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        channel_id: mezon_store::ChannelId,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title: SharedString =
+            mezon_i18n::t(locale, "channelMenu.modalConFirmLeaveThread.title")
+                .to_string()
+                .into();
+        let description: SharedString =
+            mezon_i18n::t(locale, "channelMenu.modalConFirmLeaveThread.textConfirm")
+                .to_string()
+                .into();
+        let cancel_label: SharedString = mezon_i18n::t(locale, "common.cancel").to_string().into();
+        let leave_label: SharedString =
+            mezon_i18n::t(locale, "channelMenu.modalConFirmLeaveThread.yesButton")
+                .to_string()
+                .into();
+        let view = cx.new(|cx| ConfirmLeaveThreadModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            channel_id,
+            title,
+            description,
+            cancel_label,
+            leave_label,
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);

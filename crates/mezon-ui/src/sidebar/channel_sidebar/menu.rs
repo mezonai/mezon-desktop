@@ -421,10 +421,13 @@ pub(super) fn build_channel_menu(
             show_notification,
         );
         if !permissions.is_channel_creator {
-            menu = menu.danger_item(
-                leave_label.clone(),
-                coming_soon_modal(leave_label, locale_owned.clone()),
-            );
+            let leave_locale = locale_owned.clone();
+            menu = menu.danger_item(leave_label, move |window: &mut Window, cx: &mut App| {
+                let locale = leave_locale.clone();
+                Shell::global(cx).update(cx, |shell, cx| {
+                    shell.confirm_leave_thread(clan_id, channel_id, &locale, window, cx);
+                });
+            });
         }
         if permissions.has_manage_thread {
             menu = menu
