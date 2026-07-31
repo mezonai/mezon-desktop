@@ -9,6 +9,7 @@ pub mod location;
 pub mod notifications;
 pub mod power;
 pub mod tray;
+pub mod window_icon;
 
 /// Opens a URL in the system default browser.
 ///

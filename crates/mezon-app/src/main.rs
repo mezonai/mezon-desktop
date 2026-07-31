@@ -581,7 +581,9 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                     window.window_handle().ok().map(|handle| handle.as_raw())
                 })
             {
-                mezon_native::badge::set_main_window_hwnd(win32.hwnd.get());
+                let hwnd = win32.hwnd.get();
+                mezon_native::badge::set_main_window_hwnd(hwnd);
+                mezon_native::window_icon::apply_dpi_aware_icons(hwnd);
             }
         }
 
