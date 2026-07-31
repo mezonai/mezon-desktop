@@ -2604,6 +2604,14 @@ impl AppApi {
             .await
     }
 
+    pub async fn archive_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        self.transport.archive_channel(clan_id, channel_id).await
+    }
+
+    pub async fn delete_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        self.transport.delete_channel(clan_id, channel_id).await
+    }
+
     pub async fn leave_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
         self.transport.leave_thread(clan_id, channel_id).await
     }

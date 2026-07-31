@@ -33,8 +33,8 @@ mod skeleton;
 use app_list_popover::app_list_popover_overlay;
 use items::{AppChannelSlot, SidebarItem, VoiceMemberSlot};
 use menu::{
-    CategoryMenu, ChannelMenuPermissions, OpenMenu, build_category_menu, build_channel_menu,
-    on_category_click, on_channel_click,
+    CategoryMenu, ChannelMenuContext, ChannelMenuPermissions, OpenMenu, build_category_menu,
+    build_channel_menu, on_category_click, on_channel_click,
 };
 
 fn resolve_voice_member_slot(
@@ -705,6 +705,19 @@ impl Render for ChannelSidebar {
                 })
             });
         let menu_overlay = self.open_menu.as_ref().map(|menu| {
+            let channel_list = self.channel_list.read(cx);
+            let channel = channel_list.channel(menu.clan_id, menu.channel_id);
+            let menu_context = ChannelMenuContext {
+                in_favorites_category: menu.in_favorites_category,
+                is_favorite: channel_list.is_channel_favorite(menu.clan_id, menu.channel_id),
+                channel_name: channel.map(|ch| ch.name.clone()).unwrap_or_default(),
+                category_id: channel
+                    .and_then(|ch| ch.category_id.clone())
+                    .unwrap_or_default(),
+                category_name: channel
+                    .map(|ch| ch.category_name.clone())
+                    .unwrap_or_default(),
+            };
             (
                 menu.position,
                 menu.channel_type,
@@ -712,6 +725,7 @@ impl Render for ChannelSidebar {
                 locale.clone(),
                 menu.channel_id,
                 menu.clan_id,
+                menu_context,
                 mezon_store::NotificationSettingStore::try_global(cx)
                     .is_some_and(|store| store.read(cx).is_time_muted(menu.channel_id)),
                 mezon_store::NotificationSettingStore::try_global(cx)
@@ -1015,6 +1029,7 @@ impl Render for ChannelSidebar {
                     locale,
                     channel_id,
                     clan_id,
+                    menu_context,
                     muted,
                     muted_until,
                     level,
@@ -1039,6 +1054,7 @@ impl Render for ChannelSidebar {
                             noti_sub_open,
                             clan_default,
                             channel_permissions,
+                            menu_context,
                         ),
                     ))
                 },
@@ -1768,6 +1784,7 @@ fn render_sidebar_item(
                 let menu_sidebar = sidebar.clone();
                 let reveal_sidebar = sidebar.clone();
                 let reveal_favorite = *is_favorite;
+                let menu_in_favorites = *is_favorite;
                 let menu_channel_type = *channel_type;
                 let menu_is_thread = *is_thread;
                 return element
@@ -1799,6 +1816,7 @@ fn render_sidebar_item(
                                     position,
                                     channel_id: menu_channel_id,
                                     clan_id: menu_clan_id,
+                                    in_favorites_category: menu_in_favorites,
                                     mute_sub_open: false,
                                     noti_sub_open: false,
                                 });
@@ -1916,6 +1934,7 @@ fn render_sidebar_item(
             let mut channel_col = channel_col.on_mouse_down(MouseButton::Right, {
                 let channel_type = *channel_type;
                 let is_thread = *is_thread;
+                let in_favorites_category = *is_favorite;
                 move |event: &MouseDownEvent, _window, cx| {
                     let position = event.position;
                     if let Some(view) = sidebar.upgrade() {
@@ -1926,6 +1945,7 @@ fn render_sidebar_item(
                                 position,
                                 channel_id: menu_channel_id,
                                 clan_id: menu_clan_id,
+                                in_favorites_category,
                                 mute_sub_open: false,
                                 noti_sub_open: false,
                             });

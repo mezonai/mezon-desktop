@@ -6049,18 +6049,36 @@ impl MezonTransport {
     }
 
     /// Delete a channel.
-    pub async fn delete_channel(&self, _channel_id: i64) -> Result<()> {
+    pub async fn delete_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
         let cid = self.generate_cid();
 
         let body = api::DeleteChannelDescRequest {
-            channel_id: _channel_id,
-            ..Default::default()
+            clan_id,
+            channel_id,
         }
         .encode_to_vec();
 
         let (code, _response) = self
             .send_api_request(cid, "DeleteChannelDesc", body)
             .await?;
+
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+
+        Ok(())
+    }
+
+    pub async fn archive_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        let cid = self.generate_cid();
+
+        let body = api::ArchiveChannelRequest {
+            clan_id,
+            channel_id,
+        }
+        .encode_to_vec();
+
+        let (code, _response) = self.send_api_request(cid, "ArchiveChannel", body).await?;
 
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));

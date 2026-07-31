@@ -14,7 +14,9 @@ use gpui::{
 use crate::components::primitives::{Toast, ToastKind};
 
 mod coming_soon_modal;
+mod confirm_archive_channel_modal;
 mod confirm_delete_canvas_modal;
+mod confirm_delete_channel_modal;
 mod confirm_delete_emoji_modal;
 mod confirm_delete_message_modal;
 mod confirm_delete_role_modal;
@@ -26,7 +28,9 @@ mod confirm_remove_friend_modal;
 mod disable_clan_community_modal;
 mod upload_limit_modal;
 use coming_soon_modal::ComingSoonModal;
+use confirm_archive_channel_modal::ConfirmArchiveChannelModal;
 use confirm_delete_canvas_modal::ConfirmDeleteCanvasModal;
+use confirm_delete_channel_modal::ConfirmDeleteChannelModal;
 use confirm_delete_emoji_modal::ConfirmDeleteEmojiModal;
 use confirm_delete_message_modal::ConfirmDeleteMessageModal;
 use confirm_delete_role_modal::ConfirmDeleteRoleModal;
@@ -243,6 +247,94 @@ impl Shell {
         let view = cx.new(|cx| ConfirmDeleteMessageModal {
             focus_handle: cx.focus_handle(),
             message_id,
+            title,
+            description,
+            cancel_label,
+            delete_label,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_archive_channel(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        channel_id: mezon_store::ChannelId,
+        is_thread: bool,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (title_key, text_key, button_key, toast_key) = if is_thread {
+            (
+                "channelMenu.modalConfirmArchiveThread.title",
+                "channelMenu.modalConfirmArchiveThread.textConfirm",
+                "channelMenu.modalConfirmArchiveThread.button",
+                "channelMenu.toastArchiveThread",
+            )
+        } else {
+            (
+                "channelMenu.modalConfirmArchiveChannel.title",
+                "channelMenu.modalConfirmArchiveChannel.textConfirm",
+                "channelMenu.modalConfirmArchiveChannel.button",
+                "channelMenu.toastArchiveChannel",
+            )
+        };
+        let title: SharedString = mezon_i18n::t(locale, title_key).to_string().into();
+        let description: SharedString = mezon_i18n::t(locale, text_key).to_string().into();
+        let cancel_label: SharedString = mezon_i18n::t(locale, "common.cancel").to_string().into();
+        let archive_label: SharedString = mezon_i18n::t(locale, button_key).to_string().into();
+        let toast_message: SharedString = mezon_i18n::t(locale, toast_key).to_string().into();
+        let view = cx.new(|cx| ConfirmArchiveChannelModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            channel_id,
+            title,
+            description,
+            cancel_label,
+            archive_label,
+            toast_message,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_delete_channel(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        channel_id: mezon_store::ChannelId,
+        channel_name: String,
+        is_thread: bool,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (title_key, content_key) = if is_thread {
+            (
+                "channelSetting.confirm.deleteThread.title",
+                "channelSetting.confirm.deleteThread.content",
+            )
+        } else {
+            (
+                "channelSetting.confirm.deleteChannel.title",
+                "channelSetting.confirm.deleteChannel.content",
+            )
+        };
+        let title: SharedString = mezon_i18n::t(locale, title_key).to_string().into();
+        let description: SharedString = mezon_i18n::t(locale, content_key)
+            .replace("{{channelName}}", &channel_name)
+            .into();
+        let cancel_label: SharedString = mezon_i18n::t(locale, "common.cancel").to_string().into();
+        let delete_label: SharedString =
+            mezon_i18n::t(locale, "common.modalConfirm.defaultButtonName")
+                .to_string()
+                .into();
+        let view = cx.new(|cx| ConfirmDeleteChannelModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            channel_id,
             title,
             description,
             cancel_label,
