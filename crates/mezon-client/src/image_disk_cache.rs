@@ -188,6 +188,46 @@ enum FetchResult {
     Passthrough(Response<AsyncBody>),
 }
 
+/// Whether the bytes actually start like an image.
+///
+/// A body only reaches the disk tier once, but it is read back from there for
+/// the lifetime of the entry: admitting something that cannot decode - a proxy
+/// error page served with 200, a transfer that ended early - leaves a broken
+/// image that survives restarts, because every later load replays the same
+/// stored bytes instead of asking the network again.
+fn looks_like_image(body: &[u8]) -> bool {
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+    const GIF87: &[u8] = b"GIF87a";
+    const GIF89: &[u8] = b"GIF89a";
+    const BMP: &[u8] = b"BM";
+    const TIFF_LE: &[u8] = b"II*\0";
+    const TIFF_BE: &[u8] = b"MM\0*";
+
+    if body.starts_with(PNG)
+        || body.starts_with(GIF87)
+        || body.starts_with(GIF89)
+        || body.starts_with(BMP)
+        || body.starts_with(TIFF_LE)
+        || body.starts_with(TIFF_BE)
+        || body.starts_with(&[0xFF, 0xD8, 0xFF])
+    {
+        return true;
+    }
+    // RIFF....WEBP
+    if body.len() >= 12 && body.starts_with(b"RIFF") && &body[8..12] == b"WEBP" {
+        return true;
+    }
+    // ISO base media (avif/heic): ....ftyp
+    if body.len() >= 12 && &body[4..8] == b"ftyp" {
+        return true;
+    }
+    // SVG arrives as text and may be preceded by a BOM, whitespace or a prolog.
+    let head = &body[..body.len().min(1024)];
+    let text = String::from_utf8_lossy(head);
+    let text = text.trim_start_matches('\u{feff}').trim_start();
+    text.starts_with("<svg") || (text.starts_with("<?xml") && text.contains("<svg"))
+}
+
 async fn read_limited(response: &mut Response<AsyncBody>) -> anyhow::Result<Vec<u8>> {
     let mut body = Vec::new();
     response
@@ -288,7 +328,10 @@ impl HttpClient for DiskImageCacheClient {
                                 anyhow::bail!("image fetch returned non-success status");
                             }
                             let body = read_limited(&mut response).await?;
-                            if body.is_empty() || body.len() > MAX_ENTRY_BYTES {
+                            if body.is_empty()
+                                || body.len() > MAX_ENTRY_BYTES
+                                || !looks_like_image(&body)
+                            {
                                 if let Ok(mut held) = slot.lock() {
                                     *held = Some(ok_response(body));
                                 }
@@ -314,7 +357,22 @@ impl HttpClient for DiskImageCacheClient {
                         );
                     }
                     match fetched {
-                        Ok(entry) => Ok(FetchResult::Bytes(entry.value().clone())),
+                        Ok(entry) => {
+                            let bytes = entry.value().clone();
+                            // An entry stored before this check existed, or one
+                            // whose file went bad, would otherwise be replayed
+                            // for as long as it stays resident - the image stays
+                            // broken across restarts. Drop it and report a miss
+                            // so the next attempt goes back to the network.
+                            if !looks_like_image(&bytes) {
+                                cache.remove(&key);
+                                tracing::debug!("dropped a disk cache entry that is not an image");
+                                return Err(anyhow::anyhow!(
+                                    "image disk cache entry was not usable"
+                                ));
+                            }
+                            Ok(FetchResult::Bytes(bytes))
+                        }
                         Err(err) => match downloaded {
                             Some(response) => Ok(FetchResult::Passthrough(response)),
                             None => Err(anyhow::anyhow!("image disk cache fetch failed: {err}")),
@@ -334,6 +392,28 @@ impl HttpClient for DiskImageCacheClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_real_image_bytes_are_admitted_to_disk() {
+        assert!(looks_like_image(b"\x89PNG\r\n\x1a\n----"));
+        assert!(looks_like_image(b"\xFF\xD8\xFF----"));
+        assert!(looks_like_image(b"GIF89a----"));
+        assert!(looks_like_image(b"RIFF\0\0\0\0WEBPVP8 "));
+        assert!(looks_like_image(b"\0\0\0\x18ftypavif"));
+        assert!(looks_like_image(
+            b"  <svg xmlns=\"http://www.w3.org/2000/svg\"/>"
+        ));
+        assert!(looks_like_image(
+            b"<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"/>"
+        ));
+
+        // What a proxy or gateway hands back when the object is missing. Storing
+        // any of these leaves an image that stays broken across restarts.
+        assert!(!looks_like_image(b"<!DOCTYPE html><html>404</html>"));
+        assert!(!looks_like_image(b"{\"error\":\"not found\"}"));
+        assert!(!looks_like_image(b"Not Found"));
+        assert!(!looks_like_image(b""));
+    }
 
     const AVATAR: &str = "https://dev-imgproxy.nccsoft.vn/k/rs:fill:100:100:1/mb:2097152/plain/https://cdn.komu.vn/a.png@webp";
     const PROFILE: &str = "https://dev-imgproxy.nccsoft.vn/k/rs:fit:300:300:1/mb:2097152/plain/https://cdn.komu.vn/a.png@webp";
