@@ -206,26 +206,46 @@ fn looks_like_image(body: &[u8]) -> bool {
     if body.starts_with(PNG)
         || body.starts_with(GIF87)
         || body.starts_with(GIF89)
-        || body.starts_with(BMP)
         || body.starts_with(TIFF_LE)
         || body.starts_with(TIFF_BE)
         || body.starts_with(&[0xFF, 0xD8, 0xFF])
     {
         return true;
     }
+    // "BM" alone is two bytes of ordinary text, so check the size field too.
+    if body.len() >= 6 && body.starts_with(BMP) {
+        let declared = u32::from_le_bytes([body[2], body[3], body[4], body[5]]) as usize;
+        if declared == body.len() {
+            return true;
+        }
+    }
     // RIFF....WEBP
     if body.len() >= 12 && body.starts_with(b"RIFF") && &body[8..12] == b"WEBP" {
         return true;
     }
-    // ISO base media (avif/heic): ....ftyp
+    // ISO base media: ....ftyp<brand>. Match only the image brands, so an mp4
+    // that reached this predicate is not mistaken for one.
     if body.len() >= 12 && &body[4..8] == b"ftyp" {
-        return true;
+        const IMAGE_BRANDS: [&[u8]; 6] = [b"avif", b"avis", b"heic", b"heix", b"mif1", b"msf1"];
+        if IMAGE_BRANDS.contains(&&body[8..12]) {
+            return true;
+        }
     }
     // SVG arrives as text and may be preceded by a BOM, whitespace or a prolog.
     let head = &body[..body.len().min(1024)];
     let text = String::from_utf8_lossy(head);
     let text = text.trim_start_matches('\u{feff}').trim_start();
     text.starts_with("<svg") || (text.starts_with("<?xml") && text.contains("<svg"))
+}
+
+fn content_length(response: &Response<AsyncBody>) -> Option<u64> {
+    response
+        .headers()
+        .get(http::header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()
 }
 
 async fn read_limited(response: &mut Response<AsyncBody>) -> anyhow::Result<Vec<u8>> {
@@ -327,9 +347,15 @@ impl HttpClient for DiskImageCacheClient {
                                 }
                                 anyhow::bail!("image fetch returned non-success status");
                             }
+                            let declared_len = content_length(&response);
                             let body = read_limited(&mut response).await?;
+                            // A transfer that ended early still carries a valid
+                            // header, so the magic bytes alone would let a partial
+                            // image into the cache and keep it broken from then on.
+                            let complete = declared_len.is_none_or(|len| len == body.len() as u64);
                             if body.is_empty()
                                 || body.len() > MAX_ENTRY_BYTES
+                                || !complete
                                 || !looks_like_image(&body)
                             {
                                 if let Ok(mut held) = slot.lock() {
@@ -413,6 +439,14 @@ mod tests {
         assert!(!looks_like_image(b"{\"error\":\"not found\"}"));
         assert!(!looks_like_image(b"Not Found"));
         assert!(!looks_like_image(b""));
+
+        // Bare "BM" is two bytes of ordinary text, and an mp4 also carries ftyp.
+        assert!(!looks_like_image(b"BM is not a bitmap here"));
+        assert!(!looks_like_image(b"\0\0\0\x18ftypisom"));
+        let mut bmp = b"BM\0\0\0\0rest".to_vec();
+        let len = bmp.len() as u32;
+        bmp[2..6].copy_from_slice(&len.to_le_bytes());
+        assert!(looks_like_image(&bmp));
     }
 
     const AVATAR: &str = "https://dev-imgproxy.nccsoft.vn/k/rs:fill:100:100:1/mb:2097152/plain/https://cdn.komu.vn/a.png@webp";
