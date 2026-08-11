@@ -8,6 +8,7 @@ use crate::chat::user_profile_popover::role_is_assignable;
 use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, InputState};
 use crate::image_cache::shared_avatar_cache;
 use crate::theme::{ActiveTheme, Theme};
+use crate::util::text_utils::normalize_diacritics;
 use gpui::{
     AnyElement, Context, Entity, FontWeight, Hsla, ListAlignment, ListOffset, ListState,
     MouseButton, Render, SharedString, Subscription, Window, deferred, div, img, list, prelude::*,
@@ -16,7 +17,6 @@ use gpui::{
 use mezon_store::{
     ClanId, ClanMembersStore, PermissionStore, Role, RoleId, RolesStore, Settings, UserId,
 };
-use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 const PAGE_SIZES: [usize; 3] = [10, 50, 100];
 const ROLE_PICKER_WIDTH: f32 = 288.;
@@ -192,7 +192,7 @@ impl ClanMembersPage {
         let query = self
             .search
             .as_ref()
-            .map(|input| normalize_search(input.read(cx).value().trim()))
+            .map(|input| normalize_diacritics(input.read(cx).value().trim()))
             .unwrap_or_default();
         let mut rows: Vec<_> = ClanMembersStore::global(cx)
             .read(cx)
@@ -200,9 +200,9 @@ impl ClanMembersPage {
             .into_iter()
             .filter(|member| {
                 query.is_empty()
-                    || normalize_search(&member.user.username).contains(&query)
-                    || normalize_search(&member.user.display_name).contains(&query)
-                    || normalize_search(&member.clan_nick).contains(&query)
+                    || normalize_diacritics(&member.user.username).contains(&query)
+                    || normalize_diacritics(&member.user.display_name).contains(&query)
+                    || normalize_diacritics(&member.clan_nick).contains(&query)
             })
             .map(|member| {
                 let role_count = self.visible_roles(&member.role_ids, cx).len();
@@ -220,7 +220,7 @@ impl ClanMembersPage {
             .collect();
         match self.sort_field {
             MemberSortField::Name => {
-                rows.sort_by_cached_key(|row| normalize_search(&row.name));
+                rows.sort_by_cached_key(|row| normalize_diacritics(&row.name));
                 if self.sort_descending {
                     rows.reverse();
                 }
@@ -228,13 +228,13 @@ impl ClanMembersPage {
             MemberSortField::MemberSince => rows.sort_by_cached_key(|row| {
                 (
                     timestamp_sort_key(row.member_since, self.sort_descending),
-                    normalize_search(&row.name),
+                    normalize_diacritics(&row.name),
                 )
             }),
             MemberSortField::JoinedMezon => rows.sort_by_cached_key(|row| {
                 (
                     timestamp_sort_key(row.joined_mezon, self.sort_descending),
-                    normalize_search(&row.name),
+                    normalize_diacritics(&row.name),
                 )
             }),
             MemberSortField::Roles => rows.sort_by_cached_key(|row| {
@@ -243,7 +243,7 @@ impl ClanMembersPage {
                 } else {
                     row.role_count
                 };
-                (count, normalize_search(&row.name))
+                (count, normalize_diacritics(&row.name))
             }),
         }
         self.cached_rows = rows;
@@ -1257,18 +1257,6 @@ fn timestamp_sort_key(value: u32, descending: bool) -> u32 {
     }
 }
 
-fn normalize_search(value: &str) -> String {
-    value
-        .nfd()
-        .filter(|character| !is_combining_mark(*character))
-        .flat_map(char::to_lowercase)
-        .map(|character| match character {
-            '\u{0111}' => 'd',
-            _ => character,
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1321,8 +1309,9 @@ mod tests {
 
     #[test]
     fn search_matches_vietnamese_names_without_diacritics() {
-        assert_eq!(normalize_search("Hiền"), "hien");
-        assert_eq!(normalize_search("Đặng Văn"), "dang van");
+        assert_eq!(normalize_diacritics("Hiền"), "hien");
+        assert_eq!(normalize_diacritics("Đặng Văn"), "dang van");
+        assert_eq!(normalize_diacritics("Đà Nẵng"), "da nang");
     }
 
     #[test]

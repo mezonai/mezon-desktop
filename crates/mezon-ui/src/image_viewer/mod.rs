@@ -1474,12 +1474,15 @@ impl ImageViewer {
     ) -> impl IntoElement {
         let att = self.current();
         let uploader = att.map(|a| a.uploader_name.clone()).unwrap_or_default();
+        let is_anonymous =
+            att.is_some_and(|a| mezon_store::is_anonymous_user_id(a.uploader_id, cx));
         let avatar_widget = {
             let mut avatar = Avatar::new()
                 .name(uploader.clone())
                 .size_px(px(32.))
+                .anonymous(is_anonymous)
                 .image_cache(self.image_cache.clone());
-            if let Some(att) = att {
+            if let Some(att) = att.filter(|_| !is_anonymous) {
                 let proxied = att.uploader_avatar.clone();
                 let raw = att.uploader_avatar_raw.clone();
                 if !proxied.is_empty() {

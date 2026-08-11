@@ -35,7 +35,7 @@ pub use auth::MezonClient;
 pub use auth::QrLoginId;
 pub use auth::SessionProbe;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
-pub use channel_app_launch::{ChannelAppLaunchParams, build_channel_app_url};
+pub use channel_app_launch::{ChannelAppLaunchParams, build_channel_app_url, encode_url_param};
 pub use gotify::{GotifyExtras, GotifyNotification, StreamEnd};
 pub use inbox::{
     DIRECTION_AROUND_TIMESTAMP, DIRECTION_BEFORE_TIMESTAMP, INBOX_MESSAGE_MARK_CODE,

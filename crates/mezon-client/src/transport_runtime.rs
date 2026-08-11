@@ -1797,6 +1797,8 @@ impl TransportClient {
         mentions: Vec<crate::transport::OutgoingMention>,
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
+        attachments: Vec<mezon_proto::api::MessageAttachment>,
+        reply: Option<crate::transport::OutgoingReply>,
     ) -> Result<()> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -1813,6 +1815,8 @@ impl TransportClient {
                         mentions,
                         hashtags,
                         emojis,
+                        attachments,
+                        reply,
                     )
                     .await
             })
@@ -2090,6 +2094,17 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn create_event(
+        &self,
+        request: mezon_proto::api::CreateEventRequest,
+    ) -> Result<mezon_proto::api::EventManagement> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.create_event(request).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_role_users(
         &self,
         role_id: i64,
@@ -2348,6 +2363,7 @@ impl TransportClient {
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         reply: Option<crate::transport::OutgoingReply>,
+        flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<crate::transport::ApiMessage> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -2357,7 +2373,7 @@ impl TransportClient {
                 transport
                     .send_topic_message(
                         clan_id, channel_id, &content, is_public, mode, topic_id, mentions,
-                        hashtags, emojis, reply,
+                        hashtags, emojis, reply, flags,
                     )
                     .await
             })
@@ -2380,6 +2396,7 @@ impl TransportClient {
         emojis: Vec<crate::transport::OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
         reply: Option<crate::transport::OutgoingReply>,
+        flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<crate::transport::ApiMessage> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -2400,6 +2417,7 @@ impl TransportClient {
                         emojis,
                         presign_finish,
                         reply,
+                        flags,
                     )
                     .await
             })
@@ -2420,6 +2438,7 @@ impl TransportClient {
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         ogp: Option<crate::transport::OutgoingOgp>,
+        flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<crate::transport::ApiMessage> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -2428,7 +2447,7 @@ impl TransportClient {
                 transport
                     .send_channel_message_reply(
                         clan_id, channel_id, &content, is_public, mode, reply, mentions, hashtags,
-                        emojis, ogp,
+                        emojis, ogp, flags,
                     )
                     .await
             })
@@ -2450,6 +2469,7 @@ impl TransportClient {
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
+        flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<crate::transport::ApiMessage> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -2469,6 +2489,7 @@ impl TransportClient {
                         hashtags,
                         emojis,
                         presign_finish,
+                        flags,
                     )
                     .await
             })
@@ -2672,6 +2693,15 @@ impl TransportClient {
 
         runtime()
             .spawn(async move { transport.active_archived_thread(clan_id, channel_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn archive_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.archive_channel(clan_id, channel_id).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

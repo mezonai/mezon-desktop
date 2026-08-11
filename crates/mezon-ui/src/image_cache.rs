@@ -130,9 +130,35 @@ const SHARED_AVATAR_CACHE_BYTES: u64 = 24 * 1024 * 1024;
 const SHARED_SMALL_AVATAR_CACHE_BYTES: u64 = 12 * 1024 * 1024;
 const SHARED_ROLE_ICON_CACHE_CAPACITY: usize = 512;
 const SHARED_ROLE_ICON_CACHE_BYTES: u64 = 4 * 1024 * 1024;
-const ROLE_ICON_ENTRY_MAX_BYTES: u64 = 256 * 1024;
 const SHARED_EMOJI_CACHE_CAPACITY: usize = 256;
 const SHARED_EMOJI_CACHE_BYTES: u64 = 12 * 1024 * 1024;
+
+/// The emoji picker grid holds far more cells on screen at once than any other
+/// emoji surface, and every one of them may be animated. Its budget is sized so
+/// that a fully animated screenful still fits — an entry evicted while it is
+/// visible reloads immediately and blinks.
+/// Sized to hold a whole clan's emoji corpus rather than a screenful. The grid
+/// is scrolled back and forth, and an entry evicted between two passes costs a
+/// fresh fetch + decode, which shows as a cell that stays blank for seconds. A
+/// clan with ~700 emoji fits here when they are still images (16 KB each) and
+/// still keeps a few hundred animated ones (128 KB each) resident.
+pub const EMOJI_PICKER_CACHE_CAPACITY: usize = 1024;
+pub const EMOJI_PICKER_CACHE_BYTES: u64 = 48 * 1024 * 1024;
+
+/// The sticker panel, sized on the same reasoning as the emoji picker: a cell
+/// evicted between two passes of the same scroll costs a fetch and a decode
+/// before it paints again. Sticker cells are 92px, so an entry is far larger
+/// than an emoji's -- a still is ~100 KB and an animated one ~2 MB -- which is
+/// why this budget buys fewer of them.
+pub const STICKER_CACHE_CAPACITY: usize = 256;
+pub const STICKER_CACHE_BYTES: u64 = 32 * 1024 * 1024;
+pub const STICKER_ENTRY_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Emoji and role icons painted inside one channel's message list: reaction
+/// pills, inline `:emoji:` spans and role chips, all of which animate when the
+/// source does.
+pub const MESSAGE_ICON_CACHE_CAPACITY: usize = 1024;
+pub const MESSAGE_ICON_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 
 struct SharedAvatarCache(Entity<LruImageCache>);
 impl Global for SharedAvatarCache {}
@@ -204,7 +230,7 @@ pub fn shared_role_icon_cache(cx: &mut App) -> Entity<LruImageCache> {
             "role-icons-shared",
             SHARED_ROLE_ICON_CACHE_CAPACITY,
             SHARED_ROLE_ICON_CACHE_BYTES,
-            ROLE_ICON_ENTRY_MAX_BYTES,
+            ICON_ENTRY_MAX_BYTES,
             cx,
         )
     });
@@ -249,11 +275,11 @@ pub fn shared_emoji_cache(cx: &mut App) -> Entity<LruImageCache> {
         return existing.0.clone();
     }
     let cache = cx.new(|cx| {
-        LruImageCache::avatar_thumbnail(
+        LruImageCache::emoji_thumbnail(
             "emoji-shared",
             SHARED_EMOJI_CACHE_CAPACITY,
             SHARED_EMOJI_CACHE_BYTES,
-            AVATAR_ENTRY_MAX_BYTES,
+            EMOJI_ENTRY_MAX_BYTES,
             cx,
         )
     });
@@ -378,6 +404,16 @@ const IMAGE_PIPELINE_CONCURRENCY: usize = 3;
 static IMAGE_PIPELINE_PERMITS: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(IMAGE_PIPELINE_CONCURRENCY)));
 
+/// Avatars, icons and emoji get their own, wider lane. [`IMAGE_PIPELINE_PERMITS`]
+/// is narrow because one message attachment can hold [`MESSAGE_ENTRY_MAX_BYTES`]
+/// while it decodes, so a handful in flight is already a lot of memory. These
+/// decode to at most [`AVATAR_ENTRY_MAX_BYTES`], and an emoji grid asks for a
+/// screenful at once: sharing the narrow lane makes the picker fill a few cells
+/// at a time, which reads as a panel that stays blank for seconds.
+const ICON_PIPELINE_CONCURRENCY: usize = 8;
+static ICON_PIPELINE_PERMITS: LazyLock<Arc<tokio::sync::Semaphore>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(ICON_PIPELINE_CONCURRENCY)));
+
 async fn acquire_image_pipeline_permit()
 -> Result<tokio::sync::OwnedSemaphorePermit, ImageCacheError> {
     IMAGE_PIPELINE_PERMITS
@@ -386,6 +422,17 @@ async fn acquire_image_pipeline_permit()
         .await
         .map_err(|_| {
             ImageCacheError::Other(Arc::new(anyhow::anyhow!("image pipeline semaphore closed")))
+        })
+}
+
+async fn acquire_icon_pipeline_permit() -> Result<tokio::sync::OwnedSemaphorePermit, ImageCacheError>
+{
+    ICON_PIPELINE_PERMITS
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| {
+            ImageCacheError::Other(Arc::new(anyhow::anyhow!("icon pipeline semaphore closed")))
         })
 }
 
@@ -448,11 +495,18 @@ pub const PREVIEW_ENTRY_MAX_BYTES: u64 = 4 * 1024 * 1024;
 /// blowing up RAM by refusing to retain anything decoded larger than this and
 /// negatively caching it (shown as the initials fallback instead).
 pub const AVATAR_ANIMATION_MAX_BYTES: u64 = 4 * 1024 * 1024;
-/// Every cache fed by the icon loader keeps a 256 KB per-entry cap, so an
-/// animated emoji or role icon has to be decimated to fit inside it. Decoding
-/// against the larger avatar budget instead produced entries the cache then
-/// threw away, leaving the error placeholder in place of the emoji.
-pub const ICON_ANIMATION_MAX_BYTES: u64 = 256 * 1024;
+/// Backstop for the emoji loaders. [`AnimationCaps::max_frames`] is what
+/// normally bounds an animation; this only binds when a source arrives larger
+/// than the surface that requested it, and it is sized to hold
+/// [`MESSAGE_EMOJI_MAX_FRAMES`] frames at [`MESSAGE_EMOJI_DECODE_MAX_PX`].
+pub const EMOJI_ANIMATION_MAX_BYTES: u64 = 896 * 1024;
+/// Per-entry cap for the caches the message/menu emoji loader feeds. A jumbo
+/// animated emoji is the largest legitimate entry, so the cap sits just above
+/// [`EMOJI_ANIMATION_MAX_BYTES`]; anything above that is a source we should not
+/// be keeping.
+pub const EMOJI_ENTRY_MAX_BYTES: u64 = 1024 * 1024;
+/// Per-entry cap for the picker's cache, which trades frames for cells.
+pub const ICON_ENTRY_MAX_BYTES: u64 = 512 * 1024;
 pub const AVATAR_ENTRY_MAX_BYTES: u64 = 2 * 1024 * 1024;
 pub const MESSAGE_ENTRY_MAX_BYTES: u64 = 32 * 1024 * 1024;
 pub const MESSAGE_ANIMATION_MAX_BYTES: u64 = MESSAGE_IMAGE_CACHE_BYTES / 4;
@@ -572,6 +626,9 @@ enum LoaderKind {
     AvatarThumbnail,
     AvatarThumbnailSmall,
     IconThumbnail,
+    /// Emoji painted next to text (messages, reaction pills, menus): decodes at
+    /// the surface's own 2x source size and keeps a watchable frame count.
+    EmojiThumbnail,
     GalleryThumbnail,
     /// Aspect-preserving, animation-preserving thumbnail for the sticker picker,
     /// capped at [`STICKER_DECODE_MAX_PX`].
@@ -688,6 +745,26 @@ impl LruImageCache {
         Self::with_loader(
             label,
             LoaderKind::IconThumbnail,
+            max_items,
+            max_bytes,
+            max_entry_bytes,
+            cx,
+        )
+    }
+
+    /// A cache for emoji painted next to text. Unlike [`Self::icon_thumbnail`]
+    /// it decodes up to a jumbo emoji's 2x size and keeps enough frames for the
+    /// animation to read as motion rather than as a slideshow.
+    pub fn emoji_thumbnail(
+        label: &'static str,
+        max_items: usize,
+        max_bytes: u64,
+        max_entry_bytes: u64,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_loader(
+            label,
+            LoaderKind::EmojiThumbnail,
             max_items,
             max_bytes,
             max_entry_bytes,
@@ -1145,6 +1222,9 @@ impl LruImageCache {
             LoaderKind::IconThumbnail => {
                 AssetLogger::<IconImageLoader>::load(resource.clone(), cx).boxed()
             }
+            LoaderKind::EmojiThumbnail => {
+                AssetLogger::<EmojiImageLoader>::load(resource.clone(), cx).boxed()
+            }
             LoaderKind::GalleryThumbnail => {
                 AssetLogger::<GalleryImageLoader>::load(resource.clone(), cx).boxed()
             }
@@ -1202,6 +1282,15 @@ impl LruImageCache {
     }
 }
 
+impl LruImageCache {
+    /// Decode a resource that is not on screen yet so it is ready by the time it
+    /// scrolls into view. Takes the same path a painted `img()` takes, so it
+    /// fills the entry that element will look up rather than a parallel one.
+    pub fn prefetch(&mut self, resource: &Resource, window: &mut Window, cx: &mut App) {
+        let _ = self.load(resource, window, cx);
+    }
+}
+
 impl ImageCache for LruImageCache {
     fn load(
         &mut self,
@@ -1219,6 +1308,36 @@ impl ImageCache for LruImageCache {
 const AVATAR_DECODE_MAX_PX: u32 = 160;
 const AVATAR_SMALL_DECODE_MAX_PX: u32 = 80;
 const ICON_DECODE_MAX_PX: u32 = 64;
+/// How an animated GIF/WebP is bounded while decoding.
+///
+/// Frames are what an animation costs: every one is resident in RAM and, once
+/// painted, holds a sprite-atlas tile. `max_frames` bounds that count directly
+/// so the *size* of a frame stays free to match the surface, and `max_bytes` is
+/// the backstop for a source larger than the surface expects.
+///
+/// `max_px` must be at least the size the surface paints at on a 2x display.
+/// Atlas tiles are packed with no gutter and the shaders magnify with a linear
+/// filter, so an undersized tile does not merely look soft: sampling past its
+/// edge picks up the neighbouring tile, which for an animation is the adjacent
+/// frame, and the emoji drags a ghost of itself behind every movement.
+#[derive(Clone, Copy)]
+struct AnimationCaps {
+    max_px: u32,
+    max_frames: usize,
+    max_bytes: u64,
+}
+
+/// Emoji painted in the message list: a 24px inline `:emoji:` span, a 48px
+/// jumbo emoji in an emoji-only message, and the reaction pills between them.
+/// 96px covers the largest of those on a 2x display; each surface requests its
+/// own source size, so a small one decodes small and only jumbo pays for 96px.
+const MESSAGE_EMOJI_DECODE_MAX_PX: u32 = 96;
+/// How many frames an animated emoji keeps, on every surface. The picker used to
+/// keep fewer to fit a hundred cells in its budget, but the same emoji then
+/// played visibly choppier there than in a message, which reads as a bug rather
+/// than as a budget. Its cache is sized for this instead.
+const MESSAGE_EMOJI_MAX_FRAMES: usize = 24;
+
 const GALLERY_THUMB_DECODE_MAX_PX: u32 = 320;
 /// OGP link-preview thumbnails render at ≤200px tall; decode to 512px longest
 /// side (aspect-preserving, ~2x for retina) so a large external OG image
@@ -1250,13 +1369,14 @@ const STICKER_ANIMATION_MAX_BYTES: u64 = 2 * 1024 * 1024;
 fn load_avatar_scaled(
     source: Resource,
     max_px: u32,
+    animation: AnimationCaps,
     cx: &mut App,
 ) -> impl Future<Output = Result<Arc<RenderImage>, ImageCacheError>> + Send + 'static {
     let client = cx.http_client();
     let svg_renderer = cx.svg_renderer();
     let asset_source = cx.asset_source().clone();
     async move {
-        let _permit = acquire_image_pipeline_permit().await?;
+        let _permit = acquire_icon_pipeline_permit().await?;
         let bytes = match source.clone() {
             Resource::Path(uri) => {
                 if let Some(decoded) = decode_scaled_dynamic_path(uri.as_ref(), max_px) {
@@ -1295,14 +1415,7 @@ fn load_avatar_scaled(
         };
 
         if image::guess_format(&bytes).is_ok() {
-            let animation_budget = if max_px <= ICON_DECODE_MAX_PX {
-                ICON_ANIMATION_MAX_BYTES
-            } else if max_px <= AVATAR_SMALL_DECODE_MAX_PX {
-                AVATAR_ANIMATION_MAX_BYTES
-            } else {
-                AVATAR_ENTRY_MAX_BYTES
-            };
-            decode_avatar_image(&bytes, max_px, animation_budget)
+            decode_avatar_image(&bytes, max_px, animation)
         } else {
             svg_renderer
                 .render_single_frame(&bytes, 1.0)
@@ -1321,7 +1434,16 @@ impl Asset for AvatarImageLoader {
         source: Self::Source,
         cx: &mut App,
     ) -> impl Future<Output = Self::Output> + Send + 'static {
-        load_avatar_scaled(source, AVATAR_DECODE_MAX_PX, cx)
+        load_avatar_scaled(
+            source,
+            AVATAR_DECODE_MAX_PX,
+            AnimationCaps {
+                max_px: AVATAR_DECODE_MAX_PX,
+                max_frames: usize::MAX,
+                max_bytes: AVATAR_ENTRY_MAX_BYTES,
+            },
+            cx,
+        )
     }
 }
 
@@ -1335,7 +1457,16 @@ impl Asset for AvatarImageLoaderSmall {
         source: Self::Source,
         cx: &mut App,
     ) -> impl Future<Output = Self::Output> + Send + 'static {
-        load_avatar_scaled(source, AVATAR_SMALL_DECODE_MAX_PX, cx)
+        load_avatar_scaled(
+            source,
+            AVATAR_SMALL_DECODE_MAX_PX,
+            AnimationCaps {
+                max_px: AVATAR_SMALL_DECODE_MAX_PX,
+                max_frames: usize::MAX,
+                max_bytes: AVATAR_ANIMATION_MAX_BYTES,
+            },
+            cx,
+        )
     }
 }
 
@@ -1349,7 +1480,43 @@ impl Asset for IconImageLoader {
         source: Self::Source,
         cx: &mut App,
     ) -> impl Future<Output = Self::Output> + Send + 'static {
-        load_avatar_scaled(source, ICON_DECODE_MAX_PX, cx)
+        load_avatar_scaled(
+            source,
+            ICON_DECODE_MAX_PX,
+            AnimationCaps {
+                max_px: ICON_DECODE_MAX_PX,
+                max_frames: MESSAGE_EMOJI_MAX_FRAMES,
+                max_bytes: ICON_ENTRY_MAX_BYTES,
+            },
+            cx,
+        )
+    }
+}
+
+/// Emoji painted next to text: message spans, reaction pills, hover panels and
+/// menus. Each surface asks the image proxy for its own 2x source size, so this
+/// cap only binds for the largest of them (a jumbo emoji), and the frame count
+/// is what bounds the rest.
+pub enum EmojiImageLoader {}
+
+impl Asset for EmojiImageLoader {
+    type Source = Resource;
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn load(
+        source: Self::Source,
+        cx: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        load_avatar_scaled(
+            source,
+            MESSAGE_EMOJI_DECODE_MAX_PX,
+            AnimationCaps {
+                max_px: MESSAGE_EMOJI_DECODE_MAX_PX,
+                max_frames: MESSAGE_EMOJI_MAX_FRAMES,
+                max_bytes: EMOJI_ANIMATION_MAX_BYTES,
+            },
+            cx,
+        )
     }
 }
 
@@ -1520,6 +1687,7 @@ where
 fn downscaled_avatar_animation_frames<I>(
     frames: I,
     max_px: u32,
+    frame_cap: usize,
     byte_budget: u64,
 ) -> Result<Vec<image::Frame>, AnimationDecodeError>
 where
@@ -1535,7 +1703,7 @@ where
         let side = buffer.width().min(buffer.height()).clamp(1, max_px);
         if max_frames == usize::MAX {
             let frame_bytes = u64::from(side) * u64::from(side) * 4;
-            max_frames = (byte_budget / frame_bytes).max(2) as usize;
+            max_frames = ((byte_budget / frame_bytes) as usize).clamp(2, frame_cap);
         }
 
         if source_index.is_multiple_of(stride) && out.len() >= max_frames {
@@ -1649,10 +1817,25 @@ fn reject_oversized_canvas(
     Ok(())
 }
 
+/// An animated WebP whose frames declare `DISPOSE_BACKGROUND` only disposes if
+/// the decoder has been given a background colour: `image-webp` reads the
+/// container's colour into a *hint* and leaves the field it actually composites
+/// with as `None`, so every frame alpha-blends onto the one before it and a
+/// moving sprite drags a trail of its own previous positions. Browsers clear to
+/// transparent black, which is what the GIF path does too -- ask for the same.
+fn animated_webp_decoder(
+    bytes: &[u8],
+) -> Result<image::codecs::webp::WebPDecoder<std::io::Cursor<&[u8]>>, ImageCacheError> {
+    let mut decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))?;
+    image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
+    decoder.set_background_color(image::Rgba([0, 0, 0, 0]))?;
+    Ok(decoder)
+}
+
 fn decode_avatar_image(
     bytes: &[u8],
     max_px: u32,
-    animation_byte_budget: u64,
+    animation: AnimationCaps,
 ) -> Result<Arc<RenderImage>, ImageCacheError> {
     use image::AnimationDecoder as _;
     let format = image::guess_format(bytes)?;
@@ -1663,8 +1846,9 @@ fn decode_avatar_image(
             image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
             match downscaled_avatar_animation_frames(
                 decoder.into_frames(),
-                max_px,
-                animation_byte_budget,
+                animation.max_px,
+                animation.max_frames,
+                animation.max_bytes,
             ) {
                 Ok(frames) => frames,
                 Err(AnimationDecodeError::BudgetExceeded) => vec![avatar_frame(
@@ -1675,13 +1859,13 @@ fn decode_avatar_image(
             }
         }
         image::ImageFormat::WebP => {
-            let mut decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))?;
-            image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
+            let decoder = animated_webp_decoder(bytes)?;
             if decoder.has_animation() {
                 match downscaled_avatar_animation_frames(
                     decoder.into_frames(),
-                    max_px,
-                    animation_byte_budget,
+                    animation.max_px,
+                    animation.max_frames,
+                    animation.max_bytes,
                 ) {
                     Ok(frames) => frames,
                     Err(AnimationDecodeError::BudgetExceeded) => vec![avatar_frame(
@@ -1734,8 +1918,7 @@ fn decode_message_image(
             }
         }
         image::ImageFormat::WebP => {
-            let mut decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))?;
-            image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
+            let decoder = animated_webp_decoder(bytes)?;
             if decoder.has_animation() {
                 match downscaled_animation_frames(
                     decoder.into_frames(),
@@ -1744,9 +1927,7 @@ fn decode_message_image(
                 ) {
                     Ok(frames) => frames,
                     Err(AnimationDecodeError::BudgetExceeded) => {
-                        let mut decoder =
-                            image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))?;
-                        image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
+                        let decoder = animated_webp_decoder(bytes)?;
                         first_frame_fallback(decoder, static_max_px)?
                     }
                     Err(AnimationDecodeError::Image(err)) => return Err(err),
@@ -1967,13 +2148,18 @@ fn load_bounded(
     animation_max_px: u32,
     static_max_px: u32,
     animation_byte_budget: u64,
+    wide_lane: bool,
     cx: &mut App,
 ) -> impl Future<Output = Result<Arc<RenderImage>, ImageCacheError>> + Send + 'static {
     let client = cx.http_client();
     let svg_renderer = cx.svg_renderer();
     let asset_source = cx.asset_source().clone();
     async move {
-        let _permit = acquire_image_pipeline_permit().await?;
+        let _permit = if wide_lane {
+            acquire_icon_pipeline_permit().await?
+        } else {
+            acquire_image_pipeline_permit().await?
+        };
         let bytes = match source.clone() {
             Resource::Path(uri) => std::fs::read(uri.as_ref())?,
             Resource::Uri(uri) => {
@@ -2041,6 +2227,7 @@ impl Asset for SharedImageLoader {
             SHARED_ANIMATION_MAX_PX,
             SHARED_STATIC_MAX_PX,
             SHARED_ENTRY_MAX_BYTES,
+            false,
             cx,
         )
     }
@@ -2066,6 +2253,7 @@ impl Asset for StickerImageLoader {
             STICKER_DECODE_MAX_PX,
             STICKER_DECODE_MAX_PX,
             STICKER_ANIMATION_MAX_BYTES,
+            true,
             cx,
         )
     }
@@ -2350,31 +2538,104 @@ mod tests {
 
     #[test]
     fn picker_decode_caps_cover_two_x_their_largest_cell() {
-        const EMOJI_PICKER_LARGEST_LOGICAL_PX: u32 = 28;
+        const EMOJI_PICKER_LARGEST_LOGICAL_PX: u32 = 32;
         const STICKER_PANEL_CELL_LOGICAL_PX: u32 = 80;
-        const _: () = assert!(AVATAR_SMALL_DECODE_MAX_PX >= EMOJI_PICKER_LARGEST_LOGICAL_PX * 2);
+        const _: () = assert!(ICON_DECODE_MAX_PX >= EMOJI_PICKER_LARGEST_LOGICAL_PX * 2);
         const _: () = assert!(STICKER_DECODE_MAX_PX >= STICKER_PANEL_CELL_LOGICAL_PX * 2);
     }
 
     #[test]
+    fn every_emoji_surface_decodes_at_least_its_two_x_paint_size() {
+        const JUMBO_EMOJI_LOGICAL_PX: u32 = 48;
+        const PICKER_CELL_LOGICAL_PX: u32 = 32;
+
+        const _: () = assert!(
+            MESSAGE_EMOJI_DECODE_MAX_PX >= JUMBO_EMOJI_LOGICAL_PX * 2,
+            "atlas tiles carry no gutter and the shaders magnify with a linear filter, so a tile \
+             smaller than the box it is painted into samples past its own edge into the \
+             neighbouring tile -- for an animation that is the adjacent frame, and the emoji \
+             drags a ghost of itself behind every movement"
+        );
+        const _: () = assert!(
+            ICON_DECODE_MAX_PX >= PICKER_CELL_LOGICAL_PX * 2,
+            "the picker trades frame rate for cell count, never resolution, for the same reason"
+        );
+    }
+
+    const EMOJI_PICKER_VISIBLE_CELLS: u64 = 9 * 12;
+
+    #[test]
     fn a_screenful_of_picker_cells_fits_inside_its_cache_budget() {
-        const EMOJI_PICKER_VISIBLE_CELLS: u64 = 9 * 12;
-        const EMOJI_PICKER_CACHE_BYTES: u64 = 12 * 1024 * 1024;
         const STICKER_PANEL_VISIBLE_CELLS: u64 = 3 * 8;
-        const STICKER_PANEL_CACHE_BYTES: u64 = 12 * 1024 * 1024;
 
         let bytes_at_cap = |max_px: u32| u64::from(max_px) * u64::from(max_px) * 4;
 
         assert!(
-            bytes_at_cap(AVATAR_SMALL_DECODE_MAX_PX) * EMOJI_PICKER_VISIBLE_CELLS
+            bytes_at_cap(ICON_DECODE_MAX_PX) * EMOJI_PICKER_VISIBLE_CELLS
                 <= EMOJI_PICKER_CACHE_BYTES,
             "a screenful of emoji must fit the picker's budget: once the visible cells alone \
              exceed it, every frame evicts one of them and blinks a different cell"
         );
         assert!(
             bytes_at_cap(STICKER_DECODE_MAX_PX) * STICKER_PANEL_VISIBLE_CELLS
-                <= STICKER_PANEL_CACHE_BYTES,
+                <= STICKER_CACHE_BYTES,
             "a screenful of stickers must fit the sticker panel's budget for the same reason"
+        );
+    }
+
+    #[test]
+    fn a_screenful_of_animated_emoji_fits_inside_its_cache_budget() {
+        const MESSAGE_ANIMATED_EMOJI_WORKING_SET: u64 = 16;
+        const fn animated_entry_bytes(max_px: u32, max_frames: usize) -> u64 {
+            (max_px as u64) * (max_px as u64) * 4 * (max_frames as u64)
+        }
+        const PICKER_ENTRY: u64 =
+            animated_entry_bytes(ICON_DECODE_MAX_PX, MESSAGE_EMOJI_MAX_FRAMES);
+        const MESSAGE_ENTRY: u64 =
+            animated_entry_bytes(MESSAGE_EMOJI_DECODE_MAX_PX, MESSAGE_EMOJI_MAX_FRAMES);
+
+        const CLAN_EMOJI_CORPUS: u64 = 700;
+        const STILL_ENTRY: u64 = (ICON_DECODE_MAX_PX as u64) * (ICON_DECODE_MAX_PX as u64) * 4;
+
+        const _: () = assert!(
+            STILL_ENTRY * CLAN_EMOJI_CORPUS <= EMOJI_PICKER_CACHE_BYTES,
+            "the picker is scrolled back and forth, and an entry evicted between two passes costs \
+             a fetch and a decode before the cell paints again -- seconds of blank. Its budget \
+             holds a whole clan's emoji, not merely the screenful that is visible at once"
+        );
+        const _: () = assert!(
+            CLAN_EMOJI_CORPUS <= EMOJI_PICKER_CACHE_CAPACITY as u64,
+            "the item cap must not evict what the byte budget can still afford to keep"
+        );
+        const _: () = assert!(
+            PICKER_ENTRY * EMOJI_PICKER_VISIBLE_CELLS <= EMOJI_PICKER_CACHE_BYTES,
+            "an animated emoji holds every frame it decoded, so a grid where all of them animate \
+             costs a full animation budget per cell; once that exceeds the picker's byte budget \
+             the visible cells evict each other and the grid blinks"
+        );
+        const _: () = assert!(
+            MESSAGE_ENTRY * MESSAGE_ANIMATED_EMOJI_WORKING_SET <= MESSAGE_ICON_CACHE_BYTES,
+            "reaction pills, inline spans and jumbo emoji share one cache per channel view, and a \
+             screenful of distinct animated ones must fit it for the same reason"
+        );
+        const _: () = assert!(
+            MESSAGE_ENTRY <= EMOJI_ANIMATION_MAX_BYTES && MESSAGE_ENTRY <= EMOJI_ENTRY_MAX_BYTES,
+            "an entry decoded above the per-entry cap is thrown away and negatively cached, which \
+             shows the error placeholder instead of the emoji"
+        );
+        const _: () = assert!(PICKER_ENTRY <= ICON_ENTRY_MAX_BYTES);
+
+        const STICKER_PANEL_VISIBLE_CELLS: u64 = 3 * 8;
+        const STICKER_ANIMATED_ENTRY: u64 = STICKER_ANIMATION_MAX_BYTES;
+        const _: () = assert!(
+            STICKER_ANIMATED_ENTRY <= STICKER_ENTRY_MAX_BYTES,
+            "an animated sticker decoded above the per-entry cap is thrown away and negatively \
+             cached, which leaves the cell blank for the rest of the session"
+        );
+        const _: () = assert!(
+            STICKER_ANIMATED_ENTRY * (STICKER_PANEL_VISIBLE_CELLS / 2) <= STICKER_CACHE_BYTES,
+            "half a screenful of animated stickers must fit, or scrolling the panel evicts cells \
+             that are still on screen and they reload from the network on the way back"
         );
     }
 
@@ -2396,12 +2657,128 @@ mod tests {
                 encoder.encode_frame(frame).expect("GIF frame");
             }
         }
-        let image = decode_avatar_image(&bytes, AVATAR_SMALL_DECODE_MAX_PX, AVATAR_ENTRY_MAX_BYTES)
-            .expect("animated avatar");
+        let image = decode_avatar_image(
+            &bytes,
+            AVATAR_SMALL_DECODE_MAX_PX,
+            AnimationCaps {
+                max_px: AVATAR_SMALL_DECODE_MAX_PX,
+                max_frames: usize::MAX,
+                max_bytes: AVATAR_ENTRY_MAX_BYTES,
+            },
+        )
+        .expect("animated avatar");
         assert_eq!(image.frame_count(), 2);
         let size = image.size(0);
         assert_eq!(size.width, size.height);
         assert_eq!(image.delay(0), image::Delay::from_numer_denom_ms(50, 1));
+    }
+
+    /// A 64x64 animated WebP of a 16x16 sprite (opaque core, transparent margin,
+    /// so the file carries alpha like a real sticker) that jumps from y=0 to y=40.
+    /// Both frames are sub-rectangles flagged `DISPOSE_BACKGROUND`, which is how
+    /// the image proxy re-encodes an animated sticker. Built with:
+    ///   cwebp -lossless -exact sprite.png -o sprite.webp
+    ///   webpmux -frame sprite.webp +100+0+0+1+b -frame sprite.webp +100+0+40+1+b \
+    ///           -bgcolor 0,0,0,0 -loop 0 -o fixture.webp
+    const DISPOSE_BACKGROUND_WEBP: &[u8] = &[
+        0x52, 0x49, 0x46, 0x46, 0xa0, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
+        0x58, 0x0a, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x0f, 0x00, 0x00, 0x37, 0x00, 0x00,
+        0x41, 0x4e, 0x49, 0x4d, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x41,
+        0x4e, 0x4d, 0x46, 0x36, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x00,
+        0x00, 0x0f, 0x00, 0x00, 0x64, 0x00, 0x00, 0x01, 0x56, 0x50, 0x38, 0x4c, 0x1d, 0x00, 0x00,
+        0x00, 0x2f, 0x0f, 0xc0, 0x03, 0x10, 0x0f, 0x10, 0xf3, 0x1f, 0xf3, 0x1f, 0x0c, 0x82, 0x6c,
+        0x9b, 0x19, 0xcc, 0xdf, 0xf2, 0x12, 0xcb, 0x15, 0x22, 0xfa, 0x3f, 0x01, 0xe4, 0x7c, 0x48,
+        0x00, 0x41, 0x4e, 0x4d, 0x46, 0x36, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00,
+        0x0f, 0x00, 0x00, 0x0f, 0x00, 0x00, 0x64, 0x00, 0x00, 0x01, 0x56, 0x50, 0x38, 0x4c, 0x1d,
+        0x00, 0x00, 0x00, 0x2f, 0x0f, 0xc0, 0x03, 0x10, 0x0f, 0x10, 0xf3, 0x1f, 0xf3, 0x1f, 0x0c,
+        0x82, 0x6c, 0x9b, 0x19, 0xcc, 0xdf, 0xf2, 0x12, 0xcb, 0x15, 0x22, 0xfa, 0x3f, 0x01, 0xe4,
+        0x7c, 0x48, 0x00,
+    ];
+
+    #[test]
+    fn an_animated_webp_disposes_the_frame_it_moved_away_from() {
+        let image = decode_message_image(
+            DISPOSE_BACKGROUND_WEBP,
+            MESSAGE_ANIMATION_MAX_PX,
+            MESSAGE_STATIC_MAX_PX,
+            MESSAGE_ANIMATION_MAX_BYTES,
+        )
+        .expect("animated webp");
+        assert_eq!(image.frame_count(), 2);
+
+        let size = image.size(1);
+        let width = size.width.0 as usize;
+        let bytes = image.as_bytes(1).expect("second frame");
+        let opaque_at = |y: usize| (0..width).any(|x| bytes[(y * width + x) * 4 + 3] > 8);
+
+        const FIRST_POSITION_ROW: usize = 8;
+        const SECOND_POSITION_ROW: usize = 48;
+
+        assert!(
+            opaque_at(SECOND_POSITION_ROW),
+            "the sprite must be drawn where the second frame places it"
+        );
+        assert!(
+            !opaque_at(FIRST_POSITION_ROW),
+            "the second frame declares DISPOSE_BACKGROUND on the rectangle the first one \
+             occupied, so the sprite's old position must be cleared; leaving it behind is what \
+             makes an animated sticker drag a trail of its own previous frames"
+        );
+    }
+
+    #[test]
+    fn the_picker_animates_an_emoji_as_smoothly_as_a_message_does() {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        const SOURCE_FRAMES: u32 = 48;
+
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = GifEncoder::new(&mut bytes);
+            encoder.set_repeat(Repeat::Infinite).expect("GIF repeat");
+            for index in 0..SOURCE_FRAMES {
+                let buffer = image::RgbaImage::from_pixel(
+                    100,
+                    100,
+                    image::Rgba([(index * 5) as u8, 0, 0, 255]),
+                );
+                let frame = image::Frame::from_parts(
+                    buffer,
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(30, 1),
+                );
+                encoder.encode_frame(frame).expect("GIF frame");
+            }
+        }
+
+        let decode = |max_px: u32, caps: AnimationCaps| {
+            decode_avatar_image(&bytes, max_px, caps)
+                .expect("animated emoji")
+                .frame_count()
+        };
+        let in_message = decode(
+            MESSAGE_EMOJI_DECODE_MAX_PX,
+            AnimationCaps {
+                max_px: MESSAGE_EMOJI_DECODE_MAX_PX,
+                max_frames: MESSAGE_EMOJI_MAX_FRAMES,
+                max_bytes: EMOJI_ANIMATION_MAX_BYTES,
+            },
+        );
+        let in_picker = decode(
+            ICON_DECODE_MAX_PX,
+            AnimationCaps {
+                max_px: ICON_DECODE_MAX_PX,
+                max_frames: MESSAGE_EMOJI_MAX_FRAMES,
+                max_bytes: ICON_ENTRY_MAX_BYTES,
+            },
+        );
+
+        assert_eq!(
+            in_picker, in_message,
+            "the same emoji played choppier in the picker than in a message, which reads as a \
+             bug rather than as a memory budget; the picker's cache is sized to afford the same \
+             frame count"
+        );
     }
 
     #[test]
@@ -2443,7 +2820,7 @@ mod tests {
     fn an_animated_icon_decodes_within_the_icon_cache_entry_cap() {
         use image::codecs::gif::{GifEncoder, Repeat};
         const _: () = assert!(
-            ICON_ANIMATION_MAX_BYTES <= ROLE_ICON_ENTRY_MAX_BYTES,
+            EMOJI_ANIMATION_MAX_BYTES <= EMOJI_ENTRY_MAX_BYTES,
             "every cache fed by the icon loader rejects entries above its per-entry cap, so a \
              decode budget above that cap produces animated emoji and role icons that are \
              decoded and then thrown away, leaving the error placeholder on screen"
@@ -2469,16 +2846,86 @@ mod tests {
             }
         }
 
-        let image = decode_avatar_image(&bytes, ICON_DECODE_MAX_PX, ICON_ANIMATION_MAX_BYTES)
-            .expect("animated icon");
+        let image = decode_avatar_image(
+            &bytes,
+            MESSAGE_EMOJI_DECODE_MAX_PX,
+            AnimationCaps {
+                max_px: MESSAGE_EMOJI_DECODE_MAX_PX,
+                max_frames: MESSAGE_EMOJI_MAX_FRAMES,
+                max_bytes: EMOJI_ANIMATION_MAX_BYTES,
+            },
+        )
+        .expect("animated icon");
         assert!(
             image.frame_count() > 1,
             "the animation must be decimated, not flattened"
         );
         assert!(
-            image_bytes(&image) <= ROLE_ICON_ENTRY_MAX_BYTES,
-            "a 40-frame icon decoded to {} bytes, above the {ROLE_ICON_ENTRY_MAX_BYTES}-byte cap",
+            image.size(0).width.0 as u32 <= MESSAGE_EMOJI_DECODE_MAX_PX,
+            "an animated icon keeps every frame resident, so it decodes against the smaller \
+             animated cap rather than the still-image one"
+        );
+        assert!(
+            image_bytes(&image) <= EMOJI_ANIMATION_MAX_BYTES,
+            "a 40-frame icon decoded to {} bytes, above the {EMOJI_ANIMATION_MAX_BYTES}-byte budget",
             image_bytes(&image)
+        );
+    }
+
+    #[test]
+    fn a_high_frame_rate_emoji_keeps_a_watchable_frame_rate() {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        const SOURCE_FRAMES: u32 = 48;
+        const SOURCE_DELAY_MS: u32 = 30;
+        const MIN_RETAINED_FPS: u32 = 15;
+
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = GifEncoder::new(&mut bytes);
+            encoder.set_repeat(Repeat::Infinite).expect("GIF repeat");
+            for index in 0..SOURCE_FRAMES {
+                let buffer = image::RgbaImage::from_pixel(
+                    100,
+                    100,
+                    image::Rgba([(index * 5) as u8, 0, 0, 255]),
+                );
+                let frame = image::Frame::from_parts(
+                    buffer,
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(SOURCE_DELAY_MS, 1),
+                );
+                encoder.encode_frame(frame).expect("GIF frame");
+            }
+        }
+
+        let image = decode_avatar_image(
+            &bytes,
+            MESSAGE_EMOJI_DECODE_MAX_PX,
+            AnimationCaps {
+                max_px: MESSAGE_EMOJI_DECODE_MAX_PX,
+                max_frames: MESSAGE_EMOJI_MAX_FRAMES,
+                max_bytes: EMOJI_ANIMATION_MAX_BYTES,
+            },
+        )
+        .expect("animated emoji");
+
+        let loop_ms: u128 = (0..image.frame_count())
+            .map(|index| Duration::from(image.delay(index)).as_millis())
+            .sum();
+        assert_eq!(
+            loop_ms,
+            u128::from(SOURCE_FRAMES * SOURCE_DELAY_MS),
+            "decimation scales the delay of every frame it keeps, so the animation must still \
+             take exactly as long to loop as the source did"
+        );
+        assert!(
+            image.frame_count() as u32 * 1000 / (SOURCE_FRAMES * SOURCE_DELAY_MS)
+                >= MIN_RETAINED_FPS,
+            "a 33fps emoji decimated to {} frames plays back at under {MIN_RETAINED_FPS}fps, which \
+             reads as stutter rather than animation; the animation budget buys frames, so spend it \
+             on frames rather than on pixels the emoji is never painted at",
+            image.frame_count()
         );
     }
 

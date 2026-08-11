@@ -27,6 +27,7 @@ pub struct InputBar {
     _mention_observe: Subscription,
     _messages_sub: Subscription,
     ogp_image_cache: Entity<LruImageCache>,
+    for_topic: bool,
 }
 
 impl InputBar {
@@ -34,6 +35,7 @@ impl InputBar {
         mention_input: Entity<MentionInput>,
         locale: SharedString,
         settings: &Entity<Settings>,
+        for_topic: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let settings_observe = cx.observe(settings, |_, _, cx| cx.notify());
@@ -55,6 +57,7 @@ impl InputBar {
             _mention_observe: mention_observe,
             _messages_sub: messages_sub,
             ogp_image_cache: crate::image_cache::ogp_aux_cache("composer-ogp", cx),
+            for_topic,
         }
     }
 
@@ -245,7 +248,12 @@ impl InputBar {
         let replying = self.replying_to.is_some();
         let reply_clear = self.reply_clear;
         let ogp_preview = self.mention_input.read(cx).ogp_preview().cloned();
-        let anonymous = MessagesStore::global(cx).read(cx).is_anonymous_mode();
+        let store = MessagesStore::global(cx);
+        let anonymous = if self.for_topic {
+            store.read(cx).topic_anonymous_mode()
+        } else {
+            store.read(cx).is_anonymous_mode()
+        };
         div()
             .flex()
             .flex_col()

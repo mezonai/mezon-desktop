@@ -35,14 +35,15 @@ impl ChatSending {
         receiver_id: i64,
         content: impl Into<String>,
         content_tokens: OutgoingContent,
+        attachments: Vec<OutgoingAttachment>,
         cx: &mut App,
     ) {
         let content = content.into();
-        if content.is_empty() && content_tokens.is_empty() {
+        if content.is_empty() && content_tokens.is_empty() && attachments.is_empty() {
             return;
         }
         MessagesStore::global(cx).update(cx, |store, cx| {
-            store.send_ephemeral_message(receiver_id, content, content_tokens, cx);
+            store.send_ephemeral_message(receiver_id, content, content_tokens, attachments, cx);
         });
     }
 

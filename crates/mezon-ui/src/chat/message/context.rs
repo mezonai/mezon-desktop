@@ -128,6 +128,10 @@ pub struct RowMemo {
     pub role_styles: HashMap<(Option<ClanId>, UserId), (Hsla, Option<SharedString>)>,
     /// message -> formatted head time label ("14:03" / "Yesterday at 14:03").
     pub time_labels: HashMap<MessageId, SharedString>,
+    /// emoji id -> reaction pill image url. Reactions are not precomputed by the
+    /// store the way message spans are, so without this the imgproxy url for
+    /// every pill of every visible message is rebuilt on every frame.
+    pub reaction_srcs: HashMap<SharedString, SharedString>,
     pub rich_text: HashMap<MessageId, RichTextRenderPlan>,
     pub selection_layouts: HashMap<MessageId, super::content::SelectableMessageLayoutCacheEntry>,
     pub selection_text_pieces:

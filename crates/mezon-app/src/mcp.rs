@@ -288,8 +288,11 @@ fn list_emojis(
 async fn scroll_wheel(cx: &mut AsyncApp, delta_y: f32, ticks: u32) -> anyhow::Result<Value> {
     use mezon_ui::app::capture::{
         WHEEL_MAX_TICKS, WHEEL_TICK_INTERVAL, dispatch_wheel_tick, message_viewport_state,
+        prime_wheel_pointer,
     };
     let ticks = ticks.clamp(1, WHEEL_MAX_TICKS);
+    cx.update(prime_wheel_pointer)?;
+    cx.background_executor().timer(WHEEL_TICK_INTERVAL).await;
     let before = cx.update(|cx| message_viewport_state(cx));
     let mut delivered = 0u32;
     let mut consumed = 0u32;

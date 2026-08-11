@@ -2,9 +2,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
+use mezon_client::transport::OutgoingMessageFlags;
 use mezon_client::{
     AppApi, AttachmentUploadOutcome, ConnectionStatus, RealtimeEvent, TopicDiscussion, UploadFile,
-    UploadThumbnail, UrlAttachment, topic_discussion_from_api,
+    UrlAttachment, topic_discussion_from_api,
 };
 use mezon_proto::{api, realtime};
 
@@ -24,6 +25,12 @@ const TOPICS_LIMIT: i32 = 50;
 const STREAM_MODE_CHANNEL: i32 = 2;
 const STREAM_MODE_THREAD: i32 = 6;
 const UPDATED_NOTIFY_COALESCE: Duration = Duration::from_millis(100);
+
+fn topic_anonymous_send(existing_topic_id: Option<i64>, clan_id: i64, cx: &App) -> bool {
+    existing_topic_id.is_some()
+        && clan_id != 0
+        && MessagesStore::try_global(cx).is_some_and(|store| store.read(cx).topic_anonymous_mode())
+}
 
 #[derive(Debug, Clone)]
 pub enum TopicsEvent {
@@ -754,6 +761,11 @@ impl TopicsStore {
         if existing_topic_id.is_none() && !self.begin_topic_create(origin_message_id) {
             return;
         }
+        let anonymous = topic_anonymous_send(existing_topic_id, clan_id, cx);
+        let send_flags = OutgoingMessageFlags {
+            anonymous_message: anonymous,
+            message_code: 0,
+        };
         let has_attachments = !attachments.is_empty();
         let reply_ref =
             self.reply_target
@@ -821,21 +833,7 @@ impl TopicsStore {
             let ack = if has_attachments {
                 let files: Vec<UploadFile> = attachments
                     .into_iter()
-                    .map(|att| {
-                        let thumbnail = att.poster_jpeg.map(|jpeg| UploadThumbnail {
-                            filename: format!("{}.jpg", att.filename),
-                            data: jpeg,
-                        });
-                        UploadFile {
-                            path: att.path,
-                            filename: att.filename,
-                            filetype: att.filetype,
-                            width: att.width,
-                            height: att.height,
-                            duration: att.duration,
-                            thumbnail,
-                        }
-                    })
+                    .map(OutgoingAttachment::into_upload)
                     .collect();
                 let presigned = match api.presign_files(files).await {
                     Ok(presigned) => presigned,
@@ -860,7 +858,11 @@ impl TopicsStore {
                     .iter()
                     .map(|a| presign::normalize_presign_key(&a.url))
                     .collect();
-                let update_mentions = transport_mentions.clone();
+                let update_mentions = if anonymous {
+                    Vec::new()
+                } else {
+                    transport_mentions.clone()
+                };
                 let update_hashtags = transport_hashtags.clone();
                 let update_emojis = transport_emojis.clone();
                 let sent = match api
@@ -877,6 +879,7 @@ impl TopicsStore {
                         transport_emojis,
                         Vec::new(),
                         reply_ref.clone(),
+                        send_flags,
                     )
                     .await
                 {
@@ -919,6 +922,7 @@ impl TopicsStore {
                         transport_hashtags,
                         transport_emojis,
                         reply_ref,
+                        send_flags,
                     )
                     .await
                 {
@@ -949,6 +953,7 @@ impl TopicsStore {
                     existing_topic_id.is_none(),
                     generation,
                     ack,
+                    anonymous,
                     cx,
                 );
             });
@@ -1031,6 +1036,7 @@ impl TopicsStore {
         is_new_topic: bool,
         generation: u64,
         ack: mezon_client::transport::ApiMessage,
+        anonymous: bool,
         cx: &mut Context<Self>,
     ) {
         if self.compose_generation != generation {
@@ -1042,7 +1048,7 @@ impl TopicsStore {
         let creator_id = viewer_user_id(cx);
         let append = MessagesStore::global(cx).update(cx, |store, cx| {
             store.set_active_topic(Some(topic_id), cx);
-            let append = store.append_topic_message(topic_id, ack, cx);
+            let append = store.append_topic_message(topic_id, ack, anonymous, cx);
             if is_new_topic {
                 store.mark_message_as_topic(
                     ChannelId(parent_channel_id),
@@ -1088,6 +1094,7 @@ impl TopicsStore {
         if existing_topic_id.is_none() && !self.begin_topic_create(origin_message_id) {
             return;
         }
+        let anonymous = topic_anonymous_send(existing_topic_id, clan_id, cx);
         let reply_ref =
             self.reply_target
                 .take()
@@ -1150,6 +1157,10 @@ impl TopicsStore {
                     topic_id,
                     vec![attachment],
                     reply_ref,
+                    OutgoingMessageFlags {
+                        anonymous_message: anonymous,
+                        message_code: 0,
+                    },
                 )
                 .await
             {
@@ -1179,6 +1190,7 @@ impl TopicsStore {
                     existing_topic_id.is_none(),
                     generation,
                     ack,
+                    anonymous,
                     cx,
                 );
             });

@@ -1,8 +1,7 @@
 use gpui::{App, ClickEvent, ClipboardItem, Entity, Pixels, Point, WeakEntity, Window};
 use mezon_store::{
-    AppConfig, BadgeService, ChannelId, ChannelList, ChannelType, ClanId, PERMISSION_ADMINISTRATOR,
-    PERMISSION_CLAN_OWNER, PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN,
-    PERMISSION_MANAGE_THREAD, PermissionStore,
+    AppConfig, BadgeService, ChannelId, ChannelList, ChannelType, ClanId,
+    PERMISSION_MANAGE_CHANNEL, PermissionStore, archive_menu_hidden, can_archive_channel,
 };
 
 use super::ChannelSidebar;
@@ -19,35 +18,15 @@ pub(super) struct ChannelMenuPermissions {
     pub(super) hide_archive: bool,
 }
 
-pub(super) fn archive_hidden(channel_type: ChannelType, is_welcome_channel: bool) -> bool {
-    matches!(
-        channel_type,
-        ChannelType::Voice | ChannelType::Stream | ChannelType::App
-    ) || is_welcome_channel
-}
-
 impl ChannelMenuPermissions {
     pub(super) fn resolve(clan_id: ClanId, channel_id: ChannelId, cx: &App) -> Self {
-        let Some(permissions) = PermissionStore::try_global(cx) else {
-            return Self::default();
-        };
-        let permissions = permissions.read(cx);
-        let has_clan_owner = permissions.check(clan_id, None, PERMISSION_CLAN_OWNER, cx);
-        let has_administrator = permissions.check(clan_id, None, PERMISSION_ADMINISTRATOR, cx);
-        let can_manage_clan = permissions.check(clan_id, None, PERMISSION_MANAGE_CLAN, cx);
-        let can_manage_channel = permissions.check(clan_id, None, PERMISSION_MANAGE_CHANNEL, cx);
-        let can_manage_thread =
-            permissions.check(clan_id, Some(channel_id), PERMISSION_MANAGE_THREAD, cx);
-        let is_channel_creator = BadgeService::global(cx)
-            .read(cx)
-            .current_user_id(cx)
-            .zip(
-                ChannelList::global(cx)
+        let can_manage_channel = PermissionStore::try_global(cx)
+            .map(|permissions| {
+                permissions
                     .read(cx)
-                    .channel(clan_id, channel_id)
-                    .map(|channel| channel.creator_id),
-            )
-            .is_some_and(|(me, creator_id)| me == creator_id);
+                    .check(clan_id, None, PERMISSION_MANAGE_CHANNEL, cx)
+            })
+            .unwrap_or(false);
         let is_welcome_channel = mezon_store::ClanList::global(cx)
             .read(cx)
             .welcome_channel_id(clan_id)
@@ -58,19 +37,23 @@ impl ChannelMenuPermissions {
             .channel(clan_id, channel_id)
             .map(|channel| channel.channel_type)
             .unwrap_or(ChannelType::Text);
+        let can_archive = can_archive_channel(clan_id, channel_id, cx);
+        let is_channel_creator = BadgeService::global(cx)
+            .read(cx)
+            .current_user_id(cx)
+            .zip(
+                channel_list
+                    .channel(clan_id, channel_id)
+                    .map(|channel| channel.creator_id),
+            )
+            .is_some_and(|(me, creator_id)| me == creator_id);
         Self {
-            has_archive_channel: has_clan_owner
-                || has_administrator
-                || can_manage_clan
-                || can_manage_channel
-                || is_channel_creator,
-            has_manage_thread: (can_manage_thread && is_channel_creator)
-                || has_clan_owner
-                || has_administrator,
+            has_archive_channel: can_archive,
+            has_manage_thread: can_archive,
             can_manage_channel,
             is_channel_creator,
             is_welcome_channel,
-            hide_archive: archive_hidden(channel_type, is_welcome_channel),
+            hide_archive: archive_menu_hidden(channel_type, is_welcome_channel),
         }
     }
 }
@@ -171,6 +154,19 @@ fn open_channel_settings(
                 tab: crate::chat::channel_settings::ChannelSettingsTab::Overview,
             },
         );
+    }
+}
+
+fn open_archive_confirm(
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    is_thread: bool,
+    locale: String,
+) -> impl Fn(&mut Window, &mut App) + 'static {
+    move |window: &mut Window, cx: &mut App| {
+        Shell::global(cx).update(cx, |shell, cx| {
+            shell.confirm_archive_channel(clan_id, channel_id, is_thread, &locale, window, cx);
+        });
     }
 }
 
@@ -430,10 +426,7 @@ pub(super) fn build_channel_menu(
         if permissions.has_manage_thread && !permissions.hide_archive {
             menu = menu.item(
                 t("channelMenu.menu.notification.archiveThread"),
-                coming_soon_modal(
-                    t("channelMenu.menu.notification.archiveThread"),
-                    locale_owned.clone(),
-                ),
+                open_archive_confirm(clan_id, channel_id, true, locale_owned.clone()),
             );
         }
         menu = push_mute_and_notification(
@@ -478,10 +471,7 @@ pub(super) fn build_channel_menu(
         if permissions.has_archive_channel && !permissions.hide_archive {
             menu = menu.item(
                 t("channelMenu.menu.notification.archiveChannel"),
-                coming_soon_modal(
-                    t("channelMenu.menu.notification.archiveChannel"),
-                    locale_owned.clone(),
-                ),
+                open_archive_confirm(clan_id, channel_id, false, locale_owned.clone()),
             );
         }
         menu = push_mute_and_notification(

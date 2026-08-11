@@ -9,7 +9,7 @@ use mezon_store::{
 };
 
 use crate::app::shell::Shell;
-use crate::components::primitives::{Avatar, Icon, IconName};
+use crate::components::primitives::{Avatar, Button, ButtonVariants, Icon, IconName};
 use crate::theme::ActiveTheme;
 
 pub struct ClanEventsModal {
@@ -585,7 +585,20 @@ impl Render for ClanEventsModal {
                                     .text_color(theme.text_secondary),
                             )
                             .child(div().font_weight(FontWeight::BOLD).child(event_count_label))
-                            .child(div().h(px(28.)).w(px(2.)).bg(theme.border)),
+                            .child(div().h(px(28.)).w(px(2.)).bg(theme.border))
+                            .child(
+                                Button::new("create-event")
+                                    .label(tr("eventCreator.actions.create"))
+                                    .primary()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        super::create_event_modal::open_create_event_modal(
+                                            this.clan_id,
+                                            this.settings.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            ),
                     )
                     .child(
                         div()

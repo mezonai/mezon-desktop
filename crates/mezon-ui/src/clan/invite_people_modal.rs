@@ -4,10 +4,11 @@ use crate::components::primitives::{
 };
 use crate::theme::{ActiveTheme, Theme};
 use crate::util::imgproxy;
+use crate::util::qr_image::{QrImage, QrImageOptions, build_qr_image};
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
-    FontWeight, Image as ClipboardImage, ImageFormat, ObjectFit, RenderImage, SharedString,
-    Subscription, UniformListScrollHandle, Window, div, img, prelude::*, px, uniform_list,
+    FontWeight, ObjectFit, SharedString, Subscription, UniformListScrollHandle, Window, div, img,
+    prelude::*, px, uniform_list,
 };
 use mezon_store::{
     AppConfig, ChannelId, ChannelList, ClanId, ClanInviteLink, ClanList, ClanMembersEvent,
@@ -15,8 +16,6 @@ use mezon_store::{
     FriendEvent, FriendState, FriendStore, UserId,
 };
 use std::collections::HashSet;
-use std::io::Cursor;
-use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Clone)]
@@ -30,12 +29,6 @@ struct InviteFriendRow {
     avatar_raw: SharedString,
 }
 
-#[derive(Clone)]
-struct QrInviteImage {
-    render: Arc<RenderImage>,
-    clipboard: ClipboardImage,
-}
-
 pub struct InvitePeopleModal {
     focus_handle: FocusHandle,
     clan_id: ClanId,
@@ -46,7 +39,7 @@ pub struct InvitePeopleModal {
     invite_link: String,
     invite_link_loading: bool,
     invite_link_error: Option<String>,
-    qr_image: Option<QrInviteImage>,
+    qr_image: Option<QrImage>,
     show_qr: bool,
     search_input: Entity<InputState>,
     rows: Vec<InviteFriendRow>,
@@ -189,7 +182,15 @@ impl InvitePeopleModal {
                 let _ = this.update(cx, |this, cx| match invite_link {
                     Ok(invite_link) => {
                         this.invite_link = invite_link;
-                        this.qr_image = build_qr_invite_image(&this.invite_link);
+                        this.qr_image = build_qr_image(
+                            &this.invite_link,
+                            QrImageOptions {
+                                target_size: 320,
+                                min_module_scale: 2,
+                                error_correction: qrcode::EcLevel::M,
+                                clipboard_border: 0,
+                            },
+                        );
                         this.invite_link_loading = false;
                         this.invite_link_error = None;
                         cx.notify();
@@ -1036,45 +1037,6 @@ fn invite_origin_from_url_like(value: &str) -> Option<String> {
     invite_origin_from_host(trimmed, true)
 }
 
-fn build_qr_invite_image(data: &str) -> Option<QrInviteImage> {
-    let code = qrcode::QrCode::new(data.as_bytes()).ok()?;
-    let width = code.width();
-    if width == 0 {
-        return None;
-    }
-
-    let colors = code.to_colors();
-    let scale = (320 / width).max(2);
-    let dim = (width * scale) as u32;
-    let mut buffer = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_pixel(
-        dim,
-        dim,
-        image::Rgba([255, 255, 255, 255]),
-    );
-
-    for (i, color) in colors.iter().enumerate() {
-        if *color != qrcode::Color::Dark {
-            continue;
-        }
-        let ox = ((i % width) * scale) as u32;
-        let oy = ((i / width) * scale) as u32;
-        for dy in 0..scale as u32 {
-            for dx in 0..scale as u32 {
-                buffer.put_pixel(ox + dx, oy + dy, image::Rgba([0, 0, 0, 255]));
-            }
-        }
-    }
-
-    let render = Arc::new(RenderImage::new(vec![image::Frame::new(buffer.clone())]));
-    let mut png = Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(buffer)
-        .write_to(&mut png, image::ImageFormat::Png)
-        .ok()?;
-    let clipboard = ClipboardImage::from_bytes(ImageFormat::Png, png.into_inner());
-
-    Some(QrInviteImage { render, clipboard })
-}
-
 /// Resolves the channel the invite link should point at and opens the modal.
 ///
 /// Prefers the active channel when it belongs to `clan_id`, otherwise falls back
@@ -1140,8 +1102,17 @@ mod tests {
 
     #[test]
     fn qr_invite_image_generates_renderable_and_clipboard_png() {
-        let qr = build_qr_invite_image("https://mezon.ai/invite/42").expect("qr image");
-        assert_eq!(qr.clipboard.format, ImageFormat::Png);
+        let qr = build_qr_image(
+            "https://mezon.ai/invite/42",
+            QrImageOptions {
+                target_size: 320,
+                min_module_scale: 2,
+                error_correction: qrcode::EcLevel::M,
+                clipboard_border: 0,
+            },
+        )
+        .expect("qr image");
+        assert_eq!(qr.clipboard.format, gpui::ImageFormat::Png);
         assert!(!qr.clipboard.bytes.is_empty());
     }
 }

@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         mpsc::{SendError, Sender},
         Arc,
     },
@@ -19,6 +19,8 @@ pub struct X11Capturer {
     capturer_state: Arc<AtomicU8>,
     target: Target,
 }
+
+static CURSOR_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
 
 fn draw_cursor(
     conn: &xcb::Connection,
@@ -124,7 +126,9 @@ fn grab(conn: &xcb::Connection, target: &Target, show_cursor: bool) -> anyhow::R
             let geom_cookie = conn.send_request(&x::GetGeometry {
                 drawable: x::Drawable::Window(win.raw_handle),
             });
-            let geom = conn.wait_for_reply(geom_cookie)?;
+            let geom = conn
+                .wait_for_reply(geom_cookie)
+                .context("X11 window geometry request failed")?;
             (0, 0, geom.width(), geom.height(), win.raw_handle, true)
         }
         Target::Display(disp) => (
@@ -146,12 +150,14 @@ fn grab(conn: &xcb::Connection, target: &Target, show_cursor: bool) -> anyhow::R
         height,
         plane_mask: u32::MAX,
     });
-    let img = conn.wait_for_reply(img_cookie)?;
+    let img = conn
+        .wait_for_reply(img_cookie)
+        .context("X11 image capture request failed")?;
 
     let mut img_data = img.data().to_vec();
 
     if show_cursor {
-        draw_cursor(
+        if let Err(error) = draw_cursor(
             &conn,
             &mut img_data,
             x,
@@ -160,7 +166,11 @@ fn grab(conn: &xcb::Connection, target: &Target, show_cursor: bool) -> anyhow::R
             height as i16,
             is_win,
             &window,
-        )?;
+        ) {
+            if !CURSOR_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
+                log::warn!("X11 cursor capture failed; continuing without cursor: {error}");
+            }
+        }
     }
 
     Ok(Frame::BGRx(crate::frame::BGRxFrame {

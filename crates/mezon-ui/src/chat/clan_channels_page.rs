@@ -11,13 +11,13 @@ use mezon_store::{
     ClanMembersStore, PERMISSION_ADMINISTRATOR, PermissionStore, Settings, UserId,
 };
 use ui::Tooltip;
-use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 use crate::chat::clan_management_page::management_page;
 use crate::chat::message::format_channel_setting_relative_time_from_seconds;
 use crate::components::compositions::channel_row::channel_type_icon;
 use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, InputState};
 use crate::theme::ActiveTheme;
+use crate::util::text_utils::normalize_diacritics;
 
 const PAGE_SIZES: [usize; 3] = [10, 50, 100];
 const CHANNEL_ROW_HEIGHT: f32 = 60.;
@@ -192,7 +192,7 @@ impl ClanChannelsPage {
         let query = self
             .search
             .as_ref()
-            .map(|input| normalize(input.read(cx).value().trim()))
+            .map(|input| normalize_diacritics(input.read(cx).value().trim()))
             .unwrap_or_default();
         let store = ChannelSettingsStore::global(cx);
         let mut rows = store.read(cx).rows(self.clan_id, ChannelId(0)).to_vec();
@@ -207,17 +207,17 @@ impl ClanChannelsPage {
             }
         }
         if !query.is_empty() {
-            rows.retain(|row| normalize(&row.label).contains(&query));
+            rows.retain(|row| normalize_diacritics(&row.label).contains(&query));
         }
         if let Some(field) = self.sort_field {
             match field {
-                SortField::Name => rows.sort_by_cached_key(|row| normalize(&row.label)),
+                SortField::Name => rows.sort_by_cached_key(|row| normalize_diacritics(&row.label)),
                 SortField::Members => rows.sort_by_cached_key(|row| row.user_ids.len()),
                 SortField::Messages => rows.sort_by_cached_key(|row| row.message_count),
                 SortField::LastSent => rows.sort_by_cached_key(|row| row.last_sent_seconds),
-                SortField::Creator => {
-                    rows.sort_by_cached_key(|row| normalize(&self.member_name(row.creator_id, cx)))
-                }
+                SortField::Creator => rows.sort_by_cached_key(|row| {
+                    normalize_diacritics(&self.member_name(row.creator_id, cx))
+                }),
             }
             if self.sort_descending {
                 rows.reverse();
@@ -886,14 +886,6 @@ fn key(locale: &str, suffix: &str) -> String {
     tr(locale, key).to_uppercase()
 }
 
-fn normalize(value: &str) -> String {
-    value
-        .nfkd()
-        .filter(|ch| !is_combining_mark(*ch))
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
 fn compact_number(value: i64) -> String {
     if value >= 1_000_000 {
         format!("{:.1}M", value as f64 / 1_000_000.)
@@ -1039,6 +1031,7 @@ mod tests {
 
     #[test]
     fn search_normalization_removes_diacritics() {
-        assert_eq!(normalize("Hiền"), "hien");
+        assert_eq!(normalize_diacritics("Hiền"), "hien");
+        assert_eq!(normalize_diacritics("Đà Nẵng"), "da nang");
     }
 }

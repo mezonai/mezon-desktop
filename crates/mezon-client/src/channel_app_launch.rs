@@ -36,7 +36,7 @@ pub fn build_channel_app_url(app_url: &str, params: ChannelAppLaunchParams<'_>) 
     }
 }
 
-fn encode_url_param(value: &str) -> String {
+pub fn encode_url_param(value: &str) -> String {
     percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC).to_string()
 }
 

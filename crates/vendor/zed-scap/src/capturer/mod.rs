@@ -1,6 +1,6 @@
 pub mod engine;
 
-use std::{error::Error, sync::mpsc};
+use std::{error::Error, sync::mpsc, time::Duration};
 
 use anyhow::anyhow;
 
@@ -139,6 +139,22 @@ impl Capturer {
 
             if let Some(frame) = self.engine.process_channel_item(res) {
                 return Ok(frame);
+            }
+        }
+    }
+
+    pub fn get_next_frame_timeout(&self, timeout: Duration) -> anyhow::Result<Option<Frame>> {
+        loop {
+            let res = match self.rx.recv_timeout(timeout) {
+                Ok(res) => res?,
+                Err(mpsc::RecvTimeoutError::Timeout) => return Ok(None),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(anyhow!("Screen capture frame channel disconnected"));
+                }
+            };
+
+            if let Some(frame) = self.engine.process_channel_item(res) {
+                return Ok(Some(frame));
             }
         }
     }

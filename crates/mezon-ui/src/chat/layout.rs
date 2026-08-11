@@ -8,7 +8,7 @@ use gpui::{
 };
 use mezon_store::{
     AuthState, AutoUpdateStatus, AutoUpdateStore, CHANNEL_ACTIVE_ARCHIVED, CHANNEL_ACTIVE_JOINED,
-    Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
+    Channel, ChannelEvent, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
     DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
     MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
     Settings, StreamStore, THREAD_STATUS_ARCHIVED, ThreadsEvent, ThreadsStore, TopicsEvent,
@@ -342,6 +342,23 @@ impl ChatLayout {
                 this.canvas_popover_handle.hide(cx);
                 cx.notify();
             }
+        })
+        .detach();
+        cx.subscribe(&channel_list, |this, _, event, cx| {
+            let ChannelEvent::ArchivedByAdministrator { is_thread } = event else {
+                return;
+            };
+            let locale = this.settings.read(cx).language.clone();
+            let key = if *is_thread {
+                "channelMenu.toastArchivedThreadByAdministrator"
+            } else {
+                "channelMenu.toastArchivedByAdministrator"
+            };
+            Shell::global(cx).update(cx, |shell, cx| {
+                shell.success(mezon_i18n::t(&locale, key).to_string(), cx);
+            });
+            this.redirect_archived_thread_route(cx);
+            this.ensure_active_channel_for_clan(cx);
         })
         .detach();
         cx.observe(&Router::global(cx), |this, _, cx| {
@@ -1127,6 +1144,16 @@ impl ChatLayout {
             if channel_list.channel_in_clan(clan_id, thread_id) {
                 return;
             }
+            if channel_list.is_locally_archived(thread_id) {
+                crate::router::replace(
+                    cx,
+                    Route::Channel {
+                        clan_id,
+                        channel_id,
+                    },
+                );
+                return;
+            }
         }
         let resolving = self.channel_list.update(cx, |store, cx| {
             store.ensure_channel_in_clan(clan_id, thread_id, cx)
@@ -1832,7 +1859,13 @@ impl ChatLayout {
             mention_input.take_ephemeral_receiver(cx)
         });
         if let Some(receiver_id) = ephemeral_receiver {
-            crate::chat::ChatSending::send_ephemeral(receiver_id, content, content_tokens, cx);
+            crate::chat::ChatSending::send_ephemeral(
+                receiver_id,
+                content,
+                content_tokens,
+                attachments,
+                cx,
+            );
             return;
         }
         crate::chat::ChatSending::send_text(
@@ -2126,15 +2159,10 @@ impl ChatLayout {
         }
         if self.topic_panel.is_none() {
             let settings = self.settings.clone();
-            let align_timeline = self.chat_area.timeline.clone();
-            self.topic_panel = Some(cx.new(|cx| {
-                crate::chat::create_topic_panel::TopicPanel::new(
-                    settings,
-                    align_timeline,
-                    window,
-                    cx,
-                )
-            }));
+            self.topic_panel =
+                Some(cx.new(|cx| {
+                    crate::chat::create_topic_panel::TopicPanel::new(settings, window, cx)
+                }));
         }
         self.topic_panel
             .clone()

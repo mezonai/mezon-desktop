@@ -134,6 +134,21 @@ pub enum EventsEvent {
     Changed { clan_id: ClanId },
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct CreateEventDraft {
+    pub title: String,
+    pub logo: String,
+    pub description: String,
+    pub clan_id: ClanId,
+    pub channel_voice_id: Option<ChannelId>,
+    pub address: String,
+    pub start_time_seconds: u32,
+    pub end_time_seconds: u32,
+    pub channel_id: Option<ChannelId>,
+    pub repeat_type: i32,
+    pub is_private: bool,
+}
+
 pub struct EventsStore {
     events: HashMap<ClanId, Vec<ClanEventItem>>,
     loaded: HashSet<ClanId>,
@@ -191,6 +206,50 @@ impl EventsStore {
         self.transition_generation = self.transition_generation.wrapping_add(1);
         self.transition_task = None;
         cx.notify();
+    }
+
+    pub fn create_event(
+        &mut self,
+        draft: CreateEventDraft,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        let api = self.api.clone();
+        let requested_clan_id = draft.clan_id;
+        let request = api::CreateEventRequest {
+            title: draft.title,
+            logo: draft.logo,
+            description: draft.description,
+            clan_id: draft.clan_id.0,
+            channel_voice_id: draft.channel_voice_id.map_or(0, |id| id.0),
+            address: draft.address,
+            start_time_seconds: draft.start_time_seconds,
+            end_time_seconds: draft.end_time_seconds,
+            channel_id: draft.channel_id.map_or(0, |id| id.0),
+            repeat_type: draft.repeat_type,
+            is_private: draft.is_private,
+            ..Default::default()
+        };
+        cx.spawn(async move |this, cx| {
+            let event = api.create_event(request).await?;
+            this.update(cx, |this, cx| {
+                let clan_id = if event.clan_id == 0 {
+                    requested_clan_id
+                } else {
+                    ClanId(event.clan_id)
+                };
+                let item = ClanEventItem::from_api(event);
+                let events = this.events.entry(clan_id).or_default();
+                if let Some(existing) = events.iter_mut().find(|existing| existing.id == item.id) {
+                    *existing = item;
+                } else {
+                    events.push(item);
+                }
+                this.schedule_next_transition(cx);
+                cx.emit(EventsEvent::Changed { clan_id });
+                cx.notify();
+            })?;
+            Ok(())
+        })
     }
 
     fn register_realtime(cx: &mut Context<Self>) {

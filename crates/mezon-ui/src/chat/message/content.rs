@@ -38,6 +38,14 @@ const FACEBOOK_ACCENT: u32 = 0x18_77_f2;
 const SOCIAL_CARD_BG: u32 = 0x2b_2d_31;
 const EMOJI_SIZE: f32 = 24.;
 const EMOJI_JUMBO_SIZE: f32 = 48.;
+
+/// The image proxy is asked for the emoji at the size it will actually be
+/// painted on a 2x display. An atlas tile smaller than its box is magnified
+/// with a linear filter across a gutterless atlas, which samples the
+/// neighbouring tile -- the next animation frame -- into the emoji's edges.
+fn emoji_source_px(size: Pixels) -> u32 {
+    (f32::from(size) * 2.0).round().max(1.0) as u32
+}
 pub(crate) const INLINE_ICON_PLACEHOLDER: char = '\u{2800}';
 pub(crate) const ATTACHMENT_PLACEHOLDER: char = '\u{fffc}';
 const RICH_TEXT_PLAN_LIMIT: usize = 512;
@@ -177,7 +185,7 @@ fn render_message_content_with_options(
         );
     }
     let mut row = rich_content_row(body_color, options.inline);
-    let mut link_key = 0usize;
+    let mut span_key = 0usize;
     match msg
         .rich_layout
         .as_deref()
@@ -194,14 +202,14 @@ fn render_message_content_with_options(
                         ctx,
                         body_color,
                         emoji_size,
-                        &mut link_key,
+                        &mut span_key,
                     ),
                 };
             }
         }
         None => {
             for span in &msg.spans {
-                row = append_span(row, span, ctx, body_color, emoji_size, &mut link_key);
+                row = append_span(row, span, ctx, body_color, emoji_size, &mut span_key);
             }
         }
     }
@@ -565,13 +573,13 @@ fn render_mention_only_content(
         return div().into_any_element();
     }
     let mut row = rich_content_row(body_color, inline);
-    let mut link_key = 0usize;
+    let mut span_key = 0usize;
     for span in msg
         .spans
         .iter()
         .filter(|s| matches!(s, MessageSpan::Mention { .. }))
     {
-        row = append_span(row, span, ctx, body_color, px(EMOJI_SIZE), &mut link_key);
+        row = append_span(row, span, ctx, body_color, px(EMOJI_SIZE), &mut span_key);
     }
     if msg.is_edited {
         row = row.child(edited_marker(ctx.theme, ctx.locale));
@@ -697,7 +705,7 @@ fn render_selectable_segmented_spans(
                 let bounds = Rc::new(Cell::new(None));
                 segments.push(TextSegment::bounded(base..end, bounds.clone()));
                 row = row.child(SelectableRegion::new(
-                    render_emoji_span(name, emoji_id, src, body_color, ctx, emoji_size),
+                    render_emoji_span(name, emoji_id, src, body_color, ctx, emoji_size, base),
                     bounds,
                     is_selected.then(|| rgba(SELECTION_BG)),
                 ));
@@ -1624,7 +1632,7 @@ fn append_span(
     ctx: &RowCtx,
     body_color: gpui::Rgba,
     emoji_size: Pixels,
-    link_key: &mut usize,
+    span_key: &mut usize,
 ) -> gpui::Div {
     let theme = ctx.theme;
     match span {
@@ -1677,8 +1685,8 @@ fn append_span(
             ))
         }
         MessageSpan::Link { text, url, .. } => {
-            let key = *link_key;
-            *link_key += 1;
+            let key = *span_key;
+            *span_key += 1;
             row.child(message_link_element(
                 text,
                 &resolve_link_url(url, text),
@@ -1708,9 +1716,13 @@ fn append_span(
             name,
             emoji_id,
             src,
-        } => row.child(render_emoji_span(
-            name, emoji_id, src, body_color, ctx, emoji_size,
-        )),
+        } => {
+            let key = *span_key;
+            *span_key += 1;
+            row.child(render_emoji_span(
+                name, emoji_id, src, body_color, ctx, emoji_size, key,
+            ))
+        }
         MessageSpan::Canvas { title, .. } => row.child(render_canvas_chip(title.clone())),
         MessageSpan::Heading { level, text } => row.child(render_heading(*level, text.clone())),
     }
@@ -1863,9 +1875,10 @@ fn render_emoji_span(
     body_color: gpui::Rgba,
     ctx: &RowCtx,
     size: Pixels,
+    key: usize,
 ) -> AnyElement {
     let src: SharedString = if precomputed_src.is_empty() {
-        crate::util::imgproxy::emoji_url(ctx.app, emoji_id).into()
+        crate::util::imgproxy::emoji_url_sized(ctx.app, emoji_id, emoji_source_px(size)).into()
     } else {
         precomputed_src.clone()
     };
@@ -1881,6 +1894,7 @@ fn render_emoji_span(
         .image_cache(ctx.icon_cache.clone())
         .child(
             img(src)
+                .id(("msg-emoji-frames", key))
                 .size(size)
                 .object_fit(ObjectFit::Contain)
                 .with_fallback(super::reaction_detail::emoji_error_fallback(

@@ -7,6 +7,7 @@ pub(super) struct VoiceMemberSlot {
     pub(super) display_name: String,
     pub(super) avatar_url: String,
     pub(super) avatar_raw: String,
+    pub(super) sharing_screen: bool,
 }
 
 #[derive(Clone, PartialEq)]

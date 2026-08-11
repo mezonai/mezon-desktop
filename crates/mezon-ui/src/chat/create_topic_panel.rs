@@ -26,12 +26,7 @@ pub struct TopicPanel {
 }
 
 impl TopicPanel {
-    pub fn new(
-        settings: Entity<Settings>,
-        align_timeline: Entity<ChannelMessages>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(settings: Entity<Settings>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let locale = settings.read(cx).language.clone();
         let placeholder = mezon_i18n::t(&locale, "messageBox.placeholder").to_string();
         let mention_input =
@@ -41,12 +36,12 @@ impl TopicPanel {
                 mention_input.clone(),
                 SharedString::from(locale.clone()),
                 &settings,
+                true,
                 cx,
             )
         });
         let typing = cx.new(|cx| ChannelTyping::new(&settings, cx));
-        let topic_timeline =
-            cx.new(|cx| ChannelMessages::new_topic_box(settings.clone(), align_timeline, cx));
+        let topic_timeline = cx.new(|cx| ChannelMessages::new_topic_box(settings.clone(), cx));
         topic_timeline.update(cx, |timeline, cx| timeline.bind_window(window, cx));
         mention_input.update(cx, |input, cx| input.focus_input(window, cx));
 

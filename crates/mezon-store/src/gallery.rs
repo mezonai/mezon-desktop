@@ -416,7 +416,7 @@ where
                 att.uploader_avatar_raw = info.avatar_raw.into();
             }
             _ => {
-                att.uploader_name = "Anonymous".into();
+                att.uploader_name = crate::messages::ANONYMOUS_SENDER_NAME.into();
                 att.uploader_avatar = SharedString::default();
                 att.uploader_avatar_raw = SharedString::default();
             }

@@ -1334,11 +1334,6 @@ pub struct ChannelMessages {
     row_memo: Rc<RefCell<RowMemo>>,
     row_memo_day: Option<chrono::NaiveDate>,
     is_topic_box: bool,
-    topic_align_timeline: Option<gpui::WeakEntity<ChannelMessages>>,
-    topic_spacer_h: Option<Pixels>,
-    topic_spacer_active: bool,
-    topic_aligned: bool,
-    topic_align_probe: bool,
     topic_list_topic: Option<i64>,
     topic_row_ids: Vec<MessageId>,
     topic_messages: Rc<Vec<Message>>,
@@ -1683,7 +1678,8 @@ impl ChannelMessages {
                 | MessagesEvent::ForwardProgress { .. }
                 | MessagesEvent::ForwardFinished { .. }
                 | MessagesEvent::ShareContactFinished { .. }
-                | MessagesEvent::AnonymousModeChanged => return,
+                | MessagesEvent::AnonymousModeChanged
+                | MessagesEvent::SendFailedWithoutRow => return,
                 MessagesEvent::TopicUpdated { .. } => {}
             }
             if structural {
@@ -1805,11 +1801,11 @@ impl ChannelMessages {
         });
         let avatar_image_cache = crate::image_cache::shared_avatar_cache(cx);
         let icon_image_cache = cx.new(|cx| {
-            crate::image_cache::LruImageCache::icon_thumbnail(
+            crate::image_cache::LruImageCache::emoji_thumbnail(
                 "message-icons",
-                1024,
-                8 * 1024 * 1024,
-                256 * 1024,
+                crate::image_cache::MESSAGE_ICON_CACHE_CAPACITY,
+                crate::image_cache::MESSAGE_ICON_CACHE_BYTES,
+                crate::image_cache::EMOJI_ENTRY_MAX_BYTES,
                 cx,
             )
         });
@@ -1974,11 +1970,6 @@ impl ChannelMessages {
             row_memo: Rc::new(RefCell::new(RowMemo::default())),
             row_memo_day: None,
             is_topic_box: false,
-            topic_align_timeline: None,
-            topic_spacer_h: None,
-            topic_spacer_active: false,
-            topic_aligned: false,
-            topic_align_probe: false,
             topic_list_topic: None,
             topic_row_ids: Vec::new(),
             topic_messages: Rc::new(Vec::new()),
@@ -1989,15 +1980,9 @@ impl ChannelMessages {
         }
     }
 
-    pub fn new_topic_box(
-        settings: Entity<Settings>,
-        align_timeline: Entity<ChannelMessages>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new_topic_box(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
         let mut this = Self::new(settings, cx);
         this.is_topic_box = true;
-        this.topic_align_timeline = Some(align_timeline.downgrade());
-        this.topic_spacer_h = None;
         this._subs.push(
             cx.subscribe(&TopicsStore::global(cx), |this, _, event, cx| match event {
                 TopicsEvent::Opened => {
@@ -2010,14 +1995,6 @@ impl ChannelMessages {
         );
         this.refresh_topic_messages(cx);
         this
-    }
-
-    pub fn message_viewport_top(&self, message_id: MessageId, cx: &App) -> Option<Pixels> {
-        let msg_ix = MessagesStore::global(cx)
-            .read(cx)
-            .viewport_position(message_id)?;
-        let list_ix = usize::from(self.header_shown) + msg_ix;
-        self.list_state.bounds_for_item(list_ix).map(|b| b.top())
     }
 
     fn collect_topic_messages(cx: &App) -> Vec<Message> {
@@ -2075,10 +2052,6 @@ impl ChannelMessages {
     fn reset_topic_rows(&mut self, topic_id: Option<i64>, ids: Vec<MessageId>) {
         self.topic_list_topic = topic_id;
         self.topic_row_ids = ids;
-        self.topic_spacer_active = false;
-        self.topic_spacer_h = None;
-        self.topic_aligned = false;
-        self.topic_align_probe = false;
         self.list_state.reset(self.topic_row_ids.len());
         self.list_state.scroll_to_end();
         self.at_bottom = true;
@@ -2096,8 +2069,7 @@ impl ChannelMessages {
             return false;
         }
 
-        let base = usize::from(self.topic_spacer_active);
-        if self.list_state.item_count() != base + self.topic_row_ids.len() {
+        if self.list_state.item_count() != self.topic_row_ids.len() {
             self.reset_topic_rows(active_topic, new_ids);
             return true;
         }
@@ -2127,8 +2099,7 @@ impl ChannelMessages {
                 .unwrap_or(self.at_bottom)
                 || self.topic_rows_own_recent_send());
 
-        self.list_state
-            .splice(base + prefix..base + old_end, new_end - prefix);
+        self.list_state.splice(prefix..old_end, new_end - prefix);
         self.topic_row_ids = new_ids;
 
         if follow {
@@ -2138,37 +2109,10 @@ impl ChannelMessages {
         true
     }
 
-    fn sync_topic_spacer(&mut self, active: bool, height: Pixels) {
-        if active != self.topic_spacer_active {
-            if active {
-                self.list_state.splice(0..0, 1);
-                self.topic_spacer_active = true;
-                self.topic_spacer_h = Some(height);
-                if !self.topic_aligned {
-                    self.topic_aligned = true;
-                    self.list_state.scroll_to(gpui::ListOffset {
-                        item_ix: 0,
-                        offset_in_item: px(0.),
-                    });
-                }
-            } else {
-                self.list_state.splice(0..1, 0);
-                self.topic_spacer_active = false;
-                self.topic_spacer_h = None;
-            }
-            return;
-        }
-        if active && self.topic_spacer_h != Some(height) {
-            self.topic_spacer_h = Some(height);
-            self.list_state.remeasure_items(0..1);
-        }
-    }
-
     fn remeasure_topic_rows(&self, range: std::ops::Range<usize>) {
-        let base = usize::from(self.topic_spacer_active);
         let count = self.list_state.item_count();
-        let start = (base + range.start).min(count);
-        let end = (base + range.end).min(count);
+        let start = range.start.min(count);
+        let end = range.end.min(count);
         if start < end {
             self.list_state.remeasure_items(start..end);
         }
@@ -4223,33 +4167,6 @@ impl ChannelMessages {
             Some((id, input)) => (Some(*id), Some(input.clone())),
             None => (None, None),
         };
-        let origin_id = TopicsStore::global(cx)
-            .read(cx)
-            .origin_message()
-            .map(|m| m.id);
-        let channel_origin_top = origin_id.and_then(|id| {
-            self.topic_align_timeline
-                .as_ref()?
-                .upgrade()?
-                .read(cx)
-                .message_viewport_top(id, cx)
-        });
-        let own_bounds = self.list_state.viewport_bounds();
-        let align_delta = (own_bounds.size.height > px(0.))
-            .then(|| channel_origin_top.map(|y| y - own_bounds.top()))
-            .flatten()
-            .filter(|delta| *delta > px(0.));
-        if align_delta.is_none()
-            && channel_origin_top.is_some()
-            && own_bounds.size.height <= px(0.)
-            && !self.topic_align_probe
-        {
-            self.topic_align_probe = true;
-            cx.defer_in(window, |_, _, cx| cx.notify());
-        }
-        let use_align_spacer = align_delta.is_some();
-        let align_spacer_h = align_delta.unwrap_or(px(0.));
-        self.sync_topic_spacer(use_align_spacer, align_spacer_h);
 
         let locale = self.cached_locale.clone();
         let coming_soon: SharedString = mezon_i18n::t(&locale, "common.comingSoon").into();
@@ -4307,15 +4224,6 @@ impl ChannelMessages {
             .on_mouse_down(MouseButton::Left, focus_on_click)
             .child(
                 list(list_state, move |ix, _window, cx| {
-                    if use_align_spacer && ix == 0 {
-                        return div()
-                            .id("topic-align-spacer")
-                            .w_full()
-                            .h(align_spacer_h)
-                            .flex_shrink_0()
-                            .into_any_element();
-                    }
-                    let msg_ix = ix - usize::from(use_align_spacer);
                     let ctx = RowCtx {
                         app: cx,
                         theme: cx.theme(),
@@ -4357,7 +4265,7 @@ impl ChannelMessages {
                         content_width,
                         selection: selection.clone(),
                     };
-                    render_message_item(&entity.read(cx).topic_messages, msg_ix, &ctx, cx)
+                    render_message_item(&entity.read(cx).topic_messages, ix, &ctx, cx)
                 })
                 .flex_1()
                 .size_full()

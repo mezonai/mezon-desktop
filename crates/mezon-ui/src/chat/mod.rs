@@ -9,6 +9,7 @@ pub mod clan_channels_page;
 pub mod clan_events_page;
 pub mod clan_management_page;
 pub mod clan_members_page;
+pub mod create_event_modal;
 pub mod create_thread_panel;
 pub mod create_topic_panel;
 pub mod edit_group_modal;

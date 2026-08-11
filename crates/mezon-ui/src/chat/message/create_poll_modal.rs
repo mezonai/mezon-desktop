@@ -11,6 +11,8 @@ use crate::components::primitives::{
 };
 use crate::theme::ActiveTheme;
 
+const ANSWER_EMOJI_SOURCE_PX: u32 = 40;
+
 const MIN_ANSWERS: usize = 2;
 const MAX_ANSWERS: usize = 20;
 const MAX_QUESTION_LEN: usize = 300;
@@ -242,6 +244,7 @@ impl CreatePollModal {
 
 impl Render for CreatePollModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let emoji_cache = crate::image_cache::shared_emoji_cache(cx);
         let theme = cx.theme();
         let locale = self.locale.clone();
         let t = |key: &'static str| mezon_i18n::t(&locale, key).to_string();
@@ -323,10 +326,16 @@ impl Render for CreatePollModal {
                 .and_then(Option::as_ref)
                 .cloned();
             let emoji_glyph = match &emoji_id {
-                Some(id) => img(crate::util::imgproxy::emoji_url(cx, id))
-                    .size(px(20.))
-                    .flex_none()
-                    .into_any_element(),
+                Some(id) => img(crate::util::imgproxy::emoji_url_sized(
+                    cx,
+                    id,
+                    ANSWER_EMOJI_SOURCE_PX,
+                ))
+                .image_cache(&emoji_cache)
+                .id(("poll-answer-emoji-frames", index))
+                .size(px(20.))
+                .flex_none()
+                .into_any_element(),
                 None => Icon::new(IconName::Smile)
                     .size(px(20.))
                     .flex_none()

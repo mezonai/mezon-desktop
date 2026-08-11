@@ -945,6 +945,7 @@ impl McpBackend {
                 Vec::new(),
                 Vec::new(),
                 None,
+                Default::default(),
             )
             .await?;
         Ok(serde_json::json!({
@@ -1188,6 +1189,7 @@ impl McpBackend {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                Default::default(),
             )
             .await?;
         self.api.execute_upload(presigned).await?;
@@ -1241,6 +1243,7 @@ impl McpBackend {
                     width: 0,
                     height: 0,
                 }],
+                Default::default(),
             )
             .await?;
         Ok(serde_json::json!({ "message_id": message.message_id }))

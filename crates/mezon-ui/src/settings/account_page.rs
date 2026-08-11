@@ -1,14 +1,21 @@
 use std::time::Duration;
 
 use crate::components::primitives::{
-    Avatar, Button as GpuiButton, ButtonVariants, Label, Sizable, Size, h_flex, v_flex,
+    Avatar, Button as GpuiButton, ButtonVariants, Icon, IconName, Label, Sizable, Size, h_flex,
+    v_flex,
 };
-use gpui::{Context, Entity, FontWeight, Rgba, SharedString, Task, Window, div, prelude::*, px};
-use mezon_store::{AccountStore, Settings};
+use base64::Engine;
+use gpui::{
+    App, ClipboardItem, Context, Entity, FocusHandle, FontWeight, ObjectFit, Rgba, SharedString,
+    Task, Window, div, img, prelude::*, px,
+};
+use mezon_store::{AccountStore, AppConfig, Settings, UserAccount};
 
+use crate::app::shell::Shell;
 use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
 use crate::util::avatar_color::spawn_banner_color_task;
+use crate::util::qr_image::{QrImage, QrImageOptions, build_qr_image};
 
 /// The avatar overlaps the banner, so its box is positioned against the card
 /// rather than laid out in flow. Every offset below is derived from these four
@@ -29,6 +36,171 @@ const NAME_INDENT: f32 = AVATAR_LEFT + AVATAR_BOX + AVATAR_NAME_GAP - HEADER_PAD
 const NAME_LIFT: f32 = (AVATAR_TOP + AVATAR_BOX / 2.0) - (BANNER_HEIGHT + HEADER_ROW_HEIGHT / 2.0);
 /// Optical nudge so the button's cap height sits level with the name.
 const EDIT_BUTTON_LIFT: f32 = -8.0;
+
+struct QrProfileModal {
+    focus_handle: FocusHandle,
+    locale: String,
+    qr_image: Option<QrImage>,
+    loading: bool,
+    copied: bool,
+    copy_reset_task: Option<Task<()>>,
+}
+
+impl QrProfileModal {
+    fn open(data: String, locale: String, window: &mut Window, cx: &mut App) {
+        let modal = cx.new(|cx| Self::new(locale, cx));
+        let focus_handle = modal.read(cx).focus_handle.clone();
+        Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.clone().into(), cx));
+        window.focus(&focus_handle, cx);
+
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |cx| {
+            let qr_image = executor
+                .spawn(async move {
+                    build_qr_image(
+                        &data,
+                        QrImageOptions {
+                            target_size: 328,
+                            min_module_scale: 2,
+                            error_correction: qrcode::EcLevel::L,
+                            clipboard_border: 40,
+                        },
+                    )
+                })
+                .await;
+            let _ = modal.update(cx, |this, cx| {
+                this.qr_image = qr_image;
+                this.loading = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn new(locale: String, cx: &mut Context<Self>) -> Self {
+        cx.on_release(|this, cx| {
+            if let Some(qr) = this.qr_image.take() {
+                crate::image_cache::queue_atlas_drop(cx, qr.render);
+            }
+        })
+        .detach();
+        Self {
+            focus_handle: cx.focus_handle(),
+            locale,
+            qr_image: None,
+            loading: true,
+            copied: false,
+            copy_reset_task: None,
+        }
+    }
+
+    fn copy_qr(&mut self, cx: &mut Context<Self>) {
+        if self.copied {
+            return;
+        }
+        let Some(qr) = &self.qr_image else {
+            let message = mezon_i18n::t(&self.locale, "inviteToChannel.qrModal.errorGenerating");
+            Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_image(&qr.clipboard));
+        self.copied = true;
+        let message =
+            mezon_i18n::t(&self.locale, "invitation.messages.qrCopiedSuccess").to_string();
+        Shell::global(cx).update(cx, |shell, cx| shell.success(message, cx));
+        cx.notify();
+    }
+
+    fn reset_copy_after_mouse_leave(&mut self, cx: &mut Context<Self>) {
+        if !self.copied || self.copy_reset_task.is_some() {
+            return;
+        }
+        self.copy_reset_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1000))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.copied = false;
+                this.copy_reset_task = None;
+                cx.notify();
+            });
+        }));
+    }
+
+    fn close(cx: &mut App) {
+        Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+    }
+}
+
+impl Render for QrProfileModal {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .track_focus(&self.focus_handle)
+            .key_context("menu")
+            .on_action(cx.listener(|_, _: &::menu::Cancel, _, cx| Self::close(cx)))
+            .relative()
+            .size(px(360.))
+            .p_4()
+            .rounded_lg()
+            .bg(gpui::white())
+            .shadow_lg()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(match &self.qr_image {
+                Some(image) => img(image.render.clone())
+                    .size_full()
+                    .object_fit(ObjectFit::Contain)
+                    .into_any_element(),
+                None => div()
+                    .text_color(theme.tokens.theme_text_color_dark)
+                    .child(mezon_i18n::t(
+                        &self.locale,
+                        if self.loading {
+                            "inviteToChannel.qrModal.generating"
+                        } else {
+                            "inviteToChannel.qrModal.errorGenerating"
+                        },
+                    ))
+                    .into_any_element(),
+            })
+            .child(
+                div()
+                    .absolute()
+                    .p_2()
+                    .rounded_md()
+                    .child(img("images/icon-logo-mezon.svg").size(px(56.))),
+            )
+            .child(
+                div()
+                    .id("copy-profile-qr-wrapper")
+                    .absolute()
+                    .p_3()
+                    .rounded_full()
+                    .bg(theme.tokens.bg_modal)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .child(
+                        Icon::new(if self.copied {
+                            IconName::Tick
+                        } else {
+                            IconName::CopyIcon
+                        })
+                        .size(px(16.))
+                        .text_color(gpui::white()),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.copy_qr(cx)))
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        if !hovered {
+                            this.reset_copy_after_mouse_leave(cx);
+                        }
+                    })),
+            )
+    }
+}
 
 pub struct AccountPage {
     settings: Entity<Settings>,
@@ -168,6 +340,9 @@ impl Render for AccountPage {
         };
 
         let avatar_url = SharedString::from(Self::avatar_source(account.avatar_url.as_deref(), cx));
+        let qr_account = account.clone();
+        let qr_origin = AppConfig::global(cx).domain_url.clone();
+        let qr_locale = locale.clone();
         let banner_color = self
             .banner_color
             .map(gpui::Hsla::from)
@@ -244,21 +419,52 @@ impl Render for AccountPage {
                             )
                             .child(div().flex_1())
                             .child(
-                                GpuiButton::new("edit-profile-btn")
-                                    .label(mezon_i18n::t(
-                                        &locale,
-                                        "setting.account.editUserProfile",
-                                    ))
+                                h_flex()
                                     .relative()
                                     .top(px(EDIT_BUTTON_LIFT))
-                                    .with_size(Size::Large)
-                                    .primary()
-                                    .on_click(move |_, _, cx| {
-                                        crate::router::replace(
-                                            cx,
-                                            crate::router::Route::SettingsProfile,
-                                        );
-                                    }),
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id("profile-qr-btn")
+                                            .size(px(40.))
+                                            .rounded_md()
+                                            .bg(gpui::white())
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .cursor_pointer()
+                                            .hover(|style| style.opacity(0.9))
+                                            .child(
+                                                Icon::new(IconName::QrCode)
+                                                    .size(px(24.))
+                                                    .text_color(gpui::black()),
+                                            )
+                                            .on_click(move |_, window, cx| {
+                                                let qr_data =
+                                                    profile_qr_link(&qr_account, &qr_origin);
+                                                QrProfileModal::open(
+                                                    qr_data,
+                                                    qr_locale.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            }),
+                                    )
+                                    .child(
+                                        GpuiButton::new("edit-profile-btn")
+                                            .label(mezon_i18n::t(
+                                                &locale,
+                                                "setting.account.editUserProfile",
+                                            ))
+                                            .with_size(Size::Large)
+                                            .primary()
+                                            .on_click(move |_, _, cx| {
+                                                crate::router::replace(
+                                                    cx,
+                                                    crate::router::Route::SettingsProfile,
+                                                );
+                                            }),
+                                    ),
                             ),
                     )
                     .child(
@@ -409,6 +615,27 @@ fn mask_email(email: &str) -> String {
     }
 }
 
+fn profile_qr_link(account: &UserAccount, origin: &str) -> String {
+    let name = if account.display_name.is_empty() {
+        account.username.as_str()
+    } else {
+        account.display_name.as_str()
+    };
+    let data = serde_json::json!({
+        "id": account.user_id.to_string(),
+        "name": name,
+        "avatar": account.avatar_url.as_deref().unwrap_or_default(),
+    })
+    .to_string();
+    let encoded = mezon_client::encode_url_param(&data);
+    let payload = base64::engine::general_purpose::STANDARD.encode(encoded);
+    format!(
+        "{}/chat/{}?data={payload}",
+        origin.trim_end_matches('/'),
+        account.username
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,5 +662,27 @@ mod tests {
             HEADER_PAD_X + NAME_INDENT,
             AVATAR_LEFT + AVATAR_BOX + AVATAR_NAME_GAP
         );
+    }
+
+    #[test]
+    fn generated_profile_qr_has_png_and_two_pixel_modules() {
+        let data = "https://mezon.ai/chat/alice?data=test";
+        let qr = build_qr_image(
+            data,
+            QrImageOptions {
+                target_size: 328,
+                min_module_scale: 2,
+                error_correction: qrcode::EcLevel::L,
+                clipboard_border: 40,
+            },
+        )
+        .expect("qr image");
+        let module_width =
+            qrcode::QrCode::with_error_correction_level(data.as_bytes(), qrcode::EcLevel::L)
+                .unwrap()
+                .width();
+        assert!(qr.render.size(0).width.0 as usize >= module_width * 2);
+        assert_eq!(qr.clipboard.format, gpui::ImageFormat::Png);
+        assert!(!qr.clipboard.bytes.is_empty());
     }
 }

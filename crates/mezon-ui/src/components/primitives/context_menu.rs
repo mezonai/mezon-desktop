@@ -378,6 +378,7 @@ impl RenderOnce for ContextMenu {
                     let fallback_color = muted;
                     cell = cell.child(
                         img(SharedString::from(src))
+                            .id("quick-reaction-emoji-frames")
                             .size(px(QUICK_REACTION_EMOJI_PX))
                             .with_fallback(move || {
                                 div()
@@ -668,6 +669,7 @@ impl RenderOnce for ContextMenu {
                             if !src.is_empty() {
                                 row = row.child(
                                     img(SharedString::from(src))
+                                        .id("reaction-sub-emoji-frames")
                                         .size(px(QUICK_REACTION_EMOJI_PX))
                                         .flex_none()
                                         .with_fallback(move || {

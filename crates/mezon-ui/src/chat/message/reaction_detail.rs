@@ -11,6 +11,8 @@ use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
 
+const HEADER_EMOJI_SOURCE_PX: u32 = 40;
+
 pub struct UserReactionPanel {
     message_id: MessageId,
     emoji_id: SharedString,
@@ -47,12 +49,14 @@ impl UserReactionPanel {
 
 impl Render for UserReactionPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let emoji_cache = crate::image_cache::shared_emoji_cache(cx);
         let theme = cx.theme();
         let (count, senders) = MessagesStore::global(cx)
             .read(cx)
             .reaction_view(self.message_id, &self.emoji_id, &self.emoji)
             .unwrap_or((0, Vec::new()));
-        let emoji_src = crate::util::imgproxy::emoji_url(cx, &self.emoji_id);
+        let emoji_src =
+            crate::util::imgproxy::emoji_url_sized(cx, &self.emoji_id, HEADER_EMOJI_SOURCE_PX);
         let current_uid = BadgeService::global(cx).read(cx).current_user_id(cx);
         let is_dm = MessagesStore::global(cx).read(cx).is_dm();
         let clan_id = (!is_dm)
@@ -100,6 +104,8 @@ impl Render for UserReactionPanel {
                 .into_any_element()
         } else {
             img(SharedString::from(emoji_src))
+                .image_cache(&emoji_cache)
+                .id("reaction-panel-emoji-frames")
                 .size(px(20.))
                 .object_fit(ObjectFit::ScaleDown)
                 .with_fallback(emoji_error_fallback(px(20.), theme.text_muted))

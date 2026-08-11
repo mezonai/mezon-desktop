@@ -52,7 +52,7 @@ pub use checkbox::{Checkbox, Radio};
 pub use context_menu::{ContextMenu, SubmenuOption, context_menu_at};
 pub use date_picker::{DatePicker, DatePickerEvent, DatePickerPopupMode};
 pub use divider::Divider;
-pub use dropdown::{Dropdown, DropdownTriggerStyle};
+pub use dropdown::{Dropdown, DropdownPlacement, DropdownTriggerStyle};
 pub use label::Label;
 pub use mention_count_badge::{mention_count_badge, mention_count_badge_on_channel_row};
 pub use modal::Modal;

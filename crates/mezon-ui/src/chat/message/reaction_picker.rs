@@ -19,6 +19,7 @@ const ACCENT_BLUE: u32 = 0x5865f2;
 const CELL_PX: f32 = 36.;
 const EMOJI_PX: f32 = 32.;
 const ROW_PX: f32 = 48.;
+const PREFETCH_ROWS: usize = 8;
 const EMOJI_ROW_GAP: f32 = 12.;
 const PANEL_W: f32 = 500.;
 const PANEL_MAX_H: f32 = 512.;
@@ -85,10 +86,20 @@ pub struct ReactionPicker {
     collapsed: HashSet<String>,
     selected: Option<String>,
     hover_emoji: Option<(SharedString, SharedString)>,
+    /// The cell the pointer is over. Only that one animates: a grid is scanned
+    /// rather than watched, and animating every visible cell uploads all 24
+    /// frames of each to the sprite atlas and redraws the window at the rate of
+    /// whichever emoji is fastest. Animating what the pointer is on keeps the
+    /// motion where the eye is for a fraction of the cost.
+    hovered_cell: Option<SharedString>,
     embedded_search: bool,
     fill_container: bool,
     scroll: UniformListScrollHandle,
     image_cache: Entity<LruImageCache>,
+    /// Last row the warm-ahead reached. The list closure runs every frame while
+    /// scrolling, and re-walking the same rows to re-request images already in
+    /// flight is pure per-frame cost.
+    warmed_through: std::cell::Cell<usize>,
     _emoji_sub: Option<Subscription>,
     _search_sub: Subscription,
 }
@@ -149,11 +160,11 @@ impl ReactionPicker {
             })
         });
         let image_cache = cx.new(|cx| {
-            LruImageCache::avatar_thumbnail_small(
+            LruImageCache::icon_thumbnail(
                 "reaction-picker",
-                256,
-                12 * 1024 * 1024,
-                4 * 1024 * 1024,
+                crate::image_cache::EMOJI_PICKER_CACHE_CAPACITY,
+                crate::image_cache::EMOJI_PICKER_CACHE_BYTES,
+                crate::image_cache::ICON_ENTRY_MAX_BYTES,
                 cx,
             )
         });
@@ -168,15 +179,47 @@ impl ReactionPicker {
             collapsed: HashSet::new(),
             selected: None,
             hover_emoji: None,
+            hovered_cell: None,
             embedded_search,
             fill_container,
             scroll: UniformListScrollHandle::new(),
             image_cache,
+            warmed_through: std::cell::Cell::new(0),
             _emoji_sub: emoji_sub,
             _search_sub: search_sub,
         };
         picker.rebuild_snapshot(cx);
         picker
+    }
+
+    /// Emoji just past the bottom of the viewport. A cell only starts fetching
+    /// once it is painted, so scrolling into fresh rows shows empty squares for
+    /// as long as the request takes; warming the next rows means the images are
+    /// already decoded by the time they scroll in.
+    fn set_hovered_cell(&mut self, emoji_id: Option<SharedString>, cx: &mut Context<Self>) {
+        if self.hovered_cell != emoji_id {
+            self.hovered_cell = emoji_id;
+            cx.notify();
+        }
+    }
+
+    fn sources_below(&self, first_unseen_row: usize) -> Vec<SharedString> {
+        if self.warmed_through.get() == first_unseen_row {
+            return Vec::new();
+        }
+        self.warmed_through.set(first_unseen_row);
+        self.rows
+            .iter()
+            .skip(first_unseen_row)
+            .take(PREFETCH_ROWS)
+            .filter_map(|row| match row {
+                PickerRow::Emojis(emojis) => Some(emojis),
+                PickerRow::Header { .. } => None,
+            })
+            .flatten()
+            .filter(|emoji| !emoji.src.is_empty())
+            .map(|emoji| emoji.src.clone())
+            .collect()
     }
 
     fn rebuild_snapshot(&mut self, cx: &mut Context<Self>) {
@@ -239,6 +282,7 @@ impl ReactionPicker {
     }
 
     fn rebuild(&mut self) {
+        self.warmed_through.set(0);
         let query = self.query.trim().to_lowercase();
         let mut rows = Vec::new();
         let mut nav = Vec::new();
@@ -411,23 +455,34 @@ impl Render for ReactionPicker {
         let count = self.rows.len();
         let list_entity = entity.clone();
         let track_hover = self.embedded_search;
-        let list = uniform_list("reaction-picker-list", count, move |range, _window, cx| {
+        let list = uniform_list("reaction-picker-list", count, move |range, window, cx| {
             let theme = cx.theme().clone();
-            let this = list_entity.read(cx);
-            range
-                .map(|ix| match this.rows.get(ix) {
-                    Some(PickerRow::Header {
-                        name,
-                        icon,
-                        initial,
-                        collapsed,
-                    }) => render_header(&theme, name, icon, initial, *collapsed, &list_entity),
-                    Some(PickerRow::Emojis(emojis)) => {
-                        render_emoji_row(&theme, emojis, &list_entity, track_hover)
-                    }
-                    None => div().h(px(ROW_PX)).into_any_element(),
-                })
-                .collect::<Vec<_>>()
+            let (rows, ahead, cache) = {
+                let this = list_entity.read(cx);
+                let rows = range
+                    .clone()
+                    .map(|ix| match this.rows.get(ix) {
+                        Some(PickerRow::Header {
+                            name,
+                            icon,
+                            initial,
+                            collapsed,
+                        }) => render_header(&theme, name, icon, initial, *collapsed, &list_entity),
+                        Some(PickerRow::Emojis(emojis)) => render_emoji_row(
+                            &theme,
+                            emojis,
+                            &list_entity,
+                            track_hover,
+                            this.hovered_cell.as_ref(),
+                        ),
+                        None => div().h(px(ROW_PX)).into_any_element(),
+                    })
+                    .collect::<Vec<_>>();
+                let ahead = this.sources_below(range.end);
+                (rows, ahead, this.image_cache.clone())
+            };
+            warm_emoji_sources(&cache, ahead, window, cx);
+            rows
         })
         .track_scroll(&self.scroll)
         .flex_1();
@@ -481,6 +536,7 @@ impl Render for ReactionPicker {
                 el.when(!src.is_empty(), |el| {
                     el.child(
                         img(src)
+                            .id("picker-hover-emoji-frames")
                             .max_w(px(28.))
                             .max_h(px(28.))
                             .with_fallback(emoji_error_fallback(px(28.), text_muted)),
@@ -622,6 +678,7 @@ fn render_emoji_row(
     emojis: &[PickerEmoji],
     entity: &Entity<ReactionPicker>,
     track_hover: bool,
+    hovered_cell: Option<&SharedString>,
 ) -> AnyElement {
     let hover_bg = theme.bg_hover;
     let text_muted = theme.text_muted;
@@ -645,25 +702,32 @@ fn render_emoji_row(
             .cursor_pointer()
             .hover(|s| s.bg(hover_bg));
         if !emoji.src.is_empty() {
-            cell = cell.child(
-                img(emoji.src.clone())
-                    .size(px(EMOJI_PX))
-                    .object_fit(gpui::ObjectFit::Contain)
-                    .with_fallback(emoji_error_fallback(px(EMOJI_PX), text_muted)),
-            );
-        }
-        if track_hover {
-            let hover_ent = entity.clone();
-            let hover_name = emoji.emoji.clone();
-            let hover_src = emoji.src.clone();
-            cell = cell.on_hover(move |hovered, _window, cx| {
-                if *hovered {
-                    let name = hover_name.clone();
-                    let src = hover_src.clone();
-                    hover_ent.update(cx, |this, cx| this.set_hover_emoji(src, name, cx));
-                }
+            let image = img(emoji.src.clone())
+                .size(px(EMOJI_PX))
+                .object_fit(gpui::ObjectFit::Contain)
+                .with_fallback(emoji_error_fallback(px(EMOJI_PX), text_muted));
+            cell = cell.child(if hovered_cell == Some(&emoji.emoji_id) {
+                image.id("picker-emoji-frames").into_any_element()
+            } else {
+                image.into_any_element()
             });
         }
+        let hover_ent = entity.clone();
+        let hover_name = emoji.emoji.clone();
+        let hover_src = emoji.src.clone();
+        let hover_id = emoji.emoji_id.clone();
+        cell = cell.on_hover(move |hovered, _window, cx| {
+            let entered = *hovered;
+            let id = entered.then(|| hover_id.clone());
+            let name = hover_name.clone();
+            let src = hover_src.clone();
+            hover_ent.update(cx, |this, cx| {
+                this.set_hovered_cell(id, cx);
+                if entered && track_hover {
+                    this.set_hover_emoji(src, name, cx);
+                }
+            });
+        });
         let cell = cell.on_click(move |_event, _window, cx| {
             let emoji_id = emoji_id.to_string();
             let emoji = shortname.to_string();
@@ -674,4 +738,22 @@ fn render_emoji_row(
         row = row.child(cell);
     }
     row.into_any_element()
+}
+
+/// Ask the picker's cache to decode sources that are not on screen yet. Visible
+/// rows are built before this runs, so they take the pipeline's permits first.
+fn warm_emoji_sources(
+    cache: &Entity<LruImageCache>,
+    sources: Vec<SharedString>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if sources.is_empty() {
+        return;
+    }
+    cache.update(cx, |cache, cx| {
+        for src in sources {
+            cache.prefetch(&gpui::Resource::Uri(src.to_string().into()), window, cx);
+        }
+    });
 }

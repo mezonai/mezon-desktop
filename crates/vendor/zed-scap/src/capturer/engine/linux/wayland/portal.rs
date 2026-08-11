@@ -232,10 +232,10 @@ impl<'a> ScreenCastPortal<'a> {
         let proxy = connection.with_proxy(
             "org.freedesktop.portal.Desktop",
             "/org/freedesktop/portal/desktop",
-            Duration::from_secs(4),
+            Duration::from_secs(15),
         );
 
-        let token = format!("scap_{}", rand::random::<u16>());
+        let token = Self::random_token();
 
         Self {
             proxy,
@@ -250,11 +250,32 @@ impl<'a> ScreenCastPortal<'a> {
         self
     }
 
-    fn create_session_args(&self) -> arg::PropMap {
+    fn random_token() -> String {
+        format!("scap_{}", rand::random::<u64>())
+    }
+
+    fn request_path(&self, token: &str) -> dbus::Path<'static> {
+        let sender = self.proxy.connection.unique_name().to_string();
+        let sender = sender.trim_start_matches(':').replace('.', "_");
+        dbus::Path::from(format!(
+            "/org/freedesktop/portal/desktop/request/{sender}/{token}"
+        ))
+    }
+
+    fn request_args(token: &str) -> arg::PropMap {
         let mut map = arg::PropMap::new();
         map.insert(
             String::from("handle_token"),
-            Variant(Box::new(self.token.clone())),
+            Variant(Box::new(token.to_owned())),
+        );
+        map
+    }
+
+    fn create_session_args(&self, request_token: &str) -> arg::PropMap {
+        let mut map = arg::PropMap::new();
+        map.insert(
+            String::from("handle_token"),
+            Variant(Box::new(request_token.to_owned())),
         );
         map.insert(
             String::from("session_handle_token"),
@@ -263,12 +284,8 @@ impl<'a> ScreenCastPortal<'a> {
         map
     }
 
-    fn select_sources_args(&self) -> Result<arg::PropMap, dbus::Error> {
-        let mut map = arg::PropMap::new();
-        map.insert(
-            String::from("handle_token"),
-            Variant(Box::new(self.token.clone())),
-        );
+    fn select_sources_args(&self, request_token: &str) -> Result<arg::PropMap, dbus::Error> {
+        let mut map = Self::request_args(request_token);
         let available_types = self.proxy.available_source_types()?;
         let types = match self.requested_source_types {
             Some(requested) if requested & available_types != 0 => requested & available_types,
@@ -283,22 +300,26 @@ impl<'a> ScreenCastPortal<'a> {
         Ok(map)
     }
 
-    fn handle_req_response(
+    fn handle_req_response<F>(
         connection: &Connection,
         path: dbus::Path<'static>,
         iterations: usize,
         timeout: Duration,
         response: Arc<Mutex<Response>>,
-    ) -> Result<(), dbus::Error> {
+        request: F,
+    ) -> Result<(), dbus::Error>
+    where
+        F: FnOnce() -> Result<dbus::Path<'static>, dbus::Error>,
+    {
         let got_response = Arc::new(AtomicBool::new(false));
         let got_response_clone = Arc::clone(&got_response);
 
         let mut rule = MatchRule::new();
-        rule.path = Some(dbus::Path::from(path));
+        rule.path = Some(path.clone());
         rule.msg_type = Some(dbus::MessageType::Signal);
         rule.sender = Some(BusName::from("org.freedesktop.portal.Desktop"));
         rule.interface = Some(Interface::from("org.freedesktop.portal.Request"));
-        connection.add_match(
+        let match_token = connection.add_match(
             rule,
             move |res: OrgFreedesktopPortalRequestResponse, _chuh, _msg| {
                 let mut response = response.lock().expect("Failed to lock response mutex");
@@ -308,6 +329,19 @@ impl<'a> ScreenCastPortal<'a> {
             },
         )?;
 
+        let request_path = match request() {
+            Ok(request_path) => request_path,
+            Err(error) => {
+                let _ = connection.remove_match(match_token);
+                return Err(error);
+            }
+        };
+        if request_path != path {
+            log::warn!(
+                "ScreenCast portal returned unexpected request path: expected {path}, got {request_path}"
+            );
+        }
+
         for _ in 0..iterations {
             connection.process(timeout)?;
 
@@ -316,21 +350,29 @@ impl<'a> ScreenCastPortal<'a> {
             }
         }
 
+        let _ = connection.remove_match(match_token);
+
         Ok(())
     }
 
     fn create_session(&self) -> Result<dbus::Path, LinCapError> {
-        let request_handle = self.proxy.create_session(self.create_session_args())?;
+        let request_token = Self::random_token();
+        let request_path = self.request_path(&request_token);
 
         let response = Arc::new(Mutex::new(None));
         let response_clone = Arc::clone(&response);
         Self::handle_req_response(
             self.proxy.connection,
-            request_handle,
+            request_path,
             100,
             Duration::from_millis(100),
             response_clone,
-        )?;
+            || {
+                self.proxy
+                    .create_session(self.create_session_args(&request_token))
+            },
+        )
+        .map_err(|error| LinCapError::new(format!("CreateSession request failed: {error}")))?;
 
         if let Some(res) = response.lock()?.take() {
             match_response!(res.response);
@@ -355,44 +397,54 @@ impl<'a> ScreenCastPortal<'a> {
             }
         }
 
-        Err(LinCapError::new(String::from("Did not get response")))
+        Err(LinCapError::new(String::from(
+            "CreateSession did not return a response",
+        )))
     }
 
     fn select_sources(&self, session_handle: dbus::Path) -> Result<(), LinCapError> {
-        let request_handle = self
-            .proxy
-            .select_sources(session_handle, self.select_sources_args()?)?;
+        let request_token = Self::random_token();
+        let request_path = self.request_path(&request_token);
+        let args = self.select_sources_args(&request_token)?;
 
         let response = Arc::new(Mutex::new(None));
         let response_clone = Arc::clone(&response);
         Self::handle_req_response(
             self.proxy.connection,
-            request_handle,
+            request_path,
             1200, // Wait 2 min
             Duration::from_millis(100),
             response_clone,
-        )?;
+            || self.proxy.select_sources(session_handle, args),
+        )
+        .map_err(|error| LinCapError::new(format!("SelectSources request failed: {error}")))?;
 
         if let Some(res) = response.lock()?.take() {
             match_response!(res.response);
             return Ok(());
         }
 
-        Err(LinCapError::new(String::from("Did not get response")))
+        Err(LinCapError::new(String::from(
+            "SelectSources did not return a response",
+        )))
     }
 
     fn start(&self, session_handle: dbus::Path) -> Result<Stream, LinCapError> {
-        let request_handle = self.proxy.start(session_handle, "", PropMap::new())?;
+        let request_token = Self::random_token();
+        let request_path = self.request_path(&request_token);
+        let args = Self::request_args(&request_token);
 
         let response = Arc::new(Mutex::new(None));
         let response_clone = Arc::clone(&response);
         Self::handle_req_response(
             self.proxy.connection,
-            request_handle,
+            request_path,
             1200,
             Duration::from_millis(100),
             response_clone,
-        )?;
+            || self.proxy.start(session_handle, "", args),
+        )
+        .map_err(|error| LinCapError::new(format!("Start request failed: {error}")))?;
 
         if let Some(res) = response.lock()?.take() {
             match_response!(res.response);
@@ -409,13 +461,19 @@ impl<'a> ScreenCastPortal<'a> {
             }
         }
 
-        Err(LinCapError::new(String::from("Did not get response")))
+        Err(LinCapError::new(String::from(
+            "Start did not return a response",
+        )))
     }
 
     pub fn create_stream(&self) -> Result<Stream, LinCapError> {
-        let session_handle = self.create_session()?;
-        self.select_sources(session_handle.clone())?;
+        let session_handle = self
+            .create_session()
+            .map_err(|error| LinCapError::new(format!("CreateSession failed: {error}")))?;
+        self.select_sources(session_handle.clone())
+            .map_err(|error| LinCapError::new(format!("SelectSources failed: {error}")))?;
         self.start(session_handle)
+            .map_err(|error| LinCapError::new(format!("Start failed: {error}")))
     }
 
     pub fn show_cursor(mut self, mode: bool) -> Result<Self, LinCapError> {

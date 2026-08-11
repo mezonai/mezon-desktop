@@ -150,6 +150,13 @@ pub fn start_screen(
                 }
             };
 
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            tracing::info!(
+                backend = if use_portal { "wayland-portal" } else { "x11" },
+                target = ?capture_target,
+                "starting screen capture"
+            );
+
             let options = Options {
                 fps: CAPTURE_FPS,
                 target: capture_target,
@@ -175,7 +182,7 @@ pub fn start_screen(
                     let mut capturer = match Capturer::build(options) {
                         Ok(capturer) => capturer,
                         Err(e) => {
-                            pump_slot.fail(format!("screen capture init failed: {e}"));
+                            pump_slot.fail(format!("screen capture init failed: {e:#}"));
                             return;
                         }
                     };
@@ -190,7 +197,24 @@ pub fn start_screen(
                             }
                         }
                     }
-                    #[cfg(not(target_os = "macos"))]
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    while !pump_stop.load(Ordering::Relaxed) {
+                        match capturer.get_next_frame_timeout(SLOT_WAIT) {
+                            Ok(Some(frame)) => {
+                                if let Some(bgra) = frame_to_bgra(frame)
+                                    && !bgra.data.is_empty()
+                                {
+                                    pump_slot.publish(bgra);
+                                }
+                            }
+                            Ok(None) => continue,
+                            Err(e) => {
+                                pump_slot.fail(format!("screen capture failed: {e:#}"));
+                                break;
+                            }
+                        }
+                    }
+                    #[cfg(target_os = "windows")]
                     while !pump_stop.load(Ordering::Relaxed) {
                         match capturer.get_next_frame() {
                             Ok(frame) => {
@@ -201,7 +225,7 @@ pub fn start_screen(
                                 }
                             }
                             Err(e) => {
-                                pump_slot.fail(format!("screen capture failed: {e}"));
+                                pump_slot.fail(format!("screen capture failed: {e:#}"));
                                 break;
                             }
                         }

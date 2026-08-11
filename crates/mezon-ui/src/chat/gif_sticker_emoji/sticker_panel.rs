@@ -18,9 +18,7 @@ const STICKER_CELL_PX: f32 = 92.;
 const STICKER_IMG_PX: f32 = 80.;
 const STICKER_ROW_PX: f32 = 104.;
 const HEADER_PX: f32 = 40.;
-const STICKER_CACHE_CAPACITY: usize = 96;
-const STICKER_CACHE_BYTES: u64 = 12 * 1024 * 1024;
-const STICKER_ENTRY_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const PREFETCH_ROWS: usize = 4;
 
 #[derive(Clone)]
 struct StickerCell {
@@ -59,6 +57,8 @@ pub struct StickerPanel {
     selected: Option<String>,
     empty_label: SharedString,
     list_state: ListState,
+    /// Last row the warm-ahead reached; the list closure runs per row per frame.
+    warmed_through: std::cell::Cell<usize>,
     list_dirty: bool,
     image_cache: Entity<LruImageCache>,
     _sub: Option<Subscription>,
@@ -78,9 +78,9 @@ impl StickerPanel {
         let image_cache = cx.new(|cx| {
             LruImageCache::sticker_thumbnail(
                 "gse-sticker-panel",
-                STICKER_CACHE_CAPACITY,
-                STICKER_CACHE_BYTES,
-                STICKER_ENTRY_MAX_BYTES,
+                crate::image_cache::STICKER_CACHE_CAPACITY,
+                crate::image_cache::STICKER_CACHE_BYTES,
+                crate::image_cache::STICKER_ENTRY_MAX_BYTES,
                 cx,
             )
         });
@@ -96,6 +96,7 @@ impl StickerPanel {
                 "chat.stickerPicker.noStickers",
             )),
             list_state: ListState::new(0, ListAlignment::Top, px(200.)),
+            warmed_through: std::cell::Cell::new(0),
             list_dirty: true,
             image_cache,
             _sub: sub,
@@ -168,6 +169,7 @@ impl StickerPanel {
     }
 
     fn rebuild(&mut self) {
+        self.warmed_through.set(0);
         let needle = self.query.trim().to_lowercase();
         let mut rows = Vec::new();
         let mut header_row = Vec::new();
@@ -198,6 +200,26 @@ impl StickerPanel {
         self.rows = rows;
         self.header_row = header_row;
         self.list_dirty = true;
+    }
+
+    /// Stickers a few rows below the one being painted. A cell only starts
+    /// fetching once it is on screen, so scrolling into fresh rows shows empty
+    /// squares for as long as the request takes; a sticker is a ~2 MB decode
+    /// when animated, so that wait is longer here than in the emoji grid.
+    fn sources_ahead(&self, row: usize) -> Vec<SharedString> {
+        let target = row + PREFETCH_ROWS;
+        if self.warmed_through.get() >= target {
+            return Vec::new();
+        }
+        self.warmed_through.set(target);
+        match self.rows.get(target) {
+            Some(PickerRow::Stickers(cells)) => cells
+                .iter()
+                .filter(|cell| !cell.src.is_empty())
+                .map(|cell| cell.src.clone())
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 
     fn sync_list(&mut self) {
@@ -284,19 +306,26 @@ impl Render for StickerPanel {
 
         self.sync_list();
         let list_entity = entity.clone();
-        let list = list(self.list_state.clone(), move |ix, _window, cx| {
+        let list = list(self.list_state.clone(), move |ix, window, cx| {
             let theme = cx.theme().clone();
-            let this = list_entity.read(cx);
-            match this.rows.get(ix) {
-                Some(PickerRow::Header { cat_ix, collapsed }) => {
-                    match this.categories.get(*cat_ix) {
-                        Some(cat) => render_header(&theme, cat, *collapsed, &list_entity),
-                        None => div().h(px(HEADER_PX)).into_any_element(),
+            let (row, ahead, cache) = {
+                let this = list_entity.read(cx);
+                let row = match this.rows.get(ix) {
+                    Some(PickerRow::Header { cat_ix, collapsed }) => {
+                        match this.categories.get(*cat_ix) {
+                            Some(cat) => render_header(&theme, cat, *collapsed, &list_entity),
+                            None => div().h(px(HEADER_PX)).into_any_element(),
+                        }
                     }
-                }
-                Some(PickerRow::Stickers(cells)) => render_sticker_row(&theme, cells, &list_entity),
-                None => div().h(px(STICKER_ROW_PX)).into_any_element(),
-            }
+                    Some(PickerRow::Stickers(cells)) => {
+                        render_sticker_row(&theme, cells, &list_entity)
+                    }
+                    None => div().h(px(STICKER_ROW_PX)).into_any_element(),
+                };
+                (row, this.sources_ahead(ix), this.image_cache.clone())
+            };
+            warm_sticker_sources(&cache, ahead, window, cx);
+            row
         })
         .size_full();
 
@@ -460,4 +489,22 @@ fn initial_letter(name: &str) -> String {
         .next()
         .map(|c| c.to_uppercase().to_string())
         .unwrap_or_default()
+}
+
+/// Decode sticker rows that have not scrolled into view yet. The row being
+/// painted is built first, so it takes the pipeline's permits ahead of these.
+fn warm_sticker_sources(
+    cache: &Entity<LruImageCache>,
+    sources: Vec<SharedString>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if sources.is_empty() {
+        return;
+    }
+    cache.update(cx, |cache, cx| {
+        for src in sources {
+            cache.prefetch(&gpui::Resource::Uri(src.to_string().into()), window, cx);
+        }
+    });
 }

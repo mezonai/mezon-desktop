@@ -390,7 +390,7 @@ fn render_poll_label(
 ) -> AnyElement {
     let mut row = div().flex().flex_row().items_center().overflow_hidden();
     let mut cursor = base.map(SelectableSectionCursor::new);
-    for segment in &answer.segments {
+    for (segment_index, segment) in answer.segments.iter().enumerate() {
         match segment {
             PollLabelSegment::Text(text) => {
                 let range = cursor.as_mut().and_then(|cursor| cursor.inline(text));
@@ -415,7 +415,8 @@ fn render_poll_label(
                     .w(px(20.))
                     .h(px(20.))
                     .object_fit(ObjectFit::Contain)
-                    .image_cache(&ctx.avatar_cache)
+                    .image_cache(&ctx.icon_cache)
+                    .id(("poll-label-emoji-frames", segment_index))
                     .into_any_element();
                 if let Some(range) = range {
                     let bounds = Rc::new(Cell::new(None));

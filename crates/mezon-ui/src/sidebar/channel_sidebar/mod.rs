@@ -48,6 +48,7 @@ fn resolve_voice_member_slot(
         display_name: resolved.name,
         avatar_url: resolved.avatar_src,
         avatar_raw: resolved.avatar_raw,
+        sharing_screen: m.sharing_screen,
     }
 }
 
@@ -62,6 +63,7 @@ fn resolve_stream_member_slot(
         display_name: resolved.name,
         avatar_url: resolved.avatar_src,
         avatar_raw: resolved.avatar_raw,
+        sharing_screen: false,
     }
 }
 
@@ -1900,6 +1902,7 @@ fn render_sidebar_item(
                         .pl(voice_pl)
                         .children(voice_members.iter().map(|m| {
                             let name_text = m.display_name.clone();
+                            let sharing_screen = m.sharing_screen;
                             let mut avatar = Avatar::new().name(name_text.clone());
                             if !m.avatar_url.is_empty() {
                                 avatar = avatar.src(SharedString::from(m.avatar_url.clone()));
@@ -1916,19 +1919,35 @@ fn render_sidebar_item(
                                 .flex()
                                 .flex_row()
                                 .items_center()
+                                .justify_between()
                                 .px_2()
                                 .py(px(2.))
                                 .gap_1()
-                                .child(avatar.with_size(Size::XSmall))
                                 .child(
                                     div()
                                         .min_w_0()
-                                        .flex_1()
-                                        .truncate()
-                                        .text_sm()
-                                        .text_color(theme.text_muted)
-                                        .child(name_text),
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(avatar.with_size(Size::XSmall))
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .truncate()
+                                                .text_sm()
+                                                .text_color(theme.text_muted)
+                                                .child(name_text),
+                                        ),
                                 )
+                                .when(sharing_screen, |el| {
+                                    el.child(
+                                        Icon::new(IconName::VoiceScreenShareIcon)
+                                            .size(px(16.))
+                                            .text_color(gpui::rgb(0x22c55e)),
+                                    )
+                                })
                         }))
                 };
                 channel_col = channel_col.child(members_el);

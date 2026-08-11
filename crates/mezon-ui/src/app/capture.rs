@@ -309,6 +309,24 @@ pub fn message_viewport_state(cx: &App) -> Option<(usize, usize, bool)> {
         .map(|timeline| timeline.read(cx).viewport_state())
 }
 
+pub fn prime_wheel_pointer(cx: &mut App) -> anyhow::Result<()> {
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    let bounds = message_list_bounds(cx)
+        .ok_or_else(|| anyhow::anyhow!("no message list is mounted; open a channel first"))?;
+    cx.update_window(main_handle, |_, window, cx| {
+        window.dispatch_event(
+            gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                position: bounds.center(),
+                pressed_button: None,
+                modifiers: gpui::Modifiers::default(),
+            }),
+            cx,
+        );
+        window.refresh();
+    })?;
+    Ok(())
+}
+
 pub fn dispatch_wheel_tick(cx: &mut App, delta_y: f32) -> anyhow::Result<bool> {
     let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
     let bounds = message_list_bounds(cx)

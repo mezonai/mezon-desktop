@@ -1,3 +1,4 @@
+use crate::app::shell::Shell;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -234,6 +235,7 @@ impl ChatArea {
                     mention_input.clone(),
                     SharedString::from(locale.clone()),
                     &self.settings,
+                    false,
                     cx,
                 )
             }));
@@ -249,6 +251,13 @@ impl ChatArea {
                 &MessagesStore::global(cx),
                 window,
                 |this: &mut crate::ChatLayout, store, event: &MessagesEvent, window, cx| {
+                    if matches!(event, MessagesEvent::SendFailedWithoutRow) {
+                        let locale = this.chat_area.settings.read(cx).language.clone();
+                        let message =
+                            SharedString::from(mezon_i18n::t(&locale, "message.toast.sendFailed"));
+                        Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+                        return;
+                    }
                     if matches!(event, MessagesEvent::ReplyTargetChanged) {
                         let replying_to = store.read(cx).reply_target().map(|draft| ReplyTarget {
                             sender_name: SharedString::from(draft.sender_name.clone()),
@@ -626,11 +635,15 @@ impl ChatArea {
             .overflow_hidden()
             .when(!media_channel_view, |col| {
                 let drop_input = mention_input;
+                let input_visible = !send_denied;
                 col.on_drop(
                     move |paths: &ExternalPaths, window: &mut Window, cx: &mut App| {
                         if let Some(drop_input) = drop_input.clone() {
                             let dropped: Vec<PathBuf> = paths.paths().to_vec();
                             drop_input.update(cx, |input, cx| {
+                                if input_visible {
+                                    input.focus_input(window, cx);
+                                }
                                 input.add_dropped_paths(dropped, window, cx)
                             });
                         }

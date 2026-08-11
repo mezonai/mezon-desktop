@@ -136,6 +136,12 @@ fn open_message_buzz(window: &mut Window, cx: &mut App) {
     let locale = Settings::try_global(cx)
         .map(|settings| SharedString::from(settings.read(cx).language.clone()))
         .unwrap_or_else(|| SharedString::from("en"));
+    if MessagesStore::global(cx).read(cx).is_anonymous_mode() {
+        let message =
+            SharedString::from(mezon_i18n::t(&locale, "common.cannotSendBuzzWithAnonymous"));
+        Shell::global(cx).update(cx, |shell, cx| shell.info(message, cx));
+        return;
+    }
     MessageBuzzModal::open(locale, window, cx);
 }
 
@@ -454,6 +460,7 @@ pub struct MentionInput {
     toggle_bounds: Rc<Cell<Bounds<Pixels>>>,
     _popup_subs: Vec<Subscription>,
     avatar_cache: Entity<LruImageCache>,
+    emoji_cache: Entity<LruImageCache>,
     preview_cache: Entity<LruImageCache>,
     settings: Entity<Settings>,
     pending_attachments: Vec<PendingAttachment>,
@@ -555,6 +562,8 @@ fn write_clipboard_image(image: &Image, base: i64, index: usize) -> Option<PathB
     Some(path)
 }
 
+const SUGGESTION_EMOJI_SOURCE_PX: u32 = 48;
+
 impl MentionInput {
     pub fn new(
         placeholder: impl Into<SharedString>,
@@ -613,6 +622,7 @@ impl MentionInput {
         );
         let store_subs = Self::subscribe_pool_sources(cx);
         let avatar_cache = crate::image_cache::shared_avatar_cache(cx);
+        let emoji_cache = crate::image_cache::shared_emoji_cache(cx);
         let preview_cache = cx.new(|cx| {
             LruImageCache::avatar_thumbnail(
                 "composer-attachment-preview",
@@ -645,6 +655,7 @@ impl MentionInput {
             toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             _popup_subs: Vec::new(),
             avatar_cache,
+            emoji_cache,
             preview_cache,
             settings,
             pending_attachments: Vec::new(),
@@ -705,11 +716,20 @@ impl MentionInput {
         let outgoing = self
             .draft_channel
             .map(|leaving| (leaving, self.take_draft(cx)));
+        let persist_leaving = outgoing.as_ref().map(|(leaving, _)| {
+            ChannelList::global(cx)
+                .read(cx)
+                .should_persist_compose_draft(*leaving)
+        });
         let incoming = store.update(cx, |store, _| {
             if let Some((leaving, draft)) = outgoing {
-                match draft {
-                    Some(draft) => store.set_draft(leaving, draft),
-                    None => store.clear_draft(leaving),
+                if persist_leaving.unwrap_or(false) {
+                    match draft {
+                        Some(draft) => store.set_draft(leaving, draft),
+                        None => store.clear_draft(leaving),
+                    }
+                } else {
+                    store.clear_draft(leaving);
                 }
             }
             channel_id.and_then(|channel_id| store.take_draft(channel_id))
@@ -1597,7 +1617,10 @@ impl MentionInput {
     }
 
     fn check_trigger(&mut self, content: &str, cx: &mut Context<Self>) {
-        let cursor = self.input.read(cx).cursor().min(content.len());
+        let mut cursor = self.input.read(cx).cursor().min(content.len());
+        while cursor > 0 && !content.is_char_boundary(cursor) {
+            cursor -= 1;
+        }
         if cursor == 0 || content.is_empty() {
             self.end_mention(cx);
             return;
@@ -1666,6 +1689,7 @@ impl MentionInput {
                         this.invalidate_pool(Sigil::Hash, cx);
                     }
                     ChannelEvent::Unread(_) | ChannelEvent::InVoiceChanged => {}
+                    ChannelEvent::ArchivedByAdministrator { .. } => {}
                 },
             ),
             cx.subscribe(
@@ -1887,7 +1911,11 @@ impl MentionInput {
                 break;
             }
             if emoji.shortname.contains(&needle) {
-                let src = crate::util::imgproxy::emoji_url(cx, &emoji.emoji_id);
+                let src = crate::util::imgproxy::emoji_url_sized(
+                    cx,
+                    &emoji.emoji_id,
+                    SUGGESTION_EMOJI_SOURCE_PX,
+                );
                 out.push(Suggestion::Emoji(emoji.clone(), src.into()));
             }
         }
@@ -2278,7 +2306,13 @@ impl MentionInput {
                     let leading = if src.is_empty() {
                         None
                     } else {
-                        Some(img(src.clone()).size(px(22.)).into_any_element())
+                        Some(
+                            img(src.clone())
+                                .image_cache(&self.emoji_cache)
+                                .id("suggestion-emoji-frames")
+                                .size(px(22.))
+                                .into_any_element(),
+                        )
                     };
                     (
                         leading,
