@@ -395,9 +395,12 @@ impl BadgeService {
                                 ts,
                                 message_id,
                                 cx,
-                            )
+                            );
+                            if from_me && is_new_message {
+                                cl.apply_read(clan_id, channel_id, cx);
+                            }
                         });
-                        if seen {
+                        if seen || from_me {
                             MessagesStore::global(cx).update(cx, |store, _| {
                                 store.set_last_read_message(channel_id, message_id);
                             });

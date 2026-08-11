@@ -6418,6 +6418,52 @@ mod tests {
     }
 
     #[gpui::test]
+    fn own_channel_message_clears_stale_reply_badge_immediately(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.note_channel_message(
+                    ClanId(1),
+                    ChannelId(1),
+                    true,
+                    false,
+                    100,
+                    MessageId(9),
+                    cx,
+                );
+                assert_eq!(
+                    channels.channel(ClanId(1), ChannelId(1)).unwrap().badge_count,
+                    1,
+                    "stale reply/mention badge before the writer sends again"
+                );
+
+                channels.note_channel_message(
+                    ClanId(1),
+                    ChannelId(1),
+                    false,
+                    true,
+                    200,
+                    MessageId(10),
+                    cx,
+                );
+                channels.apply_read(ClanId(1), ChannelId(1), cx);
+                assert_eq!(
+                    channels.channel(ClanId(1), ChannelId(1)).unwrap().badge_count,
+                    0,
+                    "own send must clear the channel badge immediately, not wait for last-seen debounce"
+                );
+                assert!(
+                    !channels
+                        .channel(ClanId(1), ChannelId(1))
+                        .unwrap()
+                        .is_unread()
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
     fn live_channel_badges_survive_a_structure_refetch_without_any_parked_seed(
         cx: &mut gpui::TestAppContext,
     ) {
