@@ -29,9 +29,9 @@ use crate::components::primitives::text_actions::{
 };
 use crate::theme::ActiveTheme;
 use crate::util::text_edit::{
-    EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
-    granularity_for_click, home_target, line_end, line_start, next_word_boundary,
-    previous_word_boundary, range_for_granularity, should_coalesce,
+    EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, byte_range_from_utf16,
+    extend_range_for_granularity, granularity_for_click, home_target, line_end, line_start,
+    next_word_boundary, previous_word_boundary, range_for_granularity, should_coalesce,
 };
 
 const MASK: char = '\u{2022}';
@@ -1125,8 +1125,8 @@ impl EntityInputHandler for MentionInputState {
         }
         self.selected_range = new_selected_range_utf16
             .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.start)
+            .map(|range_utf16| byte_range_from_utf16(new_text, range_utf16))
+            .map(|new_range| range.start + new_range.start..range.start + new_range.end)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
 
         self.pause_caret_blink(cx);
@@ -1662,7 +1662,53 @@ impl RenderOnce for MentionInputField {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::font;
+    use gpui::{TestAppContext, font};
+
+    #[gpui::test]
+    fn ime_composing_a_vietnamese_char_leaves_the_caret_on_a_char_boundary(
+        cx: &mut TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let field = cx.update(|window, cx| cx.new(|cx| MentionInputState::new(window, cx)));
+
+        cx.update(|window, cx| {
+            field.update(cx, |field, cx| {
+                field.replace_text_in_range(None, ":", window, cx);
+                field.replace_and_mark_text_in_range(None, "U", Some(1..1), window, cx);
+                field.replace_and_mark_text_in_range(None, "Ư", Some(1..1), window, cx);
+            });
+        });
+
+        let (value, cursor) = cx.update(|_, cx| {
+            let field = field.read(cx);
+            (field.value().to_string(), field.cursor())
+        });
+
+        assert_eq!(value, ":Ư");
+        assert!(value.is_char_boundary(cursor));
+        assert_eq!(&value[1..cursor], "Ư");
+    }
+
+    #[gpui::test]
+    fn ime_caret_inside_a_multi_char_composition_stays_valid(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let field = cx.update(|window, cx| cx.new(|cx| MentionInputState::new(window, cx)));
+
+        cx.update(|window, cx| {
+            field.update(cx, |field, cx| {
+                field.replace_and_mark_text_in_range(None, "ưới", Some(2..2), window, cx);
+            });
+        });
+
+        let (value, cursor) = cx.update(|_, cx| {
+            let field = field.read(cx);
+            (field.value().to_string(), field.cursor())
+        });
+
+        assert_eq!(value, "ưới");
+        assert!(value.is_char_boundary(cursor));
+        assert_eq!(&value[..cursor], "ướ");
+    }
 
     #[test]
     fn byte_to_utf16_ascii_is_identity() {

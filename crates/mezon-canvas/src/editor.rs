@@ -39,8 +39,8 @@ use mezon_widgets::text_actions::{
     SelectToNextWordEnd, SelectToPreviousWordStart, SelectUp, TEXT_INPUT_CONTEXT, Up,
 };
 use mezon_widgets::text_edit::{
-    SelectGranularity, extend_range_for_granularity, granularity_for_click, next_word_boundary,
-    previous_word_boundary, range_for_granularity,
+    SelectGranularity, byte_range_from_utf16, extend_range_for_granularity, granularity_for_click,
+    next_word_boundary, previous_word_boundary, range_for_granularity,
 };
 use mezon_widgets::{
     Button, ButtonVariants, Icon, IconName, Input, InputState, Sizable, Size, h_flex, v_flex,
@@ -1686,7 +1686,7 @@ impl EntityInputHandler for CanvasEditorState {
             self.marked_range = None;
         }
         if let Some(sel) = new_selected_range_utf16 {
-            let sel = self.range_from_utf16(&sel);
+            let sel = byte_range_from_utf16(new_text, &sel);
             self.selected_range = insert_start + sel.start..insert_start + sel.end;
             self.selection_reversed = false;
         }

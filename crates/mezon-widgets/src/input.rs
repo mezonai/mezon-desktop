@@ -23,9 +23,9 @@ use crate::text_actions::{
     TEXT_INPUT_CONTEXT, Undo, Up,
 };
 use crate::text_edit::{
-    EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
-    granularity_for_click, home_target, line_end, line_start, next_word_boundary,
-    previous_word_boundary, range_for_granularity, should_coalesce,
+    EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, byte_range_from_utf16,
+    extend_range_for_granularity, granularity_for_click, home_target, line_end, line_start,
+    next_word_boundary, previous_word_boundary, range_for_granularity, should_coalesce,
 };
 
 const MASK: char = '\u{2022}';
@@ -1050,8 +1050,8 @@ impl EntityInputHandler for InputState {
         }
         self.selected_range = new_selected_range_utf16
             .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.start)
+            .map(|range_utf16| byte_range_from_utf16(new_text, range_utf16))
+            .map(|new_range| range.start + new_range.start..range.start + new_range.end)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
 
         self.refresh_filter_token_chips(cx);

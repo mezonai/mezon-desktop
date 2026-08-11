@@ -125,6 +125,23 @@ pub fn line_range_at(text: &str, offset: usize) -> Range<usize> {
     line_start(text, offset)..line_end(text, offset)
 }
 
+pub fn byte_offset_from_utf16(text: &str, offset_utf16: usize) -> usize {
+    let mut utf16_count = 0;
+    for (byte_ix, ch) in text.char_indices() {
+        if utf16_count >= offset_utf16 {
+            return byte_ix;
+        }
+        utf16_count += ch.len_utf16();
+    }
+    text.len()
+}
+
+pub fn byte_range_from_utf16(text: &str, range_utf16: &Range<usize>) -> Range<usize> {
+    let start = byte_offset_from_utf16(text, range_utf16.start);
+    let end = byte_offset_from_utf16(text, range_utf16.end.max(range_utf16.start));
+    start..end
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum SelectGranularity {
     #[default]
@@ -325,6 +342,34 @@ mod tests {
         let (backward, reversed) = extend_range_for_granularity(text, &anchor, 1, word, false);
         assert_eq!(backward, 0..7);
         assert!(reversed);
+    }
+
+    #[test]
+    fn byte_offsets_from_utf16_are_relative_to_the_given_text() {
+        assert_eq!(byte_offset_from_utf16("Ư", 0), 0);
+        assert_eq!(byte_offset_from_utf16("Ư", 1), 2);
+        assert_eq!(byte_offset_from_utf16("Ư", 9), 2);
+        assert_eq!(byte_offset_from_utf16("", 0), 0);
+        assert_eq!(byte_offset_from_utf16("😀a", 2), 4);
+    }
+
+    #[test]
+    fn ime_caret_after_a_composed_vietnamese_char_lands_on_a_char_boundary() {
+        let content = ":";
+        let new_text = "Ư";
+        let insert_at = content.len();
+        let caret = byte_range_from_utf16(new_text, &(1..1));
+        let cursor = insert_at + caret.end;
+
+        let composed = format!("{content}{new_text}");
+        assert_eq!(cursor, composed.len());
+        assert!(composed.is_char_boundary(cursor));
+    }
+
+    #[test]
+    fn byte_range_from_utf16_never_yields_an_inverted_range() {
+        let inverted = Range { start: 1, end: 0 };
+        assert_eq!(byte_range_from_utf16("Ư", &inverted), 2..2);
     }
 
     #[test]
