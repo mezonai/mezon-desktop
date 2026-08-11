@@ -1,7 +1,7 @@
 use gpui::{App, ClickEvent, ClipboardItem, Entity, Pixels, Point, WeakEntity, Window};
 use mezon_store::{
-    AppConfig, BadgeService, ChannelId, ChannelList, ChannelType, ClanId,
-    PERMISSION_MANAGE_CHANNEL, PermissionStore, archive_menu_hidden, can_archive_channel,
+    AppConfig, BadgeService, ChannelId, ChannelList, ChannelType, ClanId, archive_menu_hidden,
+    can_archive_channel, can_manage_channel,
 };
 
 use super::ChannelSidebar;
@@ -20,13 +20,7 @@ pub(super) struct ChannelMenuPermissions {
 
 impl ChannelMenuPermissions {
     pub(super) fn resolve(clan_id: ClanId, channel_id: ChannelId, cx: &App) -> Self {
-        let can_manage_channel = PermissionStore::try_global(cx)
-            .map(|permissions| {
-                permissions
-                    .read(cx)
-                    .check(clan_id, None, PERMISSION_MANAGE_CHANNEL, cx)
-            })
-            .unwrap_or(false);
+        let can_manage_channel = can_manage_channel(clan_id, cx);
         let is_welcome_channel = mezon_store::ClanList::global(cx)
             .read(cx)
             .welcome_channel_id(clan_id)

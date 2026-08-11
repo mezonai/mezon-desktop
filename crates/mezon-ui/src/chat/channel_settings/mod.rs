@@ -8,8 +8,8 @@ use gpui::{
     div, point, prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanId, ClanList, PERMISSION_MANAGE_CHANNEL,
-    PERMISSION_MANAGE_CLAN, PermissionStore, Settings,
+    ChannelId, ChannelList, ChannelType, ClanId, ClanList, PermissionStore, Settings,
+    can_manage_channel,
 };
 
 use crate::components::primitives::{Icon, IconName, h_flex, v_flex};
@@ -252,12 +252,7 @@ impl ChannelSettingScreen {
         let welcome_channel_id = ClanList::global(cx)
             .read(cx)
             .welcome_channel_id(self.clan_id);
-        let has_manage_channel = {
-            let store = PermissionStore::global(cx);
-            let store = store.read(cx);
-            store.check(self.clan_id, None, PERMISSION_MANAGE_CHANNEL, cx)
-                || store.check(self.clan_id, None, PERMISSION_MANAGE_CLAN, cx)
-        };
+        let has_manage_channel = can_manage_channel(self.clan_id, cx);
         ChannelTabContext {
             channel_type,
             is_thread: channel_type == ChannelType::Thread,
