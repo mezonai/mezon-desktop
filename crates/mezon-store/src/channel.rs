@@ -1402,6 +1402,45 @@ impl ChannelList {
             .unwrap_or(0)
     }
 
+    pub(crate) fn clear_stale_channel_badge(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.channel_badge_count(clan_id, channel_id) == 0 {
+            return;
+        }
+        let Some(categories) = self.cache.get_mut(&clan_id) else {
+            return;
+        };
+        let mut cleared = 0u32;
+        let mut notify = false;
+        for ch in categories
+            .iter_mut()
+            .flat_map(|category| category.channels.iter_mut())
+            .filter(|ch| ch.id == channel_id)
+        {
+            if ch.badge_count > 0 {
+                cleared = ch.badge_count;
+                ch.badge_count = 0;
+                notify = true;
+            }
+        }
+        if let Some(user_channel) = self.user_channels.get_mut(&channel_id) {
+            if user_channel.badge_count > 0 {
+                user_channel.badge_count = 0;
+                notify = true;
+            }
+        }
+        if notify {
+            self.notify_channel_list(clan_id, cx);
+        }
+        if cleared > 0 && self.is_clan_cache_loaded(clan_id) {
+            self.sync_clan_after_read(clan_id, cleared, cx);
+        }
+    }
+
     pub fn is_clan_cache_loaded(&self, clan_id: ClanId) -> bool {
         self.cache.contains(&clan_id)
     }
@@ -6418,7 +6457,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn own_channel_message_clears_stale_reply_badge_immediately(cx: &mut gpui::TestAppContext) {
+    fn clear_stale_channel_badge_clears_count_without_touching_last_seen(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|cx| {
             let channels = init_channel_list(cx);
             channels.update(cx, |channels, cx| {
@@ -6433,9 +6474,11 @@ mod tests {
                     cx,
                 );
                 assert_eq!(
-                    channels.channel(ClanId(1), ChannelId(1)).unwrap().badge_count,
-                    1,
-                    "stale reply/mention badge before the writer sends again"
+                    channels
+                        .channel(ClanId(1), ChannelId(1))
+                        .unwrap()
+                        .badge_count,
+                    1
                 );
 
                 channels.note_channel_message(
@@ -6447,17 +6490,47 @@ mod tests {
                     MessageId(10),
                     cx,
                 );
-                channels.apply_read(ClanId(1), ChannelId(1), cx);
-                assert_eq!(
-                    channels.channel(ClanId(1), ChannelId(1)).unwrap().badge_count,
-                    0,
-                    "own send must clear the channel badge immediately, not wait for last-seen debounce"
+                let last_seen_ts = channels
+                    .channel(ClanId(1), ChannelId(1))
+                    .unwrap()
+                    .last_seen_timestamp;
+                let last_seen_id = channels
+                    .channel(ClanId(1), ChannelId(1))
+                    .unwrap()
+                    .last_seen_message_id;
+
+                channels.clear_stale_channel_badge(ClanId(1), ChannelId(1), cx);
+
+                let ch = channels.channel(ClanId(1), ChannelId(1)).unwrap();
+                assert_eq!(ch.badge_count, 0);
+                assert_eq!(ch.last_seen_timestamp, last_seen_ts);
+                assert_eq!(ch.last_seen_message_id, last_seen_id);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn clear_stale_channel_badge_is_noop_when_badge_already_zero(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), cx);
+                channels.note_channel_message(
+                    ClanId(1),
+                    ChannelId(1),
+                    false,
+                    true,
+                    200,
+                    MessageId(10),
+                    cx,
                 );
-                assert!(
-                    !channels
+                channels.clear_stale_channel_badge(ClanId(1), ChannelId(1), cx);
+                assert_eq!(
+                    channels
                         .channel(ClanId(1), ChannelId(1))
                         .unwrap()
-                        .is_unread()
+                        .badge_count,
+                    0
                 );
             });
         });

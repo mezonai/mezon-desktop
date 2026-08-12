@@ -385,22 +385,53 @@ impl BadgeService {
                         skip = skip_unread_activity,
                         "socket ChannelMessage decision"
                     );
-                    if m.topic_id == 0 && !skip_unread_activity {
-                        ChannelList::global(cx).update(cx, |cl, cx| {
-                            cl.note_channel_message(
-                                clan_id,
-                                channel_id,
-                                badge_mention,
-                                seen,
-                                ts,
-                                message_id,
-                                cx,
-                            );
-                            if from_me && is_new_message {
-                                cl.apply_read(clan_id, channel_id, cx);
+                    if !skip_unread_activity {
+                        if m.topic_id == 0 {
+                            ChannelList::global(cx).update(cx, |cl, cx| {
+                                cl.note_channel_message(
+                                    clan_id,
+                                    channel_id,
+                                    badge_mention,
+                                    seen,
+                                    ts,
+                                    message_id,
+                                    cx,
+                                );
+                            });
+                        } else if from_me && is_new_message {
+                            let parent_id = ChannelId(m.channel_id);
+                            ChannelList::global(cx).update(cx, |cl, cx| {
+                                cl.note_channel_message(
+                                    clan_id, parent_id, false, true, ts, message_id, cx,
+                                );
+                            });
+                        }
+                        if from_me && is_new_message {
+                            let clear_channel = if m.topic_id != 0 {
+                                ChannelId(m.channel_id)
+                            } else {
+                                channel_id
+                            };
+                            let captured_badge = ChannelList::global(cx)
+                                .read(cx)
+                                .channel_badge_count(clan_id, clear_channel);
+                            if captured_badge > 0 {
+                                MessagesStore::global(cx).update(cx, |store, cx| {
+                                    store.preserve_badge_for_own_send(
+                                        clan_id,
+                                        clear_channel,
+                                        message_id,
+                                        ts,
+                                        captured_badge,
+                                        cx,
+                                    );
+                                });
+                                ChannelList::global(cx).update(cx, |cl, cx| {
+                                    cl.clear_stale_channel_badge(clan_id, clear_channel, cx);
+                                });
                             }
-                        });
-                        if seen || from_me {
+                        }
+                        if seen && !message_id.is_zero() {
                             MessagesStore::global(cx).update(cx, |store, _| {
                                 store.set_last_read_message(channel_id, message_id);
                             });

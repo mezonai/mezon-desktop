@@ -1293,6 +1293,42 @@ impl MessagesStore {
         self.arm_last_seen_debounce(cx);
     }
 
+    pub(crate) fn preserve_badge_for_own_send(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        create_time: i64,
+        captured_badge: u32,
+        cx: &mut Context<Self>,
+    ) {
+        if captured_badge == 0 || message_id.is_zero() {
+            return;
+        }
+        let badge_count = self
+            .pending_last_seen
+            .as_ref()
+            .filter(|pending| pending.channel_id == channel_id)
+            .map(|pending| pending.badge_count.max(captured_badge))
+            .unwrap_or(captured_badge);
+        self.pending_last_seen = Some(PendingLastSeen {
+            clan_id,
+            channel_id,
+            message_id,
+            create_time,
+            mode: self.mode,
+            badge_count,
+        });
+        self.arm_last_seen_debounce(cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_last_seen_badge(&self) -> Option<u32> {
+        self.pending_last_seen
+            .as_ref()
+            .map(|pending| pending.badge_count)
+    }
+
     fn known_last_seen_id(&self, channel_id: ChannelId, cx: &App) -> Option<MessageId> {
         self.last_read_message_by_channel
             .get(&channel_id)
@@ -10557,6 +10593,28 @@ mod tests {
         ChannelList::init(api.clone(), cx);
         crate::account::AccountStore::init(api.clone(), cx);
         MessagesStore::init(api, cx)
+    }
+
+    #[gpui::test]
+    fn preserve_badge_for_own_send_records_badge_for_last_seen_write(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                store.active_clan_id = Some(ClanId(1));
+                store.active_channel_id = Some(ChannelId(1));
+                store.preserve_badge_for_own_send(
+                    ClanId(1),
+                    ChannelId(1),
+                    MessageId(10),
+                    200,
+                    1,
+                    cx,
+                );
+                assert_eq!(store.pending_last_seen_badge(), Some(1));
+            });
+        });
     }
 
     #[gpui::test]
