@@ -185,6 +185,30 @@ impl McpBackend {
                     .unwrap_or(true);
                 self.load_more_messages(older).await
             }
+            "list_loaded_messages" => {
+                let limit = arguments
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(50)
+                    .clamp(1, 500) as usize;
+                self.send_ui_result(|reply| McpCommand::ListLoadedMessages { limit, reply })
+                    .await
+            }
+            "jump_to_message" => {
+                self.require_write_mode("jump_to_message")?;
+                let message_id = parse_i64_field(&arguments, "message_id")?;
+                self.jump_to_message(message_id).await
+            }
+            "jump_to_present" => {
+                self.require_write_mode("jump_to_present")?;
+                self.jump_to_present().await
+            }
+            "get_user_status" => self.get_user_status().await,
+            "get_member_list" => self.get_member_list().await,
+            "set_user_status" => {
+                self.require_write_mode("set_user_status")?;
+                self.set_user_status(&arguments).await
+            }
             "get_settings" => self.get_settings().await,
             "get_voice_status" => self.get_voice_status().await,
             "list_stickers" => self.list_stickers().await,
@@ -303,6 +327,166 @@ impl McpBackend {
             "send_image" => {
                 self.require_write_mode("send_image")?;
                 self.send_image(&arguments).await
+            }
+            "composer_type" => {
+                self.require_write_mode("composer_type")?;
+                let text = arguments
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("composer_type requires string field text"))?
+                    .to_string();
+                self.send_ui_result(|reply| McpCommand::ComposerType { text, reply })
+                    .await
+            }
+            "composer_state" => {
+                self.send_ui_result(|reply| McpCommand::ComposerState { reply })
+                    .await
+            }
+            "composer_pick" => {
+                self.require_write_mode("composer_pick")?;
+                let index = arguments
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                self.send_ui_result(|reply| McpCommand::ComposerPick { index, reply })
+                    .await
+            }
+            "composer_submit" => {
+                self.require_write_mode("composer_submit")?;
+                self.send_ui_result(|reply| McpCommand::ComposerSubmit { reply })
+                    .await
+            }
+            "edit_begin" => {
+                self.require_write_mode("edit_begin")?;
+                let message_id = parse_i64_field(&arguments, "message_id")?;
+                self.send_ui_result(|reply| McpCommand::EditBegin { message_id, reply })
+                    .await
+            }
+            "edit_type" => {
+                self.require_write_mode("edit_type")?;
+                let text = arguments
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("edit_type requires string field text"))?
+                    .to_string();
+                self.send_ui_result(|reply| McpCommand::EditType { text, reply })
+                    .await
+            }
+            "edit_pick" => {
+                self.require_write_mode("edit_pick")?;
+                let index = arguments
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                self.send_ui_result(|reply| McpCommand::EditPick { index, reply })
+                    .await
+            }
+            "edit_state" => {
+                self.send_ui_result(|reply| McpCommand::EditState { reply })
+                    .await
+            }
+            "edit_save" => {
+                self.require_write_mode("edit_save")?;
+                self.send_ui_result(|reply| McpCommand::EditSave { reply })
+                    .await
+            }
+            "composer_panel_send" => {
+                self.require_write_mode("composer_panel_send")?;
+                let kind = arguments
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("composer_panel_send requires string field kind")
+                    })?
+                    .to_string();
+                let url = arguments
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("composer_panel_send requires string field url"))?
+                    .to_string();
+                let filename = arguments
+                    .get("filename")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let width = arguments.get("width").and_then(Value::as_i64).unwrap_or(0) as i32;
+                let height = arguments.get("height").and_then(Value::as_i64).unwrap_or(0) as i32;
+                self.send_ui_result(|reply| McpCommand::ComposerPanelSend {
+                    kind,
+                    url,
+                    filename,
+                    width,
+                    height,
+                    reply,
+                })
+                .await
+            }
+            "composer_drop_paths" => {
+                self.require_write_mode("composer_drop_paths")?;
+                let paths: Vec<String> = arguments
+                    .get("paths")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if paths.is_empty() {
+                    anyhow::bail!("composer_drop_paths requires a non-empty paths array");
+                }
+                self.send_ui_result(|reply| McpCommand::ComposerDropPaths { paths, reply })
+                    .await
+            }
+            "send_buzz" => {
+                self.require_write_mode("send_buzz")?;
+                let text = arguments
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                self.send_ui_result(|reply| McpCommand::SendBuzz { text, reply })
+                    .await
+            }
+            "send_attachment" => {
+                self.require_write_mode("send_attachment")?;
+                let mut paths: Vec<String> = arguments
+                    .get("paths")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if let Some(path) = arguments.get("path").and_then(Value::as_str) {
+                    paths.push(path.to_string());
+                }
+                let content = arguments
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if paths.is_empty() && content.is_empty() {
+                    anyhow::bail!("send_attachment requires path/paths or content");
+                }
+                let anonymous = arguments
+                    .get("anonymous")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let reply_to = optional_i64_field(&arguments, "reply_to").unwrap_or(0);
+                self.send_ui_result(|reply| McpCommand::SendAttachment {
+                    paths,
+                    content,
+                    anonymous,
+                    reply_to,
+                    reply,
+                })
+                .await
             }
             "send_sticker" => {
                 self.require_write_mode("send_sticker")?;
@@ -874,6 +1058,49 @@ impl McpBackend {
             .await
     }
 
+    async fn jump_to_message(&self, message_id: i64) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::JumpToMessage { message_id, reply })
+            .await
+    }
+
+    async fn jump_to_present(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::JumpToPresent { reply })
+            .await
+    }
+
+    async fn get_user_status(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::GetUserStatus { reply })
+            .await
+    }
+
+    async fn get_member_list(&self) -> anyhow::Result<Value> {
+        self.send_ui_result(|reply| McpCommand::GetMemberList { reply })
+            .await
+    }
+
+    async fn set_user_status(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let status = arguments
+            .get("status")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("set_user_status requires string field status"))?
+            .to_string();
+        let minutes = arguments
+            .get("minutes")
+            .and_then(Value::as_i64)
+            .unwrap_or(0) as i32;
+        let until_turn_on = arguments
+            .get("until_turn_on")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        self.send_ui_result(|reply| McpCommand::SetUserStatus {
+            status,
+            minutes,
+            until_turn_on,
+            reply,
+        })
+        .await
+    }
+
     async fn navigate(&self, path: &str) -> anyhow::Result<Value> {
         validate_navigate_path(path)?;
         let Some(ui_tx) = &self.ui_tx else {
@@ -1188,7 +1415,7 @@ impl McpBackend {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
-                Vec::new(),
+                Some(Vec::new()),
                 Default::default(),
             )
             .await?;

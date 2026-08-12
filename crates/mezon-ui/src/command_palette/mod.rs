@@ -561,7 +561,7 @@ impl Render for CommandPaletteModal {
             .px_6()
             .py_4()
             .rounded(px(6.))
-            .bg(theme.tokens.bg_modal_theme_search)
+            .bg(theme.surfaces.modal_search)
             .shadow_lg()
             .child(search)
             .child(list)

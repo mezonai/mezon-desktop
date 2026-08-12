@@ -21,6 +21,14 @@ use crate::wallet_persist::{self, PersistedWalletState};
 
 const GIVE_COFFEE_AMOUNT: i64 = 10_000;
 
+fn id_token_valid_for(jwt: &str) -> Option<i64> {
+    mezon_client::jwt_expires_at(jwt).map(|exp| exp as i64 - mezon_client::server_now_secs() as i64)
+}
+
+fn now_secs() -> i64 {
+    mezon_client::server_now_secs() as i64
+}
+
 fn should_refresh_balance(refreshing: bool, force: bool, same_user: bool, fresh: bool) -> bool {
     if refreshing {
         return false;
@@ -130,6 +138,7 @@ pub enum WalletEvent {
     TokenReceived { amount: i64, sender_id: String },
     CoffeeSent,
     SendFailed { message: String },
+    EnableFailed { message: String },
 }
 
 pub struct SendTokenRequest {
@@ -154,6 +163,8 @@ pub struct WalletStore {
     wallet: Option<WalletDetail>,
     zk_proofs: Option<ZkProof>,
     ephemeral: Option<EphemeralKeyPair>,
+    proof_minted_at: Option<i64>,
+    failed_id_token_exp: Option<u64>,
     is_enabled: bool,
     pending_give_coffee: bool,
     enabled_user: Option<String>,
@@ -186,6 +197,8 @@ impl WalletStore {
                 wallet: None,
                 zk_proofs: None,
                 ephemeral: None,
+                proof_minted_at: None,
+                failed_id_token_exp: None,
                 is_enabled: false,
                 pending_give_coffee: false,
                 enabled_user: None,
@@ -270,10 +283,10 @@ impl WalletStore {
             }
         }
         if config.indexer_api_url.is_empty() {
-            tracing::error!("wallet: indexer_api_url is unset, transaction history is disabled");
+            tracing::warn!("wallet: indexer_api_url is unset, transaction history is disabled");
         }
         if config.dong_service_api_url.is_empty() {
-            tracing::error!(
+            tracing::warn!(
                 "wallet: dong_service_api_url is unset, QR red envelope claim is disabled"
             );
         }
@@ -323,6 +336,9 @@ impl WalletStore {
         };
         self.auth_user = Some(user_id.clone());
         self.try_restore_persisted(&user_id, cx);
+        if !self.is_available() {
+            self.enable_wallet_for_current_user(false, cx);
+        }
         self.ensure_wallet_balance(user_id, cx);
     }
 
@@ -348,6 +364,7 @@ impl WalletStore {
         self.wallet = stored.wallet;
         self.zk_proofs = Some(zk_proofs);
         self.ephemeral = Some(ephemeral);
+        self.proof_minted_at = stored.proof_minted_at;
         self.is_enabled = true;
         self.enabled_user = Some(user_id.to_string());
         cx.notify();
@@ -357,19 +374,25 @@ impl WalletStore {
         if session.id_token.is_empty() || session.user_id.is_empty() {
             return;
         }
+        self.reset(cx);
         self.enable_wallet(session.id_token.clone(), session.user_id.clone(), true, cx);
     }
 
-    pub fn enable_wallet_for_current_user(&mut self, cx: &mut Context<Self>) {
+    pub fn enable_wallet_for_current_user(&mut self, force: bool, cx: &mut Context<Self>) {
         let Some((jwt, user_id)) = self
             .auth_state
             .read(cx)
             .session_credentials()
             .filter(|(jwt, uid)| !jwt.is_empty() && !uid.is_empty())
         else {
+            if force {
+                cx.emit(WalletEvent::EnableFailed {
+                    message: "Wallet is not available".to_string(),
+                });
+            }
             return;
         };
-        self.enable_wallet(jwt, user_id, false, cx);
+        self.enable_wallet(jwt, user_id, force, cx);
     }
 
     fn enable_wallet(&mut self, jwt: String, user_id: String, force: bool, cx: &mut Context<Self>) {
@@ -380,6 +403,24 @@ impl WalletStore {
             return;
         }
         if self.enabling_user.as_deref() == Some(user_id.as_str()) {
+            return;
+        }
+        let id_token_exp = mezon_client::jwt_expires_at(&jwt);
+        if !force && id_token_exp.is_some() && id_token_exp == self.failed_id_token_exp {
+            return;
+        }
+        let id_token_valid_for = id_token_valid_for(&jwt);
+        if id_token_valid_for.is_some_and(|left| left <= 0) {
+            self.failed_id_token_exp = id_token_exp;
+            tracing::warn!(
+                id_token_valid_for = ?id_token_valid_for,
+                "wallet: id_token expired, skipping the zk proof fetch — only a fresh login mints a new one"
+            );
+            if force {
+                cx.emit(WalletEvent::EnableFailed {
+                    message: "Session expired — sign in again to use the wallet".to_string(),
+                });
+            }
             return;
         }
         let Some(clients) = self.clients.clone() else {
@@ -394,10 +435,11 @@ impl WalletStore {
             self.reset(cx);
         }
         let generation = self.reset_generation;
+        let report_failure = force;
         self.enabling_user = Some(user_id.clone());
         self.enable_task = Some(cx.spawn(async move |this, cx| {
             let ephemeral = generate_ephemeral_key_pair().ok();
-            let (zk_proofs, account) = match &ephemeral {
+            let (zk_proofs, account, failure) = match &ephemeral {
                 Some(ephemeral) => {
                     let request = GetZkProofRequest {
                         user_id: user_id.clone(),
@@ -408,16 +450,28 @@ impl WalletStore {
                     };
                     match clients.zk.get_zk_proofs(request).await {
                         Ok(proofs) => {
+                            tracing::info!(
+                                id_token_valid_for = ?id_token_valid_for,
+                                "wallet: zk proof minted"
+                            );
                             let account = clients.mmn.get_account_by_user_id(&user_id).await.ok();
-                            (Some(proofs), account)
+                            (Some(proofs), account, None)
                         }
                         Err(error) => {
-                            tracing::warn!(%error, "wallet: zk proof fetch failed");
-                            (None, None)
+                            tracing::warn!(
+                                %error,
+                                id_token_valid_for = ?id_token_valid_for,
+                                "wallet: zk proof fetch failed"
+                            );
+                            (None, None, Some(error.to_string()))
                         }
                     }
                 }
-                None => (None, None),
+                None => (
+                    None,
+                    None,
+                    Some("Could not generate the wallet key pair".to_string()),
+                ),
             };
             this.update(cx, |this, cx| {
                 if this.enabling_user.as_deref() == Some(user_id.as_str()) {
@@ -427,10 +481,16 @@ impl WalletStore {
                     return;
                 }
                 let (Some(ephemeral), Some(zk_proofs)) = (ephemeral, zk_proofs) else {
+                    this.failed_id_token_exp = id_token_exp;
+                    if let (true, Some(message)) = (report_failure, failure) {
+                        cx.emit(WalletEvent::EnableFailed { message });
+                    }
                     return;
                 };
+                this.failed_id_token_exp = None;
                 this.ephemeral = Some(ephemeral);
                 this.zk_proofs = Some(zk_proofs);
+                this.proof_minted_at = Some(now_secs());
                 this.is_enabled = true;
                 this.enabled_user = Some(user_id.clone());
                 if let Some(account) = account {
@@ -537,6 +597,18 @@ impl WalletStore {
             ..
         } = request;
 
+        let proof_age = self.proof_minted_at.map(|minted| now_secs() - minted);
+        let id_token_left = self
+            .auth_state
+            .read(cx)
+            .session_credentials()
+            .and_then(|(jwt, _)| id_token_valid_for(&jwt));
+        tracing::info!(
+            proof_age = ?proof_age,
+            id_token_valid_for = ?id_token_left,
+            "wallet: sending a transaction"
+        );
+
         cx.spawn(async move |this, cx| {
             let nonce = clients.mmn.get_current_nonce(&sender, "pending").await;
             let nonce = match nonce {
@@ -565,15 +637,31 @@ impl WalletStore {
                 clients.mmn.send_transaction(tx_request).await
             };
 
-            let response = result.map_err(|error| error.to_string())?;
+            let response = match result {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        proof_age = ?proof_age,
+                        "wallet: transaction request failed"
+                    );
+                    return Err(error.to_string());
+                }
+            };
             if !response.ok {
                 let message = if response.error.is_empty() {
                     "Transaction failed".to_string()
                 } else {
                     response.error.clone()
                 };
+                tracing::warn!(
+                    message,
+                    proof_age = ?proof_age,
+                    "wallet: transaction rejected by MMN"
+                );
                 return Err(message);
             }
+            tracing::info!(proof_age = ?proof_age, "wallet: transaction accepted");
 
             let tx_hash = response.tx_hash.clone();
             this.update(cx, |_this, cx| {
@@ -815,6 +903,7 @@ impl WalletStore {
             wallet: self.wallet.clone(),
             zk_proofs: self.zk_proofs.clone(),
             ephemeral: self.ephemeral.clone(),
+            proof_minted_at: self.proof_minted_at,
         };
         if let Err(error) = wallet_persist::save_wallet(&state) {
             tracing::warn!(%error, "wallet: failed to persist wallet state");
@@ -843,6 +932,8 @@ impl WalletStore {
         self.wallet = None;
         self.zk_proofs = None;
         self.ephemeral = None;
+        self.proof_minted_at = None;
+        self.failed_id_token_exp = None;
         self.is_enabled = false;
         self.pending_give_coffee = false;
         self.enabled_user = None;

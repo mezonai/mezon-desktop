@@ -329,6 +329,7 @@ impl ChatLayout {
         cx.observe(&channel_list, |this, _, cx| {
             this.apply_pending_channel(cx);
             this.redirect_archived_thread_route(cx);
+            this.redirect_removed_thread_route(cx);
             this.ensure_active_channel_for_clan(cx);
             this.sync_inbox_context(cx);
             this.sync_stream_session(cx);
@@ -358,12 +359,16 @@ impl ChatLayout {
                 shell.success(mezon_i18n::t(&locale, key).to_string(), cx);
             });
             this.redirect_archived_thread_route(cx);
+            this.redirect_removed_thread_route(cx);
             this.ensure_active_channel_for_clan(cx);
         })
         .detach();
         cx.observe(&Router::global(cx), |this, _, cx| {
             let next_route = Router::global(cx).read(cx).route().clone();
             if next_route != this.last_route {
+                if matches!(this.last_route, Route::Thread { .. }) {
+                    this.focused_channel_id = None;
+                }
                 match &this.last_route {
                     Route::ClanMembers { .. } => this
                         .clan_members_page
@@ -388,6 +393,7 @@ impl ChatLayout {
             this.reset_message_search(cx);
             this.sync_active_from_route(cx);
             this.redirect_archived_thread_route(cx);
+            this.redirect_removed_thread_route(cx);
             this.ensure_active_channel_for_clan(cx);
             this.sync_stream_session(cx);
             this.sync_voice_frame_pump(cx);
@@ -1170,11 +1176,71 @@ impl ChatLayout {
         );
     }
 
+    fn redirect_removed_thread_route(&mut self, cx: &mut Context<Self>) {
+        let route = Router::global(cx).read(cx).route().clone();
+        match route {
+            Route::Thread {
+                clan_id,
+                channel_id: parent_id,
+                thread_id,
+            } => {
+                let should_redirect = {
+                    let list = self.channel_list.read(cx);
+                    list.is_clan_cache_loaded(clan_id)
+                        && !list.channel_in_clan(clan_id, thread_id)
+                        && !list.is_resolving_channel_detail(thread_id)
+                        && (list.is_locally_deleted(thread_id)
+                            || list.is_locally_archived(thread_id))
+                };
+                if !should_redirect {
+                    return;
+                }
+                crate::channel_navigation::navigate_after_thread_removed(
+                    cx, clan_id, thread_id, parent_id,
+                );
+                self.focused_channel_id = None;
+                self.dismiss_threads_popover(cx);
+                self.dismiss_topic_panel(cx);
+            }
+            Route::Channel {
+                clan_id,
+                channel_id,
+            } => {
+                let parent_id = {
+                    let list = self.channel_list.read(cx);
+                    if !list.is_clan_cache_loaded(clan_id) {
+                        return;
+                    }
+                    if list.channel_in_clan(clan_id, channel_id) {
+                        return;
+                    }
+                    if list.is_resolving_channel_detail(channel_id) {
+                        return;
+                    }
+                    if !list.is_locally_deleted(channel_id) {
+                        return;
+                    }
+                    list.deleted_channel_parent(channel_id).filter(|parent| {
+                        *parent != channel_id && list.channel_in_clan(clan_id, *parent)
+                    })
+                };
+                let Some(parent_id) = parent_id else {
+                    return;
+                };
+                crate::channel_navigation::navigate_after_thread_removed(
+                    cx, clan_id, channel_id, parent_id,
+                );
+                self.focused_channel_id = None;
+                self.dismiss_threads_popover(cx);
+                self.dismiss_topic_panel(cx);
+            }
+            _ => {}
+        }
+    }
+
     fn ensure_active_channel_for_clan(&mut self, cx: &mut Context<Self>) {
-        if !matches!(
-            Router::global(cx).read(cx).route(),
-            Route::Chat | Route::Channel { .. }
-        ) {
+        let route = Router::global(cx).read(cx).route();
+        if !matches!(route, Route::Chat | Route::Channel { .. }) {
             return;
         }
         let Some(clan_id) = self.clan_list.read(cx).active_clan_id else {
@@ -1184,7 +1250,7 @@ impl ChatLayout {
         if let Route::Channel {
             clan_id: route_clan,
             channel_id,
-        } = Router::global(cx).read(cx).route()
+        } = route
             && route_clan == clan_id
         {
             if self
@@ -1215,13 +1281,23 @@ impl ChatLayout {
             return;
         };
 
-        crate::router::navigate(
-            cx,
+        let resolved = Route::Channel {
+            clan_id,
+            channel_id,
+        };
+        let is_redirect = match route {
+            Route::Chat => true,
             Route::Channel {
-                clan_id,
-                channel_id,
-            },
-        );
+                clan_id: route_clan,
+                ..
+            } => route_clan == clan_id,
+            _ => false,
+        };
+        if is_redirect {
+            crate::router::replace(cx, resolved);
+        } else {
+            crate::router::navigate(cx, resolved);
+        }
     }
 
     fn maybe_prefetch_voice_token(&mut self, cx: &mut Context<Self>) {
@@ -1774,14 +1850,13 @@ impl Render for ChatLayout {
                     .flex_col()
                     .w(px(344.0))
                     .h_full()
-                    .bg(theme.bg_tertiary)
+                    .bg(theme.surfaces.primary.ramp())
                     .child(
                         div()
                             .flex()
                             .flex_row()
                             .flex_1()
                             .min_h_0()
-                            .bg(theme.bg_tertiary)
                             .overflow_hidden()
                             .child(
                                 div().w(px(72.0)).h_full().child(
@@ -1806,7 +1881,7 @@ impl Render for ChatLayout {
                             .border_1()
                             .border_color(theme.tokens.border_primary)
                             .shadow_lg()
-                            .bg(theme.tokens.bg_surface)
+                            .bg(theme.surfaces.surface)
                             .child(
                                 div()
                                     .id("clan-footer-bars")
@@ -2843,7 +2918,7 @@ impl ChatLayout {
                                 .overflow_hidden()
                                 .border_l_1()
                                 .border_color(theme.border)
-                                .bg(theme.bg_primary)
+                                .bg(theme.surfaces.secondary.ramp())
                                 .child(panel),
                         )
                     })
@@ -2912,7 +2987,7 @@ impl ChatLayout {
                     .min_h_0()
                     .min_w_0()
                     .gap_2()
-                    .bg(theme.bg_secondary)
+                    .bg(theme.surfaces.direct_message.ramp())
                     .child(
                         div()
                             .flex()
@@ -2934,7 +3009,7 @@ impl ChatLayout {
                                 .h_full()
                                 .flex_shrink_0()
                                 .overflow_hidden()
-                                .bg(theme.bg_primary)
+                                .bg(theme.surfaces.secondary.ramp())
                                 .child(panel),
                         )
                     })

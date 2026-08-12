@@ -165,6 +165,81 @@ impl McpRuntime {
                             cx.update(|cx| mezon_ui::app::capture::scroll_messages(cx, to_top));
                         let _ = reply.send(result);
                     }
+                    McpCommand::ComposerType { text, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::composer_type(cx, &text));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ComposerState { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::composer_state);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ComposerPick { index, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::composer_pick(cx, index));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ComposerSubmit { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::composer_submit);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::EditBegin { message_id, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::edit_begin(cx, message_id));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::EditType { text, reply } => {
+                        let result = cx.update(|cx| mezon_ui::app::capture::edit_type(cx, &text));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::EditPick { index, reply } => {
+                        let result = cx.update(|cx| mezon_ui::app::capture::edit_pick(cx, index));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::EditState { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::edit_state);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::EditSave { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::edit_save);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ComposerPanelSend {
+                        kind,
+                        url,
+                        filename,
+                        width,
+                        height,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::composer_panel_send(
+                                cx, &kind, url, filename, width, height,
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ComposerDropPaths { paths, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::composer_drop_paths(cx, paths));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::SendBuzz { text, reply } => {
+                        let result = cx.update(|cx| send_buzz(cx, &text));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::SendAttachment {
+                        paths,
+                        content,
+                        anonymous,
+                        reply_to,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            send_attachment(cx, &auth_state, &paths, &content, anonymous, reply_to)
+                        });
+                        let _ = reply.send(result);
+                    }
                     McpCommand::ListEmojis {
                         clan_id,
                         query,
@@ -178,6 +253,46 @@ impl McpRuntime {
                     }
                     McpCommand::LoadMoreMessages { older, reply } => {
                         let result = cx.update(|cx| load_more_messages(cx, older));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ListLoadedMessages { limit, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::list_loaded_messages(cx, limit));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::JumpToMessage { message_id, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::jump_to_message(cx, message_id));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::JumpToPresent { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::jump_to_present);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::GetUserStatus { reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::user_status_snapshot(cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::GetMemberList { reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::member_list_snapshot(cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::SetUserStatus {
+                        status,
+                        minutes,
+                        until_turn_on,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::set_user_status(
+                                cx,
+                                &status,
+                                minutes,
+                                until_turn_on,
+                            )
+                        });
                         let _ = reply.send(result);
                     }
                 }
@@ -351,6 +466,111 @@ fn load_more_messages(cx: &mut App, older: bool) -> anyhow::Result<Value> {
         "has_more_top": store.has_more_top(),
         "has_more_bottom": store.has_more_bottom(),
     }))
+}
+
+fn send_buzz(cx: &mut App, text: &str) -> anyhow::Result<Value> {
+    let store = mezon_store::MessagesStore::global(cx);
+    if store.read(cx).is_anonymous_mode() {
+        anyhow::bail!("buzz is blocked in anonymous mode");
+    }
+    store.update(cx, |store, cx| {
+        store.send_buzz_message(text.to_string(), cx);
+    });
+    Ok(json!({ "ok": true, "text": text }))
+}
+
+fn outgoing_attachment(path: &str) -> anyhow::Result<mezon_store::OutgoingAttachment> {
+    let path = std::path::PathBuf::from(path);
+    if !path.is_file() {
+        anyhow::bail!("file not found: {}", path.display());
+    }
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("unreadable filename"))?
+        .to_string();
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("png")
+        .to_ascii_lowercase();
+    let filetype = match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg".to_string(),
+        "png" => "image/png".to_string(),
+        "gif" => "image/gif".to_string(),
+        "webp" => "image/webp".to_string(),
+        "mp4" => "video/mp4".to_string(),
+        "pdf" => "application/pdf".to_string(),
+        "txt" => "text/plain".to_string(),
+        other => format!("image/{other}"),
+    };
+    let (width, height) = image::image_dimensions(&path).unwrap_or((0, 0));
+    Ok(mezon_store::OutgoingAttachment {
+        path,
+        filename,
+        filetype,
+        width: i32::try_from(width).unwrap_or(0),
+        height: i32::try_from(height).unwrap_or(0),
+        duration: 0,
+        poster_jpeg: None,
+    })
+}
+
+fn send_attachment(
+    cx: &mut App,
+    auth_state: &gpui::Entity<AuthState>,
+    paths: &[String],
+    content: &str,
+    anonymous: bool,
+    reply_to: i64,
+) -> anyhow::Result<Value> {
+    let attachments = paths
+        .iter()
+        .map(|path| outgoing_attachment(path))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let filenames: Vec<String> = attachments.iter().map(|att| att.filename.clone()).collect();
+    let (user_id, username) = match auth_state.read(cx) {
+        AuthState::Authenticated(session) => (session.user_id.clone(), session.username.clone()),
+        _ => anyhow::bail!("not signed in"),
+    };
+    let store = mezon_store::MessagesStore::global(cx);
+    let reply_draft = (reply_to != 0)
+        .then(|| {
+            store
+                .read(cx)
+                .reply_draft_for(mezon_store::MessageId(reply_to))
+        })
+        .flatten();
+    if reply_to != 0 && reply_draft.is_none() {
+        anyhow::bail!("message {reply_to} is not loaded in the active channel");
+    }
+    store.update(cx, |store, cx| {
+        if store.is_anonymous_mode() != anonymous {
+            store.toggle_anonymous_mode(cx);
+        }
+        if store.is_anonymous_mode() != anonymous {
+            anyhow::bail!("cannot set anonymous={anonymous} for the active channel");
+        }
+        store.send_message_with_payload(
+            content.to_string(),
+            user_id,
+            username,
+            mezon_store::OutgoingContent::default(),
+            attachments,
+            None,
+            reply_draft,
+            anonymous,
+            0,
+            cx,
+        );
+        Ok(json!({
+            "ok": true,
+            "attachments": filenames,
+            "content": content,
+            "anonymous": anonymous,
+            "reply_to": reply_to,
+        }))
+    })
 }
 
 fn build_context(cx: &App, auth_state: &gpui::Entity<AuthState>) -> Value {

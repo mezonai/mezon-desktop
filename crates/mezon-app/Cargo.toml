@@ -22,6 +22,7 @@ mezon-client.workspace = true
 mezon-cli.workspace = true
 mezon-mcp.workspace = true
 flume.workspace = true
+image.workspace = true
 reqwest_client.workspace = true
 tokio.workspace = true
 futures.workspace = true

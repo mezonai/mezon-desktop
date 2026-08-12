@@ -197,6 +197,81 @@ Parameters:
         write: false,
     },
     ToolSpec {
+        name: "jump_to_message",
+        description: "\
+Move the open channel's message list to an AROUND window centred on one message.
+
+This is the deterministic equivalent of clicking a search hit or a reply jump link. The
+newest message stops being loaded, so get_scroll_state reports has_more_bottom=true
+afterwards -- that is the \"tail detached\" state the send and live-append paths branch on.
+Use jump_to_present to return to the tail.
+
+Parameters:
+- message_id (required)",
+        write: true,
+    },
+    ToolSpec {
+        name: "list_loaded_messages",
+        description: "\
+Return the rows the open channel's message list actually holds, oldest first.
+
+This reads the UI buffer, not the API, so it is what the user can see. Compare it with
+list_messages (which reads the server) to tell a delivery failure apart from a message
+the server accepted but the list never rendered.
+
+Parameters:
+- limit (optional, default 50): return at most this many rows from each end of the buffer.",
+        write: false,
+    },
+    ToolSpec {
+        name: "jump_to_present",
+        description: "\
+Return the open channel's message list to the live tail after a jump_to_message.
+
+Parameters: none.",
+        write: true,
+    },
+    ToolSpec {
+        name: "get_user_status",
+        description: "\
+Return the signed-in user's own presence as the UI resolves it.
+
+Reports the raw account status string, the parsed presence, the custom status, and the
+`online` flag every self-aware view derives from it. Pair with get_member_list to check
+that the member list agrees with the account.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "get_member_list",
+        description: "\
+Return the member-list panel's rows exactly as it computes them for the active screen.
+
+Each section carries the header count the panel renders, and each row carries the
+`online` flag driving its status dot. A row whose `online` contradicts its section is a
+bucketing bug -- the sections come from the presence set while the self row's dot can be
+overridden by the account status.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "set_user_status",
+        description: "\
+Set the signed-in user's own presence.
+
+Mirrors the footer profile popup. The request always reaches the server, including a
+duration-only change (same status, new minutes). status_changed reports whether the
+local status string moved, which is what drives the StatusUpdated event.
+
+Parameters:
+- status (required): \"Online\", \"Idle\", \"Do Not Disturb\" or \"Invisible\"
+- minutes (optional, default 0): how long the status lasts, 0 for indefinite
+- until_turn_on (optional, default false): clear the status when the user turns it back on",
+        write: true,
+    },
+    ToolSpec {
         name: "open_panel",
         description: "\
 Open one of the composer panels: emoji, sticker, gif or sound.
@@ -600,6 +675,144 @@ Parameters:
 - channel_id (required)
 - path or url (one required)
 - content (optional caption)",
+        write: true,
+    },
+    ToolSpec {
+        name: "composer_type",
+        description: "\
+Type text into the active channel's composer, exactly as the user would.
+
+Drives the real MentionInput, so trigger characters open their popup: @ (member/role),
+# (channel), : (emoji), / (slash command). Returns the composer state including the
+suggestion list. Follow with composer_pick to accept one, then composer_submit to send.
+
+Parameters:
+- text (required): full composer text to set.",
+        write: true,
+    },
+    ToolSpec {
+        name: "composer_state",
+        description: "\
+Read the active composer: current text, whether a suggestion popup is open, the
+suggestion labels, the selected index, and which panel (emoji/sticker/gif/sound) is open.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "composer_pick",
+        description: "\
+Accept a suggestion from the open composer popup, like clicking it or pressing Enter.
+
+Parameters:
+- index (optional, default 0): index into the list returned by composer_type/composer_state.",
+        write: true,
+    },
+    ToolSpec {
+        name: "composer_submit",
+        description: "\
+Press Enter on the composer to send whatever it currently holds (text, committed
+mention/emoji tokens, pending attachments).
+
+Parameters: none.",
+        write: true,
+    },
+    ToolSpec {
+        name: "edit_begin",
+        description: "\
+Open the inline edit box on a message, exactly as the Edit action does.
+
+The returned text is what the edit box was SEEDED with — that is the markdown source
+reconstructed from the stored (marker-stripped) content, so it reveals whether code
+fences / markers survive a round-trip. Follow with edit_type / edit_pick / edit_save.
+
+Parameters:
+- message_id (required): message to edit, loaded in the active channel.",
+        write: true,
+    },
+    ToolSpec {
+        name: "edit_type",
+        description: "\
+Replace the inline edit box text. Trigger characters open their popup just like the
+composer.
+
+Parameters:
+- text (required).",
+        write: true,
+    },
+    ToolSpec {
+        name: "edit_pick",
+        description: "\
+Accept a suggestion from the edit box popup.
+
+Parameters:
+- index (optional, default 0).",
+        write: true,
+    },
+    ToolSpec {
+        name: "edit_state",
+        description: "\
+Read the inline edit box: target message id, text, popup state and suggestions.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "edit_save",
+        description: "\
+Save the inline edit, as pressing Enter does. Runs the real store edit path.
+
+Parameters: none.",
+        write: true,
+    },
+    ToolSpec {
+        name: "composer_panel_send",
+        description: "\
+Send a sticker, GIF or sound exactly as picking it from the composer panel does.
+
+Emits the same composer event the panel emits, so it exercises the real send pipeline.
+Get candidates from list_stickers / list_emojis.
+
+Parameters:
+- kind (required): sticker | gif | sound.
+- url (required): media url.
+- filename (optional), width/height (optional, GIF only).",
+        write: true,
+    },
+    ToolSpec {
+        name: "composer_drop_paths",
+        description: "\
+Drop local files onto the composer, like a drag-and-drop. They become pending
+attachments; send them with composer_submit.
+
+Parameters:
+- paths (required): array of local file paths.",
+        write: true,
+    },
+    ToolSpec {
+        name: "send_buzz",
+        description: "\
+Send a BUZZ message to the active channel. Refused while anonymous mode is on,
+matching the composer's own guard.
+
+Parameters:
+- text (optional): buzz text.",
+        write: true,
+    },
+    ToolSpec {
+        name: "send_attachment",
+        description: "\
+Send a local file to the ACTIVE channel through the app's own composer pipeline.
+
+Unlike send_image (which talks to the API directly), this drives MessagesStore::send_message,
+so it exercises optimistic rows, the presign flow and anonymous mode exactly as the UI does.
+Open the target channel first with open_channel or open_dm.
+
+Parameters:
+- path / paths (optional): one or several local file paths.
+- content (optional): message text. Required when no file is given.
+- anonymous (optional, default false): send as Anonymous in the active clan.
+- reply_to (optional): message id to reply to, loaded in the active channel.",
         write: true,
     },
     ToolSpec {

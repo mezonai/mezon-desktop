@@ -7,9 +7,9 @@ use cocoa::{
     quartzcore::AutoresizingMask,
 };
 use gpui::{
-    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, MonochromeSprite, PaintSurface,
-    Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size,
-    Surface, Underline, point, size,
+    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, GradientRamp, MonochromeSprite,
+    PaintSurface, Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow,
+    Size, Surface, Underline, point, size,
 };
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
@@ -150,6 +150,8 @@ pub(crate) struct MetalRenderer {
     polychrome_sprites_pipeline_state: metal::RenderPipelineState,
     surfaces_pipeline_state: metal::RenderPipelineState,
     unit_vertices: metal::Buffer,
+    /// Shared multi-stop gradient ramps, re-uploaded only when their generation changes.
+    gradient_ramps: Option<(u64, metal::Buffer)>,
     #[allow(clippy::arc_with_non_send_sync)]
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
     sprite_atlas: Arc<MetalAtlas>,
@@ -369,6 +371,7 @@ impl MetalRenderer {
             polychrome_sprites_pipeline_state,
             surfaces_pipeline_state,
             unit_vertices,
+            gradient_ramps: None,
             instance_buffer_pool,
             sprite_atlas,
             core_video_texture_cache,
@@ -513,7 +516,28 @@ impl MetalRenderer {
         self.path_intermediate_msaa_texture = None;
     }
 
+    fn sync_gradient_ramps(&mut self) {
+        gpui::with_gradient_ramps(|generation, ramps| {
+            if self
+                .gradient_ramps
+                .as_ref()
+                .is_some_and(|(uploaded, _)| *uploaded == generation)
+            {
+                return;
+            }
+            let fallback = [GradientRamp::default()];
+            let ramps = if ramps.is_empty() { &fallback[..] } else { ramps };
+            let buffer = self.device.new_buffer_with_data(
+                ramps.as_ptr() as *const c_void,
+                mem::size_of_val(ramps) as u64,
+                MTLResourceOptions::StorageModeManaged,
+            );
+            self.gradient_ramps = Some((generation, buffer));
+        });
+    }
+
     pub fn draw(&mut self, scene: &Scene) {
+        self.sync_gradient_ramps();
         let layer = match &self.layer {
             Some(l) => l.clone(),
             None => {
@@ -716,6 +740,7 @@ impl MetalRenderer {
             .set_usage(metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead);
         texture_descriptor.set_storage_mode(metal::MTLStorageMode::Managed);
         let target_texture = self.device.new_texture(&texture_descriptor);
+        self.sync_gradient_ramps();
 
         loop {
             let mut instance_buffer = self
@@ -838,6 +863,7 @@ impl MetalRenderer {
             .headless_render_target
             .clone()
             .expect("just ensured the render target exists");
+        self.sync_gradient_ramps();
 
         loop {
             let mut instance_buffer = self
@@ -1098,6 +1124,11 @@ impl MetalRenderer {
             Some(&instance_buffer.metal_buffer),
             *instance_offset as u64,
         );
+        command_encoder.set_fragment_buffer(
+            PathRasterizationInputIndex::GradientRamps as u64,
+            self.gradient_ramps.as_ref().map(|(_, buffer)| buffer.as_ref()),
+            0,
+        );
         let buffer_contents =
             unsafe { (instance_buffer.metal_buffer.contents() as *mut u8).add(*instance_offset) };
         unsafe {
@@ -1210,8 +1241,18 @@ impl MetalRenderer {
             Some(&instance_buffer.metal_buffer),
             *instance_offset as u64,
         );
+        command_encoder.set_fragment_buffer(
+            QuadInputIndex::GradientRamps as u64,
+            self.gradient_ramps.as_ref().map(|(_, buffer)| buffer.as_ref()),
+            0,
+        );
 
         command_encoder.set_vertex_bytes(
+            QuadInputIndex::ViewportSize as u64,
+            mem::size_of_val(&viewport_size) as u64,
+            &viewport_size as *const Size<DevicePixels> as *const _,
+        );
+        command_encoder.set_fragment_bytes(
             QuadInputIndex::ViewportSize as u64,
             mem::size_of_val(&viewport_size) as u64,
             &viewport_size as *const Size<DevicePixels> as *const _,
@@ -1796,6 +1837,7 @@ enum QuadInputIndex {
     Vertices = 0,
     Quads = 1,
     ViewportSize = 2,
+    GradientRamps = 3,
 }
 
 #[repr(C)]
@@ -1828,6 +1870,7 @@ enum SurfaceInputIndex {
 enum PathRasterizationInputIndex {
     Vertices = 0,
     ViewportSize = 1,
+    GradientRamps = 2,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

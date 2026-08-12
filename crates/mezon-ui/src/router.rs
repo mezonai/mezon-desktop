@@ -686,6 +686,23 @@ mod tests {
     }
 
     #[test]
+    fn replacing_transitional_chat_route_keeps_previous_entry_reachable() {
+        let mut router = Router::new();
+        let dm = Route::DirectMessage {
+            direct_id: ChannelId(5),
+            message_type: "3".into(),
+        };
+        router.navigate(dm.clone());
+        router.navigate(Route::Chat);
+        router.replace(Route::Channel {
+            clan_id: ClanId(1),
+            channel_id: ChannelId(2),
+        });
+        router.go_back();
+        assert_eq!(router.route(), dm);
+    }
+
+    #[test]
     fn normalize_path_removes_trailing_slash() {
         assert_eq!(Route::from_path("/chat/direct/"), Route::Direct);
     }

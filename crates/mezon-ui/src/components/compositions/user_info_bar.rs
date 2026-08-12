@@ -6,7 +6,8 @@ use gpui::{
 use crate::components::compositions::footer_profile_popup::FooterProfilePopup;
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::theme::ActiveTheme;
-use mezon_store::{AccountStore, AuthState, PresenceStore};
+use crate::util::user_status::{status_color, status_label_key};
+use mezon_store::{AccountStore, AuthState, Settings, UserPresence, current_user_status};
 
 fn on_settings_click() -> impl Fn(&ClickEvent, &mut Window, &mut App) {
     move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
@@ -17,9 +18,9 @@ fn on_settings_click() -> impl Fn(&ClickEvent, &mut Window, &mut App) {
 pub struct UserInfoBar {
     auth_state: Entity<AuthState>,
     account_store: Entity<AccountStore>,
+    settings: Option<Entity<Settings>>,
     username: SharedString,
-    presence: SharedString,
-    status: SharedString,
+    status: UserPresence,
     user_status: SharedString,
     avatar_src: SharedString,
     avatar_raw: SharedString,
@@ -30,14 +31,9 @@ pub struct UserInfoBar {
 impl UserInfoBar {
     pub fn new(auth_state: Entity<AuthState>, cx: &mut Context<Self>) -> Self {
         let account_store = AccountStore::global(cx);
-        cx.observe(&PresenceStore::global(cx), |this, _, cx| {
-            if this.sync_presence(cx) {
-                cx.notify();
-            }
-        })
-        .detach();
+        let settings = Settings::try_global(cx);
         cx.observe(&auth_state, |this, _, cx| {
-            if this.sync_presence(cx) {
+            if this.sync_username(cx) {
                 cx.notify();
             }
         })
@@ -54,31 +50,31 @@ impl UserInfoBar {
         let mut bar = Self {
             auth_state,
             account_store,
+            settings,
             username,
-            presence: SharedString::from("Offline"),
-            status: SharedString::default(),
+            status: UserPresence::default(),
             user_status: SharedString::default(),
             avatar_src: SharedString::default(),
             avatar_raw: SharedString::default(),
             profile_popup: None,
             _popup_sub: None,
         };
-        bar.sync_presence(cx);
         bar.sync_avatar(cx);
         bar.sync_status(cx);
         bar
     }
 
     fn sync_status(&mut self, cx: &App) -> bool {
-        let prev_status = self.status.clone();
-        let prev_custom = self.user_status.clone();
-        let (status, custom) = match self.account_store.read(cx).account.as_ref() {
-            Some(account) => (account.status.clone(), account.user_status.clone()),
-            None => (String::new(), String::new()),
-        };
-        self.status = SharedString::from(status);
-        self.user_status = SharedString::from(custom);
-        self.status != prev_status || self.user_status != prev_custom
+        let status = current_user_status(cx)
+            .map(|(_, status)| status)
+            .unwrap_or_default();
+        let custom = SharedString::from(status.custom_status);
+        if self.status == status.presence && self.user_status == custom {
+            return false;
+        }
+        self.status = status.presence;
+        self.user_status = custom;
+        true
     }
 
     fn toggle_profile_popup(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -123,47 +119,26 @@ impl UserInfoBar {
         }
     }
 
-    pub fn sync_presence(&mut self, cx: &App) -> bool {
-        let prev_username = self.username.clone();
-        let prev_presence = self.presence.clone();
-        let user_id = match self.auth_state.read(cx) {
-            AuthState::Authenticated(session) => {
-                self.username = SharedString::from(session.username.clone());
-                session.user_id.clone()
-            }
-            _ => {
-                self.username = SharedString::from("Unknown");
-                self.presence = SharedString::from("Offline");
-                return self.username != prev_username || self.presence != prev_presence;
-            }
-        };
-        let online = PresenceStore::global(cx)
-            .read(cx)
-            .user_online
-            .contains(&user_id.parse().unwrap_or_default());
-        self.presence = SharedString::from(if online { "Online" } else { "Offline" });
-        self.username != prev_username || self.presence != prev_presence
+    fn sync_username(&mut self, cx: &App) -> bool {
+        let username = Self::read_username(&self.auth_state, cx);
+        if self.username == username {
+            return false;
+        }
+        self.username = username;
+        true
     }
 }
 
 impl Render for UserInfoBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let presence_color = match self.presence.as_ref() {
-            "Online" => theme.status_online,
-            "Idle" => theme.status_idle,
-            "Dnd" => theme.status_dnd,
-            _ => theme.status_offline,
-        };
-        let status_dot_color = match self.status.as_ref() {
-            "Online" => theme.status_online,
-            "Idle" => theme.status_idle,
-            "Do Not Disturb" => theme.status_dnd,
-            "Invisible" => theme.status_offline,
-            _ => presence_color,
-        };
-        let subtitle = if self.user_status.is_empty() {
-            self.presence.clone()
+        let status_dot_color = status_color(self.status, theme);
+        let subtitle: SharedString = if self.user_status.is_empty() {
+            let locale = self
+                .settings
+                .as_ref()
+                .map_or("en", |settings| settings.read(cx).language.as_str());
+            SharedString::new_static(mezon_i18n::t(locale, status_label_key(self.status)))
         } else {
             self.user_status.clone()
         };

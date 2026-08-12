@@ -153,7 +153,7 @@ fn filter_dropdown_panel(
         .rounded_lg()
         .border_1()
         .border_color(theme.border)
-        .bg(theme.tokens.bg_theme_input_primary)
+        .bg(theme.surfaces.input_primary)
         .shadow_lg()
         .occlude()
         .on_mouse_down_out(on_dismiss)

@@ -2,38 +2,27 @@ use std::time::Duration;
 
 use gpui::{
     App, ClickEvent, ClipboardItem, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, Rgba, SharedString, Task, Window, deferred, div, prelude::*, px,
+    Focusable, FontWeight, SharedString, Subscription, Task, Window, deferred, div, prelude::*, px,
 };
-use mezon_store::{AccountStore, BadgeService, Settings, WalletStore};
+use mezon_store::{
+    AccountStore, BadgeService, Settings, UserPresence, WalletStore, current_user_status,
+};
 
 use crate::chat::message::{CustomStatusModal, SendTokenModal, TransactionHistoryModal};
 use crate::components::compositions::CustomStatusBubble;
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::theme::ActiveTheme;
+use crate::util::user_status::{status_color, status_icon, status_label_key};
 
 use mezon_store::TOKEN_DECIMAL_FACTOR as DECIMAL_FACTOR;
 const CURRENCY_SYMBOL: &str = "đồng";
 const COPY_USER_ID_RESET_MS: u64 = 1000;
 
-const STATUS_ONLINE: &str = "Online";
-const STATUS_IDLE: &str = "Idle";
-const STATUS_DND: &str = "Do Not Disturb";
-const STATUS_INVISIBLE: &str = "Invisible";
-
-const STATUS_OPTIONS: [(&str, &str); 4] = [
-    (
-        STATUS_ONLINE,
-        "userProfile.statusProfile.statusOptions.online",
-    ),
-    (STATUS_IDLE, "userProfile.statusProfile.statusOptions.idle"),
-    (
-        STATUS_DND,
-        "userProfile.statusProfile.statusOptions.doNotDisturb",
-    ),
-    (
-        STATUS_INVISIBLE,
-        "userProfile.statusProfile.statusOptions.invisible",
-    ),
+const STATUS_OPTIONS: [UserPresence; 4] = [
+    UserPresence::Online,
+    UserPresence::Idle,
+    UserPresence::Dnd,
+    UserPresence::Invisible,
 ];
 
 const STATUS_DURATIONS: [(&str, i32, bool); 6] = [
@@ -73,13 +62,14 @@ pub struct FooterProfilePopup {
     username: SharedString,
     avatar: SharedString,
     balance: SharedString,
-    status: SharedString,
+    status: UserPresence,
     user_status: String,
     status_menu_open: bool,
-    status_duration_for: Option<&'static str>,
+    status_duration_for: Option<UserPresence>,
     custom_status_bubble: Entity<CustomStatusBubble>,
     user_id_copied: bool,
     _copy_user_id_reset: Option<Task<()>>,
+    _account_sub: Option<Subscription>,
 }
 
 impl Focusable for FooterProfilePopup {
@@ -124,18 +114,14 @@ impl FooterProfilePopup {
         } else {
             SharedString::from(crate::util::imgproxy::avatar_url(cx, &avatar_raw))
         };
-        let status = account
-            .as_ref()
-            .map(|a| a.status.clone())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| STATUS_ONLINE.to_string());
-        let user_status = account
-            .as_ref()
-            .map(|a| a.user_status.clone())
+        let own = current_user_status(cx)
+            .map(|(_, status)| status)
             .unwrap_or_default();
         let balance = WalletStore::try_global(cx)
             .and_then(|w| w.read(cx).balance().map(format_balance))
             .unwrap_or_else(|| "0".to_string());
+        let account_sub = AccountStore::try_global(cx)
+            .map(|store| cx.observe(&store, |this, _, cx| this.sync_status(cx)));
 
         Self {
             focus_handle: cx.focus_handle(),
@@ -145,14 +131,27 @@ impl FooterProfilePopup {
             username: SharedString::from(username),
             avatar,
             balance: SharedString::from(balance),
-            status: SharedString::from(status),
-            user_status,
+            status: own.presence,
+            user_status: own.custom_status,
             status_menu_open: false,
             status_duration_for: None,
             custom_status_bubble: cx.new(|_| CustomStatusBubble::new()),
             user_id_copied: false,
             _copy_user_id_reset: None,
+            _account_sub: account_sub,
         }
+    }
+
+    fn sync_status(&mut self, cx: &mut Context<Self>) {
+        let own = current_user_status(cx)
+            .map(|(_, status)| status)
+            .unwrap_or_default();
+        if self.status == own.presence && self.user_status == own.custom_status {
+            return;
+        }
+        self.status = own.presence;
+        self.user_status = own.custom_status;
+        cx.notify();
     }
 
     fn copy_user_id(&mut self, cx: &mut Context<Self>) {
@@ -178,17 +177,17 @@ impl FooterProfilePopup {
 
     fn apply_status(
         &mut self,
-        status: &str,
+        status: UserPresence,
         minutes: i32,
         until_turn_on: bool,
         cx: &mut Context<Self>,
     ) {
-        self.status = SharedString::from(status.to_string());
+        self.status = status;
         self.status_menu_open = false;
         self.status_duration_for = None;
         if let Some(store) = AccountStore::try_global(cx) {
             store.update(cx, |store, cx| {
-                store.set_status(status.to_string(), minutes, until_turn_on, cx)
+                store.set_status(status.as_status().to_string(), minutes, until_turn_on, cx)
             });
         }
         cx.notify();
@@ -231,6 +230,7 @@ impl Render for FooterProfilePopup {
         let (
             bg_banner,
             bg_card,
+            bg_card_surface,
             bg_box,
             bg_status_menu,
             bubble_bg,
@@ -243,6 +243,7 @@ impl Render for FooterProfilePopup {
             (
                 theme.tokens.bg_button_primary,
                 theme.tokens.bg_outside_footer,
+                theme.surfaces.outside_footer.ramp(),
                 theme.tokens.theme_setting_primary,
                 theme.tokens.bg_theme_contexify,
                 theme.tokens.bg_surface,
@@ -252,7 +253,7 @@ impl Render for FooterProfilePopup {
                 theme.tokens.bg_item_hover,
             )
         };
-        let current_status_color = status_color(cx, &self.status);
+        let current_status_color = status_color(self.status, cx.theme());
 
         let banner = div().w_full().h(px(105.)).rounded_t(px(8.)).bg(bg_banner);
 
@@ -277,7 +278,7 @@ impl Render for FooterProfilePopup {
                 .w(px(90.))
                 .h(px(90.))
                 .rounded_full()
-                .bg(bg_card)
+                .bg(bg_card_surface)
                 .child(
                     Avatar::new()
                         .name(self.display_name.clone())
@@ -454,7 +455,7 @@ impl Render for FooterProfilePopup {
                         .items_center()
                         .gap_3()
                         .child(
-                            Icon::new(status_icon(&self.status))
+                            Icon::new(status_icon(self.status))
                                 .size(px(16.))
                                 .text_color(current_status_color),
                         )
@@ -462,7 +463,7 @@ impl Render for FooterProfilePopup {
                             div()
                                 .text_sm()
                                 .text_color(text_primary)
-                                .child(tk(status_label(&self.status))),
+                                .child(tk(status_label_key(self.status))),
                         ),
                 )
                 .child(
@@ -487,13 +488,14 @@ impl Render for FooterProfilePopup {
                 .bg(bg_status_menu)
                 .shadow_lg()
                 .occlude();
-            for (value, label_key) in STATUS_OPTIONS {
-                let color = status_color(cx, value);
-                let has_duration = value != STATUS_ONLINE;
+            for value in STATUS_OPTIONS {
+                let color = status_color(value, cx.theme());
+                let has_duration = value != UserPresence::Online;
                 let expanded = self.status_duration_for == Some(value);
+                let option_id = value.as_status();
                 let mut row = div()
-                    .id(SharedString::from(format!("footer-status-{value}")))
-                    .group(SharedString::from(format!("footer-status-{value}")))
+                    .id(SharedString::from(format!("footer-status-{option_id}")))
+                    .group(SharedString::from(format!("footer-status-{option_id}")))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -527,7 +529,7 @@ impl Render for FooterProfilePopup {
                                     .size(px(16.))
                                     .text_color(color),
                             )
-                            .child(div().text_sm().child(tk(label_key))),
+                            .child(div().text_sm().child(tk(status_label_key(value)))),
                     );
                 if has_duration {
                     row = row.child(
@@ -535,7 +537,7 @@ impl Render for FooterProfilePopup {
                             .size(px(12.))
                             .text_color(text_primary)
                             .group_hover(
-                                SharedString::from(format!("footer-status-{value}")),
+                                SharedString::from(format!("footer-status-{option_id}")),
                                 move |s| s.text_color(text_secondary),
                             ),
                     );
@@ -547,7 +549,7 @@ impl Render for FooterProfilePopup {
                         durations = durations.child(
                             div()
                                 .id(SharedString::from(format!(
-                                    "footer-status-{value}-{minutes}-{until}"
+                                    "footer-status-{option_id}-{minutes}-{until}"
                                 )))
                                 .flex()
                                 .flex_row()
@@ -663,7 +665,7 @@ impl Render for FooterProfilePopup {
             .rounded(px(8.))
             .border_1()
             .border_color(border)
-            .bg(bg_card)
+            .bg(bg_card_surface)
             .shadow_lg()
             .child(banner)
             .child(avatar_row)
@@ -687,34 +689,6 @@ impl Render for FooterProfilePopup {
                     ),
             )
             .when(has_custom, |popup| popup.child(custom_status_overlay))
-    }
-}
-
-fn status_label(status: &str) -> &'static str {
-    match status {
-        STATUS_IDLE => "userProfile.statusProfile.statusOptions.idle",
-        STATUS_DND => "userProfile.statusProfile.statusOptions.doNotDisturb",
-        STATUS_INVISIBLE => "userProfile.statusProfile.statusOptions.invisible",
-        _ => "userProfile.statusProfile.statusOptions.online",
-    }
-}
-
-fn status_icon(status: &str) -> IconName {
-    match status {
-        STATUS_IDLE => IconName::DarkModeIcon,
-        STATUS_DND => IconName::MinusCircleIcon,
-        STATUS_INVISIBLE => IconName::OfflineStatus,
-        _ => IconName::OnlineStatus,
-    }
-}
-
-fn status_color(cx: &App, status: &str) -> Rgba {
-    let theme = cx.theme();
-    match status {
-        STATUS_IDLE => theme.status_idle,
-        STATUS_DND => theme.status_dnd,
-        STATUS_INVISIBLE => theme.status_offline,
-        _ => theme.status_online,
     }
 }
 

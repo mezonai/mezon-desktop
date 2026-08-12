@@ -6,4 +6,6 @@ pub mod qr_image;
 pub mod reactive;
 pub mod text_edit;
 pub mod text_utils;
+pub mod theme;
+pub mod user_status;
 pub mod voice_member;

@@ -219,6 +219,10 @@ fn parse_timeline_attachment_bytes(bytes: &[u8]) -> Vec<ChannelTimelineAttachmen
     }
 }
 
+fn sort_events_newest_first(events: &mut [ChannelTimeline]) {
+    events.sort_by_key(|e| std::cmp::Reverse(e.start_time_seconds));
+}
+
 pub fn first_event_year(events: &[ChannelTimeline]) -> Option<String> {
     use chrono::{Datelike, TimeZone};
     events
@@ -457,11 +461,13 @@ impl ChannelMediaStore {
                     bucket.is_loading = false;
                     match result {
                         Ok(response) => {
-                            bucket.events = response
+                            let mut events: Vec<ChannelTimeline> = response
                                 .events
                                 .into_iter()
                                 .map(ChannelTimeline::from_proto)
                                 .collect();
+                            sort_events_newest_first(&mut events);
+                            bucket.events = events;
                             bucket.error = None;
                         }
                         Err(e) => {
@@ -745,6 +751,7 @@ impl ChannelMediaStore {
             && let Some(existing) = bucket.events.iter_mut().find(|e| e.id == event.id)
         {
             *existing = merge_timeline_event(existing, event);
+            sort_events_newest_first(&mut bucket.events);
         }
     }
 
@@ -937,6 +944,26 @@ mod tests {
         api::ListChannelTimelineAttachment { attachments: atts }.encode_to_vec()
     }
 
+    fn timeline_event(id: i64, start_time_seconds: u32) -> ChannelTimeline {
+        ChannelTimeline {
+            id,
+            clan_id: ClanId(1),
+            channel_id: ChannelId(1),
+            start_time_seconds,
+            title: String::new(),
+            description: String::new(),
+            end_time_seconds: 0,
+            location: String::new(),
+            status: 0,
+            event_type: 0,
+            creator_id: UserId(1),
+            create_time_seconds: 0,
+            update_time_seconds: 0,
+            preview_imgs: Vec::new(),
+            attachments: Vec::new(),
+        }
+    }
+
     #[test]
     fn from_proto_maps_fields_and_decodes_preview_imgs() {
         let preview_bytes = encode_attachments(vec![sample_attachment(
@@ -1025,6 +1052,29 @@ mod tests {
             },
         ];
         assert_eq!(first_event_year(&events).as_deref(), Some("2020"));
+    }
+
+    #[test]
+    fn sort_events_newest_first_orders_recent_to_oldest() {
+        let mut events = vec![
+            timeline_event(1, 1_577_836_800),
+            timeline_event(2, 1_704_067_200),
+            timeline_event(3, 1_640_995_200),
+        ];
+        sort_events_newest_first(&mut events);
+        let ids: Vec<i64> = events.iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec![2, 3, 1]);
+    }
+
+    #[test]
+    fn sort_events_newest_first_keeps_server_order_for_same_start_time() {
+        let mut events = vec![
+            timeline_event(1, 1_704_067_200),
+            timeline_event(2, 1_704_067_200),
+        ];
+        sort_events_newest_first(&mut events);
+        let ids: Vec<i64> = events.iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec![1, 2]);
     }
 
     #[test]

@@ -860,7 +860,9 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                     } else {
                         cx.update(|cx| {
                             if let Some(route) = mezon_ui::router::parse_link(&url) {
-                                mezon_ui::router::navigate(cx, route);
+                                mezon_ui::app::shell::Shell::navigate_from_external_trigger(
+                                    cx, route,
+                                );
                             }
                         });
                     }
@@ -1072,7 +1074,9 @@ fn open_main_window(
                         "notification clicked"
                     );
                     match notification_route(&target) {
-                        Some(route) => mezon_ui::router::navigate(cx, route),
+                        Some(route) => {
+                            mezon_ui::app::shell::Shell::navigate_from_external_trigger(cx, route)
+                        }
                         None => tracing::warn!("notification click with unroutable target"),
                     }
                 });

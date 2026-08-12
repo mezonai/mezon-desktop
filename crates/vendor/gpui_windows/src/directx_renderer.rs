@@ -28,6 +28,8 @@ pub(crate) const DISABLE_DIRECT_COMPOSITION: &str = "GPUI_DISABLE_DIRECT_COMPOSI
 // mezon vendor edit: escape hatch for the FLIP_DISCARD swap effect — see `create_swap_chain`.
 const DISABLE_FLIP_DISCARD: &str = "GPUI_DISABLE_FLIP_DISCARD";
 const RENDER_TARGET_FORMAT: DXGI_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
+/// Upper bound on distinct multi-stop gradient ramps held on the GPU.
+const GRADIENT_RAMP_CAPACITY: usize = 64;
 // This configuration is used for MSAA rendering on paths only, and it's guaranteed to be supported by DirectX 11.
 const PATH_MULTISAMPLE_COUNT: u32 = 4;
 
@@ -115,6 +117,9 @@ struct DirectXRenderPipelines {
 struct DirectXGlobalElements {
     global_params_buffer: Option<ID3D11Buffer>,
     sampler: Option<ID3D11SamplerState>,
+    gradient_ramps_buffer: Option<ID3D11Buffer>,
+    gradient_ramps_view: Option<ID3D11ShaderResourceView>,
+    uploaded_gradient_generation: std::cell::Cell<Option<u64>>,
 }
 
 struct DirectComposition {
@@ -220,6 +225,29 @@ impl DirectXRenderer {
                 _pad: [0; 3],
             }],
         )?;
+
+        with_gradient_ramps(|generation, ramps| -> Result<()> {
+            if self.globals.uploaded_gradient_generation.get() != Some(generation) {
+                let ramps = &ramps[..ramps.len().min(GRADIENT_RAMP_CAPACITY)];
+                if !ramps.is_empty() {
+                    update_buffer(
+                        device_context,
+                        self.globals.gradient_ramps_buffer.as_ref().unwrap(),
+                        ramps,
+                    )?;
+                }
+                self.globals
+                    .uploaded_gradient_generation
+                    .set(Some(generation));
+            }
+            Ok(())
+        })?;
+        unsafe {
+            device_context.PSSetShaderResources(
+                2,
+                Some(std::slice::from_ref(&self.globals.gradient_ramps_view)),
+            );
+        }
         unsafe {
             device_context.ClearRenderTargetView(
                 resources
@@ -1036,9 +1064,19 @@ impl DirectXGlobalElements {
             output
         };
 
+        let gradient_ramps_buffer = create_buffer(
+            device,
+            std::mem::size_of::<GradientRamp>(),
+            GRADIENT_RAMP_CAPACITY,
+        )?;
+        let gradient_ramps_view = create_buffer_view(device, &gradient_ramps_buffer)?;
+
         Ok(Self {
             global_params_buffer,
             sampler,
+            gradient_ramps_buffer: Some(gradient_ramps_buffer),
+            gradient_ramps_view,
+            uploaded_gradient_generation: std::cell::Cell::new(None),
         })
     }
 }

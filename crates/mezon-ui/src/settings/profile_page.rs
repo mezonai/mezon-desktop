@@ -1287,7 +1287,7 @@ impl ProfilePage {
                                         .top(px(28.))
                                         .size(px(14.))
                                         .rounded_full()
-                                        .bg(theme.tokens.bg_secondary)
+                                        .bg(theme.surfaces.secondary)
                                         .border_1()
                                         .border_color(theme.bg_secondary),
                                 )
@@ -1317,11 +1317,4 @@ impl ProfilePage {
     }
 }
 
-pub(super) fn profile_status(status: &str, theme: &Theme) -> (IconName, Rgba) {
-    match status.to_ascii_lowercase().as_str() {
-        "idle" => (IconName::DarkModeIcon, theme.status_idle),
-        "dnd" | "do not disturb" => (IconName::MinusCircleIcon, theme.status_dnd),
-        "invisible" | "offline" => (IconName::OfflineStatus, theme.status_offline),
-        _ => (IconName::OnlineStatus, theme.status_online),
-    }
-}
+pub(super) use crate::util::user_status::status_icon_and_color as profile_status;

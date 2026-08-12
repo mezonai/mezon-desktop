@@ -2084,7 +2084,7 @@ pub fn render_date_divider(theme: &Theme, label: &str) -> AnyElement {
                         .relative()
                         .px_4()
                         .rounded_lg()
-                        .bg(theme.tokens.bg_primary)
+                        .bg(theme.surfaces.primary)
                         .text_xs()
                         .line_height(rems(1.))
                         .font_weight(FontWeight::SEMIBOLD)

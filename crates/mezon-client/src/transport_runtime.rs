@@ -4,7 +4,7 @@
 //! this allows transport operations to work when called from GPUI's smol-based executor.
 
 use crate::abridged_tcp_adapter::AbridgedTcpAdapter;
-use crate::transport::MezonTransport;
+use crate::transport::{MezonTransport, UpdateChannelDescParams};
 use anyhow::Result;
 use futures::AsyncReadExt as _;
 use http_client::{AsyncBody, HttpClient, http};
@@ -435,7 +435,7 @@ impl TransportClient {
         self.inner.credential_rejected()
     }
 
-    pub async fn renew_fallback_token(&self) -> Result<(String, String)> {
+    pub async fn renew_fallback_token(&self) -> Result<crate::transport::RenewedTokens> {
         let transport = self.inner.clone();
         runtime()
             .spawn(async move { transport.renew_fallback_token().await })
@@ -443,7 +443,9 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    pub fn renewed_tokens(&self) -> tokio::sync::watch::Receiver<Option<(String, String)>> {
+    pub fn renewed_tokens(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<crate::transport::RenewedTokens>> {
         self.inner.renewed_tokens()
     }
 
@@ -2273,6 +2275,23 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn change_channel_category(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        new_category_id: i64,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .change_channel_category(clan_id, channel_id, new_category_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn remove_channel_users(&self, channel_id: i64, user_ids: Vec<String>) -> Result<()> {
         let transport = self.inner.clone();
         runtime()
@@ -2706,6 +2725,15 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn delete_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.delete_channel(clan_id, channel_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn leave_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
         let transport = self.inner.clone();
 
@@ -2864,6 +2892,32 @@ impl TransportClient {
             })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn registration_password(
+        &self,
+        email: &str,
+        password: &str,
+        old_password: &str,
+    ) -> std::result::Result<
+        crate::transport::ApiSession,
+        crate::transport::RegistrationPasswordError,
+    > {
+        let transport = self.inner.clone();
+        let request = mezon_proto::api::RegistrationEmailRequest {
+            email: email.to_string(),
+            password: password.to_string(),
+            old_password: old_password.to_string(),
+            ..Default::default()
+        };
+        runtime()
+            .spawn(async move { transport.registration_password(request).await })
+            .await
+            .map_err(|error| {
+                crate::transport::RegistrationPasswordError::Transport(format!(
+                    "transport task failed: {error}"
+                ))
+            })?
     }
 
     pub async fn upload_attachment_file(
@@ -3116,14 +3170,13 @@ impl TransportClient {
         &self,
         clan_id: i64,
         channel_id: i64,
-        channel_label: Option<String>,
-        channel_avatar: Option<String>,
+        params: UpdateChannelDescParams,
     ) -> Result<()> {
         let transport = self.inner.clone();
         runtime()
             .spawn(async move {
                 transport
-                    .update_channel_desc(clan_id, channel_id, channel_label, channel_avatar)
+                    .update_channel_desc(clan_id, channel_id, params)
                     .await
             })
             .await

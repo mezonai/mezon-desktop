@@ -803,7 +803,7 @@ impl ClanProfileSection {
                                         .top(px(28.))
                                         .size(px(14.))
                                         .rounded_full()
-                                        .bg(theme.tokens.bg_secondary)
+                                        .bg(theme.surfaces.secondary)
                                         .border_1()
                                         .border_color(theme.bg_secondary),
                                 )

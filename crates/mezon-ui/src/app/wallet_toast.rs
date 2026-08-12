@@ -20,7 +20,7 @@ impl WalletToastBridge {
                     WalletEvent::CoffeeSent => {
                         Shell::global(cx).update(cx, |shell, cx| shell.success("Coffee sent", cx));
                     }
-                    WalletEvent::SendFailed { message } => {
+                    WalletEvent::SendFailed { message } | WalletEvent::EnableFailed { message } => {
                         let message = message.clone();
                         Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
                     }

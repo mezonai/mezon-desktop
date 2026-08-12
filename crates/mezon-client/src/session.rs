@@ -67,7 +67,13 @@ impl Session {
 
     /// Apply a server-pushed `refresh_session_event` (mezon-js `onrefreshsession`):
     /// adopt the new token / session_id and recompute expiry from the new JWT.
-    pub fn apply_refresh(&mut self, token: &str, refresh_token: &str, session_id: &str) {
+    pub fn apply_refresh(
+        &mut self,
+        token: &str,
+        refresh_token: &str,
+        session_id: &str,
+        id_token: &str,
+    ) {
         if !token.is_empty() {
             let (user_id, username, expires_at) = decode_jwt_claims(token);
             self.token = token.to_string();
@@ -87,7 +93,14 @@ impl Session {
         if !session_id.is_empty() {
             self.session_id = session_id.to_string();
         }
+        if !id_token.is_empty() {
+            self.id_token = id_token.to_string();
+        }
     }
+}
+
+pub fn jwt_expires_at(token: &str) -> Option<u64> {
+    decode_jwt_claims(token).2
 }
 
 pub(crate) fn decode_jwt_claims(token: &str) -> (String, String, Option<u64>) {
@@ -167,12 +180,28 @@ mod tests {
         };
 
         let renewed = fake_jwt("7", "ngoc", 9000);
-        session.apply_refresh(&renewed, "new-refresh", "new-sid");
+        session.apply_refresh(&renewed, "new-refresh", "new-sid", "new-id-token");
 
         assert_eq!(session.token, renewed);
         assert_eq!(session.refresh_token, "new-refresh");
         assert_eq!(session.session_id, "new-sid");
         assert_eq!(session.expires_at, 9000);
+        assert_eq!(session.id_token, "new-id-token");
+    }
+
+    #[test]
+    fn apply_refresh_keeps_the_previous_id_token_when_the_server_sends_none() {
+        let mut session = Session {
+            id_token: "login-id-token".into(),
+            ..Default::default()
+        };
+
+        session.apply_refresh("", "", "new-sid", "");
+
+        assert_eq!(
+            session.id_token, "login-id-token",
+            "a refresh without an id_token must not strip the one zk proofs are minted from"
+        );
     }
 
     #[test]
@@ -186,7 +215,7 @@ mod tests {
             ..Default::default()
         };
 
-        session.apply_refresh("", "", "new-sid");
+        session.apply_refresh("", "", "new-sid", "");
 
         assert_eq!(
             session.token, original,

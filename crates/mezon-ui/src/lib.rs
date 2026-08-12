@@ -2,6 +2,7 @@ pub mod app;
 pub mod auth;
 pub mod canvas_navigation;
 pub mod channel_app;
+pub mod channel_navigation;
 pub mod chat;
 pub mod clan;
 pub mod command_palette;

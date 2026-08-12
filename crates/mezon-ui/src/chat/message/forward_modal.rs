@@ -965,7 +965,7 @@ fn render_shared_content(
         .items_center()
         .gap_3()
         .rounded_lg()
-        .bg(theme.tokens.bg_surface)
+        .bg(theme.surfaces.surface)
         .border_1()
         .border_color(theme.tokens.border_primary)
         .p_3();

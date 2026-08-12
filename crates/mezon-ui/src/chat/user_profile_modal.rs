@@ -352,7 +352,7 @@ impl Render for UserProfileModal {
                             .flex()
                             .flex_col()
                             .gap_4()
-                            .bg(theme.tokens.bg_primary)
+                            .bg(theme.surfaces.primary)
                             .child(
                                 div()
                                     .w(px(96.))
@@ -380,7 +380,7 @@ impl Render for UserProfileModal {
                                     .flex_1()
                                     .min_h_0()
                                     .rounded_lg()
-                                    .bg(theme.tokens.bg_secondary)
+                                    .bg(theme.surfaces.secondary)
                                     .shadow_sm()
                                     .p_4()
                                     .child(
@@ -456,7 +456,7 @@ impl Render for UserProfileModal {
                                         .top(px(25.))
                                         .size(px(14.))
                                         .rounded_full()
-                                        .bg(theme.tokens.bg_secondary)
+                                        .bg(theme.surfaces.secondary)
                                         .border_1()
                                         .border_color(theme.bg_floating),
                                 )
@@ -531,7 +531,7 @@ impl Render for UserProfileModal {
                                     .rounded_sm()
                                     .border_1()
                                     .border_color(theme.border)
-                                    .bg(theme.tokens.bg_secondary)
+                                    .bg(theme.surfaces.secondary)
                                     .shadow_lg()
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation();
@@ -776,11 +776,4 @@ fn profile_share_contact_button(
         .into_any_element()
 }
 
-fn profile_status(status: &str, theme: &crate::theme::Theme) -> (IconName, Rgba) {
-    match status.to_ascii_lowercase().as_str() {
-        "idle" => (IconName::DarkModeIcon, theme.status_idle),
-        "dnd" | "do not disturb" => (IconName::MinusCircleIcon, theme.status_dnd),
-        "invisible" | "offline" => (IconName::OfflineStatus, theme.status_offline),
-        _ => (IconName::OnlineStatus, theme.status_online),
-    }
-}
+use crate::util::user_status::status_icon_and_color as profile_status;

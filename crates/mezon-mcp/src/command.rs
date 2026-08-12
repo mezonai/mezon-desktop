@@ -71,6 +71,61 @@ pub enum McpCommand {
         to_top: bool,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
+    ComposerType {
+        text: String,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ComposerState {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ComposerPick {
+        index: usize,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ComposerSubmit {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    EditBegin {
+        message_id: i64,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    EditType {
+        text: String,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    EditPick {
+        index: usize,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    EditState {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    EditSave {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ComposerPanelSend {
+        kind: String,
+        url: String,
+        filename: String,
+        width: i32,
+        height: i32,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ComposerDropPaths {
+        paths: Vec<String>,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    SendBuzz {
+        text: String,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    SendAttachment {
+        paths: Vec<String>,
+        content: String,
+        anonymous: bool,
+        reply_to: i64,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
     ListEmojis {
         clan_id: Option<String>,
         query: Option<String>,
@@ -79,6 +134,29 @@ pub enum McpCommand {
     },
     LoadMoreMessages {
         older: bool,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ListLoadedMessages {
+        limit: usize,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    JumpToMessage {
+        message_id: i64,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    JumpToPresent {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    SetUserStatus {
+        status: String,
+        minutes: i32,
+        until_turn_on: bool,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    GetUserStatus {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    GetMemberList {
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
 }

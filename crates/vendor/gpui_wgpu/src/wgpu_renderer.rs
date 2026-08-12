@@ -1,10 +1,13 @@
 use crate::{CompositorGpuHint, WgpuAtlas, WgpuContext};
 use bytemuck::{Pod, Zeroable};
 use gpui::{
-    AtlasTextureId, Background, Bounds, DevicePixels, GpuSpecs, MonochromeSprite, Path, Point,
-    PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size, SubpixelSprite,
-    Underline, get_gamma_correction_ratios,
+    AtlasTextureId, Background, Bounds, DevicePixels, GpuSpecs, GradientRamp, MonochromeSprite,
+    Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size,
+    SubpixelSprite, Underline, get_gamma_correction_ratios,
 };
+
+/// Upper bound on distinct multi-stop gradient ramps held on the GPU.
+const GRADIENT_RAMP_CAPACITY: usize = 64;
 use log::warn;
 #[cfg(not(target_family = "wasm"))]
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -145,6 +148,8 @@ struct WgpuResources {
     bind_group_layouts: WgpuBindGroupLayouts,
     atlas_sampler: wgpu::Sampler,
     globals_buffer: wgpu::Buffer,
+    gradient_ramps_buffer: wgpu::Buffer,
+    uploaded_gradient_generation: std::cell::Cell<Option<u64>>,
     globals_bind_group: wgpu::BindGroup,
     path_globals_bind_group: wgpu::BindGroup,
     instance_buffer: wgpu::Buffer,
@@ -425,6 +430,13 @@ impl WgpuRenderer {
             mapped_at_creation: false,
         });
 
+        let gradient_ramps_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gradient_ramps_buffer"),
+            size: (GRADIENT_RAMP_CAPACITY * std::mem::size_of::<GradientRamp>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let globals_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("globals_bind_group"),
             layout: &bind_group_layouts.globals,
@@ -444,6 +456,10 @@ impl WgpuRenderer {
                         offset: gamma_offset,
                         size: Some(NonZeroU64::new(gamma_size).unwrap()),
                     }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: gradient_ramps_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -468,6 +484,10 @@ impl WgpuRenderer {
                         size: Some(NonZeroU64::new(gamma_size).unwrap()),
                     }),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: gradient_ramps_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -488,6 +508,8 @@ impl WgpuRenderer {
             bind_group_layouts,
             atlas_sampler,
             globals_buffer,
+            gradient_ramps_buffer,
+            uploaded_gradient_generation: std::cell::Cell::new(None),
             globals_bind_group,
             path_globals_bind_group,
             instance_buffer,
@@ -553,6 +575,16 @@ impl WgpuRenderer {
                             min_binding_size: NonZeroU64::new(
                                 std::mem::size_of::<GammaParams>() as u64
                             ),
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
                         count: None,
                     },
@@ -1232,6 +1264,25 @@ impl WgpuRenderer {
                 self.gamma_offset,
                 bytemuck::bytes_of(&gamma_params),
             );
+
+            gpui::with_gradient_ramps(|generation, ramps| {
+                if resources.uploaded_gradient_generation.get() == Some(generation) {
+                    return;
+                }
+                let ramps = &ramps[..ramps.len().min(GRADIENT_RAMP_CAPACITY)];
+                if !ramps.is_empty() {
+                    let bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            ramps.as_ptr() as *const u8,
+                            std::mem::size_of_val(ramps),
+                        )
+                    };
+                    resources
+                        .queue
+                        .write_buffer(&resources.gradient_ramps_buffer, 0, bytes);
+                }
+                resources.uploaded_gradient_generation.set(Some(generation));
+            });
         }
 
         loop {

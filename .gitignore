@@ -37,6 +37,7 @@ profile.json.gz
 scripts/*
 !scripts/linux-deps
 !scripts/build-deb.sh
+!scripts/gen_theme_surfaces.py
 !scripts/make-update-feed.sh
 !scripts/make-update-manifest.sh
 !scripts/install-linux.sh

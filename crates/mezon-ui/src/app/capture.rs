@@ -301,6 +301,180 @@ pub fn set_composer_panel(cx: &mut App, kind: Option<&str>) -> anyhow::Result<Va
     Ok(serde_json::json!({ "ok": true, "panel": open }))
 }
 
+fn with_composer<R>(
+    cx: &mut App,
+    f: impl FnOnce(
+        &mut crate::chat::mention_input::MentionInput,
+        &mut Window,
+        &mut gpui::Context<crate::chat::mention_input::MentionInput>,
+    ) -> R,
+) -> anyhow::Result<R> {
+    let composer = crate::chat::mention_input::MentionInput::active_composer(cx)
+        .ok_or_else(|| anyhow::anyhow!("no composer is mounted; open a channel first"))?;
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    cx.update_window(main_handle, |_, window, cx| {
+        composer.update(cx, |composer, cx| f(composer, window, cx))
+    })
+}
+
+fn composer_snapshot(cx: &mut App) -> anyhow::Result<Value> {
+    let composer = crate::chat::mention_input::MentionInput::active_composer(cx)
+        .ok_or_else(|| anyhow::anyhow!("no composer is mounted; open a channel first"))?;
+    let composer = composer.read(cx);
+    let (popup_open, selected, suggestions) = composer.probe_suggestions();
+    Ok(json!({
+        "text": composer.probe_text(cx).to_string(),
+        "popup_open": popup_open,
+        "selected": selected,
+        "suggestions": suggestions,
+        "panel": composer.active_panel(cx).map(|tab| match tab {
+            crate::chat::gif_sticker_emoji::SubPanel::Emoji => "emoji",
+            crate::chat::gif_sticker_emoji::SubPanel::Stickers => "sticker",
+            crate::chat::gif_sticker_emoji::SubPanel::Gifs => "gif",
+            crate::chat::gif_sticker_emoji::SubPanel::Sounds => "sound",
+        }),
+    }))
+}
+
+pub fn composer_type(cx: &mut App, text: &str) -> anyhow::Result<Value> {
+    with_composer(cx, |composer, window, cx| {
+        composer.probe_set_text(text, window, cx);
+    })?;
+    composer_snapshot(cx)
+}
+
+pub fn composer_state(cx: &mut App) -> anyhow::Result<Value> {
+    composer_snapshot(cx)
+}
+
+pub fn composer_pick(cx: &mut App, index: usize) -> anyhow::Result<Value> {
+    let accepted = with_composer(cx, |composer, window, cx| {
+        composer.probe_accept(index, window, cx)
+    })?;
+    if !accepted {
+        anyhow::bail!("no suggestion at index {index}; call composer_type first");
+    }
+    composer_snapshot(cx)
+}
+
+fn edit_input_entity(
+    cx: &mut App,
+) -> anyhow::Result<(
+    gpui::Entity<crate::chat::message::ChannelMessages>,
+    gpui::Entity<crate::chat::mention_input::MentionInput>,
+)> {
+    let timeline = crate::chat::message::ChannelMessages::active_timeline(cx)
+        .ok_or_else(|| anyhow::anyhow!("no message list is mounted; open a channel first"))?;
+    let input = timeline
+        .read(cx)
+        .probe_edit_input()
+        .ok_or_else(|| anyhow::anyhow!("no message is being edited; call edit_begin first"))?
+        .1;
+    Ok((timeline, input))
+}
+
+fn edit_snapshot(cx: &mut App) -> anyhow::Result<Value> {
+    let (timeline, input) = edit_input_entity(cx)?;
+    let message_id = timeline
+        .read(cx)
+        .probe_edit_input()
+        .map(|(id, _)| id.get().to_string());
+    let input = input.read(cx);
+    let (popup_open, selected, suggestions) = input.probe_suggestions();
+    Ok(json!({
+        "message_id": message_id,
+        "text": input.probe_text(cx).to_string(),
+        "popup_open": popup_open,
+        "selected": selected,
+        "suggestions": suggestions,
+    }))
+}
+
+pub fn edit_begin(cx: &mut App, message_id: i64) -> anyhow::Result<Value> {
+    let timeline = crate::chat::message::ChannelMessages::active_timeline(cx)
+        .ok_or_else(|| anyhow::anyhow!("no message list is mounted; open a channel first"))?;
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    cx.update_window(main_handle, |_, window, cx| {
+        timeline.update(cx, |timeline, cx| {
+            timeline.begin_edit(mezon_store::MessageId(message_id), window, cx);
+        });
+    })?;
+    edit_snapshot(cx)
+}
+
+pub fn edit_type(cx: &mut App, text: &str) -> anyhow::Result<Value> {
+    let (_, input) = edit_input_entity(cx)?;
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    cx.update_window(main_handle, |_, window, cx| {
+        input.update(cx, |input, cx| input.probe_set_text(text, window, cx));
+    })?;
+    edit_snapshot(cx)
+}
+
+pub fn edit_pick(cx: &mut App, index: usize) -> anyhow::Result<Value> {
+    let (_, input) = edit_input_entity(cx)?;
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    let accepted = cx.update_window(main_handle, |_, window, cx| {
+        input.update(cx, |input, cx| input.probe_accept(index, window, cx))
+    })?;
+    if !accepted {
+        anyhow::bail!("no suggestion at index {index}");
+    }
+    edit_snapshot(cx)
+}
+
+pub fn edit_state(cx: &mut App) -> anyhow::Result<Value> {
+    edit_snapshot(cx)
+}
+
+pub fn edit_save(cx: &mut App) -> anyhow::Result<Value> {
+    let before = edit_snapshot(cx)?;
+    let timeline = crate::chat::message::ChannelMessages::active_timeline(cx)
+        .ok_or_else(|| anyhow::anyhow!("no message list is mounted"))?;
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    cx.update_window(main_handle, |_, window, cx| {
+        timeline.update(cx, |timeline, cx| timeline.save_edit(window, cx));
+    })?;
+    Ok(json!({ "ok": true, "saved": before }))
+}
+
+pub fn composer_panel_send(
+    cx: &mut App,
+    kind: &str,
+    url: String,
+    filename: String,
+    width: i32,
+    height: i32,
+) -> anyhow::Result<Value> {
+    with_composer(cx, |composer, _window, cx| {
+        composer.probe_panel_send(kind, url, filename, width, height, cx)
+    })??;
+    Ok(json!({ "ok": true, "kind": kind }))
+}
+
+pub fn composer_drop_paths(cx: &mut App, paths: Vec<String>) -> anyhow::Result<Value> {
+    let missing: Vec<&String> = paths
+        .iter()
+        .filter(|path| !std::path::Path::new(path).is_file())
+        .collect();
+    if let Some(path) = missing.first() {
+        anyhow::bail!("file not found: {path}");
+    }
+    let count = paths.len();
+    with_composer(cx, |composer, window, cx| {
+        composer.add_dropped_paths(paths.into_iter().map(Into::into).collect(), window, cx);
+    })?;
+    Ok(json!({ "ok": true, "dropped": count }))
+}
+
+pub fn composer_submit(cx: &mut App) -> anyhow::Result<Value> {
+    let before = composer_snapshot(cx)?;
+    with_composer(cx, |composer, window, cx| {
+        composer.probe_enter(window, cx);
+    })?;
+    Ok(json!({ "ok": true, "sent": before }))
+}
+
 pub const WHEEL_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 pub const WHEEL_MAX_TICKS: u32 = 500;
 
@@ -367,6 +541,111 @@ pub fn scroll_messages(cx: &mut App, to_top: bool) -> anyhow::Result<Value> {
         "first_visible_index": first_visible,
         "at_bottom": at_bottom,
     }))
+}
+
+pub fn member_list_snapshot(cx: &App) -> anyhow::Result<Value> {
+    Ok(crate::chat::member_list::member_list_snapshot(cx))
+}
+
+pub fn user_status_snapshot(cx: &App) -> anyhow::Result<Value> {
+    let Some((user_id, status)) = mezon_store::current_user_status(cx) else {
+        return Ok(json!({ "signed_in": false }));
+    };
+    let raw = mezon_store::AccountStore::try_global(cx)
+        .and_then(|store| {
+            store
+                .read(cx)
+                .account
+                .as_ref()
+                .map(|account| account.status.clone())
+        })
+        .unwrap_or_default();
+    Ok(json!({
+        "signed_in": true,
+        "user_id": user_id.to_string(),
+        "account_status": raw,
+        "presence": format!("{:?}", status.presence),
+        "custom_status": status.custom_status,
+        "online": status.online,
+    }))
+}
+
+pub fn set_user_status(
+    cx: &mut App,
+    status: &str,
+    minutes: i32,
+    until_turn_on: bool,
+) -> anyhow::Result<Value> {
+    let store = mezon_store::AccountStore::try_global(cx)
+        .ok_or_else(|| anyhow::anyhow!("not signed in"))?;
+    let before = store
+        .read(cx)
+        .account
+        .as_ref()
+        .map(|account| account.status.clone())
+        .ok_or_else(|| anyhow::anyhow!("not signed in"))?;
+    let status_changed = before != status;
+    store.update(cx, |store, cx| {
+        store.set_status(status.to_string(), minutes, until_turn_on, cx)
+    });
+    let after = store
+        .read(cx)
+        .account
+        .as_ref()
+        .map(|account| account.status.clone())
+        .unwrap_or_default();
+    Ok(json!({
+        "ok": true,
+        "requested": status,
+        "minutes": minutes,
+        "until_turn_on": until_turn_on,
+        "status_before": before,
+        "status_after": after,
+        "status_changed": status_changed,
+    }))
+}
+
+pub fn list_loaded_messages(cx: &App, limit: usize) -> anyhow::Result<Value> {
+    let store = mezon_store::MessagesStore::global(cx);
+    let store = store.read(cx);
+    let rows = store.messages();
+    let row_json = |m: &mezon_store::Message| {
+        json!({
+            "message_id": m.id.to_string(),
+            "optimistic": m.id.is_optimistic(),
+            "sort_id": m.sort_id,
+            "sender": m.sender_name,
+            "send_failed": m.send_failed,
+            "content": m.content.chars().take(60).collect::<String>(),
+        })
+    };
+    let head: Vec<Value> = rows.iter().take(limit).map(row_json).collect();
+    let tail: Vec<Value> = rows
+        .iter()
+        .skip(rows.len().saturating_sub(limit))
+        .map(row_json)
+        .collect();
+    Ok(json!({
+        "channel_id": store.active_channel_id().map(|id| id.to_string()),
+        "loaded_count": rows.len(),
+        "has_more_bottom": store.has_more_bottom(),
+        "oldest": head,
+        "newest": tail,
+    }))
+}
+
+pub fn jump_to_message(cx: &mut App, message_id: i64) -> anyhow::Result<Value> {
+    let store = mezon_store::MessagesStore::global(cx);
+    store.update(cx, |store, cx| {
+        store.jump_to_message(mezon_store::MessageId::new(message_id), cx)
+    });
+    Ok(json!({ "ok": true, "message_id": message_id.to_string() }))
+}
+
+pub fn jump_to_present(cx: &mut App) -> anyhow::Result<Value> {
+    let store = mezon_store::MessagesStore::global(cx);
+    store.update(cx, |store, cx| store.jump_to_present(cx));
+    Ok(json!({ "ok": true }))
 }
 
 pub fn open_message_image_viewer(

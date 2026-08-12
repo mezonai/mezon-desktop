@@ -64,7 +64,9 @@ impl SendTokenModal {
         if let Some(wallet) = WalletStore::try_global(cx)
             && !wallet.read(cx).is_available()
         {
-            wallet.update(cx, |wallet, cx| wallet.enable_wallet_for_current_user(cx));
+            wallet.update(cx, |wallet, cx| {
+                wallet.enable_wallet_for_current_user(false, cx)
+            });
         }
         let candidates = Self::build_candidates(cx);
         let view = cx.new(|cx| {
@@ -285,8 +287,19 @@ impl SendTokenModal {
         self.can_send_with(amount, self.exceeds_balance_for(amount, cx))
     }
 
-    fn send(&mut self, cx: &mut Context<Self>) {
+    fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_send(cx) {
+            return;
+        }
+        let wallet_available = WalletStore::try_global(cx)
+            .map(|wallet| wallet.read(cx).is_available())
+            .unwrap_or(false);
+        if !wallet_available {
+            let message = mezon_i18n::t(&self.locale, "message.wallet.notAvailable").to_string();
+            let locale = self.locale.clone();
+            Shell::global(cx).update(cx, |shell, cx| {
+                shell.show_wallet_not_available(message, &locale, window, cx)
+            });
             return;
         }
         let Some((recipient, recipient_username)) = self.selected.clone() else {
@@ -600,8 +613,8 @@ impl Render for SendTokenModal {
                         "userProfile.statusProfile.sendTokenModal.buttons.sendTokens",
                     ))
                     .disabled(!can_send)
-                    .on_click(move |_: &ClickEvent, _window, cx| {
-                        entity.update(cx, |this, cx| this.send(cx));
+                    .on_click(move |_: &ClickEvent, window, cx| {
+                        entity.update(cx, |this, cx| this.send(window, cx));
                     }),
             );
 

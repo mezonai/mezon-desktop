@@ -666,7 +666,7 @@ impl CommunitySettingPage {
                 .w_full()
                 .p_6()
                 .rounded_lg()
-                .bg(theme.tokens.bg_secondary)
+                .bg(theme.surfaces.secondary)
                 .border_1()
                 .border_color(theme.border)
                 .child(
@@ -1139,7 +1139,7 @@ impl CommunitySettingPage {
                                 .rounded_md()
                                 .border_1()
                                 .border_color(theme.border)
-                                .bg(theme.tokens.bg_secondary)
+                                .bg(theme.surfaces.secondary)
                                 .child(
                                     h_flex()
                                         .items_center()

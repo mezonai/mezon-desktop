@@ -739,6 +739,7 @@ fn split_pin_plain_text(text: &str, out: &mut Vec<MessageSpan>) {
             out.push(MessageSpan::CodeBlock {
                 language,
                 text: text.into(),
+                fenced_source: fence_body.into(),
             });
             rest = &after_open[end + 3..];
         } else {

@@ -411,7 +411,7 @@ fn render_edit_box(
                 .rounded(px(8.))
                 .border_1()
                 .border_color(theme.tokens.border_primary)
-                .bg(theme.tokens.bg_surface)
+                .bg(theme.surfaces.surface)
                 .child(input),
         )
         .child(

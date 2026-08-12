@@ -51,6 +51,7 @@ mod macos_build {
             "ShadowInputIndex".into(),
             "Shadow".into(),
             "QuadInputIndex".into(),
+            "GradientRamp".into(),
             "Underline".into(),
             "UnderlineInputIndex".into(),
             "Quad".into(),

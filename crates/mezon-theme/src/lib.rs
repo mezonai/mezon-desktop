@@ -1,9 +1,12 @@
+pub mod surface;
+mod surfaces;
 pub mod tokens;
 
 use std::sync::Arc;
 
-use gpui::{App, Global, Rgba};
+use gpui::{App, Background, Global, Hsla, Rgba};
 
+use crate::surface::ThemeSurfaces;
 use crate::tokens::ThemeTokens;
 
 struct GlobalTheme(Arc<Theme>);
@@ -163,6 +166,7 @@ pub struct Theme {
     pub title_bar_bg: Rgba, // #1e1f22
 
     pub tokens: ThemeTokens,
+    pub surfaces: ThemeSurfaces,
 }
 
 fn rgba(r: u8, g: u8, b: u8, a: f32) -> Rgba {
@@ -196,6 +200,7 @@ impl Theme {
     }
 
     fn dark_base() -> Self {
+        let tokens = ThemeTokens::for_theme("dark");
         Self {
             bg_primary: rgba(49, 51, 56, 1.0),
             bg_secondary: rgba(43, 45, 49, 1.0),
@@ -229,11 +234,13 @@ impl Theme {
 
             border: rgba(100, 100, 100, 0.4),
             title_bar_bg: rgba(30, 31, 34, 1.0),
-            tokens: ThemeTokens::for_theme("dark"),
+            surfaces: ThemeSurfaces::solid(&tokens),
+            tokens,
         }
     }
 
     fn light_base() -> Self {
+        let tokens = ThemeTokens::for_theme("light");
         Self {
             bg_primary: rgba(255, 255, 255, 1.0),
             bg_secondary: rgba(242, 243, 245, 1.0),
@@ -267,11 +274,39 @@ impl Theme {
 
             border: rgba(218, 220, 224, 1.0),
             title_bar_bg: rgba(227, 229, 232, 1.0),
-            tokens: ThemeTokens::for_theme("light"),
+            surfaces: ThemeSurfaces::solid(&tokens),
+            tokens,
         }
     }
 
-    fn from_tokens(mut base: Theme, t: ThemeTokens) -> Theme {
+    /// Resolves a flat base colour to the gradient surface the theme defines as
+    /// the same colour.
+    ///
+    /// `from_tokens` aliases every base background onto a token that also backs a
+    /// `ThemeSurface` (`bg_tertiary` == `--bg-primary`, and so on), so painting the
+    /// raw base value drops a flattened fill on top of the matching gradient. Flat
+    /// themes, where the two genuinely differ, keep the base colour.
+    pub fn surface_for(&self, base: Rgba) -> Background {
+        let surfaces = [
+            self.surfaces.primary,
+            self.surfaces.secondary,
+            self.surfaces.surface,
+            self.surfaces.direct_message,
+            self.surfaces.input_primary,
+            self.surfaces.active_friend_list,
+            self.surfaces.modal_search,
+            self.surfaces.outside_footer,
+            self.surfaces.footer,
+        ];
+        for surface in surfaces {
+            if surface.gradient.is_some() && surface.solid == base {
+                return surface.ramp();
+            }
+        }
+        Background::from(Hsla::from(base))
+    }
+
+    fn from_tokens(mut base: Theme, t: ThemeTokens, name: &str) -> Theme {
         base.bg_primary = t.bg_secondary;
         base.bg_secondary = t.bg_theme_direct_message;
         base.bg_tertiary = t.bg_primary;
@@ -282,6 +317,7 @@ impl Theme {
         base.border = t.border_primary;
         base.text_link = t.color_mention_hover;
         base.title_bar_bg = t.bg_primary;
+        base.surfaces = ThemeSurfaces::for_theme(name, &t);
         base.tokens = t;
         base
     }
@@ -295,7 +331,7 @@ impl Theme {
         } else {
             Theme::dark_base()
         };
-        Self::from_tokens(base, t)
+        Self::from_tokens(base, t, name)
     }
 
     pub fn sunrise() -> Self {
@@ -336,6 +372,39 @@ mod tests {
         assert_tracks_react(Theme::purple(), "purple_haze");
         assert_tracks_react(Theme::abyss(), "abyss_dark");
         assert_tracks_react(Theme::red_dark(), "redDark");
+    }
+
+    #[test]
+    fn surface_for_promotes_aliased_base_colors() {
+        for name in ["sunrise", "purple_haze", "redDark"] {
+            let theme = Theme::from_react(name);
+            // from_tokens aliases these onto tokens that also back a gradient surface.
+            for base in [theme.bg_tertiary, theme.bg_primary, theme.bg_secondary] {
+                assert!(
+                    theme.surface_for(base).as_solid().is_none(),
+                    "{name}: {base:?} should resolve to its gradient surface"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn surface_for_keeps_flat_theme_colors() {
+        for name in ["dark", "light"] {
+            let theme = if name == "dark" {
+                Theme::dark()
+            } else {
+                Theme::light()
+            };
+            // dark/light carry no gradients at all, so every base colour must come
+            // back untouched.
+            assert!(theme.surfaces.primary.gradient.is_none());
+            assert_eq!(
+                theme.surface_for(theme.bg_tertiary).as_solid(),
+                Some(Hsla::from(theme.bg_tertiary)),
+                "{name} must keep its own tertiary"
+            );
+        }
     }
 
     #[test]

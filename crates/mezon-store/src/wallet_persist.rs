@@ -11,6 +11,8 @@ pub struct PersistedWalletState {
     pub wallet: Option<WalletDetail>,
     pub zk_proofs: Option<ZkProof>,
     pub ephemeral: Option<EphemeralKeyPair>,
+    #[serde(default)]
+    pub proof_minted_at: Option<i64>,
 }
 
 fn parse_wallet(json: &str) -> Option<PersistedWalletState> {
@@ -133,6 +135,7 @@ mod tests {
                 private_key: "priv".to_string(),
                 public_key: "pub".to_string(),
             }),
+            proof_minted_at: Some(1_700_000_000),
         };
         let json = serde_json::to_string(&state).expect("serialize");
         let parsed = parse_wallet(&json).expect("parse");

@@ -1063,6 +1063,15 @@ fn low_latency_buffer(supported: &cpal::SupportedStreamConfig) -> cpal::BufferSi
     }
 }
 
+fn playback_buffer(supported: &cpal::SupportedStreamConfig) -> cpal::BufferSize {
+    match supported.buffer_size() {
+        cpal::SupportedBufferSize::Range { min, max } => {
+            cpal::BufferSize::Fixed((supported.sample_rate() / 25).clamp(*min, *max))
+        }
+        cpal::SupportedBufferSize::Unknown => cpal::BufferSize::Default,
+    }
+}
+
 fn build_input(
     host: &cpal::Host,
     id: Option<&str>,
@@ -1184,7 +1193,7 @@ fn build_output(
     err_hook: OutputErrorHook,
 ) -> Result<cpal::Stream> {
     let mut config: cpal::StreamConfig = supported.config();
-    config.buffer_size = low_latency_buffer(supported);
+    config.buffer_size = playback_buffer(supported);
     let rate = supported.sample_rate() as i32;
     let channels = supported.channels().max(1) as i32;
     let frame = (supported.sample_rate() as usize / 100) * supported.channels().max(1) as usize;

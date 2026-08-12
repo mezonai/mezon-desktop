@@ -1827,11 +1827,12 @@ impl RenderOnce for Input {
         let multi_line = state.read(cx).multi_line;
         let masked = state.read(cx).masked;
         let toggle_color = cx.theme().text_muted;
+        let toggle_id = state.entity_id();
 
         let toggle = self.mask_toggle.then(|| {
             let state = state.clone();
             div()
-                .id("mask-toggle")
+                .id(("mask-toggle", toggle_id))
                 .absolute()
                 .top_0()
                 .bottom_0()

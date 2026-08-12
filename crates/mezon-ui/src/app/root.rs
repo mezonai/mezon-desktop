@@ -349,10 +349,10 @@ impl Render for RootView {
             .flex()
             .flex_col()
             .size_full()
-            .bg(theme.bg_primary)
             .font_family(base_font_family)
             .text_color(theme.text_primary)
             .overflow_hidden()
+            .bg(theme.surfaces.secondary.ramp())
             .child(window_controls::render_app_drag_header())
             .image_cache(self.image_cache.clone())
             .on_action(cx.listener(|_, _: &crate::ToggleInspector, window, cx| {

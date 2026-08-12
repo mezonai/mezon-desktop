@@ -9,6 +9,7 @@ use crate::{
         ApiAccount, ApiAttachment, ApiCanvas, ApiCanvasDetail, ApiCategoryDesc, ApiChannelApp,
         ApiChannelAttachment, ApiChannelDesc, ApiClanDesc, ApiDirectChannel, ApiFriend, ApiMessage,
         ApiPinMessage, ApiThreadDesc, ApiVoiceChannelUser, HttpFallbackSession, RealtimeEvent,
+        UpdateChannelDescParams,
     },
 };
 
@@ -186,11 +187,13 @@ impl AppApi {
         self.transport.set_http_fallback(fallback);
     }
 
-    pub async fn renew_fallback_token(&self) -> Result<(String, String)> {
+    pub async fn renew_fallback_token(&self) -> Result<crate::transport::RenewedTokens> {
         self.transport.renew_fallback_token().await
     }
 
-    pub fn renewed_tokens(&self) -> tokio::sync::watch::Receiver<Option<(String, String)>> {
+    pub fn renewed_tokens(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<crate::transport::RenewedTokens>> {
         self.transport.renewed_tokens()
     }
 
@@ -488,11 +491,10 @@ impl AppApi {
         &self,
         clan_id: i64,
         channel_id: i64,
-        channel_label: Option<String>,
-        channel_avatar: Option<String>,
+        params: UpdateChannelDescParams,
     ) -> Result<()> {
         self.transport
-            .update_channel_desc(clan_id, channel_id, channel_label, channel_avatar)
+            .update_channel_desc(clan_id, channel_id, params)
             .await
     }
 
@@ -1480,6 +1482,17 @@ impl AppApi {
             .await
     }
 
+    pub async fn change_channel_category(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        new_category_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .change_channel_category(clan_id, channel_id, new_category_id)
+            .await
+    }
+
     pub async fn remove_channel_users(&self, channel_id: i64, user_ids: Vec<String>) -> Result<()> {
         self.transport
             .remove_channel_users(channel_id, user_ids)
@@ -1848,7 +1861,7 @@ impl AppApi {
         mentions: Vec<crate::transport::OutgoingMention>,
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
-        presign_finish: Vec<String>,
+        presign_finish: Option<Vec<String>>,
         flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
         let echo: Vec<crate::transport::ApiAttachment> = attachments
@@ -1877,7 +1890,7 @@ impl AppApi {
                 mentions,
                 hashtags,
                 emojis,
-                Some(presign_finish),
+                presign_finish,
                 flags,
             )
             .await?;
@@ -1898,7 +1911,7 @@ impl AppApi {
         mentions: Vec<crate::transport::OutgoingMention>,
         hashtags: Vec<crate::transport::OutgoingHashtag>,
         emojis: Vec<crate::transport::OutgoingEmoji>,
-        presign_finish: Vec<String>,
+        presign_finish: Option<Vec<String>>,
         reply: Option<crate::transport::OutgoingReply>,
         flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
@@ -1928,7 +1941,7 @@ impl AppApi {
                 mentions,
                 hashtags,
                 emojis,
-                Some(presign_finish),
+                presign_finish,
                 reply,
                 flags,
             )
@@ -2240,6 +2253,20 @@ impl AppApi {
             .await
     }
 
+    pub async fn registration_password(
+        &self,
+        email: &str,
+        password: &str,
+        old_password: &str,
+    ) -> std::result::Result<
+        crate::transport::ApiSession,
+        crate::transport::RegistrationPasswordError,
+    > {
+        self.transport
+            .registration_password(email, password, old_password)
+            .await
+    }
+
     pub async fn upload_attachment_file(
         &self,
         filename: &str,
@@ -2381,6 +2408,10 @@ impl AppApi {
 
     pub async fn archive_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
         self.transport.archive_channel(clan_id, channel_id).await
+    }
+
+    pub async fn delete_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
+        self.transport.delete_channel(clan_id, channel_id).await
     }
 
     pub async fn list_clan_badge_count(&self) -> Result<Vec<(String, i32, bool)>> {

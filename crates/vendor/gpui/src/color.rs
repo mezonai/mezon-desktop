@@ -685,6 +685,7 @@ pub(crate) enum BackgroundTag {
     LinearGradient = 1,
     PatternSlash = 2,
     Checkerboard = 3,
+    LinearGradientMulti = 4,
 }
 
 /// A color space for color interpolation.
@@ -720,8 +721,9 @@ pub struct Background {
     pub(crate) solid: Hsla,
     pub(crate) gradient_angle_or_pattern_height: f32,
     pub(crate) colors: [LinearColorStop; 2],
-    /// Padding for alignment for repr(C) layout.
-    pad: u32,
+    /// Index into the shared gradient ramp table for `LinearGradientMulti`.
+    /// Doubles as padding for alignment for repr(C) layout on every other tag.
+    ramp: u32,
 }
 
 impl std::fmt::Debug for Background {
@@ -743,6 +745,11 @@ impl std::fmt::Debug for Background {
                 "Checkerboard({:?}, {})",
                 self.solid, self.gradient_angle_or_pattern_height
             ),
+            BackgroundTag::LinearGradientMulti => write!(
+                f,
+                "LinearGradientMulti({}, ramp {})",
+                self.gradient_angle_or_pattern_height, self.ramp
+            ),
         }
     }
 }
@@ -756,7 +763,7 @@ impl Default for Background {
             color_space: ColorSpace::default(),
             gradient_angle_or_pattern_height: 0.0,
             colors: [LinearColorStop::default(), LinearColorStop::default()],
-            pad: 0,
+            ramp: 0,
         }
     }
 }
@@ -809,6 +816,111 @@ pub fn linear_gradient(
         tag: BackgroundTag::LinearGradient,
         gradient_angle_or_pattern_height: angle,
         colors: [from.into(), to.into()],
+        ..Default::default()
+    }
+}
+
+/// The maximum number of color stops a single gradient ramp can carry.
+pub const MAX_GRADIENT_RAMP_STOPS: usize = 8;
+
+/// High bit of `Background::ramp`, marking the gradient as anchored to the
+/// viewport rather than to the element's own bounds.
+const VIEWPORT_ANCHORED_RAMP: u32 = 1 << 31;
+
+/// A resolved multi-stop gradient ramp, laid out for direct upload to the GPU.
+///
+/// Colors are stored as straight (non-premultiplied) linear RGBA so the fragment
+/// shader does not have to run the HSL conversion per pixel.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[repr(C)]
+pub struct GradientRamp {
+    pub(crate) colors: [f32; 32],
+    pub(crate) positions: [f32; 8],
+    pub(crate) count: u32,
+    pub(crate) _padding: [u32; 3],
+}
+
+const _: () = assert!(MAX_GRADIENT_RAMP_STOPS == 8);
+
+impl GradientRamp {
+    fn is_transparent(&self) -> bool {
+        (0..self.count as usize).all(|stop| self.colors[stop * 4 + 3] == 0.0)
+    }
+}
+
+struct GradientRampTable {
+    ramps: Vec<GradientRamp>,
+    generation: u64,
+}
+
+static GRADIENT_RAMPS: std::sync::RwLock<GradientRampTable> =
+    std::sync::RwLock::new(GradientRampTable {
+        ramps: Vec::new(),
+        generation: 0,
+    });
+
+/// Reads the shared gradient ramp table.
+///
+/// The callback receives the table's generation and its entries. Renderers keep
+/// their GPU copy in sync by re-uploading only when the generation changes.
+pub fn with_gradient_ramps<R>(f: impl FnOnce(u64, &[GradientRamp]) -> R) -> R {
+    let table = GRADIENT_RAMPS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(table.generation, &table.ramps)
+}
+
+fn register_gradient_ramp(stops: &[LinearColorStop]) -> u32 {
+    let mut entry = GradientRamp {
+        colors: [0.0; 32],
+        positions: [0.0; 8],
+        count: stops.len() as u32,
+        _padding: [0; 3],
+    };
+    for (slot, stop) in stops.iter().enumerate() {
+        let color = Rgba::from(stop.color);
+        entry.colors[slot * 4..slot * 4 + 4].copy_from_slice(&[color.r, color.g, color.b, color.a]);
+        entry.positions[slot] = stop.percentage;
+    }
+
+    let mut table = GRADIENT_RAMPS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(existing) = table.ramps.iter().position(|ramp| *ramp == entry) {
+        return existing as u32;
+    }
+    table.ramps.push(entry);
+    table.generation += 1;
+    (table.ramps.len() - 1) as u32
+}
+
+/// Creates a LinearGradient background color with an arbitrary number of color stops.
+///
+/// Stops beyond the first and last are held in a shared ramp table rather than in
+/// the background itself, so a multi-stop gradient still paints as a single quad
+/// and costs no extra per-quad instance data.
+///
+/// Falls back to a two-stop gradient when there are fewer than three stops or more
+/// than [`MAX_GRADIENT_RAMP_STOPS`].
+pub fn linear_gradient_multi(angle: f32, stops: &[LinearColorStop]) -> Background {
+    let (Some(first), Some(last)) = (stops.first(), stops.last()) else {
+        return Background::default();
+    };
+    if stops.len() < 3 || stops.len() > MAX_GRADIENT_RAMP_STOPS {
+        return linear_gradient(angle, *first, *last);
+    }
+
+    Background {
+        tag: BackgroundTag::LinearGradientMulti,
+        gradient_angle_or_pattern_height: angle,
+        solid: Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.0,
+            a: 1.0,
+        },
+        colors: [*first, *last],
+        ramp: register_gradient_ramp(stops),
         ..Default::default()
     }
 }
@@ -874,6 +986,32 @@ impl Background {
         background
     }
 
+    /// Anchors this gradient to the viewport instead of the element's own bounds,
+    /// matching CSS `background-attachment: fixed`.
+    ///
+    /// Two-stop gradients are promoted to a ramp so that only one shader path has
+    /// to understand viewport anchoring. Non-gradient backgrounds are unchanged.
+    pub fn viewport_anchored(self) -> Self {
+        match self.tag {
+            BackgroundTag::LinearGradientMulti => Self {
+                ramp: self.ramp | VIEWPORT_ANCHORED_RAMP,
+                ..self
+            },
+            BackgroundTag::LinearGradient => Self {
+                tag: BackgroundTag::LinearGradientMulti,
+                ramp: register_gradient_ramp(&self.colors) | VIEWPORT_ANCHORED_RAMP,
+                solid: Hsla {
+                    h: 0.0,
+                    s: 0.0,
+                    l: 0.0,
+                    a: 1.0,
+                },
+                ..self
+            },
+            _ => self,
+        }
+    }
+
     /// Returns whether the background color is transparent.
     pub fn is_transparent(&self) -> bool {
         match self.tag {
@@ -881,6 +1019,11 @@ impl Background {
             BackgroundTag::LinearGradient => self.colors.iter().all(|c| c.color.is_transparent()),
             BackgroundTag::PatternSlash => self.solid.is_transparent(),
             BackgroundTag::Checkerboard => self.solid.is_transparent(),
+            BackgroundTag::LinearGradientMulti => {
+                let index = (self.ramp & !VIEWPORT_ANCHORED_RAMP) as usize;
+                self.solid.a == 0.0
+                    || with_gradient_ramps(|_, ramps| ramps[index].is_transparent())
+            }
         }
     }
 }

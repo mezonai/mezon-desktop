@@ -5,7 +5,7 @@ use gpui::{
     Element, ElementId, Font, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
     InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, Pixels, Point,
     SharedString, Style, TextAlign, TextRun, TransformationMatrix, TruncateFrom, Window, fill,
-    point, px, size,
+    point, px, radians, size,
 };
 
 use crate::components::primitives::IconName;
@@ -21,6 +21,7 @@ const OWNER_GAP: Pixels = px(4.);
 const DOT_SIZE: Pixels = px(12.);
 const DOT_BORDER: Pixels = px(2.);
 const DOT_INNER: Pixels = px(8.);
+const DOT_ICON_SIZE: Pixels = px(10.);
 const STATUS_MAX_WIDTH: Pixels = px(150.);
 const ELLIPSIS: &str = "…";
 const STATUS_ICON_SIZE: Pixels = px(12.);
@@ -30,13 +31,19 @@ const FALLBACK_WIDTH: Pixels = px(245.);
 type ClickHandler = Rc<dyn Fn(Point<Pixels>, &mut Window, &mut App)>;
 type RightClickHandler = Rc<dyn Fn(Point<Pixels>, &mut Window, &mut App)>;
 
+#[derive(Clone, Copy)]
+pub enum RowDot {
+    None,
+    Fill { color: Hsla, ring: Hsla },
+    Icon { icon: IconName, color: Hsla },
+}
+
 pub struct MemberRowElement {
     element_id: ElementId,
     name: SharedString,
     avatar: Option<AnyElement>,
     name_color: Hsla,
-    dot_fill: Hsla,
-    dot_border: Hsla,
+    dot: RowDot,
     owner_icon: Option<Hsla>,
     status: Option<(SharedString, Hsla)>,
     status_icon: Option<(IconName, Hsla)>,
@@ -51,8 +58,7 @@ impl MemberRowElement {
             name,
             avatar: Some(avatar),
             name_color: gpui::black(),
-            dot_fill: gpui::black(),
-            dot_border: gpui::black(),
+            dot: RowDot::None,
             owner_icon: None,
             status: None,
             status_icon: None,
@@ -66,9 +72,8 @@ impl MemberRowElement {
         self
     }
 
-    pub fn dot(mut self, fill: Hsla, border: Hsla) -> Self {
-        self.dot_fill = fill;
-        self.dot_border = border;
+    pub fn dot(mut self, dot: RowDot) -> Self {
+        self.dot = dot;
         self
     }
 
@@ -282,14 +287,33 @@ impl Element for MemberRowElement {
             origin: point(dot_x, dot_y),
             size: size(DOT_SIZE, DOT_SIZE),
         };
-        window
-            .paint_quad(fill(dot_outer, self.dot_border).corner_radii(Corners::all(DOT_SIZE / 2.)));
-        let dot_inner = Bounds {
-            origin: point(dot_x + DOT_BORDER, dot_y + DOT_BORDER),
-            size: size(DOT_INNER, DOT_INNER),
-        };
-        window
-            .paint_quad(fill(dot_inner, self.dot_fill).corner_radii(Corners::all(DOT_INNER / 2.)));
+        match self.dot {
+            RowDot::None => {}
+            RowDot::Fill { color, ring } => {
+                window.paint_quad(fill(dot_outer, ring).corner_radii(Corners::all(DOT_SIZE / 2.)));
+                let dot_inner = Bounds {
+                    origin: point(dot_x + DOT_BORDER, dot_y + DOT_BORDER),
+                    size: size(DOT_INNER, DOT_INNER),
+                };
+                window
+                    .paint_quad(fill(dot_inner, color).corner_radii(Corners::all(DOT_INNER / 2.)));
+            }
+            RowDot::Icon { icon, color } => {
+                let inset = (DOT_SIZE - DOT_ICON_SIZE) / 2.;
+                let icon_bounds = Bounds {
+                    origin: point(dot_x + inset, dot_y + inset),
+                    size: size(DOT_ICON_SIZE, DOT_ICON_SIZE),
+                };
+                let scale = window.scale_factor();
+                let center = icon_bounds.center();
+                let transform = TransformationMatrix::unit()
+                    .translate(center.scale(scale))
+                    .rotate(radians(-std::f32::consts::FRAC_PI_2))
+                    .translate(center.scale(-scale));
+                let _ =
+                    window.paint_svg(icon_bounds, icon.path().into(), None, transform, color, cx);
+            }
+        }
 
         match global_id {
             Some(global_id) => {

@@ -509,7 +509,7 @@ impl ConnectionStore {
         let mut renewed = api.renewed_tokens();
         cx.spawn(async move |_, cx| {
             while renewed.changed().await.is_ok() {
-                let Some((token, refresh_token)) = renewed.borrow_and_update().clone() else {
+                let Some(renewed_tokens) = renewed.borrow_and_update().clone() else {
                     continue;
                 };
                 let persisted = cx.update(|cx| {
@@ -518,10 +518,18 @@ impl ConnectionStore {
                             AuthState::Authenticated(s) | AuthState::Connecting(s) => s,
                             _ => return None,
                         };
-                        if session.token == token {
+                        let token_is_new = session.token != renewed_tokens.token;
+                        let id_token_is_new = !renewed_tokens.id_token.is_empty()
+                            && session.id_token != renewed_tokens.id_token;
+                        if !token_is_new && !id_token_is_new {
                             return None;
                         }
-                        session.apply_refresh(&token, &refresh_token, "");
+                        session.apply_refresh(
+                            &renewed_tokens.token,
+                            &renewed_tokens.refresh_token,
+                            "",
+                            &renewed_tokens.id_token,
+                        );
                         cx.notify();
                         Some(session.clone())
                     })
@@ -588,19 +596,32 @@ impl ConnectionStore {
                             let token_changed = !ev.token.is_empty() && ev.token != session.token;
                             let sid_changed =
                                 !ev.session_id.is_empty() && ev.session_id != session.session_id;
-                            session.apply_refresh(&ev.token, &ev.refresh_token, &ev.session_id);
+                            let id_token_changed =
+                                !ev.id_token.is_empty() && ev.id_token != session.id_token;
+                            session.apply_refresh(
+                                &ev.token,
+                                &ev.refresh_token,
+                                &ev.session_id,
+                                &ev.id_token,
+                            );
                             tracing::info!(
-                                "refresh_session_event user_id={} token_sent={} token_changed={} refresh_token_sent={} sid_sent={} sid_changed={} jwt_valid_for={}s jwt_expired={}",
+                                "refresh_session_event user_id={} token_sent={} token_changed={} refresh_token_sent={} sid_sent={} sid_changed={} id_token_sent={} id_token_changed={} id_token_valid_for={:?} jwt_valid_for={}s jwt_expired={}",
                                 ev.user_id,
                                 !ev.token.is_empty(),
                                 token_changed,
                                 !ev.refresh_token.is_empty(),
                                 !ev.session_id.is_empty(),
                                 sid_changed,
+                                !ev.id_token.is_empty(),
+                                id_token_changed,
+                                id_token_valid_for(session),
                                 session.expires_at.saturating_sub(now_secs()),
                                 session.expires_at != 0 && now_secs() >= session.expires_at,
                             );
-                            if ev.token.is_empty() && ev.session_id.is_empty() {
+                            if ev.token.is_empty()
+                                && ev.session_id.is_empty()
+                                && ev.id_token.is_empty()
+                            {
                                 return;
                             }
                             let session_clone = session.clone();
@@ -625,6 +646,10 @@ fn now_secs() -> u64 {
     mezon_client::server_now_secs()
 }
 
+fn id_token_valid_for(session: &Session) -> Option<i64> {
+    mezon_client::jwt_expires_at(&session.id_token).map(|exp| exp as i64 - now_secs() as i64)
+}
+
 /// Rotate the token pair once per app run, right after the first confirmed handshake. Its job is
 /// to keep the *refresh* token alive — that one lives a week (`RefreshTokenExpirySec: 604800`)
 /// while the JWT lives ten minutes, so a launch-time rotation is enough to never need a re-login.
@@ -641,8 +666,8 @@ async fn refresh_jwt_for_fallback(
     }
 
     tracing::info!("Rotating the session token pair to keep the refresh token alive");
-    let (token, refresh_token) = match api.renew_fallback_token().await {
-        Ok(pair) => pair,
+    let renewed = match api.renew_fallback_token().await {
+        Ok(renewed) => renewed,
         Err(e) => {
             tracing::warn!("SessionRefresh failed ({e}) — keeping the current session");
             return (session, RefreshVerdict::Transient);
@@ -650,11 +675,18 @@ async fn refresh_jwt_for_fallback(
     };
 
     let mut session = session;
-    session.apply_refresh(&token, &refresh_token, "");
+    session.apply_refresh(
+        &renewed.token,
+        &renewed.refresh_token,
+        "",
+        &renewed.id_token,
+    );
     tracing::info!(
-        "SessionRefresh applied: jwt_valid_for={}s refresh_token_renewed={}",
+        "SessionRefresh applied: jwt_valid_for={}s refresh_token_renewed={} id_token_renewed={} id_token_valid_for={:?}",
         session.expires_at.saturating_sub(now_secs()),
-        !refresh_token.is_empty(),
+        !renewed.refresh_token.is_empty(),
+        !renewed.id_token.is_empty(),
+        id_token_valid_for(&session),
     );
 
     // Persist what `auth_state` holds, never the local copy: the handshake that just completed
@@ -670,7 +702,12 @@ async fn refresh_jwt_for_fallback(
             if current.user_id != session.user_id {
                 return None;
             }
-            current.apply_refresh(&token, &refresh_token, "");
+            current.apply_refresh(
+                &renewed.token,
+                &renewed.refresh_token,
+                "",
+                &renewed.id_token,
+            );
             cx.notify();
             Some(current.clone())
         })
@@ -877,7 +914,7 @@ mod tests {
             session_id: "retired-sid".into(),
             ..Default::default()
         };
-        session.apply_refresh("new-jwt", "new-refresh", "rotated-sid");
+        session.apply_refresh("new-jwt", "new-refresh", "rotated-sid", "new-id-token");
         assert_eq!(session.session_id, "rotated-sid");
         assert_eq!(session.ws_credential(), "rotated-sid");
     }

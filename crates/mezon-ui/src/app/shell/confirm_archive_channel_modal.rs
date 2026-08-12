@@ -2,6 +2,7 @@ use gpui::{App, Context, FocusHandle, SharedString, Window, div, prelude::*, px}
 use mezon_store::{ARCHIVE_ERR_PERMISSION, ChannelId, ChannelList, ClanId, ClanList};
 
 use super::Shell;
+use crate::channel_navigation::navigate_after_thread_removed;
 use crate::components::primitives::{Button, ButtonVariants, h_flex, v_flex};
 use crate::router::{self, Route, Router};
 use crate::theme::ActiveTheme;
@@ -38,13 +39,7 @@ fn navigate_after_archive(
         return;
     }
     if is_thread && !parent_id.is_zero() {
-        router::replace(
-            cx,
-            Route::Channel {
-                clan_id,
-                channel_id: parent_id,
-            },
-        );
+        navigate_after_thread_removed(cx, clan_id, channel_id, parent_id);
         return;
     }
     if let Some(welcome_id) = ClanList::global(cx).read(cx).welcome_channel_id(clan_id) {
@@ -87,7 +82,7 @@ impl ConfirmArchiveChannelModal {
             };
             let result = task.await;
 
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 Shell::global(cx).update(cx, |shell, cx| {
                     shell.close_modal(cx);
                     match &result {

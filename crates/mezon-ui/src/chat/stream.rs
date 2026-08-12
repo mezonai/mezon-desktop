@@ -15,10 +15,7 @@ use ui::Tooltip;
 
 const MEMBER_AVATAR_SIZE: f32 = 40.;
 
-fn theme_is_light(theme: &Theme) -> bool {
-    let bg = theme.bg_primary;
-    0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b > 0.5
-}
+use crate::util::theme::theme_is_light;
 
 fn stream_channel_bg(theme: &Theme, joined: bool) -> Rgba {
     if joined || !theme_is_light(theme) {

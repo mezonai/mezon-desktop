@@ -193,7 +193,7 @@ impl RenderOnce for Dropdown {
                 trigger = trigger
                     .h(px(40.0))
                     .px(px(12.0))
-                    .bg(theme.tokens.bg_theme_input_primary);
+                    .bg(theme.surfaces.input_primary);
             }
         }
         if let Some(background) = self.trigger_background {

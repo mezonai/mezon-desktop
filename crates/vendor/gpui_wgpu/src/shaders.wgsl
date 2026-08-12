@@ -93,6 +93,18 @@ struct GammaParams {
 
 @group(0) @binding(0) var<uniform> globals: GlobalParams;
 @group(0) @binding(1) var<uniform> gamma_params: GammaParams;
+
+struct GradientRamp {
+    colors: array<vec4<f32>, 8>,
+    positions: array<vec4<f32>, 2>,
+    count: u32,
+    _padding: array<u32, 3>,
+}
+@group(0) @binding(2) var<storage, read> b_gradient_ramps: array<GradientRamp>;
+
+fn gradient_ramp_position(ramp: GradientRamp, stop: u32) -> f32 {
+    return ramp.positions[stop / 4u][stop % 4u];
+}
 @group(1) @binding(1) var t_sprite: texture_2d<f32>;
 @group(1) @binding(2) var s_sprite: sampler;
 
@@ -135,6 +147,7 @@ struct Background {
     // 1u is LinearGradient
     // 2u is PatternSlash
     // 3u is Checkerboard
+    // 4u is LinearGradientMulti
     tag: u32,
     // 0u is sRGB linear color
     // 1u is Oklab color
@@ -142,7 +155,7 @@ struct Background {
     solid: Hsla,
     gradient_angle_or_pattern_height: f32,
     colors: array<LinearColorStop, 2>,
-    pad: u32,
+    ramp: u32,
 }
 
 struct AtlasTextureId {
@@ -428,6 +441,29 @@ fn prepare_gradient_color(tag: u32, color_space: u32,
     return result;
 }
 
+fn gradient_t(background: Background, position: vec2<f32>, bounds: Bounds) -> f32 {
+    // -90 degrees to match the CSS gradient angle.
+    let angle = background.gradient_angle_or_pattern_height;
+    let radians = (angle % 360.0 - 90.0) * M_PI_F / 180.0;
+    var direction = vec2<f32>(cos(radians), sin(radians));
+
+    // Expand the short side to be the same as the long side
+    if (bounds.size.x > bounds.size.y) {
+        direction.y *= bounds.size.y / bounds.size.x;
+    } else {
+        direction.x *= bounds.size.x / bounds.size.y;
+    }
+
+    let half_size = bounds.size / 2.0;
+    let center = bounds.origin + half_size;
+    let center_to_point = position - center;
+    let raw = dot(center_to_point, direction) / length(direction);
+    if (abs(direction.x) > abs(direction.y)) {
+        return (raw + half_size.x) / bounds.size.x;
+    }
+    return (raw + half_size.y) / bounds.size.y;
+}
+
 fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
     solid_color: vec4<f32>, color0: vec4<f32>, color1: vec4<f32>) -> vec4<f32> {
     var background_color = vec4<f32>(0.0);
@@ -438,31 +474,9 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
         }
         case 1u: {
             // Linear gradient background.
-            // -90 degrees to match the CSS gradient angle.
-            let angle = background.gradient_angle_or_pattern_height;
-            let radians = (angle % 360.0 - 90.0) * M_PI_F / 180.0;
-            var direction = vec2<f32>(cos(radians), sin(radians));
             let stop0_percentage = background.colors[0].percentage;
             let stop1_percentage = background.colors[1].percentage;
-
-            // Expand the short side to be the same as the long side
-            if (bounds.size.x > bounds.size.y) {
-                direction.y *= bounds.size.y / bounds.size.x;
-            } else {
-                direction.x *= bounds.size.x / bounds.size.y;
-            }
-
-            // Get the t value for the linear gradient with the color stop percentages.
-            let half_size = bounds.size / 2.0;
-            let center = bounds.origin + half_size;
-            let center_to_point = position - center;
-            var t = dot(center_to_point, direction) / length(direction);
-            // Check the direct to determine the use x or y
-            if (abs(direction.x) > abs(direction.y)) {
-                t = (t + half_size.x) / bounds.size.x;
-            } else {
-                t = (t + half_size.y) / bounds.size.y;
-            }
+            var t = gradient_t(background, position, bounds);
 
             // Adjust t based on the stop percentages
             t = (t - stop0_percentage) / (stop1_percentage - stop0_percentage);
@@ -508,6 +522,48 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
 
             background_color = solid_color;
             background_color.a *= saturate(should_be_colored);
+        }
+        case 4u: {
+            // Multi-stop linear gradient; stops live in the shared ramp table
+            // so the whole ramp still paints as a single quad.
+            let ramp_index = background.ramp & 0x7FFFFFFFu;
+            let anchored = (background.ramp & 0x80000000u) != 0u;
+            let ramp = b_gradient_ramps[ramp_index];
+            // A viewport-anchored ramp spans the whole window, so each panel shows
+            // its own slice of one continuous gradient (background-attachment: fixed).
+            var ramp_bounds = bounds;
+            if (anchored) {
+                ramp_bounds = Bounds(vec2<f32>(0.0, 0.0), globals.viewport_size);
+            }
+            let t = gradient_t(background, position, ramp_bounds);
+
+            // Select the segment containing t, clamping to the first/last stop.
+            var from_color = ramp.colors[0];
+            var to_color = ramp.colors[0];
+            var segment_t = 0.0;
+            for (var i = 0u; i + 1u < ramp.count; i = i + 1u) {
+                let stop_from = gradient_ramp_position(ramp, i);
+                if (i == 0u || t >= stop_from) {
+                    from_color = ramp.colors[i];
+                    to_color = ramp.colors[i + 1u];
+                    let span = max(gradient_ramp_position(ramp, i + 1u) - stop_from, 1e-6);
+                    segment_t = clamp((t - stop_from) / span, 0.0, 1.0);
+                }
+            }
+
+            switch (background.color_space) {
+                default: {
+                    let from_srgb = linear_to_srgba(from_color);
+                    let to_srgb = linear_to_srgba(to_color);
+                    background_color = srgba_to_linear(mix(from_srgb, to_srgb, segment_t));
+                }
+                case 1u: {
+                    let from_oklab = linear_srgb_to_oklab(from_color);
+                    let to_oklab = linear_srgb_to_oklab(to_color);
+                    background_color = oklab_to_linear_srgb(mix(from_oklab, to_oklab, segment_t));
+                }
+            }
+            background_color.a *= background.solid.a;
         }
     }
 

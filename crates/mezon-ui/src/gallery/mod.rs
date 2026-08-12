@@ -835,7 +835,7 @@ fn render_filter_tabs(
         .rounded(px(6.))
         .cursor_pointer()
         .text_size(px(13.))
-        .bg(theme.tokens.bg_surface)
+        .bg(theme.surfaces.surface)
         .text_color(theme.text_primary)
         .child(date_label)
         .child(chevron)
@@ -907,7 +907,7 @@ fn render_date_filter_panel(
         .flex_col()
         .gap_4()
         .rounded(px(8.))
-        .bg(theme.tokens.bg_surface)
+        .bg(theme.surfaces.surface)
         .border_1()
         .border_color(theme.border)
         .shadow_lg()
@@ -1020,8 +1020,7 @@ fn filter_tab(
         .text_size(px(13.))
         .when(is_active, |el| el.bg(theme.brand).text_color(gpui::white()))
         .when(!is_active, |el| {
-            el.bg(theme.tokens.bg_surface)
-                .text_color(theme.text_primary)
+            el.bg(theme.surfaces.surface).text_color(theme.text_primary)
         })
         .child(label)
         .on_mouse_down(

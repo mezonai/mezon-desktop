@@ -31,6 +31,7 @@ flate2 = "1"
 bytes.workspace = true
 foyer.workspace = true
 parking_lot.workspace = true
+regex.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

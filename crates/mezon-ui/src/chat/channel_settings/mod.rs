@@ -1,11 +1,13 @@
 pub mod add_mem_role_modal;
+pub mod category_tab;
 pub mod channel_acl;
+pub mod overview_tab;
 pub mod permission_overrides;
 pub mod permissions_tab;
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, FontWeight, ScrollHandle, SharedString, Window,
-    div, point, prelude::*, px,
+    App, Context, Entity, FocusHandle, Focusable, FontWeight, ScrollHandle, SharedString,
+    Subscription, Window, deferred, div, point, prelude::*, px,
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, ClanList, PERMISSION_MANAGE_CHANNEL,
@@ -14,11 +16,15 @@ use mezon_store::{
 
 use crate::components::primitives::{Icon, IconName, h_flex, v_flex};
 use crate::theme::{ActiveTheme, Theme};
+use category_tab::CategoryTab;
+use overview_tab::{OverviewTab, render_channel_overview_save_bar};
 use permissions_tab::PermissionsTab;
+use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 const SIDEBAR_WIDTH: f32 = 224.0;
 const SIDEBAR_ITEM_WIDTH: f32 = 170.0;
 const CONTENT_MAX_WIDTH: f32 = 740.0;
+const CONTENT_COLUMN_WIDTH: f32 = 790.0;
 const EXIT_BUTTON_SIZE: f32 = 40.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +144,11 @@ pub struct ChannelSettingScreen {
     current_tab: ChannelSettingsTab,
     settings: Entity<Settings>,
     permissions_tab: Option<Entity<PermissionsTab>>,
+    permissions_sub: Option<Subscription>,
+    overview_tab: Option<Entity<OverviewTab>>,
+    overview_sub: Option<Subscription>,
+    category_tab: Option<Entity<CategoryTab>>,
+    category_sub: Option<Subscription>,
     content_scroll: ScrollHandle,
     nav_scroll: ScrollHandle,
     focus_handle: FocusHandle,
@@ -160,6 +171,11 @@ impl ChannelSettingScreen {
             current_tab: ChannelSettingsTab::Overview,
             settings,
             permissions_tab: None,
+            permissions_sub: None,
+            overview_tab: None,
+            overview_sub: None,
+            category_tab: None,
+            category_sub: None,
             content_scroll: ScrollHandle::new(),
             nav_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
@@ -168,9 +184,25 @@ impl ChannelSettingScreen {
     }
 
     pub fn release_active_tab(&mut self, cx: &mut Context<Self>) {
-        if self.permissions_tab.take().is_some() || !self.clan_id.is_zero() {
+        let had_permissions_tab = self.permissions_tab.take().is_some();
+        let had_overview_tab = self.overview_tab.take().is_some();
+        let had_category_tab = self.category_tab.take().is_some();
+        let had_permissions_sub = self.permissions_sub.take().is_some();
+        let had_overview_sub = self.overview_sub.take().is_some();
+        let had_category_sub = self.category_sub.take().is_some();
+        if had_permissions_tab
+            || had_overview_tab
+            || had_category_tab
+            || had_permissions_sub
+            || had_overview_sub
+            || had_category_sub
+            || !self.clan_id.is_zero()
+        {
             cx.notify();
         }
+        self.permissions_sub = None;
+        self.overview_sub = None;
+        self.category_sub = None;
         self.clan_id = ClanId(0);
         self.channel_id = ChannelId(0);
         self.current_tab = ChannelSettingsTab::Overview;
@@ -209,6 +241,11 @@ impl ChannelSettingScreen {
         }
         if target_changed || resolved != self.current_tab {
             self.permissions_tab = None;
+            self.permissions_sub = None;
+            self.overview_tab = None;
+            self.overview_sub = None;
+            self.category_tab = None;
+            self.category_sub = None;
             self.content_scroll.set_offset(point(px(0.0), px(0.0)));
         }
         self.current_tab = resolved;
@@ -267,18 +304,56 @@ impl ChannelSettingScreen {
     }
 
     fn activate_tab(&mut self, cx: &mut Context<Self>) {
-        if self.current_tab != ChannelSettingsTab::Permissions {
+        match self.current_tab {
+            ChannelSettingsTab::Permissions => {
+                if self.permissions_tab.is_some() {
+                    return;
+                }
+                let clan_id = self.clan_id;
+                let channel_id = self.channel_id;
+                let settings = self.settings.clone();
+                let tab = cx.new(|cx| PermissionsTab::new(clan_id, channel_id, settings, cx));
+                self.permissions_sub = Some(cx.observe(&tab, |_, _, cx| cx.notify()));
+                self.permissions_tab = Some(tab);
+            }
+            ChannelSettingsTab::Category => {
+                if self.category_tab.is_some() {
+                    return;
+                }
+                let clan_id = self.clan_id;
+                let channel_id = self.channel_id;
+                let settings = self.settings.clone();
+                let tab = cx.new(|cx| CategoryTab::new(clan_id, channel_id, settings, cx));
+                self.category_sub = Some(cx.observe(&tab, |_, _, cx| cx.notify()));
+                self.category_tab = Some(tab);
+            }
+            _ => {}
+        }
+    }
+
+    fn ensure_overview_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.current_tab != ChannelSettingsTab::Overview || self.overview_tab.is_some() {
             return;
         }
-        if self.permissions_tab.is_some() {
-            return;
-        }
+        let ctx = self.tab_context(cx);
         let clan_id = self.clan_id;
         let channel_id = self.channel_id;
         let settings = self.settings.clone();
-        let tab = cx.new(|cx| PermissionsTab::new(clan_id, channel_id, settings, cx));
-        cx.observe(&tab, |_, _, cx| cx.notify()).detach();
-        self.permissions_tab = Some(tab);
+        let is_thread = ctx.is_thread;
+        let channel_type = ctx.channel_type;
+        let tab = cx.new(|cx| {
+            OverviewTab::new(
+                clan_id,
+                channel_id,
+                settings,
+                is_thread,
+                channel_type,
+                window,
+                cx,
+            )
+        });
+        self.overview_sub = Some(cx.observe(&tab, |_, _, cx| cx.notify()));
+        self.overview_tab = Some(tab);
     }
 
     fn channel_label(&self, cx: &App) -> SharedString {
@@ -354,6 +429,37 @@ impl ChannelSettingScreen {
                     }),
             );
         }
+
+        let delete_label = if ctx.is_thread {
+            mezon_i18n::t(locale, "channelSetting.fields.threadDelete.delete")
+        } else {
+            mezon_i18n::t(locale, "channelSetting.fields.channelDelete.delete")
+        };
+        nav = nav.child(
+            div()
+                .w(px(SIDEBAR_ITEM_WIDTH))
+                .mt(px(16.0))
+                .mb(px(16.0))
+                .border_t_1()
+                .border_color(theme.border),
+        );
+        nav = nav.child(
+            div()
+                .id("channel-settings-delete")
+                .w(px(SIDEBAR_ITEM_WIDTH))
+                .ml(px(-8.0))
+                .p_2()
+                .rounded(px(5.0))
+                .text_base()
+                .font_weight(FontWeight::MEDIUM)
+                .opacity(0.5)
+                .cursor_default()
+                .when(ctx.is_welcome_channel, |el| el.text_color(theme.text_muted))
+                .when(!ctx.is_welcome_channel, |el| {
+                    el.text_color(gpui::rgb(0xdc_26_26))
+                })
+                .child(delete_label),
+        );
 
         div()
             .id("channel-settings-nav")
@@ -433,13 +539,30 @@ impl Render for ChannelSettingScreen {
             window.focus(&self.focus_handle, cx);
         }
 
+        self.ensure_overview_tab(window, cx);
+
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
         let ctx = self.tab_context(cx);
 
+        let show_overview_save = self.current_tab == ChannelSettingsTab::Overview
+            && self
+                .overview_tab
+                .as_ref()
+                .is_some_and(|tab| tab.read(cx).should_show_save_bar(cx));
+        let overview_save_bar = self.overview_tab.clone().filter(|_| show_overview_save);
+
         let body = match self.current_tab {
             ChannelSettingsTab::Permissions => self
                 .permissions_tab
+                .as_ref()
+                .map(|tab| tab.clone().into_any_element()),
+            ChannelSettingsTab::Overview => self
+                .overview_tab
+                .as_ref()
+                .map(|tab| tab.clone().into_any_element()),
+            ChannelSettingsTab::Category => self
+                .category_tab
                 .as_ref()
                 .map(|tab| tab.clone().into_any_element()),
             _ => None,
@@ -467,29 +590,61 @@ impl Render for ChannelSettingScreen {
             .child(self.render_sidebar(&locale, &theme, ctx, cx))
             .child(
                 div()
-                    .id("channel-settings-content")
+                    .relative()
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.content_scroll)
+                    .min_h_0()
                     .child(
-                        h_flex()
-                            .w_full()
-                            .items_start()
-                            .justify_start()
+                        div()
+                            .id("channel-settings-content")
+                            .size_full()
+                            .relative()
+                            .overflow_hidden()
                             .child(
                                 div()
-                                    .w_full()
-                                    .max_w(px(CONTENT_MAX_WIDTH))
-                                    .pl(px(40.0))
-                                    .pr(px(10.0))
-                                    .pt(px(94.0))
-                                    .pb(px(28.0))
-                                    .child(body),
+                                    .id("channel-settings-content-scroll")
+                                    .size_full()
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.content_scroll)
+                                    .child(
+                                        h_flex()
+                                            .w_full()
+                                            .items_start()
+                                            .child(
+                                                v_flex()
+                                                    .w(px(CONTENT_COLUMN_WIDTH))
+                                                    .flex_shrink_0()
+                                                    .pl(px(40.0))
+                                                    .pr(px(10.0))
+                                                    .pt(px(94.0))
+                                                    .pb(px(28.0))
+                                                    .child(
+                                                        div()
+                                                            .w_full()
+                                                            .max_w(px(CONTENT_MAX_WIDTH))
+                                                            .child(body),
+                                                    ),
+                                            )
+                                            .child(self.render_exit_column(&theme)),
+                                    ),
                             )
-                            .child(self.render_exit_column(&theme)),
-                    ),
+                            .custom_scrollbars(
+                                Scrollbars::always_visible(ScrollAxes::Vertical)
+                                    .tracked_scroll_handle(&self.content_scroll)
+                                    .with_stable_track_along(
+                                        ScrollAxes::Vertical,
+                                        theme.tokens.theme_setting_primary.into(),
+                                    ),
+                                window,
+                                cx,
+                            ),
+                    )
+                    .when_some(overview_save_bar, |panel, overview| {
+                        panel.child(deferred(render_channel_overview_save_bar(
+                            overview, &locale, &theme, cx,
+                        )))
+                    }),
             )
     }
 }

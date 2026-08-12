@@ -8,6 +8,8 @@ pub const AVATAR_GROUP: &str = "images/avatar-group.png";
 pub const MEZON_LOGO: &str = "images/logoflashsceenmezon.png";
 pub const STREAM_THUMBNAIL: &str = "images/flahstream.png";
 pub const MEZON_COMMUNITY: &str = "images/mezon-community.png";
+pub const CHANNEL_SETTING_LOGO_LIGHT: &str = "images/channel_setting_logo_light.svg";
+pub const CHANNEL_SETTING_LOGO_DARK: &str = "images/channel_setting_logo_dark.svg";
 
 #[derive(RustEmbed)]
 #[folder = "assets"]
@@ -40,7 +42,14 @@ mod tests {
 
     #[test]
     fn every_declared_asset_is_embedded() {
-        for path in [AVATAR_GROUP, MEZON_LOGO, STREAM_THUMBNAIL, MEZON_COMMUNITY] {
+        for path in [
+            AVATAR_GROUP,
+            MEZON_LOGO,
+            STREAM_THUMBNAIL,
+            MEZON_COMMUNITY,
+            CHANNEL_SETTING_LOGO_LIGHT,
+            CHANNEL_SETTING_LOGO_DARK,
+        ] {
             let loaded = Assets
                 .load(path)
                 .unwrap_or_else(|e| panic!("{path} is declared but not embedded: {e}"));

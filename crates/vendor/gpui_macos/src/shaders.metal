@@ -35,7 +35,9 @@ float blur_along_x(float x, float y, float sigma, float corner,
 float4 over(float4 below, float4 above);
 float radians(float degrees);
 float4 fill_color(Background background, float2 position, Bounds_ScaledPixels bounds,
-  float4 solid_color, float4 color0, float4 color1);
+  float4 solid_color, float4 color0, float4 color1,
+  constant GradientRamp *gradient_ramps, Bounds_ScaledPixels viewport);
+float gradient_t(Background background, float2 position, Bounds_ScaledPixels bounds);
 
 struct GradientColor {
   float4 solid;
@@ -99,10 +101,17 @@ vertex QuadVertexOutput quad_vertex(uint unit_vertex_id [[vertex_id]],
 
 fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
                               constant Quad *quads
-                              [[buffer(QuadInputIndex_Quads)]]) {
+                              [[buffer(QuadInputIndex_Quads)]],
+                              constant GradientRamp *gradient_ramps
+                              [[buffer(QuadInputIndex_GradientRamps)]],
+                              constant Size_DevicePixels *viewport_size
+                              [[buffer(QuadInputIndex_ViewportSize)]]) {
   Quad quad = quads[input.quad_id];
+  Bounds_ScaledPixels viewport = Bounds_ScaledPixels{
+    {0.0, 0.0}, {(float)viewport_size->width, (float)viewport_size->height}};
   float4 background_color = fill_color(quad.background, input.position.xy, quad.bounds,
-    input.background_solid, input.background_color0, input.background_color1);
+    input.background_solid, input.background_color0, input.background_color1,
+    gradient_ramps, viewport);
 
   bool unrounded = quad.corner_radii.top_left == 0.0 &&
     quad.corner_radii.bottom_left == 0.0 &&
@@ -771,7 +780,8 @@ vertex PathRasterizationVertexOutput path_rasterization_vertex(
 
 fragment float4 path_rasterization_fragment(
   PathRasterizationFragmentInput input [[stage_in]],
-  constant PathRasterizationVertex *vertices [[buffer(PathRasterizationInputIndex_Vertices)]]
+  constant PathRasterizationVertex *vertices [[buffer(PathRasterizationInputIndex_Vertices)]],
+  constant GradientRamp *gradient_ramps [[buffer(PathRasterizationInputIndex_GradientRamps)]]
 ) {
   float2 dx = dfdx(input.st_position);
   float2 dy = dfdy(input.st_position);
@@ -806,7 +816,9 @@ fragment float4 path_rasterization_fragment(
     path_bounds,
     gradient_color.solid,
     gradient_color.color0,
-    gradient_color.color1
+    gradient_color.color1,
+    gradient_ramps,
+    path_bounds
   );
   return float4(color.rgb * color.a * alpha, alpha * color.a);
 }
@@ -1177,10 +1189,43 @@ float2x2 rotate2d(float angle) {
     return float2x2(c, -s, s, c);
 }
 
+float4 gradient_ramp_color(constant GradientRamp &ramp, uint stop) {
+  uint base = stop * 4u;
+  return float4(ramp.colors[base], ramp.colors[base + 1u],
+                ramp.colors[base + 2u], ramp.colors[base + 3u]);
+}
+
+float gradient_t(Background background, float2 position, Bounds_ScaledPixels bounds) {
+  // -90 degrees to match the CSS gradient angle.
+  float gradient_angle = background.gradient_angle_or_pattern_height;
+  float radians = (fmod(gradient_angle, 360.0) - 90.0) * (M_PI_F / 180.0);
+  float2 direction = float2(cos(radians), sin(radians));
+
+  // Expand the short side to be the same as the long side
+  if (bounds.size.width > bounds.size.height) {
+      direction.y *= bounds.size.height / bounds.size.width;
+  } else {
+      direction.x *=  bounds.size.width / bounds.size.height;
+  }
+
+  // Get the t value for the linear gradient with the color stop percentages.
+  float2 half_size = float2(bounds.size.width, bounds.size.height) / 2.;
+  float2 center = float2(bounds.origin.x, bounds.origin.y) + half_size;
+  float2 center_to_point = position - center;
+  float t = dot(center_to_point, direction) / length(direction);
+  // Check the direction to determine whether to use x or y
+  if (abs(direction.x) > abs(direction.y)) {
+      return (t + half_size.x) / bounds.size.width;
+  }
+  return (t + half_size.y) / bounds.size.height;
+}
+
 float4 fill_color(Background background,
                       float2 position,
                       Bounds_ScaledPixels bounds,
-                      float4 solid_color, float4 color0, float4 color1) {
+                      float4 solid_color, float4 color0, float4 color1,
+                      constant GradientRamp *gradient_ramps,
+                      Bounds_ScaledPixels viewport) {
   float4 color;
 
   switch (background.tag) {
@@ -1188,29 +1233,7 @@ float4 fill_color(Background background,
       color = solid_color;
       break;
     case 1: {
-      // -90 degrees to match the CSS gradient angle.
-      float gradient_angle = background.gradient_angle_or_pattern_height;
-      float radians = (fmod(gradient_angle, 360.0) - 90.0) * (M_PI_F / 180.0);
-      float2 direction = float2(cos(radians), sin(radians));
-
-      // Expand the short side to be the same as the long side
-      if (bounds.size.width > bounds.size.height) {
-          direction.y *= bounds.size.height / bounds.size.width;
-      } else {
-          direction.x *=  bounds.size.width / bounds.size.height;
-      }
-
-      // Get the t value for the linear gradient with the color stop percentages.
-      float2 half_size = float2(bounds.size.width, bounds.size.height) / 2.;
-      float2 center = float2(bounds.origin.x, bounds.origin.y) + half_size;
-      float2 center_to_point = position - center;
-      float t = dot(center_to_point, direction) / length(direction);
-      // Check the direction to determine whether to use x or y
-      if (abs(direction.x) > abs(direction.y)) {
-          t = (t + half_size.x) / bounds.size.width;
-      } else {
-          t = (t + half_size.y) / bounds.size.height;
-      }
+      float t = gradient_t(background, position, bounds);
 
       // Adjust t based on the stop percentages
       t = (t - background.colors[0].percentage)
@@ -1272,6 +1295,49 @@ float4 fill_color(Background background,
         color = solid_color;
         color.a *= saturate(should_be_colored);
         break;
+    }
+    case 4: {
+      // Multi-stop linear gradient. The stops live in the shared ramp table so
+      // the whole ramp still paints as a single quad.
+      uint ramp_index = background.ramp & 0x7FFFFFFFu;
+      bool anchored = (background.ramp & 0x80000000u) != 0u;
+      constant GradientRamp &ramp = gradient_ramps[ramp_index];
+      // A viewport-anchored ramp spans the whole window, so each panel shows its
+      // own slice of one continuous gradient (CSS background-attachment: fixed).
+      float t = gradient_t(background, position, anchored ? viewport : bounds);
+
+      // Select the segment containing t, clamping to the first/last stop.
+      float4 from_color = gradient_ramp_color(ramp, 0);
+      float4 to_color = from_color;
+      float segment_t = 0.0;
+      for (uint i = 0; i + 1 < ramp.count; ++i) {
+        float from = ramp.positions[i];
+        if (i == 0 || t >= from) {
+          from_color = gradient_ramp_color(ramp, i);
+          to_color = gradient_ramp_color(ramp, i + 1);
+          segment_t = saturate((t - from) / max(ramp.positions[i + 1] - from, 1e-6));
+        }
+      }
+
+      if (background.color_space == 1) {
+        color = oklab_to_srgb(
+          mix(srgb_to_oklab(from_color), srgb_to_oklab(to_color), segment_t));
+      } else {
+        color = mix(from_color, to_color, segment_t);
+      }
+      color.a *= background.solid.a;
+
+      // Dither to reduce banding in gradients (especially dark/alpha).
+      {
+        float2 seed = position * 0.6180339887; // golden ratio spread
+        float r1 = fract(sin(dot(seed, float2(12.9898, 78.233))) * 43758.5453);
+        float r2 = fract(sin(dot(seed, float2(39.3460, 11.135))) * 24634.6345);
+        float tri = r1 + r2 - 1.0; // triangular PDF, range [-1, +1]
+        color.rgb += tri * 2.0 / 255.0;
+        color.a   += tri * 3.0 / 255.0;
+      }
+
+      break;
     }
   }
 

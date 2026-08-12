@@ -1264,7 +1264,7 @@ impl CreateEventModal {
                     .border_1()
                     .border_color(theme.border)
                     .overflow_hidden()
-                    .bg(theme.tokens.bg_primary)
+                    .bg(theme.surfaces.primary)
                     .when_some(self.cover_url.clone(), |d, url| {
                         d.child(
                             div()

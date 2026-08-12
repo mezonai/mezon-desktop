@@ -351,7 +351,7 @@ impl Render for ClanSidebar {
                     .flex_col()
                     .items_center()
                     .w_full()
-                    .bg(theme.bg_tertiary)
+                    .bg(theme.surface_for(theme.bg_tertiary))
                     .pt(px(window_controls::CLAN_SIDEBAR_HEADER_TOP))
                     .child(render_window_nav(
                         theme,
@@ -456,6 +456,7 @@ fn nav_arrow(id: &'static str, enabled: bool, is_back: bool, theme: &Theme) -> A
 
     let mut button = div()
         .id(id)
+        .occlude()
         .flex()
         .items_center()
         .justify_center()

@@ -24,8 +24,8 @@ pub mod transport_runtime;
 
 pub use abridged_tcp_adapter::AbridgedTcpAdapter;
 pub use app_api::{
-    AppApi, AttachmentUploadOutcome, ConnectionStatus, UploadFile, UploadThumbnail, UrlAttachment,
-    sanitize_upload_filename,
+    AppApi, AttachmentUploadOutcome, ConnectionStatus, PresignedAttachment, UploadFile,
+    UploadThumbnail, UrlAttachment, sanitize_upload_filename,
 };
 pub use attachment_download::{
     clean_download_url, download_url_to_downloads, resolve_download_filename, sanitize_filename,
@@ -65,15 +65,17 @@ pub use search_message::{
     should_show_search_dropdown, username_filter,
 };
 pub use server_clock::{now_secs as server_now_secs, observe_http_date};
-pub use session::Session;
+pub use session::{Session, jwt_expires_at};
 pub use transport::MezonTransport;
 pub use transport::RealtimeEvent;
 pub use transport::{
     ApiCanvas, ApiCanvasDetail, ApiCategoryDesc, ApiChannelApp, ApiChannelAttachment,
     ApiChannelDesc, ApiFriend, ApiPinMessage, ApiStatusError, ApiThreadDesc, ApiVoiceChannelUser,
-    CANVAS_LIST_LIMIT, CANVAS_STATUS_CREATED, CANVAS_STATUS_UPDATE, HttpFallbackSession,
-    api_status_from_error, is_channel_limit_api_error, parse_search_attachment_field,
-    parse_search_mentions_field,
+    CANVAS_LIST_LIMIT, CANVAS_STATUS_CREATED, CANVAS_STATUS_UPDATE, FACEBOOK_LINK_MARKDOWN_KIND,
+    HttpFallbackSession, LINK_MARKDOWN_KIND, RegistrationPasswordError, TIKTOK_LINK_MARKDOWN_KIND,
+    UpdateChannelDescParams, YOUTUBE_LINK_MARKDOWN_KIND, api_status_from_error,
+    is_channel_limit_api_error, is_link_markdown_kind, link_markdown_kind,
+    parse_search_attachment_field, parse_search_mentions_field,
 };
 pub use transport_adapter::TransportAdapter;
 pub use transport_runtime::TransportClient;

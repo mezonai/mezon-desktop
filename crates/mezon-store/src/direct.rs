@@ -435,8 +435,16 @@ impl DirectMessageStore {
             avatar.as_deref(),
         );
         cx.spawn(async move |this, cx| {
-            api.update_channel_desc(0, channel_id.0, sent_label, sent_avatar)
-                .await?;
+            api.update_channel_desc(
+                0,
+                channel_id.0,
+                mezon_client::UpdateChannelDescParams {
+                    channel_label: sent_label,
+                    channel_avatar: sent_avatar,
+                    ..Default::default()
+                },
+            )
+            .await?;
             this.update(cx, |this, cx| {
                 if let Some(ch) = this.channels.find_mut(channel_id) {
                     if let Some(label) = label {
@@ -1546,6 +1554,10 @@ mod tests {
             creator_id,
             clan_name: String::new(),
             channel_avatar: String::new(),
+            topic: String::new(),
+            age_restricted: 0,
+            e2ee: 0,
+            app_id: 0,
             active: 1,
         }
     }

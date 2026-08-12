@@ -251,7 +251,7 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
                         .items_center()
                         .w_full()
                         .rounded_lg()
-                        .bg(tokens.bg_surface)
+                        .bg(theme.surfaces.surface)
                         .border_1()
                         .border_color(tokens.border_primary)
                         .px_3()

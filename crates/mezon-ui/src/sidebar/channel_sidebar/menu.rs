@@ -1,7 +1,8 @@
 use gpui::{App, ClickEvent, ClipboardItem, Entity, Pixels, Point, WeakEntity, Window};
 use mezon_store::{
-    AppConfig, BadgeService, ChannelId, ChannelList, ChannelType, ClanId,
-    PERMISSION_MANAGE_CHANNEL, PermissionStore, archive_menu_hidden, can_archive_channel,
+    AppConfig, BadgeService, ChannelId, ChannelList, ChannelType, ClanId, PERMISSION_ADMINISTRATOR,
+    PERMISSION_CLAN_OWNER, PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PermissionStore,
+    archive_menu_hidden, can_archive_channel,
 };
 
 use super::ChannelSidebar;
@@ -141,7 +142,18 @@ fn mark_channel_read(
     }
 }
 
-fn open_channel_settings(
+pub(super) fn can_open_channel_settings(clan_id: ClanId, cx: &App) -> bool {
+    let Some(permissions) = PermissionStore::try_global(cx) else {
+        return false;
+    };
+    let permissions = permissions.read(cx);
+    permissions.check(clan_id, None, PERMISSION_CLAN_OWNER, cx)
+        || permissions.check(clan_id, None, PERMISSION_ADMINISTRATOR, cx)
+        || permissions.check(clan_id, None, PERMISSION_MANAGE_CLAN, cx)
+        || permissions.check(clan_id, None, PERMISSION_MANAGE_CHANNEL, cx)
+}
+
+pub(super) fn open_channel_settings(
     clan_id: ClanId,
     channel_id: ChannelId,
 ) -> impl Fn(&mut Window, &mut App) + 'static {
@@ -166,6 +178,18 @@ fn open_archive_confirm(
     move |window: &mut Window, cx: &mut App| {
         Shell::global(cx).update(cx, |shell, cx| {
             shell.confirm_archive_channel(clan_id, channel_id, is_thread, &locale, window, cx);
+        });
+    }
+}
+
+fn open_delete_thread_confirm(
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    locale: String,
+) -> impl Fn(&mut Window, &mut App) + 'static {
+    move |window: &mut Window, cx: &mut App| {
+        Shell::global(cx).update(cx, |shell, cx| {
+            shell.confirm_delete_thread(clan_id, channel_id, &locale, window, cx);
         });
     }
 }
@@ -453,7 +477,7 @@ pub(super) fn build_channel_menu(
                 });
             });
         }
-        if permissions.has_manage_thread {
+        if permissions.has_manage_thread && !permissions.is_welcome_channel {
             menu = menu
                 .separator()
                 .item(
@@ -462,7 +486,7 @@ pub(super) fn build_channel_menu(
                 )
                 .danger_item(
                     delete_label.clone(),
-                    coming_soon_modal(delete_label, locale_owned.clone()),
+                    open_delete_thread_confirm(clan_id, channel_id, locale_owned.clone()),
                 );
         }
     } else {

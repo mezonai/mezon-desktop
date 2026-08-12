@@ -219,9 +219,6 @@ impl ThreadsStore {
                 self.apply_thread_updated(ev, cx);
             }
             RealtimeEvent::ChannelMessage(msg) => self.apply_thread_message(msg, cx),
-            RealtimeEvent::ChannelDeleted(ev) => {
-                self.apply_thread_deleted(&ev.channel_id.to_string(), cx);
-            }
             RealtimeEvent::ChannelArchive(ev) => {
                 self.apply_channel_archive(ev, cx);
             }
@@ -354,6 +351,10 @@ impl ThreadsStore {
 
     pub fn mark_thread_archived(&mut self, channel_id: &str, cx: &mut Context<Self>) {
         self.set_thread_active(channel_id, THREAD_STATUS_ARCHIVED, cx);
+    }
+
+    pub fn remove_thread_locally(&mut self, channel_id: &str, cx: &mut Context<Self>) {
+        self.apply_thread_deleted(channel_id, cx);
     }
 
     pub fn thread_active(&self, channel_id: &str) -> Option<i32> {

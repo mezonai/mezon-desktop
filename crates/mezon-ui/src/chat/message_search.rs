@@ -754,7 +754,7 @@ fn render_search_row(
                     .px_2()
                     .py_1()
                     .rounded(px(6.))
-                    .bg(theme.tokens.bg_secondary)
+                    .bg(theme.surfaces.secondary)
                     .text_size(px(10.))
                     .text_color(theme.tokens.text_theme_primary)
                     .cursor_pointer()
@@ -1495,7 +1495,7 @@ pub fn render_header_search_bar(
                 .rounded_lg()
                 .border_1()
                 .border_color(theme.tokens.border_primary)
-                .bg(theme.tokens.bg_surface)
+                .bg(theme.surfaces.surface)
                 .px_2()
                 .cursor_pointer()
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {

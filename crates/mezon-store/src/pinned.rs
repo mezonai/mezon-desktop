@@ -14,7 +14,7 @@ use crate::AppConfig;
 use crate::ids::{ChannelId, ClanId, MessageId, UserId};
 use crate::message::{
     Embed, Message, MessageAttachment, MessageSpan, OgpPreview, RichLayout, build_rich_layout,
-    parse_spans,
+    link_marker_from_kind, parse_spans,
 };
 use crate::messages::{MessagesEvent, MessagesStore, build_embeds, build_ogp_preview};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
@@ -592,7 +592,7 @@ fn rebuild_pin_content_json(msg: &Message) -> String {
                 }
                 ej.push(serde_json::Value::Object(item));
             }
-            MessageSpan::Link { text, url, .. } => {
+            MessageSpan::Link { text, url, kind } => {
                 let start = pin_utf16_len(&t);
                 t.push_str(text);
                 let mut item = serde_json::Map::new();
@@ -601,7 +601,17 @@ fn rebuild_pin_content_json(msg: &Message) -> String {
                 if !url.is_empty() {
                     item.insert("url".into(), url.clone().into());
                 }
-                lk.push(serde_json::Value::Object(item));
+                // `parse_spans` only classifies a bare `lk` token when `mk` is empty (mirroring
+                // React's `patchLinkTokens`), so the kind rides in `mk` instead. Dropping it into
+                // `lk` would downgrade the card to a plain link whenever the pinned message also
+                // carries bold or code.
+                match link_marker_from_kind(*kind) {
+                    Some(marker) => {
+                        item.insert("type".into(), marker.into());
+                        mk.push(serde_json::Value::Object(item));
+                    }
+                    None => lk.push(serde_json::Value::Object(item)),
+                }
             }
             MessageSpan::Canvas { title, .. } => t.push_str(title),
         }
@@ -808,5 +818,32 @@ mod tests {
     #[test]
     fn context_from_active_cleared() {
         assert_eq!(context_from_active(None, None), (None, None));
+    }
+
+    #[test]
+    fn rebuild_pin_content_json_round_trips_a_social_link_beside_markdown() {
+        let mut msg = Message::new(MessageId(1), "", "1", "user", 0);
+        msg.spans = vec![
+            crate::message::MessageSpan::Bold("hi".into()),
+            crate::message::MessageSpan::Text(" ".into()),
+            crate::message::MessageSpan::Link {
+                text: "https://youtu.be/abc".into(),
+                url: "https://youtu.be/abc".into(),
+                kind: crate::message::LinkKind::YouTube,
+            },
+        ];
+        let json = rebuild_pin_content_json(&msg);
+        let content: mezon_client::transport::ApiMessageContent =
+            serde_json::from_str(&json).expect("valid content json");
+        assert!(
+            parse_spans(&content).iter().any(|span| matches!(
+                span,
+                crate::message::MessageSpan::Link {
+                    kind: crate::message::LinkKind::YouTube,
+                    ..
+                }
+            )),
+            "a pinned social link must stay classified when the message also carries markdown"
+        );
     }
 }

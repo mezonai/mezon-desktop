@@ -830,6 +830,7 @@ impl TopicsStore {
             };
 
             let mut upload_ctx = None;
+            let mut uploaded_ctx = None;
             let ack = if has_attachments {
                 let files: Vec<UploadFile> = attachments
                     .into_iter()
@@ -858,13 +859,28 @@ impl TopicsStore {
                     .iter()
                     .map(|a| presign::normalize_presign_key(&a.url))
                     .collect();
-                let update_mentions = if anonymous {
-                    Vec::new()
-                } else {
-                    transport_mentions.clone()
-                };
+                let update_mentions = transport_mentions.clone();
                 let update_hashtags = transport_hashtags.clone();
                 let update_emojis = transport_emojis.clone();
+                let deferred_presigned = if anonymous {
+                    if let Err(e) = api.upload_presigned_all(presigned).await {
+                        tracing::error!("submit_reply anonymous attachment upload failed: {e}");
+                        let _ = this.update(cx, |this, cx| {
+                            this.finish_topic_create(origin_message_id);
+                            if this.compose_generation != generation {
+                                return;
+                            }
+                            this.compose.submitting = false;
+                            this.compose.creating = false;
+                            this.compose.error = Some(e.to_string());
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    None
+                } else {
+                    Some(presigned)
+                };
                 let sent = match api
                     .send_topic_presigned_message(
                         clan_id,
@@ -877,7 +893,7 @@ impl TopicsStore {
                         transport_mentions,
                         transport_hashtags,
                         transport_emojis,
-                        Vec::new(),
+                        deferred_presigned.is_some().then(Vec::new),
                         reply_ref.clone(),
                         send_flags,
                     )
@@ -899,15 +915,22 @@ impl TopicsStore {
                         return;
                     }
                 };
-                upload_ctx = Some((
-                    presigned,
-                    keys,
-                    update_mentions,
-                    update_hashtags,
-                    update_emojis,
-                    sent.message_id,
-                    sent.create_time.max(0) as u32,
-                ));
+                match deferred_presigned {
+                    Some(presigned) => {
+                        upload_ctx = Some((
+                            presigned,
+                            keys,
+                            update_mentions,
+                            update_hashtags,
+                            update_emojis,
+                            sent.message_id,
+                            sent.create_time.max(0) as u32,
+                        ));
+                    }
+                    None => {
+                        uploaded_ctx = Some((sent.message_id, keys));
+                    }
+                }
                 sent
             } else {
                 match api
@@ -958,6 +981,20 @@ impl TopicsStore {
                 );
             });
 
+            if let Some((real_message_id, keys)) = uploaded_ctx {
+                cx.update(|cx| {
+                    MessagesStore::global(cx).update(cx, |store, cx| {
+                        for key in keys {
+                            store.apply_topic_attachment_outcome(
+                                topic_id,
+                                MessageId(real_message_id),
+                                AttachmentUploadOutcome::Uploaded(key),
+                                cx,
+                            );
+                        }
+                    });
+                });
+            }
             let Some((
                 presigned,
                 keys,

@@ -9,7 +9,7 @@ use mezon_proto::{api, realtime};
 use crate::KeyedCache;
 use crate::badge::BadgeService;
 use crate::clan::ClanList;
-use crate::presence::PresenceStore;
+use crate::presence::{PresenceStore, USER_STATUS_INVISIBLE, USER_STATUS_ONLINE};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const ONLINE_FETCH_LIMIT: i32 = 500;
@@ -297,14 +297,18 @@ impl ClanMembersStore {
                             .current_user_id(cx)
                             .map(|uid| uid.0);
                         let mut degraded = false;
-                        let online_ids = match online_result {
-                            Ok(online_users) => online_ids_from_users(&online_users, self_id),
+                        let (online_ids, presences) = match online_result {
+                            Ok(online_users) => {
+                                let presences = presence_statuses_from_users(&online_users);
+                                let ids = online_ids_from_users(&online_users, self_id);
+                                (ids, presences)
+                            }
                             Err(e) => {
                                 degraded = true;
                                 tracing::warn!(
                                     "list_user_online failed for {clan_id}, keeping the known online set: {e}"
                                 );
-                                previous_online_ids(&this.cache, clan_id)
+                                (previous_online_ids(&this.cache, clan_id), Vec::new())
                             }
                         };
                         let mut bucket = ClanBucket::default();
@@ -346,7 +350,7 @@ impl ClanMembersStore {
                             this.cache.mark_stale(&clan_id);
                         }
                         PresenceStore::global(cx).update(cx, |presence, cx| {
-                            presence.seed_presence(&online_uids, &statuses, cx);
+                            presence.seed_presence(&online_uids, &statuses, &presences, cx);
                         });
                         cx.emit(ClanMembersEvent::Changed { clan_id });
                         cx.notify();
@@ -531,6 +535,26 @@ fn clan_member_from_redis(user: Option<&realtime::UserProfileRedis>) -> Option<C
     })
 }
 
+fn presence_statuses_from_users(users: &[api::User]) -> Vec<(UserId, String)> {
+    users
+        .iter()
+        .filter(|user| user.id != 0)
+        .map(|user| {
+            let status = if user.online {
+                user.status.trim()
+            } else {
+                USER_STATUS_INVISIBLE
+            };
+            let status = if status.is_empty() {
+                USER_STATUS_ONLINE
+            } else {
+                status
+            };
+            (UserId(user.id), status.to_string())
+        })
+        .collect()
+}
+
 fn user_statuses_from_list(list: api::ClanUserStatusList) -> Vec<(UserId, String)> {
     list.clan_user_statuses
         .into_iter()
@@ -566,14 +590,19 @@ fn online_ids_from_users(users: &[api::User], self_id: Option<i64>) -> HashSet<i
 pub fn split_members_by_status(
     members: &[&ClanMember],
     online: &HashSet<UserId>,
+    own: Option<(UserId, bool)>,
 ) -> (Vec<UserId>, Vec<UserId>) {
+    let is_online = |id: UserId| match own {
+        Some((own_id, own_online)) if own_id == id => own_online,
+        _ => online.contains(&id),
+    };
     let mut sorted: Vec<&&ClanMember> = members.iter().collect();
-    sorted.sort_by_cached_key(|m| (!online.contains(&m.id()), m.name().to_lowercase()));
+    sorted.sort_by_cached_key(|m| (!is_online(m.id()), m.name().to_lowercase()));
 
     let mut online_ids = Vec::new();
     let mut offline_ids = Vec::new();
     for member in sorted {
-        if online.contains(&member.id()) {
+        if is_online(member.id()) {
             online_ids.push(member.id());
         } else {
             offline_ids.push(member.id());
@@ -731,15 +760,73 @@ mod tests {
     }
 
     #[test]
+    fn presence_statuses_mirror_react_convert_status_clan() {
+        let users = vec![
+            api::User {
+                id: 1,
+                online: true,
+                status: "Idle".into(),
+                ..Default::default()
+            },
+            api::User {
+                id: 2,
+                online: true,
+                status: String::new(),
+                ..Default::default()
+            },
+            api::User {
+                id: 3,
+                online: false,
+                status: "Online".into(),
+                ..Default::default()
+            },
+            api::User {
+                id: 0,
+                online: true,
+                status: "Online".into(),
+                ..Default::default()
+            },
+        ];
+
+        assert_eq!(
+            presence_statuses_from_users(&users),
+            vec![
+                (UserId(1), "Idle".to_string()),
+                (UserId(2), "Online".to_string()),
+                (UserId(3), "Invisible".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn split_orders_online_first_then_by_name() {
         let zoe = clan_member_from_proto(proto_clan_user(1, "zoe", "Zoe", "")).unwrap();
         let amy = clan_member_from_proto(proto_clan_user(2, "amy", "Amy", "")).unwrap();
         let bob = clan_member_from_proto(proto_clan_user(3, "bob", "Bob", "")).unwrap();
         let members = vec![&zoe, &amy, &bob];
         let online: HashSet<UserId> = [UserId(1)].into_iter().collect();
-        let (online_ids, offline_ids) = split_members_by_status(&members, &online);
+        let (online_ids, offline_ids) = split_members_by_status(&members, &online, None);
         assert_eq!(online_ids, vec![UserId(1)]);
         assert_eq!(offline_ids, vec![UserId(2), UserId(3)]);
+    }
+
+    #[test]
+    fn own_status_overrides_the_presence_set_for_bucketing() {
+        let zoe = clan_member_from_proto(proto_clan_user(1, "zoe", "Zoe", "")).unwrap();
+        let amy = clan_member_from_proto(proto_clan_user(2, "amy", "Amy", "")).unwrap();
+        let members = vec![&zoe, &amy];
+        let online: HashSet<UserId> = [UserId(1), UserId(2)].into_iter().collect();
+
+        let (online_ids, offline_ids) =
+            split_members_by_status(&members, &online, Some((UserId(1), false)));
+        assert_eq!(online_ids, vec![UserId(2)]);
+        assert_eq!(offline_ids, vec![UserId(1)]);
+
+        let none_online: HashSet<UserId> = HashSet::new();
+        let (online_ids, offline_ids) =
+            split_members_by_status(&members, &none_online, Some((UserId(1), true)));
+        assert_eq!(online_ids, vec![UserId(1)]);
+        assert_eq!(offline_ids, vec![UserId(2)]);
     }
 
     fn member(id: i64, name: &str) -> ClanMember {

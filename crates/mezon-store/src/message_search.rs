@@ -684,7 +684,11 @@ fn merge_detected_markdown_links(tokens: &mut ApiMessageContent) {
         if existing.contains(&(s, e)) {
             continue;
         }
-        if tok.kind.as_deref() == Some("lk") {
+        if tok
+            .kind
+            .as_deref()
+            .is_some_and(mezon_client::is_link_markdown_kind)
+        {
             tokens.mk.push(tok);
         }
     }
@@ -861,6 +865,17 @@ mod tests {
     #[test]
     fn content_preview_hides_unparseable_json_without_text() {
         assert_eq!(content_preview_from_raw(r#"{"broken":true"#), "");
+    }
+
+    #[test]
+    fn merge_detected_markdown_links_keeps_social_link_kinds() {
+        let mut tokens = ApiMessageContent {
+            t: "https://youtu.be/abc".into(),
+            ..Default::default()
+        };
+        merge_detected_markdown_links(&mut tokens);
+        assert_eq!(tokens.mk.len(), 1);
+        assert_eq!(tokens.mk[0].kind.as_deref(), Some("lk_yt"));
     }
 
     #[test]

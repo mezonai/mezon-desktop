@@ -381,6 +381,13 @@ fn jwt_expiry(token: &str) -> u64 {
         .unwrap_or(0)
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RenewedTokens {
+    pub token: String,
+    pub refresh_token: String,
+    pub id_token: String,
+}
+
 impl HttpFallbackSession {
     fn token_expired(&self) -> bool {
         self.token_lifetime().1
@@ -412,7 +419,7 @@ pub struct MezonTransport {
     fallback_refresh_lock: Arc<tokio::sync::Mutex<()>>,
     /// Token pairs minted by the fallback, published so the store can persist them — otherwise the
     /// connection loop re-arms the fallback with the stale token it still holds.
-    renewed_tokens: watch::Sender<Option<(String, String)>>,
+    renewed_tokens: watch::Sender<Option<RenewedTokens>>,
     #[allow(dead_code)]
     base_path: String,
 }
@@ -458,14 +465,18 @@ impl MezonTransport {
 
     /// Renew the fallback token through the same single-flight path a send would use, so the
     /// connection store and a concurrent send can never spend the same refresh token twice.
-    pub async fn renew_fallback_token(&self) -> Result<(String, String)> {
+    pub async fn renew_fallback_token(&self) -> Result<RenewedTokens> {
         let current = self
             .http_fallback
             .read()
             .clone()
             .ok_or_else(|| anyhow::anyhow!("no session for the HTTP fallback"))?;
-        let renewed = self.refresh_fallback_token(&current).await?;
-        Ok((renewed.token.clone(), renewed.refresh_token.clone()))
+        let (renewed, id_token) = self.refresh_fallback_token(&current).await?;
+        Ok(RenewedTokens {
+            token: renewed.token.clone(),
+            refresh_token: renewed.refresh_token.clone(),
+            id_token,
+        })
     }
 
     /// Generate a unique correlation ID.
@@ -694,6 +705,25 @@ pub struct ApiSession {
     pub session_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistrationPasswordError {
+    IncorrectCurrentPassword,
+    Api { code: u32, message: String },
+    Transport(String),
+}
+
+impl std::fmt::Display for RegistrationPasswordError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IncorrectCurrentPassword => write!(f, "incorrect current password"),
+            Self::Api { code, message } => write!(f, "API error: code={code}, response={message}"),
+            Self::Transport(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for RegistrationPasswordError {}
+
 /// A friend relationship: the friend's account plus the relationship state and
 /// which side initiated it. `state` matches the proto `Friend.State` enum:
 /// 0 = Friend, 1 = InviteSent (outgoing), 2 = InviteReceived (incoming), 3 = Blocked.
@@ -730,10 +760,29 @@ pub struct ApiChannelDesc {
     pub clan_name: String,
     #[serde(default)]
     pub channel_avatar: String,
+    #[serde(default)]
+    pub topic: String,
+    #[serde(default)]
+    pub age_restricted: i32,
+    #[serde(default)]
+    pub e2ee: i32,
+    #[serde(default)]
+    pub app_id: i64,
 }
 
 fn default_channel_active() -> i32 {
     1
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UpdateChannelDescParams {
+    pub channel_label: Option<String>,
+    pub category_id: i64,
+    pub topic: String,
+    pub age_restricted: i32,
+    pub e2ee: i32,
+    pub app_id: i64,
+    pub channel_avatar: Option<String>,
 }
 
 /// A direct-message / group conversation descriptor (clan_id = 0 namespace). Unlike
@@ -2544,6 +2593,55 @@ struct MarkdownMatch {
     marker: usize,
 }
 
+pub const LINK_MARKDOWN_KIND: &str = "lk";
+pub const YOUTUBE_LINK_MARKDOWN_KIND: &str = "lk_yt";
+pub const FACEBOOK_LINK_MARKDOWN_KIND: &str = "lk_fb";
+pub const TIKTOK_LINK_MARKDOWN_KIND: &str = "lk_tt";
+
+static YOUTUBE_LINK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?:youtube\.com/(?:watch\?v=|embed/|v/|e/|shorts/)|youtu\.be/)")
+        .expect("static youtube link pattern")
+});
+// `\w`/`\d` are Unicode classes here but ASCII-only in JS, so the classes are spelled out to keep
+// this in step with mezon-react's getLinkType — a link this crate tags but the web client's own
+// regex rejects renders as a broken embed there.
+static FACEBOOK_LINK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?:facebook\.com/(?:reel/|watch\?v=|[0-9A-Za-z_.]+/videos/(?:[0-9A-Za-z_.]+/)?))[0-9A-Za-z_-]+",
+    )
+    .expect("static facebook link pattern")
+});
+static TIKTOK_LINK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?:tiktok\.com/@[^/]+/video/[0-9]+|vm\.tiktok\.com/[a-zA-Z0-9]+|tiktok\.com/t/[a-zA-Z0-9]+)",
+    )
+    .expect("static tiktok link pattern")
+});
+
+pub fn link_markdown_kind(url: &str) -> &'static str {
+    if YOUTUBE_LINK.is_match(url) {
+        YOUTUBE_LINK_MARKDOWN_KIND
+    } else if FACEBOOK_LINK.is_match(url) {
+        FACEBOOK_LINK_MARKDOWN_KIND
+    } else if TIKTOK_LINK.is_match(url) {
+        TIKTOK_LINK_MARKDOWN_KIND
+    } else {
+        LINK_MARKDOWN_KIND
+    }
+}
+
+/// Every kind [`link_markdown_kind`] can return. Consumers that filter detected markdown down to
+/// links must use this instead of comparing against `"lk"`, or they silently drop social links.
+pub fn is_link_markdown_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        LINK_MARKDOWN_KIND
+            | YOUTUBE_LINK_MARKDOWN_KIND
+            | FACEBOOK_LINK_MARKDOWN_KIND
+            | TIKTOK_LINK_MARKDOWN_KIND
+    )
+}
+
 fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
     let n = chars.len();
     let is_triple =
@@ -2585,8 +2683,9 @@ fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
                 j += 1;
             }
             if j > i + scheme {
+                let url: String = chars[i..j].iter().collect();
                 out.push(MarkdownMatch {
-                    kind: "lk",
+                    kind: link_markdown_kind(&url),
                     start: i,
                     end: j,
                     marker: 0,
@@ -3260,7 +3359,7 @@ impl MezonTransport {
         self.adapter.credential_rejected()
     }
 
-    pub fn renewed_tokens(&self) -> watch::Receiver<Option<(String, String)>> {
+    pub fn renewed_tokens(&self) -> watch::Receiver<Option<RenewedTokens>> {
         self.renewed_tokens.subscribe()
     }
 
@@ -3269,13 +3368,13 @@ impl MezonTransport {
     async fn refresh_fallback_token(
         &self,
         stale: &HttpFallbackSession,
-    ) -> Result<Arc<HttpFallbackSession>> {
+    ) -> Result<(Arc<HttpFallbackSession>, String)> {
         let _guard = self.fallback_refresh_lock.lock().await;
         let current = self.http_fallback.read().clone();
         if let Some(current) = current
             && !current.token_expired()
         {
-            return Ok(current);
+            return Ok((current, String::new()));
         }
 
         let body = api::SessionRefreshRequest {
@@ -3349,14 +3448,18 @@ impl MezonTransport {
             server_key: stale.server_key.clone(),
         });
         *self.http_fallback.write() = Some(renewed.clone());
-        self.renewed_tokens
-            .send_replace(Some((session.token, session.refresh_token)));
+        self.renewed_tokens.send_replace(Some(RenewedTokens {
+            token: session.token,
+            refresh_token: session.refresh_token,
+            id_token: session.id_token.clone(),
+        }));
         tracing::info!(
             target: "socket",
-            "api_http_token_renewed: jwt_valid_for={}s",
-            renewed.token_lifetime().0
+            "api_http_token_renewed: jwt_valid_for={}s id_token_renewed={}",
+            renewed.token_lifetime().0,
+            !session.id_token.is_empty()
         );
-        Ok(renewed)
+        Ok((renewed, session.id_token))
     }
 
     async fn send_api_request_over_http(&self, api_name: &str, body: Vec<u8>) -> Result<Vec<u8>> {
@@ -3374,6 +3477,7 @@ impl MezonTransport {
             self.refresh_fallback_token(&fallback)
                 .await
                 .context("could not renew the token for the HTTP fallback")?
+                .0
         } else {
             fallback
         };
@@ -3554,6 +3658,10 @@ impl MezonTransport {
             creator_id: channel.creator_id,
             clan_name: channel.clan_name,
             channel_avatar: channel.channel_avatar,
+            topic: channel.topic,
+            age_restricted: channel.age_restricted,
+            e2ee: channel.e2ee,
+            app_id: channel.app_id,
         }
     }
 
@@ -6406,13 +6514,13 @@ impl MezonTransport {
         Ok(Self::channel_desc_from_proto(channel))
     }
 
-    /// Delete a channel.
-    pub async fn delete_channel(&self, _channel_id: i64) -> Result<()> {
+    /// Delete a channel or thread.
+    pub async fn delete_channel(&self, clan_id: i64, channel_id: i64) -> Result<()> {
         let cid = self.generate_cid();
 
         let body = api::DeleteChannelDescRequest {
-            channel_id: _channel_id,
-            ..Default::default()
+            clan_id,
+            channel_id,
         }
         .encode_to_vec();
 
@@ -6466,16 +6574,19 @@ impl MezonTransport {
         &self,
         clan_id: i64,
         channel_id: i64,
-        channel_label: Option<String>,
-        channel_avatar: Option<String>,
+        params: UpdateChannelDescParams,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateChannelDescRequest {
             clan_id,
             channel_id,
-            channel_label,
-            channel_avatar,
-            ..Default::default()
+            channel_label: params.channel_label,
+            category_id: params.category_id,
+            app_id: params.app_id,
+            topic: params.topic,
+            age_restricted: params.age_restricted,
+            e2ee: params.e2ee,
+            channel_avatar: params.channel_avatar,
         }
         .encode_to_vec();
         let (code, _) = self
@@ -9072,6 +9183,35 @@ impl MezonTransport {
         })
     }
 
+    pub async fn registration_password(
+        &self,
+        req: api::RegistrationEmailRequest,
+    ) -> std::result::Result<ApiSession, RegistrationPasswordError> {
+        let cid = self.generate_cid();
+        let body = req.encode_to_vec();
+        let (code, response) = self
+            .send_api_request(cid, "RegistrationEmail", body)
+            .await
+            .map_err(|error| RegistrationPasswordError::Transport(error.to_string()))?;
+        if code != 0 {
+            if code == 3 {
+                return Err(RegistrationPasswordError::IncorrectCurrentPassword);
+            }
+            return Err(RegistrationPasswordError::Api {
+                code,
+                message: String::from_utf8_lossy(&response).into_owned(),
+            });
+        }
+        let session = api::Session::decode(response.as_slice())
+            .map_err(|error| RegistrationPasswordError::Transport(error.to_string()))?;
+        Ok(ApiSession {
+            token: session.token,
+            refresh_token: session.refresh_token,
+            user_id: session.user_id,
+            session_id: session.session_id,
+        })
+    }
+
     /// Link email.
     pub async fn link_email(&self, req: api::AccountEmail) -> Result<ApiSession> {
         let cid = self.generate_cid();
@@ -9916,6 +10056,49 @@ mod tests {
     #[test]
     fn detect_markdown_link_has_no_trailing_punctuation_trim() {
         assert_eq!(detect_markdown("see https://a.com."), vec![md("lk", 4, 18)]);
+    }
+
+    #[test]
+    fn detect_markdown_tags_social_links_by_platform() {
+        assert_eq!(
+            detect_markdown("https://www.youtube.com/watch?v=lHW3fsJQ1sg"),
+            vec![md("lk_yt", 0, 43)]
+        );
+        assert_eq!(
+            detect_markdown("https://youtu.be/abc"),
+            vec![md("lk_yt", 0, 20)]
+        );
+        assert_eq!(
+            detect_markdown("https://www.tiktok.com/@user/video/123"),
+            vec![md("lk_tt", 0, 38)]
+        );
+        assert_eq!(
+            detect_markdown("https://www.facebook.com/reel/456"),
+            vec![md("lk_fb", 0, 33)]
+        );
+        assert_eq!(detect_markdown("https://a.com"), vec![md("lk", 0, 13)]);
+    }
+
+    #[test]
+    fn link_markdown_kind_matches_js_ascii_classes() {
+        // mezon-react's getLinkType uses JS `\w`/`\d`, which are ASCII-only. Tagging a link the
+        // web client's own regex then fails to expand leaves it with a broken embed there.
+        assert_eq!(
+            link_markdown_kind("https://www.facebook.com/José/videos/abc"),
+            "lk"
+        );
+        assert_eq!(
+            link_markdown_kind("https://www.facebook.com/jose/videos/abc"),
+            "lk_fb"
+        );
+        assert_eq!(
+            link_markdown_kind("https://www.tiktok.com/@user/video/١٢٣"),
+            "lk"
+        );
+        assert_eq!(
+            link_markdown_kind("https://www.tiktok.com/@user/video/123"),
+            "lk_tt"
+        );
     }
 
     #[test]

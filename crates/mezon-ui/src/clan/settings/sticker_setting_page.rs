@@ -498,7 +498,7 @@ fn render_sticker_card(
                         .items_center()
                         .justify_center()
                         .rounded_full()
-                        .bg(theme.tokens.bg_theme_input_primary)
+                        .bg(theme.surfaces.input_primary)
                         .shadow_sm()
                         .cursor_pointer()
                         .on_click(move |_, window, cx| {

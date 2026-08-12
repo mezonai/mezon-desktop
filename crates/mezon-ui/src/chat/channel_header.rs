@@ -240,7 +240,7 @@ impl ChannelHeader {
     pub fn render(self, theme: &Theme, cx: &App) -> impl IntoElement {
         let bg_hover = theme.bg_hover;
         let bg_active = theme.bg_tertiary;
-        let icon_color = theme.text_muted;
+        let icon_color = theme.tokens.bg_icon_theme;
         let icon_active = theme.text_primary;
         let bell_icon = if self.muted {
             IconName::MuteBell
@@ -1383,7 +1383,7 @@ impl ThreadPopoverTrigger {
     fn new(theme: &Theme, open: bool) -> Self {
         Self {
             open,
-            icon_color: theme.text_muted,
+            icon_color: theme.tokens.bg_icon_theme,
             icon_active: theme.text_primary,
             bg_hover: theme.bg_hover,
             bg_active: theme.bg_tertiary,
@@ -1462,7 +1462,7 @@ impl InboxPopoverTrigger {
             open,
             show_badge,
             badge_color,
-            icon_color: theme.text_muted,
+            icon_color: theme.tokens.bg_icon_theme,
             icon_active: theme.interactive_active,
             bg_hover: theme.bg_hover,
             on_click: None,
@@ -1549,7 +1549,7 @@ impl PinPopoverTrigger {
             open,
             show_badge,
             badge_color,
-            icon_color: theme.text_muted,
+            icon_color: theme.tokens.bg_icon_theme,
             icon_active: theme.text_primary,
             bg_hover: theme.bg_hover,
             bg_active: theme.bg_tertiary,
@@ -1634,7 +1634,7 @@ impl CanvasPopoverTrigger {
     fn new(theme: &Theme, open: bool) -> Self {
         Self {
             open,
-            icon_color: theme.text_muted.into(),
+            icon_color: theme.tokens.bg_icon_theme.into(),
             on_click: None,
         }
     }
@@ -1731,7 +1731,7 @@ struct GalleryTrigger {
 impl GalleryTrigger {
     fn new(theme: &Theme) -> Self {
         Self {
-            icon_idle: theme.text_muted,
+            icon_idle: theme.tokens.bg_icon_theme,
             icon_active: theme.text_primary,
             bg_hover: theme.bg_hover,
             bg_active: theme.bg_tertiary,
@@ -1813,7 +1813,7 @@ struct FilesPopoverTrigger {
 impl FilesPopoverTrigger {
     fn new(theme: &Theme) -> Self {
         Self {
-            icon_idle: theme.text_muted,
+            icon_idle: theme.tokens.bg_icon_theme,
             icon_active: theme.text_primary,
             bg_hover: theme.bg_hover,
             bg_active: theme.bg_tertiary,
@@ -1897,7 +1897,7 @@ impl NotificationSettingTrigger {
             } else {
                 IconName::Bell
             },
-            icon_idle: theme.text_muted,
+            icon_idle: theme.tokens.bg_icon_theme,
             icon_active: theme.text_primary,
             bg_hover: theme.bg_hover,
             bg_active: theme.bg_tertiary,

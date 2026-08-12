@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::transport::ApiAccount;
-use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
+use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent, RegistrationPasswordError};
 use serde::{Deserialize, Serialize};
 
 use crate::Freshness;
@@ -52,6 +52,8 @@ pub enum AccountEvent {
     DevicesLoadFailed,
     AccountSaved,
     AccountSaveFailed(String),
+    PasswordSaved,
+    PasswordSaveFailed(PasswordSaveError),
     UserAvatarUploaded(String),
     ClanAvatarUploaded(ClanId, String),
     UserAvatarUploadFailed(String),
@@ -64,6 +66,13 @@ pub enum AccountEvent {
     ClanProfileSaveFailed(String),
     NicknameDuplicateChecked(bool),
     StatusUpdated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasswordSaveError {
+    IncorrectCurrentPassword,
+    UpdateFailed,
+    CreateFailed,
 }
 
 pub struct AccountStore {
@@ -384,6 +393,91 @@ impl AccountStore {
         .detach();
     }
 
+    pub fn save_password(
+        &mut self,
+        email: String,
+        password: String,
+        old_password: String,
+        cx: &mut Context<Self>,
+    ) {
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        let user_id = self.account.as_ref().map(|account| account.user_id);
+        let changing = !old_password.is_empty();
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .registration_password(&email, &password, &old_password)
+                .await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(rotated) => {
+                    if this.reset_generation != generation
+                        || this.account.as_ref().map(|account| account.user_id) != user_id
+                        || user_id.is_none_or(|id| rotated.user_id != 0 && rotated.user_id != id)
+                    {
+                        return;
+                    }
+                    let auth_state = crate::login::LoginStore::global(cx).read(cx).auth_state();
+                    let applied = auth_state.update(cx, |state, cx| {
+                        let session = match state {
+                            crate::AuthState::Authenticated(session)
+                            | crate::AuthState::Connecting(session) => session,
+                            _ => return None,
+                        };
+                        if user_id.is_some_and(|id| session.user_id != id.to_string()) {
+                            return None;
+                        }
+                        session.apply_refresh(
+                            &rotated.token,
+                            &rotated.refresh_token,
+                            &rotated.session_id,
+                            "",
+                        );
+                        cx.notify();
+                        Some(session.clone())
+                    });
+                    let Some(session) = applied else {
+                        return;
+                    };
+                    cx.background_executor()
+                        .spawn(async move {
+                            if let Err(error) = crate::login::LoginStore::persist_session(&session)
+                            {
+                                tracing::warn!(
+                                    "Failed to persist password-rotated session: {error}"
+                                );
+                            }
+                        })
+                        .detach();
+                    if let Some(account) = &mut this.account {
+                        account.password_setted = true;
+                    }
+                    if let Some(account) = &this.account {
+                        Self::spawn_persist_cache(account, cx);
+                    }
+                    cx.emit(AccountEvent::PasswordSaved);
+                    cx.notify();
+                }
+                Err(error) => {
+                    if this.reset_generation != generation
+                        || this.account.as_ref().map(|account| account.user_id) != user_id
+                    {
+                        return;
+                    }
+                    let error = match error {
+                        RegistrationPasswordError::IncorrectCurrentPassword if changing => {
+                            PasswordSaveError::IncorrectCurrentPassword
+                        }
+                        _ if changing => PasswordSaveError::UpdateFailed,
+                        _ => PasswordSaveError::CreateFailed,
+                    };
+                    cx.emit(AccountEvent::PasswordSaveFailed(error));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     pub fn set_status(
         &mut self,
         status: String,
@@ -391,19 +485,17 @@ impl AccountStore {
         until_turn_on: bool,
         cx: &mut Context<Self>,
     ) {
-        if let Some(account) = &mut self.account {
-            if account.status == status {
-                return;
-            }
-            account.status = status.clone();
-        } else {
+        let Some(account) = &mut self.account else {
             return;
+        };
+        if account.status != status {
+            account.status = status.clone();
+            if let Some(account) = &self.account {
+                Self::spawn_persist_cache(account, cx);
+            }
+            cx.emit(AccountEvent::StatusUpdated);
+            cx.notify();
         }
-        if let Some(account) = &self.account {
-            Self::spawn_persist_cache(account, cx);
-        }
-        cx.emit(AccountEvent::StatusUpdated);
-        cx.notify();
         let api = self.api.clone();
         cx.spawn(async move |_this, _cx| {
             if let Err(e) = api.update_user_status(status, minutes, until_turn_on).await {

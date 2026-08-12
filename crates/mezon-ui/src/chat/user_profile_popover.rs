@@ -7,7 +7,8 @@ use gpui::{
 use mezon_store::{
     BadgeService, ChannelList, ClanId, ClanMembersStore, DirectMessageBody, DirectMessageStore,
     FriendState, FriendStore, PERMISSION_CLAN_OWNER, PERMISSION_MANAGE_CLAN, PermissionStore,
-    PresenceStore, ProfileContext, RoleId, RolesStore, Settings, UserId, resolve_user_profile,
+    PresenceStore, ProfileContext, RoleId, RolesStore, Settings, UserId, current_user_status,
+    resolve_user_profile,
 };
 use ui::{Clickable, PopoverMenu, Toggleable};
 
@@ -646,18 +647,25 @@ impl Render for UserProfilePopover {
             ),
         };
 
-        let custom_status = PresenceStore::global(cx)
-            .read(cx)
-            .user_status(self.user_id)
-            .unwrap_or("")
-            .to_string();
+        let own_status = current_user_status(cx)
+            .filter(|(id, _)| *id == self.user_id)
+            .map(|(_, status)| status);
+        let custom_status = match &own_status {
+            Some(status) => status.custom_status.clone(),
+            None => PresenceStore::global(cx)
+                .read(cx)
+                .user_status(self.user_id)
+                .unwrap_or("")
+                .to_string(),
+        };
 
         let member_since = format_member_since(create_time);
-        let status_icon = if online {
-            IconName::OnlineStatus
-        } else {
-            IconName::OfflineStatus
+        let status_presence = match &own_status {
+            Some(status) => status.presence,
+            None if online => mezon_store::UserPresence::Online,
+            None => mezon_store::UserPresence::Invisible,
         };
+        let status_icon = crate::util::user_status::status_icon(status_presence);
 
         let avatar_proxied = if avatar_raw.is_empty() {
             SharedString::default()
@@ -748,7 +756,13 @@ impl Render for UserProfilePopover {
                     )
                     .children(banner_actions),
             )
-            .child(render_avatar_row(avatar, status_icon, custom_status, theme))
+            .child(render_avatar_row(
+                avatar,
+                status_icon,
+                crate::util::user_status::status_color(status_presence, theme),
+                custom_status,
+                theme,
+            ))
             .child(
                 div().px(px(16.)).child(
                     div()
@@ -1293,6 +1307,7 @@ fn render_voice_button(
 fn render_avatar_row(
     avatar: Avatar,
     status_icon: IconName,
+    status_color: gpui::Rgba,
     custom_status: String,
     theme: &Theme,
 ) -> AnyElement {
@@ -1315,11 +1330,11 @@ fn render_avatar_row(
                         .child(avatar),
                 )
                 .child(
-                    div()
-                        .absolute()
-                        .bottom(px(4.))
-                        .right(px(8.))
-                        .child(Icon::new(status_icon).size(px(16.))),
+                    div().absolute().bottom(px(4.)).right(px(8.)).child(
+                        Icon::new(status_icon)
+                            .size(px(16.))
+                            .text_color(status_color),
+                    ),
                 ),
         )
         .when(!custom_status.is_empty(), |row| {
@@ -1413,7 +1428,7 @@ fn role_expander_pill(
         .rounded(px(4.))
         .p_1()
         .cursor_pointer()
-        .bg(theme.tokens.bg_theme_input_primary)
+        .bg(theme.surfaces.input_primary)
         .text_color(theme.tokens.text_theme_primary)
         .child(
             div()

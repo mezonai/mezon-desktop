@@ -558,7 +558,6 @@ impl Render for EventDetailView {
             };
             self.sync_body_list(1 + grid_rows);
             render_detail_body(
-                &theme,
                 &locale,
                 &event,
                 &config,
@@ -606,7 +605,6 @@ impl Render for EventDetailView {
 }
 
 fn render_detail_body(
-    theme: &Theme,
     locale: &str,
     event: &ChannelTimeline,
     config: &AppConfig,
@@ -624,7 +622,7 @@ fn render_detail_body(
     let featured = attachments.first().cloned();
     let description = event.description.clone();
     let view = cx.weak_entity();
-    let theme = theme.clone();
+    let theme = cx.theme().clone();
     let locale = locale.to_string();
     let config = config.clone();
     let description_input = description_input.clone();

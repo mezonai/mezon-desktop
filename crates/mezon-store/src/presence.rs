@@ -46,6 +46,92 @@ pub enum DmAvatarPresence {
     Dnd = 3,
 }
 
+pub const USER_STATUS_ONLINE: &str = "Online";
+pub const USER_STATUS_IDLE: &str = "Idle";
+pub const USER_STATUS_DND: &str = "Do Not Disturb";
+pub const USER_STATUS_INVISIBLE: &str = "Invisible";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UserPresence {
+    #[default]
+    Online,
+    Idle,
+    Dnd,
+    Invisible,
+}
+
+impl UserPresence {
+    pub fn from_status(raw: &str) -> Self {
+        let raw = raw.trim();
+        if raw.eq_ignore_ascii_case(USER_STATUS_IDLE) {
+            Self::Idle
+        } else if raw.eq_ignore_ascii_case("dnd") || raw.eq_ignore_ascii_case(USER_STATUS_DND) {
+            Self::Dnd
+        } else if raw.eq_ignore_ascii_case(USER_STATUS_INVISIBLE)
+            || raw.eq_ignore_ascii_case("offline")
+        {
+            Self::Invisible
+        } else {
+            Self::Online
+        }
+    }
+
+    pub fn as_status(self) -> &'static str {
+        match self {
+            Self::Online => USER_STATUS_ONLINE,
+            Self::Idle => USER_STATUS_IDLE,
+            Self::Dnd => USER_STATUS_DND,
+            Self::Invisible => USER_STATUS_INVISIBLE,
+        }
+    }
+
+    pub fn is_visible(self) -> bool {
+        !matches!(self, Self::Invisible)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberStatus {
+    pub presence: UserPresence,
+    pub custom_status: String,
+    pub online: bool,
+}
+
+impl Default for MemberStatus {
+    fn default() -> Self {
+        Self::own("", "")
+    }
+}
+
+impl MemberStatus {
+    pub fn own(status: &str, custom_status: &str) -> Self {
+        let presence = UserPresence::from_status(status);
+        Self {
+            presence,
+            custom_status: custom_status.to_string(),
+            online: presence.is_visible(),
+        }
+    }
+}
+
+pub fn current_user_presence(cx: &App) -> Option<(UserId, UserPresence)> {
+    let store = AccountStore::try_global(cx)?;
+    let account = store.read(cx).account.as_ref()?;
+    Some((
+        UserId(account.user_id),
+        UserPresence::from_status(&account.status),
+    ))
+}
+
+pub fn current_user_status(cx: &App) -> Option<(UserId, MemberStatus)> {
+    let store = AccountStore::try_global(cx)?;
+    let account = store.read(cx).account.as_ref()?;
+    Some((
+        UserId(account.user_id),
+        MemberStatus::own(&account.status, &account.user_status),
+    ))
+}
+
 #[derive(Debug)]
 pub struct PresenceStore {
     typing_by_channel: HashMap<ChannelId, HashMap<UserId, TypingEntry>>,
@@ -156,6 +242,34 @@ impl PresenceStore {
             .get(&user_id)
             .map(String::as_str)
             .filter(|s| !s.is_empty())
+    }
+
+    pub fn member_online(&self, user_id: UserId, cx: &App) -> bool {
+        self.resolve_member_online(user_id, current_user_presence(cx))
+    }
+
+    fn resolve_member_online(&self, user_id: UserId, own: Option<(UserId, UserPresence)>) -> bool {
+        match own {
+            Some((me, presence)) if me == user_id => presence.is_visible(),
+            _ => self.is_online(user_id),
+        }
+    }
+
+    pub fn member_presence(
+        &self,
+        user_id: UserId,
+        own: Option<(UserId, UserPresence)>,
+    ) -> DmAvatarPresence {
+        if let Some((_, presence)) = own.filter(|(me, _)| *me == user_id) {
+            return presence_badge(presence);
+        }
+        if !self.is_online(user_id) {
+            return DmAvatarPresence::None;
+        }
+        match self.presence_status(user_id) {
+            Some(status) => dm_presence_from_status(status),
+            None => DmAvatarPresence::Online,
+        }
     }
 
     pub fn dm_avatar_presence(&self, user_id: UserId, api_online: bool) -> DmAvatarPresence {
@@ -281,12 +395,10 @@ impl PresenceStore {
                 let user_id = UserId(e.user_id);
                 let status = e.custom_status.trim();
                 tracing::debug!(user_id = e.user_id, status, " user-status updated");
-                if status.eq_ignore_ascii_case("invisible")
-                    || status.eq_ignore_ascii_case("offline")
-                {
-                    self.user_online.remove(&user_id);
-                } else {
+                if UserPresence::from_status(status).is_visible() {
                     self.user_online.insert(user_id);
+                } else {
+                    self.user_online.remove(&user_id);
                 }
                 self.presence_status.insert(user_id, status.to_string());
                 self.mark_presence_known(user_id);
@@ -423,6 +535,9 @@ impl PresenceStore {
             let value = if status.is_empty() { "online" } else { status };
             self.presence_status.insert(*uid, value.to_string());
             self.mark_presence_known(*uid);
+            if value.eq_ignore_ascii_case(USER_STATUS_INVISIBLE) {
+                self.user_online.remove(uid);
+            }
         }
     }
 
@@ -467,9 +582,12 @@ impl PresenceStore {
         &mut self,
         online: &[UserId],
         statuses: &[(UserId, String)],
+        presences: &[(UserId, String)],
         cx: &mut Context<Self>,
     ) {
-        let changed = self.apply_seed_online(online) | self.apply_seed_user_status(statuses);
+        let changed = self.apply_seed_online(online)
+            | self.apply_seed_user_status(statuses)
+            | self.apply_seed_presence_status(presences);
         if changed {
             cx.emit(PresenceEvent::StatusChanged);
             cx.notify();
@@ -480,6 +598,21 @@ impl PresenceStore {
         let mut changed = false;
         for uid in online {
             changed |= self.user_online.insert(*uid);
+        }
+        changed
+    }
+
+    pub(crate) fn apply_seed_presence_status(&mut self, presences: &[(UserId, String)]) -> bool {
+        let mut changed = false;
+        for (uid, status) in presences {
+            if self.presence_status.get(uid).map(String::as_str) != Some(status.as_str()) {
+                self.presence_status.insert(*uid, status.clone());
+                changed = true;
+            }
+            self.mark_presence_known(*uid);
+            if status.eq_ignore_ascii_case(USER_STATUS_INVISIBLE) {
+                changed |= self.user_online.remove(uid);
+            }
         }
         changed
     }
@@ -498,16 +631,17 @@ impl PresenceStore {
     }
 }
 
-fn dm_presence_from_status(status: &str) -> DmAvatarPresence {
-    if status.eq_ignore_ascii_case("idle") {
-        DmAvatarPresence::Idle
-    } else if status.eq_ignore_ascii_case("dnd") || status.eq_ignore_ascii_case("do not disturb") {
-        DmAvatarPresence::Dnd
-    } else if status.eq_ignore_ascii_case("invisible") || status.eq_ignore_ascii_case("offline") {
-        DmAvatarPresence::None
-    } else {
-        DmAvatarPresence::Online
+fn presence_badge(presence: UserPresence) -> DmAvatarPresence {
+    match presence {
+        UserPresence::Online => DmAvatarPresence::Online,
+        UserPresence::Idle => DmAvatarPresence::Idle,
+        UserPresence::Dnd => DmAvatarPresence::Dnd,
+        UserPresence::Invisible => DmAvatarPresence::None,
     }
+}
+
+fn dm_presence_from_status(status: &str) -> DmAvatarPresence {
+    presence_badge(UserPresence::from_status(status))
 }
 
 #[cfg(test)]
@@ -668,6 +802,80 @@ mod tests {
     }
 
     #[test]
+    fn seeded_invisible_member_is_dropped_from_the_online_set() {
+        let mut store = empty_store();
+        store.apply_seed_online(&[UserId(1), UserId(2), UserId(3)]);
+        let changed = store.apply_seed_presence_status(&[
+            (UserId(1), USER_STATUS_ONLINE.to_string()),
+            (UserId(2), USER_STATUS_IDLE.to_string()),
+            (UserId(3), USER_STATUS_INVISIBLE.to_string()),
+        ]);
+
+        assert!(changed);
+        assert!(store.is_online(UserId(1)));
+        assert!(store.is_online(UserId(2)));
+        assert!(!store.is_online(UserId(3)));
+        assert_eq!(store.presence_status(UserId(2)), Some(USER_STATUS_IDLE));
+    }
+
+    #[test]
+    fn a_realtime_invisible_join_does_not_stay_online() {
+        let mut store = empty_store();
+        store.apply_status_presence(&[UserId(1), UserId(2)], &[]);
+        store.apply_presence_statuses(
+            &[
+                (UserId(1), USER_STATUS_DND.to_string()),
+                (UserId(2), USER_STATUS_INVISIBLE.to_string()),
+            ],
+            &[],
+        );
+
+        assert!(store.is_online(UserId(1)));
+        assert!(!store.is_online(UserId(2)));
+        assert_eq!(store.presence_status(UserId(1)), Some(USER_STATUS_DND));
+    }
+
+    #[test]
+    fn a_seeded_status_drives_the_member_badge() {
+        let mut store = empty_store();
+        store.apply_seed_online(&[UserId(1), UserId(2), UserId(3), UserId(4)]);
+        store.apply_seed_presence_status(&[
+            (UserId(1), USER_STATUS_ONLINE.to_string()),
+            (UserId(2), USER_STATUS_IDLE.to_string()),
+            (UserId(3), USER_STATUS_DND.to_string()),
+            (UserId(4), USER_STATUS_INVISIBLE.to_string()),
+        ]);
+
+        assert_eq!(
+            store.member_presence(UserId(1), None),
+            DmAvatarPresence::Online
+        );
+        assert_eq!(
+            store.member_presence(UserId(2), None),
+            DmAvatarPresence::Idle
+        );
+        assert_eq!(
+            store.member_presence(UserId(3), None),
+            DmAvatarPresence::Dnd
+        );
+        assert_eq!(
+            store.member_presence(UserId(4), None),
+            DmAvatarPresence::None
+        );
+    }
+
+    #[test]
+    fn an_online_member_without_a_seeded_status_falls_back_to_online() {
+        let mut store = empty_store();
+        store.apply_seed_online(&[UserId(1)]);
+
+        assert_eq!(
+            store.member_presence(UserId(1), None),
+            DmAvatarPresence::Online
+        );
+    }
+
+    #[test]
     fn seed_user_status_stores_and_reads_back() {
         let mut store = empty_store();
         let changed = store.apply_seed_user_status(&[(UserId(1), "Working".to_string())]);
@@ -711,6 +919,120 @@ mod tests {
     fn typing_users_returns_empty_for_unknown_channel() {
         let store = empty_store();
         assert!(store.typing_users(ChannelId(999)).is_empty());
+    }
+
+    #[test]
+    fn user_presence_classifies_every_wire_spelling() {
+        assert_eq!(UserPresence::from_status("Online"), UserPresence::Online);
+        assert_eq!(UserPresence::from_status("idle"), UserPresence::Idle);
+        assert_eq!(UserPresence::from_status("dnd"), UserPresence::Dnd);
+        assert_eq!(
+            UserPresence::from_status("Do Not Disturb"),
+            UserPresence::Dnd
+        );
+        assert_eq!(
+            UserPresence::from_status(" invisible "),
+            UserPresence::Invisible
+        );
+        assert_eq!(
+            UserPresence::from_status("offline"),
+            UserPresence::Invisible
+        );
+    }
+
+    #[test]
+    fn empty_account_status_reads_as_online() {
+        assert_eq!(UserPresence::from_status(""), UserPresence::Online);
+        assert_eq!(MemberStatus::own("", "").presence, UserPresence::Online);
+        assert!(MemberStatus::own("", "").online);
+    }
+
+    #[test]
+    fn self_reads_online_even_when_the_presence_set_is_empty() {
+        let store = empty_store();
+        let me = UserId(7);
+        assert!(!store.is_online(me));
+        assert!(store.resolve_member_online(me, Some((me, UserPresence::Online))));
+        assert!(store.resolve_member_online(me, Some((me, UserPresence::Idle))));
+        assert!(store.resolve_member_online(me, Some((me, UserPresence::Dnd))));
+    }
+
+    #[test]
+    fn self_reads_offline_only_when_invisible() {
+        let mut store = empty_store();
+        let me = UserId(7);
+        store.user_online.insert(me);
+        assert!(!store.resolve_member_online(me, Some((me, UserPresence::Invisible))));
+    }
+
+    #[test]
+    fn other_members_still_come_from_the_presence_set() {
+        let mut store = empty_store();
+        let me = UserId(7);
+        let other = UserId(8);
+        store.user_online.insert(other);
+        assert!(store.resolve_member_online(other, Some((me, UserPresence::Invisible))));
+        assert!(!store.resolve_member_online(UserId(9), Some((me, UserPresence::Online))));
+    }
+
+    #[test]
+    fn without_a_loaded_account_everyone_comes_from_presence() {
+        let mut store = empty_store();
+        let me = UserId(7);
+        assert!(!store.resolve_member_online(me, None));
+        store.user_online.insert(me);
+        assert!(store.resolve_member_online(me, None));
+    }
+
+    #[test]
+    fn own_status_matrix_covers_every_state() {
+        let cases = [
+            ("Online", UserPresence::Online, true),
+            ("online", UserPresence::Online, true),
+            ("", UserPresence::Online, true),
+            ("Idle", UserPresence::Idle, true),
+            ("idle", UserPresence::Idle, true),
+            ("Do Not Disturb", UserPresence::Dnd, true),
+            ("dnd", UserPresence::Dnd, true),
+            ("Invisible", UserPresence::Invisible, false),
+            ("invisible", UserPresence::Invisible, false),
+            ("offline", UserPresence::Invisible, false),
+        ];
+        for (raw, presence, online) in cases {
+            for custom in ["", "Deep work"] {
+                let status = MemberStatus::own(raw, custom);
+                assert_eq!(status.presence, presence, "presence for {raw:?}");
+                assert_eq!(status.online, online, "online for {raw:?}");
+                assert_eq!(status.custom_status, custom, "custom for {raw:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn own_status_ignores_the_presence_set() {
+        let own = MemberStatus::own("Do Not Disturb", "Deep work");
+        assert_eq!(own.presence, UserPresence::Dnd);
+        assert_eq!(own.custom_status, "Deep work");
+        assert!(own.online);
+    }
+
+    #[test]
+    fn own_invisible_status_reads_as_offline() {
+        let own = MemberStatus::own("Invisible", "");
+        assert_eq!(own.presence, UserPresence::Invisible);
+        assert!(!own.online);
+    }
+
+    #[test]
+    fn canonical_status_round_trips_through_classification() {
+        for presence in [
+            UserPresence::Online,
+            UserPresence::Idle,
+            UserPresence::Dnd,
+            UserPresence::Invisible,
+        ] {
+            assert_eq!(UserPresence::from_status(presence.as_status()), presence);
+        }
     }
 
     #[test]

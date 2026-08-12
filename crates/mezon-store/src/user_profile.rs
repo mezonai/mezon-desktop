@@ -136,7 +136,9 @@ pub fn resolve_user_profile(
     context: ProfileContext,
     cx: &App,
 ) -> Option<UserProfileView> {
-    let online = PresenceStore::global(cx).read(cx).is_online(user_id);
+    let online = PresenceStore::global(cx)
+        .read(cx)
+        .member_online(user_id, cx);
     match context {
         ProfileContext::Clan(clan_id) => ClanMembersStore::global(cx)
             .read(cx)

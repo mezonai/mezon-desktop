@@ -851,17 +851,16 @@ fn render_selectable_segmented_spans(
                         url_row = url_row.child(styled);
                         part_base += part.len();
                     }
-                    url_col = url_col.child(if line.trim().is_empty() {
-                        empty_text_line()
-                    } else {
-                        url_row
-                    });
+                    url_col = url_col.child(url_row);
                     line_base += line.len() + 1;
                 }
+                let card_key = link_part_index;
+                link_part_index += 1;
                 row = row.child(render_social_link_card(
                     *kind,
                     &ctx.selection,
                     resolved,
+                    card_key,
                     url_col,
                 ));
                 base += text.len();
@@ -1409,10 +1408,6 @@ pub(crate) enum CachedSelectableTextPiece {
     LineBreak,
 }
 
-fn empty_text_line() -> gpui::Div {
-    div().w_full().h(rems(1.375))
-}
-
 fn memoized_selectable_text_pieces(
     text: &SharedString,
     ctx: &RowCtx,
@@ -1677,10 +1672,13 @@ fn append_span(
                 .child(text.clone()),
         ),
         MessageSpan::Link { text, url, kind } if *kind != LinkKind::Plain => {
+            let key = *span_key;
+            *span_key += 1;
             row.child(render_social_link_card(
                 *kind,
                 &ctx.selection,
                 SharedString::from(resolve_link_url(url, text)),
+                key,
                 render_social_link_url_row(text, theme),
             ))
         }
@@ -1823,48 +1821,56 @@ fn render_social_link_card(
     kind: LinkKind,
     selection: &SharedSelection,
     resolved: SharedString,
+    // Keyed by position, not by url: the same social link twice in one message would otherwise
+    // hash to one id and the two cards would share their interactive state.
+    key: usize,
     url_row: impl IntoElement,
 ) -> AnyElement {
     let (accent, label) = match kind {
         LinkKind::YouTube => (YOUTUBE_ACCENT, "YouTube"),
         LinkKind::Facebook => (FACEBOOK_ACCENT, "Facebook"),
         LinkKind::TikTok => (TIKTOK_ACCENT, "TikTok"),
-        LinkKind::Plain => (SOCIAL_CARD_BG, ""),
+        LinkKind::Plain => return gpui::Empty.into_any_element(),
     };
-    let id = hashed_element_id("msg-social", &resolved);
+    let id = ("msg-social", key);
     let selection = selection.clone();
     div()
-        .id(id)
         .flex()
-        .flex_col()
-        .gap_1()
-        .when(kind != LinkKind::Plain, |card| {
-            card.flex_basis(relative(1.))
-        })
+        .flex_row()
+        .flex_basis(relative(1.))
         .w_full()
         .min_w_0()
-        .max_w(px(400.))
-        .my_1()
-        .p(px(16.))
-        .rounded(px(4.))
-        .border_l_4()
-        .border_color(rgb(accent))
-        .bg(rgb(SOCIAL_CARD_BG))
-        .overflow_hidden()
-        .cursor_pointer()
-        .on_click(move |_, _, cx| {
-            if !selection.borrow().has_selection() {
-                open_message_link(resolved.to_string(), cx);
-            }
-        })
         .child(
             div()
-                .text_size(px(12.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(accent))
-                .child(label),
+                .id(id)
+                .flex()
+                .flex_col()
+                .gap_1()
+                .w_full()
+                .min_w_0()
+                .max_w(px(400.))
+                .my_1()
+                .p(px(16.))
+                .rounded(px(4.))
+                .border_l_4()
+                .border_color(rgb(accent))
+                .bg(rgb(SOCIAL_CARD_BG))
+                .overflow_hidden()
+                .cursor_pointer()
+                .on_click(move |_, _, cx| {
+                    if !selection.borrow().has_selection() {
+                        open_message_link(resolved.to_string(), cx);
+                    }
+                })
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(accent))
+                        .child(label),
+                )
+                .child(url_row),
         )
-        .child(url_row)
         .into_any_element()
 }
 

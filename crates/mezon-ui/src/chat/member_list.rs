@@ -6,15 +6,16 @@ use gpui::{
     deferred, div, prelude::*, px, rgb, size, uniform_list,
 };
 use mezon_store::{
-    AccountStore, BadgeService, ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent,
-    ChannelMembersStore, ChannelType, ClanId, ClanList, ClanMember, ClanMembersStore, DirectEvent,
-    DirectKind, DirectMessageStore, GroupMember, GroupMembersEvent, GroupMembersStore,
-    PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER, PermissionStore, PresenceEvent, PresenceStore,
-    ProfileContext, RolesEvent, RolesStore, Settings, UserId, split_members_by_status,
+    AccountEvent, AccountStore, BadgeService, ChannelEvent, ChannelId, ChannelList,
+    ChannelMembersEvent, ChannelMembersStore, ChannelType, ClanId, ClanList, ClanMember,
+    ClanMembersStore, DirectEvent, DirectKind, DirectMessageStore, DmAvatarPresence, GroupMember,
+    GroupMembersEvent, GroupMembersStore, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
+    PermissionStore, PresenceEvent, PresenceStore, ProfileContext, RolesEvent, RolesStore,
+    Settings, UserId, current_user_presence, current_user_status, split_members_by_status,
 };
 
 use crate::app::shell::Shell;
-use crate::chat::member_row_element::MemberRowElement;
+use crate::chat::member_row_element::{MemberRowElement, RowDot};
 use crate::chat::message::{ShareContactModal, share_contact_subject};
 use crate::chat::role_style::{role_color_in, role_fallback_color};
 use crate::chat::user_profile_popover::UserProfilePopover;
@@ -55,6 +56,7 @@ struct MemberRow {
     avatar_src: SharedString,
     avatar_raw: SharedString,
     online: bool,
+    presence: DmAvatarPresence,
     user_status: SharedString,
     in_voice: bool,
     is_owner: bool,
@@ -67,6 +69,7 @@ struct RawMember {
     name: String,
     avatar_raw: String,
     online: bool,
+    presence: DmAvatarPresence,
     user_status: String,
     in_voice: bool,
     role_color: Option<Hsla>,
@@ -143,6 +146,16 @@ impl MemberListPanel {
             },
         ));
         subs.push(cx.observe(&settings, |_, _, cx| cx.notify()));
+        if let Some(account) = AccountStore::try_global(cx) {
+            subs.push(cx.subscribe(&account, |this, _, event, cx| {
+                if matches!(
+                    event,
+                    AccountEvent::StatusUpdated | AccountEvent::AccountLoaded
+                ) {
+                    this.rebuild(cx);
+                }
+            }));
+        }
 
         match source {
             MemberSource::Channel => {
@@ -508,22 +521,78 @@ fn channel_raw_members(cx: &App, ctx: ChannelContext) -> (Vec<RawMember>, Vec<Ra
             .collect(),
         None => store.members(ctx.clan_id),
     };
-    let (online_ids, offline_ids) = split_members_by_status(&pool, online);
+    let own = current_user_status(cx);
+    let own_presence = current_user_presence(cx);
+    let (online_ids, offline_ids) = split_members_by_status(
+        &pool,
+        online,
+        own.as_ref().map(|(id, status)| (*id, status.online)),
+    );
     let to_raw = |ids: &[UserId], is_online: bool| -> Vec<RawMember> {
         ids.iter()
             .filter_map(|id| store.member(ctx.clan_id, *id))
-            .map(|member| RawMember {
-                user_id: member.id(),
-                name: member.name().to_string(),
-                avatar_raw: member.avatar().to_string(),
-                online: is_online,
-                user_status: presence.user_status(member.id()).unwrap_or("").to_string(),
-                in_voice: is_online && channels.in_voice_status(member.id()).is_some(),
-                role_color: Some(role_color_in(roles, ctx.clan_id, member.id())),
+            .map(|member| {
+                let own_status = own
+                    .as_ref()
+                    .filter(|(id, _)| *id == member.id())
+                    .map(|(_, status)| status);
+                RawMember {
+                    user_id: member.id(),
+                    name: member.name().to_string(),
+                    avatar_raw: member.avatar().to_string(),
+                    online: is_online,
+                    presence: presence.member_presence(member.id(), own_presence),
+                    user_status: own_status.map_or_else(
+                        || presence.user_status(member.id()).unwrap_or("").to_string(),
+                        |status| status.custom_status.clone(),
+                    ),
+                    in_voice: is_online && channels.in_voice_status(member.id()).is_some(),
+                    role_color: Some(role_color_in(roles, ctx.clan_id, member.id())),
+                }
             })
             .collect()
     };
     (to_raw(&online_ids, true), to_raw(&offline_ids, false))
+}
+
+fn raw_member_json(member: &RawMember) -> serde_json::Value {
+    serde_json::json!({
+        "user_id": member.user_id.to_string(),
+        "name": member.name,
+        "online": member.online,
+        "presence": format!("{:?}", member.presence),
+        "user_status": member.user_status,
+        "in_voice": member.in_voice,
+    })
+}
+
+fn member_section_json(label: &str, members: &[RawMember]) -> serde_json::Value {
+    serde_json::json!({
+        "label": label,
+        "header_count": members.len(),
+        "rows": members.iter().map(raw_member_json).collect::<Vec<_>>(),
+    })
+}
+
+pub fn member_list_snapshot(cx: &App) -> serde_json::Value {
+    if let Some(direct_id) = active_group_dm(cx) {
+        let members = group_raw_members(cx, direct_id);
+        return serde_json::json!({
+            "source": "group",
+            "sections": [member_section_json("MEMBERS", &members)],
+        });
+    }
+    let Some(ctx) = active_channel_context(cx) else {
+        return serde_json::json!({ "source": "none", "sections": [] });
+    };
+    let (online, offline) = channel_raw_members(cx, ctx);
+    serde_json::json!({
+        "source": "channel",
+        "sections": [
+            member_section_json("ONLINE", &online),
+            member_section_json("OFFLINE", &offline),
+        ],
+    })
 }
 
 fn group_raw_members(cx: &App, direct_id: ChannelId) -> Vec<RawMember> {
@@ -534,16 +603,36 @@ fn group_raw_members(cx: &App, direct_id: ChannelId) -> Vec<RawMember> {
     let store = store.read(cx);
     let mut members: Vec<&GroupMember> = store.members(direct_id).iter().collect();
     members.sort_by_cached_key(|m| m.name().to_lowercase());
+    let own = current_user_status(cx);
+    let own_presence = current_user_presence(cx);
     members
         .into_iter()
-        .map(|member| RawMember {
-            user_id: member.id(),
-            name: member.name().to_string(),
-            avatar_raw: member.avatar().to_string(),
-            online: member.online || presence_online.contains(&member.id()),
-            user_status: presence.user_status(member.id()).unwrap_or("").to_string(),
-            in_voice: false,
-            role_color: None,
+        .map(|member| {
+            let own_status = own
+                .as_ref()
+                .filter(|(id, _)| *id == member.id())
+                .map(|(_, status)| status);
+            let online = own_status.map_or_else(
+                || member.online || presence_online.contains(&member.id()),
+                |status| status.online,
+            );
+            RawMember {
+                user_id: member.id(),
+                name: member.name().to_string(),
+                avatar_raw: member.avatar().to_string(),
+                online,
+                presence: if online {
+                    presence.member_presence(member.id(), own_presence)
+                } else {
+                    DmAvatarPresence::None
+                },
+                user_status: own_status.map_or_else(
+                    || presence.user_status(member.id()).unwrap_or("").to_string(),
+                    |status| status.custom_status.clone(),
+                ),
+                in_voice: false,
+                role_color: None,
+            }
         })
         .collect()
 }
@@ -756,6 +845,7 @@ fn make_member_row(cx: &App, raw: RawMember, owner_id: Option<UserId>) -> Row {
         avatar_src,
         avatar_raw: raw.avatar_raw.into(),
         online: raw.online,
+        presence: raw.presence,
         user_status: single_line(raw.user_status).into(),
         in_voice: raw.in_voice,
         is_owner: owner_id == Some(raw.user_id),
@@ -842,12 +932,17 @@ fn render_member(
         color
     };
 
-    let dot_fill = dim(if member.online {
-        theme.status_online.into()
-    } else {
-        theme.text_muted.into()
-    });
-    let dot_border = dim(theme.bg_secondary.into());
+    let dot = match crate::util::user_status::presence_badge_color(member.presence) {
+        None => RowDot::None,
+        Some(color) if member.presence == DmAvatarPresence::Idle => RowDot::Icon {
+            icon: IconName::DarkModeIcon,
+            color: color.into(),
+        },
+        Some(color) => RowDot::Fill {
+            color: color.into(),
+            ring: theme.bg_secondary.into(),
+        },
+    };
     let name_color = dim(member.role_color.unwrap_or_else(role_fallback_color));
     let owner_icon = member.is_owner.then(|| dim(rgb(0xF0B132).into()));
     let status_color = {
@@ -871,7 +966,7 @@ fn render_member(
 
     let mut row = MemberRowElement::new(member.rcm_id.clone(), member.name.clone(), avatar)
         .name_color(name_color)
-        .dot(dot_fill, dot_border)
+        .dot(dot)
         .owner_icon(owner_icon)
         .status(status)
         .status_icon(status_icon)
@@ -1015,9 +1110,9 @@ impl Render for MemberListPanel {
             .w(px(245.))
             .h_full()
             .flex_shrink_0()
-            .bg(theme.bg_secondary)
             .border_l_1()
             .border_color(theme.border)
+            .bg(theme.surfaces.direct_message.ramp())
             .child(list)
             .when_some(
                 menu_overlay,

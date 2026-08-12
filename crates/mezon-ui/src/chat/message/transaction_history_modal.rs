@@ -578,7 +578,7 @@ impl Render for TransactionHistoryModal {
             .flex()
             .flex_col()
             .rounded(px(12.))
-            .bg(theme.tokens.bg_surface)
+            .bg(theme.surfaces.surface)
             .shadow_lg()
             .child(self.render_header(&theme, window, cx))
             .child(self.render_tabs(&theme, cx))

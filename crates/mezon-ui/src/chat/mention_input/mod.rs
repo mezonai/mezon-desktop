@@ -2143,6 +2143,72 @@ impl MentionInput {
             .and_then(|composer| composer.0.upgrade())
     }
 
+    pub(crate) fn probe_set_text(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.input.update(cx, |input, cx| {
+            input.set_value(text, window, cx);
+        });
+        self.on_change(cx);
+    }
+
+    pub(crate) fn probe_text(&self, cx: &App) -> SharedString {
+        self.input.read(cx).value_shared()
+    }
+
+    pub(crate) fn probe_suggestions(&self) -> (bool, usize, Vec<String>) {
+        let labels = self
+            .suggestions
+            .iter()
+            .map(|suggestion| suggestion.sort_keys().0.to_string())
+            .collect();
+        (self.popup_open(), self.selected, labels)
+    }
+
+    pub(crate) fn probe_accept(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.popup_open() || index >= self.suggestions.len() {
+            return false;
+        }
+        self.accept(index, window, cx);
+        true
+    }
+
+    pub(crate) fn probe_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_enter(window, cx);
+    }
+
+    pub(crate) fn probe_panel_send(
+        &mut self,
+        kind: &str,
+        url: String,
+        filename: String,
+        width: i32,
+        height: i32,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        self.close_popup();
+        match kind {
+            "sticker" => cx.emit(MentionInputEvent::SendSticker { url, filename }),
+            "gif" => cx.emit(MentionInputEvent::SendGif {
+                url,
+                width: width.max(0) as u32,
+                height: height.max(0) as u32,
+            }),
+            "sound" => cx.emit(MentionInputEvent::SendSound { url, filename }),
+            other => anyhow::bail!("unknown panel kind: {other}"),
+        }
+        cx.notify();
+        Ok(())
+    }
+
     fn insert_emoji(
         &mut self,
         emoji: EmojiSuggestRaw,

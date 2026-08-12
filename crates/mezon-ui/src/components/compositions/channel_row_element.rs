@@ -17,6 +17,9 @@ const ICON_LEFT_INSET: Pixels = px(16.);
 const ICON_SIZE: Pixels = px(16.);
 const NAME_LEFT_INSET: Pixels = px(40.);
 const NAME_RIGHT_RESERVE: Pixels = px(24.);
+const GEAR_SIZE: Pixels = px(20.);
+const GEAR_RIGHT_GAP: Pixels = px(12.);
+const TRAILING_ACTION_RESERVE: Pixels = px(32.);
 const NAME_FONT_SIZE: Pixels = px(16.);
 const BG_CORNER_RADIUS: Pixels = px(8.);
 const BG_VERTICAL_INSET: Pixels = px(0.5);
@@ -53,6 +56,13 @@ pub struct ThreadConnector {
     pub color: Hsla,
 }
 
+#[derive(Clone)]
+pub struct ChannelRowTrailingAction {
+    pub icon: IconName,
+    pub hover_color: Hsla,
+    pub on_click: ClickHandler,
+}
+
 #[derive(Default)]
 struct ChannelRowElementState {
     hovered: Rc<Cell<bool>>,
@@ -74,6 +84,7 @@ pub struct ChannelRowElement {
     unread_nub: Option<Hsla>,
     badge: Option<ChannelRowBadge>,
     connector: Option<ThreadConnector>,
+    trailing_action: Option<ChannelRowTrailingAction>,
     on_click: Option<ClickHandler>,
     on_right_click: Option<RightClickHandler>,
 }
@@ -95,6 +106,7 @@ impl ChannelRowElement {
             unread_nub: None,
             badge: None,
             connector: None,
+            trailing_action: None,
             on_click: None,
             on_right_click: None,
         }
@@ -143,6 +155,11 @@ impl ChannelRowElement {
         self
     }
 
+    pub fn trailing_action(mut self, action: Option<ChannelRowTrailingAction>) -> Self {
+        self.trailing_action = action;
+        self
+    }
+
     pub fn on_click(mut self, f: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_click = Some(Rc::new(f));
         self
@@ -169,6 +186,16 @@ fn muted_color(mut color: Hsla, muted: bool) -> Hsla {
         color.a *= 0.7;
     }
     color
+}
+
+fn gear_bounds(row_bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+    let row_height = row_bounds.size.height;
+    let gear_x = row_bounds.origin.x + row_bounds.size.width - GEAR_RIGHT_GAP - GEAR_SIZE;
+    let gear_y = row_bounds.origin.y + (row_height - GEAR_SIZE) / 2.;
+    Bounds {
+        origin: point(gear_x, gear_y),
+        size: size(GEAR_SIZE, GEAR_SIZE),
+    }
 }
 
 impl Element for ChannelRowElement {
@@ -363,7 +390,13 @@ impl Element for ChannelRowElement {
                 } else {
                     NAME_LEFT_INSET
                 };
-                let name_max_width = (width - name_left - NAME_RIGHT_RESERVE).max(px(0.));
+                let trailing_reserve = if self.trailing_action.is_some() && !is_thread {
+                    TRAILING_ACTION_RESERVE
+                } else {
+                    px(0.)
+                };
+                let name_max_width =
+                    (width - name_left - NAME_RIGHT_RESERVE - trailing_reserve).max(px(0.));
                 let text_system = window.text_system().clone();
                 let mut name_run = window.text_style().to_run(self.name.len());
                 name_run.color = name_color;
@@ -432,6 +465,22 @@ impl Element for ChannelRowElement {
                     );
                 }
 
+                if hovered
+                    && !is_thread
+                    && let Some(action) = &self.trailing_action
+                {
+                    let gear_bounds = gear_bounds(bounds);
+                    let gear_color = action.hover_color;
+                    let _ = window.paint_svg(
+                        gear_bounds,
+                        action.icon.path().into(),
+                        None,
+                        TransformationMatrix::default(),
+                        gear_color,
+                        cx,
+                    );
+                }
+
                 if hovered {
                     window.set_cursor_style(CursorStyle::PointingHand, hitbox);
                 }
@@ -440,6 +489,8 @@ impl Element for ChannelRowElement {
                     let hitbox_down = hitbox.clone();
                     let mouse_down = state.mouse_down.clone();
                     let on_right_click = self.on_right_click.clone();
+                    let trailing_action = self.trailing_action.clone();
+                    let has_trailing = trailing_action.is_some() && !is_thread;
                     window.on_mouse_event(
                         move |event: &MouseDownEvent, phase, window: &mut Window, cx: &mut App| {
                             if phase != DispatchPhase::Bubble || !hitbox_down.is_hovered(window) {
@@ -460,6 +511,7 @@ impl Element for ChannelRowElement {
                     let hitbox_up = hitbox.clone();
                     let mouse_up = state.mouse_down.clone();
                     let on_click = self.on_click.clone();
+                    let hovered_cell = state.hovered.clone();
                     window.on_mouse_event(
                         move |event: &MouseUpEvent, phase, window: &mut Window, cx: &mut App| {
                             if phase != DispatchPhase::Bubble {
@@ -467,9 +519,18 @@ impl Element for ChannelRowElement {
                             }
                             if event.button == MouseButton::Left && mouse_up.get() {
                                 mouse_up.set(false);
-                                if hitbox_up.is_hovered(window)
-                                    && let Some(on_click) = on_click.as_ref()
+                                if !hitbox_up.is_hovered(window) {
+                                    return;
+                                }
+                                if has_trailing
+                                    && hovered_cell.get()
+                                    && gear_bounds(hitbox_up.bounds).contains(&event.position)
+                                    && let Some(action) = trailing_action.as_ref()
                                 {
+                                    (action.on_click)(window, cx);
+                                    return;
+                                }
+                                if let Some(on_click) = on_click.as_ref() {
                                     on_click(window, cx);
                                 }
                             }

@@ -30,6 +30,7 @@ use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
 use livekit::webrtc::peer_connection_factory::IceServer;
 use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions, RtcAudioSource, VideoBuffer};
+use livekit::webrtc::stats::RtcStats;
 use livekit::webrtc::video_frame::I420Buffer;
 use livekit::webrtc::video_stream::native::NativeVideoStream;
 use parking_lot::{Condvar, Mutex};
@@ -62,6 +63,9 @@ const MAX_REMOTE_VIDEO_HEIGHT: u32 = 1080;
 
 const AUDIO_SOURCE_QUEUE_SIZE_MS: u32 = 100;
 const MIC_PUBLISH_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+const MIC_EGRESS_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const MIC_EGRESS_PUBLISH_GRACE: Duration = Duration::from_secs(3);
+const MIC_EGRESS_STALL_LIMIT: u32 = 3;
 const PLAYBACK_RESTART_DELAY: Duration = Duration::from_millis(500);
 const MAX_PLAYBACK_RESTARTS: u32 = 3;
 
@@ -332,6 +336,13 @@ async fn session_main(
                 let mut sample_rate: u32 = 48_000;
                 let mut current_in_fmt: Option<AudioFormat> = None;
                 let mut last_publish_attempt: Option<Instant> = None;
+                let mut egress_timer = tokio::time::interval(MIC_EGRESS_POLL_INTERVAL);
+                egress_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut last_egress_packets: u64 = 0;
+                let mut egress_stall_polls: u32 = 0;
+                let mut frames_since_poll: u64 = 0;
+                let mut egress_recovering = false;
+                let mut egress_grace_until: Option<Instant> = None;
                 loop {
                     tokio::select! {
                         biased;
@@ -351,6 +362,10 @@ async fn session_main(
                                     channels = new_source.channels;
                                     sample_rate = new_source.sample_rate;
                                     source = Some(new_source.source);
+                                    last_egress_packets = 0;
+                                    egress_stall_polls = 0;
+                                    egress_grace_until =
+                                        Some(Instant::now() + MIC_EGRESS_PUBLISH_GRACE);
                                 }
                                 Err(e) => {
                                     tracing::warn!("failed to publish mic track: {e:#}");
@@ -381,6 +396,10 @@ async fn session_main(
                                         channels = new_source.channels;
                                         sample_rate = new_source.sample_rate;
                                         source = Some(new_source.source);
+                                        last_egress_packets = 0;
+                                        egress_stall_polls = 0;
+                                        egress_grace_until =
+                                            Some(Instant::now() + MIC_EGRESS_PUBLISH_GRACE);
                                     }
                                     Err(e) => {
                                         tracing::warn!("failed to retry mic track publish: {e:#}");
@@ -403,7 +422,61 @@ async fn session_main(
                             if let Err(e) = mic_source.capture_frame(&frame).await {
                                 tracing::warn!("failed to capture mic frame: {e}");
                                 source = None;
+                            } else {
+                                frames_since_poll += 1;
                             }
+                        }
+                        _ = egress_timer.tick() => {
+                            let fed = std::mem::take(&mut frames_since_poll);
+                            if !mic_enabled.load(Ordering::Relaxed) || source.is_none() {
+                                egress_stall_polls = 0;
+                                continue;
+                            }
+                            if egress_grace_until.is_some_and(|until| Instant::now() < until) {
+                                continue;
+                            }
+                            if fed == 0 {
+                                egress_stall_polls = 0;
+                                continue;
+                            }
+                            let track = mic_publication_task
+                                .lock()
+                                .as_ref()
+                                .and_then(|publication| publication.track());
+                            let Some(LocalTrack::Audio(track)) = track else {
+                                continue;
+                            };
+                            let packets = match tokio::time::timeout(
+                                Duration::from_millis(500),
+                                track.get_stats(),
+                            )
+                            .await
+                            {
+                                Ok(Ok(stats)) => outbound_audio_packets_sent(&stats),
+                                _ => continue,
+                            };
+                            if packets > last_egress_packets {
+                                last_egress_packets = packets;
+                                egress_stall_polls = 0;
+                                if egress_recovering {
+                                    tracing::info!("voice mic egress recovered after republish");
+                                    egress_recovering = false;
+                                }
+                                continue;
+                            }
+                            egress_stall_polls += 1;
+                            if egress_stall_polls < MIC_EGRESS_STALL_LIMIT {
+                                continue;
+                            }
+                            tracing::warn!(
+                                packets_sent = packets,
+                                "voice mic published but no RTP egress while unmuted; republishing track"
+                            );
+                            source = None;
+                            last_publish_attempt = None;
+                            egress_stall_polls = 0;
+                            egress_recovering = true;
+                            egress_grace_until = Some(Instant::now() + MIC_EGRESS_PUBLISH_GRACE);
                         }
                     }
                 }
@@ -832,6 +905,16 @@ struct PublishedMicSource {
     source: NativeAudioSource,
     channels: u32,
     sample_rate: u32,
+}
+
+fn outbound_audio_packets_sent(stats: &[RtcStats]) -> u64 {
+    stats
+        .iter()
+        .filter_map(|stat| match stat {
+            RtcStats::OutboundRtp(outbound) => Some(outbound.sent.packets_sent),
+            _ => None,
+        })
+        .sum()
 }
 
 async fn publish_microphone_track(
