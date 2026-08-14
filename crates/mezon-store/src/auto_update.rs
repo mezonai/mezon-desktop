@@ -5,6 +5,10 @@ const POLL_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const FIRST_POLL_DELAY: Duration = Duration::from_secs(5);
 const AUTO_CHECK_MIN_GAP: Duration = Duration::from_secs(5 * 60);
 
+/// Windows `.exe` builds self-update from the same feed the Microsoft Store build
+/// watches, so a single published `latest.yml` drives both channels.
+const WINDOWS_EXE_FEED_URL: &str = "https://cdn.komu.vn/release/latest.yml";
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum AutoUpdateStatus {
     Idle,
@@ -55,6 +59,9 @@ pub struct AutoUpdateStore {
     last_auto_check: Option<std::time::SystemTime>,
     _poll_task: Option<Task<()>>,
     pending: Option<Task<()>>,
+    /// Manifest stashed by `check_windows_exe` between detection and the
+    /// user-triggered `install_available` (Windows `.exe` two-step flow).
+    pending_manifest: Option<mezon_updater::UpdateManifest>,
 }
 
 struct GlobalAutoUpdateStore(Entity<AutoUpdateStore>);
@@ -131,6 +138,7 @@ impl AutoUpdateStore {
                 last_auto_check: None,
                 _poll_task: poll_task,
                 pending: None,
+                pending_manifest: None,
             }
         });
         cx.set_global(GlobalAutoUpdateStore(entity.clone()));
@@ -176,6 +184,17 @@ impl AutoUpdateStore {
             self.check_store(channel, manual, cx);
             return;
         }
+        // Windows `.exe` builds track the shared store `latest.yml` and self-install in
+        // two steps (`check_windows_exe` -> `install_available`). Every other platform
+        // keeps the original detect-download-install-in-one-shot behavior.
+        if cfg!(target_os = "windows") {
+            self.check_windows_exe(manual, cx);
+        } else {
+            self.check_native(manual, cx);
+        }
+    }
+
+    fn check_native(&mut self, manual: bool, cx: &mut Context<Self>) {
         let current_version = match &self.status {
             AutoUpdateStatus::Updated { version } => version.to_string(),
             _ => env!("CARGO_PKG_VERSION").to_string(),
@@ -299,6 +318,169 @@ impl AutoUpdateStore {
                         } else {
                             tracing::info!("auto-update check failed: {error:#}");
                             AutoUpdateStatus::Idle
+                        }
+                    }
+                };
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Windows `.exe`: detect a newer version from the shared `latest.yml` and surface
+    /// it as `UpdateAvailable`, stashing the manifest for a user-triggered install. Never
+    /// downloads on its own — that is `install_available`'s job.
+    fn check_windows_exe(&mut self, manual: bool, cx: &mut Context<Self>) {
+        if matches!(self.status, AutoUpdateStatus::Updated { .. }) && !manual {
+            return;
+        }
+        let current_version = match &self.status {
+            AutoUpdateStatus::Updated { version } => version.to_string(),
+            _ => env!("CARGO_PKG_VERSION").to_string(),
+        };
+
+        self.status = AutoUpdateStatus::Checking;
+        cx.notify();
+
+        let work = mezon_client::transport_runtime::handle().spawn(async move {
+            mezon_updater::fetch_manifest_at_url(WINDOWS_EXE_FEED_URL, &current_version).await
+        });
+
+        self.pending = Some(cx.spawn(async move |this, cx| {
+            let result = work
+                .await
+                .map_err(|e| anyhow::anyhow!("update task failed: {e}"))
+                .and_then(|inner| inner);
+
+            let _ = this.update(cx, |this, cx| {
+                this.pending = None;
+                this.status = match result {
+                    Ok(Some(manifest)) => {
+                        let version = manifest.version.clone();
+                        this.pending_manifest = Some(manifest);
+                        AutoUpdateStatus::UpdateAvailable {
+                            version: SharedString::from(version),
+                        }
+                    }
+                    Ok(None) => {
+                        if manual {
+                            AutoUpdateStatus::UpToDate
+                        } else {
+                            AutoUpdateStatus::Idle
+                        }
+                    }
+                    Err(error) => {
+                        if manual {
+                            tracing::error!("auto-update check failed: {error:#}");
+                            AutoUpdateStatus::Errored {
+                                message: SharedString::from(format!("{error:#}")),
+                            }
+                        } else {
+                            tracing::info!("auto-update check failed: {error:#}");
+                            AutoUpdateStatus::Idle
+                        }
+                    }
+                };
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Windows `.exe`: download the stashed update and swap the running binary in place.
+    /// Invoked when the user acts on the `UpdateAvailable` affordance.
+    pub fn install_available(&mut self, cx: &mut Context<Self>) {
+        if self.pending.is_some() {
+            return;
+        }
+        if !matches!(self.status, AutoUpdateStatus::UpdateAvailable { .. }) {
+            return;
+        }
+        let Some(manifest) = self.pending_manifest.clone() else {
+            return;
+        };
+        let base_url = match mezon_updater::base_dir_of(WINDOWS_EXE_FEED_URL) {
+            Ok(base) => base,
+            Err(error) => {
+                tracing::error!("cannot derive update base url: {error:#}");
+                self.status = AutoUpdateStatus::Errored {
+                    message: SharedString::from(format!("{error:#}")),
+                };
+                cx.notify();
+                return;
+            }
+        };
+
+        let version = SharedString::from(manifest.version.clone());
+        self.status = AutoUpdateStatus::Downloading {
+            version: version.clone(),
+            progress: None,
+        };
+        cx.notify();
+
+        let app_path = cx.app_path().ok();
+        let (phase_tx, phase_rx) = flume::unbounded::<UpdatePhase>();
+
+        let work = mezon_client::transport_runtime::handle().spawn(async move {
+            let progress_tx = phase_tx.clone();
+            let downloaded =
+                mezon_updater::download_update(&base_url, &manifest, move |written, total| {
+                    let fraction =
+                        total.map(|total| (written as f32 / total as f32).clamp(0.0, 1.0));
+                    let _ = progress_tx.send(UpdatePhase::Downloading { fraction });
+                })
+                .await?;
+            let _ = phase_tx.send(UpdatePhase::Installing);
+            let outcome = mezon_updater::install_update(&downloaded, app_path.as_deref()).await?;
+            anyhow::Ok(outcome)
+        });
+
+        self.pending = Some(cx.spawn(async move |this, cx| {
+            while let Ok(phase) = phase_rx.recv_async().await {
+                let ok = this
+                    .update(cx, |this, cx| {
+                        match phase {
+                            UpdatePhase::Downloading { fraction } => {
+                                this.status = AutoUpdateStatus::Downloading {
+                                    version: version.clone(),
+                                    progress: fraction,
+                                };
+                            }
+                            UpdatePhase::Installing => {
+                                this.status = AutoUpdateStatus::Installing {
+                                    version: version.clone(),
+                                };
+                            }
+                            UpdatePhase::Found { .. } => {}
+                        }
+                        cx.notify();
+                    })
+                    .is_ok();
+                if !ok {
+                    return;
+                }
+            }
+
+            let result = work
+                .await
+                .map_err(|e| anyhow::anyhow!("update task failed: {e}"))
+                .and_then(|inner| inner);
+
+            let _ = this.update(cx, |this, cx| {
+                this.pending = None;
+                this.pending_manifest = None;
+                this.status = match result {
+                    Ok(outcome) => {
+                        if let Some(restart_path) = outcome.restart_path {
+                            cx.set_restart_path(restart_path);
+                        }
+                        tracing::info!("update installed; restart to apply v{version}");
+                        AutoUpdateStatus::Updated {
+                            version: version.clone(),
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!("auto-update install failed: {error:#}");
+                        AutoUpdateStatus::Errored {
+                            message: SharedString::from(format!("{error:#}")),
                         }
                     }
                 };
