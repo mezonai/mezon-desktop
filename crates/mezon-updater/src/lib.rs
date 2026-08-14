@@ -67,7 +67,6 @@ fn allowed_download_hosts() -> anyhow::Result<Vec<String>> {
     .collect())
 }
 
-#[derive(Clone)]
 pub struct UpdateManifest {
     pub version: String,
     pub sha512: String,
@@ -154,16 +153,6 @@ fn validate_url_with_base(url: &str, base_url: &str) -> Result<()> {
     validate_url_against(url, &hosts)
 }
 
-/// Derive the directory a manifest lives in, so relative artifact `path`s can be
-/// resolved against it. e.g. `https://host/release/latest.yml` -> `https://host/release/`.
-pub fn base_dir_of(url: &str) -> Result<String> {
-    let base = url::Url::parse(url)
-        .map_err(|e| anyhow!("invalid URL: {e}"))?
-        .join(".")
-        .map_err(|e| anyhow!("cannot derive base dir from URL: {e}"))?;
-    Ok(base.to_string())
-}
-
 fn join_url(base_url: &str, file: &str) -> Result<String> {
     let mut base = base_url.to_string();
     if !base.ends_with('/') {
@@ -240,48 +229,6 @@ fn parse_manifest(body: &str) -> Result<UpdateManifest> {
         deb_path: parse_field(body, "deb").map(str::to_string),
         deb_sha512: parse_field(body, "debSha512").map(str::to_string),
     })
-}
-
-/// Parse a manifest body and return it only if it advertises a version newer than
-/// `current`. Pure decision logic shared by the feed-fetching entry points.
-fn manifest_if_newer(body: &str, current: &semver::Version) -> Result<Option<UpdateManifest>> {
-    let manifest = parse_manifest(body)?;
-    let latest = semver::Version::parse(&manifest.version)
-        .map_err(|e| anyhow!("invalid semver in manifest: {e}"))?;
-    Ok((latest > *current).then_some(manifest))
-}
-
-/// Fetch a full update manifest from an explicit URL (e.g. a shared `latest.yml`)
-/// and return it when it is newer than `current_version`. Unlike
-/// [`check_store_feed`], this parses the artifact `path`/`sha512` so the caller can
-/// download and self-install; unlike [`check_for_updates_with_manifest`], the URL is
-/// taken verbatim rather than composed from a per-platform filename.
-pub async fn fetch_manifest_at_url(
-    manifest_url: &str,
-    current_version: &str,
-) -> Result<Option<UpdateManifest>> {
-    let current = semver::Version::parse(current_version)
-        .map_err(|e| anyhow!("invalid current version '{current_version}': {e}"))?;
-    validate_url_with_base(manifest_url, manifest_url)?;
-
-    let response = http_client()
-        .get(manifest_url)
-        .send()
-        .await
-        .map_err(|e| anyhow!("update manifest fetch failed: {e}"))?;
-    if !response.status().is_success() {
-        bail!("update manifest returned HTTP {}", response.status());
-    }
-    let body = response
-        .text()
-        .await
-        .map_err(|e| anyhow!("failed to read update manifest body: {e}"))?;
-
-    let result = manifest_if_newer(&body, &current)?;
-    if let Some(manifest) = &result {
-        tracing::info!("update available: {} -> {}", current, manifest.version);
-    }
-    Ok(result)
 }
 
 pub async fn check_for_updates(base_url: &str, current_version: &str) -> Result<Option<String>> {
@@ -1018,50 +965,6 @@ mod tests {
             host_of("https://cdn.example/release/").as_deref(),
             Some("cdn.example")
         );
-    }
-
-    #[test]
-    fn base_dir_of_strips_filename() {
-        assert_eq!(
-            base_dir_of("https://cdn.komu.vn/release/latest.yml").unwrap(),
-            "https://cdn.komu.vn/release/"
-        );
-    }
-
-    #[test]
-    fn base_dir_of_preserves_directory_url() {
-        assert_eq!(
-            base_dir_of("https://cdn.komu.vn/release/").unwrap(),
-            "https://cdn.komu.vn/release/"
-        );
-    }
-
-    #[test]
-    fn base_dir_of_rejects_malformed_url() {
-        assert!(base_dir_of("not a url").is_err());
-    }
-
-    #[test]
-    fn manifest_if_newer_returns_manifest_when_remote_is_newer() {
-        let body = "version: 2.0.11\npath: mezon-2.0.11-windows-x86_64.zip\nsha512: abc=\n";
-        let current = semver::Version::new(2, 0, 10);
-        let manifest = manifest_if_newer(body, &current).unwrap().unwrap();
-        assert_eq!(manifest.version, "2.0.11");
-        assert_eq!(manifest.path, "mezon-2.0.11-windows-x86_64.zip");
-    }
-
-    #[test]
-    fn manifest_if_newer_returns_none_when_up_to_date() {
-        let body = "version: 2.0.10\npath: mezon-2.0.10-windows-x86_64.zip\nsha512: abc=\n";
-        let current = semver::Version::new(2, 0, 10);
-        assert!(manifest_if_newer(body, &current).unwrap().is_none());
-    }
-
-    #[test]
-    fn manifest_if_newer_returns_none_when_remote_is_older() {
-        let body = "version: 2.0.9\npath: mezon-2.0.9-windows-x86_64.zip\nsha512: abc=\n";
-        let current = semver::Version::new(2, 0, 10);
-        assert!(manifest_if_newer(body, &current).unwrap().is_none());
     }
 
     #[test]

@@ -30,11 +30,6 @@ pub fn update_available_clicked(cx: &mut App) {
     };
     if let Some(url) = store.read(cx).store_page_url() {
         cx.open_url(url);
-        return;
-    }
-    if cfg!(target_os = "windows") {
-        // Windows `.exe`: the click confirms the two-step self-update (download + swap).
-        store.update(cx, |store, cx| store.install_available(cx));
     } else {
         store.update(cx, |store, cx| store.check(true, cx));
     }
