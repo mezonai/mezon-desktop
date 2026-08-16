@@ -416,6 +416,7 @@ impl gpui::Render for CanvasView {
                     a: 0.08,
                 })
                 .shadow_lg()
+                .occlude()
                 .child(
                     Button::new("canvas-discard")
                         .label(mezon_i18n::t(&locale, "canvas.actions.discardChanges"))
@@ -533,7 +534,6 @@ impl gpui::Render for CanvasView {
                         .right_0()
                         .flex()
                         .justify_center()
-                        .occlude()
                         .child(bar),
                 )
             })

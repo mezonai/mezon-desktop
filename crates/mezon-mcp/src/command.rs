@@ -85,6 +85,28 @@ pub enum McpCommand {
     ComposerSubmit {
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
+    OpenTopic {
+        message_id: i64,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    CloseTopic {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    TopicState {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    TopicType {
+        text: String,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    TopicSubmit {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    TopicScrollWheel {
+        delta_y: f32,
+        ticks: u32,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
     EditBegin {
         message_id: i64,
         reply: oneshot::Sender<anyhow::Result<Value>>,

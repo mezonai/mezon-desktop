@@ -122,6 +122,8 @@ jobs:
 
   windows:
     name: Windows artifacts
+    # Disabled by default: set ENABLE_WINDOWS_BUILD=true to build Windows artifacts again.
+    if: ${{ vars.ENABLE_WINDOWS_BUILD == 'true' }}
     runs-on: windows-latest
     steps:
       - name: Checkout

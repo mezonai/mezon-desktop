@@ -183,6 +183,35 @@ impl McpRuntime {
                         let result = cx.update(mezon_ui::app::capture::composer_submit);
                         let _ = reply.send(result);
                     }
+                    McpCommand::OpenTopic { message_id, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::open_topic(cx, message_id));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CloseTopic { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::close_topic);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::TopicState { reply } => {
+                        let result = cx.update(|cx| mezon_ui::app::capture::topic_state(cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::TopicType { text, reply } => {
+                        let result = cx.update(|cx| mezon_ui::app::capture::topic_type(cx, &text));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::TopicSubmit { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::topic_submit);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::TopicScrollWheel {
+                        delta_y,
+                        ticks,
+                        reply,
+                    } => {
+                        let result = topic_scroll_wheel(cx, delta_y, ticks).await;
+                        let _ = reply.send(result);
+                    }
                     McpCommand::EditBegin { message_id, reply } => {
                         let result =
                             cx.update(|cx| mezon_ui::app::capture::edit_begin(cx, message_id));
@@ -421,6 +450,40 @@ async fn scroll_wheel(cx: &mut AsyncApp, delta_y: f32, ticks: u32) -> anyhow::Re
         }
     }
     let after = cx.update(|cx| message_viewport_state(cx));
+    let (item_count, first_visible, at_bottom) = after.unwrap_or((0, 0, false));
+    Ok(json!({
+        "ok": true,
+        "ticks": delivered,
+        "consumed_ticks": consumed,
+        "moved": before != after,
+        "delta_y": delta_y,
+        "item_count": item_count,
+        "first_visible_index": first_visible,
+        "at_bottom": at_bottom,
+    }))
+}
+
+async fn topic_scroll_wheel(cx: &mut AsyncApp, delta_y: f32, ticks: u32) -> anyhow::Result<Value> {
+    use mezon_ui::app::capture::{
+        WHEEL_MAX_TICKS, WHEEL_TICK_INTERVAL, dispatch_topic_wheel_tick, prime_topic_wheel_pointer,
+        topic_viewport_state,
+    };
+    let ticks = ticks.clamp(1, WHEEL_MAX_TICKS);
+    cx.update(prime_topic_wheel_pointer)?;
+    cx.background_executor().timer(WHEEL_TICK_INTERVAL).await;
+    let before = cx.update(|cx| topic_viewport_state(cx));
+    let mut delivered = 0u32;
+    let mut consumed = 0u32;
+    for tick in 0..ticks {
+        if cx.update(|cx| dispatch_topic_wheel_tick(cx, delta_y))? {
+            consumed += 1;
+        }
+        delivered += 1;
+        if tick + 1 < ticks {
+            cx.background_executor().timer(WHEEL_TICK_INTERVAL).await;
+        }
+    }
+    let after = cx.update(|cx| topic_viewport_state(cx));
     let (item_count, first_visible, at_bottom) = after.unwrap_or((0, 0, false));
     Ok(json!({
         "ok": true,

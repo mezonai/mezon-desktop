@@ -7,15 +7,15 @@ mod blink;
 
 use blink::CaretBlink;
 use gpui::{
-    Anchor, App, Bounds, ClickEvent, ClipboardEntry, ClipboardItem, Context, CursorStyle,
-    DispatchPhase, Div, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    FocusHandle, Focusable, FontStyle, FontWeight, GlobalElementId, Hsla, Image, ImageFormat,
-    InspectorElementId, InteractiveElement as _, IntoElement, KeyBinding, KeyContext, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render,
-    RenderOnce, ScrollDelta, ScrollHandle, ScrollWheelEvent, ShapedLine, SharedString,
-    StrikethroughStyle, Style, StyleRefinement, Styled, TextAlign, TextRun, UTF16Selection,
-    UnderlineStyle, Window, WrappedLine, actions, anchored, deferred, div, fill, point, prelude::*,
-    px, size,
+    Anchor, AnyElement, App, Bounds, ClickEvent, ClipboardEntry, ClipboardItem, Context,
+    CursorStyle, DispatchPhase, Display, Div, Element, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, FocusHandle, Focusable, FontStyle, FontWeight, GlobalElementId, Hsla,
+    Image, ImageFormat, InspectorElementId, InteractiveElement as _, IntoElement, KeyBinding,
+    KeyContext, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
+    Pixels, Point, Position, Render, RenderOnce, ScrollDelta, ScrollHandle, ScrollWheelEvent,
+    ShapedLine, SharedString, StrikethroughStyle, Style, StyleRefinement, Styled, TextAlign,
+    TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, anchored, deferred, div,
+    fill, point, prelude::*, px, size,
 };
 use mezon_store::{CanvasStore, PlatformStore};
 use serde_json::{Value, json};
@@ -277,8 +277,7 @@ impl CanvasEditorState {
             this.caret_blink.sync_blurred(cx);
             let link_focused = this.link_input.read(cx).focus_handle(cx).is_focused(window);
             if !link_focused {
-                this.block_menu_open = false;
-                this.link_menu_open = false;
+                this.dismiss_bubble_menus();
             }
             cx.notify();
         })
@@ -298,8 +297,7 @@ impl CanvasEditorState {
         if read_only {
             self.selected_range = 0..0;
             self.selection_reversed = false;
-            self.block_menu_open = false;
-            self.link_menu_open = false;
+            self.dismiss_bubble_menus();
         }
         cx.notify();
     }
@@ -551,8 +549,14 @@ impl CanvasEditorState {
         }
     }
 
+    fn dismiss_bubble_menus(&mut self) {
+        self.block_menu_open = false;
+        self.link_menu_open = false;
+    }
+
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         let offset = snap_offset(&self.content, offset.min(self.content.len()));
+        self.dismiss_bubble_menus();
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         self.caret_blink.pause_blinking(cx);
@@ -561,6 +565,7 @@ impl CanvasEditorState {
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         let offset = snap_offset(&self.content, offset.min(self.content.len()));
+        self.dismiss_bubble_menus();
         if self.selection_reversed {
             self.selected_range.start = offset;
         } else {
@@ -1171,6 +1176,7 @@ impl CanvasEditorState {
         let range = range_for_granularity(&self.content, offset, self.select_granularity, true);
         self.select_anchor = range.clone();
         self.selection_reversed = false;
+        self.dismiss_bubble_menus();
         self.selected_range = range;
         self.caret_blink.pause_blinking(cx);
         cx.notify();
@@ -1205,6 +1211,7 @@ impl CanvasEditorState {
         if range == self.selected_range && reversed == self.selection_reversed {
             return;
         }
+        self.dismiss_bubble_menus();
         self.selected_range = range;
         self.selection_reversed = reversed;
         self.caret_blink.pause_blinking(cx);
@@ -1408,6 +1415,7 @@ impl CanvasEditorState {
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_bubble_menus();
         self.selected_range = 0..self.content.len();
         self.selection_reversed = false;
         cx.notify();
@@ -2972,6 +2980,167 @@ fn open_canvas_link(url: &str, cx: &mut App) {
     }
 }
 
+const CANVAS_FLOATING_GAP: Pixels = px(4.);
+
+struct CanvasFormatToolbar {
+    bar: AnyElement,
+    floating: Option<AnyElement>,
+}
+
+impl CanvasFormatToolbar {
+    fn new(bar: impl IntoElement) -> Self {
+        Self {
+            bar: bar.into_any_element(),
+            floating: None,
+        }
+    }
+
+    fn with_floating(mut self, floating: impl IntoElement) -> Self {
+        self.floating = Some(floating.into_any_element());
+        self
+    }
+}
+
+impl IntoElement for CanvasFormatToolbar {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+struct CanvasFormatToolbarLayout {
+    floating_id: Option<LayoutId>,
+}
+
+impl Element for CanvasFormatToolbar {
+    type RequestLayoutState = CanvasFormatToolbarLayout;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let bar_id = self.bar.request_layout(window, cx);
+        let floating_id = self.floating.as_mut().map(|floating| {
+            let panel_id = floating.request_layout(window, cx);
+            window.request_layout(
+                Style {
+                    position: Position::Absolute,
+                    display: Display::Flex,
+                    inset: gpui::Edges {
+                        top: px(0.).into(),
+                        left: px(0.).into(),
+                        ..gpui::Edges::auto()
+                    },
+                    ..Style::default()
+                },
+                [panel_id],
+                cx,
+            )
+        });
+
+        let mut child_ids = smallvec::SmallVec::<[LayoutId; 2]>::new();
+        child_ids.push(bar_id);
+        if let Some(floating_id) = floating_id {
+            child_ids.push(floating_id);
+        }
+
+        let layout_id = window.request_layout(Style::default(), child_ids, cx);
+
+        (layout_id, CanvasFormatToolbarLayout { floating_id })
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.bar.prepaint(window, cx);
+
+        let Some(floating_id) = layout.floating_id else {
+            return;
+        };
+        let Some(floating) = self.floating.as_mut() else {
+            return;
+        };
+
+        let panel_bounds = window.layout_bounds(floating_id);
+        let panel_size = panel_bounds.size;
+        let client_inset = window.client_inset().unwrap_or(px(0.));
+        let limits = Bounds {
+            origin: Point::default(),
+            size: window.viewport_size(),
+        };
+        let space_below = limits.bottom() - client_inset - bounds.bottom();
+        let flip_up = space_below < panel_size.height + CANVAS_FLOATING_GAP;
+
+        let attach = if flip_up {
+            point(bounds.left(), bounds.top() - CANVAS_FLOATING_GAP)
+        } else {
+            point(bounds.left(), bounds.bottom() + CANVAS_FLOATING_GAP)
+        };
+        let anchor = if flip_up {
+            Anchor::BottomLeft
+        } else {
+            Anchor::TopLeft
+        };
+        let mut desired = Bounds::from_anchor_and_size(anchor, attach, panel_size);
+
+        if desired.right() > limits.right() - client_inset {
+            desired.origin.x -= desired.right() - (limits.right() - client_inset);
+        }
+        if desired.left() < limits.left() + client_inset {
+            desired.origin.x = limits.left() + client_inset;
+        }
+        if desired.bottom() > limits.bottom() - client_inset {
+            desired.origin.y -= desired.bottom() - (limits.bottom() - client_inset);
+        }
+        if desired.top() < limits.top() + client_inset {
+            desired.origin.y = limits.top() + client_inset;
+        }
+
+        let offset = point(
+            (desired.origin.x - panel_bounds.origin.x).round(),
+            (desired.origin.y - panel_bounds.origin.y).round(),
+        );
+        window.with_element_offset(offset, |window| {
+            floating.prepaint(window, cx);
+        });
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.bar.paint(window, cx);
+        if let Some(floating) = self.floating.as_mut() {
+            floating.paint(window, cx);
+        }
+    }
+}
+
 fn render_bubble_menu(
     editor: Entity<CanvasEditorState>,
     locale: SharedString,
@@ -3004,54 +3173,77 @@ fn render_bubble_menu(
     let cancel_label = mezon_i18n::t(&locale, "canvas.toolbar.cancel");
     let apply_label = mezon_i18n::t(&locale, "canvas.toolbar.apply");
 
-    let link_popover = v_flex()
-        .w(px(280.))
-        .p(px(12.))
-        .rounded(px(10.))
-        .bg(menu_bg)
-        .border_1()
-        .border_color(brand)
-        .shadow_lg()
-        .gap_2()
-        .occlude()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(Input::new(&link_input).w_full().min_w(px(0.)).text_sm())
-        .child(
-            h_flex()
-                .w_full()
-                .justify_end()
-                .gap_2()
-                .child(
-                    Button::new("canvas-link-cancel")
-                        .label(cancel_label)
-                        .ghost()
-                        .with_size(Size::Small)
-                        .on_click({
-                            let editor = editor.clone();
-                            move |_: &ClickEvent, window, cx| {
-                                editor.update(cx, |this, cx| {
-                                    this.cancel_link_menu(window, cx);
-                                });
-                            }
-                        }),
-                )
-                .child(
-                    Button::new("canvas-link-apply")
-                        .label(apply_label)
-                        .primary()
-                        .with_size(Size::Small)
-                        .on_click({
-                            let editor = editor.clone();
-                            move |_: &ClickEvent, window, cx| {
-                                editor.update(cx, |this, cx| {
-                                    this.apply_link_menu(window, cx);
-                                });
-                            }
-                        }),
-                ),
-        );
+    let link_popover = link_menu_open.then(|| {
+        v_flex()
+            .w(px(280.))
+            .p(px(12.))
+            .rounded(px(10.))
+            .bg(menu_bg)
+            .border_1()
+            .border_color(border)
+            .shadow_lg()
+            .gap_2()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(Input::new(&link_input).w_full().min_w(px(0.)).text_sm())
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("canvas-link-cancel")
+                            .label(cancel_label)
+                            .ghost()
+                            .with_size(Size::Small)
+                            .on_click({
+                                let editor = editor.clone();
+                                move |_: &ClickEvent, window, cx| {
+                                    editor.update(cx, |this, cx| {
+                                        this.cancel_link_menu(window, cx);
+                                    });
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new("canvas-link-apply")
+                            .label(apply_label)
+                            .primary()
+                            .with_size(Size::Small)
+                            .on_click({
+                                let editor = editor.clone();
+                                move |_: &ClickEvent, window, cx| {
+                                    editor.update(cx, |this, cx| {
+                                        this.apply_link_menu(window, cx);
+                                    });
+                                }
+                            }),
+                    ),
+            )
+    });
 
-    h_flex()
+    let block_dropdown_panel = block_menu_open.then(|| {
+        v_flex()
+            .min_w(px(220.))
+            .py(px(6.))
+            .rounded(px(10.))
+            .bg(menu_bg)
+            .border_1()
+            .border_color(border)
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .children(block_menu_items(
+                editor.clone(),
+                active_block,
+                &locale,
+                icon_color,
+                active_color,
+                border,
+            ))
+    });
+
+    let format_bar = h_flex()
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .gap(px(2.))
@@ -3063,66 +3255,38 @@ fn render_bubble_menu(
         .shadow_md()
         .child(
             div()
-                .relative()
+                .id("canvas-bubble-block")
+                .px(px(10.))
+                .py(px(6.))
+                .rounded(px(4.))
+                .cursor_pointer()
+                .tooltip(TooltipView::text(block_tooltip))
+                .when(block_menu_open, |el| el.bg(cx.theme().bg_tertiary))
                 .child(
-                    div()
-                        .id("canvas-bubble-block")
-                        .px(px(10.))
-                        .py(px(6.))
-                        .rounded(px(4.))
-                        .cursor_pointer()
-                        .tooltip(TooltipView::text(block_tooltip))
-                        .when(block_menu_open, |el| el.bg(cx.theme().bg_tertiary))
+                    h_flex()
+                        .items_center()
+                        .gap_1()
                         .child(
-                            h_flex()
-                                .items_center()
-                                .gap_1()
-                                .child(
-                                    Icon::new(IconName::ParagraphIcon)
-                                        .size(px(14.))
-                                        .text_color(icon_color),
-                                )
-                                .child(
-                                    Icon::new(IconName::ArrowDown)
-                                        .size(px(12.))
-                                        .text_color(icon_color),
-                                ),
+                            Icon::new(IconName::ParagraphIcon)
+                                .size(px(14.))
+                                .text_color(icon_color),
                         )
-                        .on_mouse_down(MouseButton::Left, {
-                            let editor = editor.clone();
-                            move |_, _, cx| {
-                                cx.stop_propagation();
-                                editor.update(cx, |this, cx| {
-                                    this.block_menu_open = !this.block_menu_open;
-                                    this.link_menu_open = false;
-                                    cx.notify();
-                                });
-                            }
-                        }),
-                )
-                .when(block_menu_open, |el| {
-                    el.child(
-                        div().absolute().top(px(38.)).left_0().child(
-                            v_flex()
-                                .min_w(px(220.))
-                                .py(px(6.))
-                                .rounded(px(10.))
-                                .bg(menu_bg)
-                                .border_1()
-                                .border_color(border)
-                                .shadow_lg()
-                                .occlude()
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .children(block_menu_items(
-                                    editor.clone(),
-                                    active_block,
-                                    &locale,
-                                    icon_color,
-                                    active_color,
-                                    border,
-                                )),
+                        .child(
+                            Icon::new(IconName::ArrowDown)
+                                .size(px(12.))
+                                .text_color(icon_color),
                         ),
-                    )
+                )
+                .on_mouse_down(MouseButton::Left, {
+                    let editor = editor.clone();
+                    move |_, _, cx| {
+                        cx.stop_propagation();
+                        editor.update(cx, |this, cx| {
+                            this.block_menu_open = !this.block_menu_open;
+                            this.link_menu_open = false;
+                            cx.notify();
+                        });
+                    }
                 }),
         )
         .child(div().w(px(1.)).h(px(24.)).mx(px(4.)).bg(border))
@@ -3170,37 +3334,24 @@ fn render_bubble_menu(
         .child(div().w(px(1.)).h(px(24.)).mx(px(4.)).bg(border))
         .child(
             div()
-                .relative()
-                .child(
-                    div()
-                        .id("canvas-bubble-link")
-                        .px(px(10.))
-                        .py(px(6.))
-                        .rounded(px(4.))
-                        .cursor_pointer()
-                        .tooltip(TooltipView::text(add_link_tooltip))
-                        .when(link_menu_open, |el| el.bg(cx.theme().bg_tertiary))
-                        .text_sm()
-                        .text_color(icon_color)
-                        .child("Link")
-                        .on_mouse_down(MouseButton::Left, {
-                            let editor = editor.clone();
-                            move |_, window, cx| {
-                                cx.stop_propagation();
-                                editor.update(cx, |this, cx| {
-                                    this.open_link_menu(window, cx);
-                                });
-                            }
-                        }),
-                )
-                .when(link_menu_open, |el| {
-                    el.child(
-                        div()
-                            .absolute()
-                            .top(px(40.))
-                            .left(px(-115.))
-                            .child(link_popover),
-                    )
+                .id("canvas-bubble-link")
+                .px(px(10.))
+                .py(px(6.))
+                .rounded(px(4.))
+                .cursor_pointer()
+                .tooltip(TooltipView::text(add_link_tooltip))
+                .when(link_menu_open, |el| el.bg(cx.theme().bg_tertiary))
+                .text_sm()
+                .text_color(icon_color)
+                .child("Link")
+                .on_mouse_down(MouseButton::Left, {
+                    let editor = editor.clone();
+                    move |_, window, cx| {
+                        cx.stop_propagation();
+                        editor.update(cx, |this, cx| {
+                            this.open_link_menu(window, cx);
+                        });
+                    }
                 }),
         )
         .when(has_link, |el| {
@@ -3228,7 +3379,15 @@ fn render_bubble_menu(
                         }
                     }),
             )
-        })
+        });
+
+    let mut toolbar = CanvasFormatToolbar::new(format_bar);
+    if let Some(panel) = block_dropdown_panel {
+        toolbar = toolbar.with_floating(panel);
+    } else if let Some(panel) = link_popover {
+        toolbar = toolbar.with_floating(panel);
+    }
+    toolbar
 }
 
 #[derive(Clone, Copy)]

@@ -194,6 +194,18 @@ fn open_delete_thread_confirm(
     }
 }
 
+fn open_delete_channel_confirm(
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    locale: String,
+) -> impl Fn(&mut Window, &mut App) + 'static {
+    move |window: &mut Window, cx: &mut App| {
+        Shell::global(cx).update(cx, |shell, cx| {
+            shell.confirm_delete_channel(clan_id, channel_id, &locale, window, cx);
+        });
+    }
+}
+
 pub(crate) const MUTE_DURATIONS: &[(i32, &str)] = &[
     (
         mezon_store::notification_setting::MUTE_FOR_15_MINUTES_SEC,
@@ -540,7 +552,7 @@ pub(super) fn build_channel_menu(
             if !permissions.is_welcome_channel {
                 menu = menu.danger_item(
                     delete_label.clone(),
-                    coming_soon_modal(delete_label, locale_owned.clone()),
+                    open_delete_channel_confirm(clan_id, channel_id, locale_owned.clone()),
                 );
             }
         }

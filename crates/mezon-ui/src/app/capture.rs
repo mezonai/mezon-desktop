@@ -390,6 +390,169 @@ fn edit_snapshot(cx: &mut App) -> anyhow::Result<Value> {
     }))
 }
 
+struct ActiveTopicPanel {
+    composer: gpui::WeakEntity<crate::chat::mention_input::MentionInput>,
+    timeline: gpui::WeakEntity<crate::chat::message::ChannelMessages>,
+}
+impl gpui::Global for ActiveTopicPanel {}
+
+pub fn register_active_topic_panel(
+    composer: &gpui::Entity<crate::chat::mention_input::MentionInput>,
+    timeline: &gpui::Entity<crate::chat::message::ChannelMessages>,
+    cx: &mut App,
+) {
+    cx.set_global(ActiveTopicPanel {
+        composer: composer.downgrade(),
+        timeline: timeline.downgrade(),
+    });
+}
+
+fn topic_panel(
+    cx: &App,
+) -> anyhow::Result<(
+    gpui::Entity<crate::chat::mention_input::MentionInput>,
+    gpui::Entity<crate::chat::message::ChannelMessages>,
+)> {
+    let panel = cx
+        .try_global::<ActiveTopicPanel>()
+        .ok_or_else(|| anyhow::anyhow!("no topic panel is mounted; call open_topic first"))?;
+    let composer = panel
+        .composer
+        .upgrade()
+        .ok_or_else(|| anyhow::anyhow!("the topic panel was closed"))?;
+    let timeline = panel
+        .timeline
+        .upgrade()
+        .ok_or_else(|| anyhow::anyhow!("the topic panel was closed"))?;
+    Ok((composer, timeline))
+}
+
+fn topic_snapshot(cx: &App) -> anyhow::Result<Value> {
+    let topics = mezon_store::TopicsStore::global(cx);
+    let topics = topics.read(cx);
+    let messages = mezon_store::MessagesStore::global(cx);
+    let messages = messages.read(cx);
+    let topic_id = topics.active_topic_id();
+    let loaded = topic_id
+        .map(|id| {
+            messages
+                .messages_in_channel(mezon_store::ChannelId(id))
+                .len()
+        })
+        .unwrap_or(0);
+    let (item_count, first_visible, at_bottom) = topic_panel(cx)
+        .map(|(_, timeline)| timeline.read(cx).viewport_state())
+        .unwrap_or((0, 0, false));
+    Ok(json!({
+        "panel_open": topics.is_panel_open(),
+        "topic_id": topic_id.map(|id| id.to_string()),
+        "origin_message_id": topics.origin_message().map(|m| m.id.get().to_string()),
+        "loaded_count": loaded,
+        "loading": messages.is_topic_loading(),
+        "has_more_top": messages.topic_has_more_top(),
+        "has_more_bottom": messages.topic_has_more_bottom(),
+        "loading_more": messages.is_topic_loading_more(),
+        "item_count": item_count,
+        "first_visible_index": first_visible,
+        "at_bottom": at_bottom,
+    }))
+}
+
+pub fn open_topic(cx: &mut App, message_id: i64) -> anyhow::Result<Value> {
+    let messages = mezon_store::MessagesStore::global(cx);
+    if messages
+        .read(cx)
+        .viewport_message_by_id(mezon_store::MessageId(message_id))
+        .is_none()
+    {
+        anyhow::bail!(
+            "message {message_id} is not in the open channel's loaded history; open_channel and load_more_messages first"
+        );
+    }
+    mezon_store::TopicsStore::global(cx).update(cx, |store, cx| {
+        store.start_create_for_message(mezon_store::MessageId(message_id), cx);
+    });
+    if let Some(main_handle) = handle(cx) {
+        cx.update_window(main_handle, |_, window, _| window.refresh())?;
+    }
+    topic_snapshot(cx)
+}
+
+pub fn close_topic(cx: &mut App) -> anyhow::Result<Value> {
+    mezon_store::TopicsStore::global(cx).update(cx, |store, cx| store.close_panel(cx));
+    Ok(json!({ "ok": true }))
+}
+
+pub fn topic_state(cx: &App) -> anyhow::Result<Value> {
+    topic_snapshot(cx)
+}
+
+pub fn topic_type(cx: &mut App, text: &str) -> anyhow::Result<Value> {
+    let (composer, _) = topic_panel(cx)?;
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    cx.update_window(main_handle, |_, window, cx| {
+        composer.update(cx, |composer, cx| composer.probe_set_text(text, window, cx));
+    })?;
+    Ok(json!({ "ok": true, "text": text }))
+}
+
+pub fn topic_submit(cx: &mut App) -> anyhow::Result<Value> {
+    let (composer, _) = topic_panel(cx)?;
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    let sent = composer.read(cx).probe_text(cx).to_string();
+    cx.update_window(main_handle, |_, window, cx| {
+        composer.update(cx, |composer, cx| composer.probe_enter(window, cx));
+    })?;
+    Ok(json!({ "ok": true, "sent": sent }))
+}
+
+pub fn topic_viewport_state(cx: &App) -> Option<(usize, usize, bool)> {
+    topic_panel(cx)
+        .ok()
+        .map(|(_, timeline)| timeline.read(cx).viewport_state())
+}
+
+fn topic_list_bounds(cx: &App) -> Option<gpui::Bounds<gpui::Pixels>> {
+    topic_panel(cx)
+        .ok()
+        .and_then(|(_, timeline)| timeline.read(cx).list_bounds())
+        .filter(|bounds| bounds.size.width > gpui::px(0.) && bounds.size.height > gpui::px(0.))
+}
+
+pub fn prime_topic_wheel_pointer(cx: &mut App) -> anyhow::Result<()> {
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    let bounds = topic_list_bounds(cx)
+        .ok_or_else(|| anyhow::anyhow!("no topic list is mounted; call open_topic first"))?;
+    cx.update_window(main_handle, |_, window, cx| {
+        window.dispatch_event(
+            gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                position: bounds.center(),
+                pressed_button: None,
+                modifiers: gpui::Modifiers::default(),
+            }),
+            cx,
+        );
+        window.refresh();
+    })?;
+    Ok(())
+}
+
+pub fn dispatch_topic_wheel_tick(cx: &mut App, delta_y: f32) -> anyhow::Result<bool> {
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    let bounds = topic_list_bounds(cx)
+        .ok_or_else(|| anyhow::anyhow!("no topic list is mounted; call open_topic first"))?;
+    let consumed = cx.update_window(main_handle, |_, window, cx| {
+        let event = gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+            position: bounds.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(delta_y))),
+            modifiers: gpui::Modifiers::default(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        !window.dispatch_event(event, cx).propagate
+    })?;
+    Ok(consumed)
+}
+
 pub fn edit_begin(cx: &mut App, message_id: i64) -> anyhow::Result<Value> {
     let timeline = crate::chat::message::ChannelMessages::active_timeline(cx)
         .ok_or_else(|| anyhow::anyhow!("no message list is mounted; open a channel first"))?;

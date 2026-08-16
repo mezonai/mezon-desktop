@@ -151,9 +151,41 @@ pub fn open_screen_share_pip(
         ..Default::default()
     };
 
-    cx.open_window(options, |_window, cx| {
+    cx.open_window(options, |window, cx| {
+        keep_pip_above_other_windows(window);
         cx.new(|cx| ScreenSharePipView::new(voice, key, cx))
     })
     .ok()
     .map(Into::into)
 }
+
+#[cfg(target_os = "windows")]
+fn keep_pip_above_other_windows(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+    };
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(win32.hwnd.get() as *mut _);
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn keep_pip_above_other_windows(_window: &Window) {}

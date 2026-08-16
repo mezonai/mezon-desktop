@@ -388,11 +388,12 @@ impl AppApi {
         clan_id: i64,
         channel_id: i64,
         topic_id: i64,
+        message_id: i64,
         direction: i32,
         limit: u32,
     ) -> Result<crate::transport::ListChannelMessagesResult> {
         self.transport
-            .list_topic_messages(clan_id, channel_id, topic_id, direction, limit)
+            .list_topic_messages(clan_id, channel_id, topic_id, message_id, direction, limit)
             .await
     }
 

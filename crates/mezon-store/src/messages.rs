@@ -55,6 +55,7 @@ use crate::topics::TopicsStore;
 use crate::wallet::{SendTokenRequest, WalletEvent, WalletStore};
 
 const MESSAGE_PAGE_LIMIT: u32 = 50;
+const TOPIC_FULL_PAGE_LEN: usize = MESSAGE_PAGE_LIMIT as usize - 1;
 const MAX_COUNTED_TOPIC_REPLIES: usize = 2048;
 const DIRECTION_BEFORE: i32 = 3;
 const DIRECTION_AFTER: i32 = 1;
@@ -67,6 +68,7 @@ use crate::message::STICKER_FILETYPE;
 const AUDIO_FILETYPE: &str = "audio/mpeg";
 pub const ANONYMOUS_SENDER_NAME: &str = "Anonymous";
 const MAX_MESSAGES_PER_CHANNEL: usize = 200;
+const MAX_PENDING_BELOW: usize = 500;
 const MAX_CACHED_CHANNELS: usize = 30;
 const LAST_SEEN_DEBOUNCE: Duration = Duration::from_millis(1000);
 const TYPING_THROTTLE: Duration = Duration::from_millis(1000);
@@ -106,6 +108,9 @@ pub struct TopicAppend {
 
 #[derive(Debug, Clone)]
 pub enum MessagesEvent {
+    /// A live message landed below the loaded window while the reader was away
+    /// from the tail. No row exists for it, but the scroll-down button counts it.
+    UnreadBelowChanged,
     /// A send failed with no row to mark (the channel's first page had not landed,
     /// so there is no optimistic row) — the UI has to surface it as a toast.
     SendFailedWithoutRow,
@@ -556,11 +561,16 @@ pub struct MessagesStore {
     last_read_message_by_channel: HashMap<ChannelId, MessageId>,
     /// User scrolled away from the bottom (React `isViewingOlderMessagesByChannelId`).
     viewing_older_by_channel: HashMap<ChannelId, bool>,
+    /// Live messages for the open channel that arrived while its tail was not
+    /// visible, so they never entered the buffer. They still count as unread
+    /// under the scroll-down button until the reader gets back to the bottom.
+    pending_below_by_channel: HashMap<ChannelId, Vec<MessageId>>,
     active_channel_id: Option<ChannelId>,
     active_clan_id: Option<ClanId>,
     /// Topic bucket currently shown in the discussion side panel, if any. Lets
     /// realtime replies to a non-active topic bucket still notify the panel.
     active_topic_id: Option<ChannelId>,
+    active_topic_parent: Option<ChannelId>,
     pending_jump: Option<(ChannelId, MessageId)>,
     is_public: bool,
     is_dm: bool,
@@ -572,6 +582,11 @@ pub struct MessagesStore {
     /// so we don't blast through the whole history (cf. React `handleOnChange`).
     last_load_more: Option<Instant>,
     consecutive_loads: u32,
+    topic_loading: bool,
+    topic_loading_more: bool,
+    retained_topic: Option<ChannelId>,
+    topic_last_load_more: Option<Instant>,
+    topic_consecutive_loads: u32,
     fetch_generation: u64,
     latest_fetch: HashMap<ChannelId, u64>,
     reset_generation: u64,
@@ -933,9 +948,11 @@ impl MessagesStore {
         self.last_message_by_channel.clear();
         self.last_read_message_by_channel.clear();
         self.viewing_older_by_channel.clear();
+        self.pending_below_by_channel.clear();
         self.active_channel_id = None;
         self.active_clan_id = None;
         self.active_topic_id = None;
+        self.active_topic_parent = None;
         self.is_public = true;
         self.is_dm = false;
         self.mode = STREAM_MODE_CHANNEL;
@@ -943,6 +960,11 @@ impl MessagesStore {
         self.loading_more = false;
         self.last_load_more = None;
         self.consecutive_loads = 0;
+        self.topic_loading = false;
+        self.topic_loading_more = false;
+        self.retained_topic = None;
+        self.topic_last_load_more = None;
+        self.topic_consecutive_loads = 0;
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
         self.latest_fetch.clear();
         self.reset_generation = self.reset_generation.wrapping_add(1);
@@ -988,9 +1010,11 @@ impl MessagesStore {
             last_message_by_channel: HashMap::new(),
             last_read_message_by_channel: HashMap::new(),
             viewing_older_by_channel: HashMap::new(),
+            pending_below_by_channel: HashMap::new(),
             active_channel_id: None,
             active_clan_id: None,
             active_topic_id: None,
+            active_topic_parent: None,
             pending_jump: None,
             is_public: true,
             is_dm: false,
@@ -999,6 +1023,11 @@ impl MessagesStore {
             loading_more: false,
             last_load_more: None,
             consecutive_loads: 0,
+            topic_loading: false,
+            topic_loading_more: false,
+            retained_topic: None,
+            topic_last_load_more: None,
+            topic_consecutive_loads: 0,
             fetch_generation: 0,
             latest_fetch: HashMap::new(),
             reset_generation: 0,
@@ -1157,6 +1186,20 @@ impl MessagesStore {
         })
     }
 
+    /// A send from a detached window has no row to show where the user is
+    /// looking, so follow it back to the live tail instead of leaving the send
+    /// invisible. This must run on the ack, not on the send: the newest page
+    /// only contains the message once the server has stored it, and the ack is
+    /// also what moves the recorded tail onto the id we need to land on. A burst
+    /// of sends supersedes itself through `fetch_generation`, so the last ack
+    /// wins and the buffer converges on a tail that owns every sent row.
+    fn follow_send_to_present(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        if self.active_channel_id != Some(channel_id) || !self.tail_detached(channel_id) {
+            return;
+        }
+        self.jump_to_present(cx);
+    }
+
     /// Emit the splice for a single row appended at the bottom, accounting for
     /// any front-trim that dropped the oldest rows to keep the buffer within the
     /// cap. `old_len` is the buffer length before the push.
@@ -1218,6 +1261,49 @@ impl MessagesStore {
         }
     }
 
+    fn note_pending_below(
+        &mut self,
+        storage_id: ChannelId,
+        message_id: MessageId,
+        own: bool,
+    ) -> bool {
+        if own || message_id.is_optimistic() || self.active_channel_id != Some(storage_id) {
+            return false;
+        }
+        let pending = self.pending_below_by_channel.entry(storage_id).or_default();
+        if pending.contains(&message_id) {
+            return false;
+        }
+        if pending.len() >= MAX_PENDING_BELOW {
+            pending.remove(0);
+        }
+        pending.push(message_id);
+        true
+    }
+
+    /// Unread messages that sit below the loaded buffer: they arrived while the
+    /// reader was away from the tail, so the scroll-down button has to count
+    /// them even though no row exists for them yet.
+    pub fn pending_below_count(&self, counted_from: Option<MessageId>) -> u32 {
+        let Some(channel_id) = self.active_channel_id else {
+            return 0;
+        };
+        let Some(pending) = self.pending_below_by_channel.get(&channel_id) else {
+            return 0;
+        };
+        let Some(channel) = self.cache.get(&channel_id) else {
+            return pending.len() as u32;
+        };
+        pending
+            .iter()
+            .filter(|id| {
+                let counted_by_the_viewport = counted_from.is_some_and(|seen| **id > seen)
+                    && channel.messages.contains_id(**id);
+                !counted_by_the_viewport
+            })
+            .count() as u32
+    }
+
     fn is_viewing_older(&self, storage_id: ChannelId) -> bool {
         self.viewing_older_by_channel
             .get(&storage_id)
@@ -1269,6 +1355,7 @@ impl MessagesStore {
         let Some(clan_id) = self.active_clan_id else {
             return;
         };
+        self.pending_below_by_channel.remove(&channel_id);
         if !should_write_last_seen(
             self.known_last_seen_id(channel_id, cx),
             self.last_message_by_channel.get(&channel_id).copied(),
@@ -3118,16 +3205,51 @@ impl MessagesStore {
             return;
         }
         if let Some(prev) = self.active_topic_id
-            && next != Some(prev)
+            && let Some(stale) = self.retained_topic.replace(prev)
+            && stale != prev
         {
-            self.cache.remove(&prev);
-            self.last_message_by_channel.remove(&prev);
-            self.pending_self_adds
-                .retain(|(channel_id, _, _), _| *channel_id != prev);
+            self.drop_topic_bucket(stale);
+        }
+        if let Some(next_id) = next
+            && self.retained_topic == Some(next_id)
+        {
+            self.retained_topic = None;
         }
         self.active_topic_id = next;
+        self.active_topic_parent = None;
         self.sync_anonymous_mode(cx);
         cx.notify();
+    }
+
+    fn drop_topic_bucket(&mut self, topic_id: ChannelId) {
+        self.cache.remove(&topic_id);
+        self.last_message_by_channel.remove(&topic_id);
+        self.pending_self_adds
+            .retain(|(channel_id, _, _), _| *channel_id != topic_id);
+    }
+
+    pub fn is_topic_loading(&self) -> bool {
+        self.topic_loading
+    }
+
+    pub fn topic_has_more_top(&self) -> bool {
+        self.active_topic_id
+            .and_then(|topic_id| self.cache.get(&topic_id))
+            .map(|c| c.has_more)
+            .unwrap_or(false)
+    }
+
+    pub fn topic_has_more_bottom(&self) -> bool {
+        let Some(topic_key) = self.active_topic_id else {
+            return false;
+        };
+        let Some(channel) = self.cache.get(&topic_key) else {
+            return false;
+        };
+        has_more_bottom_for(
+            self.last_message_by_channel.get(&topic_key).copied(),
+            &channel.messages,
+        )
     }
 
     /// Load a discussion topic's replies into their own bucket (keyed by topic id).
@@ -3140,31 +3262,300 @@ impl MessagesStore {
         cx: &mut Context<Self>,
     ) {
         let topic_key = ChannelId(topic_id);
+        self.active_topic_parent = Some(ChannelId(parent_channel_id));
+        self.topic_loading = true;
+        cx.notify();
         let api = self.api.clone();
         let cfg = AppConfig::try_global(cx).cloned();
         let viewer_id = viewer_user_id(cx);
         cx.spawn(async move |this, cx| {
             let result = api
-                .list_topic_messages(clan_id, parent_channel_id, topic_id, 0, MESSAGE_PAGE_LIMIT)
+                .list_topic_messages(
+                    clan_id,
+                    parent_channel_id,
+                    topic_id,
+                    0,
+                    0,
+                    MESSAGE_PAGE_LIMIT,
+                )
                 .await;
             let msgs = match result {
                 Ok(page) => page.messages,
                 Err(e) => {
                     tracing::error!("fetch_topic_messages failed for topic {topic_id}: {e}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.topic_loading = false;
+                        cx.notify();
+                    });
                     return;
                 }
             };
+            let fetched = msgs.len();
             let parsed = prepare_messages(msgs, cfg.as_ref(), viewer_id);
             let _ = this.update(cx, |this, cx| {
+                this.topic_loading = false;
                 if this.active_topic_id != Some(topic_key) {
+                    cx.notify();
                     return;
                 }
                 this.set_channel(topic_key, parsed);
+                if let Some(channel) = this.cache.get_mut(&topic_key) {
+                    channel.has_more = fetched >= TOPIC_FULL_PAGE_LEN;
+                }
                 cx.emit(MessagesEvent::TopicUpdated { topic_id });
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    pub fn is_topic_loading_more(&self) -> bool {
+        self.topic_loading_more
+    }
+
+    pub fn load_more_topic(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.topic_loading_more {
+            return false;
+        }
+        let Some(topic_key) = self.active_topic_id else {
+            return false;
+        };
+        let Some(parent_channel_id) = self.active_topic_parent else {
+            return false;
+        };
+        let Some(clan_id) = self.active_clan_id else {
+            return false;
+        };
+        let Some(channel) = self.cache.get(&topic_key) else {
+            return false;
+        };
+        if !channel.has_more {
+            return false;
+        }
+        let Some(oldest_id) = channel
+            .messages
+            .first()
+            .map(|m| m.id)
+            .filter(|id| !id.is_optimistic())
+        else {
+            return false;
+        };
+
+        let now = Instant::now();
+        let rapid = self
+            .topic_last_load_more
+            .map(|t| now.duration_since(t) < Duration::from_millis(300))
+            .unwrap_or(false);
+        self.topic_consecutive_loads = if rapid {
+            (self.topic_consecutive_loads + 1).min(3)
+        } else {
+            0
+        };
+        self.topic_last_load_more = Some(now);
+        let backoff = Duration::from_millis(u64::from(self.topic_consecutive_loads) * 333);
+
+        self.topic_loading_more = true;
+        cx.notify();
+        tracing::debug!(
+            topic_id = topic_key.get(),
+            before_message_id = oldest_id.get(),
+            backoff_ms = backoff.as_millis() as u64,
+            "load_more_topic: fetching older page"
+        );
+
+        let api = self.api.clone();
+        let cfg = AppConfig::try_global(cx).cloned();
+        let viewer_id = viewer_user_id(cx);
+        cx.spawn(async move |this, cx| {
+            if !backoff.is_zero() {
+                cx.background_executor().timer(backoff).await;
+            }
+            let result = api
+                .list_topic_messages(
+                    clan_id.get(),
+                    parent_channel_id.get(),
+                    topic_key.get(),
+                    oldest_id.get(),
+                    DIRECTION_BEFORE,
+                    MESSAGE_PAGE_LIMIT,
+                )
+                .await;
+            let msgs = match result {
+                Ok(page) => page.messages,
+                Err(e) => {
+                    tracing::error!("load_more_topic failed for topic {}: {e}", topic_key.get());
+                    let _ = this.update(cx, |this, cx| {
+                        this.topic_loading_more = false;
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let batch_len = msgs.len();
+            let parsed: Vec<Message> = cx
+                .background_executor()
+                .spawn(async move { prepare_messages(msgs, cfg.as_ref(), viewer_id) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.topic_loading_more = false;
+                if this.active_topic_id != Some(topic_key) {
+                    cx.notify();
+                    return;
+                }
+                let prepended = match this.cache.get_mut(&topic_key) {
+                    Some(channel) => {
+                        let store_oldest = channel.messages.first().map(|m| m.id);
+                        let batch_oldest = parsed.iter().map(|m| m.id).min();
+                        let reached_top = topic_reached_top(store_oldest, batch_oldest, batch_len);
+                        let older: Vec<Message> = parsed
+                            .into_iter()
+                            .filter(|m| !channel.messages.contains_id(m.id))
+                            .collect();
+                        let prepended = older.len();
+                        if prepended > 0 {
+                            channel.messages.prepend_older(older);
+                        }
+                        channel.has_more = !reached_top && prepended > 0;
+                        prepended
+                    }
+                    None => 0,
+                };
+                tracing::debug!(
+                    topic_id = topic_key.get(),
+                    fetched = batch_len,
+                    prepended,
+                    "load_more_topic: page applied"
+                );
+                if prepended > 0 {
+                    cx.emit(MessagesEvent::TopicUpdated {
+                        topic_id: topic_key.get(),
+                    });
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        true
+    }
+
+    pub fn load_more_topic_bottom(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.topic_loading_more {
+            return false;
+        }
+        let Some(topic_key) = self.active_topic_id else {
+            return false;
+        };
+        let Some(parent_channel_id) = self.active_topic_parent else {
+            return false;
+        };
+        let Some(clan_id) = self.active_clan_id else {
+            return false;
+        };
+        let Some(channel) = self.cache.get(&topic_key) else {
+            return false;
+        };
+        let expected_tail = self.last_message_by_channel.get(&topic_key).copied();
+        if !has_more_bottom_for(expected_tail, &channel.messages) {
+            return false;
+        }
+        let Some(newest_id) = channel
+            .messages
+            .last()
+            .map(|m| m.id)
+            .filter(|id| !id.is_optimistic())
+        else {
+            return false;
+        };
+
+        self.topic_loading_more = true;
+        cx.notify();
+        tracing::debug!(
+            topic_id = topic_key.get(),
+            after_message_id = newest_id.get(),
+            "load_more_topic_bottom: fetching newer page"
+        );
+
+        let api = self.api.clone();
+        let cfg = AppConfig::try_global(cx).cloned();
+        let viewer_id = viewer_user_id(cx);
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .list_topic_messages(
+                    clan_id.get(),
+                    parent_channel_id.get(),
+                    topic_key.get(),
+                    newest_id.get(),
+                    DIRECTION_AFTER,
+                    MESSAGE_PAGE_LIMIT,
+                )
+                .await;
+            let msgs = match result {
+                Ok(page) => page.messages,
+                Err(e) => {
+                    tracing::error!(
+                        "load_more_topic_bottom failed for topic {}: {e}",
+                        topic_key.get()
+                    );
+                    let _ = this.update(cx, |this, cx| {
+                        this.topic_loading_more = false;
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let batch_len = msgs.len();
+            let parsed: Vec<Message> = cx
+                .background_executor()
+                .spawn(async move { prepare_messages(msgs, cfg.as_ref(), viewer_id) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.topic_loading_more = false;
+                if this.active_topic_id != Some(topic_key) {
+                    cx.notify();
+                    return;
+                }
+                let appended = match this.cache.get_mut(&topic_key) {
+                    Some(channel) => {
+                        let newer: Vec<Message> = parsed
+                            .into_iter()
+                            .filter(|m| !channel.messages.contains_id(m.id))
+                            .collect();
+                        let appended = newer.len();
+                        if appended > 0 {
+                            let dropped = channel.messages.append_newer(newer);
+                            if dropped > 0 {
+                                channel.has_more = true;
+                            }
+                        }
+                        appended
+                    }
+                    None => 0,
+                };
+                if appended == 0
+                    && let Some(tail) = reconciled_tail_after_empty_page(
+                        this.last_message_by_channel.get(&topic_key).copied(),
+                        expected_tail,
+                        newest_id,
+                    )
+                {
+                    this.last_message_by_channel.insert(topic_key, tail);
+                }
+                tracing::debug!(
+                    topic_id = topic_key.get(),
+                    fetched = batch_len,
+                    appended,
+                    "load_more_topic_bottom: page applied"
+                );
+                if appended > 0 {
+                    cx.emit(MessagesEvent::TopicUpdated {
+                        topic_id: topic_key.get(),
+                    });
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        true
     }
 
     pub fn append_topic_message(
@@ -3197,6 +3588,7 @@ impl MessagesStore {
         } else {
             self.set_channel(topic_key, vec![msg]);
         }
+        self.set_last_message(topic_key, message_id);
         let should_count_reply = topic_id != 0
             && mark_topic_reply_counted(
                 &mut self.counted_topic_replies,
@@ -4567,6 +4959,7 @@ impl MessagesStore {
         self.is_dm = is_dm;
         self.mode = mode;
         self.viewing_older_by_channel.insert(channel_id, false);
+        self.pending_below_by_channel.clear();
         self.loading_more = false;
         self.sync_anonymous_mode(cx);
         if self.reply_target.take().is_some() {
@@ -4778,7 +5171,11 @@ impl MessagesStore {
                     self.set_last_message(storage_id, message_id);
                     return;
                 }
+                let own = viewer_id.is_some_and(|uid| uid.get() == m.sender_id);
                 if self.is_viewing_older(storage_id) {
+                    if self.note_pending_below(storage_id, message_id, own) {
+                        cx.emit(MessagesEvent::UnreadBelowChanged);
+                    }
                     self.set_last_message(storage_id, message_id);
                     return;
                 }
@@ -4789,6 +5186,9 @@ impl MessagesStore {
                     )
                 });
                 if !tail_loaded {
+                    if self.note_pending_below(storage_id, message_id, own) {
+                        cx.emit(MessagesEvent::UnreadBelowChanged);
+                    }
                     self.set_last_message(storage_id, message_id);
                     return;
                 }
@@ -5825,21 +6225,24 @@ impl MessagesStore {
             return;
         };
         let old_len = channel.messages.len();
-        let pushed = if let Some(idx) = channel.messages.position(temp_id) {
-            let temp = channel
-                .messages
-                .get_by_id(temp_id)
-                .expect("temp row must exist at position")
-                .clone();
-            let confirmed = merge_sparse_sender(&temp, confirmed);
-            channel.messages.replace_at_and_regroup(idx, confirmed);
-            false
-        } else if !tail_detached && !channel.messages.contains_id(confirmed.id) {
-            channel.messages.push_sorted(confirmed);
-            true
-        } else {
-            false
-        };
+        let (pushed, dropped_by_detached_tail) =
+            if let Some(idx) = channel.messages.position(temp_id) {
+                let temp = channel
+                    .messages
+                    .get_by_id(temp_id)
+                    .expect("temp row must exist at position")
+                    .clone();
+                let confirmed = merge_sparse_sender(&temp, confirmed);
+                channel.messages.replace_at_and_regroup(idx, confirmed);
+                (false, false)
+            } else if tail_detached {
+                (false, true)
+            } else if !channel.messages.contains_id(confirmed.id) {
+                channel.messages.push_sorted(confirmed);
+                (true, false)
+            } else {
+                (false, false)
+            };
         self.set_last_message(channel_id, confirmed_id);
         if self.active_channel_id != Some(channel_id) {
             return;
@@ -5851,6 +6254,9 @@ impl MessagesStore {
                 message_id: Some(confirmed_id),
             });
             cx.notify();
+        }
+        if dropped_by_detached_tail {
+            self.follow_send_to_present(channel_id, cx);
         }
     }
 
@@ -6305,6 +6711,33 @@ fn has_more_from_oldest(messages: &[Message]) -> bool {
     messages
         .first()
         .is_some_and(|m| m.code != MessageCode::Indicator)
+}
+
+fn is_older_message_id(candidate: Option<MessageId>, reference: Option<MessageId>) -> bool {
+    match (candidate, reference) {
+        (Some(candidate), Some(reference)) => candidate < reference,
+        _ => false,
+    }
+}
+
+fn message_id_sequence_gap(newer: Option<MessageId>, older: Option<MessageId>) -> i64 {
+    match (newer, older) {
+        (Some(newer), Some(older)) => snowflake_seq(newer) - snowflake_seq(older),
+        _ => 0,
+    }
+}
+
+fn topic_reached_top(
+    store_oldest: Option<MessageId>,
+    batch_oldest: Option<MessageId>,
+    batch_len: usize,
+) -> bool {
+    if !is_older_message_id(batch_oldest, store_oldest) {
+        return true;
+    }
+    let scanned_to_window_edge =
+        message_id_sequence_gap(store_oldest, batch_oldest) >= TOPIC_FULL_PAGE_LEN as i64;
+    batch_len < TOPIC_FULL_PAGE_LEN && !scanned_to_window_edge
 }
 
 pub(crate) fn prepare_messages(
@@ -7952,6 +8385,101 @@ mod tests {
         assert_eq!(first_non_empty("live", "baked"), "live");
         assert_eq!(first_non_empty("", "baked"), "baked");
         assert_eq!(first_non_empty("", ""), "");
+    }
+
+    #[gpui::test]
+    fn a_topic_pages_older_replies_from_its_own_bucket(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let clan = ClanId(1);
+            let parent = ChannelId(10);
+            let topic = ChannelId(77);
+
+            store.update(cx, |store, cx| {
+                store.activate(clan, parent, true, false, 1, 2, cx);
+
+                assert!(
+                    !store.load_more_topic(cx),
+                    "no topic open means nothing to page"
+                );
+
+                store.set_active_topic(Some(topic.get()), cx);
+                store.fetch_topic_messages(clan.get(), parent.get(), topic.get(), cx);
+                store.set_channel(
+                    topic,
+                    vec![Message::new(MessageId(5), "reply", "6", "Eve", 300)],
+                );
+
+                assert!(store.topic_has_more_top());
+                assert!(
+                    store.load_more_topic(cx),
+                    "an open topic with older history must page"
+                );
+                assert!(
+                    !store.load_more_topic(cx),
+                    "a second page must not start while one is in flight"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_topic_pages_newer_replies_once_its_tail_was_trimmed(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let clan = ClanId(1);
+            let parent = ChannelId(10);
+            let topic = ChannelId(77);
+
+            store.update(cx, |store, cx| {
+                store.activate(clan, parent, true, false, 1, 2, cx);
+                store.set_active_topic(Some(topic.get()), cx);
+                store.fetch_topic_messages(clan.get(), parent.get(), topic.get(), cx);
+                store.set_channel(
+                    topic,
+                    vec![
+                        Message::new(MessageId(5), "older", "6", "Eve", 300),
+                        Message::new(MessageId(9), "newest", "6", "Eve", 400),
+                    ],
+                );
+
+                assert!(
+                    !store.topic_has_more_bottom(),
+                    "the loaded tail is the real tail"
+                );
+                assert!(!store.load_more_topic_bottom(cx));
+
+                store.set_channel(
+                    topic,
+                    vec![Message::new(MessageId(5), "older", "6", "Eve", 300)],
+                );
+
+                assert!(
+                    store.topic_has_more_bottom(),
+                    "the known tail is no longer in the buffer"
+                );
+                assert!(
+                    store.load_more_topic_bottom(cx),
+                    "a trimmed tail must page newer replies back in"
+                );
+            });
+        });
     }
 
     #[gpui::test]
@@ -10235,6 +10763,7 @@ mod tests {
             let temp_id = MessageId::next_optimistic();
 
             store.update(cx, |store, cx| {
+                store.active_channel_id = Some(channel);
                 store.set_channel(
                     channel,
                     vec![
@@ -10279,6 +10808,136 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_live_message_below_the_viewport_counts_toward_the_scroll_down_badge(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let channel = ChannelId(7);
+
+            store.update(cx, |store, cx| {
+                store.active_channel_id = Some(channel);
+                store.set_channel(
+                    channel,
+                    vec![Message::new(MessageId(10), "pinned", "5", "Bob", 100)],
+                );
+                store.set_many_last_messages([(channel, MessageId(500))]);
+                store.set_viewing_older(channel, true);
+
+                store.handle_event(
+                    &RealtimeEvent::ChannelMessage(mezon_proto::api::ChannelMessage {
+                        clan_id: 3,
+                        channel_id: 7,
+                        message_id: 501,
+                        sender_id: 42,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+
+                assert_eq!(
+                    store.messages_in_channel(channel).len(),
+                    1,
+                    "a live message must not be sewn onto a window detached from the tail"
+                );
+                assert_eq!(
+                    store.pending_below_count(None),
+                    1,
+                    "but it is unread, so the scroll-down button has to count it"
+                );
+
+                store.note_pending_below(channel, MessageId(502), true);
+                assert_eq!(
+                    store.pending_below_count(None),
+                    1,
+                    "the reader's own message is not unread"
+                );
+
+                store.set_channel(
+                    channel,
+                    vec![Message::new(MessageId(501), "hi", "42", "Bob", 900)],
+                );
+                assert_eq!(
+                    store.pending_below_count(Some(MessageId(500))),
+                    0,
+                    "once the row is loaded and the viewport counts it, it is not counted twice"
+                );
+                assert_eq!(
+                    store.pending_below_count(None),
+                    1,
+                    "while the viewport counts nothing the badge keeps carrying it"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn sending_from_a_jump_window_follows_the_send_back_to_the_present(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let channel = ChannelId(7);
+
+            store.update(cx, |store, cx| {
+                store.active_channel_id = Some(channel);
+                store.active_clan_id = Some(ClanId(3));
+                store.set_channel(
+                    channel,
+                    vec![Message::new(MessageId(10), "pinned", "5", "Bob", 100)],
+                );
+                store.set_many_last_messages([(channel, MessageId(500))]);
+                store.set_viewing_older(channel, true);
+                assert!(store.tail_detached(channel));
+
+                let temp_id = MessageId::next_optimistic();
+                let generation = store.fetch_generation;
+                store.reconcile_temp(
+                    channel,
+                    temp_id,
+                    Message::new(MessageId(501), "re", "42", "Me", 900),
+                    cx,
+                );
+
+                assert_eq!(
+                    store.messages_in_channel(channel).len(),
+                    1,
+                    "the ack must not seal the gap by landing on the detached window"
+                );
+                assert!(
+                    !store.is_viewing_older(channel),
+                    "the ack must not leave the viewport parked on the detached window"
+                );
+                assert!(
+                    store.loading && store.fetch_generation != generation,
+                    "the ack refetches the live tail so the sent row becomes reachable"
+                );
+                assert_eq!(
+                    store.last_message_by_channel.get(&channel).copied(),
+                    Some(MessageId(501)),
+                    "the refetch has to chase the id the send just created"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
     fn sending_at_the_channel_tail_still_shows_the_optimistic_row(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let api = Arc::new(mezon_client::AppApi::new(
@@ -10294,6 +10953,7 @@ mod tests {
             let temp_id = MessageId::next_optimistic();
 
             store.update(cx, |store, cx| {
+                store.active_channel_id = Some(channel);
                 store.set_channel(
                     channel,
                     vec![Message::new(MessageId(10), "hi", "5", "Bob", 100)],
@@ -10399,6 +11059,40 @@ mod tests {
         let plain = topic_proto(10, 0, r#"{"t":"hello"}"#);
         assert_eq!(storage_channel_id(&plain), ChannelId(10));
         assert_eq!(parent_channel_id(&plain), ChannelId(10));
+    }
+
+    fn snowflake_at(millis: i64) -> Option<MessageId> {
+        Some(MessageId(millis << SNOWFLAKE_TIME_SHIFT))
+    }
+
+    #[test]
+    fn topic_top_is_reached_when_the_page_holds_nothing_older() {
+        assert!(topic_reached_top(snowflake_at(1000), None, 0));
+        assert!(topic_reached_top(snowflake_at(1000), snowflake_at(1000), 1));
+        assert!(topic_reached_top(snowflake_at(1000), snowflake_at(1200), 5));
+    }
+
+    #[test]
+    fn topic_top_is_reached_when_a_short_page_stayed_inside_the_window() {
+        assert!(topic_reached_top(snowflake_at(1000), snowflake_at(990), 10));
+    }
+
+    #[test]
+    fn topic_keeps_paging_when_a_short_page_spans_a_full_window() {
+        assert!(!topic_reached_top(
+            snowflake_at(1000),
+            snowflake_at(900),
+            10
+        ));
+    }
+
+    #[test]
+    fn topic_keeps_paging_on_a_full_page() {
+        assert!(!topic_reached_top(
+            snowflake_at(1000),
+            snowflake_at(999),
+            TOPIC_FULL_PAGE_LEN
+        ));
     }
 
     #[test]

@@ -20,12 +20,9 @@ pub const GALLERY_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 /// Default page size (React gallery slice `limit = 50`).
 pub const GALLERY_PAGE_SIZE: i32 = 50;
 
-/// Client-side media tab filter (React `MediaFilterType`). Switching tabs never
-/// refetches — it filters the already-loaded list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MediaFilter {
     #[default]
-    All,
     Image,
     Video,
 }
@@ -33,7 +30,6 @@ pub enum MediaFilter {
 impl MediaFilter {
     fn matches(self, att: &ChannelAttachment) -> bool {
         match self {
-            MediaFilter::All => att.is_image || att.is_video,
             MediaFilter::Image => att.is_image,
             MediaFilter::Video => att.is_video,
         }
@@ -1040,8 +1036,6 @@ mod tests {
     fn media_filter_matches() {
         let img = att(1, 1, "image/png");
         let vid = att(2, 2, "video/mp4");
-        assert!(MediaFilter::All.matches(&img));
-        assert!(MediaFilter::All.matches(&vid));
         assert!(MediaFilter::Image.matches(&img));
         assert!(!MediaFilter::Image.matches(&vid));
         assert!(MediaFilter::Video.matches(&vid));

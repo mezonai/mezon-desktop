@@ -24,12 +24,20 @@ pub type MicPcmCaptureFactory = Arc<
         + Sync,
 >;
 
-pub type DeviceEnumerator =
-    Arc<dyn Fn() -> (Vec<AudioDeviceInfo>, Vec<AudioDeviceInfo>) + Send + Sync>;
+pub struct DeviceSnapshot {
+    pub inputs: Vec<AudioDeviceInfo>,
+    pub outputs: Vec<AudioDeviceInfo>,
+    pub default_input_name: Option<String>,
+    pub default_output_name: Option<String>,
+}
+
+pub type DeviceEnumerator = Arc<dyn Fn() -> DeviceSnapshot + Send + Sync>;
 
 pub struct AudioStore {
     pub input_devices: Vec<AudioDeviceInfo>,
     pub output_devices: Vec<AudioDeviceInfo>,
+    pub default_input_name: Option<String>,
+    pub default_output_name: Option<String>,
     pub mic_capture_factory: Option<MicCaptureFactory>,
     pub mic_pcm_capture_factory: Option<MicPcmCaptureFactory>,
     device_enumerator: Option<DeviceEnumerator>,
@@ -41,6 +49,8 @@ impl AudioStore {
         let entity = cx.new(|_| Self {
             input_devices: Vec::new(),
             output_devices: Vec::new(),
+            default_input_name: None,
+            default_output_name: None,
             mic_capture_factory: None,
             mic_pcm_capture_factory: None,
             device_enumerator: None,
@@ -58,15 +68,12 @@ impl AudioStore {
         cx.try_global::<GlobalAudioStore>().map(|g| g.0.clone())
     }
 
-    pub fn set_devices(
-        entity: &Entity<Self>,
-        input: Vec<AudioDeviceInfo>,
-        output: Vec<AudioDeviceInfo>,
-        cx: &mut App,
-    ) {
+    pub fn set_devices(entity: &Entity<Self>, snapshot: DeviceSnapshot, cx: &mut App) {
         entity.update(cx, |store, cx| {
-            store.input_devices = input;
-            store.output_devices = output;
+            store.input_devices = snapshot.inputs;
+            store.output_devices = snapshot.outputs;
+            store.default_input_name = snapshot.default_input_name;
+            store.default_output_name = snapshot.default_output_name;
             cx.notify();
         });
     }
@@ -105,13 +112,13 @@ impl AudioStore {
         });
         let weak = entity.downgrade();
         cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-            let (inputs, outputs) = cx
+            let snapshot = cx
                 .background_executor()
                 .spawn(async move { enumerator() })
                 .await;
             cx.update(|cx| {
                 if let Some(store) = weak.upgrade() {
-                    AudioStore::set_devices(&store, inputs, outputs, cx);
+                    AudioStore::set_devices(&store, snapshot, cx);
                 }
             });
         })
@@ -128,13 +135,13 @@ impl AudioStore {
         });
         let weak = entity.downgrade();
         cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-            let (inputs, outputs) = cx
+            let snapshot = cx
                 .background_executor()
                 .spawn(async move { enumerator() })
                 .await;
             cx.update(|cx| {
                 if let Some(store) = weak.upgrade() {
-                    AudioStore::set_devices(&store, inputs, outputs, cx);
+                    AudioStore::set_devices(&store, snapshot, cx);
                 }
             });
         })

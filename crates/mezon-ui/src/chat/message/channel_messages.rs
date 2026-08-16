@@ -1689,6 +1689,9 @@ impl ChannelMessages {
                         });
                     }));
                 }
+                MessagesEvent::UnreadBelowChanged => {
+                    this.refresh_derived_state(cx);
+                }
                 MessagesEvent::ReplyTargetChanged
                 | MessagesEvent::ForwardProgress { .. }
                 | MessagesEvent::ForwardFinished { .. }
@@ -1712,12 +1715,13 @@ impl ChannelMessages {
         }));
 
         subs.push(cx.observe(&store, |this, store, cx| {
-            if this.is_topic_box {
-                return;
-            }
             let fetching = {
                 let s = store.read(cx);
-                s.is_loading() || s.is_loading_more()
+                if this.is_topic_box {
+                    s.is_topic_loading_more()
+                } else {
+                    s.is_loading() || s.is_loading_more()
+                }
             };
             let finished = this.pagination_fetch_active && !fetching;
             this.pagination_fetch_active = fetching;
@@ -2033,16 +2037,18 @@ impl ChannelMessages {
                 .or_else(|| topics.origin_message().cloned())
         });
 
-        let mut messages = Vec::new();
+        let replies = topics
+            .active_topic_id()
+            .map(|topic_id| store.messages_in_channel(ChannelId(topic_id)))
+            .unwrap_or_default();
+        let mut messages = Vec::with_capacity(replies.len() + usize::from(origin.is_some()));
         if let Some(mut origin) = origin {
             origin.combined_with_prev = false;
             messages.push(origin);
         }
-        if let Some(topic_id) = topics.active_topic_id() {
-            for msg in store.messages_in_channel(ChannelId(topic_id)) {
-                if origin_id != Some(msg.id) {
-                    messages.push(msg.clone());
-                }
+        for msg in replies {
+            if origin_id != Some(msg.id) {
+                messages.push(msg.clone());
             }
         }
         messages
@@ -2068,9 +2074,22 @@ impl ChannelMessages {
     fn reset_topic_rows(&mut self, topic_id: Option<i64>, ids: Vec<MessageId>) {
         self.topic_list_topic = topic_id;
         self.topic_row_ids = ids;
-        self.list_state.reset(self.topic_row_ids.len());
+        self.list_state
+            .reset(self.topic_row_ids.len() + usize::from(self.header_shown));
         self.list_state.scroll_to_end();
         self.at_bottom = true;
+    }
+
+    fn sync_topic_header(&mut self, cx: &App) {
+        let want_header = !self.topic_row_ids.is_empty()
+            && MessagesStore::global(cx).read(cx).topic_has_more_top();
+        if want_header && !self.header_shown {
+            self.list_state.splice(0..0, 1);
+            self.header_shown = true;
+        } else if !want_header && self.header_shown {
+            self.list_state.splice(0..1, 0);
+            self.header_shown = false;
+        }
     }
 
     fn sync_topic_rows(&mut self, cx: &App) -> bool {
@@ -2085,7 +2104,8 @@ impl ChannelMessages {
             return false;
         }
 
-        if self.list_state.item_count() != self.topic_row_ids.len() {
+        let h = usize::from(self.header_shown);
+        if self.list_state.item_count() != self.topic_row_ids.len() + h {
             self.reset_topic_rows(active_topic, new_ids);
             return true;
         }
@@ -2108,27 +2128,60 @@ impl ChannelMessages {
         let new_end = new_ids.len() - suffix;
 
         let appended_at_tail = prefix == old.len() && suffix == 0;
+        let has_more_bottom = MessagesStore::global(cx).read(cx).topic_has_more_bottom();
+        let prev_top = self.list_state.logical_scroll_top();
+        let prev_row_ix = prev_top.item_ix.saturating_sub(h);
+        let was_at_end = prev_top.item_ix >= old.len() + h;
         let follow = appended_at_tail
+            && !has_more_bottom
             && (self
                 .list_state
                 .is_scrolled_to_end()
                 .unwrap_or(self.at_bottom)
                 || self.topic_rows_own_recent_send());
+        let anchor = old.get(prev_row_ix.max(prefix)).copied();
+        let pinned_tail = was_at_end.then(|| old.last().copied()).flatten();
 
-        self.list_state.splice(prefix..old_end, new_end - prefix);
+        let inserted = new_end - prefix;
+        let size_hint = (inserted > 0)
+            .then(|| self.list_state.average_measured_item_size())
+            .flatten();
+        match size_hint {
+            Some(size_hint) => {
+                self.list_state
+                    .splice_with_size_hint(h + prefix..h + old_end, inserted, size_hint);
+            }
+            None => self.list_state.splice(h + prefix..h + old_end, inserted),
+        }
         self.topic_row_ids = new_ids;
 
         if follow {
             self.list_state.scroll_to_end();
             self.at_bottom = true;
+        } else if let Some(pinned) = pinned_tail
+            && let Some(item_ix) = self.topic_row_ids.iter().position(|id| *id == pinned)
+        {
+            self.list_state.scroll_to(gpui::ListOffset {
+                item_ix: h + item_ix,
+                offset_in_item: px(0.),
+            });
+            self.at_bottom = false;
+        } else if let Some(anchor) = anchor
+            && let Some(item_ix) = self.topic_row_ids.iter().position(|id| *id == anchor)
+        {
+            self.list_state.scroll_to(gpui::ListOffset {
+                item_ix: h + item_ix,
+                offset_in_item: prev_top.offset_in_item,
+            });
         }
         true
     }
 
     fn remeasure_topic_rows(&self, range: std::ops::Range<usize>) {
         let count = self.list_state.item_count();
-        let start = range.start.min(count);
-        let end = range.end.min(count);
+        let h = usize::from(self.header_shown);
+        let start = (h + range.start).min(count);
+        let end = (h + range.end).min(count);
         if start < end {
             self.list_state.remeasure_items(start..end);
         }
@@ -3018,7 +3071,8 @@ impl ChannelMessages {
                 .iter()
                 .rev()
                 .map(|message| message.id),
-        );
+        )
+        .saturating_add(store.read(cx).pending_below_count(self.last_seen_at_bottom));
         if welcome == self.welcome
             && onboarding == self.onboarding
             && unread == self.cached_unread_boundary
@@ -3110,11 +3164,12 @@ impl ChannelMessages {
             });
         }
         if matches!(decision, ResetScroll::ToBottom) {
-            if let Some(last) = store
-                .read(cx)
-                .viewport_messages()
-                .last()
-                .filter(|m| !m.id.is_optimistic())
+            if !store.read(cx).has_more_bottom()
+                && let Some(last) = store
+                    .read(cx)
+                    .viewport_messages()
+                    .last()
+                    .filter(|m| !m.id.is_optimistic())
             {
                 self.last_seen_at_bottom = Some(last.id);
             }
@@ -3315,7 +3370,67 @@ impl ChannelMessages {
         });
     }
 
+    fn maybe_paginate_topic(&mut self, cx: &mut Context<Self>) {
+        let item_count = self.list_state.item_count();
+        let scroll_top = self.list_state.logical_scroll_top().item_ix;
+        let (visible_start, visible_end) = pagination_visible_range(
+            scroll_top,
+            self.last_visible_start,
+            self.last_visible_end,
+            item_count,
+        );
+        let (near_top, near_bottom) =
+            pagination_proximity(visible_start, visible_end, item_count, self.header_shown);
+        let store_entity = MessagesStore::global(cx);
+        let (has_more_top, has_more_bottom) = {
+            let store = store_entity.read(cx);
+            (store.topic_has_more_top(), store.topic_has_more_bottom())
+        };
+        let count = self.topic_row_ids.len();
+        let edges = (
+            self.topic_row_ids.first().copied(),
+            self.topic_row_ids.last().copied(),
+        );
+        if count != self.last_paginate_count || edges != self.last_paginate_edges {
+            self.last_paginate_count = count;
+            self.last_paginate_edges = edges;
+            self.paginate_armed_top = true;
+            self.paginate_armed_bottom = true;
+        }
+        if !near_top || !has_more_top {
+            self.paginate_armed_top = true;
+        }
+        if !near_bottom || !has_more_bottom {
+            self.paginate_armed_bottom = true;
+        }
+        self.paginate_retry_pending = false;
+        match pagination_direction(
+            near_top,
+            near_bottom,
+            has_more_top,
+            has_more_bottom,
+            self.paginate_armed_top,
+            self.paginate_armed_bottom,
+        ) {
+            Some(PaginationDirection::Top) => {
+                let started = store_entity.update(cx, |store, cx| store.load_more_topic(cx));
+                self.paginate_armed_top = !started;
+                self.paginate_retry_pending = !started;
+            }
+            Some(PaginationDirection::Bottom) => {
+                let started = store_entity.update(cx, |store, cx| store.load_more_topic_bottom(cx));
+                self.paginate_armed_bottom = !started;
+                self.paginate_retry_pending = !started;
+            }
+            None => {}
+        }
+    }
+
     fn maybe_paginate_by_items(&mut self, cx: &mut Context<Self>) {
+        if self.is_topic_box {
+            self.maybe_paginate_topic(cx);
+            return;
+        }
         let item_count = self.list_state.item_count();
         let scroll_top = self.list_state.logical_scroll_top().item_ix;
         let (visible_start, visible_end) = pagination_visible_range(
@@ -3428,11 +3543,12 @@ impl ChannelMessages {
                 store.set_viewing_older(channel_id, false);
             });
         }
-        if let Some(last) = store_entity
-            .read(cx)
-            .viewport_messages()
-            .last()
-            .filter(|m| !m.id.is_optimistic())
+        if !store_entity.read(cx).has_more_bottom()
+            && let Some(last) = store_entity
+                .read(cx)
+                .viewport_messages()
+                .last()
+                .filter(|m| !m.id.is_optimistic())
         {
             self.last_seen_at_bottom = Some(last.id);
         }
@@ -3567,7 +3683,7 @@ impl ChannelMessages {
         }
     }
 
-    fn skeleton_overlay(&self, theme: &Theme) -> Option<gpui::AnyElement> {
+    pub(crate) fn skeleton_overlay(&self, theme: &Theme) -> Option<gpui::AnyElement> {
         let base = || {
             div()
                 .absolute()
@@ -4186,6 +4302,24 @@ impl ChannelMessages {
         let suppress_hover = self.list_state.is_scroll_hover_suppressed();
         let scroll_active =
             self.keyboard_scroll.is_some() || self.list_state.is_scroll_hover_active();
+        self.sync_topic_header(cx);
+        self.maybe_paginate_topic(cx);
+        let header_shown = self.header_shown;
+        let topic_id = TopicsStore::global(cx).read(cx).active_topic_id();
+        let first_load = {
+            let store = MessagesStore::global(cx);
+            let store = store.read(cx);
+            store.is_topic_loading()
+                && topic_id.is_none_or(|id| store.messages_in_channel(ChannelId(id)).is_empty())
+        };
+        self.advance_skeleton(
+            first_load,
+            topic_id.map_or(SkeletonKey::None, |id| {
+                SkeletonKey::Conversation(ChannelId(id))
+            }),
+            cx,
+        );
+
         let store = MessagesStore::global(cx);
         let active_clan = ClanList::global(cx).read(cx).active_clan_id;
         let (is_dm, dm_channel) = {
@@ -4260,6 +4394,14 @@ impl ChannelMessages {
             .on_mouse_down(MouseButton::Left, focus_on_click)
             .child(
                 list(list_state, move |ix, _window, cx| {
+                    if header_shown && ix == 0 {
+                        return div()
+                            .id("topic-loading-top")
+                            .py_2()
+                            .child(message_skeleton(cx.theme(), 3))
+                            .into_any_element();
+                    }
+                    let row_ix = ix - usize::from(header_shown);
                     let ctx = RowCtx {
                         app: cx,
                         theme: cx.theme(),
@@ -4301,7 +4443,7 @@ impl ChannelMessages {
                         content_width,
                         selection: selection.clone(),
                     };
-                    render_message_item(&entity.read(cx).topic_messages, ix, &ctx, cx)
+                    render_message_item(&entity.read(cx).topic_messages, row_ix, &ctx, cx)
                 })
                 .flex_1()
                 .size_full()

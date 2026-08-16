@@ -230,6 +230,10 @@ impl InputState {
         self.content.as_ref()
     }
 
+    pub fn is_composing(&self) -> bool {
+        self.marked_range.is_some()
+    }
+
     pub fn set_value(
         &mut self,
         value: impl Into<SharedString>,

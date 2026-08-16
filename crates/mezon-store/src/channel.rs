@@ -209,10 +209,26 @@ pub fn archive_allowed_by_server(
     }
 }
 
+pub fn delete_allowed_by_server(
+    is_creator: bool,
+    has_owner: bool,
+    has_administrator: bool,
+    has_manage_clan: bool,
+    has_manage_channel: bool,
+) -> bool {
+    is_creator || has_owner || has_administrator || has_manage_clan || has_manage_channel
+}
+
 pub fn can_archive_channel(clan_id: ClanId, channel_id: ChannelId, cx: &App) -> bool {
     ChannelList::global(cx)
         .read(cx)
         .can_archive_channel_for(clan_id, channel_id, cx)
+}
+
+pub fn can_delete_channel(clan_id: ClanId, channel_id: ChannelId, cx: &App) -> bool {
+    ChannelList::global(cx)
+        .read(cx)
+        .can_delete_channel_for(clan_id, channel_id, cx)
 }
 
 fn archive_permission_for(
@@ -238,6 +254,34 @@ fn archive_permission_for(
     let permissions = permissions.read(cx);
     archive_allowed_by_server(
         is_thread,
+        is_creator,
+        permissions.check(clan_id, None, PERMISSION_CLAN_OWNER, cx),
+        permissions.check(clan_id, None, PERMISSION_ADMINISTRATOR, cx),
+        permissions.check(clan_id, None, PERMISSION_MANAGE_CLAN, cx),
+        permissions.check(clan_id, None, PERMISSION_MANAGE_CHANNEL, cx),
+    )
+}
+
+fn delete_permission_for(
+    channel_list: &ChannelList,
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    cx: &App,
+) -> bool {
+    if ClanList::global(cx).read(cx).welcome_channel_id(clan_id) == Some(channel_id) {
+        return false;
+    }
+    let Some(channel) = channel_list.channel(clan_id, channel_id) else {
+        return false;
+    };
+    let is_creator = BadgeService::try_global(cx)
+        .and_then(|badges| badges.read(cx).current_user_id(cx))
+        .is_some_and(|me| me == channel.creator_id);
+    let Some(permissions) = PermissionStore::try_global(cx) else {
+        return is_creator;
+    };
+    let permissions = permissions.read(cx);
+    delete_allowed_by_server(
         is_creator,
         permissions.check(clan_id, None, PERMISSION_CLAN_OWNER, cx),
         permissions.check(clan_id, None, PERMISSION_ADMINISTRATOR, cx),
@@ -510,6 +554,10 @@ impl ChannelList {
         cx: &App,
     ) -> bool {
         archive_permission_for(self, clan_id, channel_id, cx)
+    }
+
+    pub fn can_delete_channel_for(&self, clan_id: ClanId, channel_id: ChannelId, cx: &App) -> bool {
+        delete_permission_for(self, clan_id, channel_id, cx)
     }
 
     pub fn fetch_channel_app_url(
@@ -1021,7 +1069,7 @@ impl ChannelList {
                     {
                         return Err(DELETE_ERR_SYSTEM_CHANNEL.into());
                     }
-                    if !this.can_archive_channel_for(clan_id, channel_id, cx) {
+                    if !this.can_delete_channel_for(clan_id, channel_id, cx) {
                         return Err(DELETE_ERR_PERMISSION.into());
                     }
                     if !this.begin_deleting(channel_id) {
@@ -1096,8 +1144,10 @@ impl ChannelList {
         merge_previous_voice_members(&mut categories, &previous_voice);
         let mut categories = rebuild_favorites(categories, clan_id, self.favorites.get(&clan_id));
         for cat in categories.iter_mut() {
-            cat.channels
-                .retain(|ch| !self.archived_channel_ids.contains(&ch.id));
+            cat.channels.retain(|ch| {
+                !self.archived_channel_ids.contains(&ch.id)
+                    && !self.deleted_channel_ids.contains(&ch.id)
+            });
         }
         if seed_in_voice_from_categories(&mut self.in_voice, clan_id, &categories) {
             cx.emit(ChannelEvent::InVoiceChanged);
@@ -3333,6 +3383,11 @@ impl ChannelList {
             }
             notify_in_voice_change(removed, in_voice_changed, cx);
         }
+        if parent_id.is_zero() {
+            self.clear_compose_draft(channel_id, cx);
+            self.remove_deleted_child_threads_of_channel(clan_id, channel_id, cx);
+            self.remove_favorite_locally(channel_id, clan_id, cx);
+        }
         if changed {
             cx.notify();
         }
@@ -3407,17 +3462,7 @@ impl ChannelList {
         parent_channel_id: ChannelId,
         cx: &mut Context<Self>,
     ) {
-        let child_ids: Vec<ChannelId> = self
-            .cache
-            .get(&clan_id)
-            .map(|cats| {
-                cats.iter()
-                    .flat_map(|c| &c.channels)
-                    .filter(|ch| ch.parent_id == Some(parent_channel_id))
-                    .map(|ch| ch.id)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let child_ids = self.child_thread_ids(clan_id, parent_channel_id);
         if child_ids.is_empty() {
             return;
         }
@@ -3451,6 +3496,68 @@ impl ChannelList {
             self.invalidate_channel_index(clan_id);
             cx.notify();
         }
+    }
+
+    fn child_thread_ids(&self, clan_id: ClanId, parent_channel_id: ChannelId) -> Vec<ChannelId> {
+        self.cache
+            .get(&clan_id)
+            .map(|cats| {
+                cats.iter()
+                    .flat_map(|c| &c.channels)
+                    .filter(|ch| ch.parent_id == Some(parent_channel_id))
+                    .map(|ch| ch.id)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn remove_deleted_child_threads_of_channel(
+        &mut self,
+        clan_id: ClanId,
+        parent_channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        let child_ids = self.child_thread_ids(clan_id, parent_channel_id);
+        if let Some(threads) = crate::threads::ThreadsStore::try_global(cx) {
+            threads.update(cx, |store, cx| {
+                store.remove_threads_of_parent(&parent_channel_id.to_string(), cx);
+            });
+        }
+        if child_ids.is_empty() {
+            return;
+        }
+        let mut removed_any = false;
+        if let Some(cats) = self.cache.get_mut(&clan_id) {
+            for child_id in &child_ids {
+                removed_any |= remove_channel(cats, *child_id);
+            }
+        }
+        let mut active_cleared = false;
+        for child_id in child_ids {
+            self.deleted_channel_ids.insert(child_id);
+            self.deleted_channel_parents
+                .insert(child_id, parent_channel_id);
+            self.channel_detail_pending.remove(&child_id);
+            self.channel_detail_failed.remove(&child_id);
+            if self.active_channel_id == Some(child_id) {
+                self.active_channel_id = None;
+                active_cleared = true;
+            }
+            remove_user_channel(
+                &mut self.user_channels,
+                &mut self.user_channels_order,
+                child_id,
+            );
+            self.clear_compose_draft(child_id, cx);
+        }
+        if active_cleared {
+            cx.emit(ChannelEvent::ActiveChannelChanged(None));
+        }
+        if removed_any {
+            self.invalidate_channel_index(clan_id);
+        }
+        self.sync_clan_after_read(clan_id, 0, cx);
+        cx.notify();
     }
 
     pub fn apply_self_removed_from_channel(
@@ -6715,6 +6822,163 @@ mod tests {
     }
 
     #[gpui::test]
+    fn parent_delete_cascade_removes_child_threads(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_parent_and_two_threads(),
+                    favor_ids(&[ChannelId(1)]),
+                    cx,
+                );
+                channels.select_channel(ChannelId(9), cx);
+                channels.apply_local_delete(ClanId(1), ChannelId(1), ChannelId(0), cx);
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(1)));
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(10)));
+                assert!(channels.is_locally_deleted(ChannelId(1)));
+                assert!(channels.is_locally_deleted(ChannelId(9)));
+                assert!(channels.is_locally_deleted(ChannelId(10)));
+                assert_eq!(
+                    channels.deleted_channel_parent(ChannelId(9)),
+                    Some(ChannelId(1))
+                );
+                assert!(channels.active_channel_id.is_none());
+                assert!(
+                    channels
+                        .categories_for_clan(ClanId(1))
+                        .iter()
+                        .find(|cat| cat.id == FAVOR_CATE_ID)
+                        .is_none_or(|cat| !cat.channels.iter().any(|ch| ch.id == ChannelId(1)))
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn channel_deleted_socket_parent_cascades_children(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_parent_and_two_threads(),
+                    favor_ids(&[ChannelId(1)]),
+                    cx,
+                );
+                crate::threads::ThreadsStore::global(cx).update(cx, |store, cx| {
+                    store.seed_threads_for_test(
+                        "1",
+                        vec![
+                            crate::threads::ThreadSummary {
+                                channel_id: "9".into(),
+                                channel_label: "t1".into(),
+                                clan_id: "1".into(),
+                                parent_id: "1".into(),
+                                channel_private: 0,
+                                active: crate::threads::THREAD_STATUS_JOINED,
+                                creator_id: "1".into(),
+                                last_message_content: String::new(),
+                                last_message_sender_id: String::new(),
+                                last_message_sender_name: String::new(),
+                                last_message_sender_avatar: String::new(),
+                                last_sent_timestamp: 0,
+                                member_count: 0,
+                            },
+                            crate::threads::ThreadSummary {
+                                channel_id: "99".into(),
+                                channel_label: "orphan-only-in-threads".into(),
+                                clan_id: "1".into(),
+                                parent_id: "1".into(),
+                                channel_private: 0,
+                                active: crate::threads::THREAD_STATUS_JOINED,
+                                creator_id: "1".into(),
+                                last_message_content: String::new(),
+                                last_message_sender_id: String::new(),
+                                last_message_sender_name: String::new(),
+                                last_message_sender_avatar: String::new(),
+                                last_sent_timestamp: 0,
+                                member_count: 0,
+                            },
+                            crate::threads::ThreadSummary {
+                                channel_id: "50".into(),
+                                channel_label: "other-parent".into(),
+                                clan_id: "1".into(),
+                                parent_id: "2".into(),
+                                channel_private: 0,
+                                active: crate::threads::THREAD_STATUS_JOINED,
+                                creator_id: "1".into(),
+                                last_message_content: String::new(),
+                                last_message_sender_id: String::new(),
+                                last_message_sender_name: String::new(),
+                                last_message_sender_avatar: String::new(),
+                                last_sent_timestamp: 0,
+                                member_count: 0,
+                            },
+                        ],
+                        cx,
+                    );
+                });
+                channels.handle_event(
+                    &RealtimeEvent::ChannelDeleted(channel_deleted_event(1, 1, 0)),
+                    cx,
+                );
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(1)));
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(10)));
+                assert!(channels.is_locally_deleted(ChannelId(9)));
+                assert!(channels.is_locally_deleted(ChannelId(10)));
+                assert!(!channels.ensure_channel_in_clan(ClanId(1), ChannelId(9), cx));
+                assert!(
+                    channels
+                        .categories_for_clan(ClanId(1))
+                        .iter()
+                        .find(|cat| cat.id == FAVOR_CATE_ID)
+                        .is_none_or(|cat| !cat.channels.iter().any(|ch| ch.id == ChannelId(1)))
+                );
+                let threads = crate::threads::ThreadsStore::global(cx).read(cx);
+                assert!(threads.threads().iter().all(|t| t.parent_id != "1"));
+                assert_eq!(threads.threads().len(), 1);
+                assert_eq!(threads.threads()[0].channel_id, "50");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn channel_deleted_socket_does_not_emit_admin_archive_toast_event(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let seen = Rc::new(Cell::new(false));
+        let sink = seen.clone();
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            cx.subscribe(&channels, move |_, event, _| {
+                if matches!(event, ChannelEvent::ArchivedByAdministrator { .. }) {
+                    sink.set(true);
+                }
+            })
+            .detach();
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_parent_and_two_threads(),
+                    None,
+                    cx,
+                );
+                channels.handle_event(
+                    &RealtimeEvent::ChannelDeleted(channel_deleted_event(1, 1, 0)),
+                    cx,
+                );
+            });
+        });
+        assert!(!seen.get());
+    }
+
+    #[gpui::test]
     fn archive_socket_cascade_removes_child_threads(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
@@ -8482,6 +8746,14 @@ mod tests {
     }
 
     #[test]
+    fn delete_allowed_accepts_manage_channel_for_top_level() {
+        assert!(delete_allowed_by_server(false, false, false, false, true));
+        assert!(delete_allowed_by_server(false, false, false, true, false));
+        assert!(delete_allowed_by_server(true, false, false, false, false));
+        assert!(!delete_allowed_by_server(false, false, false, false, false));
+    }
+
+    #[test]
     fn archive_allowed_thread_needs_manage_channel_not_creator_only() {
         assert!(archive_allowed_by_server(
             true, false, false, false, true, true
@@ -8499,6 +8771,34 @@ mod tests {
         assert!(archive_menu_hidden(ChannelType::Voice, false));
         assert!(archive_menu_hidden(ChannelType::Text, true));
         assert!(!archive_menu_hidden(ChannelType::Text, false));
+    }
+
+    #[gpui::test]
+    fn parent_delete_structure_refetch_does_not_resurrect(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_parent_and_two_threads(),
+                    None,
+                    cx,
+                );
+                channels.apply_local_delete(ClanId(1), ChannelId(1), ChannelId(0), cx);
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_parent_and_two_threads(),
+                    None,
+                    cx,
+                );
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(1)));
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(10)));
+                assert!(channels.is_locally_deleted(ChannelId(1)));
+                assert!(channels.is_locally_deleted(ChannelId(9)));
+                assert!(channels.is_locally_deleted(ChannelId(10)));
+            });
+        });
     }
 
     #[gpui::test]
@@ -8529,7 +8829,7 @@ mod tests {
                     ApiChannelDesc {
                         channel_id: 9,
                         channel_label: "Rust 1".into(),
-                        channel_type: CHANNEL_TYPE_THREAD as u32,
+                        channel_type: CHANNEL_TYPE_THREAD,
                         clan_id: 1,
                         category_name: String::new(),
                         category_id: 0,
@@ -8547,6 +8847,10 @@ mod tests {
                         creator_id: 0,
                         clan_name: String::new(),
                         channel_avatar: String::new(),
+                        topic: String::new(),
+                        age_restricted: 0,
+                        e2ee: 0,
+                        app_id: 0,
                     },
                     cx,
                 );

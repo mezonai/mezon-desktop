@@ -284,6 +284,75 @@ Parameters:
         write: false,
     },
     ToolSpec {
+        name: "open_topic",
+        description: "\
+Open the discussion-topic side panel on a message of the open channel.
+
+The message must be in the channel's loaded history, so call open_channel (and
+load_more_messages when it sits further back) first. A message that has no topic yet
+gets one on the first topic_submit, so topic_id stays null until then.
+
+Parameters:
+- message_id (required)",
+        write: true,
+    },
+    ToolSpec {
+        name: "close_topic",
+        description: "\
+Close the discussion-topic side panel.
+
+Returns ok even when no panel was open.
+
+Parameters: none.",
+        write: true,
+    },
+    ToolSpec {
+        name: "topic_state",
+        description: "\
+Report what the open topic panel holds.
+
+Returns panel_open, topic_id, origin_message_id, loaded_count, has_more_top,
+loading_more and the panel list's item_count / first_visible_index / at_bottom.
+has_more_top drives topic paging the way get_scroll_state does for a channel.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "topic_type",
+        description: "\
+Replace the topic composer's text, the way typing into the panel does.
+
+Parameters:
+- text (required)",
+        write: false,
+    },
+    ToolSpec {
+        name: "topic_submit",
+        description: "\
+Send whatever the topic composer holds, the way pressing Enter in the panel does.
+
+The first submit on a message without a topic creates the topic.
+
+Parameters: none.",
+        write: true,
+    },
+    ToolSpec {
+        name: "topic_scroll_wheel",
+        description: "\
+Send wheel events to the topic panel's message list, the way a mouse wheel does.
+
+The topic counterpart of scroll_wheel: events are aimed at the panel list's bounds and
+paced one per frame, so reaching the top pages older replies in. Read topic_state
+before and after to see loaded_count grow and has_more_top settle.
+
+Parameters:
+- delta_y (optional): pixels per tick. Positive scrolls toward older replies, negative
+  toward the newest one. Default -120.
+- ticks (optional): how many wheel events to send, 1-500. Default 10.",
+        write: false,
+    },
+    ToolSpec {
         name: "close_panel",
         description: "\
 Close the composer panel opened by open_panel.
@@ -329,8 +398,8 @@ list does not do even when it scrolls, so it stays 0 on a working scroll and is 
 useful for debugging.
 
 Parameters:
-- delta_y (optional): pixels per tick. Negative scrolls toward older messages
-  (content moves down). Default -120.
+- delta_y (optional): pixels per tick. Positive scrolls toward older messages (up the
+  history), negative toward the live tail. Default -120.
 - ticks (optional): how many wheel events to send, 1-500. Default 10.",
         write: false,
     },

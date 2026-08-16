@@ -76,12 +76,13 @@ jobs:
             name: Linux
             artifact_name: mezon-linux-x86_64
             container: ubuntu:22.04
-          - os: windows-latest
-            name: Windows
-            artifact_name: mezon-windows-x86_64
-          - os: macos-latest
-            name: macOS
-            artifact_name: mezon-macos-aarch64
+          # Temporarily disabled: only build Linux artifacts.
+          # - os: windows-latest
+          #   name: Windows
+          #   artifact_name: mezon-windows-x86_64
+          # - os: macos-latest
+          #   name: macOS
+          #   artifact_name: mezon-macos-aarch64
 
     steps:
       - name: Install container prerequisites

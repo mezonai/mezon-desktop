@@ -6,14 +6,13 @@ use mezon_client::AppApi;
 use mezon_client::transport::ApiChannelAttachment;
 
 use crate::KeyedCache;
-use crate::gallery::resolve_attachment_uploader;
+use crate::gallery::{initial_page_has_more, next_page_has_more, resolve_attachment_uploader};
 use crate::ids::{ChannelId, ClanId, MessageId, UserId};
 
 pub const FILES_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 pub const FILES_PAGE_SIZE: i32 = 100;
-pub const FILES_TYPED_QUERY: &str = "FILE";
-pub const FILES_BROAD_QUERY: &str = "";
-const FILES_QUERY_GEN: u8 = 3;
+pub const FILES_QUERY: &str = "doc";
+const FILES_QUERY_GEN: u8 = 4;
 const MAX_CACHED_CHANNELS: usize = 32;
 
 #[derive(Debug, Clone)]
@@ -70,7 +69,13 @@ pub fn is_document(filetype: &str) -> bool {
     if lower == "sticker" {
         return false;
     }
-    if lower.starts_with("image/") || lower.starts_with("video/") {
+    if lower.starts_with("image/")
+        || lower.starts_with("video/")
+        || lower.starts_with("audio/")
+        || lower == "image"
+        || lower == "video"
+        || lower == "audio"
+    {
         return false;
     }
     true
@@ -79,8 +84,10 @@ pub fn is_document(filetype: &str) -> bool {
 #[derive(Default)]
 struct FilesChannel {
     documents: Vec<ChannelDocument>,
+    ids: std::collections::HashSet<i64>,
     is_loading: bool,
     fetch_error: bool,
+    has_more_before: bool,
     fetched_at: Option<Instant>,
     query_gen: u8,
 }
@@ -146,6 +153,12 @@ impl FilesStore {
             .is_some_and(|c| c.fetch_error)
     }
 
+    pub fn has_more_before(&self, channel_id: ChannelId) -> bool {
+        self.by_channel
+            .get(&channel_id)
+            .is_some_and(|c| c.has_more_before)
+    }
+
     pub fn is_empty(&self, channel_id: ChannelId) -> bool {
         self.documents(channel_id).is_empty()
     }
@@ -161,7 +174,7 @@ impl FilesStore {
             None => true,
         };
         if needs_fetch {
-            self.fetch(clan_id, channel_id, cx);
+            self.fetch(clan_id, channel_id, true, cx);
         } else {
             self.by_channel.touch(&channel_id);
         }
@@ -175,7 +188,17 @@ impl FilesStore {
         {
             return;
         }
-        self.fetch(clan_id, channel_id, cx);
+        self.fetch(clan_id, channel_id, true, cx);
+    }
+
+    pub fn fetch_page(&mut self, clan_id: ClanId, channel_id: ChannelId, cx: &mut Context<Self>) {
+        let Some(channel) = self.by_channel.get(&channel_id) else {
+            return;
+        };
+        if channel.is_loading || !channel.has_more_before {
+            return;
+        }
+        self.fetch(clan_id, channel_id, false, cx);
     }
 
     pub fn clear_channel(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
@@ -219,7 +242,32 @@ impl FilesStore {
             .expect("channel just ensured")
     }
 
-    fn fetch(&mut self, clan_id: ClanId, channel_id: ChannelId, cx: &mut Context<Self>) {
+    fn fetch(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        reset: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let mut before = 0u32;
+        if !reset {
+            let Some(oldest) = self
+                .by_channel
+                .get(&channel_id)
+                .and_then(|c| c.documents.last())
+            else {
+                return;
+            };
+            let Some(cursor) = oldest.create_time_seconds.checked_add(1) else {
+                let entry = self.ensure_channel(channel_id);
+                entry.has_more_before = false;
+                cx.emit(FilesEvent::Changed(channel_id));
+                cx.notify();
+                return;
+            };
+            before = cursor;
+        }
+
         let entry = self.ensure_channel(channel_id);
         entry.is_loading = true;
         entry.fetch_error = false;
@@ -228,26 +276,44 @@ impl FilesStore {
 
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let result =
-                fetch_channel_documents(&api, clan_id.0, channel_id.0, FILES_PAGE_SIZE).await;
+            let result = api
+                .list_channel_attachments(
+                    clan_id.0,
+                    channel_id.0,
+                    FILES_QUERY,
+                    0,
+                    FILES_PAGE_SIZE,
+                    before,
+                    0,
+                )
+                .await;
             let mapped = result.map(|list| {
+                let raw_count = list.len();
                 let mut docs: Vec<ChannelDocument> = list
                     .into_iter()
                     .filter(|a| is_document(&a.filetype))
                     .map(|a| ChannelDocument::from_api(a, channel_id, clan_id))
                     .collect();
                 sort_desc_in_place(&mut docs);
-                dedupe_by_id(docs)
+                (docs, raw_count)
             });
             let _ = this.update(cx, |this, cx| {
                 let succeeded = match mapped {
-                    Ok(docs) => {
+                    Ok((docs, raw_count)) => {
                         let entry = this.ensure_channel(channel_id);
                         entry.is_loading = false;
-                        entry.documents = docs;
+                        entry.fetch_error = false;
+                        let added =
+                            merge_documents(&mut entry.documents, &mut entry.ids, docs, reset);
+                        if reset {
+                            entry.has_more_before =
+                                initial_page_has_more(raw_count, FILES_PAGE_SIZE);
+                        } else {
+                            entry.has_more_before =
+                                next_page_has_more(raw_count, FILES_PAGE_SIZE, added);
+                        }
                         entry.fetched_at = Some(Instant::now());
                         entry.query_gen = FILES_QUERY_GEN;
-                        entry.fetch_error = false;
                         true
                     }
                     Err(e) => {
@@ -296,49 +362,76 @@ impl FilesStore {
     }
 }
 
-async fn fetch_channel_documents(
-    api: &AppApi,
-    clan_id: i64,
-    channel_id: i64,
-    limit: i32,
-) -> anyhow::Result<Vec<ApiChannelAttachment>> {
-    let broad = api
-        .list_channel_attachments(clan_id, channel_id, FILES_BROAD_QUERY, 0, limit, 0, 0)
-        .await?;
-    let typed = api
-        .list_channel_attachments(clan_id, channel_id, FILES_TYPED_QUERY, 0, limit, 0, 0)
-        .await?;
-    Ok(merge_attachments(broad, typed))
-}
-
-fn merge_attachments(
-    mut broad: Vec<ApiChannelAttachment>,
-    typed: Vec<ApiChannelAttachment>,
-) -> Vec<ApiChannelAttachment> {
-    let mut seen = std::collections::HashSet::new();
-    for item in &broad {
-        seen.insert(item.id);
-    }
-    for item in typed {
-        if seen.insert(item.id) {
-            broad.push(item);
-        }
-    }
-    broad
+fn document_desc_cmp(a: &ChannelDocument, b: &ChannelDocument) -> std::cmp::Ordering {
+    a.create_time_seconds
+        .cmp(&b.create_time_seconds)
+        .reverse()
+        .then_with(|| a.id.cmp(&b.id).reverse())
 }
 
 fn sort_desc_in_place(items: &mut [ChannelDocument]) {
-    items.sort_by(|a, b| {
-        a.create_time_seconds
-            .cmp(&b.create_time_seconds)
-            .reverse()
-            .then_with(|| a.id.cmp(&b.id).reverse())
-    });
+    items.sort_by(document_desc_cmp);
 }
 
-fn dedupe_by_id(docs: Vec<ChannelDocument>) -> Vec<ChannelDocument> {
-    let mut seen = std::collections::HashSet::new();
-    docs.into_iter().filter(|doc| seen.insert(doc.id)).collect()
+fn merge_two_desc_sorted(
+    left: Vec<ChannelDocument>,
+    right: Vec<ChannelDocument>,
+) -> Vec<ChannelDocument> {
+    let mut merged = Vec::with_capacity(left.len() + right.len());
+    let mut left = left.into_iter().peekable();
+    let mut right = right.into_iter().peekable();
+    loop {
+        match (left.peek(), right.peek()) {
+            (Some(l), Some(r)) => {
+                if document_desc_cmp(l, r) == std::cmp::Ordering::Greater {
+                    merged.push(right.next().unwrap());
+                } else {
+                    merged.push(left.next().unwrap());
+                }
+            }
+            (Some(_), None) => {
+                merged.extend(left);
+                break;
+            }
+            (None, _) => {
+                merged.extend(right);
+                break;
+            }
+        }
+    }
+    merged
+}
+
+fn merge_documents(
+    existing: &mut Vec<ChannelDocument>,
+    ids: &mut std::collections::HashSet<i64>,
+    incoming: Vec<ChannelDocument>,
+    reset: bool,
+) -> usize {
+    if reset {
+        existing.clear();
+        ids.clear();
+    }
+    let mut new_items = Vec::new();
+    let mut added = 0usize;
+    for doc in incoming {
+        if ids.insert(doc.id) {
+            new_items.push(doc);
+            added += 1;
+        }
+    }
+    if reset {
+        sort_desc_in_place(&mut new_items);
+        *existing = new_items;
+        return added;
+    }
+    if added == 0 {
+        return 0;
+    }
+    sort_desc_in_place(&mut new_items);
+    let taken = std::mem::take(existing);
+    *existing = merge_two_desc_sorted(taken, new_items);
+    added
 }
 
 pub fn short_file_type_label(filetype: &str) -> SharedString {
@@ -407,20 +500,38 @@ pub fn filename_matches_query(filename: &str, query: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn doc(id: i64, ts: u32) -> ChannelDocument {
+        ChannelDocument {
+            id,
+            channel_id: ChannelId(1),
+            clan_id: ClanId(1),
+            message_id: MessageId(0),
+            uploader_id: UserId(0),
+            url: String::new(),
+            filename: format!("f{id}"),
+            filetype: "FILE".into(),
+            create_time_seconds: ts,
+            uploader_name: SharedString::default(),
+        }
+    }
+
     #[test]
-    fn is_document_excludes_media_and_sticker() {
+    fn is_document_excludes_media_sticker_and_audio() {
         assert!(!is_document("image/png"));
         assert!(!is_document("video/mp4"));
+        assert!(!is_document("audio/mpeg"));
+        assert!(!is_document("audio/mp4"));
         assert!(!is_document("sticker"));
-        assert!(is_document("application/mp4"));
+        assert!(!is_document("image"));
+        assert!(!is_document("video"));
+        assert!(!is_document("audio"));
         assert!(is_document("application/pdf"));
         assert!(is_document("text/csv"));
         assert!(is_document("text/plain"));
         assert!(is_document("FILE"));
+        assert!(is_document("doc"));
         assert!(is_document(""));
         assert!(is_document("application/zip"));
-        assert!(is_document("audio/mpeg"));
-        assert!(is_document("audio/mp4"));
     }
 
     #[test]
@@ -440,44 +551,7 @@ mod tests {
 
     #[test]
     fn sort_desc_orders_by_time_then_id() {
-        let mut items = vec![
-            ChannelDocument {
-                id: 1,
-                channel_id: ChannelId(1),
-                clan_id: ClanId(1),
-                message_id: MessageId(0),
-                uploader_id: UserId(0),
-                url: String::new(),
-                filename: "a".into(),
-                filetype: "FILE".into(),
-                create_time_seconds: 10,
-                uploader_name: SharedString::default(),
-            },
-            ChannelDocument {
-                id: 3,
-                channel_id: ChannelId(1),
-                clan_id: ClanId(1),
-                message_id: MessageId(0),
-                uploader_id: UserId(0),
-                url: String::new(),
-                filename: "b".into(),
-                filetype: "FILE".into(),
-                create_time_seconds: 20,
-                uploader_name: SharedString::default(),
-            },
-            ChannelDocument {
-                id: 2,
-                channel_id: ChannelId(1),
-                clan_id: ClanId(1),
-                message_id: MessageId(0),
-                uploader_id: UserId(0),
-                url: String::new(),
-                filename: "c".into(),
-                filetype: "FILE".into(),
-                create_time_seconds: 20,
-                uploader_name: SharedString::default(),
-            },
-        ];
+        let mut items = vec![doc(1, 10), doc(3, 20), doc(2, 20)];
         sort_desc_in_place(&mut items);
         assert_eq!(items[0].id, 3);
         assert_eq!(items[1].id, 2);
@@ -501,36 +575,42 @@ mod tests {
     }
 
     #[test]
-    fn merge_attachments_dedupes_by_id() {
-        let broad = vec![
-            ApiChannelAttachment {
-                id: 1,
-                filetype: "text/plain".into(),
-                ..ApiChannelAttachment::default()
-            },
-            ApiChannelAttachment {
-                id: 2,
-                filetype: "image/png".into(),
-                ..ApiChannelAttachment::default()
-            },
-        ];
-        let typed = vec![
-            ApiChannelAttachment {
-                id: 2,
-                filetype: "application/pdf".into(),
-                ..ApiChannelAttachment::default()
-            },
-            ApiChannelAttachment {
-                id: 3,
-                filetype: "application/pdf".into(),
-                ..ApiChannelAttachment::default()
-            },
-        ];
-        let merged = merge_attachments(broad, typed);
-        assert_eq!(merged.len(), 3);
-        assert!(merged.iter().any(|a| a.id == 1));
-        assert!(merged.iter().any(|a| a.id == 2));
-        assert!(merged.iter().any(|a| a.id == 3));
+    fn merge_documents_dedupes_and_sorts() {
+        let mut existing = vec![doc(2, 20)];
+        let mut ids: std::collections::HashSet<i64> = existing.iter().map(|d| d.id).collect();
+        let added = merge_documents(
+            &mut existing,
+            &mut ids,
+            vec![doc(2, 20), doc(1, 10), doc(3, 30)],
+            false,
+        );
+        assert_eq!(added, 2);
+        assert_eq!(
+            existing.iter().map(|d| d.id).collect::<Vec<_>>(),
+            vec![3, 2, 1]
+        );
+    }
+
+    #[test]
+    fn merge_documents_reset_replaces() {
+        let mut existing = vec![doc(9, 90)];
+        let mut ids: std::collections::HashSet<i64> = existing.iter().map(|d| d.id).collect();
+        let added = merge_documents(&mut existing, &mut ids, vec![doc(1, 10)], true);
+        assert_eq!(added, 1);
+        assert_eq!(existing.len(), 1);
+        assert_eq!(existing[0].id, 1);
+    }
+
+    #[test]
+    fn merge_documents_keeps_desc_order_without_full_resort_of_head() {
+        let mut existing = vec![doc(3, 30), doc(2, 20)];
+        let mut ids: std::collections::HashSet<i64> = existing.iter().map(|d| d.id).collect();
+        let added = merge_documents(&mut existing, &mut ids, vec![doc(1, 10), doc(0, 5)], false);
+        assert_eq!(added, 2);
+        assert_eq!(
+            existing.iter().map(|d| d.id).collect::<Vec<_>>(),
+            vec![3, 2, 1, 0]
+        );
     }
 
     #[test]
@@ -543,49 +623,11 @@ mod tests {
     }
 
     #[test]
-    fn dedupe_by_id_keeps_first() {
-        let docs = vec![
-            ChannelDocument {
-                id: 1,
-                channel_id: ChannelId(1),
-                clan_id: ClanId(1),
-                message_id: MessageId(0),
-                uploader_id: UserId(0),
-                url: String::new(),
-                filename: "a".into(),
-                filetype: "FILE".into(),
-                create_time_seconds: 20,
-                uploader_name: SharedString::default(),
-            },
-            ChannelDocument {
-                id: 1,
-                channel_id: ChannelId(1),
-                clan_id: ClanId(1),
-                message_id: MessageId(0),
-                uploader_id: UserId(0),
-                url: String::new(),
-                filename: "b".into(),
-                filetype: "FILE".into(),
-                create_time_seconds: 10,
-                uploader_name: SharedString::default(),
-            },
-            ChannelDocument {
-                id: 2,
-                channel_id: ChannelId(1),
-                clan_id: ClanId(1),
-                message_id: MessageId(0),
-                uploader_id: UserId(0),
-                url: String::new(),
-                filename: "c".into(),
-                filetype: "FILE".into(),
-                create_time_seconds: 5,
-                uploader_name: SharedString::default(),
-            },
-        ];
-        let deduped = dedupe_by_id(docs);
-        assert_eq!(deduped.len(), 2);
-        assert_eq!(deduped[0].id, 1);
-        assert_eq!(deduped[0].filename, "a");
-        assert_eq!(deduped[1].id, 2);
+    fn has_more_uses_raw_page_size() {
+        assert!(initial_page_has_more(100, FILES_PAGE_SIZE));
+        assert!(!initial_page_has_more(99, FILES_PAGE_SIZE));
+        assert!(next_page_has_more(100, FILES_PAGE_SIZE, 12));
+        assert!(!next_page_has_more(12, FILES_PAGE_SIZE, 12));
+        assert!(!next_page_has_more(100, FILES_PAGE_SIZE, 0));
     }
 }

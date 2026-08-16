@@ -67,8 +67,13 @@ fn capture_macos_preview(target: &scap::Target) -> Option<ScreenSharePreview> {
 
 #[cfg(target_os = "macos")]
 fn cg_image_to_preview(
-    image: &core_graphics_helmer_fork::image::CGImageRef,
+    image: &core_graphics_helmer_fork::image::CGImage,
 ) -> Option<ScreenSharePreview> {
+    use core_graphics_helmer_fork::base::{kCGBitmapByteOrder32Little, kCGImageAlphaNoneSkipFirst};
+    use core_graphics_helmer_fork::color_space::{CGColorSpace, kCGColorSpaceSRGB};
+    use core_graphics_helmer_fork::context::CGContext;
+    use core_graphics_helmer_fork::geometry::{CGPoint, CGRect, CGSize};
+
     let width = image.width() as u32;
     let height = image.height() as u32;
     if width == 0 || height == 0 {
@@ -76,28 +81,39 @@ fn cg_image_to_preview(
     }
 
     let (thumb_w, thumb_h) = preview_dimensions(width, height);
-    let bytes_per_row = image.bytes_per_row();
-    if bytes_per_row < (width as usize * 4) {
+
+    let color_space = CGColorSpace::create_with_name(unsafe { kCGColorSpaceSRGB })
+        .unwrap_or_else(CGColorSpace::create_device_rgb);
+    let mut context = CGContext::create_bitmap_context(
+        None,
+        thumb_w as usize,
+        thumb_h as usize,
+        8,
+        0,
+        &color_space,
+        kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little,
+    );
+    context.draw_image(
+        CGRect::new(
+            &CGPoint::new(0.0, 0.0),
+            &CGSize::new(thumb_w as f64, thumb_h as f64),
+        ),
+        image,
+    );
+
+    let src_stride = context.bytes_per_row();
+    let dst_stride = thumb_w as usize * 4;
+    if src_stride < dst_stride {
         return None;
     }
-
-    let data = image.data();
-    let bytes = data.bytes();
-    let mut rgba = vec![0u8; (thumb_w * thumb_h * 4) as usize];
-
+    let src = context.data();
+    let mut rgba = vec![0u8; dst_stride * thumb_h as usize];
     for y in 0..thumb_h as usize {
-        let src_y = y * height as usize / thumb_h as usize;
-        for x in 0..thumb_w as usize {
-            let src_x = x * width as usize / thumb_w as usize;
-            let src_offset = src_y * bytes_per_row + src_x * 4;
-            let dst_offset = (y * thumb_w as usize + x) * 4;
-            if src_offset + 3 >= bytes.len() {
-                continue;
-            }
-            rgba[dst_offset] = bytes[src_offset];
-            rgba[dst_offset + 1] = bytes[src_offset + 1];
-            rgba[dst_offset + 2] = bytes[src_offset + 2];
-            rgba[dst_offset + 3] = bytes[src_offset + 3];
+        let src_row = &src[y * src_stride..y * src_stride + dst_stride];
+        let dst_row = &mut rgba[y * dst_stride..(y + 1) * dst_stride];
+        dst_row.copy_from_slice(src_row);
+        for pixel in dst_row.chunks_exact_mut(4) {
+            pixel[3] = 0xff;
         }
     }
 
@@ -346,9 +362,9 @@ fn windows_bgra_to_preview(width: u32, height: u32, bgra: &[u8]) -> Option<Scree
             if src_offset + 3 >= bgra.len() {
                 continue;
             }
-            rgba[dst_offset] = bgra[src_offset + 2];
+            rgba[dst_offset] = bgra[src_offset];
             rgba[dst_offset + 1] = bgra[src_offset + 1];
-            rgba[dst_offset + 2] = bgra[src_offset];
+            rgba[dst_offset + 2] = bgra[src_offset + 2];
             rgba[dst_offset + 3] = 0xff;
         }
     }

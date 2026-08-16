@@ -35,6 +35,10 @@ const PREVIEW_MAX_WIDTH: u32 = 1280;
 #[cfg(not(target_os = "macos"))]
 const PREVIEW_MAX_HEIGHT: u32 = 800;
 const SLOT_WAIT: Duration = Duration::from_millis(250);
+#[cfg(target_os = "macos")]
+const MAX_SCREEN_RESTART_ATTEMPTS: u32 = 5;
+#[cfg(target_os = "macos")]
+const SCREEN_RESTART_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Default)]
 struct SlotState {
@@ -179,59 +183,109 @@ pub fn start_screen(
             let pump = std::thread::Builder::new()
                 .name("mezon-screen-pump".into())
                 .spawn(move || {
-                    let mut capturer = match Capturer::build(options) {
-                        Ok(capturer) => capturer,
-                        Err(e) => {
-                            pump_slot.fail(format!("screen capture init failed: {e:#}"));
-                            return;
-                        }
-                    };
-                    capturer.start_capture();
                     #[cfg(target_os = "macos")]
-                    while !pump_stop.load(Ordering::Relaxed) {
-                        match capturer.raw().get_next_pixel_buffer() {
-                            Ok(frame) => pump_slot.publish(frame),
-                            Err(e) => {
-                                pump_slot.fail(format!("screen capture failed: {e}"));
+                    {
+                        let mut restart_attempts = 0u32;
+                        loop {
+                            if pump_stop.load(Ordering::Relaxed) {
                                 break;
                             }
-                        }
-                    }
-                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                    while !pump_stop.load(Ordering::Relaxed) {
-                        match capturer.get_next_frame_timeout(SLOT_WAIT) {
-                            Ok(Some(frame)) => {
-                                if let Some(bgra) = frame_to_bgra(frame)
-                                    && !bgra.data.is_empty()
-                                {
-                                    pump_slot.publish(bgra);
+                            let mut capturer = match Capturer::build(options.clone()) {
+                                Ok(capturer) => capturer,
+                                Err(e) => {
+                                    pump_slot.fail(format!("screen capture init failed: {e:#}"));
+                                    return;
+                                }
+                            };
+                            capturer.start_capture();
+                            let mut errored = false;
+                            let mut produced = false;
+                            while !pump_stop.load(Ordering::Relaxed) {
+                                match capturer.raw().get_next_pixel_buffer() {
+                                    Ok(frame) => {
+                                        produced = true;
+                                        pump_slot.publish(frame);
+                                    }
+                                    Err(_) => {
+                                        errored = true;
+                                        break;
+                                    }
                                 }
                             }
-                            Ok(None) => continue,
-                            Err(e) => {
-                                pump_slot.fail(format!("screen capture failed: {e:#}"));
+                            if !errored {
+                                let _ =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        capturer.stop_capture()
+                                    }));
                                 break;
                             }
+                            drop(capturer);
+                            if produced {
+                                restart_attempts = 0;
+                            }
+                            restart_attempts += 1;
+                            if restart_attempts > MAX_SCREEN_RESTART_ATTEMPTS {
+                                pump_slot.fail(
+                                    "screen capture stopped and could not be restarted".into(),
+                                );
+                                return;
+                            }
+                            tracing::warn!(
+                                attempt = restart_attempts,
+                                max_attempts = MAX_SCREEN_RESTART_ATTEMPTS,
+                                "screen capture source errored; restarting capture"
+                            );
+                            std::thread::sleep(SCREEN_RESTART_DELAY);
                         }
+                        pump_slot.close();
                     }
-                    #[cfg(target_os = "windows")]
-                    while !pump_stop.load(Ordering::Relaxed) {
-                        match capturer.get_next_frame() {
-                            Ok(frame) => {
-                                if let Some(bgra) = frame_to_bgra(frame)
-                                    && !bgra.data.is_empty()
-                                {
-                                    pump_slot.publish(bgra);
+
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        let mut capturer = match Capturer::build(options) {
+                            Ok(capturer) => capturer,
+                            Err(e) => {
+                                pump_slot.fail(format!("screen capture init failed: {e:#}"));
+                                return;
+                            }
+                        };
+                        capturer.start_capture();
+                        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                        while !pump_stop.load(Ordering::Relaxed) {
+                            match capturer.get_next_frame_timeout(SLOT_WAIT) {
+                                Ok(Some(frame)) => {
+                                    if let Some(bgra) = frame_to_bgra(frame)
+                                        && !bgra.data.is_empty()
+                                    {
+                                        pump_slot.publish(bgra);
+                                    }
+                                }
+                                Ok(None) => continue,
+                                Err(e) => {
+                                    pump_slot.fail(format!("screen capture failed: {e:#}"));
+                                    break;
                                 }
                             }
-                            Err(e) => {
-                                pump_slot.fail(format!("screen capture failed: {e:#}"));
-                                break;
+                        }
+                        #[cfg(target_os = "windows")]
+                        while !pump_stop.load(Ordering::Relaxed) {
+                            match capturer.get_next_frame() {
+                                Ok(frame) => {
+                                    if let Some(bgra) = frame_to_bgra(frame)
+                                        && !bgra.data.is_empty()
+                                    {
+                                        pump_slot.publish(bgra);
+                                    }
+                                }
+                                Err(e) => {
+                                    pump_slot.fail(format!("screen capture failed: {e:#}"));
+                                    break;
+                                }
                             }
                         }
+                        capturer.stop_capture();
+                        pump_slot.close();
                     }
-                    capturer.stop_capture();
-                    pump_slot.close();
                 });
             if let Err(e) = pump {
                 let _ = track_tx.send(Err(format!("screen capture pump failed: {e}")));

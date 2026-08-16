@@ -43,6 +43,7 @@ impl TopicPanel {
         let typing = cx.new(|cx| ChannelTyping::new(&settings, cx));
         let topic_timeline = cx.new(|cx| ChannelMessages::new_topic_box(settings.clone(), cx));
         topic_timeline.update(cx, |timeline, cx| timeline.bind_window(window, cx));
+        crate::app::capture::register_active_topic_panel(&mention_input, &topic_timeline, cx);
         mention_input.update(cx, |input, cx| input.focus_input(window, cx));
 
         let mut subs = Vec::new();
@@ -269,10 +270,26 @@ impl Render for TopicPanel {
             }))
             .child(header)
             .child(
-                div().flex_1().min_h_0().w_full().overflow_hidden().child(
-                    AnyView::from(self.topic_timeline.clone())
-                        .cached(StyleRefinement::default().size_full()),
-                ),
+                div()
+                    .id("topic-timeline-host")
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_hidden()
+                    .on_hover({
+                        let timeline = self.topic_timeline.clone();
+                        move |hovered, _window, cx| {
+                            if *hovered {
+                                timeline.update(cx, |_, cx| cx.notify());
+                            }
+                        }
+                    })
+                    .child(
+                        AnyView::from(self.topic_timeline.clone())
+                            .cached(StyleRefinement::default().size_full()),
+                    )
+                    .children(self.topic_timeline.read(cx).skeleton_overlay(cx.theme())),
             )
             .child(composer)
     }

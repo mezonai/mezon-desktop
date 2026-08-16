@@ -2017,6 +2017,15 @@ impl VoiceStore {
                     self.call_status = VoiceCallStatus::Stable;
                 }
             }
+            VoiceEvent::DeviceResetToDefault { input } => {
+                let kind = if input {
+                    DeviceKind::AudioInput
+                } else {
+                    DeviceKind::AudioOutput
+                };
+                Self::persist_device(kind, None, cx);
+                cx.notify();
+            }
             VoiceEvent::Participants(mut list) => {
                 if !self.pending_removals.is_empty() {
                     let now = Instant::now();

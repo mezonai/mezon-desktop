@@ -204,8 +204,10 @@ impl ThreadsStore {
             return;
         }
         let Some(list_id) = self.list_channel_id.clone() else {
-            if let RealtimeEvent::ChannelArchive(ev) = event {
-                self.apply_channel_archive(ev, cx);
+            match event {
+                RealtimeEvent::ChannelArchive(ev) => self.apply_channel_archive(ev, cx),
+                RealtimeEvent::ChannelDeleted(ev) => self.apply_channel_deleted(ev, cx),
+                _ => {}
             }
             return;
         };
@@ -222,6 +224,7 @@ impl ThreadsStore {
             RealtimeEvent::ChannelArchive(ev) => {
                 self.apply_channel_archive(ev, cx);
             }
+            RealtimeEvent::ChannelDeleted(ev) => self.apply_channel_deleted(ev, cx),
             _ => {}
         }
     }
@@ -357,6 +360,22 @@ impl ThreadsStore {
         self.apply_thread_deleted(channel_id, cx);
     }
 
+    pub fn remove_threads_of_parent(&mut self, parent_id: &str, cx: &mut Context<Self>) {
+        self.apply_parent_channel_deleted(parent_id, cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_threads_for_test(
+        &mut self,
+        list_channel_id: &str,
+        threads: Vec<ThreadSummary>,
+        cx: &mut Context<Self>,
+    ) {
+        self.list_channel_id = Some(list_channel_id.to_string());
+        self.threads = threads;
+        cx.notify();
+    }
+
     pub fn thread_active(&self, channel_id: &str) -> Option<i32> {
         self.threads
             .iter()
@@ -402,6 +421,40 @@ impl ThreadsStore {
             self.mark_thread_archived(&channel_id, cx);
         } else {
             self.mark_thread_active(&channel_id, cx);
+        }
+    }
+
+    fn apply_channel_deleted(
+        &mut self,
+        ev: &realtime::ChannelDeletedEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let channel_id = ev.channel_id.to_string();
+        if ev.parent_id != 0 {
+            self.apply_thread_deleted(&channel_id, cx);
+            return;
+        }
+        self.apply_parent_channel_deleted(&channel_id, cx);
+    }
+
+    fn apply_parent_channel_deleted(&mut self, parent_id: &str, cx: &mut Context<Self>) {
+        let before = self.threads.len();
+        self.threads.retain(|t| t.parent_id != parent_id);
+        let mut changed = self.threads.len() != before;
+        if let Some(results) = self.search_results.as_mut() {
+            let results_before = results.len();
+            results.retain(|t| t.parent_id != parent_id);
+            changed |= results.len() != results_before;
+        }
+        if self.list_channel_id.as_deref() == Some(parent_id) {
+            self.list_channel_id = None;
+            self.loaded_channel = None;
+            self.search_results = None;
+            self.search_query.clear();
+            changed = true;
+        }
+        if changed {
+            cx.notify();
         }
     }
 
@@ -1593,6 +1646,96 @@ mod tests {
                 store.cancel_create(cx);
                 assert!(!store.is_submitting());
                 assert!(!store.is_creating());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn channel_deleted_removes_thread_and_parent_children(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = ThreadsStore::init(api, cx);
+            store.update(cx, |store, cx| {
+                store.threads = vec![
+                    ThreadSummary {
+                        channel_id: "9".into(),
+                        channel_label: "t1".into(),
+                        clan_id: "1".into(),
+                        parent_id: "1".into(),
+                        channel_private: 0,
+                        active: THREAD_STATUS_JOINED,
+                        creator_id: "1".into(),
+                        last_message_content: String::new(),
+                        last_message_sender_id: String::new(),
+                        last_message_sender_name: String::new(),
+                        last_message_sender_avatar: String::new(),
+                        last_sent_timestamp: 0,
+                        member_count: 0,
+                    },
+                    ThreadSummary {
+                        channel_id: "10".into(),
+                        channel_label: "t2".into(),
+                        clan_id: "1".into(),
+                        parent_id: "1".into(),
+                        channel_private: 0,
+                        active: THREAD_STATUS_JOINED,
+                        creator_id: "1".into(),
+                        last_message_content: String::new(),
+                        last_message_sender_id: String::new(),
+                        last_message_sender_name: String::new(),
+                        last_message_sender_avatar: String::new(),
+                        last_sent_timestamp: 0,
+                        member_count: 0,
+                    },
+                    ThreadSummary {
+                        channel_id: "20".into(),
+                        channel_label: "other".into(),
+                        clan_id: "1".into(),
+                        parent_id: "2".into(),
+                        channel_private: 0,
+                        active: THREAD_STATUS_JOINED,
+                        creator_id: "1".into(),
+                        last_message_content: String::new(),
+                        last_message_sender_id: String::new(),
+                        last_message_sender_name: String::new(),
+                        last_message_sender_avatar: String::new(),
+                        last_sent_timestamp: 0,
+                        member_count: 0,
+                    },
+                ];
+                store.on_realtime_event(
+                    &RealtimeEvent::ChannelDeleted(mezon_proto::realtime::ChannelDeletedEvent {
+                        clan_id: 1,
+                        channel_id: 9,
+                        parent_id: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                assert_eq!(store.threads.len(), 2);
+                assert!(!store.threads.iter().any(|t| t.channel_id == "9"));
+
+                store.list_channel_id = Some("1".into());
+                store.loaded_channel = Some("1".into());
+                store.on_realtime_event(
+                    &RealtimeEvent::ChannelDeleted(mezon_proto::realtime::ChannelDeletedEvent {
+                        clan_id: 1,
+                        channel_id: 1,
+                        parent_id: 0,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                assert_eq!(store.threads.len(), 1);
+                assert_eq!(store.threads[0].channel_id, "20");
+                assert!(store.list_channel_id.is_none());
+                assert!(store.loaded_channel.is_none());
             });
         });
     }

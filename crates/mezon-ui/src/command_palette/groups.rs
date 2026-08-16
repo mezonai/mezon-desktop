@@ -182,7 +182,7 @@ pub fn render_section_header(theme: &Theme, label: &SharedString) -> AnyElement 
         .px(px(10.))
         .text_size(px(12.))
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme.tokens.text_theme_primary_hover)
+        .text_color(theme.tokens.text_secondary)
         .child(label.to_string().to_uppercase())
         .into_any_element()
 }

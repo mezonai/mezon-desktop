@@ -105,6 +105,7 @@ pub enum VoiceEvent {
     Reconnected,
     NetworkWeak,
     NetworkRecovered,
+    DeviceResetToDefault { input: bool },
     Disconnected { reason: String },
     Participants(Vec<VoiceParticipant>),
     Error(String),
@@ -311,6 +312,7 @@ async fn session_main(
     let mut out_fmt = None;
     let mut audio_io: Option<audio::AudioIo> = None;
     let mut out_change_rx: Option<flume::Receiver<AudioFormat>> = None;
+    let mut device_reset_rx: Option<flume::Receiver<audio::DeviceResetKind>> = None;
     let mut microphone_task: Option<tokio::task::JoinHandle<()>> = None;
 
     let audio = tokio::task::spawn_blocking(move || {
@@ -324,6 +326,7 @@ async fn session_main(
             audio_mixer = Some(audio.mixer.clone());
             out_fmt = Some(audio.output_format);
             out_change_rx = Some(audio.output_format_rx.clone());
+            device_reset_rx = Some(audio.device_reset_rx.clone());
 
             let mic_enabled = mic_enabled.clone();
             let mic_publication_task = mic_publication.clone();
@@ -867,6 +870,13 @@ async fn session_main(
                     respawn_audio_playback(&room, mixer, new_fmt, &mut audio_tracks);
                 }
             }
+            reset = recv_device_reset(&device_reset_rx) => {
+                if let Some(kind) = reset {
+                    let _ = evt_tx.send(VoiceEvent::DeviceResetToDefault {
+                        input: matches!(kind, audio::DeviceResetKind::Input),
+                    });
+                }
+            }
         }
     }
 
@@ -1129,6 +1139,15 @@ fn spawn_playback(
 }
 
 async fn recv_output_change(rx: &Option<flume::Receiver<AudioFormat>>) -> Option<AudioFormat> {
+    match rx {
+        Some(rx) => rx.recv_async().await.ok(),
+        None => std::future::pending().await,
+    }
+}
+
+async fn recv_device_reset(
+    rx: &Option<flume::Receiver<audio::DeviceResetKind>>,
+) -> Option<audio::DeviceResetKind> {
     match rx {
         Some(rx) => rx.recv_async().await.ok(),
         None => std::future::pending().await,

@@ -67,6 +67,8 @@ jobs:
 
   windows-check:
     name: Windows Check
+    # Disabled by default: set ENABLE_WINDOWS_BUILD=true to restore this check.
+    if: ${{ vars.ENABLE_WINDOWS_BUILD == 'true' }}
     runs-on: windows-latest
     # Compile-verification only: this is the sole gate that builds the vendored
     # gpui_windows platform crate, and the repo rule is to never lint vendored

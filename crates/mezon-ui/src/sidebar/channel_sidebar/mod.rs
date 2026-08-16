@@ -5,7 +5,7 @@ use std::time::Duration;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Context, Entity, ListState, MouseButton,
     MouseDownEvent, SharedString, Subscription, Task, WeakEntity, Window, div, ease_in_out, list,
-    prelude::*, px,
+    prelude::*, px, relative,
 };
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
@@ -1936,15 +1936,16 @@ fn render_sidebar_item(
                                 avatar = avatar.src(SharedString::from(m.avatar_raw.clone()));
                             }
                             div()
-                                .w_full()
+                                .w(relative(0.9))
                                 .min_w_0()
                                 .flex()
                                 .flex_row()
                                 .items_center()
                                 .justify_between()
-                                .px_2()
-                                .py(px(2.))
-                                .gap_1()
+                                .p(px(4.))
+                                .pr(px(8.))
+                                .gap(px(12.))
+                                .rounded(px(8.))
                                 .child(
                                     div()
                                         .min_w_0()

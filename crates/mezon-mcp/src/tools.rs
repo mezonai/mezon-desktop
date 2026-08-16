@@ -150,6 +150,39 @@ impl McpBackend {
                 self.send_ui_result(|reply| McpCommand::SetPanel { kind: None, reply })
                     .await
             }
+            "open_topic" => {
+                let message_id = parse_i64_field(&arguments, "message_id")?;
+                self.send_ui_result(|reply| McpCommand::OpenTopic { message_id, reply })
+                    .await
+            }
+            "close_topic" => self.send_ui_result(|reply| McpCommand::CloseTopic { reply }).await,
+            "topic_state" => self.send_ui_result(|reply| McpCommand::TopicState { reply }).await,
+            "topic_type" => {
+                let text = arguments
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("topic_type requires string field text"))?
+                    .to_string();
+                self.send_ui_result(|reply| McpCommand::TopicType { text, reply })
+                    .await
+            }
+            "topic_submit" => {
+                self.send_ui_result(|reply| McpCommand::TopicSubmit { reply })
+                    .await
+            }
+            "topic_scroll_wheel" => {
+                let delta_y = arguments
+                    .get("delta_y")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(-120.0) as f32;
+                let ticks = arguments.get("ticks").and_then(Value::as_u64).unwrap_or(10) as u32;
+                self.send_ui_result(|reply| McpCommand::TopicScrollWheel {
+                    delta_y,
+                    ticks,
+                    reply,
+                })
+                .await
+            }
             "list_emojis" => {
                 let clan_id = arguments
                     .get("clan_id")

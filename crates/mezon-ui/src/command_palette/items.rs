@@ -382,9 +382,14 @@ pub fn render_palette_row(
         FontWeight::MEDIUM
     };
     let label_color = if emphasized {
-        theme.tokens.text_theme_primary_hover
+        theme.tokens.text_secondary
     } else {
         theme.tokens.text_theme_primary
+    };
+    let icon_color = if emphasized || selected {
+        theme.tokens.bg_icon_theme_active
+    } else {
+        theme.tokens.bg_icon_theme
     };
     let (subtext_size, subtext_uppercase) = match item.kind {
         PaletteItemKind::Channel => (px(10.), true),
@@ -406,11 +411,7 @@ pub fn render_palette_row(
                     item.private,
                 ))
                 .size(px(14.))
-                .text_color(if emphasized {
-                    theme.tokens.text_theme_primary_hover
-                } else {
-                    theme.tokens.text_theme_primary
-                }),
+                .text_color(icon_color),
             )
             .into_any_element(),
         PaletteItemKind::Direct | PaletteItemKind::Member => render_palette_avatar(item),

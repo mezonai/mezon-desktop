@@ -1184,15 +1184,28 @@ impl ChatLayout {
                 channel_id: parent_id,
                 thread_id,
             } => {
-                let should_redirect = {
+                let (parent_deleted, thread_gone) = {
                     let list = self.channel_list.read(cx);
-                    list.is_clan_cache_loaded(clan_id)
-                        && !list.channel_in_clan(clan_id, thread_id)
+                    if !list.is_clan_cache_loaded(clan_id) {
+                        return;
+                    }
+                    let parent_deleted = list.is_locally_deleted(parent_id);
+                    let thread_gone = !list.channel_in_clan(clan_id, thread_id)
                         && !list.is_resolving_channel_detail(thread_id)
                         && (list.is_locally_deleted(thread_id)
-                            || list.is_locally_archived(thread_id))
+                            || list.is_locally_archived(thread_id));
+                    (parent_deleted, thread_gone)
                 };
-                if !should_redirect {
+                if parent_deleted {
+                    crate::channel_navigation::navigate_after_channel_removed(
+                        cx, clan_id, parent_id,
+                    );
+                    self.focused_channel_id = None;
+                    self.dismiss_threads_popover(cx);
+                    self.dismiss_topic_panel(cx);
+                    return;
+                }
+                if !thread_gone {
                     return;
                 }
                 crate::channel_navigation::navigate_after_thread_removed(
@@ -1205,8 +1218,22 @@ impl ChatLayout {
             Route::Channel {
                 clan_id,
                 channel_id,
+            }
+            | Route::ChannelSettings {
+                clan_id,
+                channel_id,
+                ..
+            }
+            | Route::Canvas {
+                clan_id,
+                channel_id,
+                ..
             } => {
-                let parent_id = {
+                enum DeletedRedirect {
+                    Thread { parent: ChannelId },
+                    Channel { id: ChannelId },
+                }
+                let redirect = {
                     let list = self.channel_list.read(cx);
                     if !list.is_clan_cache_loaded(clan_id) {
                         return;
@@ -1220,16 +1247,28 @@ impl ChatLayout {
                     if !list.is_locally_deleted(channel_id) {
                         return;
                     }
-                    list.deleted_channel_parent(channel_id).filter(|parent| {
-                        *parent != channel_id && list.channel_in_clan(clan_id, *parent)
-                    })
+                    match list.deleted_channel_parent(channel_id) {
+                        Some(parent)
+                            if parent != channel_id && list.channel_in_clan(clan_id, parent) =>
+                        {
+                            DeletedRedirect::Thread { parent }
+                        }
+                        Some(parent) if parent != channel_id && list.is_locally_deleted(parent) => {
+                            DeletedRedirect::Channel { id: parent }
+                        }
+                        _ => DeletedRedirect::Channel { id: channel_id },
+                    }
                 };
-                let Some(parent_id) = parent_id else {
-                    return;
-                };
-                crate::channel_navigation::navigate_after_thread_removed(
-                    cx, clan_id, channel_id, parent_id,
-                );
+                match redirect {
+                    DeletedRedirect::Thread { parent } => {
+                        crate::channel_navigation::navigate_after_thread_removed(
+                            cx, clan_id, channel_id, parent,
+                        );
+                    }
+                    DeletedRedirect::Channel { id } => {
+                        crate::channel_navigation::navigate_after_channel_removed(cx, clan_id, id);
+                    }
+                }
                 self.focused_channel_id = None;
                 self.dismiss_threads_popover(cx);
                 self.dismiss_topic_panel(cx);
@@ -1846,11 +1885,25 @@ impl Render for ChatLayout {
             .relative()
             .child(
                 div()
+                    .relative()
                     .flex()
                     .flex_col()
                     .w(px(344.0))
                     .h_full()
-                    .bg(theme.surfaces.primary.ramp())
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .flex_row()
+                            .child(
+                                div()
+                                    .w(px(72.0))
+                                    .h_full()
+                                    .bg(theme.surface_for(theme.bg_tertiary)),
+                            )
+                            .child(div().flex_1().h_full().bg(theme.bg_secondary)),
+                    )
                     .child(
                         div()
                             .flex()

@@ -345,13 +345,13 @@ impl Render for ClanSidebar {
             .w_full()
             .h_full()
             .items_center()
+            .bg(theme.surface_for(theme.bg_tertiary))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .items_center()
                     .w_full()
-                    .bg(theme.surface_for(theme.bg_tertiary))
                     .pt(px(window_controls::CLAN_SIDEBAR_HEADER_TOP))
                     .child(render_window_nav(
                         theme,

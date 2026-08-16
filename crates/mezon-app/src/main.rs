@@ -1103,7 +1103,12 @@ fn open_main_window(
                     name: d.name,
                 })
                 .collect::<Vec<_>>();
-            (inputs, outputs)
+            mezon_store::DeviceSnapshot {
+                inputs,
+                outputs,
+                default_input_name: mezon_native::audio::default_input_device_name(),
+                default_output_name: mezon_native::audio::default_output_device_name(),
+            }
         }),
         cx,
     );

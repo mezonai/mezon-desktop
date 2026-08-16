@@ -50,6 +50,18 @@ pub fn enumerate_output_devices() -> Vec<AudioDeviceInfo> {
     collect_devices(devices)
 }
 
+pub fn default_input_device_name() -> Option<String> {
+    let host = cpal::default_host();
+    let device = host.default_input_device()?;
+    Some(device.description().ok()?.to_string())
+}
+
+pub fn default_output_device_name() -> Option<String> {
+    let host = cpal::default_host();
+    let device = host.default_output_device()?;
+    Some(device.description().ok()?.to_string())
+}
+
 #[cfg(not(target_os = "linux"))]
 fn collect_devices(devices: impl Iterator<Item = cpal::Device>) -> Vec<AudioDeviceInfo> {
     devices

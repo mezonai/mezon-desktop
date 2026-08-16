@@ -26,6 +26,8 @@ const POPOVER_WIDTH: f32 = 540.;
 const HEADER_HEIGHT: f32 = 48.;
 const MIN_POPOVER_HEIGHT: f32 = 400.;
 const LIST_OVERDRAW: f32 = 200.;
+const LOAD_MORE_THRESHOLD: usize = 3;
+const MAX_VIEWPORT_AUTOFILL_PAGES: u8 = 3;
 const MAX_VH: f32 = 0.8;
 const SEARCH_WIDTH: f32 = 224.;
 const SEARCH_DEBOUNCE_MS: u64 = 200;
@@ -35,6 +37,7 @@ const AUDIO_TICK_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone)]
 struct FileRowVm {
+    id: i64,
     url: SharedString,
     filename: SharedString,
     shared_by: SharedString,
@@ -63,6 +66,7 @@ impl FileRowVm {
         );
         let filetype = doc.filetype.to_ascii_lowercase();
         Self {
+            id: doc.id,
             url: doc.url.clone().into(),
             filename: doc.filename.clone().into(),
             shared_by: shared_by.into(),
@@ -83,6 +87,7 @@ pub struct FilesPopoverPanel {
     list_state: ListState,
     focus_handle: FocusHandle,
     rows: Rc<Vec<FileRowVm>>,
+    viewport_autofill_remaining: u8,
     audio_url: Option<SharedString>,
     audio_player: Option<mezon_audio::AudioPlayer>,
     audio_ready: bool,
@@ -147,6 +152,7 @@ impl FilesPopoverPanel {
             list_state,
             focus_handle,
             rows: Rc::new(Vec::new()),
+            viewport_autofill_remaining: MAX_VIEWPORT_AUTOFILL_PAGES,
             audio_url: None,
             audio_player: None,
             audio_ready: false,
@@ -156,8 +162,46 @@ impl FilesPopoverPanel {
             _debounce_task: Task::ready(()),
             _subs: subs,
         };
+        this.install_scroll_handler(cx);
         this.refresh_rows(cx);
         this
+    }
+
+    fn install_scroll_handler(&self, cx: &mut Context<Self>) {
+        let weak = cx.weak_entity();
+        let clan = self.clan_id;
+        let channel = self.channel_id;
+        self.list_state
+            .set_scroll_handler(move |event, _window, cx| {
+                let near_bottom =
+                    event.visible_range.end + LOAD_MORE_THRESHOLD >= event.count && event.count > 0;
+                if !near_bottom {
+                    return;
+                }
+                let user_scrolled = event.visible_range.start > 0;
+                let Some(this) = weak.upgrade() else {
+                    return;
+                };
+                this.update(cx, |this, cx| {
+                    let store = FilesStore::global(cx);
+                    let can_page = {
+                        let store = store.read(cx);
+                        store.has_more_before(channel) && !store.is_loading(channel)
+                    };
+                    if !can_page {
+                        return;
+                    }
+                    if !user_scrolled {
+                        if this.viewport_autofill_remaining == 0 {
+                            return;
+                        }
+                        this.viewport_autofill_remaining -= 1;
+                    }
+                    store.update(cx, |store, cx| {
+                        store.fetch_page(clan, channel, cx);
+                    });
+                });
+            });
     }
 
     fn schedule_debounced_filter(&mut self, cx: &mut Context<Self>) {
@@ -173,14 +217,17 @@ impl FilesPopoverPanel {
     }
 
     fn refresh_rows(&mut self, cx: &mut Context<Self>) {
-        self.rows = Rc::new(Self::compute_rows(
-            self.channel_id,
-            &self.settings,
-            &self.debounced_query,
-            cx,
-        ));
-        if self.list_state.item_count() != self.rows.len() {
-            self.list_state.reset(self.rows.len());
+        let new_rows =
+            Self::compute_rows(self.channel_id, &self.settings, &self.debounced_query, cx);
+        let old_count = self.rows.len();
+        let new_count = new_rows.len();
+        let prefix = file_rows_common_prefix(&self.rows, &new_rows);
+        self.rows = Rc::new(new_rows);
+        if old_count == 0 || prefix == 0 {
+            self.list_state.reset(new_count);
+        } else if prefix < old_count || new_count != old_count {
+            self.list_state
+                .splice(prefix..old_count, new_count.saturating_sub(prefix));
         }
         cx.notify();
     }
@@ -509,7 +556,8 @@ fn render_body(
                 .child(Spinner::new().with_size(Size::Small))
                 .into_any_element()
         } else if fetch_error && !has_documents {
-            render_error_body(&locale, &theme, clan_id, channel_id).into_any_element()
+            render_error_body(&locale, &theme, clan_id, channel_id, panel.clone())
+                .into_any_element()
         } else {
             render_empty_body(&locale, &theme).into_any_element()
         }
@@ -517,7 +565,7 @@ fn render_body(
         let rows_for_list = rows.clone();
         let theme_for_list = theme.clone();
         let locale_for_list = locale.clone();
-        let panel_for_list = panel;
+        let panel_for_list = panel.clone();
         let playing_for_list = playing_audio_url;
         div()
             .size_full()
@@ -529,7 +577,13 @@ fn render_body(
                     div()
                         .px(px(LIST_PAD_X))
                         .pt(px(8.))
-                        .child(render_retry_banner(&locale, &theme, clan_id, channel_id)),
+                        .child(render_retry_banner(
+                            &locale,
+                            &theme,
+                            clan_id,
+                            channel_id,
+                            panel.clone(),
+                        )),
                 )
             })
             .child(
@@ -632,11 +686,26 @@ fn render_empty_body(locale: &str, theme: &Theme) -> impl IntoElement {
         )
 }
 
+fn request_files_refresh(
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    panel: WeakEntity<FilesPopoverPanel>,
+    cx: &mut App,
+) {
+    let _ = panel.update(cx, |this, _| {
+        this.viewport_autofill_remaining = MAX_VIEWPORT_AUTOFILL_PAGES;
+    });
+    FilesStore::global(cx).update(cx, |store, cx| {
+        store.refresh(clan_id, channel_id, cx);
+    });
+}
+
 fn render_error_body(
     locale: &str,
     theme: &Theme,
     clan_id: ClanId,
     channel_id: ChannelId,
+    panel: WeakEntity<FilesPopoverPanel>,
 ) -> impl IntoElement {
     let tokens = &theme.tokens;
     v_flex()
@@ -657,9 +726,7 @@ fn render_error_body(
                 .ghost()
                 .with_size(Size::Small)
                 .on_click(move |_: &ClickEvent, _window, cx| {
-                    FilesStore::global(cx).update(cx, |store, cx| {
-                        store.refresh(clan_id, channel_id, cx);
-                    });
+                    request_files_refresh(clan_id, channel_id, panel.clone(), cx);
                 }),
         )
 }
@@ -669,6 +736,7 @@ fn render_retry_banner(
     theme: &Theme,
     clan_id: ClanId,
     channel_id: ChannelId,
+    panel: WeakEntity<FilesPopoverPanel>,
 ) -> impl IntoElement {
     let tokens = &theme.tokens;
     h_flex()
@@ -692,9 +760,7 @@ fn render_retry_banner(
                 .ghost()
                 .with_size(Size::XSmall)
                 .on_click(move |_: &ClickEvent, _window, cx| {
-                    FilesStore::global(cx).update(cx, |store, cx| {
-                        store.refresh(clan_id, channel_id, cx);
-                    });
+                    request_files_refresh(clan_id, channel_id, panel.clone(), cx);
                 }),
         )
 }
@@ -922,6 +988,13 @@ fn file_audio_thumb(
                 ),
         )
         .into_any_element()
+}
+
+fn file_rows_common_prefix(old: &[FileRowVm], new: &[FileRowVm]) -> usize {
+    old.iter()
+        .zip(new.iter())
+        .take_while(|(a, b)| a.id == b.id)
+        .count()
 }
 
 fn format_file_time(create_time: i64, locale: &str) -> String {

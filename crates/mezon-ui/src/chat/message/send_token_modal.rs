@@ -112,8 +112,10 @@ impl SendTokenModal {
                         return;
                     }
                     this.error = None;
-                    let raw = input.read(cx).value();
-                    let needs_reformat = format_amount_input(raw, &this.locale) != raw;
+                    let state = input.read(cx);
+                    let needs_reformat =
+                        amount_reformat_target(state.value(), state.is_composing(), &this.locale)
+                            .is_some();
                     if needs_reformat && !this.amount_reformat_queued {
                         this.amount_reformat_queued = true;
                         let input = input.clone();
@@ -122,9 +124,10 @@ impl SendTokenModal {
                         window.defer(cx, move |window, cx| {
                             view.update(cx, |this, _| this.amount_reformat_queued = false);
                             input.update(cx, |input, cx| {
-                                let current = input.value().to_string();
-                                let formatted = format_amount_input(&current, &locale);
-                                if formatted != current {
+                                let composing = input.is_composing();
+                                let target =
+                                    amount_reformat_target(input.value(), composing, &locale);
+                                if let Some(formatted) = target {
                                     input.set_value(formatted, window, cx);
                                 }
                             });
@@ -676,6 +679,14 @@ fn group_separator(locale: &str) -> char {
     if locale.starts_with("vi") { '.' } else { ',' }
 }
 
+fn amount_reformat_target(raw: &str, composing: bool, locale: &str) -> Option<String> {
+    if composing {
+        return None;
+    }
+    let formatted = format_amount_input(raw, locale);
+    (formatted != raw).then_some(formatted)
+}
+
 fn format_amount_input(raw: &str, locale: &str) -> String {
     if raw.is_empty() {
         return String::new();
@@ -714,8 +725,8 @@ fn section(theme: &crate::theme::Theme, label: impl Into<SharedString>) -> gpui:
 #[cfg(test)]
 mod tests {
     use super::{
-        DECIMAL_FACTOR, MAX_AMOUNT_DIGITS, amount_exceeds_balance, digit_count,
-        format_amount_input, format_thousands, parse_whole_token_amount,
+        DECIMAL_FACTOR, MAX_AMOUNT_DIGITS, amount_exceeds_balance, amount_reformat_target,
+        digit_count, format_amount_input, format_thousands, parse_whole_token_amount,
     };
 
     #[test]
@@ -789,6 +800,17 @@ mod tests {
         assert_eq!(format_amount_input("1000", "vi"), "1.000");
         assert_eq!(format_amount_input("12345678", "vi"), "12.345.678");
         assert_eq!(format_amount_input("999", "en"), "999");
+    }
+
+    #[test]
+    fn an_ime_composition_is_never_reformatted_under_the_engine() {
+        assert_eq!(
+            amount_reformat_target("10000", false, "en"),
+            Some("10,000".to_string())
+        );
+        assert_eq!(amount_reformat_target("10000", true, "en"), None);
+        assert_eq!(amount_reformat_target("10.000", true, "vi"), None);
+        assert_eq!(amount_reformat_target("10,000", false, "en"), None);
     }
 
     #[test]

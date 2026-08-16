@@ -911,17 +911,15 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
     collect(&content.hg, Kind::Hashtag, &mut toks);
     collect(&content.ej, Kind::Emoji, &mut toks);
     collect(&content.mk, Kind::Markdown, &mut toks);
-    if content.mk.is_empty() {
-        for t in &content.lk {
-            let s = t.s.unwrap_or(0);
-            let e = t.e.unwrap_or(0);
-            if e > s {
-                let kind = link_kind_from_marker(mezon_client::link_markdown_kind(&slice(s, e)));
-                toks.push((s, e, Kind::Link(kind), t.clone()));
-            }
+    for t in &content.lk {
+        let s = t.s.unwrap_or(0);
+        let e = t.e.unwrap_or(0);
+        if e > s {
+            let text = slice(s, e);
+            let target = resolve_link_url(t.url.as_deref().unwrap_or(""), &text);
+            let kind = link_kind_from_marker(mezon_client::link_markdown_kind(&target));
+            toks.push((s, e, Kind::Link(kind), t.clone()));
         }
-    } else {
-        collect(&content.lk, Kind::Link(LinkKind::Plain), &mut toks);
     }
     collect(&content.vk, Kind::Link(LinkKind::Plain), &mut toks);
     collect(&content.lky, Kind::Link(LinkKind::YouTube), &mut toks);
@@ -1968,6 +1966,53 @@ mod tests {
                 url: url.into(),
                 kind: LinkKind::Plain,
             }]
+        );
+    }
+
+    #[test]
+    fn parse_spans_classifies_a_link_token_by_its_target_not_its_display_text() {
+        let text = "https://www.youtube.com/watch?v=lHW3fsJQ1sg";
+        let content = ApiMessageContent {
+            t: text.into(),
+            lk: vec![ContentToken {
+                url: Some("https://evil.example/".into()),
+                ..token(0, text.len() as i64)
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![MessageSpan::Link {
+                text: text.into(),
+                url: "https://evil.example/".into(),
+                kind: LinkKind::Plain,
+            }],
+            "the card brand must follow the url the click opens, not the text it shows"
+        );
+    }
+
+    #[test]
+    fn parse_spans_classifies_a_link_token_alongside_unrelated_markdown() {
+        let text = "hi https://youtu.be/abc";
+        let content = ApiMessageContent {
+            t: text.into(),
+            mk: vec![ContentToken {
+                kind: Some("b".into()),
+                ..token(0, 2)
+            }],
+            lk: vec![token(3, text.len() as i64)],
+            ..Default::default()
+        };
+        let spans = parse_spans(&content);
+        assert!(
+            spans.iter().any(|span| matches!(
+                span,
+                MessageSpan::Link {
+                    kind: LinkKind::YouTube,
+                    ..
+                }
+            )),
+            "an unrelated bold run must not downgrade the link to plain: {spans:?}"
         );
     }
 

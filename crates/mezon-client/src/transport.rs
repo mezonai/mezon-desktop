@@ -4299,13 +4299,15 @@ impl MezonTransport {
     }
 
     /// List messages belonging to a discussion topic. Mirrors mezon-js
-    /// `listChannelMessages(clanId, channelId, undefined, direction, limit, topicId)`:
-    /// the parent `channel_id` is passed with `message_id = 0` and the `topic_id` set.
+    /// `listChannelMessages(clanId, channelId, messageId, direction, limit, topicId)`:
+    /// the parent `channel_id` is passed with the `topic_id` set, and `message_id`
+    /// is the paging cursor (`0` for the newest page).
     pub async fn list_topic_messages(
         &self,
         clan_id: i64,
         channel_id: i64,
         topic_id: i64,
+        message_id: i64,
         direction: i32,
         limit: u32,
     ) -> Result<ListChannelMessagesResult> {
@@ -4315,7 +4317,7 @@ impl MezonTransport {
         let body = api::ListChannelMessagesRequest {
             clan_id,
             channel_id,
-            message_id: 0,
+            message_id,
             direction,
             limit: limit as i32,
             topic_id,

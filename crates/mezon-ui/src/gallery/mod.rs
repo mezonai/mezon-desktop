@@ -149,7 +149,7 @@ impl GalleryModal {
             channel_id,
             channel_label,
             settings,
-            active_filter: MediaFilter::All,
+            active_filter: MediaFilter::Image,
             from_date_picker: from_date_picker.clone(),
             to_date_picker: to_date_picker.clone(),
             date_validation_error: None,
@@ -859,13 +859,6 @@ fn render_filter_tabs(
                 .flex_row()
                 .gap_2()
                 .child(filter_tab(
-                    MediaFilter::All,
-                    active,
-                    mezon_i18n::t(locale, "channelTopbar.gallery.filters.all").to_string(),
-                    theme,
-                    entity,
-                ))
-                .child(filter_tab(
                     MediaFilter::Image,
                     active,
                     mezon_i18n::t(locale, "channelTopbar.gallery.filters.images").to_string(),
@@ -1048,7 +1041,6 @@ fn empty_label(filter: MediaFilter, date_filtered: bool, locale: &str) -> String
         "channelTopbar.gallery.emptyState.noMediaFilesDateRange"
     } else {
         match filter {
-            MediaFilter::All => "channelTopbar.gallery.emptyState.noMediaFiles",
             MediaFilter::Image => "channelTopbar.gallery.emptyState.noImages",
             MediaFilter::Video => "channelTopbar.gallery.emptyState.noVideos",
         }
