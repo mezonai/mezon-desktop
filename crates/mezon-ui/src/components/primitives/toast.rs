@@ -67,7 +67,6 @@ impl RenderOnce for Toast {
         div()
             .relative()
             .w(px(360.))
-            .max_w(px(360.))
             .min_h(px(56.))
             .rounded(px(10.))
             .border_1()

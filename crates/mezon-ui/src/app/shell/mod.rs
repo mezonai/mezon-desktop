@@ -50,8 +50,8 @@ struct ToastItem {
     message: SharedString,
     kind: ToastKind,
     progress: Option<f32>,
+    expires_at: Option<Instant>,
     countdown: Option<f32>,
-    _dismiss_task: Option<Task<()>>,
 }
 
 struct StackedModalHost {
@@ -85,6 +85,7 @@ pub struct Shell {
     modal_fullscreen: bool,
     command_palette_open: bool,
     next_id: usize,
+    countdown_ticker: Option<Task<()>>,
 }
 
 struct GlobalShell(Entity<Shell>);
@@ -99,6 +100,7 @@ impl Shell {
             modal_fullscreen: false,
             command_palette_open: false,
             next_id: 0,
+            countdown_ticker: None,
         });
         cx.set_global(GlobalShell(entity.clone()));
         entity
@@ -117,45 +119,63 @@ impl Shell {
     ) {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        let ttl = TOAST_TTL;
-        let dismiss_task = cx.spawn(async move |this, cx| {
-            let started_at = Instant::now();
-            let tick = Duration::from_secs_f32(1. / TOAST_COUNTDOWN_FPS);
-            loop {
-                let remaining = ttl.saturating_sub(started_at.elapsed());
-                cx.background_executor().timer(tick.min(remaining)).await;
-                let elapsed = started_at.elapsed();
-                let should_continue = this
-                    .update(cx, |this, cx| {
-                        if elapsed >= ttl {
-                            this.toasts.retain(|toast| toast.id != id);
-                            cx.notify();
-                            return false;
-                        }
-                        let Some(toast) = this.toasts.iter_mut().find(|toast| toast.id == id)
-                        else {
-                            return false;
-                        };
-                        toast.countdown = Some(1. - elapsed.as_secs_f32() / ttl.as_secs_f32());
-                        cx.notify();
-                        true
-                    })
-                    .unwrap_or(false);
-                if !should_continue {
-                    break;
-                }
-            }
-        });
         self.toasts.push(ToastItem {
             id,
             key: None,
             message: message.into(),
             kind,
             progress: None,
+            expires_at: Some(cx.background_executor().now() + TOAST_TTL),
             countdown: Some(1.),
-            _dismiss_task: Some(dismiss_task),
         });
+        self.ensure_countdown_ticker(cx);
         cx.notify();
+    }
+
+    fn ensure_countdown_ticker(&mut self, cx: &mut Context<Self>) {
+        if self.countdown_ticker.is_some() {
+            return;
+        }
+        self.countdown_ticker = Some(cx.spawn(async move |this, cx| {
+            let tick = Duration::from_secs_f32(1. / TOAST_COUNTDOWN_FPS);
+            loop {
+                cx.background_executor().timer(tick).await;
+                let expiring_toasts_remain = this
+                    .update(cx, |this, cx| this.advance_countdowns(cx))
+                    .unwrap_or(false);
+                if !expiring_toasts_remain {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |this, _| this.countdown_ticker = None);
+        }));
+    }
+
+    fn advance_countdowns(&mut self, cx: &mut Context<Self>) -> bool {
+        let now = cx.background_executor().now();
+        let count_before_expiry = self.toasts.len();
+        self.toasts
+            .retain(|toast| toast.expires_at.is_none_or(|at| at > now));
+        let mut needs_redraw = self.toasts.len() != count_before_expiry;
+
+        if cx.active_window().is_some() {
+            let ttl = TOAST_TTL.as_secs_f32();
+            for toast in self.toasts.iter_mut() {
+                let Some(expires_at) = toast.expires_at else {
+                    continue;
+                };
+                let remaining = Some(expires_at.saturating_duration_since(now).as_secs_f32() / ttl);
+                if toast.countdown != remaining {
+                    toast.countdown = remaining;
+                    needs_redraw = true;
+                }
+            }
+        }
+
+        if needs_redraw {
+            cx.notify();
+        }
+        self.toasts.iter().any(|toast| toast.expires_at.is_some())
     }
 
     /// Show a keyed toast that stays until something dismisses it. Used for conditions the user
@@ -186,8 +206,8 @@ impl Shell {
             message: message.into(),
             kind,
             progress: None,
+            expires_at: None,
             countdown: None,
-            _dismiss_task: None,
         });
         cx.notify();
     }
@@ -237,8 +257,8 @@ impl Shell {
                 message,
                 kind: ToastKind::Info,
                 progress: Some(progress.clamp(0., 1.)),
+                expires_at: None,
                 countdown: None,
-                _dismiss_task: None,
             });
         }
         cx.notify();
@@ -926,5 +946,66 @@ impl Shell {
                         })),
                 ))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn every_transient_toast_shares_one_countdown_ticker(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        cx.update(|window, _| window.activate_window());
+        let shell = cx.update(|_, cx| Shell::init(cx));
+
+        shell.update(cx, |shell, cx| {
+            shell.toast(ToastKind::Info, "first", cx);
+            shell.toast(ToastKind::Success, "second", cx);
+        });
+        cx.update(|_, cx| {
+            let shell = shell.read(cx);
+            assert_eq!(shell.toasts.len(), 2);
+            assert!(shell.countdown_ticker.is_some());
+        });
+
+        cx.executor().advance_clock(TOAST_TTL / 2);
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            for toast in &shell.read(cx).toasts {
+                let countdown = toast.countdown.expect("a transient toast counts down");
+                assert!((0.0..1.0).contains(&countdown), "countdown was {countdown}");
+            }
+        });
+
+        cx.executor().advance_clock(TOAST_TTL);
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let shell = shell.read(cx);
+            assert!(shell.toasts.is_empty());
+            assert!(shell.countdown_ticker.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn sticky_and_progress_toasts_never_tick(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        cx.update(|window, _| window.activate_window());
+        let shell = cx.update(|_, cx| Shell::init(cx));
+
+        shell.update(cx, |shell, cx| {
+            shell.sticky("offline", ToastKind::Error, "offline", cx);
+            shell.progress_toast("upload", "uploading", 0.4, cx);
+        });
+
+        cx.executor().advance_clock(TOAST_TTL * 3);
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let shell = shell.read(cx);
+            assert_eq!(shell.toasts.len(), 2);
+            assert!(shell.countdown_ticker.is_none());
+            assert!(shell.toasts.iter().all(|toast| toast.expires_at.is_none()));
+        });
     }
 }
