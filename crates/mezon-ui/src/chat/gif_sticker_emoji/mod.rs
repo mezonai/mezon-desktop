@@ -222,6 +222,9 @@ impl GifStickerEmojiPopup {
                 SubPanel::Stickers | SubPanel::Emoji
             )
         );
+        if self.active == SubPanel::Sounds {
+            sound_panel::stop_preview(cx);
+        }
         self.active = tab;
         self.ensure_active_panel(window, cx);
         if !preserve {

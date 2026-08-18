@@ -178,26 +178,35 @@ impl InboxPopoverPanel {
         });
     }
 
-    fn sync_list_state(&mut self, tab_changed: bool) {
+    fn scroll_list_to_top(&self) {
+        self.list_state.scroll_to(gpui::ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.),
+        });
+    }
+
+    fn sync_list_state(&mut self, pin_top: bool) {
         let count = self.cached_items.len();
         let old_count = self.list_state.item_count();
-        let count_changed = old_count != count;
-        if count_changed {
-            if !tab_changed && count > old_count {
-                self.list_state
-                    .splice(old_count..old_count, count - old_count);
-            } else {
-                self.list_state.reset(count);
-            }
-        } else if tab_changed && count > 0 {
-            self.list_state.remeasure();
+        if pin_top {
+            self.list_state.reset(count);
+            self.scroll_list_to_top();
+            return;
         }
-        if tab_changed {
-            self.list_state.scroll_to(gpui::ListOffset {
-                item_ix: 0,
-                offset_in_item: px(0.),
-            });
+        if old_count == count {
+            return;
         }
+        if old_count == 0 {
+            self.list_state.reset(count);
+            self.scroll_list_to_top();
+            return;
+        }
+        if count > old_count {
+            self.list_state
+                .splice(old_count..old_count, count - old_count);
+            return;
+        }
+        self.list_state.reset(count);
     }
 
     fn prefetch_context_for_tab(&self, cx: &mut Context<Self>) {
@@ -244,7 +253,10 @@ impl InboxPopoverPanel {
                     .into_iter()
                     .map(|topic| {
                         let view = build_topic_row_view(&topic, cx);
-                        ListRow::Topic { topic, view }
+                        ListRow::Topic {
+                            topic: Box::new(topic),
+                            view: Box::new(view),
+                        }
                     })
                     .collect(),
             );
@@ -263,7 +275,7 @@ impl InboxPopoverPanel {
                     let view = build_notification_row_view(&notification, locale, cx);
                     ListRow::Notification {
                         notification: Box::new(notification),
-                        view,
+                        view: Box::new(view),
                     }
                 })
                 .collect(),
@@ -276,7 +288,7 @@ impl InboxPopoverPanel {
         }
         self.tab = tab;
         self.prefetch_context_for_tab(cx);
-        self.sync_from_store(cx);
+        self.cached_items = Self::build_items(self.tab, &self.clan_id, &self.locale, cx);
         self.sync_list_state(true);
         cx.notify();
     }
@@ -292,11 +304,16 @@ impl InboxPopoverPanel {
     }
 
     fn maybe_load_more(&self, visible_end: usize, cx: &mut Context<Self>) {
-        if self.tab == InboxTab::Topics {
-            return;
-        }
         let count = self.cached_items.len();
         if count == 0 || count.saturating_sub(visible_end) > PREFETCH_THRESHOLD {
+            return;
+        }
+        if self.tab == InboxTab::Topics {
+            TopicsStore::global(cx).update(cx, |store, cx| {
+                if store.has_more() {
+                    store.fetch_more(&self.clan_id, cx);
+                }
+            });
             return;
         }
         if let Some(category) = self.tab.category() {
@@ -313,11 +330,11 @@ impl InboxPopoverPanel {
 enum ListRow {
     Notification {
         notification: Box<InboxNotification>,
-        view: NotificationRowView,
+        view: Box<NotificationRowView>,
     },
     Topic {
-        topic: TopicDiscussion,
-        view: TopicRowView,
+        topic: Box<TopicDiscussion>,
+        view: Box<TopicRowView>,
     },
 }
 
@@ -702,7 +719,7 @@ fn render_row(
             theme,
             locale,
             *notification,
-            view,
+            *view,
             tab,
             avatar_cache,
             message_cache,
@@ -711,7 +728,7 @@ fn render_row(
             cx,
         ),
         ListRow::Topic { topic, view } => {
-            render_topic_item(theme, locale, topic, view, avatar_cache, inbox_handle, cx)
+            render_topic_item(theme, locale, *topic, *view, avatar_cache, inbox_handle, cx)
         }
     }
 }

@@ -28,6 +28,19 @@ pub fn sanitize_upload_filename(name: &str) -> String {
         .collect()
 }
 
+pub fn upload_attachment_type(filetype: &str) -> &'static str {
+    let lower = filetype.to_ascii_lowercase();
+    if lower.contains("image") {
+        "image"
+    } else if lower.contains("video") {
+        "video"
+    } else if lower.contains("audio") {
+        "audio"
+    } else {
+        "doc"
+    }
+}
+
 fn clamp_i32(value: usize) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
@@ -282,6 +295,36 @@ impl AppApi {
         self.transport.list_clan_descs().await
     }
 
+    pub async fn list_onboarding(
+        &self,
+        clan_id: i64,
+        limit: i32,
+        page: i32,
+    ) -> Result<mezon_proto::api::ListOnboardingResponse> {
+        self.transport.list_onboarding(clan_id, limit, page).await
+    }
+
+    pub async fn create_onboarding(
+        &self,
+        clan_id: i64,
+        contents: Vec<mezon_proto::api::OnboardingContent>,
+    ) -> Result<mezon_proto::api::ListOnboardingResponse> {
+        self.transport.create_onboarding(clan_id, contents).await
+    }
+
+    pub async fn update_onboarding(
+        &self,
+        id: i64,
+        clan_id: i64,
+        content: mezon_proto::api::OnboardingContent,
+    ) -> Result<()> {
+        self.transport.update_onboarding(id, clan_id, content).await
+    }
+
+    pub async fn delete_onboarding(&self, id: i64, clan_id: i64) -> Result<()> {
+        self.transport.delete_onboarding(id, clan_id).await
+    }
+
     pub async fn list_clan_users(
         &self,
         clan_id: i64,
@@ -334,6 +377,10 @@ impl AppApi {
         request: mezon_proto::api::UpdateClanDescRequest,
     ) -> Result<()> {
         self.transport.update_clan_desc(request).await
+    }
+
+    pub async fn delete_clan_desc(&self, clan_desc_id: i64) -> Result<()> {
+        self.transport.delete_clan_desc(clan_desc_id).await
     }
 
     pub async fn get_system_message_by_clan_id(
@@ -1500,6 +1547,41 @@ impl AppApi {
             .await
     }
 
+    pub async fn remove_clan_users(&self, clan_id: i64, user_ids: Vec<String>) -> Result<()> {
+        self.transport.remove_clan_users(clan_id, user_ids).await
+    }
+
+    pub async fn ban_clan_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        user_ids: Vec<String>,
+        ban_time: i32,
+    ) -> Result<()> {
+        self.transport
+            .ban_clan_users(clan_id, channel_id, user_ids, ban_time)
+            .await
+    }
+
+    pub async fn unban_clan_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        user_ids: Vec<String>,
+    ) -> Result<()> {
+        self.transport
+            .unban_clan_users(clan_id, channel_id, user_ids)
+            .await
+    }
+
+    pub async fn list_banned_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<mezon_proto::api::BannedUserList> {
+        self.transport.list_banned_users(clan_id, channel_id).await
+    }
+
     pub async fn get_clan_user_role(&self, clan_id: i64) -> Result<mezon_proto::api::RoleList> {
         self.transport.get_clan_user_role(clan_id, 0).await
     }
@@ -1653,6 +1735,23 @@ impl AppApi {
         })
     }
 
+    pub async fn update_category(
+        &self,
+        clan_id: i64,
+        category_id: i64,
+        category_name: &str,
+    ) -> Result<()> {
+        self.transport
+            .update_category(category_id, category_name, clan_id)
+            .await
+    }
+
+    pub async fn delete_category(&self, clan_id: i64, category_id: i64) -> Result<()> {
+        self.transport
+            .delete_category_desc(category_id, clan_id)
+            .await
+    }
+
     pub async fn add_channel_users(&self, channel_id: i64, user_ids: Vec<String>) -> Result<()> {
         self.transport.add_channel_users(channel_id, user_ids).await
     }
@@ -1709,6 +1808,7 @@ impl AppApi {
             thumbnail,
         } = file;
         let upload_name = sanitize_upload_filename(&filename);
+        let upload_type = upload_attachment_type(&filetype);
         let raw_size = crate::transport_runtime::file_len(path.clone()).await?;
         let size = i32::try_from(raw_size)
             .map_err(|_| anyhow::anyhow!("attachment too large to upload: {raw_size} bytes"))?;
@@ -1722,7 +1822,7 @@ impl AppApi {
                 .transport
                 .multipart_upload_attachment_file_start(mezon_proto::api::UploadAttachmentRequest {
                     filename: upload_name.clone(),
-                    filetype: filetype.clone(),
+                    filetype: upload_type.to_string(),
                     size,
                     width,
                     height,
@@ -1744,14 +1844,14 @@ impl AppApi {
                     part_urls: started.urls,
                     ranges,
                     path,
-                    content_type: filetype.clone(),
+                    content_type: filetype,
                     filename: started.filename,
                 },
             )
         } else {
             let upload = self
                 .transport
-                .upload_attachment_file(&upload_name, &filetype, size, width, height)
+                .upload_attachment_file(&upload_name, upload_type, size, width, height)
                 .await?;
             let url = attachment_cdn_url(&self.base_img_url, &upload.filename)?;
             (
@@ -1767,7 +1867,7 @@ impl AppApi {
                 filename,
                 size,
                 url,
-                filetype,
+                filetype: upload_type.to_string(),
                 width,
                 height,
                 thumbnail: thumbnail_url,
@@ -2222,15 +2322,16 @@ impl AppApi {
             (0, 0)
         };
 
+        let upload_type = upload_attachment_type(&filetype);
         let url = self
-            .upload_bytes(&upload_name, &filetype, size, width, height, data)
+            .upload_bytes(&upload_name, upload_type, size, width, height, data)
             .await?;
 
         Ok(mezon_proto::api::MessageAttachment {
             filename,
             size,
             url,
-            filetype,
+            filetype: upload_type.to_string(),
             width,
             height,
             thumbnail: String::new(),
@@ -2594,8 +2695,9 @@ impl AppApi {
         &self,
         clan_id: &str,
         limit: i32,
+        page: i32,
     ) -> Result<Vec<crate::TopicDiscussion>> {
-        self.transport.list_sd_topics(clan_id, limit).await
+        self.transport.list_sd_topics(clan_id, limit, page).await
     }
 
     pub async fn get_topic_detail(&self, topic_id: &str) -> Result<crate::TopicDiscussion> {
@@ -2632,6 +2734,73 @@ impl AppApi {
     pub async fn write_voice_reaction(&self, emojis: Vec<String>, channel_id: i64) -> Result<()> {
         self.transport
             .write_voice_reaction(emojis, channel_id)
+            .await
+    }
+
+    pub async fn forward_webrtc_signaling(
+        &self,
+        receiver_id: i64,
+        data_type: i32,
+        json_data: String,
+        channel_id: i64,
+        caller_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .forward_webrtc_signaling(receiver_id, data_type, json_data, channel_id, caller_id)
+            .await
+    }
+
+    pub async fn make_call_push(
+        &self,
+        receiver_id: i64,
+        json_data: String,
+        channel_id: i64,
+        caller_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .make_call_push(receiver_id, json_data, channel_id, caller_id)
+            .await
+    }
+
+    pub async fn update_channel_message_structured(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        content_json: String,
+        mode: i32,
+        create_time_seconds: u32,
+    ) -> Result<()> {
+        self.transport
+            .update_channel_message_structured(
+                clan_id,
+                channel_id,
+                message_id,
+                content_json,
+                mode,
+                create_time_seconds,
+            )
+            .await
+    }
+
+    pub async fn write_voice_interactive(
+        &self,
+        clan_id: i64,
+        voice_channel_id: i64,
+        sender_id: i64,
+        receiver_id: i64,
+        event_type: i32,
+        params: String,
+    ) -> Result<()> {
+        self.transport
+            .write_voice_interactive(
+                clan_id,
+                voice_channel_id,
+                sender_id,
+                receiver_id,
+                event_type,
+                params,
+            )
             .await
     }
 
@@ -2760,7 +2929,24 @@ impl AppApi {
 mod tests {
     use super::{
         MULTIPART_PART_SIZE, attachment_cdn_url, multipart_part_ranges, sanitize_upload_filename,
+        upload_attachment_type,
     };
+
+    #[test]
+    fn everything_that_is_not_media_uploads_as_a_doc() {
+        assert_eq!(upload_attachment_type("image/png"), "image");
+        assert_eq!(upload_attachment_type("video/mp4"), "video");
+        assert_eq!(upload_attachment_type("audio/webm"), "audio");
+        assert_eq!(upload_attachment_type("application/pdf"), "doc");
+        assert_eq!(upload_attachment_type("text/csv"), "doc");
+        assert_eq!(upload_attachment_type(""), "doc");
+        assert_eq!(
+            upload_attachment_type(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            ),
+            "doc"
+        );
+    }
 
     #[test]
     fn upload_filename_folds_every_non_ascii_char() {

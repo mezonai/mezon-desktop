@@ -7,7 +7,10 @@ use mezon_client::{AppApi, ConnectionStatus};
 use mezon_proto::api;
 
 use crate::Freshness;
-use crate::emoji::{MAX_STICKER_BYTES, is_valid_emoticon_shortname, upload_emoticon_file};
+use crate::emoji::{
+    EmoticonError, EmoticonErrorKind, MAX_STICKER_BYTES, is_valid_emoticon_shortname,
+    upload_emoticon_file,
+};
 use crate::ids::ClanId;
 use crate::voice::{MAX_SOUND_BYTES, upload_sound_file};
 
@@ -225,14 +228,14 @@ impl StickerStore {
         shortname: &str,
         is_for_sale: bool,
         cx: &mut Context<Self>,
-    ) -> Task<Result<(), String>> {
+    ) -> Task<Result<(), EmoticonError>> {
         let api = self.api.clone();
         let path = path.to_path_buf();
         let shortname = shortname.trim().to_string();
         let clan = clan_id.get();
         cx.spawn(async move |this, cx| {
             if !is_valid_emoticon_shortname(&shortname) {
-                return Err("invalid_name".into());
+                return Err(EmoticonErrorKind::InvalidName.into());
             }
             let (id, url) =
                 upload_emoticon_file(&api, &path, "stickers", MAX_STICKER_BYTES, is_for_sale)
@@ -247,9 +250,9 @@ impl StickerStore {
                 is_for_sale,
             )
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| EmoticonError::other(e.to_string()))?;
             this.update(cx, |this, cx| this.refresh(cx))
-                .map_err(|_| "store dropped".to_string())?;
+                .map_err(|_| EmoticonError::other("store dropped"))?;
             Ok(())
         })
     }
@@ -261,24 +264,26 @@ impl StickerStore {
         source: &str,
         shortname: &str,
         cx: &mut Context<Self>,
-    ) -> Task<Result<(), String>> {
+    ) -> Task<Result<(), EmoticonError>> {
         let api = self.api.clone();
         let id: i64 = match sticker_id.parse() {
             Ok(id) => id,
-            Err(_) => return cx.spawn(async move |_, _| Err("invalid sticker id".into())),
+            Err(_) => {
+                return cx.spawn(async move |_, _| Err(EmoticonError::other("invalid sticker id")));
+            }
         };
         let shortname = shortname.trim().to_string();
         let source = source.to_string();
         let clan = clan_id.get();
         cx.spawn(async move |this, cx| {
             if !is_valid_emoticon_shortname(&shortname) {
-                return Err("invalid_name".into());
+                return Err(EmoticonErrorKind::InvalidName.into());
             }
             api.update_clan_sticker_by_id(id, clan, &source, &shortname, "Among Us")
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| EmoticonError::other(e.to_string()))?;
             this.update(cx, |this, cx| this.refresh(cx))
-                .map_err(|_| "store dropped".to_string())?;
+                .map_err(|_| EmoticonError::other("store dropped"))?;
             Ok(())
         })
     }
@@ -317,16 +322,18 @@ impl StickerStore {
         path: &Path,
         shortname: &str,
         cx: &mut Context<Self>,
-    ) -> Task<Result<(), String>> {
+    ) -> Task<Result<(), EmoticonError>> {
         let api = self.api.clone();
         let path = path.to_path_buf();
         let shortname = shortname.trim().to_string();
         let clan = clan_id.get();
         cx.spawn(async move |this, cx| {
             if !is_valid_emoticon_shortname(&shortname) {
-                return Err("invalid_name".into());
+                return Err(EmoticonErrorKind::InvalidName.into());
             }
-            let (id, url) = upload_sound_file(&api, &path, MAX_SOUND_BYTES).await?;
+            let (id, url) = upload_sound_file(&api, &path, MAX_SOUND_BYTES)
+                .await
+                .map_err(EmoticonError::other)?;
             api.add_clan_sticker(
                 clan,
                 &url,
@@ -337,9 +344,9 @@ impl StickerStore {
                 false,
             )
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| EmoticonError::other(e.to_string()))?;
             this.update(cx, |this, cx| this.refresh(cx))
-                .map_err(|_| "store dropped".to_string())?;
+                .map_err(|_| EmoticonError::other("store dropped"))?;
             Ok(())
         })
     }
@@ -351,7 +358,7 @@ impl StickerStore {
         source: &str,
         shortname: &str,
         cx: &mut Context<Self>,
-    ) -> Task<Result<(), String>> {
+    ) -> Task<Result<(), EmoticonError>> {
         self.update_sticker(sound_id, clan_id, source, shortname, cx)
     }
 

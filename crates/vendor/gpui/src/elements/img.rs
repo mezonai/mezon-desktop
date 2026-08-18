@@ -1,7 +1,8 @@
 use crate::{
     AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, DefiniteLength, Element, ElementId,
-    Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId, InteractiveElement,
-    Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels, RenderImage, Resource,
+    Entity, GlobalElementId, Hitbox, Image, ImageCache, ImageId, InspectorElementId,
+    InteractiveElement, Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels,
+    RenderImage, Resource,
     SharedString, SharedUri, StyleRefinement, Styled, Task, Window, px,
 };
 use anyhow::Result;
@@ -251,6 +252,10 @@ impl DerefMut for Stateful<Img> {
 /// The image state between frames
 struct ImgState {
     frame_index: usize,
+    /// mezon vendor edit: which image `frame_index` counts frames of. An element
+    /// id outlives the source it renders, so without this the index of a long
+    /// animation carries over to whatever image the source resolves to next.
+    last_image_id: Option<ImageId>,
     last_frame_time: Option<Instant>,
     started_loading: Option<(Instant, Task<()>)>,
     next_frame_due: Option<Instant>,
@@ -303,6 +308,7 @@ impl Element for Img {
             let mut state = state.map(|state| {
                 state.unwrap_or(ImgState {
                     frame_index: 0,
+                    last_image_id: None,
                     last_frame_time: None,
                     started_loading: None,
                     next_frame_due: None,
@@ -332,6 +338,15 @@ impl Element for Img {
                             let max_frame_index = frame_count.saturating_sub(1);
 
                             if let Some(state) = &mut state {
+                                // mezon vendor edit: start the animation over when the
+                                // source resolves to a different image, so the index
+                                // never outlives the image it was counted against.
+                                if state.last_image_id != Some(data.id) {
+                                    state.last_image_id = Some(data.id);
+                                    state.frame_index = 0;
+                                    state.last_frame_time = None;
+                                    state.next_frame_due = None;
+                                }
                                 state.frame_index = state.frame_index.min(max_frame_index);
                                 if frame_count > 1 {
                                     if window.is_window_active() {
@@ -541,10 +556,19 @@ impl Element for Img {
                     if data.frame_count() == 0 {
                         return;
                     }
+                    // mezon vendor edit: `layout_state.frame_index` was computed in
+                    // `request_layout`, where it is only clamped when the image is
+                    // already decoded. A decode that lands between layout and paint
+                    // (`ImageCacheItem::get` polls the task with `now_or_never`) hands
+                    // paint a *different* image than layout saw -- e.g. this element id
+                    // was animating a 30-frame GIF and its src now resolves to a static
+                    // frame -- so the stale index has to be re-clamped against the data
+                    // actually being painted.
+                    let frame_index = layout_state.frame_index.min(data.frame_count() - 1);
                     let new_bounds = self
                         .style
                         .object_fit
-                        .get_bounds(bounds, data.size(layout_state.frame_index));
+                        .get_bounds(bounds, data.size(frame_index));
                     let corner_radii = style
                         .corner_radii
                         .to_pixels(window.rem_size())
@@ -554,7 +578,7 @@ impl Element for Img {
                             new_bounds,
                             corner_radii,
                             data,
-                            layout_state.frame_index,
+                            frame_index,
                             self.style.grayscale,
                         )
                         .log_err();

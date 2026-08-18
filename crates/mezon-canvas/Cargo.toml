@@ -18,7 +18,7 @@ mezon-i18n.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 unicode-segmentation.workspace = true
-image.workspace = true
+image = { workspace = true, features = ["webp"] }
 base64.workspace = true
 futures.workspace = true
 smallvec.workspace = true

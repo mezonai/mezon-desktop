@@ -731,6 +731,11 @@ impl ChatArea {
                 )
             });
 
+        let hide_header = is_dm
+            && channel_id.is_some_and(|cid| {
+                crate::chat::call_window::call_panel_active_for_dm(cid.get(), cx)
+            });
+
         div()
             .flex()
             .flex_col()
@@ -740,7 +745,7 @@ impl ChatArea {
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
-            .child(header)
+            .when(!hide_header, |this| this.child(header))
             .child(body)
             .into_any_element()
     }

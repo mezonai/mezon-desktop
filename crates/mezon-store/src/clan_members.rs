@@ -231,6 +231,26 @@ impl ClanMembersStore {
         self.fetch(clan_id, cx).detach();
     }
 
+    pub fn kick_member(
+        &mut self,
+        clan_id: ClanId,
+        user_id: UserId,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            api.remove_clan_users(clan_id.get(), vec![user_id.get().to_string()])
+                .await?;
+            this.update(cx, |this, cx| {
+                if apply_remove_members(&mut this.cache, clan_id, &[user_id]) {
+                    cx.emit(ClanMembersEvent::Changed { clan_id });
+                    cx.notify();
+                }
+            })?;
+            Ok(())
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn seed_members_for_test(&mut self, clan_id: ClanId, members: Vec<ClanMember>) {
         let mut bucket = ClanBucket::default();

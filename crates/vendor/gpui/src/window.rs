@@ -4076,7 +4076,7 @@ impl Window {
     }
 
     /// Paint an image into the scene for the next frame at the current z-index.
-    /// This method will panic if the frame_index is not valid
+    /// Returns an error if `frame_index` is out of range for `data`.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
     pub fn paint_image(
@@ -4088,6 +4088,17 @@ impl Window {
         grayscale: bool,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
+
+        // mezon vendor edit: this used to `.expect()` inside the atlas callback, so a
+        // frame index that outlived the image it was computed for (an animated image
+        // swapped for a shorter/static one between layout and paint) aborted the whole
+        // app. Every caller already handles the `Result`, so report it instead.
+        if frame_index >= data.frame_count() {
+            return Err(anyhow!(
+                "paint_image called with frame index {frame_index}, image has {} frames",
+                data.frame_count()
+            ));
+        }
 
         let bounds = self.snap_bounds(bounds);
         let params = RenderImageParams {

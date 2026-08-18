@@ -68,6 +68,12 @@ pub struct SoundPanel {
 
 impl EventEmitter<SoundPanelEvent> for SoundPanel {}
 
+pub fn stop_preview(cx: &mut App) {
+    if let Some(store) = VoiceStore::try_global(cx) {
+        store.update(cx, |store, cx| store.stop_sound_preview(cx));
+    }
+}
+
 impl SoundPanel {
     pub fn new(locale: String, cx: &mut Context<Self>) -> Self {
         let sticker_sub = StickerStore::try_global(cx).map(|store| {
@@ -97,6 +103,7 @@ impl SoundPanel {
                 cx,
             )
         });
+        cx.on_release(|_, cx| stop_preview(cx)).detach();
         let mut panel = Self {
             query: String::new(),
             categories: Vec::new(),

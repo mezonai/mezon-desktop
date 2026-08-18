@@ -120,119 +120,118 @@ jobs:
           path: target/update-feed/*
           if-no-files-found: error
 
-  windows:
-    name: Windows artifacts
-    # Disabled by default: set ENABLE_WINDOWS_BUILD=true to build Windows artifacts again.
-    if: ${{ vars.ENABLE_WINDOWS_BUILD == 'true' }}
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          submodules: recursive
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master @ 2026-07-12
-        with:
-          toolchain: 1.95.0
-
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-
-      - name: Build release binary
-        shell: bash
-        run: |
-          VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
-          MEZON_STORE_VERSION="$VERSION" cargo build --release -p mezon-app --locked
-
-      - name: Detect signing configuration
-        id: signing
-        shell: bash
-        env:
-          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
-        run: |
-          if [ -n "$WINDOWS_CERT_PFX" ]; then
-            echo "has_cert=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_cert=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Sign mezon.exe
-        if: steps.signing.outputs.has_cert == 'true'
-        shell: pwsh
-        env:
-          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
-          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
-        run: |
-          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
-          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
-            Sort-Object FullName | Select-Object -Last 1).FullName
-          & $signtool sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 /td SHA256 `
-            /tr http://timestamp.digicert.com target\release\mezon.exe
-          $code = $LASTEXITCODE
-          Remove-Item $pfx
-          if ($code -ne 0) { exit 1 }
-          & $signtool verify /pa target\release\mezon.exe
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-
-      - name: Build Microsoft Store package
-        shell: pwsh
-        run: |
-          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
-          & .\packaging\windows\build-appx.ps1 -Version $version
-
-      - name: Upload Store package
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: appx-store
-          path: target/appx/*.appx
-          if-no-files-found: error
-
-      - name: Package update feed
-        shell: bash
-        run: bash scripts/make-update-feed.sh windows
-
-      - name: Build installer
-        shell: pwsh
-        run: |
-          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
-            /DMyAppVersion=$version `
-            /DSourceExe="$PWD\target\release\mezon.exe" `
-            /DSetupIcon="$PWD\crates\mezon-app\resources\windows\app.ico" `
-            /O"$PWD\target\installer" `
-            packaging\windows\mezon.iss
-
-      - name: Sign installer
-        if: steps.signing.outputs.has_cert == 'true'
-        shell: pwsh
-        env:
-          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
-          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
-        run: |
-          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
-          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
-            Sort-Object FullName | Select-Object -Last 1).FullName
-          $setup = (Get-ChildItem target\installer\*.exe).FullName
-          & $signtool sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 /td SHA256 `
-            /tr http://timestamp.digicert.com $setup
-          $code = $LASTEXITCODE
-          Remove-Item $pfx
-          if ($code -ne 0) { exit 1 }
-
-      - name: Collect installer
-        shell: pwsh
-        run: Copy-Item target\installer\*.exe target\update-feed\
-
-      - name: Upload feed
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: update-feed-windows
-          path: target/update-feed/*
-          if-no-files-found: error
-
+#   windows:
+#     name: Windows artifacts
+#     # Temporarily disabled while releases target Linux only.
+#     runs-on: windows-latest
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+#         with:
+#           submodules: recursive
+#
+#       - name: Install Rust toolchain
+#         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master @ 2026-07-12
+#         with:
+#           toolchain: 1.95.0
+#
+#       - name: Cache Cargo
+#         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+#
+#       - name: Build release binary
+#         shell: bash
+#         run: |
+#           VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+#           MEZON_STORE_VERSION="$VERSION" cargo build --release -p mezon-app --locked
+#
+#       - name: Detect signing configuration
+#         id: signing
+#         shell: bash
+#         env:
+#           WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+#         run: |
+#           if [ -n "$WINDOWS_CERT_PFX" ]; then
+#             echo "has_cert=true" >> "$GITHUB_OUTPUT"
+#           else
+#             echo "has_cert=false" >> "$GITHUB_OUTPUT"
+#           fi
+#
+#       - name: Sign mezon.exe
+#         if: steps.signing.outputs.has_cert == 'true'
+#         shell: pwsh
+#         env:
+#           WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+#           WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+#         run: |
+#           $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
+#           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
+#           $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+#             Sort-Object FullName | Select-Object -Last 1).FullName
+#           & $signtool sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 /td SHA256 `
+#             /tr http://timestamp.digicert.com target\release\mezon.exe
+#           $code = $LASTEXITCODE
+#           Remove-Item $pfx
+#           if ($code -ne 0) { exit 1 }
+#           & $signtool verify /pa target\release\mezon.exe
+#           if ($LASTEXITCODE -ne 0) { exit 1 }
+#
+#       - name: Build Microsoft Store package
+#         shell: pwsh
+#         run: |
+#           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+#           & .\packaging\windows\build-appx.ps1 -Version $version
+#
+#       - name: Upload Store package
+#         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+#         with:
+#           name: appx-store
+#           path: target/appx/*.appx
+#           if-no-files-found: error
+#
+#       - name: Package update feed
+#         shell: bash
+#         run: bash scripts/make-update-feed.sh windows
+#
+#       - name: Build installer
+#         shell: pwsh
+#         run: |
+#           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+#           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+#             /DMyAppVersion=$version `
+#             /DSourceExe="$PWD\target\release\mezon.exe" `
+#             /DSetupIcon="$PWD\crates\mezon-app\resources\windows\app.ico" `
+#             /O"$PWD\target\installer" `
+#             packaging\windows\mezon.iss
+#
+#       - name: Sign installer
+#         if: steps.signing.outputs.has_cert == 'true'
+#         shell: pwsh
+#         env:
+#           WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+#           WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+#         run: |
+#           $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
+#           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
+#           $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+#             Sort-Object FullName | Select-Object -Last 1).FullName
+#           $setup = (Get-ChildItem target\installer\*.exe).FullName
+#           & $signtool sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 /td SHA256 `
+#             /tr http://timestamp.digicert.com $setup
+#           $code = $LASTEXITCODE
+#           Remove-Item $pfx
+#           if ($code -ne 0) { exit 1 }
+#
+#       - name: Collect installer
+#         shell: pwsh
+#         run: Copy-Item target\installer\*.exe target\update-feed\
+#
+#       - name: Upload feed
+#         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+#         with:
+#           name: update-feed-windows
+#           path: target/update-feed/*
+#           if-no-files-found: error
+#
 #   macos:
 #     name: macOS artifacts
 #     runs-on: macos-latest
@@ -369,7 +368,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [linux, windows]
+    needs: linux
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -392,8 +391,8 @@ jobs:
           merge-multiple: true
           path: feed
 
-      - name: Include installer scripts
-        run: cp scripts/install-linux.sh scripts/install-windows.ps1 feed/
+      - name: Include Linux installer script
+        run: cp scripts/install-linux.sh feed/
 
       - name: List feed
         run: ls -la feed/

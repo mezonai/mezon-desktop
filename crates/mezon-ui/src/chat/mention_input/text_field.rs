@@ -1201,8 +1201,12 @@ impl Render for MentionInputState {
             self.caret_blink.sync_blurred(cx);
         }
 
-        let text_color: Hsla = cx.theme().text_primary.into();
         let compact = self.compact;
+        let text_color: Hsla = if compact {
+            cx.theme().tokens.text_theme_message.into()
+        } else {
+            cx.theme().text_primary.into()
+        };
 
         let viewport_h = self
             .last_bounds

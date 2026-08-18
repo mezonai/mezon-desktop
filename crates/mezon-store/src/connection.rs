@@ -274,8 +274,7 @@ impl ConnectionStore {
 
                 // Two credentials authenticate the same session; the JWT is the escape hatch when
                 // the stored `session_id` keeps being refused.
-                let use_jwt =
-                    session.session_id.is_empty() || gateway_refusals >= SSID_REFUSALS_BEFORE_JWT;
+                let use_jwt = should_lead_with_jwt(&session, gateway_refusals);
                 if use_jwt && !jwt_is_fresh(&session) {
                     let (renewed, verdict) =
                         refresh_jwt_for_fallback(&api, &auth_state, session.clone(), cx).await;
@@ -459,24 +458,32 @@ impl ConnectionStore {
                 connected_user_id = None;
                 api.set_status(ConnectionStatus::Disconnected);
                 consecutive_failures += 1;
-                // Count a refusal only when the probe has just shown the network up. A link that
-                // dies mid-handshake also looks like a refusal, and letting that arm the credential
-                // checks would hand a network problem a path towards logging the user out.
-                if outcome == ConnectOutcome::Refused && network_confirmed {
+                let refused = outcome == ConnectOutcome::Refused;
+                if refused {
                     gateway_refusals += 1;
-                    if use_jwt {
+                    if use_jwt && network_confirmed {
                         jwt_refusals += 1;
+                    } else if use_jwt {
+                        tracing::info!(
+                            "JWT refusal seen without a confirmed network — not counting it against the session"
+                        );
                     }
-                } else if outcome == ConnectOutcome::Refused {
-                    tracing::info!(
-                        "Refusal seen without a confirmed network — not counting it against the credentials"
-                    );
                 }
+
+                let switched_to_jwt = if refused && !use_jwt {
+                    discard_session_id(&auth_state, cx).await
+                } else {
+                    false
+                };
 
                 // No connect failure ends the session: a refusal is answered by trying the other
                 // credential and then asking the API host, an unreachable host by waiting.
                 if reached_failure_limit(consecutive_failures) {
                     promote_connecting_to_authenticated(&auth_state, cx);
+                }
+
+                if switched_to_jwt {
+                    continue;
                 }
 
                 retry_backoff_secs = next_backoff_secs(retry_backoff_secs);
@@ -727,6 +734,49 @@ async fn refresh_jwt_for_fallback(
         })
         .await;
     (session, RefreshVerdict::Renewed)
+}
+
+fn should_lead_with_jwt(session: &Session, gateway_refusals: u32) -> bool {
+    session.session_id.is_empty() || gateway_refusals >= SSID_REFUSALS_BEFORE_JWT
+}
+
+fn clear_socket_credential(session: &mut Session) -> bool {
+    if session.session_id.is_empty() {
+        return false;
+    }
+    session.session_id.clear();
+    true
+}
+
+async fn discard_session_id(auth_state: &Entity<AuthState>, cx: &mut AsyncApp) -> bool {
+    let cleared = cx.update(|cx| {
+        auth_state.update(cx, |state, cx| {
+            let session = match state {
+                AuthState::Authenticated(s) | AuthState::Connecting(s) => s,
+                _ => return None,
+            };
+            if !clear_socket_credential(session) {
+                return None;
+            }
+            cx.notify();
+            Some(session.clone())
+        })
+    });
+    let Some(session) = cleared else {
+        return false;
+    };
+
+    tracing::info!(
+        "The gateway refused the stored session_id — dropping it so the JWT leads until the server pushes a new one"
+    );
+    cx.background_executor()
+        .spawn(async move {
+            if let Err(e) = keychain::save_session(&session) {
+                tracing::warn!("Failed to persist the session without its refused session_id: {e}");
+            }
+        })
+        .await;
+    true
 }
 
 /// Whether the JWT can still authenticate a handshake or an HTTP call.
@@ -1019,6 +1069,35 @@ mod tests {
         assert!(jwt_only.session_id.is_empty());
         assert_eq!(jwt_only.ws_credential(), "jwt");
         assert!(jwt_is_fresh(&jwt_only));
+    }
+
+    #[test]
+    fn a_refused_socket_credential_is_dropped_and_the_jwt_takes_over() {
+        let mut session = Session {
+            token: "jwt".into(),
+            session_id: "dead-sid".into(),
+            expires_at: now_secs() + 600,
+            ..Default::default()
+        };
+        assert!(!should_lead_with_jwt(&session, 0));
+
+        assert!(clear_socket_credential(&mut session));
+        assert!(should_lead_with_jwt(&session, 0));
+        assert_eq!(session.ws_credential(), "jwt");
+        assert!(jwt_is_fresh(&session));
+
+        assert!(!clear_socket_credential(&mut session));
+    }
+
+    #[test]
+    fn a_single_gateway_refusal_moves_the_ladder_to_the_jwt() {
+        let session = Session {
+            token: "jwt".into(),
+            session_id: "sid".into(),
+            ..Default::default()
+        };
+        assert!(!should_lead_with_jwt(&session, 0));
+        assert!(should_lead_with_jwt(&session, SSID_REFUSALS_BEFORE_JWT));
     }
 
     #[test]

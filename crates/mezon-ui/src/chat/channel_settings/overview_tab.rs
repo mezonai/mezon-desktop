@@ -5,9 +5,10 @@ use gpui::{
     img, prelude::*, px, rgb,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanId, MAX_CHANNEL_TOPIC_CHARS,
-    PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PermissionStore, Settings,
-    UpdateChannelOverviewError, truncate_chars, validate_channel_name,
+    BadgeService, ChannelId, ChannelList, ChannelType, ClanId, MAX_CHANNEL_TOPIC_CHARS,
+    PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER, PERMISSION_MANAGE_CHANNEL,
+    PERMISSION_MANAGE_CLAN, PermissionStore, Settings, UpdateChannelOverviewError,
+    overview_duplicate_thread_parent_id, truncate_chars, validate_channel_name,
 };
 
 use crate::app::shell::Shell;
@@ -236,8 +237,26 @@ impl OverviewTab {
     fn can_edit(&self, cx: &App) -> bool {
         let store = PermissionStore::global(cx);
         let store = store.read(cx);
-        store.check(self.clan_id, None, PERMISSION_MANAGE_CHANNEL, cx)
-            || store.check(self.clan_id, None, PERMISSION_MANAGE_CLAN, cx)
+        let has_manage_channel_or_clan =
+            store.check(self.clan_id, None, PERMISSION_MANAGE_CHANNEL, cx)
+                || store.check(self.clan_id, None, PERMISSION_MANAGE_CLAN, cx);
+        let is_clan_owner = store.check(self.clan_id, None, PERMISSION_CLAN_OWNER, cx);
+        let is_administrator = store.check(self.clan_id, None, PERMISSION_ADMINISTRATOR, cx);
+        let is_creator = ChannelList::global(cx)
+            .read(cx)
+            .channel(self.clan_id, self.channel_id)
+            .is_some_and(|channel| {
+                BadgeService::try_global(cx)
+                    .and_then(|badges| badges.read(cx).current_user_id(cx))
+                    .is_some_and(|me| me == channel.creator_id)
+            });
+        can_edit_overview(
+            self.is_thread,
+            has_manage_channel_or_clan,
+            is_clan_owner,
+            is_administrator,
+            is_creator,
+        )
     }
 
     fn sync_from_store(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -411,11 +430,7 @@ impl OverviewTab {
                 });
                 return;
             };
-            let duplicate = if channel.channel_type == ChannelType::Thread {
-                let parent = channel
-                    .parent_id
-                    .map(|parent| parent.get().to_string())
-                    .unwrap_or_default();
+            let duplicate = if let Some(parent) = overview_duplicate_thread_parent_id(&channel) {
                 api.check_duplicate_thread_name(&validated, &parent)
                     .await
                     .unwrap_or(false)
@@ -507,26 +522,8 @@ impl OverviewTab {
     }
 
     fn validation_message(&self, locale: &str, draft: &str) -> Option<SharedString> {
-        match self.validation {
-            NameValidation::Invalid if draft.trim().is_empty() => {
-                Some(mezon_i18n::t(locale, "channelSetting.fields.channelName.emptyError").into())
-            }
-            NameValidation::Invalid => Some(
-                mezon_i18n::t(
-                    locale,
-                    if self.is_thread {
-                        "channelSetting.fields.threadName.errorMessage"
-                    } else {
-                        "channelSetting.fields.channelName.errorMessage"
-                    },
-                )
-                .into(),
-            ),
-            NameValidation::Duplicate => Some(
-                mezon_i18n::t(locale, "channelSetting.fields.channelName.duplicateError").into(),
-            ),
-            NameValidation::None | NameValidation::Valid => None,
-        }
+        overview_name_validation_key(self.is_thread, self.validation, draft.trim().is_empty())
+            .map(|key| mezon_i18n::t(locale, key).into())
     }
 
     fn render_hr(theme: &Theme) -> impl IntoElement {
@@ -943,5 +940,93 @@ impl Render for OverviewTab {
                 el.child(self.render_bottom_block(&locale, &theme, can_edit, cx))
             })
             .child(div().h(px(80.0)))
+    }
+}
+
+fn can_edit_overview(
+    is_thread: bool,
+    has_manage_channel_or_clan: bool,
+    is_clan_owner: bool,
+    is_administrator: bool,
+    is_creator: bool,
+) -> bool {
+    has_manage_channel_or_clan || (is_thread && (is_clan_owner || is_administrator || is_creator))
+}
+
+fn overview_name_validation_key(
+    is_thread: bool,
+    validation: NameValidation,
+    draft_empty: bool,
+) -> Option<&'static str> {
+    match validation {
+        NameValidation::Invalid if draft_empty => Some(if is_thread {
+            "channelSetting.fields.threadName.emptyError"
+        } else {
+            "channelSetting.fields.channelName.emptyError"
+        }),
+        NameValidation::Invalid => Some(if is_thread {
+            "channelSetting.fields.threadName.errorMessage"
+        } else {
+            "channelSetting.fields.channelName.errorMessage"
+        }),
+        NameValidation::Duplicate => Some(if is_thread {
+            "channelSetting.fields.threadName.duplicateError"
+        } else {
+            "channelSetting.fields.channelName.duplicateError"
+        }),
+        NameValidation::None | NameValidation::Valid => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thread_creator_owner_or_admin_can_edit_overview() {
+        assert!(can_edit_overview(true, false, false, false, true));
+        assert!(can_edit_overview(true, false, true, false, false));
+        assert!(can_edit_overview(true, false, false, true, false));
+        assert!(can_edit_overview(true, true, false, false, false));
+    }
+
+    #[test]
+    fn stranger_cannot_edit_thread_overview_without_manage() {
+        assert!(!can_edit_overview(true, false, false, false, false));
+    }
+
+    #[test]
+    fn regular_channel_overview_does_not_unlock_for_creator_only() {
+        assert!(!can_edit_overview(false, false, false, false, true));
+        assert!(!can_edit_overview(false, false, true, false, false));
+        assert!(can_edit_overview(false, true, false, false, false));
+    }
+
+    #[test]
+    fn thread_validation_uses_thread_name_keys() {
+        assert_eq!(
+            overview_name_validation_key(true, NameValidation::Invalid, true),
+            Some("channelSetting.fields.threadName.emptyError")
+        );
+        assert_eq!(
+            overview_name_validation_key(true, NameValidation::Invalid, false),
+            Some("channelSetting.fields.threadName.errorMessage")
+        );
+        assert_eq!(
+            overview_name_validation_key(true, NameValidation::Duplicate, false),
+            Some("channelSetting.fields.threadName.duplicateError")
+        );
+    }
+
+    #[test]
+    fn channel_validation_keeps_channel_name_keys() {
+        assert_eq!(
+            overview_name_validation_key(false, NameValidation::Invalid, true),
+            Some("channelSetting.fields.channelName.emptyError")
+        );
+        assert_eq!(
+            overview_name_validation_key(false, NameValidation::Duplicate, false),
+            Some("channelSetting.fields.channelName.duplicateError")
+        );
     }
 }

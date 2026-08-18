@@ -15,6 +15,7 @@ mezon-i18n.workspace = true
 mmn-client.workspace = true
 mezon-updater.workspace = true
 mezon-voice.workspace = true
+mezon-call.workspace = true
 mezon-stream.workspace = true
 mezon-audio.workspace = true
 gpui.workspace = true

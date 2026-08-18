@@ -1,6 +1,7 @@
 use gpui::{AnyElement, ClickEvent, Entity, FontWeight, div, prelude::*, px};
 
 use crate::chat::layout::ChatLayout;
+use crate::chat::mention_input::MentionInput;
 use crate::components::primitives::{
     Button, ButtonVariants, Checkbox, Icon, IconName, Input, InputState, h_flex, v_flex,
 };
@@ -10,7 +11,7 @@ const PANEL_WIDTH: f32 = 510.;
 
 pub struct CreateThreadPanelParams<'a> {
     pub thread_name_input: Entity<InputState>,
-    pub message_input: Entity<InputState>,
+    pub message_input: Entity<MentionInput>,
     pub name_error: Option<&'a str>,
     pub submitting: bool,
     pub create_private: bool,
@@ -35,8 +36,6 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
     let layout_footer_cancel = layout.clone();
     let layout_private = layout.clone();
     let send_layout = layout.clone();
-    let name_input = thread_name_input.clone();
-    let msg_input = message_input.clone();
     let private_label = mezon_i18n::t(
         locale,
         "channelTopbar.createThread.privateThreadDescription",
@@ -254,15 +253,7 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
                         .bg(theme.surfaces.surface)
                         .border_1()
                         .border_color(tokens.border_primary)
-                        .px_3()
-                        .py_2()
-                        .min_h(px(45.))
-                        .child(
-                            Input::new(&message_input)
-                                .w_full()
-                                .text_sm()
-                                .text_color(tokens.text_theme_message),
-                        ),
+                        .child(message_input.clone()),
                 )
                 .child(
                     h_flex()
@@ -292,10 +283,8 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
                                 .loading(submitting)
                                 .disabled(submitting)
                                 .on_click(move |_: &ClickEvent, window, cx| {
-                                    let name = name_input.read(cx).value().to_string();
-                                    let message = msg_input.read(cx).value().to_string();
                                     send_layout.update(cx, |layout, cx| {
-                                        layout.submit_create_thread(name, message, window, cx);
+                                        layout.submit_create_thread(window, cx);
                                     });
                                 }),
                         ),

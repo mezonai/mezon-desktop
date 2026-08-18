@@ -1,14 +1,14 @@
 use gpui::{
-    App, ClickEvent, Context, DefiniteLength, Entity, FontWeight, Hsla, Pixels, ScrollHandle,
-    SharedString, Window, div, prelude::*, px, relative,
+    App, ClickEvent, Context, DefiniteLength, Entity, Focusable, FontWeight, Hsla, Pixels,
+    ScrollHandle, SharedString, Window, div, prelude::*, px, relative,
 };
 use mezon_store::{BadgeService, CanvasDetail, CanvasStore, ChannelId, ClanId, Settings, UserId};
 use serde::Deserialize;
 use serde_json::Value;
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
-use crate::doc_view::render_tiptap_node;
 use crate::editor::{CanvasEditor, CanvasEditorState};
+use crate::image::remember_canvas_image_size;
 use crate::navigation::{CanvasRoute, navigate_to_canvas, navigate_to_channel};
 use crate::quill::{is_quill_delta, quill_delta_to_tiptap_json};
 use mezon_theme::ActiveTheme;
@@ -41,8 +41,6 @@ pub struct CanvasView {
     creator_id: UserId,
     content_scroll: ScrollHandle,
     pending_detail: Option<CanvasDetail>,
-    view_doc_source: SharedString,
-    view_doc: Option<TipTapNode>,
     _load_task: Option<gpui::Task<()>>,
 }
 
@@ -87,8 +85,6 @@ impl CanvasView {
             creator_id: UserId(0),
             content_scroll: ScrollHandle::new(),
             pending_detail: None,
-            view_doc_source: SharedString::default(),
-            view_doc: None,
             _load_task: None,
         };
         view.start_load(window, cx);
@@ -395,6 +391,8 @@ impl gpui::Render for CanvasView {
                                         input.focus(window, cx);
                                     });
                                 }
+                            } else {
+                                window.blur();
                             }
                             cx.notify();
                         })),
@@ -454,6 +452,8 @@ impl gpui::Render for CanvasView {
                 div()
                     .relative()
                     .w_full()
+                    .h(px(34.))
+                    .min_h(px(34.))
                     .when(editing, |el| {
                         el.child(
                             Input::new(&self.title_input).text_color(tokens.text_theme_message),
@@ -466,36 +466,19 @@ impl gpui::Render for CanvasView {
                         } else {
                             title.to_string()
                         };
-                        el.min_h(px(34.)).child(display)
+                        el.child(display)
                     }),
             )
             .into_any_element();
 
-        let body: gpui::AnyElement = if editing {
-            div()
-                .id("canvas-body")
-                .w_full()
-                .min_w_0()
-                .py_2()
-                .text_size(CANVAS_BODY_FONT_SIZE)
-                .line_height(CANVAS_BODY_LINE_HEIGHT)
-                .child(CanvasEditor::new(&self.content_editor))
-                .into_any_element()
-        } else {
-            if self.view_doc_source.as_ref() != self.loaded_content.as_ref() {
-                self.view_doc = parse_tiptap_doc(self.loaded_content.as_ref());
-                self.view_doc_source = self.loaded_content.clone();
-            }
-            div()
-                .id("canvas-body")
-                .w_full()
-                .min_w_0()
-                .py_2()
-                .when_some(self.view_doc.clone(), |el, doc| {
-                    el.child(render_tiptap_node(doc, theme.as_ref(), cx))
-                })
-                .into_any_element()
-        };
+        let body = div()
+            .id("canvas-body")
+            .w_full()
+            .min_w_0()
+            .py_2()
+            .text_size(CANVAS_BODY_FONT_SIZE)
+            .line_height(CANVAS_BODY_LINE_HEIGHT)
+            .child(CanvasEditor::new(&self.content_editor));
 
         let scroll_content = canvas_scroll_viewport(
             self.content_scroll.clone(),
@@ -601,6 +584,64 @@ pub struct TipTapMark {
     #[serde(rename = "type")]
     pub kind: String,
     pub attrs: Option<Value>,
+}
+
+pub fn image_src_from_attrs(attrs: Option<&Value>) -> Option<String> {
+    let attrs = attrs?;
+    for key in ["src", "url", "href"] {
+        if let Some(src) = attrs.get(key).and_then(|value| value.as_str()) {
+            let src = src.trim();
+            if !src.is_empty() {
+                return Some(src.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn json_positive_u32(value: Option<&Value>) -> Option<u32> {
+    let value = value?;
+    if let Some(n) = value.as_u64() {
+        return u32::try_from(n).ok().filter(|n| *n > 0);
+    }
+    if let Some(n) = value.as_i64() {
+        return u32::try_from(n).ok().filter(|n| *n > 0);
+    }
+    if let Some(n) = value.as_f64() {
+        if n.is_finite() && n > 0. {
+            return Some(n.round() as u32).filter(|n| *n > 0);
+        }
+        return None;
+    }
+    value
+        .as_str()?
+        .trim()
+        .trim_end_matches("px")
+        .trim()
+        .parse()
+        .ok()
+        .filter(|n| *n > 0)
+}
+
+pub fn image_size_from_attrs(attrs: Option<&Value>) -> Option<(u32, u32)> {
+    let attrs = attrs?;
+    let width = json_positive_u32(attrs.get("width"))?;
+    let height = json_positive_u32(attrs.get("height"))?;
+    Some((width, height))
+}
+
+pub fn remember_tiptap_image_sizes(node: &TipTapNode, cx: &mut App) {
+    if node.kind == "image"
+        && let Some(src) = image_src_from_attrs(node.attrs.as_ref())
+        && let Some((width, height)) = image_size_from_attrs(node.attrs.as_ref())
+    {
+        remember_canvas_image_size(cx, &src, width, height);
+    }
+    if let Some(children) = &node.content {
+        for child in children {
+            remember_tiptap_image_sizes(child, cx);
+        }
+    }
 }
 
 pub fn parse_tiptap_doc(raw: &str) -> Option<TipTapNode> {
@@ -714,6 +755,25 @@ fn plain_text_to_tiptap(text: &str) -> String {
 mod tests {
     use super::*;
 
+    fn image_srcs_in_doc(node: &TipTapNode) -> Vec<String> {
+        let mut srcs = Vec::new();
+        collect_image_srcs(node, &mut srcs);
+        srcs
+    }
+
+    fn collect_image_srcs(node: &TipTapNode, srcs: &mut Vec<String>) {
+        if node.kind == "image"
+            && let Some(src) = image_src_from_attrs(node.attrs.as_ref())
+        {
+            srcs.push(src);
+        }
+        if let Some(children) = &node.content {
+            for child in children {
+                collect_image_srcs(child, srcs);
+            }
+        }
+    }
+
     #[test]
     fn parse_quill_delta_canvas_from_electron() {
         let raw = r#"{"ops":[{"insert":"Noti when only mentions die\nCheck remember channel"}]}"#;
@@ -722,6 +782,48 @@ mod tests {
         let content = doc.content.as_ref().expect("content");
         assert!(!content.is_empty());
         assert_eq!(content[0].kind, "paragraph");
+    }
+
+    #[test]
+    fn image_src_from_attrs_reads_src_url_or_href() {
+        assert_eq!(
+            image_size_from_attrs(Some(&serde_json::json!({"width": 320, "height": "180px"}))),
+            Some((320, 180))
+        );
+        assert_eq!(
+            image_size_from_attrs(Some(&serde_json::json!({"width": null, "height": 10}))),
+            None
+        );
+        assert_eq!(
+            image_src_from_attrs(Some(
+                &serde_json::json!({"src":" https://cdn.mezon.ai/a.png "})
+            )),
+            Some("https://cdn.mezon.ai/a.png".into())
+        );
+        assert_eq!(
+            image_src_from_attrs(Some(
+                &serde_json::json!({"url":"https://cdn.mezon.ai/b.png"})
+            )),
+            Some("https://cdn.mezon.ai/b.png".into())
+        );
+        assert_eq!(
+            image_src_from_attrs(Some(&serde_json::json!({"src":""}))),
+            None
+        );
+    }
+
+    #[test]
+    fn collects_nested_and_block_image_srcs() {
+        let raw = r#"{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Hi"},{"type":"image","attrs":{"src":"https://cdn.mezon.ai/a.png"}}]},{"type":"image","attrs":{"src":"https://cdn.mezon.ai/b.png"}}]}"#;
+        let doc = parse_tiptap_doc(raw).expect("parse");
+        let srcs = image_srcs_in_doc(&doc);
+        assert_eq!(
+            srcs,
+            vec![
+                "https://cdn.mezon.ai/a.png".to_string(),
+                "https://cdn.mezon.ai/b.png".to_string()
+            ]
+        );
     }
 
     #[test]

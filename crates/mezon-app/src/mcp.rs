@@ -1,5 +1,5 @@
 use futures::StreamExt as _;
-use gpui::{App, AsyncApp};
+use gpui::{App, AppContext as _, AsyncApp};
 use mezon_client::AppApi;
 use mezon_mcp::{
     CaptureTarget, McpCommand, McpController, McpStartParams, ToolCallParams, is_write_tool,
@@ -125,6 +125,33 @@ impl McpRuntime {
                     }
                     McpCommand::SetCliEnabled { enabled, reply } => {
                         let result = cx.update(|_| set_cli_enabled(enabled));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::JoinVoice {
+                        channel_id,
+                        clan_id,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::join_voice(channel_id, clan_id, cx)
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::LeaveVoice { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::leave_voice);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::GetRecordingState { reply } => {
+                        let value = cx.update(mezon_ui::app::capture::recording_state);
+                        let _ = reply.send(value);
+                    }
+                    McpCommand::StartRecording { path, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::start_recording(path, cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::StopRecording { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::stop_recording);
                         let _ = reply.send(result);
                     }
                     McpCommand::GetScrollState { reply } => {
@@ -264,9 +291,22 @@ impl McpRuntime {
                         reply_to,
                         reply,
                     } => {
-                        let result = cx.update(|cx| {
-                            send_attachment(cx, &auth_state, &paths, &content, anonymous, reply_to)
-                        });
+                        let prepared = cx
+                            .background_spawn(async move { outgoing_attachments(&paths) })
+                            .await;
+                        let result = match prepared {
+                            Ok(attachments) => cx.update(|cx| {
+                                send_attachment(
+                                    cx,
+                                    &auth_state,
+                                    attachments,
+                                    &content,
+                                    anonymous,
+                                    reply_to,
+                                )
+                            }),
+                            Err(error) => Err(error),
+                        };
                         let _ = reply.send(result);
                     }
                     McpCommand::ListEmojis {
@@ -306,6 +346,194 @@ impl McpRuntime {
                     McpCommand::GetMemberList { reply } => {
                         let result =
                             cx.update(|cx| mezon_ui::app::capture::member_list_snapshot(cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ListBannedUsers {
+                        clan_id,
+                        channel_id,
+                        reply,
+                    } => {
+                        let task = cx.update(|cx| {
+                            mezon_ui::app::capture::banned_users_task(cx, clan_id, channel_id)
+                        });
+                        let _ = reply.send(task.await);
+                    }
+                    McpCommand::CloseModal { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::close_modal);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::MemberMenuState { reply } => {
+                        let result = cx.update(|cx| mezon_ui::app::capture::member_menu_state(cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::MemberMenuOpen {
+                        user_id,
+                        x,
+                        y,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::member_menu_open(
+                                cx,
+                                mezon_store::UserId(user_id),
+                                x,
+                                y,
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::MemberMenuClose { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::member_menu_close);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::MemberMenuPick {
+                        index,
+                        value,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::member_menu_pick(cx, index, value)
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ClanMenuState { reply } => {
+                        let result = cx.update(|cx| mezon_ui::app::capture::clan_menu_state(cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ClanMenuOpen {
+                        clan_id,
+                        x,
+                        y,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::clan_menu_open(
+                                cx,
+                                mezon_store::ClanId(clan_id),
+                                x,
+                                y,
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ClanMenuClose { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::clan_menu_close);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ClanMenuPick {
+                        index,
+                        value,
+                        reply,
+                    } => {
+                        let result = cx
+                            .update(|cx| mezon_ui::app::capture::clan_menu_pick(cx, index, value));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ListCategories { clan_id, reply } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::list_categories(
+                                cx,
+                                mezon_store::ClanId(clan_id),
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CreateCategory {
+                        clan_id,
+                        name,
+                        reply,
+                    } => {
+                        let task = cx.update(|cx| {
+                            mezon_ui::app::capture::create_category_task(
+                                cx,
+                                mezon_store::ClanId(clan_id),
+                                name,
+                            )
+                        });
+                        let _ = reply.send(task.await);
+                    }
+                    McpCommand::ChannelMenuState { reply } => {
+                        let result = cx.update(|cx| mezon_ui::app::capture::channel_menu_state(cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ChannelMenuOpen {
+                        clan_id,
+                        channel_id,
+                        x,
+                        y,
+                        in_favorites,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::channel_menu_open(
+                                cx,
+                                mezon_store::ClanId(clan_id),
+                                mezon_store::ChannelId(channel_id),
+                                x,
+                                y,
+                                in_favorites,
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ChannelMenuClose { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::channel_menu_close);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ChannelMenuPick {
+                        index,
+                        value,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::channel_menu_pick(cx, index, value)
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CategoryMenuState { reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::category_menu_state(cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CategoryMenuOpen {
+                        clan_id,
+                        category_id,
+                        x,
+                        y,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::category_menu_open(
+                                cx,
+                                mezon_store::ClanId(clan_id),
+                                category_id,
+                                x,
+                                y,
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CategoryMenuClose { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::category_menu_close);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CategoryMenuPick {
+                        index,
+                        value,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::category_menu_pick(cx, index, value)
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::CreateClan { name, logo, reply } => {
+                        let task = cx
+                            .update(|cx| mezon_ui::app::capture::create_clan_task(cx, name, logo));
+                        let _ = reply.send(task.await);
+                    }
+                    McpCommand::OpenCreateClanModal { reply } => {
+                        let result = cx.update(mezon_ui::app::capture::open_create_clan_modal);
                         let _ = reply.send(result);
                     }
                     McpCommand::SetUserStatus {
@@ -542,55 +770,37 @@ fn send_buzz(cx: &mut App, text: &str) -> anyhow::Result<Value> {
     Ok(json!({ "ok": true, "text": text }))
 }
 
-fn outgoing_attachment(path: &str) -> anyhow::Result<mezon_store::OutgoingAttachment> {
-    let path = std::path::PathBuf::from(path);
-    if !path.is_file() {
-        anyhow::bail!("file not found: {}", path.display());
-    }
-    let filename = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow::anyhow!("unreadable filename"))?
-        .to_string();
-    let ext = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("png")
-        .to_ascii_lowercase();
-    let filetype = match ext.as_str() {
-        "jpg" | "jpeg" => "image/jpeg".to_string(),
-        "png" => "image/png".to_string(),
-        "gif" => "image/gif".to_string(),
-        "webp" => "image/webp".to_string(),
-        "mp4" => "video/mp4".to_string(),
-        "pdf" => "application/pdf".to_string(),
-        "txt" => "text/plain".to_string(),
-        other => format!("image/{other}"),
-    };
-    let (width, height) = image::image_dimensions(&path).unwrap_or((0, 0));
-    Ok(mezon_store::OutgoingAttachment {
-        path,
-        filename,
-        filetype,
-        width: i32::try_from(width).unwrap_or(0),
-        height: i32::try_from(height).unwrap_or(0),
-        duration: 0,
-        poster_jpeg: None,
-    })
+fn outgoing_attachments(paths: &[String]) -> anyhow::Result<Vec<mezon_store::OutgoingAttachment>> {
+    paths
+        .iter()
+        .map(|path| {
+            let path = std::path::PathBuf::from(path);
+            if !path.is_file() {
+                anyhow::bail!("file not found: {}", path.display());
+            }
+            let pending = mezon_ui::chat::mention_input::build_pending(path.clone())
+                .ok_or_else(|| anyhow::anyhow!("unreadable attachment: {}", path.display()))?;
+            Ok(mezon_store::OutgoingAttachment {
+                path: pending.path,
+                filename: pending.filename,
+                filetype: pending.filetype,
+                width: i32::try_from(pending.width).unwrap_or(0),
+                height: i32::try_from(pending.height).unwrap_or(0),
+                duration: pending.duration,
+                poster_jpeg: pending.poster_jpeg,
+            })
+        })
+        .collect()
 }
 
 fn send_attachment(
     cx: &mut App,
     auth_state: &gpui::Entity<AuthState>,
-    paths: &[String],
+    attachments: Vec<mezon_store::OutgoingAttachment>,
     content: &str,
     anonymous: bool,
     reply_to: i64,
 ) -> anyhow::Result<Value> {
-    let attachments = paths
-        .iter()
-        .map(|path| outgoing_attachment(path))
-        .collect::<anyhow::Result<Vec<_>>>()?;
     let filenames: Vec<String> = attachments.iter().map(|att| att.filename.clone()).collect();
     let (user_id, username) = match auth_state.read(cx) {
         AuthState::Authenticated(session) => (session.user_id.clone(), session.username.clone()),

@@ -202,6 +202,32 @@ impl ChannelMembersStore {
         cx.notify();
     }
 
+    pub fn remove_member(
+        &mut self,
+        channel_id: ChannelId,
+        user_id: UserId,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            api.remove_channel_users(channel_id.get(), vec![user_id.get().to_string()])
+                .await?;
+            this.update(cx, |this, cx| {
+                if let Some(bucket) = this.cache.get_mut(&channel_id) {
+                    bucket.remove(user_id);
+                }
+                cx.emit(ChannelMembersEvent::Changed { channel_id });
+                cx.notify();
+                if let Some(store) = crate::channel_users::ChannelUsersStore::try_global(cx) {
+                    store.update(cx, |store, cx| {
+                        store.remove_users(channel_id, &[user_id], cx);
+                    });
+                }
+            })?;
+            Ok(())
+        })
+    }
+
     pub fn is_loading(&self, channel_id: ChannelId) -> bool {
         self.loading.get(&channel_id).copied().unwrap_or(false)
     }

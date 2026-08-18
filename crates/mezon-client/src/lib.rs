@@ -41,7 +41,7 @@ pub use inbox::{
     DIRECTION_AROUND_TIMESTAMP, DIRECTION_BEFORE_TIMESTAMP, INBOX_MESSAGE_MARK_CODE,
     INBOX_PAGE_LIMIT, InboxCategory, InboxMentionSpan, InboxMessagePreview, InboxNotification,
     MarkedInboxMessageInput, TopicDiscussion, TopicReplyPreview, attachment_link_is_image,
-    display_text_from_message_content, inbox_notification_from_api,
+    attachment_link_is_video, display_text_from_message_content, inbox_notification_from_api,
     inbox_notification_from_marked_message, inbox_notification_from_marked_message_local,
     inbox_notifications_from_list, is_pending_inbox_notification_id, message_content_is_attachment,
     pending_inbox_notification_id, topic_discussion_from_api, topic_reply_preview,

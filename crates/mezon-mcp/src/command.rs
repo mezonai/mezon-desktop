@@ -50,6 +50,24 @@ pub enum McpCommand {
         enabled: bool,
         reply: oneshot::Sender<anyhow::Result<bool>>,
     },
+    JoinVoice {
+        channel_id: i64,
+        clan_id: i64,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    LeaveVoice {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    GetRecordingState {
+        reply: oneshot::Sender<Value>,
+    },
+    StartRecording {
+        path: Option<String>,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    StopRecording {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
     GetScrollState {
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
@@ -179,6 +197,102 @@ pub enum McpCommand {
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
     GetMemberList {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    CloseModal {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ListBannedUsers {
+        clan_id: i64,
+        channel_id: i64,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    MemberMenuState {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    MemberMenuOpen {
+        user_id: i64,
+        x: f32,
+        y: f32,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    MemberMenuClose {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    MemberMenuPick {
+        index: usize,
+        value: Option<i32>,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ClanMenuState {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ClanMenuOpen {
+        clan_id: i64,
+        x: f32,
+        y: f32,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ClanMenuClose {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ClanMenuPick {
+        index: usize,
+        value: Option<i32>,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ListCategories {
+        clan_id: i64,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    CreateCategory {
+        clan_id: i64,
+        name: String,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ChannelMenuState {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ChannelMenuOpen {
+        clan_id: i64,
+        channel_id: i64,
+        x: f32,
+        y: f32,
+        in_favorites: bool,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ChannelMenuClose {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ChannelMenuPick {
+        index: usize,
+        value: Option<i32>,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    CategoryMenuState {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    CategoryMenuOpen {
+        clan_id: i64,
+        category_id: String,
+        x: f32,
+        y: f32,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    CategoryMenuClose {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    CategoryMenuPick {
+        index: usize,
+        value: Option<i32>,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    CreateClan {
+        name: String,
+        logo: String,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    OpenCreateClanModal {
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
 }

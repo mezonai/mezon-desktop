@@ -262,10 +262,8 @@ impl FilesPopoverPanel {
             .inspect_err(|err| tracing::warn!("audio output unavailable: {err}"))
             .ok();
         if self.audio_player.is_none() {
-            if let Some(store) = mezon_store::PlatformStore::try_global(cx) {
-                let _ = store.read(cx).open_url_external(url.as_ref());
-            }
             self.audio_url = None;
+            cx.defer(crate::chat::message::report_audio_output_unavailable);
             cx.notify();
             return;
         }

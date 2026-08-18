@@ -11,6 +11,8 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(not(target_os = "macos"))]
+mod poster;
+#[cfg(not(target_os = "macos"))]
 mod render_frame;
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod unsupported;
@@ -49,14 +51,16 @@ pub struct VideoProbe {
     pub poster_jpeg: Option<Vec<u8>>,
 }
 
-#[cfg(target_os = "macos")]
 pub fn probe_video(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
-    macos::probe_video(path, max_poster_edge)
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn probe_video(_path: &str, _max_poster_edge: u32) -> Option<VideoProbe> {
-    None
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    {
+        platform::probe_video(path, max_poster_edge)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        let _ = (path, max_poster_edge);
+        None
+    }
 }
 
 #[derive(Debug, Clone)]

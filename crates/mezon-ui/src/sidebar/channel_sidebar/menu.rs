@@ -1,12 +1,13 @@
-use gpui::{App, ClickEvent, ClipboardItem, Entity, Pixels, Point, WeakEntity, Window};
+use gpui::{App, AppContext, ClickEvent, ClipboardItem, Entity, Pixels, Point, WeakEntity, Window};
 use mezon_store::{
     AppConfig, BadgeService, ChannelId, ChannelList, ChannelType, ClanId, PERMISSION_ADMINISTRATOR,
     PERMISSION_CLAN_OWNER, PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PermissionStore,
     archive_menu_hidden, can_archive_channel,
 };
 
-use super::ChannelSidebar;
+use super::{CategoryMenuData, ChannelMenuData, ChannelSidebar};
 use crate::app::shell::Shell;
+use crate::clan::edit_category_modal::EditCategoryModal;
 use crate::components::primitives::{ContextMenu, SubmenuOption};
 
 #[derive(Clone, Copy, Default)]
@@ -17,6 +18,7 @@ pub(super) struct ChannelMenuPermissions {
     pub(super) is_channel_creator: bool,
     pub(super) is_welcome_channel: bool,
     pub(super) hide_archive: bool,
+    pub(super) is_favorite: bool,
 }
 
 impl ChannelMenuPermissions {
@@ -55,6 +57,7 @@ impl ChannelMenuPermissions {
             is_channel_creator,
             is_welcome_channel,
             hide_archive: archive_menu_hidden(channel_type, is_welcome_channel),
+            is_favorite: channel_list.is_channel_favorite(clan_id, channel_id),
         }
     }
 }
@@ -100,10 +103,19 @@ pub(super) struct OpenMenu {
     pub(super) noti_sub_open: bool,
 }
 
-fn coming_soon_toast(message: String) -> impl Fn(&mut Window, &mut App) + 'static {
+fn toggle_channel_favorite(
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    is_favorite: bool,
+) -> impl Fn(&mut Window, &mut App) + 'static {
     move |_window: &mut Window, cx: &mut App| {
-        let message = message.clone();
-        Shell::global(cx).update(cx, move |shell, cx| shell.info(message, cx));
+        ChannelList::global(cx).update(cx, |channels, cx| {
+            if is_favorite {
+                channels.remove_channel_favorite(channel_id, clan_id, cx);
+            } else {
+                channels.add_channel_favorite(channel_id, clan_id, cx);
+            }
+        });
     }
 }
 
@@ -303,6 +315,38 @@ fn set_submenu_open(
     }
 }
 
+fn close_channel_submenus(
+    sidebar: WeakEntity<ChannelSidebar>,
+) -> impl Fn(&mut Window, &mut App) + 'static {
+    move |_window: &mut Window, cx: &mut App| {
+        let _ = sidebar.update(cx, |this, cx| {
+            if let Some(menu) = this.open_menu.as_mut()
+                && (menu.mute_sub_open || menu.noti_sub_open)
+            {
+                menu.mute_sub_open = false;
+                menu.noti_sub_open = false;
+                cx.notify();
+            }
+        });
+    }
+}
+
+fn close_category_submenus(
+    sidebar: WeakEntity<ChannelSidebar>,
+) -> impl Fn(&mut Window, &mut App) + 'static {
+    move |_window: &mut Window, cx: &mut App| {
+        let _ = sidebar.update(cx, |this, cx| {
+            if let Some(menu) = this.category_menu.as_mut()
+                && (menu.mute_sub_open || menu.noti_sub_open)
+            {
+                menu.mute_sub_open = false;
+                menu.noti_sub_open = false;
+                cx.notify();
+            }
+        });
+    }
+}
+
 pub(crate) fn apply_mute(
     channel_id: ChannelId,
     clan_id: ClanId,
@@ -407,37 +451,41 @@ fn push_mute_and_notification(
     menu
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn build_channel_menu(
     sidebar: WeakEntity<ChannelSidebar>,
-    locale: &str,
-    channel_type: ChannelType,
-    is_thread: bool,
-    channel_id: ChannelId,
-    clan_id: ClanId,
-    muted: bool,
-    muted_until: Option<String>,
-    level: i32,
-    mute_sub_open: bool,
-    noti_sub_open: bool,
-    clan_default: Option<i32>,
-    in_favorites: bool,
-    permissions: ChannelMenuPermissions,
+    data: &ChannelMenuData,
 ) -> ContextMenu {
+    let ChannelMenuData {
+        channel_type,
+        is_thread,
+        channel_id,
+        clan_id,
+        muted,
+        level,
+        mute_sub_open,
+        noti_sub_open,
+        clan_default,
+        in_favorites,
+        permissions,
+        ..
+    } = *data;
+    let locale = data.locale.as_str();
+    let muted_until = data.muted_until.clone();
     let t = |key: &'static str| mezon_i18n::t(locale, key).to_string();
-    let coming_soon = t("common.comingSoon");
     let locale_owned = locale.to_string();
     let sidebar_dismiss = sidebar.clone();
     let show_notification = matches!(channel_type, ChannelType::Text) || is_thread;
 
-    let mut menu = ContextMenu::new().on_dismiss(move |_window, cx| {
-        if let Some(view) = sidebar_dismiss.upgrade() {
-            view.update(cx, |this, cx| {
-                this.open_menu = None;
-                cx.notify();
-            });
-        }
-    });
+    let mut menu = ContextMenu::new()
+        .on_submenu_close(close_channel_submenus(sidebar.clone()))
+        .on_dismiss(move |_window, cx| {
+            if let Some(view) = sidebar_dismiss.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.open_menu = None;
+                    cx.notify();
+                });
+            }
+        });
 
     if !in_favorites {
         menu = menu
@@ -492,12 +540,9 @@ pub(super) fn build_channel_menu(
         if permissions.has_manage_thread && !permissions.is_welcome_channel {
             menu = menu
                 .separator()
-                .item(
-                    edit_label.clone(),
-                    coming_soon_modal(edit_label, locale_owned.clone()),
-                )
+                .item(edit_label, open_channel_settings(clan_id, channel_id))
                 .danger_item(
-                    delete_label.clone(),
+                    delete_label,
                     open_delete_thread_confirm(clan_id, channel_id, locale_owned.clone()),
                 );
         }
@@ -525,9 +570,14 @@ pub(super) fn build_channel_menu(
             noti_sub_open,
             show_notification,
         );
+        let favorite_label = if permissions.is_favorite {
+            t("channelMenu.menu.inviteMenu.unMarkFavorite")
+        } else {
+            t("channelMenu.menu.inviteMenu.markFavorite")
+        };
         menu = menu.item(
-            t("channelMenu.menu.inviteMenu.markFavorite"),
-            coming_soon_toast(coming_soon.clone()),
+            favorite_label,
+            toggle_channel_favorite(clan_id, channel_id, permissions.is_favorite),
         );
 
         if permissions.can_manage_channel {
@@ -675,41 +725,50 @@ fn apply_category_mute_forever(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn build_category_menu(
     sidebar: WeakEntity<ChannelSidebar>,
     channel_list: Entity<ChannelList>,
-    locale: &str,
-    category_id: String,
-    clan_id: ClanId,
-    collapsed: bool,
-    time_muted: bool,
-    muted_until: Option<String>,
-    level: i32,
-    mute_sub_open: bool,
-    noti_sub_open: bool,
-    can_manage_category: bool,
-    category_is_empty: bool,
+    data: &CategoryMenuData,
 ) -> ContextMenu {
+    let CategoryMenuData {
+        clan_id,
+        collapsed,
+        time_muted,
+        level,
+        mute_sub_open,
+        noti_sub_open,
+        can_manage_category,
+        category_is_empty,
+        ..
+    } = *data;
+    let locale = data.locale.as_str();
+    let category_id = data.category_id.clone();
+    let muted_until = data.muted_until.clone();
     let t = |key: &'static str| mezon_i18n::t(locale, key).to_string();
-    let coming_soon = t("common.comingSoon");
     let locale_owned = locale.to_string();
     let sidebar_dismiss = sidebar.clone();
 
-    let mut menu = ContextMenu::new().on_dismiss(move |_window, cx| {
-        if let Some(view) = sidebar_dismiss.upgrade() {
-            view.update(cx, |this, cx| {
-                this.category_menu = None;
-                cx.notify();
-            });
-        }
-    });
+    let mut menu = ContextMenu::new()
+        .on_submenu_close(close_category_submenus(sidebar.clone()))
+        .on_dismiss(move |_window, cx| {
+            if let Some(view) = sidebar_dismiss.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.category_menu = None;
+                    cx.notify();
+                });
+            }
+        });
 
     menu = menu
-        .item(
-            t("contextMenu.markAsRead"),
-            coming_soon_toast(coming_soon.clone()),
-        )
+        .item(t("contextMenu.markAsRead"), {
+            let channel_list = channel_list.clone();
+            let category_id = category_id.clone();
+            move |_window, cx| {
+                channel_list.update(cx, |list, cx| {
+                    list.mark_category_as_read(clan_id, &category_id, cx);
+                });
+            }
+        })
         .separator()
         .checkbox_item(t("contextMenu.collapseCategory"), collapsed, {
             let channel_list = channel_list.clone();
@@ -720,10 +779,14 @@ pub(super) fn build_category_menu(
                 });
             }
         })
-        .item(
-            t("contextMenu.collapseAllCategories"),
-            coming_soon_toast(coming_soon.clone()),
-        )
+        .item(t("contextMenu.collapseAllCategories"), {
+            let channel_list = channel_list.clone();
+            move |_window, cx| {
+                channel_list.update(cx, |list, cx| {
+                    list.collapse_all_categories(clan_id, cx);
+                });
+            }
+        })
         .separator();
 
     menu = if time_muted {
@@ -750,23 +813,62 @@ pub(super) fn build_category_menu(
         submenu_options(locale, CATEGORY_NOTI_LEVELS, level),
         noti_sub_open,
         set_category_submenu_open(sidebar, false),
-        apply_category_level(category_id, clan_id),
+        apply_category_level(category_id.clone(), clan_id),
     );
 
     if can_manage_category {
         let edit_label = t("contextMenu.editCategory");
         let delete_label = t("contextMenu.deleteCategory");
         menu = menu.separator().item(
-            edit_label.clone(),
-            coming_soon_modal(edit_label, locale_owned.clone()),
+            edit_label,
+            open_edit_category(
+                clan_id,
+                category_id.clone(),
+                channel_list,
+                locale_owned.clone(),
+            ),
         );
         if category_is_empty {
             menu = menu.danger_item(
-                delete_label.clone(),
-                coming_soon_modal(delete_label, locale_owned),
+                delete_label,
+                open_delete_category_confirm(clan_id, category_id, locale_owned),
             );
         }
     }
 
     menu
+}
+
+fn open_edit_category(
+    clan_id: ClanId,
+    category_id: String,
+    channel_list: Entity<ChannelList>,
+    locale: String,
+) -> impl Fn(&mut Window, &mut App) + 'static {
+    move |window: &mut Window, cx: &mut App| {
+        let modal = cx.new(|cx| {
+            EditCategoryModal::new(
+                clan_id,
+                category_id.clone(),
+                channel_list.clone(),
+                locale.clone(),
+                window,
+                cx,
+            )
+        });
+        Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
+    }
+}
+
+fn open_delete_category_confirm(
+    clan_id: ClanId,
+    category_id: String,
+    locale: String,
+) -> impl Fn(&mut Window, &mut App) + 'static {
+    move |window: &mut Window, cx: &mut App| {
+        let category_id = category_id.clone();
+        Shell::global(cx).update(cx, |shell, cx| {
+            shell.confirm_delete_category(clan_id, category_id, &locale, window, cx);
+        });
+    }
 }

@@ -8,8 +8,6 @@ use crate::theme::Theme;
 pub const DM_ROW_HEIGHT: f32 = 42.;
 
 const DM_AVATAR_SIZE: Pixels = px(32.);
-const PRESENCE_DOT_SIZE: Pixels = px(12.);
-const PRESENCE_IDLE_ICON_SIZE: Pixels = px(10.);
 
 pub struct DmRow {
     id: SharedString,
@@ -256,50 +254,10 @@ impl DmRow {
     }
 
     fn render_presence_badge(&self, theme: &Theme) -> Option<AnyElement> {
-        let badge_size = PRESENCE_DOT_SIZE;
-        let border = theme.bg_secondary;
-        match self.presence_badge {
-            DmAvatarPresence::None => None,
-            DmAvatarPresence::Online | DmAvatarPresence::Dnd => {
-                let fill = crate::util::user_status::presence_badge_color(self.presence_badge)
-                    .unwrap_or(theme.status_online);
-                Some(
-                    div()
-                        .absolute()
-                        .bottom(px(-1.))
-                        .right(px(-1.))
-                        .size(badge_size)
-                        .rounded_full()
-                        .border_2()
-                        .border_color(border)
-                        .bg(fill)
-                        .into_any_element(),
-                )
-            }
-            DmAvatarPresence::Idle => Some(
-                div()
-                    .absolute()
-                    .bottom(px(-1.))
-                    .right(px(-1.))
-                    .size(badge_size)
-                    .flex()
-                    .items_end()
-                    .justify_end()
-                    .child(
-                        Icon::new(IconName::DarkModeIcon)
-                            .size(PRESENCE_IDLE_ICON_SIZE)
-                            .with_transformation(gpui::Transformation::rotate(gpui::radians(
-                                -std::f32::consts::FRAC_PI_2,
-                            )))
-                            .text_color(
-                                crate::util::user_status::presence_badge_color(
-                                    DmAvatarPresence::Idle,
-                                )
-                                .unwrap_or(theme.status_idle),
-                            ),
-                    )
-                    .into_any_element(),
-            ),
-        }
+        crate::util::user_status::presence_badge_element(
+            self.presence_badge,
+            theme.bg_secondary,
+            theme,
+        )
     }
 }

@@ -355,7 +355,7 @@ impl Render for UserProfileModal {
                             .bg(theme.surfaces.primary)
                             .child(
                                 div()
-                                    .w(px(96.))
+                                    .w_full()
                                     .min_w_0()
                                     .child(
                                         div()

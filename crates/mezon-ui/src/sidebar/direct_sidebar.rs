@@ -147,6 +147,21 @@ fn dm_set_mute_submenu_open(
     }
 }
 
+fn dm_close_submenus(
+    sidebar: WeakEntity<DirectSidebar>,
+) -> impl Fn(&mut Window, &mut App) + 'static {
+    move |_window: &mut Window, cx: &mut App| {
+        let _ = sidebar.update(cx, |this, cx| {
+            if let Some(menu) = this.open_menu.as_mut()
+                && menu.mute_sub_open
+            {
+                menu.mute_sub_open = false;
+                cx.notify();
+            }
+        });
+    }
+}
+
 fn build_dm_menu(
     sidebar: WeakEntity<DirectSidebar>,
     locale: &str,
@@ -158,6 +173,7 @@ fn build_dm_menu(
     let t = |key: &'static str| mezon_i18n::t(locale, key).to_string();
     let sidebar_dismiss = sidebar.clone();
     let mut menu = ContextMenu::new()
+        .on_submenu_close(dm_close_submenus(sidebar.clone()))
         .on_dismiss(move |_window, cx| {
             let _ = sidebar_dismiss.update(cx, |this, cx| {
                 this.open_menu = None;

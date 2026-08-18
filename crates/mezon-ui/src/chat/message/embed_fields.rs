@@ -76,26 +76,28 @@ fn render_field(
     }
     let name = selection_cursor
         .section(&field.name)
-        .map(|range| selection_context.text_node(&field.name, range))
-        .unwrap_or_else(|| gpui::StyledText::new(field.name.clone()));
+        .map(|range| selection_context.text_node(&field.name, range));
+    let value_text = field.value.strip_suffix('\n').unwrap_or(&field.value);
     let value = selection_cursor
         .section(&field.value)
-        .map(|range| selection_context.text_node(&field.value, range))
-        .unwrap_or_else(|| gpui::StyledText::new(field.value.clone()));
-    column = column
-        .child(
-            div()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_size(px(14.))
-                .text_color(ctx.theme.tokens.text_theme_message)
-                .child(name),
-        )
-        .child(
-            div()
-                .text_size(px(14.))
-                .text_color(ctx.theme.tokens.text_theme_message)
-                .child(value),
-        );
+        .filter(|_| !value_text.is_empty())
+        .map(|range| {
+            selection_context.text_node(value_text, range.start..range.start + value_text.len())
+        });
+    let mut name_row = div()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_size(px(14.))
+        .text_color(ctx.theme.tokens.text_theme_message);
+    if let Some(name) = name {
+        name_row = name_row.child(name);
+    }
+    let mut value_row = div()
+        .text_size(px(14.))
+        .text_color(ctx.theme.tokens.text_theme_message);
+    if let Some(value) = value {
+        value_row = value_row.child(value);
+    }
+    column = column.child(name_row).child(value_row);
     match field.input.as_ref() {
         Some(EmbedInput::Text(text)) if !text.disabled => {
             column = column.child(render_embed_text_input(message_id, text, ctx));

@@ -294,6 +294,18 @@ impl WindowsPlatform {
             .map(|hwnd| hwnd.as_raw())
     }
 
+    /// A shell dialog with no owner can come up *behind* the app, which reads to
+    /// the user as "the dialog never opened". Fall back to any window we own so
+    /// it is always modal to something visible.
+    fn dialog_owner_window(&self) -> Option<HWND> {
+        self.find_current_active_window().or_else(|| {
+            self.raw_window_handles
+                .read()
+                .first()
+                .map(|hwnd| hwnd.as_raw())
+        })
+    }
+
     fn begin_vsync_thread(&self) {
         let Some(directx_devices) = self.inner.state.directx_devices.borrow().clone() else {
             return;
@@ -560,7 +572,7 @@ impl Platform for WindowsPlatform {
         options: PathPromptOptions,
     ) -> Receiver<Result<Option<Vec<PathBuf>>>> {
         let (tx, rx) = oneshot::channel();
-        let window = self.find_current_active_window();
+        let window = self.dialog_owner_window();
         self.foreground_executor()
             .spawn(async move {
                 let _ = tx.send(file_open_dialog(options, window));
@@ -578,7 +590,7 @@ impl Platform for WindowsPlatform {
         let directory = directory.to_owned();
         let suggested_name = suggested_name.map(|s| s.to_owned());
         let (tx, rx) = oneshot::channel();
-        let window = self.find_current_active_window();
+        let window = self.dialog_owner_window();
         self.foreground_executor()
             .spawn(async move {
                 let _ = tx.send(file_save_dialog(directory, suggested_name, window));
@@ -1135,6 +1147,17 @@ fn open_target_in_explorer(target: &Path) -> Result<()> {
     })
 }
 
+/// `IFileDialog::Show` reports a cancelled dialog as `ERROR_CANCELLED`. Every
+/// other failure means the dialog never came up, and reporting that as a cancel
+/// leaves the caller silently doing nothing at all.
+fn dialog_cancelled(error: windows::core::Error) -> Result<()> {
+    if error.code() == HRESULT::from_win32(ERROR_CANCELLED.0) {
+        Ok(())
+    } else {
+        Err(error).context("failed to show the file dialog")
+    }
+}
+
 fn file_open_dialog(
     options: PathPromptOptions,
     window: Option<HWND>,
@@ -1158,9 +1181,8 @@ fn file_open_dialog(
             folder_dialog.SetOkButtonLabel(&HSTRING::from(prompt))?;
         }
 
-        if folder_dialog.Show(window).is_err() {
-            // User cancelled
-            return Ok(None);
+        if let Err(error) = folder_dialog.Show(window) {
+            return dialog_cancelled(error).map(|()| None);
         }
     }
 
@@ -1218,9 +1240,8 @@ fn file_save_dialog(
             pszName: windows::core::w!("All files"),
             pszSpec: windows::core::w!("*.*"),
         }])?;
-        if dialog.Show(window).is_err() {
-            // User cancelled
-            return Ok(None);
+        if let Err(error) = dialog.Show(window) {
+            return dialog_cancelled(error).map(|()| None);
         }
     }
     let shell_item = unsafe { dialog.GetResult()? };

@@ -16,6 +16,7 @@ mod tab_bar;
 mod textarea;
 mod toast;
 mod tooltip;
+mod unsaved_changes_bar;
 
 pub mod button {
     pub use mezon_widgets::{Button, ButtonVariant, ButtonVariants};
@@ -64,6 +65,7 @@ pub use tab_bar::TabBar;
 pub use textarea::{TextArea, TextAreaEvent, TextAreaField};
 pub use toast::{Toast, ToastKind};
 pub use tooltip::Tooltip;
+pub use unsaved_changes_bar::UnsavedChangesBar;
 
 pub use button::{Button, ButtonVariant, ButtonVariants};
 pub use icon::{Icon, IconName};

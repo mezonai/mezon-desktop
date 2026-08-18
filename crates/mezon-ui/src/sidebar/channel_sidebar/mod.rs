@@ -127,7 +127,122 @@ pub struct ChannelSidebar {
     _notification_setting_observe: Subscription,
 }
 
+struct ActiveChannelSidebar(gpui::WeakEntity<ChannelSidebar>);
+impl gpui::Global for ActiveChannelSidebar {}
+
+struct ChannelMenuData {
+    position: gpui::Point<gpui::Pixels>,
+    channel_type: mezon_store::ChannelType,
+    is_thread: bool,
+    locale: String,
+    channel_id: ChannelId,
+    clan_id: ClanId,
+    muted: bool,
+    muted_until: Option<String>,
+    level: i32,
+    mute_sub_open: bool,
+    noti_sub_open: bool,
+    clan_default: Option<i32>,
+    in_favorites: bool,
+    permissions: ChannelMenuPermissions,
+}
+
+struct CategoryMenuData {
+    position: gpui::Point<gpui::Pixels>,
+    locale: String,
+    category_id: String,
+    clan_id: ClanId,
+    collapsed: bool,
+    time_muted: bool,
+    muted_until: Option<String>,
+    level: i32,
+    mute_sub_open: bool,
+    noti_sub_open: bool,
+    can_manage_category: bool,
+    category_is_empty: bool,
+}
+
 impl ChannelSidebar {
+    fn channel_menu_data(&self, locale: &str, cx: &App) -> Option<ChannelMenuData> {
+        let menu = self.open_menu.as_ref()?;
+        let store = mezon_store::NotificationSettingStore::try_global(cx);
+        Some(ChannelMenuData {
+            position: menu.position,
+            channel_type: menu.channel_type,
+            is_thread: menu.is_thread,
+            locale: locale.to_string(),
+            channel_id: menu.channel_id,
+            clan_id: menu.clan_id,
+            muted: store
+                .as_ref()
+                .is_some_and(|s| s.read(cx).is_time_muted(menu.channel_id)),
+            muted_until: store
+                .as_ref()
+                .and_then(|s| s.read(cx).muted_until_ms(menu.channel_id))
+                .map(|ms| {
+                    format!(
+                        "{} {}",
+                        mezon_i18n::t(locale, "channelMenu.menu.notification.mutedUntil"),
+                        crate::chat::notification_setting_popover::format_muted_until(ms)
+                    )
+                }),
+            level: store
+                .as_ref()
+                .map(|s| s.read(cx).level(menu.channel_id))
+                .unwrap_or(0),
+            mute_sub_open: menu.mute_sub_open,
+            noti_sub_open: menu.noti_sub_open,
+            clan_default: store
+                .as_ref()
+                .and_then(|s| s.read(cx).clan_default(menu.clan_id)),
+            in_favorites: menu.in_favorites,
+            permissions: ChannelMenuPermissions::resolve(menu.clan_id, menu.channel_id, cx),
+        })
+    }
+
+    fn category_menu_data(&self, locale: &str, cx: &App) -> Option<CategoryMenuData> {
+        let menu = self.category_menu.as_ref()?;
+        let store = mezon_store::NotificationSettingStore::try_global(cx);
+        Some(CategoryMenuData {
+            position: menu.position,
+            locale: locale.to_string(),
+            category_id: menu.category_id.clone(),
+            clan_id: menu.clan_id,
+            collapsed: menu.collapsed,
+            time_muted: store
+                .as_ref()
+                .is_some_and(|s| s.read(cx).category_is_time_muted(&menu.category_id)),
+            muted_until: store
+                .as_ref()
+                .and_then(|s| s.read(cx).category_muted_until_ms(&menu.category_id))
+                .map(|ms| {
+                    format!(
+                        "{} {}",
+                        mezon_i18n::t(locale, "channelMenu.menu.notification.mutedUntil"),
+                        crate::chat::notification_setting_popover::format_muted_until(ms)
+                    )
+                }),
+            level: store
+                .as_ref()
+                .and_then(|s| s.read(cx).category_default(&menu.category_id))
+                .unwrap_or(0),
+            mute_sub_open: menu.mute_sub_open,
+            noti_sub_open: menu.noti_sub_open,
+            can_manage_category: PermissionStore::try_global(cx).is_some_and(|permissions| {
+                permissions
+                    .read(cx)
+                    .check(menu.clan_id, None, PERMISSION_MANAGE_CLAN, cx)
+            }),
+            category_is_empty: self
+                .channel_list
+                .read(cx)
+                .categories_for_clan(menu.clan_id)
+                .iter()
+                .find(|category| category.id == menu.category_id)
+                .is_some_and(|category| category.channels.is_empty()),
+        })
+    }
+
     pub fn new(
         clan_list: Entity<ClanList>,
         channel_list: Entity<ChannelList>,
@@ -263,6 +378,7 @@ impl ChannelSidebar {
             _channel_permissions_observe: channel_permissions_observe,
             _notification_setting_observe: notification_setting_observe,
         };
+        cx.set_global(ActiveChannelSidebar(cx.entity().downgrade()));
         this.rebuild_items(cx);
         this
     }
@@ -640,6 +756,26 @@ impl ChannelSidebar {
         }
     }
 
+    fn clear_overlays(&mut self) {
+        self.open_menu = None;
+        self.category_menu = None;
+        self.clan_menu_open = false;
+        self.app_list_open = false;
+        self.app_list_apps.clear();
+    }
+
+    fn open_channel_menu(&mut self, menu: OpenMenu, cx: &mut Context<Self>) {
+        self.clear_overlays();
+        self.open_menu = Some(menu);
+        cx.notify();
+    }
+
+    fn open_category_menu(&mut self, menu: CategoryMenu, cx: &mut Context<Self>) {
+        self.clear_overlays();
+        self.category_menu = Some(menu);
+        cx.notify();
+    }
+
     pub(crate) fn dismiss_clan_menu(&mut self, cx: &mut Context<Self>) {
         if self.clan_menu_open {
             self.clan_menu_open = false;
@@ -660,6 +796,7 @@ impl ChannelSidebar {
             self.dismiss_app_list(cx);
             return;
         }
+        self.clear_overlays();
         self.app_list_open = true;
         self.app_list_apps = apps;
         cx.notify();
@@ -713,82 +850,8 @@ impl Render for ChannelSidebar {
                         .check_permission(clan_id, PERMISSION_MANAGE_CLAN, cx)
                 })
             });
-        let menu_overlay = self.open_menu.as_ref().map(|menu| {
-            (
-                menu.position,
-                menu.channel_type,
-                menu.is_thread,
-                locale.clone(),
-                menu.channel_id,
-                menu.clan_id,
-                mezon_store::NotificationSettingStore::try_global(cx)
-                    .is_some_and(|store| store.read(cx).is_time_muted(menu.channel_id)),
-                mezon_store::NotificationSettingStore::try_global(cx)
-                    .and_then(|store| store.read(cx).muted_until_ms(menu.channel_id))
-                    .map(|ms| {
-                        format!(
-                            "{} {}",
-                            mezon_i18n::t(&locale, "channelMenu.menu.notification.mutedUntil"),
-                            crate::chat::notification_setting_popover::format_muted_until(ms)
-                        )
-                    }),
-                mezon_store::NotificationSettingStore::try_global(cx)
-                    .map(|store| store.read(cx).level(menu.channel_id))
-                    .unwrap_or(0),
-                menu.mute_sub_open,
-                menu.noti_sub_open,
-                mezon_store::NotificationSettingStore::try_global(cx)
-                    .and_then(|store| store.read(cx).clan_default(menu.clan_id)),
-                menu.in_favorites,
-                ChannelMenuPermissions::resolve(menu.clan_id, menu.channel_id, cx),
-            )
-        });
-        let category_menu_overlay = self.category_menu.as_ref().map(|menu| {
-            let store = mezon_store::NotificationSettingStore::try_global(cx);
-            let level = store
-                .as_ref()
-                .and_then(|s| s.read(cx).category_default(&menu.category_id))
-                .unwrap_or(0);
-            let time_muted = store
-                .as_ref()
-                .is_some_and(|s| s.read(cx).category_is_time_muted(&menu.category_id));
-            let muted_until = store
-                .as_ref()
-                .and_then(|s| s.read(cx).category_muted_until_ms(&menu.category_id))
-                .map(|ms| {
-                    format!(
-                        "{} {}",
-                        mezon_i18n::t(&locale, "channelMenu.menu.notification.mutedUntil"),
-                        crate::chat::notification_setting_popover::format_muted_until(ms)
-                    )
-                });
-            let can_manage_category = PermissionStore::try_global(cx).is_some_and(|permissions| {
-                permissions
-                    .read(cx)
-                    .check(menu.clan_id, None, PERMISSION_MANAGE_CLAN, cx)
-            });
-            let category_is_empty = self
-                .channel_list
-                .read(cx)
-                .categories_for_clan(menu.clan_id)
-                .iter()
-                .find(|category| category.id == menu.category_id)
-                .is_some_and(|category| category.channels.is_empty());
-            (
-                menu.position,
-                locale.clone(),
-                menu.category_id.clone(),
-                menu.clan_id,
-                menu.collapsed,
-                time_muted,
-                muted_until,
-                level,
-                menu.mute_sub_open,
-                menu.noti_sub_open,
-                can_manage_category,
-                category_is_empty,
-            )
-        });
+        let menu_overlay = self.channel_menu_data(&locale, cx);
+        let category_menu_overlay = self.category_menu_data(&locale, cx);
         let clan_menu_data = self.clan_menu_open.then(|| {
             let active_clan_for_menu = self.clan_list.read(cx).active_clan().map(|clan| {
                 (
@@ -810,6 +873,10 @@ impl Render for ChannelSidebar {
                     .read(cx)
                     .is_show_empty_category(self.active_clan_id.unwrap_or(ClanId(0))),
                 can_create_category,
+                crate::clan::clan_menu::can_leave_clan(
+                    self.active_clan_id.unwrap_or(ClanId(0)),
+                    cx,
+                ),
                 locale.clone(),
             )
         });
@@ -936,7 +1003,9 @@ impl Render for ChannelSidebar {
                                     move |_: &MouseDownEvent, _window, cx| {
                                         if let Some(view) = sidebar.upgrade() {
                                             view.update(cx, |this, cx| {
-                                                this.clan_menu_open = !this.clan_menu_open;
+                                                let opening = !this.clan_menu_open;
+                                                this.clear_overlays();
+                                                this.clan_menu_open = opening;
                                                 cx.notify();
                                             });
                                         }
@@ -979,6 +1048,7 @@ impl Render for ChannelSidebar {
                             clan_avatar_url,
                             show_empty,
                             can_create_category,
+                            can_leave,
                             locale,
                         )| {
                             let Some(clan_id) = clan_id else {
@@ -994,6 +1064,7 @@ impl Render for ChannelSidebar {
                                     &locale,
                                     show_empty,
                                     can_create_category,
+                                    can_leave,
                                 ),
                                 px(50.),
                                 px(8.),
@@ -1016,83 +1087,22 @@ impl Render for ChannelSidebar {
                         cx,
                     ),
             )
-            .when_some(
-                menu_overlay,
-                move |el,
-                      (
-                    position,
-                    channel_type,
-                    is_thread,
-                    locale,
-                    channel_id,
-                    clan_id,
-                    muted,
-                    muted_until,
-                    level,
-                    mute_sub_open,
-                    noti_sub_open,
-                    clan_default,
-                    in_favorites,
-                    channel_permissions,
-                )| {
-                    el.child(context_menu_at(
-                        position,
-                        build_channel_menu(
-                            sidebar_for_channel_menu.clone(),
-                            &locale,
-                            channel_type,
-                            is_thread,
-                            channel_id,
-                            clan_id,
-                            muted,
-                            muted_until,
-                            level,
-                            mute_sub_open,
-                            noti_sub_open,
-                            clan_default,
-                            in_favorites,
-                            channel_permissions,
-                        ),
-                    ))
-                },
-            )
-            .when_some(
-                category_menu_overlay,
-                move |el,
-                      (
-                    position,
-                    locale,
-                    category_id,
-                    clan_id,
-                    collapsed,
-                    time_muted,
-                    muted_until,
-                    level,
-                    mute_sub_open,
-                    noti_sub_open,
-                    can_manage_category,
-                    category_is_empty,
-                )| {
-                    el.child(context_menu_at(
-                        position,
-                        build_category_menu(
-                            sidebar_for_category_menu.clone(),
-                            channel_list_for_category_menu.clone(),
-                            &locale,
-                            category_id,
-                            clan_id,
-                            collapsed,
-                            time_muted,
-                            muted_until,
-                            level,
-                            mute_sub_open,
-                            noti_sub_open,
-                            can_manage_category,
-                            category_is_empty,
-                        ),
-                    ))
-                },
-            )
+            .when_some(menu_overlay, move |el, data| {
+                el.child(context_menu_at(
+                    data.position,
+                    build_channel_menu(sidebar_for_channel_menu.clone(), &data),
+                ))
+            })
+            .when_some(category_menu_overlay, move |el, data| {
+                el.child(context_menu_at(
+                    data.position,
+                    build_category_menu(
+                        sidebar_for_category_menu.clone(),
+                        channel_list_for_category_menu.clone(),
+                        &data,
+                    ),
+                ))
+            })
             .when_some(app_list_overlay, move |el, (apps, locale)| {
                 el.child(app_list_popover_overlay(
                     &apps,
@@ -1104,6 +1114,242 @@ impl Render for ChannelSidebar {
                 ))
             })
     }
+}
+
+fn active_channel_sidebar(cx: &App) -> anyhow::Result<Entity<ChannelSidebar>> {
+    cx.try_global::<ActiveChannelSidebar>()
+        .and_then(|active| active.0.upgrade())
+        .ok_or_else(|| anyhow::anyhow!("no channel sidebar is mounted; sign in first"))
+}
+
+fn probe_items_json(menu: &crate::components::primitives::ContextMenu) -> serde_json::Value {
+    serde_json::Value::Array(
+        menu.probe_items()
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| {
+                serde_json::json!({
+                    "index": index,
+                    "kind": item.kind,
+                    "label": item.label,
+                    "disabled": item.disabled,
+                    "options": item
+                        .options
+                        .into_iter()
+                        .map(|(value, label)| serde_json::json!({ "value": value, "label": label }))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn channel_menu_json(sidebar: &Entity<ChannelSidebar>, cx: &App) -> serde_json::Value {
+    let this = sidebar.read(cx);
+    let locale = this.settings.read(cx).language.clone();
+    let Some(data) = this.channel_menu_data(&locale, cx) else {
+        return serde_json::json!({ "open": false, "items": [] });
+    };
+    let menu = build_channel_menu(sidebar.downgrade(), &data);
+    serde_json::json!({
+        "open": true,
+        "clan_id": data.clan_id.to_string(),
+        "channel_id": data.channel_id.to_string(),
+        "is_thread": data.is_thread,
+        "in_favorites": data.in_favorites,
+        "is_favorite": data.permissions.is_favorite,
+        "can_manage_channel": data.permissions.can_manage_channel,
+        "mute_submenu_open": data.mute_sub_open,
+        "noti_submenu_open": data.noti_sub_open,
+        "items": probe_items_json(&menu),
+    })
+}
+
+fn category_menu_json(sidebar: &Entity<ChannelSidebar>, cx: &App) -> serde_json::Value {
+    let this = sidebar.read(cx);
+    let locale = this.settings.read(cx).language.clone();
+    let Some(data) = this.category_menu_data(&locale, cx) else {
+        return serde_json::json!({ "open": false, "items": [] });
+    };
+    let menu = build_category_menu(sidebar.downgrade(), this.channel_list_handle.clone(), &data);
+    serde_json::json!({
+        "open": true,
+        "clan_id": data.clan_id.to_string(),
+        "category_id": data.category_id,
+        "collapsed": data.collapsed,
+        "can_manage_category": data.can_manage_category,
+        "category_is_empty": data.category_is_empty,
+        "mute_submenu_open": data.mute_sub_open,
+        "noti_submenu_open": data.noti_sub_open,
+        "items": probe_items_json(&menu),
+    })
+}
+
+pub fn channel_menu_state(cx: &App) -> anyhow::Result<serde_json::Value> {
+    let sidebar = active_channel_sidebar(cx)?;
+    Ok(channel_menu_json(&sidebar, cx))
+}
+
+pub fn channel_menu_open(
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    position: gpui::Point<gpui::Pixels>,
+    in_favorites: bool,
+    cx: &mut App,
+) -> anyhow::Result<serde_json::Value> {
+    let sidebar = active_channel_sidebar(cx)?;
+    let channels = ChannelList::global(cx);
+    let channel = channels
+        .read(cx)
+        .channel(clan_id, channel_id)
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "channel {channel_id} is not in clan {clan_id}; call list_channels first"
+            )
+        })?;
+    sidebar.update(cx, |this, cx| {
+        this.open_channel_menu(
+            OpenMenu {
+                channel_type: channel.channel_type,
+                is_thread: channel.parent_id.is_some(),
+                position,
+                channel_id,
+                clan_id,
+                in_favorites,
+                mute_sub_open: false,
+                noti_sub_open: false,
+            },
+            cx,
+        );
+    });
+    Ok(channel_menu_json(&sidebar, cx))
+}
+
+pub fn channel_menu_close(cx: &mut App) -> anyhow::Result<serde_json::Value> {
+    let sidebar = active_channel_sidebar(cx)?;
+    sidebar.update(cx, |this, cx| {
+        this.open_menu = None;
+        cx.notify();
+    });
+    Ok(channel_menu_json(&sidebar, cx))
+}
+
+pub fn channel_menu_pick(
+    index: usize,
+    value: Option<i32>,
+    window: &mut Window,
+    cx: &mut App,
+) -> anyhow::Result<serde_json::Value> {
+    let sidebar = active_channel_sidebar(cx)?;
+    let locale = sidebar.read(cx).settings.read(cx).language.clone();
+    let data = sidebar
+        .read(cx)
+        .channel_menu_data(&locale, cx)
+        .ok_or_else(|| anyhow::anyhow!("channel menu is not open; call channel_menu_open first"))?;
+    let menu = build_channel_menu(sidebar.downgrade(), &data);
+    let picked = menu
+        .probe_items()
+        .get(index)
+        .map(|item| (item.kind, item.label.clone()))
+        .ok_or_else(|| anyhow::anyhow!("no menu item at index {index}"))?;
+    menu.probe_activate(index, value, window, cx)?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "index": index,
+        "kind": picked.0,
+        "label": picked.1,
+        "value": value,
+        "menu_open": sidebar.read(cx).open_menu.is_some(),
+    }))
+}
+
+pub fn category_menu_state(cx: &App) -> anyhow::Result<serde_json::Value> {
+    let sidebar = active_channel_sidebar(cx)?;
+    Ok(category_menu_json(&sidebar, cx))
+}
+
+pub fn category_menu_open(
+    clan_id: ClanId,
+    category_id: String,
+    position: gpui::Point<gpui::Pixels>,
+    cx: &mut App,
+) -> anyhow::Result<serde_json::Value> {
+    let sidebar = active_channel_sidebar(cx)?;
+    anyhow::ensure!(
+        category_id != FAVOR_CATE_ID,
+        "the favourites category has no context menu"
+    );
+    let channels = ChannelList::global(cx);
+    anyhow::ensure!(
+        channels
+            .read(cx)
+            .categories_for_clan(clan_id)
+            .iter()
+            .any(|category| category.id == category_id),
+        "category {category_id} is not in clan {clan_id}; call list_channels first"
+    );
+    let collapsed = channels
+        .read(cx)
+        .is_category_collapsed(clan_id, &category_id);
+    sidebar.update(cx, |this, cx| {
+        this.open_category_menu(
+            CategoryMenu {
+                position,
+                category_id: category_id.clone(),
+                clan_id,
+                collapsed,
+                mute_sub_open: false,
+                noti_sub_open: false,
+            },
+            cx,
+        );
+        if let Some(store) = mezon_store::NotificationSettingStore::try_global(cx) {
+            store.update(cx, |store, cx| store.ensure_category(category_id, cx));
+        }
+    });
+    Ok(category_menu_json(&sidebar, cx))
+}
+
+pub fn category_menu_close(cx: &mut App) -> anyhow::Result<serde_json::Value> {
+    let sidebar = active_channel_sidebar(cx)?;
+    sidebar.update(cx, |this, cx| {
+        this.category_menu = None;
+        cx.notify();
+    });
+    Ok(category_menu_json(&sidebar, cx))
+}
+
+pub fn category_menu_pick(
+    index: usize,
+    value: Option<i32>,
+    window: &mut Window,
+    cx: &mut App,
+) -> anyhow::Result<serde_json::Value> {
+    let sidebar = active_channel_sidebar(cx)?;
+    let locale = sidebar.read(cx).settings.read(cx).language.clone();
+    let data = sidebar
+        .read(cx)
+        .category_menu_data(&locale, cx)
+        .ok_or_else(|| {
+            anyhow::anyhow!("category menu is not open; call category_menu_open first")
+        })?;
+    let channel_list = sidebar.read(cx).channel_list_handle.clone();
+    let menu = build_category_menu(sidebar.downgrade(), channel_list, &data);
+    let picked = menu
+        .probe_items()
+        .get(index)
+        .map(|item| (item.kind, item.label.clone()))
+        .ok_or_else(|| anyhow::anyhow!("no menu item at index {index}"))?;
+    menu.probe_activate(index, value, window, cx)?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "index": index,
+        "kind": picked.0,
+        "label": picked.1,
+        "value": value,
+        "menu_open": sidebar.read(cx).category_menu.is_some(),
+    }))
 }
 
 fn sk_bar(sk: gpui::Rgba, w: gpui::Pixels, h: gpui::Pixels) -> gpui::Div {
@@ -1620,17 +1866,23 @@ fn render_sidebar_item(
                     let sidebar = sidebar.clone();
                     let category_id = category_id.clone();
                     move |event: &MouseDownEvent, _window, cx| {
+                        if category_id == FAVOR_CATE_ID {
+                            return;
+                        }
                         let position = event.position;
                         if let Some(view) = sidebar.upgrade() {
                             view.update(cx, |this, cx| {
-                                this.category_menu = Some(CategoryMenu {
-                                    position,
-                                    category_id: category_id.clone(),
-                                    clan_id: clan_id_for_toggle,
-                                    collapsed: menu_collapsed,
-                                    mute_sub_open: false,
-                                    noti_sub_open: false,
-                                });
+                                this.open_category_menu(
+                                    CategoryMenu {
+                                        position,
+                                        category_id: category_id.clone(),
+                                        clan_id: clan_id_for_toggle,
+                                        collapsed: menu_collapsed,
+                                        mute_sub_open: false,
+                                        noti_sub_open: false,
+                                    },
+                                    cx,
+                                );
                                 if let Some(store) =
                                     mezon_store::NotificationSettingStore::try_global(cx)
                                 {
@@ -1837,16 +2089,19 @@ fn render_sidebar_item(
                     .on_right_click(move |position, _window, cx| {
                         if let Some(view) = menu_sidebar.upgrade() {
                             view.update(cx, |this, cx| {
-                                this.open_menu = Some(OpenMenu {
-                                    channel_type: menu_channel_type,
-                                    is_thread: menu_is_thread,
-                                    position,
-                                    channel_id: menu_channel_id,
-                                    clan_id: menu_clan_id,
-                                    in_favorites,
-                                    mute_sub_open: false,
-                                    noti_sub_open: false,
-                                });
+                                this.open_channel_menu(
+                                    OpenMenu {
+                                        channel_type: menu_channel_type,
+                                        is_thread: menu_is_thread,
+                                        position,
+                                        channel_id: menu_channel_id,
+                                        clan_id: menu_clan_id,
+                                        in_favorites,
+                                        mute_sub_open: false,
+                                        noti_sub_open: false,
+                                    },
+                                    cx,
+                                );
                                 if let Some(store) =
                                     mezon_store::NotificationSettingStore::try_global(cx)
                                 {
@@ -1984,16 +2239,19 @@ fn render_sidebar_item(
                     let position = event.position;
                     if let Some(view) = sidebar.upgrade() {
                         view.update(cx, |this, cx| {
-                            this.open_menu = Some(OpenMenu {
-                                channel_type,
-                                is_thread,
-                                position,
-                                channel_id: menu_channel_id,
-                                clan_id: menu_clan_id,
-                                in_favorites,
-                                mute_sub_open: false,
-                                noti_sub_open: false,
-                            });
+                            this.open_channel_menu(
+                                OpenMenu {
+                                    channel_type,
+                                    is_thread,
+                                    position,
+                                    channel_id: menu_channel_id,
+                                    clan_id: menu_clan_id,
+                                    in_favorites,
+                                    mute_sub_open: false,
+                                    noti_sub_open: false,
+                                },
+                                cx,
+                            );
                             if let Some(store) =
                                 mezon_store::NotificationSettingStore::try_global(cx)
                             {

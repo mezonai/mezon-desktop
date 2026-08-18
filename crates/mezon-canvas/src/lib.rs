@@ -1,4 +1,3 @@
-mod doc_view;
 mod editor;
 mod image;
 mod navigation;

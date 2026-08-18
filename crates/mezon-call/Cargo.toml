@@ -1,0 +1,23 @@
+[package]
+name = "mezon-call"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+libwebrtc = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "time", "macros"] }
+futures = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+flume.workspace = true
+parking_lot.workspace = true
+base64.workspace = true
+flate2.workspace = true
+mezon-voice = { path = "../mezon-voice" }

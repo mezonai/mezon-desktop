@@ -278,9 +278,9 @@ impl LoginView {
                 }
             };
             let exec = cx.background_executor().clone();
-            let login_id_for_qr = login_id.clone();
+            let qr_payload = format!("mezon.ai://login/{login_id}");
             let qr_images = exec
-                .spawn(async move { build_qr_images(&login_id_for_qr) })
+                .spawn(async move { build_qr_images(&qr_payload) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let (sharp, blurred) = match qr_images {

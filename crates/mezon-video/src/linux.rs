@@ -182,3 +182,95 @@ impl Drop for PlayerImpl {
 fn clock_time_to_seconds(time: gst::ClockTime) -> f64 {
     time.nseconds() as f64 / 1_000_000_000.0
 }
+
+const POSTER_TIME: gst::ClockTime = gst::ClockTime::from_seconds(1);
+const PROBE_TIMEOUT: gst::ClockTime = gst::ClockTime::from_seconds(5);
+
+pub fn probe_video(path: &str, max_poster_edge: u32) -> Option<crate::VideoProbe> {
+    if path.is_empty() {
+        return None;
+    }
+    ensure_gstreamer().ok()?;
+    let uri = match gst::glib::filename_to_uri(path, None) {
+        Ok(uri) => uri,
+        Err(error) => {
+            tracing::warn!(target: "mezon_video", %error, "video probe path is not a uri");
+            return None;
+        }
+    };
+    let probe = PosterPipeline::open(uri.as_str())?.probe(max_poster_edge);
+    if probe.is_none() {
+        tracing::warn!(target: "mezon_video", "video probe produced no frame");
+    }
+    probe
+}
+
+struct PosterPipeline {
+    playbin: gst::Element,
+    appsink: gst_app::AppSink,
+}
+
+impl PosterPipeline {
+    fn open(uri: &str) -> Option<Self> {
+        let playbin = gst::ElementFactory::make("playbin").build().ok()?;
+        let appsink = gst_app::AppSink::builder()
+            .caps(
+                &gst_video::VideoCapsBuilder::new()
+                    .format(gst_video::VideoFormat::Bgra)
+                    .build(),
+            )
+            .max_buffers(1)
+            .drop(false)
+            .sync(false)
+            .build();
+        let audio_sink = gst::ElementFactory::make("fakesink").build().ok()?;
+        playbin.set_property("uri", uri);
+        playbin.set_property("video-sink", &appsink);
+        playbin.set_property("audio-sink", &audio_sink);
+        Some(Self { playbin, appsink })
+    }
+
+    fn probe(&self, max_poster_edge: u32) -> Option<crate::VideoProbe> {
+        self.playbin.set_state(gst::State::Paused).ok()?;
+        self.playbin.state(PROBE_TIMEOUT).0.ok()?;
+        if self.playbin.query_duration::<gst::ClockTime>() > Some(POSTER_TIME)
+            && self
+                .playbin
+                .seek_simple(
+                    gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                    POSTER_TIME,
+                )
+                .is_ok()
+        {
+            self.playbin.state(PROBE_TIMEOUT).0.ok()?;
+        }
+        let sample = self.appsink.pull_preroll().ok()?;
+        let buffer = sample.buffer()?;
+        let info = gst_video::VideoInfo::from_caps(sample.caps()?).ok()?;
+        let frame = gst_video::VideoFrameRef::from_buffer_ref_readable(buffer, &info).ok()?;
+        let width = frame.width();
+        let height = frame.height();
+        let stride = usize::try_from(*frame.plane_stride().first()?).ok()?;
+        let poster_jpeg = crate::poster::encode_poster_jpeg(
+            frame.plane_data(0).ok()?,
+            width,
+            height,
+            stride,
+            false,
+            max_poster_edge,
+        );
+        Some(crate::VideoProbe {
+            width,
+            height,
+            poster_jpeg,
+        })
+    }
+}
+
+impl Drop for PosterPipeline {
+    fn drop(&mut self) {
+        if let Err(error) = self.playbin.set_state(gst::State::Null) {
+            tracing::warn!(target: "mezon_video", %error, "gstreamer probe teardown failed");
+        }
+    }
+}

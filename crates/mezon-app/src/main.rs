@@ -981,6 +981,7 @@ fn open_main_window(
     mezon_store::PresenceStore::init(api.clone(), cx);
     mezon_store::StreamStore::init(api.clone(), cx);
     mezon_store::VoiceStore::init(api.clone(), cx);
+    mezon_store::CallStore::init(api.clone(), cx);
     mezon_store::ClanMembersStore::init(api.clone(), cx);
     mezon_store::EmojiStore::init(api.clone(), cx);
     mezon_store::StickerStore::init(api.clone(), cx);
@@ -988,6 +989,7 @@ fn open_main_window(
     mezon_store::ChannelMembersStore::init(api.clone(), cx);
     mezon_store::ChannelPermissionsStore::init(api.clone(), cx);
     mezon_store::ChannelUsersStore::init(api.clone(), cx);
+    mezon_store::BannedUsersStore::init(api.clone(), cx);
     mezon_store::ChannelRolePermissionsStore::init(api.clone(), cx);
     mezon_store::GroupMembersStore::init(api.clone(), cx);
     mezon_store::UsersByUserStore::init(api.clone(), cx);

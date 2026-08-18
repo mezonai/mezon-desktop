@@ -5768,7 +5768,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-app"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -5777,7 +5777,6 @@ dependencies = [
  "futures",
  "gpui",
  "gpui_platform",
- "image",
  "mezon-cli",
  "mezon-client",
  "mezon-mcp",
@@ -5800,7 +5799,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-audio"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "flume",
@@ -5814,8 +5813,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "mezon-call"
+version = "2.0.15"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "flate2",
+ "flume",
+ "futures",
+ "libwebrtc",
+ "mezon-voice",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "mezon-canvas"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5837,7 +5854,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-cli"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "clap",
@@ -5853,7 +5870,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-client"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5890,14 +5907,14 @@ dependencies = [
 
 [[package]]
 name = "mezon-i18n"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "mezon-mcp"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "axum",
@@ -5918,7 +5935,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-native"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "auto-launch",
@@ -5945,7 +5962,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-proto"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "prost 0.13.5",
  "prost-build 0.13.5",
@@ -5955,8 +5972,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "mezon-record"
+version = "2.0.15"
+dependencies = [
+ "anyhow",
+ "core-foundation 0.10.0",
+ "core-foundation-sys 0.8.7",
+ "core-video",
+ "flume",
+ "gstreamer",
+ "gstreamer-app",
+ "gstreamer-video",
+ "libc",
+ "objc",
+ "parking_lot",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "windows 0.61.3",
+ "windows-core 0.61.2",
+ "yuv",
+]
+
+[[package]]
 name = "mezon-store"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5967,6 +6007,7 @@ dependencies = [
  "image",
  "keyring",
  "mezon-audio",
+ "mezon-call",
  "mezon-client",
  "mezon-i18n",
  "mezon-proto",
@@ -5987,7 +6028,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-stream"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "flume",
@@ -6005,7 +6046,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-theme"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "gpui",
  "theme",
@@ -6013,7 +6054,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-ui"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6055,7 +6096,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-updater"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6076,7 +6117,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-video"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -6098,13 +6139,14 @@ dependencies = [
 
 [[package]]
 name = "mezon-voice"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "anyhow",
  "block",
  "cocoa 0.25.0",
  "core-graphics-helmer-fork",
  "core-video",
+ "cosmic-text",
  "cpal",
  "flume",
  "futures",
@@ -6113,11 +6155,13 @@ dependencies = [
  "livekit",
  "livekit-protocol",
  "mezon-native",
+ "mezon-record",
  "nokhwa",
  "objc",
  "parking_lot",
  "screencapturekit",
  "screencapturekit-sys",
+ "tiny-skia",
  "tokio",
  "tracing",
  "windows 0.61.3",
@@ -6129,7 +6173,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-widgets"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "gpui",
  "mezon-store",
@@ -6193,7 +6237,7 @@ dependencies = [
 
 [[package]]
 name = "mmn-client"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "base64 0.22.1",
  "bs58",

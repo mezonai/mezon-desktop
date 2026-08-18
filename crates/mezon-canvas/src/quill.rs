@@ -1,5 +1,15 @@
 use serde_json::{Value, json};
 
+fn quill_image_src(image: Option<&Value>) -> Option<&str> {
+    let image = image?;
+    let src = image
+        .as_str()
+        .or_else(|| image.get("src").and_then(|value| value.as_str()))
+        .or_else(|| image.get("url").and_then(|value| value.as_str()))?;
+    let src = src.trim();
+    if src.is_empty() { None } else { Some(src) }
+}
+
 pub fn is_quill_delta(value: &Value) -> bool {
     value
         .get("ops")
@@ -52,15 +62,13 @@ pub fn quill_delta_to_tiptap_json(delta: &Value) -> Value {
             && insert.is_object()
             && !insert.as_object().is_some_and(|o| o.is_empty())
         {
-            if let Some(image) = insert.get("image").and_then(|v| v.as_str()) {
-                if !image.is_empty() {
-                    flush_paragraph(&mut doc_content, &mut current_paragraph, &mut current_list);
-                    flush_list(&mut doc_content, &mut current_list);
-                    doc_content.push(json!({
-                        "type": "image",
-                        "attrs": { "src": image }
-                    }));
-                }
+            if let Some(image) = quill_image_src(insert.get("image")) {
+                flush_paragraph(&mut doc_content, &mut current_paragraph, &mut current_list);
+                flush_list(&mut doc_content, &mut current_list);
+                doc_content.push(json!({
+                    "type": "image",
+                    "attrs": { "src": image }
+                }));
                 continue;
             }
             continue;
@@ -217,5 +225,21 @@ mod tests {
         );
         assert_eq!(content[2]["type"], "paragraph");
         assert_eq!(content[2]["content"][0]["text"], "After image");
+    }
+
+    #[test]
+    fn converts_quill_image_object_src() {
+        let raw = json!({
+            "ops": [
+                { "insert": { "image": { "src": "https://cdn.mezon.ai/clan/photo.png", "alt": "shot" } } },
+                { "insert": "\n" }
+            ]
+        });
+        let out = quill_delta_to_tiptap_json(&raw);
+        assert_eq!(out["content"][0]["type"], "image");
+        assert_eq!(
+            out["content"][0]["attrs"]["src"],
+            "https://cdn.mezon.ai/clan/photo.png"
+        );
     }
 }

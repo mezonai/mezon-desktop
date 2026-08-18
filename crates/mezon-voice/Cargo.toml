@@ -24,6 +24,9 @@ nokhwa = { version = "0.10", default-features = false }
 
 image = { workspace = true }
 yuv = { workspace = true }
+mezon-record = { path = "../mezon-record" }
+tiny-skia = "0.11"
+cosmic-text = "0.19"
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 scap = { workspace = true, features = ["wayland", "x11"] }

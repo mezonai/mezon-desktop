@@ -302,10 +302,39 @@ pub struct AudioFormat {
 #[derive(Default)]
 pub struct PlaybackMixer {
     tracks: Mutex<HashMap<u64, VecDeque<i16>>>,
+    record: crate::record::RecordTaps,
+    record_rate: AtomicU32,
+    record_channels: AtomicU32,
 }
 
 impl PlaybackMixer {
     const MAX_BUFFERED: usize = 48_000;
+
+    pub fn new(record: crate::record::RecordTaps) -> Self {
+        Self {
+            record,
+            ..Default::default()
+        }
+    }
+
+    pub fn record_taps(&self) -> crate::record::RecordTaps {
+        self.record.clone()
+    }
+
+    fn set_output_format(&self, rate: u32, channels: u32) {
+        self.record_rate.store(rate, Ordering::Relaxed);
+        self.record_channels.store(channels, Ordering::Relaxed);
+    }
+
+    fn tee_to_recorder(&self, mixed: &[i16]) {
+        let rate = self.record_rate.load(Ordering::Relaxed);
+        let channels = self.record_channels.load(Ordering::Relaxed);
+        if rate == 0 || channels == 0 {
+            return;
+        }
+        self.record
+            .push(mezon_record::AudioSource::Remote, mixed, rate, channels);
+    }
 
     pub fn push(&self, key: u64, samples: &[i16]) {
         let mut tracks = self.tracks.lock();
@@ -334,6 +363,8 @@ impl PlaybackMixer {
                     (*slot as i32 + sample as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
             }
         }
+        drop(tracks);
+        self.tee_to_recorder(out);
     }
 }
 
@@ -388,8 +419,9 @@ impl AudioIo {
     pub fn start(
         input_device_id: Option<String>,
         output_device_id: Option<String>,
+        record_taps: crate::record::RecordTaps,
     ) -> Result<Self> {
-        let mixer = Arc::new(PlaybackMixer::default());
+        let mixer = Arc::new(PlaybackMixer::new(record_taps));
         let (mic_tx, mic_rx) = flume::bounded::<Vec<i16>>(128);
         let (capture_tx, capture_rx) = flume::bounded::<CaptureChunk>(128);
         let (reverse_tx, reverse_rx) = flume::bounded::<ReverseChunk>(128);
@@ -1435,6 +1467,7 @@ fn build_output(
     let rate = supported.sample_rate() as i32;
     let channels = supported.channels().max(1) as i32;
     let frame = (supported.sample_rate() as usize / 100) * supported.channels().max(1) as usize;
+    mixer.set_output_format(rate as u32, channels as u32);
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => {
             let mut tmp: Vec<i16> = Vec::new();

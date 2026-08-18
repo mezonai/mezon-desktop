@@ -31,7 +31,7 @@ use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, Spinn
 use crate::theme::Theme;
 
 const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
-const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
+pub(crate) const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 
 pub fn effective_clan_id(clan_id: Option<ClanId>, cx: &App) -> Option<ClanId> {
     clan_id
@@ -836,7 +836,7 @@ fn render_audio(
     audio_pill(
         ("audio-play", index),
         ("audio-dl", index),
-        false,
+        IconName::AudioPlay,
         audio_time_label(0.0, duration),
         move |_, _, cx| {
             if activate_selection.borrow().has_selection() {

@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Context, Entity, ListState, Pixels, Point, SharedString, Subscription, Window,
-    div, img, list, prelude::*, px, size,
+    AnyElement, App, Context, Entity, ListState, Pixels, Point, SharedString, Subscription,
+    WeakEntity, Window, div, img, list, prelude::*, px, size,
 };
 use mezon_store::{
     AccountStore, ClanId, ClanList, DirectMessageStore, FriendStore, NotificationSettingStore,
@@ -12,7 +12,7 @@ use ui::Tooltip;
 
 use crate::app::shell::Shell;
 use crate::app::window_controls;
-use crate::components::primitives::{Icon, IconName, context_menu_at};
+use crate::components::primitives::{ContextMenu, Icon, IconName, context_menu_at};
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
 
@@ -20,11 +20,23 @@ mod clan_row;
 mod direct_unread_list;
 use clan_row::{CLAN_ROW_HEIGHT, ClanRow, build_clan_rail_menu, render_clan_row, render_pill};
 
+pub(super) struct ClanMenuArgs {
+    pub(super) position: Point<Pixels>,
+    pub(super) clan_id: ClanId,
+    pub(super) clan_default: Option<i32>,
+    pub(super) noti_sub_open: bool,
+    pub(super) can_leave: bool,
+    pub(super) locale: SharedString,
+}
+
 pub(super) struct ClanPanelMenu {
     position: Point<Pixels>,
     clan_id: ClanId,
     noti_sub_open: bool,
 }
+
+struct ActiveClanSidebar(gpui::WeakEntity<ClanSidebar>);
+impl gpui::Global for ActiveClanSidebar {}
 
 use super::friend_request_badge;
 use direct_unread_list::{
@@ -47,6 +59,7 @@ pub struct ClanSidebar {
     image_cache: Entity<crate::image_cache::LruImageCache>,
     clan_menu: Option<ClanPanelMenu>,
     _clan_sub: Subscription,
+    _clan_removed_sub: Subscription,
     _direct_sub: Subscription,
     _settings_sub: Subscription,
     _router_sub: Subscription,
@@ -67,6 +80,20 @@ impl ClanSidebar {
             .suppress_hover_while_scrolling();
         let direct_sub = cx.observe(&direct_store, |this, _store, cx| {
             this.refresh_direct_unread(cx);
+        });
+
+        let clan_removed_sub = cx.subscribe(&clan_list, |_, _, event, cx| {
+            if let mezon_store::ClanEvent::Deleted(clan_id) = event {
+                let clan_id = *clan_id;
+                let leaving_current = Router::global(cx).read(cx).route().targets_clan(clan_id);
+                Router::global(cx).update(cx, |router, cx| {
+                    router.forget_clan(clan_id);
+                    cx.notify();
+                });
+                if leaving_current {
+                    crate::router::navigate(cx, Route::Friends);
+                }
+            }
         });
 
         let clan_sub = cx.observe(&clan_list, |this, clan_list, cx| {
@@ -116,6 +143,8 @@ impl ClanSidebar {
             }
         });
 
+        cx.set_global(ActiveClanSidebar(cx.entity().downgrade()));
+
         let router = Router::global(cx);
         let router_view = router.read(cx);
         let initial_dm_active = matches!(
@@ -151,6 +180,7 @@ impl ClanSidebar {
             }),
             clan_menu: None,
             _clan_sub: clan_sub,
+            _clan_removed_sub: clan_removed_sub,
             _direct_sub: direct_sub,
             _settings_sub: settings_sub,
             _router_sub: router_sub,
@@ -181,11 +211,39 @@ impl ClanSidebar {
         cx.notify();
     }
 
+    fn clan_menu_args(&self, cx: &App) -> Option<ClanMenuArgs> {
+        let menu = self.clan_menu.as_ref()?;
+        Some(ClanMenuArgs {
+            position: menu.position,
+            clan_id: menu.clan_id,
+            clan_default: NotificationSettingStore::global(cx)
+                .read(cx)
+                .clan_default(menu.clan_id),
+            noti_sub_open: menu.noti_sub_open,
+            can_leave: crate::clan::clan_menu::can_leave_clan(menu.clan_id, cx),
+            locale: self.settings.read(cx).language.clone().into(),
+        })
+    }
+
+    fn probe_menu(&self, weak: WeakEntity<Self>, cx: &App) -> Option<(ClanId, ContextMenu)> {
+        let args = self.clan_menu_args(cx)?;
+        Some((args.clan_id, build_clan_rail_menu(weak, &args)))
+    }
+
     pub(super) fn set_clan_noti_sub_open(&mut self, cx: &mut Context<Self>) {
         if let Some(menu) = self.clan_menu.as_mut()
             && !menu.noti_sub_open
         {
             menu.noti_sub_open = true;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn close_clan_submenus(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = self.clan_menu.as_mut()
+            && menu.noti_sub_open
+        {
+            menu.noti_sub_open = false;
             cx.notify();
         }
     }
@@ -325,18 +383,7 @@ impl Render for ClanSidebar {
         let unread_list = self.direct_unread.render();
 
         let sidebar_for_menu = sidebar.clone();
-        let menu_locale = self.settings.read(cx).language.clone();
-        let clan_menu_overlay = self.clan_menu.as_ref().map(|menu| {
-            let clan_default = NotificationSettingStore::global(cx)
-                .read(cx)
-                .clan_default(menu.clan_id);
-            (
-                menu.position,
-                menu.clan_id,
-                menu.noti_sub_open,
-                clan_default,
-            )
-        });
+        let clan_menu_overlay = self.clan_menu_args(cx);
 
         div()
             .image_cache(avatar_cache)
@@ -406,21 +453,12 @@ impl Render for ClanSidebar {
                     .child(div().w(px(40.)).h(px(1.)).bg(theme.border).mt_3().mb_3()),
             )
             .child(div().flex_1().min_h_0().w_full().child(list_element))
-            .when_some(
-                clan_menu_overlay,
-                move |el, (position, clan_id, noti_sub_open, clan_default)| {
-                    el.child(context_menu_at(
-                        position,
-                        build_clan_rail_menu(
-                            sidebar_for_menu.clone(),
-                            clan_id,
-                            clan_default,
-                            noti_sub_open,
-                            &menu_locale,
-                        ),
-                    ))
-                },
-            )
+            .when_some(clan_menu_overlay, move |el, args| {
+                el.child(context_menu_at(
+                    args.position,
+                    build_clan_rail_menu(sidebar_for_menu.clone(), &args),
+                ))
+            })
     }
 }
 
@@ -569,4 +607,103 @@ fn render_clan_footer(
                 ),
         )
         .into_any_element()
+}
+
+fn active_clan_sidebar(cx: &App) -> anyhow::Result<Entity<ClanSidebar>> {
+    cx.try_global::<ActiveClanSidebar>()
+        .and_then(|active| active.0.upgrade())
+        .ok_or_else(|| anyhow::anyhow!("no clan rail is mounted; sign in first"))
+}
+
+fn clan_menu_json(sidebar: &Entity<ClanSidebar>, cx: &App) -> serde_json::Value {
+    let this = sidebar.read(cx);
+    let Some((clan_id, menu)) = this.probe_menu(sidebar.downgrade(), cx) else {
+        return serde_json::json!({ "open": false, "items": [] });
+    };
+    let state = this.clan_menu.as_ref().expect("probe_menu checked it");
+    let items = menu
+        .probe_items()
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| {
+            serde_json::json!({
+                "index": index,
+                "kind": item.kind,
+                "label": item.label,
+                "disabled": item.disabled,
+                "options": item
+                    .options
+                    .into_iter()
+                    .map(|(value, label)| serde_json::json!({ "value": value, "label": label }))
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let clan_list = ClanList::global(cx);
+    let clan = clan_list.read(cx).clan_by_id(clan_id);
+    serde_json::json!({
+        "open": true,
+        "clan_id": clan_id.to_string(),
+        "clan_name": clan.map(|clan| clan.name.clone()).unwrap_or_default(),
+        "is_clan_owner": !crate::clan::clan_menu::can_leave_clan(clan_id, cx),
+        "is_active_clan": clan_list.read(cx).is_active_clan(clan_id),
+        "position": { "x": f32::from(state.position.x), "y": f32::from(state.position.y) },
+        "notification_submenu_open": state.noti_sub_open,
+        "items": items,
+    })
+}
+
+pub fn clan_menu_state(cx: &App) -> anyhow::Result<serde_json::Value> {
+    let sidebar = active_clan_sidebar(cx)?;
+    Ok(clan_menu_json(&sidebar, cx))
+}
+
+pub fn clan_menu_open(
+    clan_id: ClanId,
+    position: Point<Pixels>,
+    cx: &mut App,
+) -> anyhow::Result<serde_json::Value> {
+    let sidebar = active_clan_sidebar(cx)?;
+    anyhow::ensure!(
+        ClanList::global(cx).read(cx).clan_by_id(clan_id).is_some(),
+        "clan {clan_id} is not in the clan rail; call list_clans first"
+    );
+    sidebar.update(cx, |this, cx| this.open_clan_menu(clan_id, position, cx));
+    Ok(clan_menu_json(&sidebar, cx))
+}
+
+pub fn clan_menu_close(cx: &mut App) -> anyhow::Result<serde_json::Value> {
+    let sidebar = active_clan_sidebar(cx)?;
+    sidebar.update(cx, |this, cx| {
+        this.clan_menu = None;
+        cx.notify();
+    });
+    Ok(clan_menu_json(&sidebar, cx))
+}
+
+pub fn clan_menu_pick(
+    index: usize,
+    value: Option<i32>,
+    window: &mut Window,
+    cx: &mut App,
+) -> anyhow::Result<serde_json::Value> {
+    let sidebar = active_clan_sidebar(cx)?;
+    let (_, menu) = sidebar
+        .read(cx)
+        .probe_menu(sidebar.downgrade(), cx)
+        .ok_or_else(|| anyhow::anyhow!("clan menu is not open; call clan_menu_open first"))?;
+    let picked = menu
+        .probe_items()
+        .get(index)
+        .map(|item| (item.kind, item.label.clone()))
+        .ok_or_else(|| anyhow::anyhow!("no menu item at index {index}"))?;
+    menu.probe_activate(index, value, window, cx)?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "index": index,
+        "kind": picked.0,
+        "label": picked.1,
+        "value": value,
+        "menu_open": sidebar.read(cx).clan_menu.is_some(),
+    }))
 }

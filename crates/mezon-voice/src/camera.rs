@@ -90,8 +90,8 @@ pub fn start_camera(
                 return;
             }
 
-            let mut current_device = device_id;
-            let mut camera = match open_camera(current_device.as_deref()) {
+            let current_device = device_id;
+            let camera = match open_camera(current_device.as_deref()) {
                 Ok(camera) => camera,
                 Err(e) => {
                     let _ = track_tx.send(Err(e));
@@ -117,81 +117,155 @@ pub fn start_camera(
                 return;
             }
 
-            let key = local_camera_key(&identity);
-            let started = Instant::now();
-            tracing::info!("camera capture started: {source_width}x{source_height}");
-
-            let mut preview = Vec::new();
-            let frame_interval = Duration::from_secs_f64(1.0 / TARGET_FPS as f64);
-            let mut last_capture: Option<Instant> = None;
-
-            'outer: loop {
-                let switch_to = 'capture: loop {
-                    if thread_stop.load(Ordering::Relaxed) {
-                        break 'outer;
-                    }
-                    if let Ok(device) = switch_rx.try_recv() {
-                        let mut latest = device;
-                        while let Ok(next) = switch_rx.try_recv() {
-                            latest = next;
-                        }
-                        if latest != current_device {
-                            break 'capture latest;
-                        }
-                    }
-                    let buffer = match camera.frame() {
-                        Ok(buffer) => buffer,
-                        Err(e) => {
-                            tracing::warn!("camera frame error: {e}");
-                            continue;
-                        }
-                    };
-                    if let Some(last) = last_capture
-                        && last.elapsed() < frame_interval
-                    {
-                        continue;
-                    }
-                    last_capture = Some(Instant::now());
-                    push_camera_frame(
-                        &buffer,
-                        &source,
-                        &frame_store,
-                        key,
-                        started.elapsed().as_micros() as i64,
-                        &mut preview,
-                    );
-                };
-
-                drop(camera);
-                camera = match open_camera(switch_to.as_deref()) {
-                    Ok(camera) => {
-                        current_device = switch_to;
-                        let res = camera.resolution();
-                        tracing::info!("camera switched: {}x{}", res.width(), res.height());
-                        camera
-                    }
-                    Err(e) => {
-                        tracing::warn!("camera switch failed: {e}; reverting to previous device");
-                        match open_camera(current_device.as_deref()) {
-                            Ok(camera) => camera,
-                            Err(e) => {
-                                tracing::error!("camera revert failed: {e}");
-                                break 'outer;
-                            }
-                        }
-                    }
-                };
-                last_capture = None;
-            }
-
-            frame_store.remove(key);
-            tracing::info!("camera capture stopped");
+            capture_loop(
+                camera,
+                source,
+                &frame_store,
+                &identity,
+                current_device,
+                &thread_stop,
+                &switch_rx,
+            );
         });
     if let Err(e) = spawned {
         tracing::error!("failed to spawn camera capture thread: {e}");
     }
 
     (CameraController { stop, switch_tx }, track_rx)
+}
+
+pub fn start_camera_into(
+    identity: String,
+    frame_store: Arc<VideoFrameStore>,
+    device_id: Option<String>,
+    source: NativeVideoSource,
+    err_tx: flume::Sender<String>,
+) -> CameraController {
+    let stop = Arc::new(AtomicBool::new(false));
+    let (switch_tx, switch_rx) = flume::unbounded::<Option<String>>();
+
+    let thread_stop = stop.clone();
+    let spawned = std::thread::Builder::new()
+        .name("mezon-camera".into())
+        .spawn(move || {
+            let _guard = crate::runtime::handle().enter();
+
+            if !request_macos_permission() {
+                tracing::warn!("camera permission denied");
+                let _ = err_tx.send("camera permission denied".into());
+                return;
+            }
+
+            let current_device = device_id;
+            let camera = match open_camera(current_device.as_deref()) {
+                Ok(camera) => camera,
+                Err(e) => {
+                    tracing::warn!("camera start failed: {e}");
+                    let _ = err_tx.send(e);
+                    return;
+                }
+            };
+
+            capture_loop(
+                camera,
+                source,
+                &frame_store,
+                &identity,
+                current_device,
+                &thread_stop,
+                &switch_rx,
+            );
+        });
+    if let Err(e) = spawned {
+        tracing::error!("failed to spawn camera capture thread: {e}");
+    }
+
+    CameraController { stop, switch_tx }
+}
+
+fn capture_loop(
+    mut camera: Camera,
+    source: NativeVideoSource,
+    frame_store: &Arc<VideoFrameStore>,
+    identity: &str,
+    mut current_device: Option<String>,
+    thread_stop: &AtomicBool,
+    switch_rx: &flume::Receiver<Option<String>>,
+) {
+    let key = local_camera_key(identity);
+    let started = Instant::now();
+    let resolution = camera.resolution();
+    tracing::info!(
+        "camera capture started: {}x{}",
+        resolution.width(),
+        resolution.height()
+    );
+
+    let mut preview = Vec::new();
+    let frame_interval = Duration::from_secs_f64(1.0 / TARGET_FPS as f64);
+    let mut last_capture: Option<Instant> = None;
+
+    'outer: loop {
+        let switch_to = 'capture: loop {
+            if thread_stop.load(Ordering::Relaxed) {
+                break 'outer;
+            }
+            if let Ok(device) = switch_rx.try_recv() {
+                let mut latest = device;
+                while let Ok(next) = switch_rx.try_recv() {
+                    latest = next;
+                }
+                if latest != current_device {
+                    break 'capture latest;
+                }
+            }
+            let buffer = match camera.frame() {
+                Ok(buffer) => buffer,
+                Err(e) => {
+                    tracing::warn!("camera frame error: {e}");
+                    continue;
+                }
+            };
+            if let Some(last) = last_capture
+                && last.elapsed() < frame_interval
+            {
+                continue;
+            }
+            last_capture = Some(Instant::now());
+            push_camera_frame(
+                &buffer,
+                &source,
+                frame_store,
+                key,
+                started.elapsed().as_micros() as i64,
+                &mut preview,
+            );
+        };
+
+        drop(camera);
+        camera = match open_camera(switch_to.as_deref()) {
+            Ok(camera) => {
+                current_device = switch_to;
+                let res = camera.resolution();
+                tracing::info!("camera switched: {}x{}", res.width(), res.height());
+                camera
+            }
+            Err(e) => {
+                tracing::warn!("camera switch failed: {e}; reverting to previous device");
+                match open_camera(current_device.as_deref()) {
+                    Ok(camera) => camera,
+                    Err(e) => {
+                        tracing::error!("camera revert failed: {e}");
+                        break 'outer;
+                    }
+                }
+            }
+        };
+        last_capture = None;
+    }
+
+    frame_store.remove(key);
+    tracing::info!("camera capture stopped");
 }
 
 fn push_camera_frame(
@@ -447,6 +521,32 @@ fn request_macos_permission() -> bool {
 #[cfg(not(target_os = "macos"))]
 fn request_macos_permission() -> bool {
     true
+}
+
+#[cfg(target_os = "macos")]
+fn camera_authorization_status() -> i64 {
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::NSString;
+    use objc::runtime::Class;
+    use objc::{msg_send, sel, sel_impl};
+
+    unsafe {
+        let Some(cls) = Class::get("AVCaptureDevice") else {
+            return 3;
+        };
+        let media_type: id = NSString::alloc(nil).init_str("vide");
+        msg_send![cls, authorizationStatusForMediaType: media_type]
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn camera_denied() -> bool {
+    matches!(camera_authorization_status(), 1 | 2)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn camera_denied() -> bool {
+    false
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 use tokio::sync::watch;
@@ -37,6 +37,7 @@ pub struct VideoFrameData {
 pub struct VideoFrameStore {
     state: Mutex<VideoFrameState>,
     seq: AtomicU64,
+    recording: AtomicBool,
     frame_tx: watch::Sender<u64>,
 }
 
@@ -45,6 +46,7 @@ impl Default for VideoFrameStore {
         Self {
             state: Mutex::new(VideoFrameState::default()),
             seq: AtomicU64::new(0),
+            recording: AtomicBool::new(false),
             frame_tx: watch::channel(0).0,
         }
     }
@@ -55,6 +57,10 @@ struct VideoFrameState {
     frames: HashMap<u64, Arc<VideoFrameData>>,
     recycled: HashMap<u64, Vec<Vec<u8>>>,
     active: HashSet<u64>,
+    // The render path consumes frames with take_new, so a second reader would
+    // race the UI for every frame and mostly lose. While a recording is running
+    // each published frame is also kept here, where reads never remove it.
+    recorded: HashMap<u64, Arc<VideoFrameData>>,
 }
 
 impl VideoFrameStore {
@@ -72,6 +78,11 @@ impl VideoFrameStore {
         let recycled = {
             let mut state = self.state.lock();
             state.active.insert(key);
+            if self.recording.load(Ordering::Relaxed) {
+                state.recorded.insert(key, frame.clone());
+            } else if !state.recorded.is_empty() {
+                state.recorded.remove(&key);
+            }
             let previous = state.frames.insert(key, frame);
             if let Some(buffer) = previous
                 .and_then(|frame| Arc::try_unwrap(frame).ok())
@@ -88,6 +99,18 @@ impl VideoFrameStore {
 
     pub fn get(&self, key: u64) -> Option<Arc<VideoFrameData>> {
         self.state.lock().frames.get(&key).cloned()
+    }
+
+    /// Non-destructive read for the recorder, which must not race the renderer.
+    pub fn recorded(&self, key: u64) -> Option<Arc<VideoFrameData>> {
+        self.state.lock().recorded.get(&key).cloned()
+    }
+
+    pub fn set_recording(&self, recording: bool) {
+        self.recording.store(recording, Ordering::Relaxed);
+        if !recording {
+            self.state.lock().recorded.clear();
+        }
     }
 
     pub fn publish_seq(&self) -> u64 {
@@ -126,6 +149,7 @@ impl VideoFrameStore {
     pub fn remove(&self, key: u64) {
         let mut state = self.state.lock();
         state.frames.remove(&key);
+        state.recorded.remove(&key);
         state.recycled.remove(&key);
         state.active.remove(&key);
     }
@@ -492,6 +516,40 @@ pub fn yuyv422_to_i420(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_recorder_read_survives_the_renderer_taking_the_frame() {
+        let store = VideoFrameStore::default();
+        store.set_recording(true);
+        store.publish(7, 2, 1, vec![9u8; 8]);
+
+        assert!(
+            store.take_new(7, None).is_some(),
+            "renderer takes the frame"
+        );
+        assert!(store.get(7).is_none(), "the shared slot is now empty");
+
+        let recorded = store.recorded(7).expect("recorder still sees the frame");
+        assert_eq!(recorded.bgra, vec![9u8; 8]);
+    }
+
+    #[test]
+    fn nothing_is_recorded_while_no_recording_runs() {
+        let store = VideoFrameStore::default();
+        store.publish(7, 2, 1, vec![9u8; 8]);
+        assert!(store.recorded(7).is_none());
+    }
+
+    #[test]
+    fn stopping_a_recording_releases_the_frames() {
+        let store = VideoFrameStore::default();
+        store.set_recording(true);
+        store.publish(7, 2, 1, vec![9u8; 8]);
+        store.set_recording(false);
+        assert!(store.recorded(7).is_none());
+        store.publish(7, 2, 1, vec![9u8; 8]);
+        assert!(store.recorded(7).is_none(), "publishing must not refill it");
+    }
+
     use super::*;
 
     fn reference_i420_to_bgra(

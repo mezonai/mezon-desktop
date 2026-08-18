@@ -35,12 +35,14 @@ pub enum RealtimeKind {
     AddClanUser,
     ClanEventCreated,
     UserClanRemoved,
+    BanUser,
     ClanProfileUpdated,
     UserProfileUpdated,
     SessionRefreshed,
     VoiceJoined,
     VoiceLeaved,
     VoiceReaction,
+    VoiceInteractive,
     ScreenShare,
     StreamingJoined,
     StreamingLeaved,
@@ -64,6 +66,7 @@ pub enum RealtimeKind {
     UnblockFriend,
     TokenSent,
     RoleEvent,
+    WebrtcSignaling,
 }
 
 impl RealtimeKind {
@@ -87,12 +90,14 @@ impl RealtimeKind {
             RealtimeEvent::AddClanUser(_) => Self::AddClanUser,
             RealtimeEvent::ClanEventCreated(_) => Self::ClanEventCreated,
             RealtimeEvent::UserClanRemoved(_) => Self::UserClanRemoved,
+            RealtimeEvent::BanUser(_) => Self::BanUser,
             RealtimeEvent::ClanProfileUpdated(_) => Self::ClanProfileUpdated,
             RealtimeEvent::UserProfileUpdated(_) => Self::UserProfileUpdated,
             RealtimeEvent::SessionRefreshed(_) => Self::SessionRefreshed,
             RealtimeEvent::VoiceJoined(_) => Self::VoiceJoined,
             RealtimeEvent::VoiceLeaved(_) => Self::VoiceLeaved,
             RealtimeEvent::VoiceReaction(_) => Self::VoiceReaction,
+            RealtimeEvent::VoiceInteractive(_) => Self::VoiceInteractive,
             RealtimeEvent::ScreenShare(_) => Self::ScreenShare,
             RealtimeEvent::StreamingJoined(_) => Self::StreamingJoined,
             RealtimeEvent::StreamingLeaved(_) => Self::StreamingLeaved,
@@ -116,6 +121,7 @@ impl RealtimeKind {
             RealtimeEvent::UnblockFriend(_) => Self::UnblockFriend,
             RealtimeEvent::TokenSent(_) => Self::TokenSent,
             RealtimeEvent::Unhandled(realtime::envelope::Message::RoleEvent(_)) => Self::RoleEvent,
+            RealtimeEvent::WebrtcSignaling(_) => Self::WebrtcSignaling,
             _ => return None,
         })
     }
@@ -298,6 +304,16 @@ mod tests {
                 realtime::VoiceReactionSend::default()
             )),
             Some(RealtimeKind::VoiceReaction)
+        );
+    }
+
+    #[test]
+    fn kind_of_maps_voice_interactive() {
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::VoiceInteractive(
+                realtime::VoiceInteractiveEvent::default()
+            )),
+            Some(RealtimeKind::VoiceInteractive)
         );
     }
 

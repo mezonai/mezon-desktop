@@ -25,6 +25,8 @@ enum Validation {
     Validated,
 }
 
+const MODAL_WIDTH: f32 = 480.;
+
 pub struct CreateClanModal {
     focus_handle: FocusHandle,
     clan_list: Entity<ClanList>,
@@ -358,7 +360,7 @@ impl CreateClanModal {
         v_flex()
             .px(px(20.))
             .py(px(16.))
-            .w(px(480.))
+            .w_full()
             .items_center()
             .child(
                 div()
@@ -472,7 +474,7 @@ impl CreateClanModal {
         v_flex()
             .px(px(20.))
             .py(px(16.))
-            .w(px(480.))
+            .w_full()
             .items_center()
             .child(
                 div()
@@ -620,8 +622,7 @@ impl Render for CreateClanModal {
             .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
             }))
-            .min_w(px(320.))
-            .max_w(px(480.))
+            .w(px(MODAL_WIDTH))
             .rounded(px(12.))
             .bg(theme_setting_primary)
             .shadow_lg()

@@ -8,8 +8,8 @@ use gpui::{
 };
 use mezon_store::{
     AuthState, AutoUpdateStatus, AutoUpdateStore, CHANNEL_ACTIVE_ARCHIVED, CHANNEL_ACTIVE_JOINED,
-    Channel, ChannelEvent, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
-    DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
+    CallStore, Channel, ChannelEvent, ChannelId, ChannelList, ChannelType, ClanId, ClanList,
+    ClanMembersStore, DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
     MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
     Settings, StreamStore, THREAD_STATUS_ARCHIVED, ThreadsEvent, ThreadsStore, TopicsEvent,
     TopicsStore, UiState, VoiceConnection, VoiceMember, VoiceModerationError, VoiceStore,
@@ -19,7 +19,9 @@ use ui::PopoverMenuHandle;
 
 use crate::app::shell::Shell;
 use crate::chat::area::ChatArea;
+use crate::chat::call_window::{CallPanelView, render_call_mini_bar};
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
+use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::{ReactionPicker, ReactionPickerEvent};
 use crate::chat::message_search::{
     MessageSearchPanel, apply_search_dropdown_item, register_chat_layout,
@@ -52,6 +54,7 @@ pub struct ChatLayout {
     auth_state: Entity<AuthState>,
     settings: Entity<Settings>,
     voice_store: Entity<VoiceStore>,
+    call_panel: Entity<CallPanelView>,
     stream_store: Entity<StreamStore>,
     voice_strip_scroll: ScrollHandle,
     voice_strip_width: Pixels,
@@ -91,7 +94,8 @@ pub struct ChatLayout {
     pub(crate) thread_search_input: Option<Entity<InputState>>,
     pub(crate) canvas_search_input: Option<Entity<InputState>>,
     thread_name_input: Option<Entity<InputState>>,
-    create_thread_message_input: Option<Entity<InputState>>,
+    create_thread_message_input: Option<Entity<MentionInput>>,
+    _create_thread_mention_sub: Option<Subscription>,
     topic_panel: Option<Entity<crate::chat::create_topic_panel::TopicPanel>>,
     pin_popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
     canvas_popover_handle: PopoverMenuHandle<CanvasPopoverPanel>,
@@ -267,6 +271,10 @@ impl ChatLayout {
             }
         })
         .detach();
+
+        let call_panel = cx.new(CallPanelView::new);
+        cx.observe(&CallStore::global(cx), |_, _, cx| cx.notify())
+            .detach();
 
         let stream_store = StreamStore::global(cx);
         cx.observe(&stream_store, |this, store, cx| {
@@ -483,6 +491,7 @@ impl ChatLayout {
             chat_area,
             settings,
             voice_store,
+            call_panel,
             stream_store,
             voice_strip_scroll: ScrollHandle::new(),
             voice_strip_width: px(0.),
@@ -523,6 +532,7 @@ impl ChatLayout {
             canvas_search_input: None,
             thread_name_input: None,
             create_thread_message_input: None,
+            _create_thread_mention_sub: None,
             topic_panel: None,
             pin_popover_handle: PopoverMenuHandle::default(),
             canvas_popover_handle: PopoverMenuHandle::default(),
@@ -1488,9 +1498,7 @@ impl ChatLayout {
             .active_channel()
             .map(|ch| (ch.channel_type, ch.id));
         self.stream_store.update(cx, |store, cx| {
-            if store.should_leave_for_active_channel(active) {
-                store.leave_stream(cx);
-            }
+            store.sync_chat_for_active_channel(active, cx);
             store.clear_error_on_active_channel_change(active, cx);
         });
     }
@@ -1502,7 +1510,9 @@ impl ChatLayout {
             .channel_list
             .read(cx)
             .active_channel()
-            .is_some_and(|ch| ch.channel_type == ChannelType::Stream);
+            .is_some_and(|ch| {
+                ch.channel_type == ChannelType::Stream && stream.is_session_channel(ch.id)
+            });
         let want_pump =
             stream.is_joined() && stream.remote_video() && (on_stream || stream.fullscreen());
         if !want_pump {
@@ -1712,6 +1722,7 @@ impl Render for ChatLayout {
             chat_content
         };
         let voice_mini_bar = self.render_voice_mini_bar(cx);
+        let call_mini_bar = render_call_mini_bar(cx.theme(), cx);
         let stream_connected_bar = crate::chat::stream::render_stream_connected_bar(
             cx.theme(),
             self.stream_store.read(cx),
@@ -1943,6 +1954,7 @@ impl Render for ChatLayout {
                                     .overflow_y_scroll()
                                     .children(stream_connected_bar)
                                     .children(voice_mini_bar)
+                                    .children(call_mini_bar)
                                     .children(update_available_pill)
                                     .children(update_pill)
                                     .children(manual_install_pill),
@@ -2041,9 +2053,8 @@ impl ChatLayout {
         if let Some(input) = &self.thread_name_input {
             input.update(cx, |state, cx| state.clear(cx));
         }
-        if let Some(input) = &self.create_thread_message_input {
-            input.update(cx, |state, cx| state.clear(cx));
-        }
+        self.create_thread_message_input = None;
+        self._create_thread_mention_sub = None;
     }
 
     fn clear_thread_search(&mut self, cx: &mut Context<Self>) {
@@ -2055,17 +2066,20 @@ impl ChatLayout {
         });
     }
 
-    pub(crate) fn submit_create_thread(
-        &mut self,
-        name: String,
-        message: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn submit_create_thread(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let name = self
+            .thread_name_input
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_default();
+        let (message, tokens, attachments) = self
+            .create_thread_message_input
+            .as_ref()
+            .map(|input| input.read(cx).current_content(cx))
+            .unwrap_or_default();
         ThreadsStore::global(cx).update(cx, |store, cx| {
-            store.submit_create(name, message, cx);
+            store.submit_create(name, message, tokens, attachments, cx);
         });
-        let _ = window;
     }
 
     pub(crate) fn navigate_to_thread(
@@ -2235,8 +2249,18 @@ impl ChatLayout {
         if self.create_thread_message_input.is_none() {
             let locale = self.settings.read(cx).language.clone();
             let ph = mezon_i18n::t(&locale, "chat.messagePlaceholder");
-            self.create_thread_message_input =
-                Some(cx.new(|cx| InputState::new(window, cx).placeholder(ph).embedded(true)));
+            let settings = self.settings.clone();
+            let input = cx.new(|cx| MentionInput::new_compact(ph, settings, window, cx));
+            self._create_thread_mention_sub = Some(cx.subscribe_in(
+                &input,
+                window,
+                |this, _, event: &MentionInputEvent, window, cx| match event {
+                    MentionInputEvent::Submit => this.submit_create_thread(window, cx),
+                    MentionInputEvent::Cancel => this.close_create_thread(cx),
+                    _ => {}
+                },
+            ));
+            self.create_thread_message_input = Some(input);
         }
     }
 
@@ -2735,7 +2759,7 @@ impl ChatLayout {
                     dm.peer_user_id
                         .and_then(|user_id| self.channel_list.read(cx).in_voice_status(user_id))
                 };
-                return self
+                let dm_chat = self
                     .chat_area
                     .render(
                         &locale,
@@ -2768,6 +2792,18 @@ impl ChatLayout {
                         false,
                         cx,
                     )
+                    .into_any_element();
+                return div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .w_full()
+                    .h_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(self.call_panel.clone())
+                    .child(dm_chat)
                     .into_any_element();
             }
             if matches!(

@@ -29,6 +29,7 @@ struct CategoryBucket {
     has_more: bool,
     fetch_generation: u64,
     fetched_at: Option<Instant>,
+    server_loaded: bool,
 }
 
 impl Default for CategoryBucket {
@@ -40,6 +41,7 @@ impl Default for CategoryBucket {
             has_more: true,
             fetch_generation: 0,
             fetched_at: None,
+            server_loaded: false,
         }
     }
 }
@@ -181,10 +183,20 @@ impl InboxStore {
             .or_default()
     }
 
-    fn is_fresh(&self, category: InboxCategory) -> bool {
-        self.bucket(category)
-            .and_then(|b| b.fetched_at)
-            .is_some_and(|t| t.elapsed() < CACHE_TTL)
+    fn should_fetch_initial(bucket: Option<&CategoryBucket>) -> bool {
+        let Some(bucket) = bucket else {
+            return true;
+        };
+        if bucket.loading {
+            return false;
+        }
+        if !bucket.server_loaded {
+            return true;
+        }
+        if bucket.fetched_at.is_some_and(|t| t.elapsed() < CACHE_TTL) {
+            return false;
+        }
+        bucket.items.is_empty()
     }
 
     pub fn fetch_if_empty(
@@ -193,15 +205,8 @@ impl InboxStore {
         category: InboxCategory,
         cx: &mut Context<Self>,
     ) {
-        if self.is_fresh(category) {
+        if !Self::should_fetch_initial(self.bucket(category)) {
             return;
-        }
-        let never_fetched = self.bucket(category).is_none_or(|b| b.fetched_at.is_none());
-        if !never_fetched {
-            let empty = self.bucket(category).is_none_or(|b| b.items.is_empty());
-            if !empty {
-                return;
-            }
         }
         self.fetch_page(clan_id, category, None, cx);
     }
@@ -278,7 +283,6 @@ impl InboxStore {
         if bucket.items.len() > REALTIME_BUCKET_CAP {
             bucket.items.truncate(REALTIME_BUCKET_CAP);
         }
-        bucket.fetched_at = Some(Instant::now());
         self.emit_updated(cx);
         cx.notify();
     }
@@ -325,12 +329,13 @@ impl InboxStore {
                     bucket
                         .items
                         .extend(items.into_iter().filter(|n| !existing.contains(&n.id)));
-                    bucket
-                        .items
-                        .sort_by_key(|n| std::cmp::Reverse(n.create_time_seconds));
                 }
+                bucket
+                    .items
+                    .sort_by_key(|n| std::cmp::Reverse(n.create_time_seconds));
                 bucket.last_id = bucket.items.last().map(|n| n.id.clone());
                 bucket.fetched_at = Some(Instant::now());
+                bucket.server_loaded = true;
                 self.emit_updated(cx);
                 cx.notify();
             }
@@ -503,5 +508,27 @@ mod tests {
         };
         assert!(store.should_skip_realtime(&sample_notification("7")));
         assert!(!store.should_skip_realtime(&sample_notification("8")));
+    }
+
+    #[test]
+    fn fetch_initial_after_local_prepend_without_server_page() {
+        let local_only = CategoryBucket {
+            items: vec![sample_notification("7")],
+            ..CategoryBucket::default()
+        };
+        assert!(InboxStore::should_fetch_initial(Some(&local_only)));
+        assert!(InboxStore::should_fetch_initial(None));
+    }
+
+    #[test]
+    fn skip_initial_fetch_when_server_page_is_fresh() {
+        let loaded = CategoryBucket {
+            items: vec![sample_notification("7")],
+            last_id: Some("1".into()),
+            fetched_at: Some(Instant::now()),
+            server_loaded: true,
+            ..CategoryBucket::default()
+        };
+        assert!(!InboxStore::should_fetch_initial(Some(&loaded)));
     }
 }

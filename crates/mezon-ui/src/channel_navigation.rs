@@ -9,9 +9,6 @@ pub fn navigate_after_thread_removed(
     removed_id: ChannelId,
     parent_id: ChannelId,
 ) {
-    if parent_id.is_zero() {
-        return;
-    }
     let viewing_removed = match Router::global(cx).read(cx).route() {
         Route::Channel {
             channel_id: active, ..
@@ -28,16 +25,23 @@ pub fn navigate_after_thread_removed(
     if !viewing_removed {
         return;
     }
-    ChannelList::global(cx).update(cx, |list, cx| {
-        list.clear_compose_draft(parent_id, cx);
-    });
-    let parent_available = ChannelList::global(cx)
+    if !parent_id.is_zero() {
+        ChannelList::global(cx).update(cx, |list, cx| {
+            list.clear_compose_draft(parent_id, cx);
+        });
+    }
+    let parent_in_clan = ChannelList::global(cx)
         .read(cx)
         .channel_in_clan(clan_id, parent_id);
-    if !parent_available {
+    if !thread_removed_opens_parent(parent_id, parent_in_clan) {
+        router::go_back(cx);
         return;
     }
     open_clan_channel(cx, clan_id, parent_id);
+}
+
+fn thread_removed_opens_parent(parent_id: ChannelId, parent_in_clan: bool) -> bool {
+    !parent_id.is_zero() && parent_in_clan
 }
 
 pub fn navigate_after_channel_removed(cx: &mut App, clan_id: ClanId, removed_id: ChannelId) {
@@ -151,5 +155,12 @@ mod tests {
             Some(ChannelId(3))
         );
         assert_eq!(pick_fallback_channel_after_delete(None, None, None), None);
+    }
+
+    #[test]
+    fn thread_removed_without_parent_goes_back() {
+        assert!(!super::thread_removed_opens_parent(ChannelId(0), true));
+        assert!(!super::thread_removed_opens_parent(ChannelId(9), false));
+        assert!(super::thread_removed_opens_parent(ChannelId(9), true));
     }
 }

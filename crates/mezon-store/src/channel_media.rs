@@ -911,7 +911,7 @@ async fn upload_timeline_file(
         id: 0,
         file_name: att.filename,
         file_url: att.url,
-        file_type: att.filetype,
+        file_type: filetype,
         file_size: i64::from(att.size),
         thumbnail: att.thumbnail,
         width: att.width,

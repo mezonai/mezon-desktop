@@ -5,7 +5,7 @@ use gpui::{
     div, prelude::*, px,
 };
 
-use mezon_store::{ChannelList, ClanId, PermissionStore};
+use mezon_store::{ChannelList, ClanId, PERMISSION_CLAN_OWNER, PermissionStore};
 
 use crate::app::shell::Shell;
 use crate::clan::create_category_modal::CreateCategoryModal;
@@ -235,14 +235,12 @@ pub fn clan_menu_overlay(menu: ClanMenuDropdown, top: Pixels, left: Pixels) -> i
     deferred(div().absolute().top(top).left(left).child(menu))
 }
 
-fn coming_soon_modal(title: String, locale: String) -> impl Fn(&mut Window, &mut App) + 'static {
-    move |window: &mut Window, cx: &mut App| {
-        let title = title.clone();
-        let locale = locale.clone();
-        Shell::global(cx).update(cx, |shell, cx| {
-            shell.show_coming_soon(title, &locale, window, cx);
-        });
-    }
+pub fn can_leave_clan(clan_id: ClanId, cx: &App) -> bool {
+    !PermissionStore::try_global(cx).is_some_and(|store| {
+        store
+            .read(cx)
+            .check_permission(clan_id, PERMISSION_CLAN_OWNER, cx)
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -255,6 +253,7 @@ pub fn build_clan_menu(
     locale: &str,
     show_empty_categories: bool,
     can_create_category: bool,
+    can_leave: bool,
 ) -> ClanMenuDropdown {
     let t = |key: &'static str| mezon_i18n::t(locale, key).to_string();
     let locale_owned = locale.to_string();
@@ -367,12 +366,18 @@ pub fn build_clan_menu(
         },
     );
 
-    let leave_label = t("clanMenu.modalPanel.leaveClan");
-    menu = menu.danger_item_icon(
-        leave_label.clone(),
-        IconName::LeaveClanIcon,
-        coming_soon_modal(leave_label, locale_owned),
-    );
+    if can_leave {
+        menu = menu.danger_item_icon(
+            t("clanMenu.modalPanel.leaveClan"),
+            IconName::LeaveClanIcon,
+            move |window, cx| {
+                let locale = locale_owned.clone();
+                Shell::global(cx).update(cx, |shell, cx| {
+                    shell.confirm_leave_clan(clan_id, &locale, window, cx);
+                });
+            },
+        );
+    }
 
     menu
 }

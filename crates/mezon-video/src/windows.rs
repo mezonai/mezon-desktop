@@ -19,15 +19,23 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SA
 use windows::Win32::Graphics::Dxgi::IDXGIAdapter;
 use windows::Win32::Media::MediaFoundation::{
     CLSID_MFMediaEngineClassFactory, IMFAttributes, IMFDXGIDeviceManager, IMFMediaEngine,
-    IMFMediaEngineClassFactory, IMFMediaEngineNotify, IMFMediaEngineNotify_Impl,
-    MF_MEDIA_ENGINE_CALLBACK, MF_MEDIA_ENGINE_DXGI_MANAGER, MF_MEDIA_ENGINE_EVENT_ERROR,
-    MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, MF_VERSION, MFCreateAttributes, MFCreateDXGIDeviceManager,
-    MFSTARTUP_FULL, MFStartup,
+    IMFMediaEngineClassFactory, IMFMediaEngineNotify, IMFMediaEngineNotify_Impl, IMFMediaType,
+    IMFSample, IMFSourceReader, MF_MEDIA_ENGINE_CALLBACK, MF_MEDIA_ENGINE_DXGI_MANAGER,
+    MF_MEDIA_ENGINE_EVENT_ERROR, MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, MF_MT_DEFAULT_STRIDE,
+    MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READER_ALL_STREAMS,
+    MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+    MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR, MF_VERSION, MFCreateAttributes,
+    MFCreateDXGIDeviceManager, MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Video,
+    MFSTARTUP_FULL, MFStartup, MFVideoFormat_RGB32,
 };
-use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
-use windows::core::{BSTR, Interface, implement};
+use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
+use windows::Win32::System::Com::{
+    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+};
+use windows::Win32::System::Variant::VT_I8;
+use windows::core::{BSTR, GUID, HSTRING, Interface, implement};
 
-use crate::{PlayerError, VideoFrame};
+use crate::{PlayerError, VideoFrame, VideoProbe};
 
 fn ensure_media_foundation() -> windows::core::Result<()> {
     static INIT: Once = Once::new();
@@ -368,5 +376,138 @@ impl Drop for PlayerImpl {
         unsafe {
             let _ = self.engine.Shutdown();
         }
+    }
+}
+
+const POSTER_TIME_HNS: i64 = 10_000_000;
+const POSTER_MAX_READS: u32 = 32;
+
+pub fn probe_video(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
+    if path.is_empty() {
+        return None;
+    }
+    ensure_media_foundation().ok()?;
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
+    match unsafe { probe_with_source_reader(path, max_poster_edge) } {
+        Ok(probe) => Some(probe),
+        Err(error) => {
+            tracing::warn!(target: "mezon_video", %error, "video probe failed");
+            None
+        }
+    }
+}
+
+unsafe fn probe_with_source_reader(
+    path: &str,
+    max_poster_edge: u32,
+) -> windows::core::Result<VideoProbe> {
+    unsafe {
+        let mut attributes = None;
+        MFCreateAttributes(&mut attributes, 1)?;
+        let attributes = attributes.ok_or_else(|| windows::core::Error::from(E_FAIL))?;
+        attributes.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)?;
+
+        let reader = MFCreateSourceReaderFromURL(&HSTRING::from(path), &attributes)?;
+        let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+        reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)?;
+        reader.SetStreamSelection(stream, true)?;
+
+        let requested = MFCreateMediaType()?;
+        requested.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+        requested.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)?;
+        reader.SetCurrentMediaType(stream, None, &requested)?;
+
+        let decoded = reader.GetCurrentMediaType(stream)?;
+        let frame_size = decoded.GetUINT64(&MF_MT_FRAME_SIZE)?;
+        let width = (frame_size >> 32) as u32;
+        let height = frame_size as u32;
+        if width == 0 || height == 0 {
+            return Err(windows::core::Error::from(E_FAIL));
+        }
+
+        let poster_jpeg = poster_frame(&reader, stream, &decoded, width, height, max_poster_edge);
+        Ok(VideoProbe {
+            width,
+            height,
+            poster_jpeg,
+        })
+    }
+}
+
+unsafe fn poster_frame(
+    reader: &IMFSourceReader,
+    stream: u32,
+    decoded: &IMFMediaType,
+    width: u32,
+    height: u32,
+    max_poster_edge: u32,
+) -> Option<Vec<u8>> {
+    unsafe {
+        seek_to_poster_time(reader);
+        let sample = read_first_frame(reader, stream)?;
+        let buffer = sample.ConvertToContiguousBuffer().ok()?;
+        let mut data = std::ptr::null_mut();
+        let mut len = 0u32;
+        buffer.Lock(&mut data, None, Some(&mut len)).ok()?;
+        let (stride, bottom_up) = row_pitch(decoded, width);
+        let jpeg = if data.is_null() {
+            None
+        } else {
+            crate::poster::encode_poster_jpeg(
+                std::slice::from_raw_parts(data, len as usize),
+                width,
+                height,
+                stride,
+                bottom_up,
+                max_poster_edge,
+            )
+        };
+        let _ = buffer.Unlock();
+        jpeg
+    }
+}
+
+unsafe fn seek_to_poster_time(reader: &IMFSourceReader) {
+    unsafe {
+        let mut position = PROPVARIANT::default();
+        let value = &mut *position.Anonymous.Anonymous;
+        value.vt = VT_I8;
+        value.Anonymous.hVal = POSTER_TIME_HNS;
+        let _ = reader.SetCurrentPosition(&GUID::zeroed(), &position);
+    }
+}
+
+unsafe fn read_first_frame(reader: &IMFSourceReader, stream: u32) -> Option<IMFSample> {
+    unsafe {
+        for _ in 0..POSTER_MAX_READS {
+            let mut flags = 0u32;
+            let mut sample = None;
+            reader
+                .ReadSample(stream, 0, None, Some(&mut flags), None, Some(&mut sample))
+                .ok()?;
+            if sample.is_some() {
+                return sample;
+            }
+            let ended = flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0;
+            let errored = flags & MF_SOURCE_READERF_ERROR.0 as u32 != 0;
+            if ended || errored {
+                return None;
+            }
+        }
+        None
+    }
+}
+
+unsafe fn row_pitch(decoded: &IMFMediaType, width: u32) -> (usize, bool) {
+    let tightly_packed = width as usize * 4;
+    let Ok(declared) = (unsafe { decoded.GetUINT32(&MF_MT_DEFAULT_STRIDE) }) else {
+        return (tightly_packed, false);
+    };
+    let signed = declared as i32;
+    match signed.unsigned_abs() as usize {
+        0 => (tightly_packed, false),
+        pitch => (pitch, signed < 0),
     }
 }

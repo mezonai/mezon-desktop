@@ -3096,13 +3096,21 @@ impl MessagesStore {
                 size: i32::try_from(att.size).unwrap_or(0),
             })
             .collect();
-        let attachment_link = attachments
-            .first()
+        let first_attachment = attachments.first();
+        let attachment_link = first_attachment
             .map(|att| att.url.clone())
             .unwrap_or_default();
-        let attachment_type = attachments
-            .first()
+        let attachment_type = first_attachment
             .map(|att| att.filetype.clone())
+            .unwrap_or_default();
+        let attachment_filename = first_attachment
+            .map(|att| att.filename.clone())
+            .unwrap_or_default();
+        let attachment_size = first_attachment
+            .map(|att| att.size.max(0) as u64)
+            .unwrap_or(0);
+        let attachment_thumbnail = first_attachment
+            .map(|att| att.thumbnail.clone())
             .unwrap_or_default();
         let has_more_attachment = attachments.len() > 1;
         let avatar = msg.avatar_url.to_string();
@@ -3132,6 +3140,9 @@ impl MessagesStore {
             create_time_seconds,
             attachment_link,
             attachment_type,
+            attachment_filename,
+            attachment_size,
+            attachment_thumbnail,
             has_more_attachment,
             mention_spans,
             channel_type,
@@ -5942,7 +5953,7 @@ async fn ensure_archived_thread_reactivated(
     }
 }
 
-fn plan_thread_membership(
+pub(crate) fn plan_thread_membership(
     self_id: Option<UserId>,
     thread_members: &[UserId],
     parent_members: &[UserId],
@@ -5973,7 +5984,7 @@ fn needs_parent_lookup(thread_members: &[UserId], candidates: &[UserId]) -> bool
         .any(|user_id| !thread_members.contains(user_id))
 }
 
-fn mentioned_thread_candidates(
+pub(crate) fn mentioned_thread_candidates(
     mentions: &[TransportMention],
     clan_id: ClanId,
     cx: &App,
@@ -7042,7 +7053,7 @@ async fn send_anonymous_attachment_message(
     });
 }
 
-async fn upload_attachments_now(
+pub(crate) async fn upload_attachments_now(
     api: &AppApi,
     attachments: Vec<OutgoingAttachment>,
 ) -> anyhow::Result<Vec<mezon_proto::api::MessageAttachment>> {

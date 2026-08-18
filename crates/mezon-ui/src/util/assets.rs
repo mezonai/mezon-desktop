@@ -10,6 +10,7 @@ pub const STREAM_THUMBNAIL: &str = "images/flahstream.png";
 pub const MEZON_COMMUNITY: &str = "images/mezon-community.png";
 pub const CHANNEL_SETTING_LOGO_LIGHT: &str = "images/channel_setting_logo_light.svg";
 pub const CHANNEL_SETTING_LOGO_DARK: &str = "images/channel_setting_logo_dark.svg";
+pub const ONBOARDING: &str = "images/onboarding.png";
 
 #[derive(RustEmbed)]
 #[folder = "assets"]
@@ -49,6 +50,22 @@ mod tests {
             MEZON_COMMUNITY,
             CHANNEL_SETTING_LOGO_LIGHT,
             CHANNEL_SETTING_LOGO_DARK,
+            ONBOARDING,
+            "icons/flower.svg",
+            "icons/flower-rose-line.svg",
+            "icons/flower-peony.svg",
+            "icons/flower-five-petal.svg",
+            "icons/flower-tulips.svg",
+            "icons/flower-cluster.svg",
+            "icons/flower-bouquet.svg",
+            "icons/flower-sprig.svg",
+            "icons/flower-daisy.svg",
+            "icons/flower-stems.svg",
+            "icons/flower-lotus.svg",
+            "icons/flower-tied.svg",
+            "icons/flower-sun.svg",
+            "icons/flower-ring.svg",
+            "icons/flower-bud.svg",
         ] {
             let loaded = Assets
                 .load(path)

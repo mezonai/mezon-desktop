@@ -26,7 +26,54 @@ pub(crate) fn ensure_http_url(url: &str) -> anyhow::Result<()> {
 /// Only `http://` and `https://` URLs are accepted; other schemes are rejected.
 pub fn open_url(url: &str) -> anyhow::Result<()> {
     ensure_http_url(url)?;
-    open::that_detached(url).map_err(|e| anyhow::anyhow!("Failed to open URL: {}", e))
+    #[cfg(unix)]
+    {
+        open_url_reaped(url)
+    }
+    #[cfg(not(unix))]
+    {
+        open::that_detached(url).map_err(|e| anyhow::anyhow!("Failed to open URL: {}", e))
+    }
+}
+
+#[cfg(unix)]
+fn open_url_reaped(url: &str) -> anyhow::Result<()> {
+    use std::os::unix::process::CommandExt as _;
+    use std::process::Stdio;
+
+    let mut last_err: Option<std::io::Error> = None;
+    for mut command in open::commands(url) {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unsafe {
+            command.pre_exec(|| {
+                match libc::fork() {
+                    -1 => return Err(std::io::Error::last_os_error()),
+                    0 => (),
+                    _ => libc::_exit(0),
+                }
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        match command.spawn() {
+            Ok(mut child) => {
+                let _ = child.wait();
+                return Ok(());
+            }
+            Err(err) => last_err = Some(err),
+        }
+    }
+    Err(anyhow::anyhow!(
+        "Failed to open URL: {}",
+        last_err
+            .map(|err| err.to_string())
+            .unwrap_or_else(|| "no launcher available".to_string())
+    ))
 }
 
 #[cfg(test)]

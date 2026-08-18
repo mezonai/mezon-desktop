@@ -13,6 +13,9 @@ use super::category_sort_page::CategorySortPage;
 use super::community_setting_page::{CommunitySettingPage, render_community_save_bar};
 use super::emoji_setting_page::EmojiSettingPage;
 use super::integration_setting_page::IntegrationSettingPage;
+use super::onboarding_setting_page::{
+    OnboardingSettingPage, render_onboarding_editor_modal, render_onboarding_save_bar,
+};
 use super::overview_setting_page::{OverviewSettingPage, render_clan_overview_save_bar};
 use super::role_icon_picker::render_role_icon_picker_modal;
 use super::role_setting_page::{RoleSettingPage, render_role_save_bar};
@@ -176,6 +179,7 @@ pub struct ClanSettingScreen {
     roles_page: Option<Entity<RoleSettingPage>>,
     integrations_page: Option<Entity<IntegrationSettingPage>>,
     community_page: Option<Entity<CommunitySettingPage>>,
+    onboarding_page: Option<Entity<OnboardingSettingPage>>,
     scroll: ScrollHandle,
     nav_scroll: ScrollHandle,
     focus_handle: FocusHandle,
@@ -214,6 +218,7 @@ impl ClanSettingScreen {
             roles_page: None,
             integrations_page: None,
             community_page: None,
+            onboarding_page: None,
             scroll: ScrollHandle::new(),
             nav_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
@@ -301,6 +306,7 @@ impl ClanSettingScreen {
                 self.release_page(ClanSettingsPage::Roles, cx);
                 self.release_page(ClanSettingsPage::Integrations, cx);
                 self.release_page(ClanSettingsPage::ClanCommunity, cx);
+                self.release_page(ClanSettingsPage::Onboarding, cx);
             }
             self.reset_content_scroll();
         }
@@ -350,6 +356,11 @@ impl ClanSettingScreen {
             ClanSettingsPage::ClanCommunity => {
                 if let Some(entity) = self.community_page.take() {
                     entity.update(cx, |page, cx| page.release(cx));
+                }
+            }
+            ClanSettingsPage::Onboarding => {
+                if let Some(entity) = self.onboarding_page.take() {
+                    entity.update(cx, |page, _| page.release());
                 }
             }
             _ => {}
@@ -432,6 +443,16 @@ impl ClanSettingScreen {
                     cx.observe(page, |_, _, cx| cx.notify()).detach();
                 }
             }
+            ClanSettingsPage::Onboarding if self.onboarding_page.is_none() => {
+                let clan_list = self.clan_list.clone();
+                let channel_list = self.channel_list.clone();
+                self.onboarding_page = Some(cx.new(|cx| {
+                    OnboardingSettingPage::new(clan_id, clan_list, channel_list, settings, cx)
+                }));
+                if let Some(page) = &self.onboarding_page {
+                    cx.observe(page, |_, _, cx| cx.notify()).detach();
+                }
+            }
             _ => {}
         }
         if page == ClanSettingsPage::Roles && self.roles_page.is_none() {
@@ -470,7 +491,7 @@ impl ClanSettingScreen {
         mezon_i18n::t(locale, page.i18n_key()).into()
     }
 
-    fn current_page_view(&self) -> Option<gpui::AnyElement> {
+    fn current_page_view(&self, locale: &str, theme: &Theme, cx: &App) -> Option<gpui::AnyElement> {
         match self.current_page {
             ClanSettingsPage::Overview => self
                 .overview_page
@@ -512,7 +533,13 @@ impl ClanSettingScreen {
                 .community_page
                 .as_ref()
                 .map(|p| p.clone().into_any_element()),
-            _ => None,
+            ClanSettingsPage::Onboarding => self.onboarding_page.as_ref().map(|page| {
+                if page.read(cx).is_setup_open() {
+                    OnboardingSettingPage::render_enable_card(page.clone(), locale, theme)
+                } else {
+                    page.clone().into_any_element()
+                }
+            }),
         }
     }
 }
@@ -539,18 +566,20 @@ impl Render for ClanSettingScreen {
             .read(cx)
             .clan_settings_permissions(clan_id, cx);
         let audit_log_layout = page == ClanSettingsPage::AuditLog;
-        let content = self.current_page_view().unwrap_or_else(|| {
-            div()
-                .flex_1()
-                .py_8()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.text_muted)
-                        .child(mezon_i18n::t(&locale, "common.comingSoon")),
-                )
-                .into_any_element()
-        });
+        let content = self
+            .current_page_view(&locale, &theme, cx)
+            .unwrap_or_else(|| {
+                div()
+                    .flex_1()
+                    .py_8()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.text_muted)
+                            .child(mezon_i18n::t(&locale, "common.comingSoon")),
+                    )
+                    .into_any_element()
+            });
 
         let show_overview_save = page == ClanSettingsPage::Overview
             && self
@@ -581,6 +610,26 @@ impl Render for ClanSettingScreen {
                 .as_ref()
                 .is_some_and(|community| community.read(cx).should_show_save_bar(cx));
         let community_save_bar = self.community_page.clone().filter(|_| show_community_save);
+        let show_onboarding_save = page == ClanSettingsPage::Onboarding
+            && self
+                .onboarding_page
+                .as_ref()
+                .is_some_and(|onboarding| onboarding.read(cx).should_show_save_bar());
+        let onboarding_save_bar = self
+            .onboarding_page
+            .clone()
+            .filter(|_| show_onboarding_save);
+        let onboarding_setup_modal = self.onboarding_page.clone().filter(|onboarding| {
+            page == ClanSettingsPage::Onboarding && onboarding.read(cx).is_setup_open()
+        });
+        let onboarding_editor_modal = self.onboarding_page.clone().filter(|onboarding| {
+            page == ClanSettingsPage::Onboarding && onboarding.read(cx).is_editor_open()
+        });
+        let onboarding_enabled = self
+            .clan_list
+            .read(cx)
+            .clan_by_id(clan_id)
+            .is_some_and(|clan| clan.is_onboarding);
 
         fn nav_item(
             id: &str,
@@ -588,6 +637,8 @@ impl Render for ClanSettingScreen {
             is_active: bool,
             theme: &Theme,
             path: String,
+            status: Option<bool>,
+            status_label: Option<SharedString>,
         ) -> impl IntoElement {
             let id = id.to_string();
             div()
@@ -609,7 +660,27 @@ impl Render for ClanSettingScreen {
                 .when(!is_active, |el| {
                     el.text_color(theme.tokens.text_theme_primary)
                 })
-                .child(label)
+                .child(h_flex().w_full().justify_between().child(label).when_some(
+                    status.zip(status_label),
+                    |el, (enabled, label)| {
+                        el.child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(if enabled {
+                                    theme.status_online
+                                } else {
+                                    theme.danger
+                                }))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .child(label),
+                                ),
+                        )
+                    },
+                ))
                 .on_click(move |_, _, cx| {
                     crate::router::replace(cx, crate::router::Route::from_path(&path));
                 })
@@ -652,6 +723,18 @@ impl Render for ClanSettingScreen {
                     page == item,
                     &theme,
                     path,
+                    (item == ClanSettingsPage::Onboarding).then_some(onboarding_enabled),
+                    (item == ClanSettingsPage::Onboarding).then(|| {
+                        mezon_i18n::t(
+                            &locale,
+                            if onboarding_enabled {
+                                "onBoardingClan.status.on"
+                            } else {
+                                "onBoardingClan.status.off"
+                            },
+                        )
+                        .into()
+                    }),
                 ));
             }
             nav = nav.child(div().mt(px(4.0)).border_b_1().border_color(theme.border));
@@ -674,11 +757,8 @@ impl Render for ClanSettingScreen {
                     .hover(|s| s.bg(theme.bg_hover))
                     .child(mezon_i18n::t(&locale, "clanSettings.sidebar.deleteClan"))
                     .on_click(move |_, window, cx| {
-                        let title =
-                            mezon_i18n::t(&locale_for_delete, "clanSettings.sidebar.deleteClan")
-                                .to_string();
                         crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
-                            shell.show_coming_soon(title, &locale_for_delete, window, cx);
+                            shell.confirm_delete_clan(clan_id, &locale_for_delete, window, cx);
                         });
                     }),
             );
@@ -910,6 +990,29 @@ impl Render for ClanSettingScreen {
                 panel.child(deferred(render_community_save_bar(
                     community, &locale, &theme, cx,
                 )))
+            })
+            .when_some(onboarding_save_bar, |panel, onboarding| {
+                panel.child(deferred(render_onboarding_save_bar(
+                    onboarding, &locale, &theme, cx,
+                )))
+            })
+            .when_some(onboarding_setup_modal, |panel, onboarding| {
+                panel.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(gpui::black().alpha(0.72))
+                        .child(onboarding),
+                )
+            })
+            .when_some(onboarding_editor_modal, |panel, onboarding| {
+                panel.child(render_onboarding_editor_modal(
+                    onboarding, &locale, &theme, cx,
+                ))
             })
     }
 }

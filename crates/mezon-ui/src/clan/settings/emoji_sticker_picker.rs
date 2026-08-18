@@ -5,8 +5,8 @@ use gpui::{
     SharedString, Subscription, Task, Window, div, img, prelude::*, px,
 };
 use mezon_store::{
-    ClanId, EMOJI_UPLOAD_MAX_PX, EMOTICON_SHORTNAME_MAX, EmojiStore, MAX_EMOJI_BYTES,
-    MAX_STICKER_BYTES, STICKER_UPLOAD_MAX_PX, Settings, StickerStore, is_valid_emoticon_shortname,
+    ClanId, EMOJI_SHORTNAME_MAX, EMOTICON_SHORTNAME_MIN, EmojiStore, EmoticonErrorKind,
+    MAX_EMOJI_BYTES, MAX_STICKER_BYTES, Settings, StickerStore, is_valid_emoticon_shortname,
     strip_emoji_colons, validate_emoticon_file,
 };
 
@@ -17,17 +17,6 @@ use crate::components::primitives::{
 use crate::theme::{ActiveTheme, Theme};
 
 const FORM_CONTROL_H: f32 = 34.0;
-
-fn default_emoticon_shortname(kind: EmoticonKind) -> String {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    match kind {
-        EmoticonKind::Emoji => format!("emoji_{timestamp}"),
-        EmoticonKind::Sticker => format!("sticker_{timestamp}"),
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum EmoticonKind {
@@ -158,13 +147,6 @@ impl EmojiStickerPicker {
         }
     }
 
-    fn max_upload_px(&self) -> u32 {
-        match self.kind {
-            EmoticonKind::Emoji => EMOJI_UPLOAD_MAX_PX,
-            EmoticonKind::Sticker => STICKER_UPLOAD_MAX_PX,
-        }
-    }
-
     fn is_editing(&self) -> bool {
         self.editing.is_some()
     }
@@ -174,7 +156,7 @@ impl EmojiStickerPicker {
             return false;
         }
         let name = strip_emoji_colons(self.name_input.read(cx).value());
-        if !is_valid_emoticon_shortname(&name) {
+        if !is_valid_emoticon_shortname(&name) || name.chars().count() > EMOJI_SHORTNAME_MAX {
             return false;
         }
         if let Some(editing) = &self.editing {
@@ -194,7 +176,6 @@ impl EmojiStickerPicker {
         };
         let prompt: SharedString = mezon_i18n::t(&locale, prompt_key).to_string().into();
         let max_bytes = self.max_bytes();
-        let max_upload_px = self.max_upload_px();
         let kind = self.kind;
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -233,19 +214,24 @@ impl EmojiStickerPicker {
             };
             let path_buf = path.clone();
             let validated = cx
-                .background_spawn(async move {
-                    validate_emoticon_file(&path_buf, max_bytes, max_upload_px)
-                })
+                .background_spawn(async move { validate_emoticon_file(&path_buf, max_bytes) })
                 .await;
-            if let Err(code) = validated {
-                let message = emoticon_error_message(kind, &locale, &code);
+            if let Err(error) = validated {
+                let empty_file_label: SharedString =
+                    mezon_i18n::t(&locale, prompt_key).to_string().into();
                 let _ = this.update(cx, |this, cx| {
                     finish(this);
                     this.picked_path = None;
+                    this.file_label = empty_file_label;
                     this.preview = None;
                     cx.notify();
                 });
-                show_error(cx, message);
+                let feedback = this.update_in(cx, |_, window, cx| {
+                    show_emoticon_error(kind, &locale, error, max_bytes, window, cx);
+                });
+                if let Err(err) = feedback {
+                    tracing::warn!("failed to show emoticon validation feedback: {err}");
+                }
                 return;
             }
             let label = path
@@ -253,15 +239,11 @@ impl EmojiStickerPicker {
                 .and_then(|n| n.to_str())
                 .unwrap_or("file")
                 .to_string();
-            let default_name = default_emoticon_shortname(kind);
-            let _ = this.update_in(cx, |this, window, cx| {
+            let _ = this.update(cx, |this, cx| {
                 finish(this);
                 this.picked_path = Some(path.clone());
                 this.file_label = label.into();
                 this.preview = Some(EmoticonPreview::Local(path));
-                this.name_input.update(cx, |state, cx| {
-                    state.set_value(default_name, window, cx);
-                });
                 cx.notify();
             });
         }));
@@ -273,7 +255,7 @@ impl EmojiStickerPicker {
         }
         let locale = self.settings.read(cx).language.clone();
         let name = strip_emoji_colons(self.name_input.read(cx).value());
-        if !is_valid_emoticon_shortname(&name) {
+        if !is_valid_emoticon_shortname(&name) || name.chars().count() > EMOJI_SHORTNAME_MAX {
             let message = match self.kind {
                 EmoticonKind::Emoji => {
                     mezon_i18n::t(&locale, "clanEmojiSetting.toast.validateName")
@@ -282,8 +264,8 @@ impl EmojiStickerPicker {
                     mezon_i18n::t(&locale, "clanStickerSetting.toast.validateName")
                 }
             }
-            .replace("{{min}}", "3")
-            .replace("{{max}}", "64");
+            .replace("{{min}}", &EMOTICON_SHORTNAME_MIN.to_string())
+            .replace("{{max}}", &EMOJI_SHORTNAME_MAX.to_string());
             Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
             return;
         }
@@ -338,12 +320,21 @@ impl EmojiStickerPicker {
                 }
                 Err(e) => {
                     tracing::error!("emoticon save failed: {e}");
-                    let message = emoticon_error_message(kind, &locale, &e);
+                    let error = e.kind();
+                    let max_bytes = match kind {
+                        EmoticonKind::Emoji => MAX_EMOJI_BYTES,
+                        EmoticonKind::Sticker => MAX_STICKER_BYTES,
+                    };
                     let _ = this.update(cx, |this, cx| {
                         this.submitting = false;
                         cx.notify();
                     });
-                    show_error(cx, message);
+                    let feedback = this.update_in(cx, |_, window, cx| {
+                        show_emoticon_error(kind, &locale, error, max_bytes, window, cx);
+                    });
+                    if let Err(err) = feedback {
+                        tracing::warn!("failed to show emoticon upload feedback: {err}");
+                    }
                 }
             }
         }));
@@ -367,11 +358,16 @@ impl EmojiStickerPicker {
             .min_w_0()
             .gap_1()
             .child(
-                div()
-                    .text_xs()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(theme.text_secondary)
-                    .child(file_label_title.to_uppercase()),
+                h_flex()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(theme.text_secondary)
+                            .child(file_label_title.to_uppercase()),
+                    )
+                    .child(div().text_xs().text_color(theme.danger_text).child("*")),
             )
             .child(
                 h_flex()
@@ -388,6 +384,8 @@ impl EmojiStickerPicker {
                             .pl(px(12.))
                             .pr(px(16.))
                             .rounded_md()
+                            .border_2()
+                            .border_color(theme.border)
                             .bg(theme.bg_secondary)
                             .overflow_hidden()
                             .child(
@@ -426,11 +424,16 @@ impl EmojiStickerPicker {
                 h_flex()
                     .justify_between()
                     .child(
-                        div()
-                            .text_xs()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(theme.text_secondary)
-                            .child(name_label.to_uppercase()),
+                        h_flex()
+                            .gap(px(3.))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(theme.text_secondary)
+                                    .child(name_label.to_uppercase()),
+                            )
+                            .child(div().text_xs().text_color(theme.danger_text).child("*")),
                     )
                     .child(
                         div()
@@ -440,38 +443,68 @@ impl EmojiStickerPicker {
                             } else {
                                 theme.text_muted
                             })
-                            .child(format!("{name_len}/{EMOTICON_SHORTNAME_MAX}")),
+                            .child(format!("{name_len}/{EMOJI_SHORTNAME_MAX}")),
                     ),
             )
             .child(Input::new(&self.name_input))
     }
 }
 
-fn emoticon_error_message(kind: EmoticonKind, locale: &str, code: &str) -> String {
-    match code {
-        "size_limit" | "image_too_large" => match kind {
+fn emoticon_error_message(kind: EmoticonKind, locale: &str, error: EmoticonErrorKind) -> String {
+    match error {
+        EmoticonErrorKind::SizeLimit | EmoticonErrorKind::ImageTooLarge => match kind {
             EmoticonKind::Emoji => mezon_i18n::t(locale, "clanEmojiSetting.toast.errorSizeLimit"),
             EmoticonKind::Sticker => {
                 mezon_i18n::t(locale, "clanStickerSetting.toast.errorSizeLimit")
             }
         }
         .to_string(),
-        "invalid_name" => match kind {
+        EmoticonErrorKind::InvalidName => match kind {
             EmoticonKind::Emoji => mezon_i18n::t(locale, "clanEmojiSetting.toast.validateName"),
             EmoticonKind::Sticker => mezon_i18n::t(locale, "clanStickerSetting.toast.validateName"),
         }
-        .replace("{{min}}", "3")
-        .replace("{{max}}", "64"),
-        "unsupported_type" | "empty" | "invalid_image" => {
+        .replace("{{min}}", &EMOTICON_SHORTNAME_MIN.to_string())
+        .replace("{{max}}", &EMOJI_SHORTNAME_MAX.to_string()),
+        EmoticonErrorKind::UnsupportedType
+        | EmoticonErrorKind::Empty
+        | EmoticonErrorKind::InvalidImage => {
             mezon_i18n::t(locale, "common.onlyImageFiles").to_string()
         }
-        _ => mezon_i18n::t(locale, "common.somethingWentWrong").to_string(),
+        EmoticonErrorKind::Other => mezon_i18n::t(locale, "common.somethingWentWrong").to_string(),
     }
 }
 
 fn show_error(cx: &mut AsyncApp, message: String) {
     cx.update(|cx| {
         Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+    });
+}
+
+fn show_emoticon_error(
+    kind: EmoticonKind,
+    locale: &str,
+    error: EmoticonErrorKind,
+    max_bytes: u64,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if matches!(
+        error,
+        EmoticonErrorKind::SizeLimit | EmoticonErrorKind::ImageTooLarge
+    ) {
+        show_emoticon_upload_limit(locale, max_bytes, window, cx);
+    } else {
+        let message = emoticon_error_message(kind, locale, error);
+        Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+    }
+}
+
+fn show_emoticon_upload_limit(locale: &str, max_bytes: u64, window: &mut Window, cx: &mut App) {
+    let title = mezon_i18n::t(locale, "common.filesTooPowerful");
+    let size_limit = format!("{} KB", max_bytes / 1024);
+    let content = mezon_i18n::t(locale, "common.maxFileSize").replace("{{sizeLimit}}", &size_limit);
+    Shell::global(cx).update(cx, |shell, cx| {
+        shell.show_upload_limit(title, content, window, cx);
     });
 }
 
@@ -562,26 +595,31 @@ impl Render for EmojiStickerPicker {
             .track_focus(&self.focus_handle)
             .key_context("menu")
             .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| this.close(cx)))
-            .w(px(520.))
-            .max_h(px(640.))
-            .gap_4()
-            .p(px(24.))
+            .w(px(684.))
+            .max_h(px(760.))
+            .gap(px(20.))
+            .px(px(24.))
+            .pt(px(20.))
+            .pb(px(24.))
             .rounded_lg()
             .border_1()
             .border_color(theme.border)
-            .bg(theme.bg_floating)
+            .bg(theme.bg_secondary)
             .shadow_lg()
             .child(
                 h_flex()
+                    .relative()
                     .w_full()
-                    .justify_between()
-                    .items_start()
+                    .justify_center()
+                    .items_center()
+                    .pb(px(4.))
                     .child(
                         v_flex()
-                            .gap_1()
+                            .items_center()
+                            .gap_2()
                             .child(
                                 div()
-                                    .text_lg()
+                                    .text_2xl()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(theme.text_primary)
                                     .child(title),
@@ -596,6 +634,9 @@ impl Render for EmojiStickerPicker {
                     .child(
                         div()
                             .id("emoticon-picker-close")
+                            .absolute()
+                            .right_0()
+                            .top_0()
                             .p_1()
                             .rounded_full()
                             .cursor_pointer()
@@ -621,7 +662,7 @@ impl Render for EmojiStickerPicker {
                     .child(
                         h_flex()
                             .w_full()
-                            .h(px(140.))
+                            .h(px(224.))
                             .rounded_lg()
                             .overflow_hidden()
                             .border_1()
@@ -633,8 +674,11 @@ impl Render for EmojiStickerPicker {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .bg(gpui::rgb(0x1e1f22))
-                                    .child(preview_image(self.preview.as_ref())),
+                                    .bg(theme.tokens.bg_tertiary)
+                                    .child(preview_image(
+                                        self.preview.as_ref(),
+                                        theme.tokens.text_theme_primary,
+                                    )),
                             )
                             .child(
                                 div()
@@ -643,8 +687,10 @@ impl Render for EmojiStickerPicker {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .bg(gpui::rgb(0xf2f3f5))
-                                    .child(preview_image(self.preview.as_ref())),
+                                    .child(preview_image(
+                                        self.preview.as_ref(),
+                                        theme.tokens.text_theme_primary,
+                                    )),
                             ),
                     ),
             )
@@ -699,7 +745,10 @@ impl Render for EmojiStickerPicker {
     }
 }
 
-fn preview_image(preview: Option<&EmoticonPreview>) -> gpui::AnyElement {
+fn preview_image(
+    preview: Option<&EmoticonPreview>,
+    placeholder_color: impl Into<gpui::Hsla>,
+) -> gpui::AnyElement {
     match preview {
         Some(EmoticonPreview::Local(path)) => img(path.clone())
             .size(px(72.))
@@ -712,8 +761,8 @@ fn preview_image(preview: Option<&EmoticonPreview>) -> gpui::AnyElement {
             .rounded_md()
             .into_any_element(),
         None => Icon::new(IconName::UploadImage)
-            .size(px(32.))
-            .text_color(gpui::rgb(0x80848e))
+            .size(px(50.))
+            .text_color(placeholder_color)
             .into_any_element(),
     }
 }

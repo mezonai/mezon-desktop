@@ -710,6 +710,226 @@ pub fn member_list_snapshot(cx: &App) -> anyhow::Result<Value> {
     Ok(crate::chat::member_list::member_list_snapshot(cx))
 }
 
+pub fn banned_users_task(
+    cx: &mut App,
+    clan_id: i64,
+    channel_id: i64,
+) -> gpui::Task<anyhow::Result<Value>> {
+    let Some(store) = mezon_store::BannedUsersStore::try_global(cx) else {
+        return gpui::Task::ready(Err(anyhow::anyhow!("banned users store unavailable")));
+    };
+    let task = store.update(cx, |store, cx| {
+        store.fetch_raw(
+            mezon_store::ClanId(clan_id),
+            mezon_store::ChannelId(channel_id),
+            cx,
+        )
+    });
+    cx.background_spawn(async move {
+        let entries = task.await?;
+        Ok(json!({
+            "clan_id": clan_id.to_string(),
+            "channel_id": channel_id.to_string(),
+            "count": entries.len(),
+            "banned_users": entries
+                .into_iter()
+                .map(|e| json!({
+                    "channel_id": e.channel_id.to_string(),
+                    "banned_id": e.banned_id.to_string(),
+                    "banner_id": e.banner_id.to_string(),
+                    "ban_time": e.ban_time,
+                    "reason": e.reason,
+                }))
+                .collect::<Vec<_>>(),
+        }))
+    })
+}
+
+pub fn close_modal(cx: &mut App) -> anyhow::Result<Value> {
+    let shell = crate::app::shell::Shell::try_global(cx)
+        .ok_or_else(|| anyhow::anyhow!("shell unavailable"))?;
+    let had_modal = shell.read(cx).has_modal();
+    shell.update(cx, |shell, cx| shell.close_modal(cx));
+    Ok(json!({ "ok": true, "closed": had_modal }))
+}
+
+pub fn member_menu_state(cx: &App) -> anyhow::Result<Value> {
+    crate::chat::member_list::member_menu_state(cx)
+}
+
+pub fn member_menu_open(
+    cx: &mut App,
+    user_id: mezon_store::UserId,
+    x: f32,
+    y: f32,
+) -> anyhow::Result<Value> {
+    crate::chat::member_list::member_menu_open(user_id, gpui::point(gpui::px(x), gpui::px(y)), cx)
+}
+
+pub fn member_menu_close(cx: &mut App) -> anyhow::Result<Value> {
+    crate::chat::member_list::member_menu_close(cx)
+}
+
+pub fn member_menu_pick(cx: &mut App, index: usize, value: Option<i32>) -> anyhow::Result<Value> {
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    cx.update_window(main_handle, |_, window, cx| {
+        crate::chat::member_list::member_menu_pick(index, value, window, cx)
+    })?
+}
+
+pub fn create_clan_task(
+    cx: &mut App,
+    name: String,
+    logo: String,
+) -> gpui::Task<anyhow::Result<Value>> {
+    let Some(clan_list) = mezon_store::ClanList::try_global(cx) else {
+        return gpui::Task::ready(Err(anyhow::anyhow!("clan store unavailable")));
+    };
+    let task = clan_list.update(cx, |list, cx| list.create_clan(name.clone(), logo, cx));
+    cx.spawn(async move |_| {
+        let clan_id = task.await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(json!({ "ok": true, "clan_id": clan_id, "name": name }))
+    })
+}
+
+pub fn open_create_clan_modal(cx: &mut App) -> anyhow::Result<Value> {
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    cx.update_window(main_handle, |_, window, cx| {
+        let clan_list = mezon_store::ClanList::global(cx);
+        let settings = mezon_store::Settings::try_global(cx)
+            .ok_or_else(|| anyhow::anyhow!("settings unavailable"))?;
+        let modal = cx.new(|cx| {
+            crate::clan::create_clan_modal::CreateClanModal::new(clan_list, settings, window, cx)
+        });
+        crate::app::shell::Shell::global(cx)
+            .update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
+        anyhow::Ok(json!({ "ok": true }))
+    })?
+}
+
+pub fn clan_menu_state(cx: &App) -> anyhow::Result<Value> {
+    crate::sidebar::clan_sidebar::clan_menu_state(cx)
+}
+
+pub fn clan_menu_open(
+    cx: &mut App,
+    clan_id: mezon_store::ClanId,
+    x: f32,
+    y: f32,
+) -> anyhow::Result<Value> {
+    crate::sidebar::clan_sidebar::clan_menu_open(clan_id, gpui::point(gpui::px(x), gpui::px(y)), cx)
+}
+
+pub fn clan_menu_close(cx: &mut App) -> anyhow::Result<Value> {
+    crate::sidebar::clan_sidebar::clan_menu_close(cx)
+}
+
+pub fn clan_menu_pick(cx: &mut App, index: usize, value: Option<i32>) -> anyhow::Result<Value> {
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    cx.update_window(main_handle, |_, window, cx| {
+        crate::sidebar::clan_sidebar::clan_menu_pick(index, value, window, cx)
+    })?
+}
+
+pub fn list_categories(cx: &App, clan_id: mezon_store::ClanId) -> anyhow::Result<Value> {
+    let channels = mezon_store::ChannelList::try_global(cx)
+        .ok_or_else(|| anyhow::anyhow!("channel store unavailable"))?;
+    let channels = channels.read(cx);
+    let items: Vec<Value> = channels
+        .categories_for_clan(clan_id)
+        .iter()
+        .map(|category| {
+            json!({
+                "id": category.id,
+                "name": category.name,
+                "order": category.order,
+                "channel_count": category.channels.len(),
+                "collapsed": channels.is_category_collapsed(clan_id, &category.id),
+            })
+        })
+        .collect();
+    Ok(Value::Array(items))
+}
+
+pub fn create_category_task(
+    cx: &mut App,
+    clan_id: mezon_store::ClanId,
+    name: String,
+) -> gpui::Task<anyhow::Result<Value>> {
+    let Some(channels) = mezon_store::ChannelList::try_global(cx) else {
+        return gpui::Task::ready(Err(anyhow::anyhow!("channel store unavailable")));
+    };
+    let task = channels.update(cx, |list, cx| {
+        list.create_category(clan_id, name.clone(), cx)
+    });
+    cx.background_spawn(async move {
+        task.await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        Ok(json!({ "ok": true, "name": name }))
+    })
+}
+
+pub fn channel_menu_state(cx: &App) -> anyhow::Result<Value> {
+    crate::sidebar::channel_sidebar::channel_menu_state(cx)
+}
+
+pub fn channel_menu_open(
+    cx: &mut App,
+    clan_id: mezon_store::ClanId,
+    channel_id: mezon_store::ChannelId,
+    x: f32,
+    y: f32,
+    in_favorites: bool,
+) -> anyhow::Result<Value> {
+    crate::sidebar::channel_sidebar::channel_menu_open(
+        clan_id,
+        channel_id,
+        gpui::point(gpui::px(x), gpui::px(y)),
+        in_favorites,
+        cx,
+    )
+}
+
+pub fn channel_menu_close(cx: &mut App) -> anyhow::Result<Value> {
+    crate::sidebar::channel_sidebar::channel_menu_close(cx)
+}
+
+pub fn channel_menu_pick(cx: &mut App, index: usize, value: Option<i32>) -> anyhow::Result<Value> {
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    cx.update_window(main_handle, |_, window, cx| {
+        crate::sidebar::channel_sidebar::channel_menu_pick(index, value, window, cx)
+    })?
+}
+
+pub fn category_menu_state(cx: &App) -> anyhow::Result<Value> {
+    crate::sidebar::channel_sidebar::category_menu_state(cx)
+}
+
+pub fn category_menu_open(
+    cx: &mut App,
+    clan_id: mezon_store::ClanId,
+    category_id: String,
+    x: f32,
+    y: f32,
+) -> anyhow::Result<Value> {
+    crate::sidebar::channel_sidebar::category_menu_open(
+        clan_id,
+        category_id,
+        gpui::point(gpui::px(x), gpui::px(y)),
+        cx,
+    )
+}
+
+pub fn category_menu_close(cx: &mut App) -> anyhow::Result<Value> {
+    crate::sidebar::channel_sidebar::category_menu_close(cx)
+}
+
+pub fn category_menu_pick(cx: &mut App, index: usize, value: Option<i32>) -> anyhow::Result<Value> {
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    cx.update_window(main_handle, |_, window, cx| {
+        crate::sidebar::channel_sidebar::category_menu_pick(index, value, window, cx)
+    })?
+}
+
 pub fn user_status_snapshot(cx: &App) -> anyhow::Result<Value> {
     let Some((user_id, status)) = mezon_store::current_user_status(cx) else {
         return Ok(json!({ "signed_in": false }));
@@ -857,6 +1077,114 @@ pub fn open_message_image_viewer(
         );
     })?;
     Ok(serde_json::json!({ "ok": true, "url": opened }))
+}
+
+pub fn join_voice(channel_id: i64, clan_id: i64, cx: &mut App) -> anyhow::Result<Value> {
+    let voice = mezon_store::VoiceStore::try_global(cx)
+        .ok_or_else(|| anyhow::anyhow!("the voice store is not available"))?;
+    let settings = mezon_store::Settings::try_global(cx)
+        .ok_or_else(|| anyhow::anyhow!("settings are not available"))?;
+    let (input, output, camera) = {
+        let settings = settings.read(cx);
+        (
+            settings.input_device_id.clone(),
+            settings.output_device_id.clone(),
+            settings.camera_device_id.clone(),
+        )
+    };
+    let handle = cx
+        .active_window()
+        .or_else(|| cx.windows().first().copied())
+        .ok_or_else(|| anyhow::anyhow!("no window is open"))?;
+    handle
+        .update(cx, |_, window, cx| {
+            voice.update(cx, |store, cx| {
+                store.join(
+                    channel_id.to_string(),
+                    clan_id.to_string(),
+                    String::new(),
+                    input,
+                    output,
+                    camera,
+                    window,
+                    cx,
+                );
+            });
+        })
+        .map_err(|e| anyhow::anyhow!(e))?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+pub fn leave_voice(cx: &mut App) -> anyhow::Result<Value> {
+    let voice = mezon_store::VoiceStore::try_global(cx)
+        .ok_or_else(|| anyhow::anyhow!("the voice store is not available"))?;
+    let handle = cx
+        .active_window()
+        .or_else(|| cx.windows().first().copied())
+        .ok_or_else(|| anyhow::anyhow!("no window is open"))?;
+    handle
+        .update(cx, |_, window, cx| {
+            voice.update(cx, |store, cx| store.leave(window, cx));
+        })
+        .map_err(|e| anyhow::anyhow!(e))?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+pub fn recording_state(cx: &mut App) -> Value {
+    let Some(voice) = mezon_store::VoiceStore::try_global(cx) else {
+        return serde_json::json!({ "state": "unavailable" });
+    };
+    let store = voice.read(cx);
+    let state = match store.recording_state() {
+        mezon_store::RecordingState::Idle => "idle",
+        mezon_store::RecordingState::Starting => "starting",
+        mezon_store::RecordingState::Recording => "recording",
+        mezon_store::RecordingState::Stopping => "stopping",
+    };
+    serde_json::json!({
+        "state": state,
+        "elapsed_seconds": store.recording_elapsed().as_secs_f64(),
+        "video_stalled": store.recording_stalled(),
+        "can_record": store.can_record(),
+        "in_call": store.connection().active_channel_id().is_some(),
+    })
+}
+
+pub fn start_recording(path: Option<String>, cx: &mut App) -> anyhow::Result<Value> {
+    let voice = mezon_store::VoiceStore::try_global(cx)
+        .ok_or_else(|| anyhow::anyhow!("the voice store is not available"))?;
+    let window_id = cx
+        .active_window()
+        .or_else(|| cx.windows().first().copied())
+        .and_then(|handle| {
+            handle
+                .update(cx, |_, window, _| {
+                    crate::chat::record_window::record_window_id(window)
+                })
+                .ok()
+                .flatten()
+        });
+    voice.update(cx, |store, cx| {
+        let target = match path {
+            Some(path) => std::path::PathBuf::from(path),
+            None => store.suggested_recording_path(),
+        };
+        store
+            .start_recording_at(target.clone(), window_id, cx)
+            .map(|()| serde_json::json!({ "ok": true, "path": target.to_string_lossy() }))
+            .map_err(|error| anyhow::anyhow!(error))
+    })
+}
+
+pub fn stop_recording(cx: &mut App) -> anyhow::Result<Value> {
+    let voice = mezon_store::VoiceStore::try_global(cx)
+        .ok_or_else(|| anyhow::anyhow!("the voice store is not available"))?;
+    voice.update(cx, |store, cx| {
+        store
+            .request_stop_recording(cx)
+            .map(|()| serde_json::json!({ "ok": true }))
+            .map_err(|error| anyhow::anyhow!(error))
+    })
 }
 
 pub fn go_back(cx: &mut App) -> anyhow::Result<()> {

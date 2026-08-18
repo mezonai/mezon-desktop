@@ -28,9 +28,9 @@ use mezon_store::{
 };
 use std::time::Duration;
 
+pub use attachments::build_pending;
 use attachments::{
-    AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, build_pending, mime_from_extension,
-    validate_batch,
+    AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, mime_from_extension, validate_batch,
 };
 use recorder::{ActiveRecording, MIN_RECORDING_MILLIS, RecordTask, encode_recording};
 
@@ -576,6 +576,15 @@ impl MentionInput {
         this
     }
 
+    pub fn new_compact(
+        placeholder: impl Into<SharedString>,
+        settings: Entity<Settings>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::build(placeholder, settings, true, window, cx)
+    }
+
     pub fn new_edit(
         placeholder: impl Into<SharedString>,
         settings: Entity<Settings>,
@@ -782,6 +791,20 @@ impl MentionInput {
         cx.notify();
     }
 
+    pub fn current_content(&self, cx: &App) -> (String, OutgoingContent, Vec<OutgoingAttachment>) {
+        let raw = self.input.read(cx).value().to_string();
+        let text = if self.committed.is_empty() {
+            raw.trim().to_string()
+        } else {
+            raw.trim_end().to_string()
+        };
+        (
+            text,
+            outgoing_content_from_committed(&raw, &self.committed),
+            outgoing_attachments(&self.pending_attachments),
+        )
+    }
+
     pub fn take_payload(
         &mut self,
         window: &mut Window,
@@ -816,43 +839,8 @@ impl MentionInput {
             });
             return None;
         }
-        let mut content = OutgoingContent::default();
-        for token in &self.committed {
-            let s = byte_offset_to_utf16(&raw, token.start) as i32;
-            let e = byte_offset_to_utf16(&raw, token.end) as i32;
-            match &token.kind {
-                TokenKind::Mention { user_id, role_id } => content.mentions.push(OutgoingMention {
-                    user_id: user_id.clone(),
-                    role_id: role_id.clone(),
-                    display: token.display.clone(),
-                    s,
-                    e,
-                }),
-                TokenKind::Hashtag { channel_id } => content.hashtags.push(OutgoingHashtag {
-                    channel_id: channel_id.clone(),
-                    s,
-                    e,
-                }),
-                TokenKind::Emoji { emoji_id } => content.emojis.push(OutgoingEmoji {
-                    emoji_id: emoji_id.clone(),
-                    s,
-                    e,
-                }),
-            }
-        }
-        let attachments: Vec<OutgoingAttachment> = self
-            .pending_attachments
-            .drain(..)
-            .map(|p| OutgoingAttachment {
-                path: p.path,
-                filename: p.filename,
-                filetype: p.filetype,
-                width: i32::try_from(p.width).unwrap_or(0),
-                height: i32::try_from(p.height).unwrap_or(0),
-                duration: p.duration,
-                poster_jpeg: p.poster_jpeg,
-            })
-            .collect();
+        let content = outgoing_content_from_committed(&raw, &self.committed);
+        let attachments = outgoing_attachments(&std::mem::take(&mut self.pending_attachments));
         let ogp = self.take_outgoing_ogp();
         self.committed.clear();
         self.reset_popup();
@@ -2581,12 +2569,15 @@ impl MentionInput {
     fn render_compact(&self, cx: &mut Context<Self>) -> AnyElement {
         let open = self.popup_open();
         let popup = open.then(|| self.build_suggestion_popup(cx));
+        let previews =
+            (!self.pending_attachments.is_empty()).then(|| self.render_attachment_previews(cx));
         div()
             .relative()
             .w_full()
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(Self::on_accept))
             .on_action(cx.listener(Self::on_dismiss))
+            .when_some(previews, |this, previews| this.child(previews))
             .child(MentionInputField::new(&self.input))
             .when_some(popup, |this, popup| this.child(popup))
             .into_any_element()
@@ -2734,6 +2725,49 @@ fn emoji_suggest_pool(cx: &App) -> Vec<EmojiSuggestRaw> {
             shortname_lc: emoji.shortname.to_lowercase(),
         })
         .collect()
+}
+
+fn outgoing_attachments(pending: &[PendingAttachment]) -> Vec<OutgoingAttachment> {
+    pending
+        .iter()
+        .map(|pending| OutgoingAttachment {
+            path: pending.path.clone(),
+            filename: pending.filename.clone(),
+            filetype: pending.filetype.clone(),
+            width: i32::try_from(pending.width).unwrap_or(0),
+            height: i32::try_from(pending.height).unwrap_or(0),
+            duration: pending.duration,
+            poster_jpeg: pending.poster_jpeg.clone(),
+        })
+        .collect()
+}
+
+fn outgoing_content_from_committed(raw: &str, committed: &[CommittedToken]) -> OutgoingContent {
+    let mut content = OutgoingContent::default();
+    for token in committed {
+        let s = byte_offset_to_utf16(raw, token.start) as i32;
+        let e = byte_offset_to_utf16(raw, token.end) as i32;
+        match &token.kind {
+            TokenKind::Mention { user_id, role_id } => content.mentions.push(OutgoingMention {
+                user_id: user_id.clone(),
+                role_id: role_id.clone(),
+                display: token.display.clone(),
+                s,
+                e,
+            }),
+            TokenKind::Hashtag { channel_id } => content.hashtags.push(OutgoingHashtag {
+                channel_id: channel_id.clone(),
+                s,
+                e,
+            }),
+            TokenKind::Emoji { emoji_id } => content.emojis.push(OutgoingEmoji {
+                emoji_id: emoji_id.clone(),
+                s,
+                e,
+            }),
+        }
+    }
+    content
 }
 
 fn committed_from_compose_tokens(text: &str, tokens: Vec<ComposeToken>) -> Vec<CommittedToken> {

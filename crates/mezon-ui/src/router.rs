@@ -67,6 +67,20 @@ pub enum Route {
 }
 
 impl Route {
+    pub fn targets_clan(&self, clan: ClanId) -> bool {
+        match self {
+            Route::ClanMembers { clan_id }
+            | Route::ClanChannels { clan_id }
+            | Route::Channel { clan_id, .. }
+            | Route::Thread { clan_id, .. }
+            | Route::Canvas { clan_id, .. }
+            | Route::SettingsClanProfile { clan_id }
+            | Route::ClanSettings { clan_id, .. }
+            | Route::ChannelSettings { clan_id, .. } => *clan_id == clan,
+            _ => false,
+        }
+    }
+
     pub fn to_path(&self) -> String {
         match self {
             Route::Chat => "/chat".to_string(),
@@ -295,6 +309,11 @@ impl Router {
 
     pub fn reset(&mut self) {
         *self = Router::new();
+    }
+
+    pub fn forget_clan(&mut self, clan_id: ClanId) {
+        self.backward.retain(|route| !route.targets_clan(clan_id));
+        self.forward.retain(|route| !route.targets_clan(clan_id));
     }
 
     pub fn go_back(&mut self) {

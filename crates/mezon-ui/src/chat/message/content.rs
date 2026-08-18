@@ -2275,7 +2275,13 @@ fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> 
         .borrow_mut()
         .registry
         .insert(msg.id, inline.text_layout());
-    Some(inline.into_any_element())
+    Some(
+        div()
+            .max_w_full()
+            .min_w_0()
+            .child(inline)
+            .into_any_element(),
+    )
 }
 
 fn hashtag_channel(channel_id: ChannelId, cx: &App) -> Option<ResolvedHashtag> {

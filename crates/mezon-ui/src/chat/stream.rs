@@ -49,7 +49,8 @@ pub fn render_stream_channel(
     let clan_name = channel.clan_name.clone();
     let error_message = store.error_message().map(str::to_owned);
     let output_device = output_device_id.clone();
-    let joined = store.is_joined() || store.is_joining();
+    let session_here = store.is_session_channel(channel_id);
+    let joined = session_here && (store.is_joined() || store.is_joining());
     let shell_bg = stream_channel_bg(theme, joined);
 
     let body = if let Some(message) = error_message {
@@ -69,7 +70,7 @@ pub fn render_stream_channel(
             output_device,
             cx,
         )
-    } else if store.is_joined() || store.is_joining() {
+    } else if joined {
         render_joined(
             window,
             theme,
@@ -89,7 +90,7 @@ pub fn render_stream_channel(
             &channel_label,
             &members,
             window_width,
-            store.is_joining(),
+            session_here && store.is_joining(),
             stream_entity,
             auth_entity,
             clan_id,
@@ -114,8 +115,8 @@ pub fn render_stream_channel(
             locale,
             &channel.name,
             show_chat,
+            joined,
             stream.clone(),
-            cx,
         ))
         .child(body)
         .into_any_element()
@@ -353,16 +354,15 @@ fn stream_header(
     locale: &str,
     name: &str,
     show_chat: bool,
+    streaming: bool,
     stream: Entity<StreamStore>,
-    cx: &App,
 ) -> AnyElement {
     let chat_label = if show_chat {
         mezon_i18n::t(locale, "channelTopbar.tooltips.hideChat")
     } else {
         mezon_i18n::t(locale, "channelTopbar.tooltips.showChat")
     };
-    let stream_toggle = stream.clone();
-    let streaming = stream.read(cx).is_joined() || stream.read(cx).is_joining();
+    let stream_toggle = stream;
     let stream_icon_color = if streaming {
         theme.text_primary
     } else {

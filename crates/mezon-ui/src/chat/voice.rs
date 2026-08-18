@@ -1,20 +1,24 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use gpui::{
-    Anchor, Animation, AnimationExt, AnyElement, App, ClickEvent, ClipboardItem, Context,
-    CursorStyle, Entity, FontWeight, Hsla, Image, ImageFormat, IntoElement, MouseButton,
-    MouseDownEvent, ObjectFit, Pixels, RenderOnce, Rgba, ScrollHandle, SharedString, StyledImage,
-    Window, canvas, deferred, div, img, point, prelude::*, px, relative,
+    Anchor, Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context,
+    CursorStyle, Entity, FontFeatures, FontWeight, Hsla, Image, ImageFormat, IntoElement,
+    MouseButton, MouseDownEvent, ObjectFit, Pixels, RenderOnce, Rgba, ScrollHandle, SharedString,
+    StyledImage, TransformationMatrix, Window, canvas, deferred, div, img, point, prelude::*, px,
+    radians, relative, rems, rgb,
 };
 use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, ClanMembersStore, DeviceKind,
-    DeviceMenuKind, DisplayedReaction, NetworkQuality, PERMISSION_MANAGE_CHANNEL, PermissionStore,
-    Settings, UserId, VoiceCallStatus, VoiceConnection, VoiceMember, VoiceParticipant,
-    VoiceRenderFrame, VoiceStore,
+    DeviceMenuKind, DisplayedFlower, DisplayedReaction, FLOWER_ANIMATION_TTL, FLOWER_PALETTE_SIZE,
+    FLOWER_SPRITE_COUNT, FlowerParticle, NetworkQuality, PERMISSION_MANAGE_CHANNEL,
+    PermissionStore, RecordingState, Settings, UserId, VoiceCallStatus, VoiceConnection,
+    VoiceMember, VoiceParticipant, VoiceRenderFrame, VoiceStore, WalletStore, flower_menu_blocked,
+    flower_particle_pose,
 };
 
 use crate::ChatLayout;
+use crate::Shell;
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
 use crate::components::primitives::{
     Avatar, ContextMenu, Icon, IconName, Sizable, Size, Spinner, context_menu_at,
@@ -1228,6 +1232,199 @@ fn reactions_overlay(
     )
 }
 
+fn flower_burst(flower: &DisplayedFlower, theme: &Theme) -> AnyElement {
+    let label = flower.label.clone();
+    let duration = FLOWER_ANIMATION_TTL;
+    let particles = flower.particles.clone();
+    let ttl = duration.as_secs_f32();
+    let colors = flower_burst_colors(theme);
+    let started_at = flower.started_at;
+    let delta = (started_at.elapsed().as_secs_f32() / ttl).clamp(0.0, 1.0);
+
+    div()
+        .absolute()
+        .inset_0()
+        .child(
+            canvas(
+                move |bounds, window, _| {
+                    if started_at.elapsed() < duration {
+                        window.request_animation_frame();
+                    }
+                    bounds
+                },
+                move |bounds, _, window, cx| {
+                    paint_flower_burst(
+                        bounds,
+                        started_at.elapsed().as_secs_f32(),
+                        ttl,
+                        particles.as_slice(),
+                        &colors,
+                        window,
+                        cx,
+                    );
+                },
+            )
+            .absolute()
+            .inset_0()
+            .size_full(),
+        )
+        .child(
+            div()
+                .absolute()
+                .bottom(relative(0.15 + delta))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .px_4()
+                .opacity(reaction_opacity(delta))
+                .child(
+                    div()
+                        .px_3()
+                        .py(px(4.))
+                        .max_w(relative(0.85))
+                        .rounded_full()
+                        .bg(theme.bg_floating)
+                        .border_1()
+                        .border_color(theme.border)
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.tokens.text_tooltip_app)
+                        .text_center()
+                        .child(label),
+                ),
+        )
+        .into_any_element()
+}
+
+fn flower_burst_colors(theme: &Theme) -> [Hsla; FLOWER_PALETTE_SIZE as usize] {
+    [
+        theme.brand.into(),
+        theme.status_idle.into(),
+        theme.status_online.into(),
+        theme.text_link.into(),
+        rgb(0xf472b6).into(),
+        theme.status_dnd.into(),
+        rgb(0xff2d95).into(),
+        rgb(0xff6b00).into(),
+        rgb(0xffd60a).into(),
+        rgb(0x84cc16).into(),
+        rgb(0x22d3ee).into(),
+        rgb(0xa855f7).into(),
+        rgb(0xff4d4d).into(),
+        rgb(0xff8c42).into(),
+    ]
+}
+
+const FLOWER_SPRITE_PX: f32 = 48.0;
+
+const FLOWER_SPRITES: [&str; FLOWER_SPRITE_COUNT as usize] = [
+    "icons/flower-rose-line.svg",
+    "icons/flower-peony.svg",
+    "icons/flower-five-petal.svg",
+    "icons/flower-tulips.svg",
+    "icons/flower-cluster.svg",
+    "icons/flower-bouquet.svg",
+    "icons/flower-sprig.svg",
+    "icons/flower-daisy.svg",
+    "icons/flower-stems.svg",
+    "icons/flower-lotus.svg",
+    "icons/flower-tied.svg",
+    "icons/flower-sun.svg",
+    "icons/flower-ring.svg",
+    "icons/flower-bud.svg",
+];
+
+fn flower_sprite(index: u8) -> SharedString {
+    static SPRITES: std::sync::OnceLock<[SharedString; FLOWER_SPRITE_COUNT as usize]> =
+        std::sync::OnceLock::new();
+    let sprites =
+        SPRITES.get_or_init(|| std::array::from_fn(|i| SharedString::from(FLOWER_SPRITES[i])));
+    sprites[index as usize % sprites.len()].clone()
+}
+
+fn paint_flower_burst(
+    bounds: Bounds<Pixels>,
+    elapsed: f32,
+    ttl: f32,
+    particles: &[FlowerParticle],
+    colors: &[Hsla; FLOWER_PALETTE_SIZE as usize],
+    window: &mut Window,
+    cx: &App,
+) {
+    let unit = f32::from(bounds.size.width.min(bounds.size.height));
+    let origin = point(
+        bounds.center().x,
+        bounds.origin.y + bounds.size.height * 0.46,
+    );
+    for particle in particles {
+        let pose = flower_particle_pose(particle, elapsed, ttl);
+        if pose.opacity < 0.02 {
+            continue;
+        }
+        let position = point(origin.x + px(pose.x * unit), origin.y + px(pose.y * unit));
+        let visual = particle.size * pose.scale;
+        let radius = px(visual * std::f32::consts::FRAC_1_SQRT_2);
+        if position.x + radius < bounds.origin.x
+            || position.y + radius < bounds.origin.y
+            || position.x - radius > bounds.origin.x + bounds.size.width
+            || position.y - radius > bounds.origin.y + bounds.size.height
+        {
+            continue;
+        }
+        let slot = (particle.palette as usize) % colors.len();
+        let color = colors[slot].opacity(pose.opacity);
+        paint_flower_sprite(
+            window,
+            position,
+            visual / FLOWER_SPRITE_PX,
+            pose.spin,
+            color,
+            &flower_sprite(particle.sprite),
+            cx,
+        );
+    }
+}
+
+fn paint_flower_sprite(
+    window: &mut Window,
+    origin: gpui::Point<Pixels>,
+    instance_scale: f32,
+    spin: f32,
+    color: Hsla,
+    icon: &SharedString,
+    cx: &App,
+) {
+    let half = px(FLOWER_SPRITE_PX * 0.5);
+    let bounds = Bounds {
+        origin: point(origin.x - half, origin.y - half),
+        size: gpui::size(px(FLOWER_SPRITE_PX), px(FLOWER_SPRITE_PX)),
+    };
+    let window_scale = window.scale_factor();
+    let center = bounds.center();
+    let transform = TransformationMatrix::unit()
+        .translate(center.scale(window_scale))
+        .rotate(radians(spin))
+        .scale(gpui::size(instance_scale, instance_scale))
+        .translate(center.scale(-window_scale));
+    let _ = window.paint_svg(bounds, icon.clone(), None, transform, color, cx);
+}
+
+fn flowers_overlay(store: &VoiceStore, theme: &Theme) -> Option<AnyElement> {
+    let flowers = store.displayed_flowers();
+    if flowers.is_empty() {
+        return None;
+    }
+    Some(
+        div()
+            .absolute()
+            .inset_0()
+            .overflow_hidden()
+            .children(flowers.iter().map(|flower| flower_burst(flower, theme)))
+            .into_any_element(),
+    )
+}
+
 enum InCallBodyLayout {
     Focus {
         cells: Vec<VideoCell>,
@@ -1364,8 +1561,8 @@ fn render_in_call(
 
     let emoji_cache = crate::image_cache::shared_emoji_cache(cx);
     let reactions = reactions_overlay(voice.read(cx), emoji_cache);
-
     let theme = cx.theme();
+    let flowers = flowers_overlay(voice.read(cx), theme);
     let connection_status: Option<(SharedString, Hsla, bool)> = if connecting {
         Some((
             SharedString::from(mezon_i18n::t(locale, "channelVoice.connecting").to_string()),
@@ -1452,6 +1649,8 @@ fn render_in_call(
                 name,
                 can_moderate,
                 participant.muted,
+                participant.is_local,
+                flower_menu_disabled(cx),
                 locale,
             );
             Some(context_menu_at(position, menu).into_any_element())
@@ -1493,6 +1692,7 @@ fn render_in_call(
         })
         .children(connection_toast)
         .children(reactions)
+        .children(flowers)
         .children(raised_hands_overlay(cx, channel.clan_id, voice.read(cx)))
         .children(mic_modal)
         .children(participant_menu)
@@ -2420,12 +2620,22 @@ fn participant_menu_trigger(
     }
 }
 
+fn flower_menu_disabled(cx: &App) -> bool {
+    WalletStore::try_global(cx).is_some_and(|wallet| {
+        let wallet = wallet.read(cx);
+        wallet.is_available() && flower_menu_blocked(wallet.pending_give_flower(), wallet.balance())
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_participant_menu(
     voice: &Entity<VoiceStore>,
     identity: String,
     name: String,
     can_moderate: bool,
     muted: bool,
+    is_local: bool,
+    flower_disabled: bool,
     locale: &str,
 ) -> ContextMenu {
     let dismiss = {
@@ -2463,6 +2673,34 @@ fn build_participant_menu(
                 },
             )
             .separator();
+    }
+
+    if !is_local {
+        let voice = voice.clone();
+        let identity = identity.clone();
+        let label = mezon_i18n::t(locale, "contextMenu.giveFlower");
+        let locale = locale.to_string();
+        menu = menu
+            .item_icon(label, IconName::Flower, move |window, cx| {
+                let identity = identity.clone();
+                let locale = locale.clone();
+                let wallet_available = WalletStore::try_global(cx)
+                    .map(|wallet| wallet.read(cx).is_available())
+                    .unwrap_or(false);
+                if !wallet_available {
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.show_wallet_not_available(
+                            mezon_i18n::t(&locale, "message.wallet.notAvailable"),
+                            &locale,
+                            window,
+                            cx,
+                        );
+                    });
+                    return;
+                }
+                voice.update(cx, |store, cx| store.give_flower(identity, cx));
+            })
+            .disabled(flower_disabled);
     }
 
     menu.item_icon(
@@ -2749,6 +2987,13 @@ fn tile_sound_overlay(store: &VoiceStore, cell: &VideoCell) -> Option<AnyElement
 }
 
 #[allow(clippy::too_many_arguments)]
+/// gg sans gives each digit its own advance — `1` measures 392 units against
+/// `0`'s 594 — so a ticking timer re-measured the pill around it on every
+/// second. Tabular figures pin all ten to 600, which holds the whole string at
+/// one width no matter what the clock reads.
+static TABULAR_FIGURES: LazyLock<FontFeatures> =
+    LazyLock::new(|| FontFeatures(Arc::new(vec![("tnum".to_string(), 1)])));
+
 fn control_bar(
     theme: &Theme,
     locale: &str,
@@ -2761,6 +3006,8 @@ fn control_bar(
     let mic_enabled = store.mic_enabled();
     let camera_enabled = store.camera_enabled();
     let screen_enabled = store.screen_share_enabled();
+    let recording = store.recording_state();
+    let can_record = store.can_record();
 
     let neutral_bg = theme.bg_secondary;
     let neutral_hover = darken(theme.bg_secondary, 0.1);
@@ -2883,6 +3130,50 @@ fn control_bar(
             }
         })
     };
+
+    let record_button = can_record.then(|| {
+        let voice = voice.clone();
+        let active = matches!(recording, RecordingState::Recording);
+        let busy = matches!(
+            recording,
+            RecordingState::Starting | RecordingState::Stopping
+        );
+        let (bg, hover, color): (Hsla, Hsla, Hsla) = if active {
+            (
+                gpui::rgb(LEAVE_RED).into(),
+                gpui::rgb(LEAVE_RED_HOVER).into(),
+                gpui::rgb(0xffffff).into(),
+            )
+        } else {
+            (neutral_bg.into(), neutral_hover, theme.text_muted.into())
+        };
+        circle_button(
+            "voice-record-btn",
+            bg,
+            hover,
+            if active {
+                IconName::VoiceRecordStopIcon
+            } else {
+                IconName::VoiceRecordIcon
+            },
+            color,
+        )
+        .tooltip(Tooltip::text(mezon_i18n::t(
+            locale,
+            if active {
+                "channelVoice.stopRecording"
+            } else {
+                "channelVoice.startRecording"
+            },
+        )))
+        .on_click(move |_, window, cx| {
+            if busy {
+                return;
+            }
+            let window_id = crate::chat::record_window::record_window_id(window);
+            voice.update(cx, |store, cx| store.toggle_recording(window_id, cx));
+        })
+    });
 
     let leave_button = {
         let voice = voice.clone();
@@ -3060,6 +3351,57 @@ fn control_bar(
         })
     };
 
+    let record_badge = matches!(recording, RecordingState::Recording).then(|| {
+        let elapsed = store.recording_elapsed().as_secs();
+        let stalled = store.recording_stalled();
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .px_2()
+            .py_1()
+            .rounded(px(999.))
+            .bg(gpui::rgba(0xc4362b26))
+            .border_1()
+            .border_color(gpui::rgb(LEAVE_RED))
+            .child(div().size(px(8.)).rounded_full().bg(gpui::rgb(LEAVE_RED)))
+            .child(
+                div()
+                    .font_features(TABULAR_FIGURES.clone())
+                    // Linux shapes text through cosmic-text, which ignores font
+                    // features, so keep a floor above the widest the string can
+                    // measure (4.64rem) to hold the pill still there too. In
+                    // rems, because the window's rem size follows the zoom
+                    // level and the old px floor sat below the text either way.
+                    .min_w(rems(4.75))
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(gpui::rgb(LEAVE_RED))
+                    .child(format!(
+                        "REC {:02}:{:02}:{:02}",
+                        elapsed / 3600,
+                        (elapsed % 3600) / 60,
+                        elapsed % 60
+                    )),
+            )
+            .when(stalled, |el| {
+                el.child(
+                    div()
+                        .id("voice-record-stalled")
+                        .child(
+                            Icon::new(IconName::VoiceScreenShareStopIcon)
+                                .size(px(12.))
+                                .text_color(gpui::rgb(RAISE_HAND_GOLD)),
+                        )
+                        .tooltip(Tooltip::text(mezon_i18n::t(
+                            locale,
+                            "channelVoice.recordingVideoStalled",
+                        ))),
+                )
+            })
+    });
+
     let left = div()
         .flex()
         .flex_row()
@@ -3067,7 +3409,9 @@ fn control_bar(
         .items_center()
         .gap_3()
         .child(emoji_button)
-        .child(sound_button);
+        .child(sound_button)
+        .children(record_button)
+        .children(record_badge);
 
     let center = div()
         .flex()

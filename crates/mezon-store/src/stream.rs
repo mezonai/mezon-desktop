@@ -171,20 +171,26 @@ impl StreamStore {
         }
     }
 
-    pub fn should_leave_for_active_channel(
-        &self,
+    pub fn is_session_channel(&self, channel_id: ChannelId) -> bool {
+        self.session_channel_id() == Some(channel_id)
+    }
+
+    pub fn sync_chat_for_active_channel(
+        &mut self,
         active: Option<(ChannelType, ChannelId)>,
-    ) -> bool {
-        if !self.is_joined() && !self.is_joining() {
-            return false;
+        cx: &mut Context<Self>,
+    ) {
+        if !self.show_chat {
+            return;
         }
-        let Some(session_channel) = self.session_channel_id() else {
-            return false;
+        let Some((ChannelType::Stream, channel_id)) = active else {
+            return;
         };
-        match active {
-            Some((ChannelType::Stream, channel_id)) => session_channel != channel_id,
-            _ => false,
+        if self.is_session_channel(channel_id) && (self.is_joined() || self.is_joining()) {
+            return;
         }
+        self.show_chat = false;
+        cx.notify();
     }
 
     pub fn show_chat(&self) -> bool {
@@ -758,6 +764,63 @@ mod tests {
             channel_id,
             display_name: name.into(),
         }
+    }
+
+    fn init_store(cx: &mut gpui::TestAppContext) -> Entity<StreamStore> {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            cx.new(|cx| StreamStore::new(api, cx))
+        })
+    }
+
+    #[gpui::test]
+    fn viewing_another_stream_channel_keeps_the_session(cx: &mut gpui::TestAppContext) {
+        let joined = ChannelId(1);
+        let other = ChannelId(2);
+        let store = init_store(cx);
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.phase = StreamPhase::Joined {
+                    channel_id: joined,
+                    clan_id: ClanId(9),
+                    is_live: true,
+                };
+                store.show_chat = true;
+                store.sync_chat_for_active_channel(Some((ChannelType::Stream, other)), cx);
+            });
+        });
+
+        cx.update(|cx| {
+            let store = store.read(cx);
+            assert!(store.is_joined());
+            assert_eq!(store.session_channel_id(), Some(joined));
+            assert!(store.is_session_channel(joined));
+            assert!(!store.is_session_channel(other));
+            assert!(!store.show_chat());
+        });
+    }
+
+    #[gpui::test]
+    fn viewing_the_session_channel_keeps_chat_open(cx: &mut gpui::TestAppContext) {
+        let joined = ChannelId(1);
+        let store = init_store(cx);
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.phase = StreamPhase::Joined {
+                    channel_id: joined,
+                    clan_id: ClanId(9),
+                    is_live: true,
+                };
+                store.show_chat = true;
+                store.sync_chat_for_active_channel(Some((ChannelType::Stream, joined)), cx);
+            });
+        });
+
+        assert!(cx.update(|cx| store.read(cx).show_chat()));
     }
 
     #[test]

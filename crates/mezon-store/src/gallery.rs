@@ -421,10 +421,10 @@ where
 }
 
 fn is_video_type(filetype: &str, url: &str) -> bool {
-    if filetype.starts_with("video/") {
+    let lower = filetype.to_ascii_lowercase();
+    if lower.starts_with("video/") || lower == "video" {
         return true;
     }
-    let lower = filetype.to_ascii_lowercase();
     if lower.contains("mp4") || lower.contains("mov") || lower.contains("webm") {
         return true;
     }
@@ -904,6 +904,38 @@ mod tests {
             uploader_avatar: SharedString::default(),
             uploader_avatar_raw: SharedString::default(),
         }
+    }
+
+    #[test]
+    fn bare_upload_category_is_recognised_as_media() {
+        use mezon_client::transport::ApiChannelAttachment;
+
+        let cfg = AppConfig::dev_defaults();
+        let video = ChannelAttachment::from_api(
+            ApiChannelAttachment {
+                url: "https://cdn.example/2016174228608389120/2072236531032002560.m4v".into(),
+                filetype: "video".into(),
+                ..ApiChannelAttachment::default()
+            },
+            ChannelId(1),
+            ClanId(1),
+            &cfg,
+        );
+        assert!(video.is_video);
+        assert!(!video.is_image);
+
+        let image = ChannelAttachment::from_api(
+            ApiChannelAttachment {
+                url: format!("{}/2072236531032002561.png", cfg.base_img_url),
+                filetype: "image".into(),
+                ..ApiChannelAttachment::default()
+            },
+            ChannelId(1),
+            ClanId(1),
+            &cfg,
+        );
+        assert!(image.is_image);
+        assert!(!image.is_video);
     }
 
     #[test]

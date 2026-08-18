@@ -630,7 +630,7 @@ fn open_remove_friend_modal(
     });
 }
 
-fn open_dm_with_user(user: UserId, error_message: SharedString, cx: &mut App) {
+pub(crate) fn open_dm_with_user(user: UserId, error_message: SharedString, cx: &mut App) {
     let Some(store) = DirectMessageStore::try_global(cx) else {
         return;
     };

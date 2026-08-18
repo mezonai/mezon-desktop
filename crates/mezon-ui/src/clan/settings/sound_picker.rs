@@ -495,7 +495,7 @@ impl SoundPicker {
                 }
                 Err(e) => {
                     tracing::error!("sound save failed: {e}");
-                    let message = sound_error_message(&locale, &e);
+                    let message = sound_error_message(&locale, &e.to_string());
                     let _ = this.update(cx, |this, cx| {
                         this.submitting = false;
                         cx.notify();

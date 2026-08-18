@@ -4,6 +4,18 @@ use std::sync::Arc;
 
 const LEGACY_MEDIA_ORIGINS: [&str; 2] = ["https://cdn.mezon.ai", "http://cdn.mezon.ai"];
 
+const READ_CDN_ORIGINS: [&str; 9] = [
+    "https://cdn.mezon.ai",
+    "http://cdn.mezon.ai",
+    "https://cdn.mezon.vn",
+    "http://cdn.mezon.vn",
+    "https://cdn.komu.ai",
+    "http://cdn.komu.ai",
+    "https://cdn.komu.vn",
+    "http://cdn.komu.vn",
+    "https://pub-35517170c1554a008bed9d7565fa4bb2.r2.dev",
+];
+
 #[allow(dead_code)]
 mod baked_env {
     include!(concat!(env!("OUT_DIR"), "/baked_env.rs"));
@@ -353,13 +365,11 @@ impl AppConfig {
     }
 
     pub fn media_origins(&self) -> Vec<&str> {
-        let mut origins = Vec::with_capacity(4);
-        for origin in [
-            self.base_img_url.trim_end_matches('/'),
-            self.profile_img_url.trim_end_matches('/'),
-            LEGACY_MEDIA_ORIGINS[0],
-            LEGACY_MEDIA_ORIGINS[1],
-        ] {
+        let mut origins = Vec::with_capacity(READ_CDN_ORIGINS.len() + 2);
+        for origin in std::iter::once(self.base_img_url.trim_end_matches('/'))
+            .chain(std::iter::once(self.profile_img_url.trim_end_matches('/')))
+            .chain(READ_CDN_ORIGINS.iter().copied())
+        {
             if !origin.is_empty() && !origins.contains(&origin) {
                 origins.push(origin);
             }
@@ -368,8 +378,16 @@ impl AppConfig {
     }
 
     pub fn is_own_media_origin(&self, url: &str) -> bool {
-        self.media_origins()
-            .into_iter()
+        let base = self.base_img_url.trim_end_matches('/');
+        if !base.is_empty() && url_has_origin(url, base) {
+            return true;
+        }
+        let profile = self.profile_img_url.trim_end_matches('/');
+        if !profile.is_empty() && url_has_origin(url, profile) {
+            return true;
+        }
+        READ_CDN_ORIGINS
+            .iter()
             .any(|origin| url_has_origin(url, origin))
     }
 
@@ -869,7 +887,24 @@ mod tests {
         assert!(origins.contains(&cfg.profile_img_url.as_str()));
         assert!(origins.contains(&"https://cdn.mezon.ai"));
         assert!(origins.contains(&"http://cdn.mezon.ai"));
+        assert!(origins.contains(&"https://cdn.mezon.vn"));
+        assert!(origins.contains(&"https://cdn.komu.ai"));
+        assert!(origins.contains(&"https://pub-35517170c1554a008bed9d7565fa4bb2.r2.dev"));
         assert!(!origins.contains(&cfg.upload_img_url.as_str()));
+    }
+
+    #[test]
+    fn web_canvas_cdns_are_own_media_and_imgproxied() {
+        let cfg = AppConfig::dev_defaults();
+        let r2 = "https://pub-35517170c1554a008bed9d7565fa4bb2.r2.dev/clan/photo.png";
+        let mezon_vn = "https://cdn.mezon.vn/clan/photo.png";
+        assert!(cfg.is_own_media_origin(r2));
+        assert!(cfg.is_own_media_origin(mezon_vn));
+        let r2_out = cfg.imgproxy_url(r2, 100, 100, "fit");
+        assert!(r2_out.starts_with(&cfg.imgproxy_base_url), "{r2_out}");
+        assert!(r2_out.contains(r2));
+        let vn_out = cfg.imgproxy_url(mezon_vn, 100, 100, "fit");
+        assert!(vn_out.starts_with(&cfg.imgproxy_base_url), "{vn_out}");
     }
 
     #[test]

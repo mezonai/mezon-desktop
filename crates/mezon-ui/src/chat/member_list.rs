@@ -6,21 +6,27 @@ use gpui::{
     deferred, div, prelude::*, px, rgb, size, uniform_list,
 };
 use mezon_store::{
-    AccountEvent, AccountStore, BadgeService, ChannelEvent, ChannelId, ChannelList,
-    ChannelMembersEvent, ChannelMembersStore, ChannelType, ClanId, ClanList, ClanMember,
-    ClanMembersStore, DirectEvent, DirectKind, DirectMessageStore, DmAvatarPresence, GroupMember,
+    AccountEvent, AccountStore, BAN_FOR_1_HOUR_SEC, BAN_FOR_3_HOURS_SEC, BAN_FOR_8_HOURS_SEC,
+    BAN_FOR_15_MINUTES_SEC, BAN_FOR_24_HOURS_SEC, BAN_FOREVER, BadgeService, BannedUsersEvent,
+    BannedUsersStore, ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent,
+    ChannelMembersStore, ChannelType, ClanId, ClanList, ClanMember, ClanMembersStore, DirectEvent,
+    DirectKind, DirectMessageStore, DmAvatarPresence, FriendState, FriendStore, GroupMember,
     GroupMembersEvent, GroupMembersStore, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
     PermissionStore, PresenceEvent, PresenceStore, ProfileContext, RolesEvent, RolesStore,
     Settings, UserId, current_user_presence, current_user_status, split_members_by_status,
 };
 
-use crate::app::shell::Shell;
+use crate::app::shell::{FriendRemovalKind, Shell};
+use crate::chat::friends_page::open_dm_with_user;
 use crate::chat::member_row_element::{MemberRowElement, RowDot};
 use crate::chat::message::{ShareContactModal, share_contact_subject};
 use crate::chat::role_style::{role_color_in, role_fallback_color};
+use crate::chat::user_profile_modal::UserProfileModal;
 use crate::chat::user_profile_popover::UserProfilePopover;
-use crate::components::primitives::{Avatar, ContextMenu, IconName, context_menu_at};
-use crate::image_cache::LruImageCache;
+use crate::components::primitives::{
+    Avatar, ContextMenu, IconName, SubmenuOption, context_menu_at,
+};
+use crate::image_cache::{LruImageCache, shared_avatar_cache};
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
 use crate::util::reactive::Derived;
@@ -81,6 +87,16 @@ struct ProfilePopoverState {
     _subscription: Subscription,
 }
 
+struct MemberMenuState {
+    user_id: UserId,
+    display_name: SharedString,
+    position: Point<Pixels>,
+    ban_sub_open: bool,
+}
+
+struct ActiveMemberList(WeakEntity<MemberListPanel>);
+impl gpui::Global for ActiveMemberList {}
+
 pub struct MemberListPanel {
     source: MemberSource,
     settings: Entity<Settings>,
@@ -90,7 +106,7 @@ pub struct MemberListPanel {
     small_avatar_image_cache: Entity<LruImageCache>,
     active_context: Option<ProfileContext>,
     route_key: RouteKey,
-    open_menu: Option<(UserId, SharedString, Point<Pixels>)>,
+    open_menu: Option<MemberMenuState>,
     open_profile: Option<ProfilePopoverState>,
     rebuild_pending: bool,
     loading_channel: Option<ChannelId>,
@@ -115,6 +131,65 @@ impl MemberListPanel {
         self.open_profile.is_some()
     }
 
+    fn menu_args(&self, panel: WeakEntity<Self>, cx: &App) -> Option<MemberMenuArgs> {
+        let state = self.open_menu.as_ref()?;
+        Some(MemberMenuArgs {
+            user_id: state.user_id,
+            display_name: state.display_name.clone(),
+            position: state.position,
+            ban_sub_open: state.ban_sub_open,
+            context: self.active_context,
+            settings: self.settings.clone(),
+            locale: self.settings.read(cx).language.clone(),
+            panel,
+            permissions: MemberMenuPermissions::resolve(state.user_id, self.active_context, cx),
+        })
+    }
+
+    fn probe_open_menu(
+        &mut self,
+        user_id: UserId,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let display_name = self
+            .rows
+            .get()
+            .iter()
+            .find_map(|row| match row {
+                Row::Member(member) if member.user_id == user_id => Some(member.name.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("user {user_id} is not in the visible member list"))?;
+        self.open_menu = Some(MemberMenuState {
+            user_id,
+            display_name,
+            position,
+            ban_sub_open: false,
+        });
+        self.ensure_ban_list_loaded(user_id, cx);
+        cx.notify();
+        Ok(())
+    }
+
+    fn probe_close_menu(&mut self, cx: &mut Context<Self>) {
+        self.open_menu = None;
+        cx.notify();
+    }
+
+    fn ensure_ban_list_loaded(&mut self, user_id: UserId, cx: &mut Context<Self>) {
+        let permissions = MemberMenuPermissions::resolve(user_id, self.active_context, cx);
+        let (Some(clan_id), Some(channel_id)) = (permissions.clan_id, permissions.channel_id)
+        else {
+            return;
+        };
+        if !permissions.show_ban {
+            return;
+        }
+        BannedUsersStore::global(cx)
+            .update(cx, |store, cx| store.ensure_loaded(clan_id, channel_id, cx));
+    }
+
     pub fn new(
         source: MemberSource,
         settings: Entity<Settings>,
@@ -122,6 +197,24 @@ impl MemberListPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut subs = Vec::new();
+        subs.push(
+            cx.subscribe(&BannedUsersStore::global(cx), |this, _, event, cx| {
+                if !matches!(
+                    event,
+                    BannedUsersEvent::BanFailed | BannedUsersEvent::UnbanFailed
+                ) {
+                    return;
+                }
+                let locale = this.settings.read(cx).language.clone();
+                let message = mezon_i18n::t(&locale, "common.somethingWentWrong").to_string();
+                Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+            }),
+        );
+        subs.push(cx.observe(&BannedUsersStore::global(cx), |this, _, cx| {
+            if this.open_menu.is_some() {
+                cx.notify();
+            }
+        }));
         subs.push(cx.observe(&Router::global(cx), |this, _, cx| {
             let key = route_key(this.source, cx);
             if key != this.route_key {
@@ -217,6 +310,8 @@ impl MemberListPanel {
                 );
             }
         }
+
+        cx.set_global(ActiveMemberList(cx.entity().downgrade()));
 
         let mut this = Self {
             source,
@@ -572,6 +667,111 @@ fn member_section_json(label: &str, members: &[RawMember]) -> serde_json::Value 
         "header_count": members.len(),
         "rows": members.iter().map(raw_member_json).collect::<Vec<_>>(),
     })
+}
+
+fn active_member_panel(cx: &App) -> anyhow::Result<Entity<MemberListPanel>> {
+    cx.try_global::<ActiveMemberList>()
+        .and_then(|active| active.0.upgrade())
+        .ok_or_else(|| anyhow::anyhow!("no member list is mounted; open a channel or group DM"))
+}
+
+fn member_menu_json(panel: &Entity<MemberListPanel>, cx: &App) -> serde_json::Value {
+    let this = panel.read(cx);
+    let Some(state) = this.open_menu.as_ref() else {
+        return serde_json::json!({ "open": false, "items": [] });
+    };
+    let Some(args) = this.menu_args(panel.downgrade(), cx) else {
+        return serde_json::json!({ "open": false, "items": [] });
+    };
+    let user_id = args.user_id.to_string();
+    let display_name = args.display_name.to_string();
+    let permissions = args.permissions;
+    let items = build_member_menu(args)
+        .probe_items()
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| {
+            serde_json::json!({
+                "index": index,
+                "kind": item.kind,
+                "label": item.label,
+                "disabled": item.disabled,
+                "options": item
+                    .options
+                    .into_iter()
+                    .map(|(value, label)| serde_json::json!({ "value": value, "label": label }))
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "open": true,
+        "user_id": user_id,
+        "display_name": display_name,
+        "position": { "x": f32::from(state.position.x), "y": f32::from(state.position.y) },
+        "ban_submenu_open": state.ban_sub_open,
+        "permissions": {
+            "is_self": permissions.is_self,
+            "is_friend": permissions.is_friend,
+            "is_blocked": permissions.is_blocked,
+            "is_banned": permissions.is_banned,
+            "show_ban": permissions.show_ban,
+            "show_kick": permissions.show_kick,
+            "show_remove_from_thread": permissions.show_remove_from_thread,
+            "clan_id": permissions.clan_id.map(|id| id.to_string()),
+            "channel_id": permissions.channel_id.map(|id| id.to_string()),
+        },
+        "items": items,
+    })
+}
+
+pub fn member_menu_state(cx: &App) -> anyhow::Result<serde_json::Value> {
+    let panel = active_member_panel(cx)?;
+    Ok(member_menu_json(&panel, cx))
+}
+
+pub fn member_menu_open(
+    user_id: UserId,
+    position: Point<Pixels>,
+    cx: &mut App,
+) -> anyhow::Result<serde_json::Value> {
+    let panel = active_member_panel(cx)?;
+    panel.update(cx, |this, cx| this.probe_open_menu(user_id, position, cx))?;
+    Ok(member_menu_json(&panel, cx))
+}
+
+pub fn member_menu_close(cx: &mut App) -> anyhow::Result<serde_json::Value> {
+    let panel = active_member_panel(cx)?;
+    panel.update(cx, |this, cx| this.probe_close_menu(cx));
+    Ok(member_menu_json(&panel, cx))
+}
+
+pub fn member_menu_pick(
+    index: usize,
+    value: Option<i32>,
+    window: &mut Window,
+    cx: &mut App,
+) -> anyhow::Result<serde_json::Value> {
+    let panel = active_member_panel(cx)?;
+    let args = panel
+        .read(cx)
+        .menu_args(panel.downgrade(), cx)
+        .ok_or_else(|| anyhow::anyhow!("member menu is not open; call member_menu_open first"))?;
+    let menu = build_member_menu(args);
+    let picked = menu
+        .probe_items()
+        .get(index)
+        .map(|item| (item.kind, item.label.clone()))
+        .ok_or_else(|| anyhow::anyhow!("no menu item at index {index}"))?;
+    menu.probe_activate(index, value, window, cx)?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "index": index,
+        "kind": picked.0,
+        "label": picked.1,
+        "value": value,
+        "menu_open": panel.read(cx).open_menu.is_some(),
+    }))
 }
 
 pub fn member_list_snapshot(cx: &App) -> serde_json::Value {
@@ -975,7 +1175,13 @@ fn render_member(
             move |position, _window, cx| {
                 if let Some(p) = panel.upgrade() {
                     p.update(cx, |this, cx| {
-                        this.open_menu = Some((user_id, display_name.clone(), position));
+                        this.open_menu = Some(MemberMenuState {
+                            user_id,
+                            display_name: display_name.clone(),
+                            position,
+                            ban_sub_open: false,
+                        });
+                        this.ensure_ban_list_loaded(user_id, cx);
                         cx.notify();
                     });
                 }
@@ -1054,18 +1260,7 @@ impl Render for MemberListPanel {
         let context = self.active_context;
         let settings = self.settings.clone();
         let panel_weak = cx.entity().downgrade();
-        let menu_overlay = self.open_menu.as_ref().map(|(user_id, display_name, pos)| {
-            (
-                *user_id,
-                display_name.clone(),
-                *pos,
-                context,
-                settings.clone(),
-                locale.clone(),
-                panel_weak.clone(),
-                MemberMenuPermissions::resolve(*user_id, context, cx),
-            )
-        });
+        let menu_overlay = self.menu_args(panel_weak.clone(), cx);
         let profile_overlay = self
             .open_profile
             .as_ref()
@@ -1114,23 +1309,10 @@ impl Render for MemberListPanel {
             .border_color(theme.border)
             .bg(theme.surfaces.direct_message.ramp())
             .child(list)
-            .when_some(
-                menu_overlay,
-                |el, (user_id, display_name, pos, ctx, settings, locale, panel, permissions)| {
-                    el.child(context_menu_at(
-                        pos,
-                        build_member_menu(
-                            user_id,
-                            display_name,
-                            ctx,
-                            settings,
-                            panel,
-                            &locale,
-                            permissions,
-                        ),
-                    ))
-                },
-            )
+            .when_some(menu_overlay, |el, args| {
+                let position = args.position;
+                el.child(context_menu_at(position, build_member_menu(args)))
+            })
             .when_some(profile_overlay, |el, (popover, pos)| {
                 el.child(deferred(
                     anchored()
@@ -1143,29 +1325,42 @@ impl Render for MemberListPanel {
     }
 }
 
-fn toast_coming_soon(settings: Entity<Settings>) -> impl Fn(&mut Window, &mut App) + 'static {
-    move |_window: &mut Window, cx: &mut App| {
-        let locale = settings.read(cx).language.clone();
-        let msg = mezon_i18n::t(&locale, "common.comingSoon").to_string();
-        Shell::global(cx).update(cx, |shell, cx| shell.info(msg, cx));
-    }
-}
-
 #[derive(Clone, Copy, Default)]
 struct MemberMenuPermissions {
     is_self: bool,
     show_ban: bool,
     show_kick: bool,
     show_remove_from_thread: bool,
+    is_friend: bool,
+    is_blocked: bool,
+    blocked_by_me: bool,
+    is_banned: bool,
+    clan_id: Option<ClanId>,
+    channel_id: Option<ChannelId>,
 }
 
 impl MemberMenuPermissions {
     fn resolve(user_id: UserId, context: Option<ProfileContext>, cx: &App) -> Self {
         let me = BadgeService::global(cx).read(cx).current_user_id(cx);
         let is_self = me == Some(user_id);
+        let (is_friend, is_blocked, blocked_by_me) = FriendStore::try_global(cx)
+            .and_then(|store| {
+                store.read(cx).friend(user_id).map(|friend| {
+                    let blocked = friend.state == FriendState::Blocked;
+                    (
+                        friend.state == FriendState::Friend,
+                        blocked,
+                        blocked && Some(friend.source_id) == me,
+                    )
+                })
+            })
+            .unwrap_or((false, false, false));
         let Some(ProfileContext::Clan(clan_id)) = context else {
             return Self {
                 is_self,
+                is_friend,
+                is_blocked,
+                blocked_by_me,
                 ..Default::default()
             };
         };
@@ -1186,61 +1381,155 @@ impl MemberMenuPermissions {
         let active_channel = ChannelList::global(cx)
             .read(cx)
             .active_channel()
-            .map(|channel| (channel.channel_type, channel.creator_id));
+            .map(|channel| (channel.id, channel.channel_type, channel.creator_id));
+        let channel_id = active_channel.map(|(id, _, _)| id);
         let is_thread = active_channel
-            .is_some_and(|(channel_type, _)| matches!(channel_type, ChannelType::Thread));
+            .is_some_and(|(_, channel_type, _)| matches!(channel_type, ChannelType::Thread));
         let is_channel_creator =
-            me.is_some() && active_channel.map(|(_, creator_id)| creator_id) == me;
+            me.is_some() && active_channel.map(|(_, _, creator_id)| creator_id) == me;
         let elevated = has_clan_owner || (has_administrator && !member_is_clan_owner);
+        let is_banned = channel_id.is_some_and(|channel_id| {
+            BannedUsersStore::try_global(cx)
+                .is_some_and(|store| store.read(cx).is_banned(channel_id, user_id))
+        });
         Self {
             is_self,
             show_ban: has_administrator && !is_self,
             show_kick: !is_self && elevated,
             show_remove_from_thread: !is_self && is_thread && (is_channel_creator || elevated),
+            is_friend,
+            is_blocked,
+            blocked_by_me,
+            is_banned,
+            clan_id: Some(clan_id),
+            channel_id,
         }
     }
 }
 
-fn build_member_menu(
+struct MemberMenuArgs {
     user_id: UserId,
     display_name: SharedString,
+    position: Point<Pixels>,
+    ban_sub_open: bool,
     context: Option<ProfileContext>,
     settings: Entity<Settings>,
+    locale: String,
     panel: WeakEntity<MemberListPanel>,
-    locale: &str,
     permissions: MemberMenuPermissions,
-) -> ContextMenu {
-    let t = |key: &'static str| mezon_i18n::t(locale, key).to_string();
+}
+
+fn close_member_submenus(
+    panel: WeakEntity<MemberListPanel>,
+) -> impl Fn(&mut Window, &mut App) + 'static {
+    move |_window: &mut Window, cx: &mut App| {
+        let _ = panel.update(cx, |this, cx| {
+            if let Some(menu) = this.open_menu.as_mut()
+                && menu.ban_sub_open
+            {
+                menu.ban_sub_open = false;
+                cx.notify();
+            }
+        });
+    }
+}
+
+fn close_member_menu(panel: &WeakEntity<MemberListPanel>, cx: &mut App) {
+    if let Some(panel) = panel.upgrade() {
+        panel.update(cx, |this, cx| {
+            this.open_menu = None;
+            cx.notify();
+        });
+    }
+}
+
+const BAN_DURATIONS: &[(i32, &str)] = &[
+    (BAN_FOR_15_MINUTES_SEC, "contextMenu.muteFor15Minutes"),
+    (BAN_FOR_1_HOUR_SEC, "contextMenu.muteFor1Hour"),
+    (BAN_FOR_3_HOURS_SEC, "contextMenu.muteFor3Hours"),
+    (BAN_FOR_8_HOURS_SEC, "contextMenu.muteFor8Hours"),
+    (BAN_FOR_24_HOURS_SEC, "contextMenu.muteFor24Hours"),
+    (BAN_FOREVER, "contextMenu.muteUntilTurnedBack"),
+];
+
+fn ban_duration_options(locale: &str) -> Vec<SubmenuOption> {
+    BAN_DURATIONS
+        .iter()
+        .map(|(value, key)| SubmenuOption {
+            value: *value,
+            label: mezon_i18n::t(locale, key).into(),
+            selected: false,
+        })
+        .collect()
+}
+
+fn build_member_menu(args: MemberMenuArgs) -> ContextMenu {
+    let MemberMenuArgs {
+        user_id,
+        display_name,
+        position: _,
+        ban_sub_open,
+        context,
+        settings,
+        locale,
+        panel,
+        permissions,
+    } = args;
+    let t = |key: &'static str| mezon_i18n::t(&locale, key).to_string();
     let is_clan = matches!(context, Some(ProfileContext::Clan(_)));
     let is_self = permissions.is_self;
 
     let dismiss = {
         let panel = panel.clone();
-        move |_window: &mut Window, cx: &mut App| {
-            if let Some(p) = panel.upgrade() {
-                p.update(cx, |this, cx| {
-                    this.open_menu = None;
-                    cx.notify();
-                });
-            }
-        }
+        move |_window: &mut Window, cx: &mut App| close_member_menu(&panel, cx)
     };
 
-    let remove_from_thread_label = mezon_i18n::t(locale, "contextMenu.member.removeFromThread")
+    let remove_from_thread_label = mezon_i18n::t(&locale, "contextMenu.member.removeFromThread")
         .replace("{{username}}", display_name.as_ref());
 
-    let mut menu = ContextMenu::new().on_dismiss(dismiss).item(
-        t("contextMenu.member.profile"),
-        toast_coming_soon(settings.clone()),
-    );
+    let mut menu = ContextMenu::new()
+        .on_submenu_close(close_member_submenus(panel.clone()))
+        .on_dismiss(dismiss)
+        .item(t("contextMenu.member.profile"), {
+            let panel = panel.clone();
+            let settings = settings.clone();
+            move |_window: &mut Window, cx: &mut App| {
+                let clan_id = match context {
+                    Some(ProfileContext::Clan(clan_id)) => clan_id,
+                    _ => ClanId::default(),
+                };
+                close_member_menu(&panel, cx);
+                if let Some(p) = panel.upgrade() {
+                    p.update(cx, |this, cx| {
+                        this.open_profile = None;
+                        cx.notify();
+                    });
+                }
+                let avatar_image_cache = shared_avatar_cache(cx);
+                let settings = settings.clone();
+                let modal = cx.new(|cx| {
+                    UserProfileModal::new(user_id, clan_id, settings, avatar_image_cache, cx)
+                });
+                Shell::global(cx).update(cx, |shell, cx| {
+                    shell.show_fullscreen_modal(modal.into(), cx);
+                });
+            }
+        });
 
     if !is_self {
-        menu = menu
-            .item(
-                t("contextMenu.member.message"),
-                toast_coming_soon(settings.clone()),
-            )
-            .item(t("contextMenu.member.shareContact"), {
+        menu = menu.item(t("contextMenu.member.message"), {
+            let panel = panel.clone();
+            let locale = locale.clone();
+            move |_window: &mut Window, cx: &mut App| {
+                let error: SharedString =
+                    mezon_i18n::t(&locale, "shareContact.card.messageError").into();
+                open_dm_with_user(user_id, error, cx);
+                close_member_menu(&panel, cx);
+            }
+        });
+
+        if permissions.is_friend && !permissions.is_blocked {
+            menu = menu.item(t("contextMenu.member.shareContact"), {
                 let settings = settings.clone();
                 let display_name = display_name.clone();
                 let panel = panel.clone();
@@ -1249,47 +1538,200 @@ fn build_member_menu(
                         share_contact_subject(user_id, display_name.as_ref(), context, cx);
                     let locale = settings.read(cx).language.clone().into();
                     ShareContactModal::open(contact, locale, window, cx);
-                    if let Some(p) = panel.upgrade() {
-                        p.update(cx, |this, cx| {
-                            this.open_menu = None;
-                            cx.notify();
+                    close_member_menu(&panel, cx);
+                }
+            });
+        }
+
+        if !permissions.is_friend && !permissions.is_blocked {
+            menu = menu.item(t("contextMenu.member.addFriend"), {
+                let panel = panel.clone();
+                let display_name = display_name.clone();
+                let locale = locale.clone();
+                move |_window: &mut Window, cx: &mut App| {
+                    let contact =
+                        share_contact_subject(user_id, display_name.as_ref(), context, cx);
+                    if contact.username.is_empty() {
+                        let message =
+                            mezon_i18n::t(&locale, "friends.toast.sendAddFriendFail").to_string();
+                        Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+                    } else {
+                        FriendStore::global(cx).update(cx, |store, cx| {
+                            store.add_friend(
+                                user_id,
+                                contact.username,
+                                contact.display_name,
+                                contact.avatar,
+                                cx,
+                            );
                         });
                     }
+                    close_member_menu(&panel, cx);
                 }
-            })
-            .item(
-                t("contextMenu.member.addFriend"),
-                toast_coming_soon(settings.clone()),
-            )
-            .separator()
-            .danger_item(
-                t("contextMenu.member.removeFriend"),
-                toast_coming_soon(settings.clone()),
-            );
+            });
+        }
+
+        if permissions.blocked_by_me {
+            menu = menu.item(t("contextMenu.member.unblock"), {
+                let panel = panel.clone();
+                move |_window: &mut Window, cx: &mut App| {
+                    FriendStore::global(cx).update(cx, |store, cx| {
+                        store.unblock_friend(user_id, cx);
+                    });
+                    close_member_menu(&panel, cx);
+                }
+            });
+        }
+
+        if permissions.is_friend {
+            menu = menu
+                .separator()
+                .danger_item(t("contextMenu.member.removeFriend"), {
+                    let panel = panel.clone();
+                    let display_name = display_name.clone();
+                    let locale = locale.clone();
+                    move |window: &mut Window, cx: &mut App| {
+                        let contact =
+                            share_contact_subject(user_id, display_name.as_ref(), context, cx);
+                        let username = if contact.username.is_empty() {
+                            contact.display_name
+                        } else {
+                            contact.username
+                        };
+                        close_member_menu(&panel, cx);
+                        Shell::global(cx).update(cx, |shell, cx| {
+                            shell.confirm_remove_friend(
+                                user_id,
+                                &username,
+                                FriendRemovalKind::RemoveFriend,
+                                &locale,
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                });
+        }
     }
 
-    if is_clan
-        && (permissions.show_ban || permissions.show_kick || permissions.show_remove_from_thread)
-    {
+    let can_ban =
+        permissions.show_ban && permissions.clan_id.is_some() && permissions.channel_id.is_some();
+    let can_kick = permissions.show_kick && permissions.clan_id.is_some();
+    let can_remove_from_thread =
+        permissions.show_remove_from_thread && permissions.channel_id.is_some();
+
+    if is_clan && (can_ban || can_kick || can_remove_from_thread) {
         menu = menu.separator();
-        if permissions.show_ban {
-            menu = menu.danger_item(
-                t("contextMenu.member.banChat"),
-                toast_coming_soon(settings.clone()),
-            );
+        if can_ban
+            && let Some(clan_id) = permissions.clan_id
+            && let Some(channel_id) = permissions.channel_id
+        {
+            if permissions.is_banned {
+                menu = menu.danger_item(t("contextMenu.member.unBanChat"), {
+                    let panel = panel.clone();
+                    move |_window: &mut Window, cx: &mut App| {
+                        BannedUsersStore::global(cx).update(cx, |store, cx| {
+                            store.unban(clan_id, channel_id, user_id, cx);
+                        });
+                        close_member_menu(&panel, cx);
+                    }
+                });
+            } else {
+                menu = menu.danger_submenu(
+                    t("contextMenu.member.banChat"),
+                    None,
+                    ban_duration_options(&locale),
+                    ban_sub_open,
+                    {
+                        let panel = panel.clone();
+                        move |_window: &mut Window, cx: &mut App| {
+                            if let Some(p) = panel.upgrade() {
+                                p.update(cx, |this, cx| {
+                                    if let Some(menu) = this.open_menu.as_mut()
+                                        && !menu.ban_sub_open
+                                    {
+                                        menu.ban_sub_open = true;
+                                        cx.notify();
+                                    }
+                                });
+                            }
+                        }
+                    },
+                    {
+                        let panel = panel.clone();
+                        move |ban_time: i32, _window: &mut Window, cx: &mut App| {
+                            BannedUsersStore::global(cx).update(cx, |store, cx| {
+                                store.ban(clan_id, channel_id, user_id, ban_time, cx);
+                            });
+                            close_member_menu(&panel, cx);
+                        }
+                    },
+                );
+            }
         }
-        if permissions.show_kick {
-            menu = menu.danger_item(
-                t("contextMenu.member.kick"),
-                toast_coming_soon(settings.clone()),
-            );
+        if can_kick && let Some(clan_id) = permissions.clan_id {
+            menu = menu.danger_item(t("contextMenu.member.kick"), {
+                let panel = panel.clone();
+                let display_name = display_name.clone();
+                let locale = locale.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    let contact =
+                        share_contact_subject(user_id, display_name.as_ref(), context, cx);
+                    let username = if contact.username.is_empty() {
+                        contact.display_name
+                    } else {
+                        contact.username
+                    };
+                    close_member_menu(&panel, cx);
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.confirm_kick_member(clan_id, user_id, &username, &locale, window, cx);
+                    });
+                }
+            });
         }
-        if permissions.show_remove_from_thread {
-            menu = menu.danger_item(remove_from_thread_label, toast_coming_soon(settings));
+        if can_remove_from_thread && let Some(channel_id) = permissions.channel_id {
+            menu = menu.danger_item(remove_from_thread_label, {
+                let panel = panel.clone();
+                let locale = locale.clone();
+                move |_window: &mut Window, cx: &mut App| {
+                    remove_member_from_thread(channel_id, user_id, &locale, cx);
+                    close_member_menu(&panel, cx);
+                }
+            });
         }
     }
 
     menu
+}
+
+fn remove_member_from_thread(channel_id: ChannelId, user_id: UserId, locale: &str, cx: &mut App) {
+    let success: SharedString = mezon_i18n::t(
+        locale,
+        "clanOverviewSetting.permissions.toast.removeMemberThreadSuccess",
+    )
+    .into();
+    let failure: SharedString = mezon_i18n::t(
+        locale,
+        "clanOverviewSetting.permissions.toast.removeMemberThreadFailed",
+    )
+    .into();
+    let task = ChannelMembersStore::global(cx)
+        .update(cx, |store, cx| store.remove_member(channel_id, user_id, cx));
+    cx.spawn(async move |cx| {
+        let result = task.await;
+        cx.update(|cx| {
+            Shell::global(cx).update(cx, |shell, cx| match result {
+                Ok(()) => shell.success(success, cx),
+                Err(error) => {
+                    tracing::error!(
+                        "remove member {user_id} from thread {channel_id} failed: {error}"
+                    );
+                    shell.error(failure, cx);
+                }
+            });
+        });
+    })
+    .detach();
 }
 
 #[cfg(test)]

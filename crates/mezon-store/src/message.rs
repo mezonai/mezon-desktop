@@ -49,11 +49,14 @@ pub fn url_extension(url: &str) -> Option<String> {
 }
 
 pub fn is_image_type(filetype: &str, url: &str) -> bool {
-    let mime_image =
-        (filetype.starts_with("image") || filetype == STICKER_FILETYPE) && !is_svg_type(filetype);
+    let ext = url_extension(url);
+    if is_svg_type(filetype) || ext.as_deref() == Some("svg") {
+        return false;
+    }
+    let mime_image = filetype.starts_with("image") || filetype == STICKER_FILETYPE;
     mime_image
         || matches!(
-            url_extension(url).as_deref(),
+            ext.as_deref(),
             Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "avif")
         )
 }
@@ -92,7 +95,7 @@ impl MessageAttachment {
     }
 
     pub fn is_unsupported_media(&self) -> bool {
-        matches!(
+        if matches!(
             self.filetype.as_str(),
             "video/x-ms-wmv"
                 | "video/wmv"
@@ -106,6 +109,25 @@ impl MessageAttachment {
                 | "image/tiff"
                 | "image/bmp"
                 | "image/psd"
+        ) {
+            return true;
+        }
+        let ext = url_extension(&self.filename).or_else(|| url_extension(&self.url));
+        matches!(
+            ext.as_deref(),
+            Some(
+                "wmv"
+                    | "avi"
+                    | "flv"
+                    | "mkv"
+                    | "rmvb"
+                    | "wma"
+                    | "ra"
+                    | "tiff"
+                    | "tif"
+                    | "bmp"
+                    | "psd"
+            )
         )
     }
 }
@@ -2405,6 +2427,7 @@ mod tests {
     fn svg_is_a_file_row_not_an_image() {
         assert!(!attachment("image/svg+xml", "https://cdn.example/logo.svg").is_image());
         assert!(!attachment("", "https://cdn.example/logo.svg").is_image());
+        assert!(!attachment("image", "https://cdn.example/logo.svg").is_image());
     }
 
     #[test]
@@ -2588,6 +2611,12 @@ mod tests {
         let bmp = attachment("image/bmp", "https://cdn.example/x.bmp");
         assert!(bmp.is_unsupported_media());
         assert!(bmp.is_image());
+
+        let uploaded_bmp = attachment("image", "https://cdn.example/1234.bmp");
+        assert!(uploaded_bmp.is_unsupported_media());
+
+        let uploaded_wmv = attachment("video", "https://cdn.example/1234.wmv");
+        assert!(uploaded_wmv.is_unsupported_media());
     }
 
     #[test]

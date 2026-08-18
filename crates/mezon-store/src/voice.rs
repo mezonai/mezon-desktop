@@ -6,7 +6,10 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use gpui::{App, AppContext, Context, Entity, Global, RenderImage, Subscription, Task, Window};
+use gpui::{
+    App, AppContext, Context, Entity, EventEmitter, Global, RenderImage, SharedString,
+    Subscription, Task, Window,
+};
 use mezon_audio::{AudioPlayer, DecodedPcm};
 use mezon_client::{AppApi, RealtimeEvent};
 use mezon_voice::{IceServerConfig, VoiceEvent, VoiceSession};
@@ -22,9 +25,20 @@ pub use mezon_voice::{
 };
 
 use crate::AppConfig;
+use crate::Settings;
+use crate::account::AccountStore;
 use crate::clan_members::ClanMembersStore;
+use crate::direct::DirectMessageStore;
+use crate::gifts::{
+    FLOWER_ANIMATION_TTL, FLOWER_RATE_LIMIT, FlowerParticle, GiveFlowerDeny,
+    VoiceInteractiveEventType, build_flower_transfer, can_give_flower, flower_effect_key,
+    flower_event_from_payload, flower_particles, flower_price, format_flower_amount,
+    is_uncertain_transfer_error, serialize_flower_interactive_params,
+};
 use crate::ids::{ClanId, UserId};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+use crate::users_by_user::UsersByUserStore;
+use crate::wallet::{WalletEvent, WalletStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceKind {
@@ -42,6 +56,7 @@ pub enum DeviceMenuKind {
 const MEET_TOKEN_CACHE_TTL: Duration = Duration::from_secs(45);
 const RAISE_HAND_TTL: Duration = Duration::from_secs(10);
 const REACTION_THROTTLE: Duration = Duration::from_millis(150);
+const RECORDING_TICK_INTERVAL: Duration = Duration::from_secs(1);
 const SOUND_REACTION_VOLUME: f32 = 0.3;
 const SOUND_REACTION_TAIL: Duration = Duration::from_millis(300);
 const SOUND_REACTION_THROTTLE: Duration = Duration::from_millis(500);
@@ -57,6 +72,7 @@ const RECONNECT_STALL_TIMEOUT: Duration = Duration::from_secs(15);
 const RECONNECT_RETRY_DELAY: Duration = Duration::from_secs(5);
 static RAISE_HAND_SOUND: &[u8] = include_bytes!("../assets/audio/raising-hand.mp3");
 static JOIN_VOICE_SOUND: &[u8] = include_bytes!("../assets/audio/joincallsound.mp3");
+static GIVE_FLOWER_SOUND: &[u8] = include_bytes!("../assets/audio/give-flower.mp3");
 
 fn parse_raise_token(token: &str) -> Option<bool> {
     if token.starts_with("raising-up:") {
@@ -179,13 +195,18 @@ pub struct VoiceStore {
     raising_hand_sound_loading: bool,
     join_voice_player: Option<AudioPlayer>,
     join_voice_sound_loading: bool,
+    give_flower_player: Option<AudioPlayer>,
+    give_flower_sound_loading: bool,
     join_sound_baseline_set: bool,
     last_reaction_send: Option<Instant>,
+    last_flower_send: Option<Instant>,
+    last_flower_effect_at: Option<Instant>,
     active_sounds: HashMap<String, ActiveSound>,
     sound_throttle: HashMap<String, Instant>,
     sound_cache: Vec<(String, Arc<DecodedPcm>)>,
     sound_preview: Option<SoundPreview>,
     displayed_reactions: Vec<DisplayedReaction>,
+    displayed_flowers: Vec<DisplayedFlower>,
     reaction_seq: u64,
     last_emoji_at: Option<Instant>,
     session: Option<VoiceSession>,
@@ -204,6 +225,12 @@ pub struct VoiceStore {
     meet_token_prefetching: Option<String>,
     last_screen_share: Option<(PickedScreen, bool)>,
     link_copied: bool,
+    recording: RecordingState,
+    recording_elapsed: Duration,
+    recording_stalled: bool,
+    recording_avatars: HashMap<String, Option<Arc<mezon_voice::compose::AvatarImage>>>,
+    _recording_tick: Option<Task<()>>,
+    _recording_start: Option<Task<()>>,
     _events_task: Option<Task<()>>,
     _reconnect_watch_task: Option<Task<()>>,
     _link_copied_reset: Option<Task<()>>,
@@ -252,8 +279,88 @@ pub struct DisplayedReaction {
     _remove_timer: Task<()>,
 }
 
+pub struct DisplayedFlower {
+    pub key: String,
+    pub giver_id: String,
+    pub receiver_id: String,
+    pub giver_name: String,
+    pub receiver_name: String,
+    pub timestamp: i64,
+    pub particles: Arc<Vec<FlowerParticle>>,
+    pub started_at: Instant,
+    pub label: SharedString,
+    _remove_timer: Task<()>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecordingState {
+    #[default]
+    Idle,
+    Starting,
+    Recording,
+    Stopping,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordingToast {
+    Saved(std::path::PathBuf),
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VoiceStoreEvent {
+    RecordingFinished(RecordingToast),
+    RecordingVideoUnavailable,
+}
+
+impl EventEmitter<VoiceStoreEvent> for VoiceStore {}
+
 struct GlobalVoiceStore(Entity<VoiceStore>);
 impl Global for GlobalVoiceStore {}
+
+impl VoiceStore {
+    fn display_name_for(&self, participant: &VoiceParticipant, cx: &App) -> String {
+        let resolved = self.resolve_reaction_name(&participant.identity, cx);
+        if !resolved.is_empty() {
+            return resolved;
+        }
+        // LiveKit hands back the identity as the name, and a raw user id in the
+        // recording reads as noise — leave the pill off instead.
+        if participant.name.chars().all(|c| c.is_ascii_digit()) {
+            return String::new();
+        }
+        participant.name.clone()
+    }
+}
+
+async fn load_avatar(url: &str) -> Option<Arc<mezon_voice::compose::AvatarImage>> {
+    let (bytes, _) = mezon_client::transport_runtime::fetch_bytes(url)
+        .await
+        .map_err(|error| tracing::warn!("could not fetch a recording avatar: {error}"))
+        .ok()?;
+    let decoded = image::load_from_memory(&bytes)
+        .map_err(|error| tracing::warn!("could not decode a recording avatar: {error}"))
+        .ok()?
+        .thumbnail(256, 256)
+        .to_rgba8();
+    let (width, height) = decoded.dimensions();
+    let mut bgra = decoded.into_raw();
+    for pixel in bgra.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    Some(Arc::new(mezon_voice::compose::AvatarImage {
+        width,
+        height,
+        bgra,
+    }))
+}
+
+fn initial_of(name: &str) -> String {
+    name.chars()
+        .next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_default()
+}
 
 pub fn screen_tile_id(identity: &str) -> String {
     format!("{identity}\u{1}screen")
@@ -356,13 +463,18 @@ impl VoiceStore {
             raising_hand_sound_loading: false,
             join_voice_player: None,
             join_voice_sound_loading: false,
+            give_flower_player: None,
+            give_flower_sound_loading: false,
             join_sound_baseline_set: false,
             last_reaction_send: None,
+            last_flower_send: None,
+            last_flower_effect_at: None,
             active_sounds: HashMap::new(),
             sound_throttle: HashMap::new(),
             sound_cache: Vec::new(),
             sound_preview: None,
             displayed_reactions: Vec::new(),
+            displayed_flowers: Vec::new(),
             reaction_seq: 0,
             last_emoji_at: None,
             session: None,
@@ -381,6 +493,12 @@ impl VoiceStore {
             meet_token_prefetching: None,
             last_screen_share: None,
             link_copied: false,
+            recording: RecordingState::Idle,
+            recording_elapsed: Duration::ZERO,
+            recording_stalled: false,
+            recording_avatars: HashMap::new(),
+            _recording_tick: None,
+            _recording_start: None,
             _events_task: None,
             _reconnect_watch_task: None,
             _link_copied_reset: None,
@@ -707,6 +825,11 @@ impl VoiceStore {
             dispatch.on(RealtimeKind::VoiceReaction, &entity, |this, event, cx| {
                 this.handle_voice_reaction(event, cx)
             });
+            dispatch.on(
+                RealtimeKind::VoiceInteractive,
+                &entity,
+                |this, event, cx| this.handle_voice_interactive(event, cx),
+            );
         });
     }
 
@@ -840,6 +963,37 @@ impl VoiceStore {
                 player.set_data(pcm);
                 player.play();
                 this.raising_hand_player = Some(player);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn play_flower_sound(&mut self, cx: &mut Context<Self>) {
+        if let Some(player) = &self.give_flower_player {
+            player.play();
+            return;
+        }
+        if self.give_flower_sound_loading {
+            return;
+        }
+        self.give_flower_sound_loading = true;
+        cx.spawn(async move |this, cx| {
+            let decoded = cx
+                .background_executor()
+                .spawn(async move { mezon_audio::decode_audio(GIVE_FLOWER_SOUND.to_vec()) })
+                .await;
+            this.update(cx, |this, _| {
+                this.give_flower_sound_loading = false;
+                let Ok(pcm) = decoded else {
+                    return;
+                };
+                let Ok(player) = AudioPlayer::new() else {
+                    return;
+                };
+                player.set_data(pcm);
+                player.play();
+                this.give_flower_player = Some(player);
             })
             .ok();
         })
@@ -1009,6 +1163,154 @@ impl VoiceStore {
 
     pub fn displayed_reactions(&self) -> &[DisplayedReaction] {
         &self.displayed_reactions
+    }
+
+    pub fn displayed_flowers(&self) -> &[DisplayedFlower] {
+        &self.displayed_flowers
+    }
+
+    fn handle_voice_interactive(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::VoiceInteractive(msg) = event else {
+            return;
+        };
+        let Some((channel_id, _)) = self.connection.connected_channel() else {
+            return;
+        };
+        let Ok(joined_channel) = channel_id.parse::<i64>() else {
+            return;
+        };
+        let Some((giver_id, receiver_id, timestamp, _)) = flower_event_from_payload(
+            msg.event_type,
+            msg.sender_id,
+            msg.voice_channel_id,
+            &msg.params,
+            joined_channel,
+        ) else {
+            return;
+        };
+        self.show_flower_effect(giver_id, receiver_id, timestamp, cx);
+    }
+
+    fn show_flower_effect(
+        &mut self,
+        giver_id: String,
+        receiver_id: String,
+        timestamp: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let key = flower_effect_key(&giver_id, &receiver_id, timestamp);
+        if self
+            .displayed_flowers
+            .iter()
+            .any(|flower| flower.key == key)
+        {
+            return;
+        }
+        let now = Instant::now();
+        let play_sound = self
+            .last_flower_effect_at
+            .is_none_or(|last| now.duration_since(last) >= FLOWER_RATE_LIMIT);
+        if play_sound {
+            self.last_flower_effect_at = Some(now);
+        }
+        self.displayed_flowers.clear();
+        let giver_name = self.resolve_flower_name(&giver_id, cx);
+        let receiver_name = self.resolve_flower_name(&receiver_id, cx);
+        let locale = Settings::try_global(cx)
+            .map(|settings| settings.read(cx).language.clone())
+            .unwrap_or_default();
+        let label = SharedString::from(
+            mezon_i18n::t(&locale, "channelVoice.giveFlowerGiven")
+                .replace("{{giver}}", &giver_name)
+                .replace("{{receiver}}", &receiver_name),
+        );
+        let expire_key = key.clone();
+        let remove_timer = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FLOWER_ANIMATION_TTL).await;
+            this.update(cx, |this, cx| {
+                this.displayed_flowers
+                    .retain(|flower| flower.key != expire_key);
+                cx.notify();
+            })
+            .ok();
+        });
+        self.displayed_flowers.push(DisplayedFlower {
+            key,
+            giver_id,
+            receiver_id,
+            giver_name,
+            receiver_name,
+            timestamp,
+            particles: Arc::new(flower_particles(timestamp.unsigned_abs())),
+            started_at: Instant::now(),
+            label,
+            _remove_timer: remove_timer,
+        });
+        if play_sound {
+            self.play_flower_sound(cx);
+        }
+        cx.notify();
+    }
+
+    fn resolve_flower_name(&self, user_id: &str, cx: &App) -> String {
+        let clan_id = self
+            .connection
+            .connected_channel()
+            .and_then(|(_, clan)| clan.parse::<i64>().ok())
+            .map(ClanId);
+        let uid = user_id.parse::<i64>().ok().map(UserId);
+        if let (Some(clan_id), Some(uid)) = (clan_id, uid)
+            && let Some(store) = ClanMembersStore::try_global(cx)
+            && let Some(member) = store.read(cx).member(clan_id, uid)
+        {
+            let name = member.name();
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+        if let Some(uid) = uid
+            && let Some(store) = UsersByUserStore::try_global(cx)
+            && let Some(user) = store.read(cx).user(uid)
+        {
+            if !user.display_name.is_empty() {
+                return user.display_name.clone();
+            }
+            if !user.username.is_empty() {
+                return user.username.clone();
+            }
+        }
+        if let Some(uid) = uid
+            && let Some(account) = AccountStore::try_global(cx)
+        {
+            let account = account.read(cx);
+            if account
+                .account
+                .as_ref()
+                .is_some_and(|me| me.user_id == uid.get())
+            {
+                if let Some(clan_id) = clan_id
+                    && let Some(profile) = account.clan_profile.as_ref()
+                    && profile.clan_id == clan_id
+                    && !profile.nick_name.is_empty()
+                {
+                    return profile.nick_name.clone();
+                }
+                if let Some(me) = account.account.as_ref() {
+                    if !me.display_name.is_empty() {
+                        return me.display_name.clone();
+                    }
+                    if !me.username.is_empty() {
+                        return me.username.clone();
+                    }
+                }
+            }
+        }
+        self.participants
+            .iter()
+            .find(|p| p.identity == user_id)
+            .map(|p| p.name.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| user_id.to_string())
     }
 
     fn handle_emoji_reaction(
@@ -1446,6 +1748,183 @@ impl VoiceStore {
         cx.notify();
     }
 
+    pub fn give_flower(&mut self, identity: String, cx: &mut Context<Self>) {
+        self.close_participant_menu(cx);
+        let Some(local_id) = self.local_user_id() else {
+            return;
+        };
+        let Some((channel_id, clan_id)) = self
+            .connection
+            .connected_channel()
+            .map(|(channel, clan)| (channel.to_string(), clan.to_string()))
+        else {
+            return;
+        };
+        let receiver_name = self
+            .participants
+            .iter()
+            .find(|p| p.identity == identity)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| identity.clone());
+        let Ok(receiver_id) = identity.parse::<UserId>() else {
+            return;
+        };
+        let Ok(receiver_i64) = identity.parse::<i64>() else {
+            return;
+        };
+        let Ok(giver_i64) = local_id.parse::<i64>() else {
+            return;
+        };
+        let Ok(channel_i64) = channel_id.parse::<i64>() else {
+            return;
+        };
+        let Ok(clan_i64) = clan_id.parse::<i64>() else {
+            return;
+        };
+
+        let wallet = WalletStore::try_global(cx);
+        let wallet_available = wallet
+            .as_ref()
+            .map(|store| store.read(cx).is_available())
+            .unwrap_or(false);
+        let pending = wallet
+            .as_ref()
+            .map(|store| store.read(cx).pending_give_flower())
+            .unwrap_or(false);
+        let balance = wallet
+            .as_ref()
+            .and_then(|store| store.read(cx).balance().map(str::to_string));
+        let locale = Settings::try_global(cx)
+            .map(|settings| settings.read(cx).language.clone())
+            .unwrap_or_default();
+
+        match can_give_flower(
+            identity == local_id,
+            wallet_available,
+            pending,
+            self.last_flower_send,
+            Instant::now(),
+            balance.as_deref(),
+        ) {
+            Err(
+                GiveFlowerDeny::SelfTarget
+                | GiveFlowerDeny::Pending
+                | GiveFlowerDeny::WalletUnavailable,
+            ) => return,
+            Err(GiveFlowerDeny::RateLimited) => {
+                if let Some(wallet) = wallet {
+                    let message =
+                        mezon_i18n::t(&locale, "channelVoice.giveFlowerRateLimited").to_string();
+                    wallet.update(cx, |_wallet, cx| {
+                        cx.emit(WalletEvent::SendFailed { message });
+                    });
+                }
+                return;
+            }
+            Err(GiveFlowerDeny::Insufficient) => {
+                if let Some(wallet) = wallet {
+                    let message =
+                        mezon_i18n::t(&locale, "channelVoice.giveFlowerInsufficient").to_string();
+                    wallet.update(cx, |_wallet, cx| {
+                        cx.emit(WalletEvent::SendFailed { message });
+                    });
+                }
+                return;
+            }
+            Ok(()) => {}
+        }
+
+        let Some(wallet) = wallet else {
+            return;
+        };
+        let sender_username = AccountStore::global(cx)
+            .read(cx)
+            .account
+            .as_ref()
+            .map(|account| account.username.clone())
+            .unwrap_or_default();
+        let timestamp = mezon_client::server_now_secs() as i64 * 1000;
+        let params = serialize_flower_interactive_params(&identity, timestamp);
+        let gift_channel = channel_id.clone();
+        let request = build_flower_transfer(
+            local_id.clone(),
+            sender_username,
+            identity.clone(),
+            clan_id,
+            channel_id,
+        );
+        let card_text = format!(
+            "{} {}₫ | {}",
+            mezon_i18n::t(&locale, "token.tokensSent"),
+            format_flower_amount(flower_price()),
+            mezon_i18n::t(&locale, "token.giveFlowerAction"),
+        );
+        let flower_generation = wallet.read(cx).reset_generation();
+        self.last_flower_send = Some(Instant::now());
+        wallet.update(cx, |store, _| store.set_pending_give_flower(true));
+        let task = wallet.update(cx, |store, cx| store.send_transaction(request, cx));
+        let wallet_weak = wallet.downgrade();
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            wallet_weak
+                .update(cx, |_store, cx| match &result {
+                    Ok(_) => cx.emit(WalletEvent::FlowerSent),
+                    Err(message) if is_uncertain_transfer_error(message) => {
+                        cx.emit(WalletEvent::FlowerUncertain);
+                    }
+                    Err(message) => cx.emit(WalletEvent::SendFailed {
+                        message: message.clone(),
+                    }),
+                })
+                .ok();
+            if result.is_ok() {
+                this.update(cx, |this, cx| {
+                    let current_generation = wallet_weak
+                        .upgrade()
+                        .map(|store| store.read(cx).reset_generation());
+                    if current_generation != Some(flower_generation) {
+                        return;
+                    }
+                    let card = DirectMessageStore::global(cx).update(cx, |store, cx| {
+                        store.create_dm_and_send_token_card(
+                            receiver_id,
+                            receiver_name,
+                            card_text,
+                            cx,
+                        )
+                    });
+                    card.detach();
+                    let still_in_room = this
+                        .connection
+                        .connected_channel()
+                        .is_some_and(|(channel, _)| channel == gift_channel);
+                    if still_in_room {
+                        this.show_flower_effect(local_id, identity, timestamp, cx);
+                    }
+                })
+                .ok();
+                if let Err(error) = api
+                    .write_voice_interactive(
+                        clan_i64,
+                        channel_i64,
+                        giver_i64,
+                        receiver_i64,
+                        VoiceInteractiveEventType::Gift as i32,
+                        params,
+                    )
+                    .await
+                {
+                    tracing::warn!("write_voice_interactive failed: {error}");
+                }
+            }
+            wallet_weak
+                .update(cx, |store, _| store.set_pending_give_flower(false))
+                .ok();
+        })
+        .detach();
+    }
+
     pub fn cancel_kick(&mut self, cx: &mut Context<Self>) {
         if self.pending_kick.take().is_some() {
             cx.notify();
@@ -1667,6 +2146,11 @@ impl VoiceStore {
             return;
         }
 
+        self.flush_recording(cx);
+        self.recording = RecordingState::Idle;
+        self.recording_elapsed = Duration::ZERO;
+        self.recording_stalled = false;
+        self._recording_tick = None;
         self.session_generation = self.session_generation.wrapping_add(1);
         let session_generation = self.session_generation;
         self._events_task = None;
@@ -1874,6 +2358,11 @@ impl VoiceStore {
     }
 
     fn clear_session_handles(&mut self, mut window: Option<&mut Window>, cx: &mut Context<Self>) {
+        self.flush_recording(cx);
+        self.recording = RecordingState::Idle;
+        self.recording_elapsed = Duration::ZERO;
+        self.recording_stalled = false;
+        self._recording_tick = None;
         self.session_generation = self.session_generation.wrapping_add(1);
         self._events_task = None;
         self.session = None;
@@ -2027,6 +2516,7 @@ impl VoiceStore {
                 cx.notify();
             }
             VoiceEvent::Participants(mut list) => {
+                let refresh_scene = self.recording == RecordingState::Recording;
                 if !self.pending_removals.is_empty() {
                     let now = Instant::now();
                     self.pending_removals.retain(|identity, issued_at| {
@@ -2050,6 +2540,9 @@ impl VoiceStore {
                 self.join_sound_baseline_set = true;
                 self.track_visual_ranks(&list);
                 self.participants = list;
+                if refresh_scene {
+                    self.publish_recording_scene(cx);
+                }
                 if remote_joined {
                     self.play_join_sound(cx);
                 }
@@ -2252,6 +2745,353 @@ impl VoiceStore {
         cx.notify();
     }
 
+    pub fn recording_state(&self) -> RecordingState {
+        self.recording
+    }
+
+    pub fn recording_elapsed(&self) -> Duration {
+        self.recording_elapsed
+    }
+
+    pub fn recording_stalled(&self) -> bool {
+        self.recording_stalled
+    }
+
+    pub fn can_record(&self) -> bool {
+        self.session.is_some() && mezon_voice::record_supported()
+    }
+
+    pub fn toggle_recording(&mut self, window_id: Option<u64>, cx: &mut Context<Self>) {
+        match self.recording {
+            RecordingState::Idle => self.start_recording(window_id, cx),
+            RecordingState::Recording => self.stop_recording(cx),
+            // Nothing to do, but a button that looks dead is worth a line in the
+            // log — a finalize that never returns lands here every time.
+            state => tracing::warn!("ignoring the record button while the recorder is {state:?}"),
+        }
+    }
+
+    pub fn suggested_recording_path(&self) -> std::path::PathBuf {
+        let directory = dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        directory.join(format!(
+            "mezon-call-{}.{}",
+            chrono::Local::now().format("%Y%m%d-%H%M%S"),
+            mezon_voice::record_file_extension()
+        ))
+    }
+
+    pub fn start_recording_at(
+        &mut self,
+        path: std::path::PathBuf,
+        window_id: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.recording != RecordingState::Idle {
+            return Err("a recording is already running".into());
+        }
+        let Some((scene, starter)) = self.session.as_ref().map(|session| {
+            (
+                Some(session.record_frame_source()),
+                session.record_starter(),
+            )
+        }) else {
+            return Err("not in a call".into());
+        };
+        let _ = window_id;
+        self.fetch_missing_avatars(cx);
+        self.publish_recording_scene(cx);
+        let generation = self.session_generation;
+        self.recording = RecordingState::Starting;
+        cx.notify();
+
+        self._recording_start = Some(cx.spawn(async move |this, cx| {
+            let started = cx
+                .background_executor()
+                .spawn(async move { starter.start(path, scene) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.session_generation != generation {
+                    return;
+                }
+                match started {
+                    Ok(()) => {
+                        this.recording = RecordingState::Recording;
+                        this.recording_elapsed = Duration::ZERO;
+                        this.recording_stalled = false;
+                        this.start_recording_tick(cx);
+                    }
+                    Err(error) => {
+                        tracing::error!("could not start the call recording: {error}");
+                        this.recording = RecordingState::Idle;
+                        cx.emit(VoiceStoreEvent::RecordingFinished(RecordingToast::Failed(
+                            error,
+                        )));
+                    }
+                }
+                cx.notify();
+            });
+        }));
+        Ok(())
+    }
+
+    pub fn request_stop_recording(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        if self.recording != RecordingState::Recording {
+            return Err("no recording is running".into());
+        }
+        self.stop_recording(cx);
+        Ok(())
+    }
+
+    fn start_recording(&mut self, window_id: Option<u64>, cx: &mut Context<Self>) {
+        if self.recording != RecordingState::Idle || self.session.is_none() {
+            return;
+        }
+        let default_path = self.suggested_recording_path();
+        let directory = default_path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let suggested = default_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let receiver = cx.prompt_for_new_path(&directory, Some(suggested.as_str()));
+
+        self.recording = RecordingState::Starting;
+        let generation = self.session_generation;
+        cx.notify();
+
+        self._recording_start = Some(cx.spawn(async move |this, cx| {
+            let path = match receiver.await {
+                Ok(Ok(Some(path))) => path,
+                Ok(Ok(None)) => {
+                    tracing::info!("the recording save dialog was cancelled");
+                    let _ = this.update(cx, |this, cx| {
+                        this.recording = RecordingState::Idle;
+                        cx.notify();
+                    });
+                    return;
+                }
+                failed => {
+                    let reason = match failed {
+                        Ok(Err(error)) => error.to_string(),
+                        _ => "the save dialog is unavailable".to_string(),
+                    };
+                    tracing::error!("could not ask where to save the recording: {reason}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.recording = RecordingState::Idle;
+                        cx.emit(VoiceStoreEvent::RecordingFinished(RecordingToast::Failed(
+                            reason,
+                        )));
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.session_generation != generation {
+                    tracing::info!("dropping a save dialog that outlived its call");
+                    return;
+                }
+                this.recording = RecordingState::Idle;
+                let _ = this.start_recording_at(path, window_id, cx);
+            });
+        }));
+    }
+
+    fn stop_recording(&mut self, cx: &mut Context<Self>) {
+        if self.recording != RecordingState::Recording {
+            return;
+        }
+        let Some(session) = self.session.as_ref().and_then(|s| s.take_recording()) else {
+            self.recording = RecordingState::Idle;
+            self._recording_tick = None;
+            cx.notify();
+            return;
+        };
+        self.recording = RecordingState::Stopping;
+        self._recording_tick = None;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { session.finish() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.recording = RecordingState::Idle;
+                this.recording_elapsed = Duration::ZERO;
+                this.recording_stalled = false;
+                cx.emit(VoiceStoreEvent::RecordingFinished(match result {
+                    Ok(path) => RecordingToast::Saved(path),
+                    Err(error) => {
+                        tracing::error!("could not finish the call recording: {error}");
+                        RecordingToast::Failed(error)
+                    }
+                }));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn fetch_missing_avatars(&mut self, cx: &mut Context<Self>) {
+        let Some((_, clan)) = self.connection.connected_channel() else {
+            return;
+        };
+        let Ok(clan_id) = clan.parse::<i64>() else {
+            return;
+        };
+        let wanted: Vec<(String, String)> = self
+            .participants
+            .iter()
+            .filter(|p| !self.recording_avatars.contains_key(&p.identity))
+            .filter_map(|p| {
+                let uid = p.identity.parse::<i64>().ok()?;
+                let url = ClanMembersStore::try_global(cx).and_then(|store| {
+                    store
+                        .read(cx)
+                        .member(ClanId(clan_id), UserId(uid))
+                        .map(|m| m.avatar().to_string())
+                })?;
+                (!url.is_empty()).then_some((p.identity.clone(), url))
+            })
+            .collect();
+
+        for (identity, url) in wanted {
+            self.recording_avatars.insert(identity.clone(), None);
+            cx.spawn(async move |this, cx| {
+                let decoded = cx
+                    .background_executor()
+                    .spawn(async move { load_avatar(&url).await })
+                    .await;
+                let _ = this.update(cx, |this, _| {
+                    this.recording_avatars.insert(identity, decoded);
+                });
+            })
+            .detach();
+        }
+    }
+
+    fn publish_recording_scene(&self, cx: &App) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let focused = self.focused_tile();
+        let mut tiles = Vec::new();
+        for participant in &self.participants {
+            let label = self.display_name_for(participant, cx);
+            let avatar = self
+                .recording_avatars
+                .get(&participant.identity)
+                .cloned()
+                .flatten();
+            if let Some(key) = participant.screenshare {
+                let id = screen_tile_id(&participant.identity);
+                tiles.push(mezon_voice::compose::SceneTile {
+                    focused: focused == Some(id.as_str()),
+                    key: id,
+                    label: label.clone(),
+                    initial: initial_of(&label),
+                    avatar: avatar.clone(),
+                    frame_key: Some(key),
+                    is_screen_share: true,
+                    speaking: false,
+                });
+            }
+            let id = camera_tile_id(&participant.identity);
+            tiles.push(mezon_voice::compose::SceneTile {
+                focused: focused == Some(id.as_str()),
+                key: id,
+                label: label.clone(),
+                initial: initial_of(&label),
+                avatar: avatar.clone(),
+                frame_key: participant.camera,
+                is_screen_share: false,
+                speaking: participant.speaking,
+            });
+        }
+        session.record_scene().set(tiles);
+    }
+
+    fn start_recording_tick(&mut self, cx: &mut Context<Self>) {
+        self._recording_tick = Some(cx.spawn(async move |this, cx| {
+            let mut reported_video_gap = false;
+            loop {
+                cx.background_executor()
+                    .timer(RECORDING_TICK_INTERVAL)
+                    .await;
+                let keep_going = this
+                    .update(cx, |this, cx| {
+                        let Some(stats) = this.session.as_ref().and_then(|s| s.recording_stats())
+                        else {
+                            return false;
+                        };
+                        if this.recording != RecordingState::Recording {
+                            return false;
+                        }
+                        if !reported_video_gap
+                            && this
+                                .session
+                                .as_ref()
+                                .is_some_and(|s| s.recording_video_unavailable())
+                        {
+                            reported_video_gap = true;
+                            cx.emit(VoiceStoreEvent::RecordingVideoUnavailable);
+                        }
+                        if this
+                            .session
+                            .as_ref()
+                            .is_some_and(|session| session.recording_failed())
+                        {
+                            tracing::error!("the call recorder failed mid-recording; stopping");
+                            this.stop_recording(cx);
+                            return false;
+                        }
+                        this.fetch_missing_avatars(cx);
+                        this.publish_recording_scene(cx);
+                        if this.recording_elapsed != stats.elapsed
+                            || this.recording_stalled != stats.video_stalled
+                        {
+                            this.recording_elapsed = stats.elapsed;
+                            this.recording_stalled = stats.video_stalled;
+                            cx.notify();
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_going {
+                    return;
+                }
+            }
+        }));
+    }
+
+    fn flush_recording(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref().and_then(|s| s.take_recording()) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { session.finish() })
+                .await;
+            let _ = this.update(cx, |_this, cx| {
+                cx.emit(VoiceStoreEvent::RecordingFinished(match result {
+                    Ok(path) => RecordingToast::Saved(path),
+                    Err(error) => {
+                        tracing::error!("could not finish the call recording on leave: {error}");
+                        RecordingToast::Failed(error)
+                    }
+                }));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub fn stop_screen_share(&mut self, cx: &mut Context<Self>) {
         if !self.screen_share_enabled {
             return;
@@ -2300,12 +3140,21 @@ impl VoiceStore {
         self.raising_hand_sound_loading = false;
         self.join_voice_player = None;
         self.join_voice_sound_loading = false;
+        self.give_flower_player = None;
+        self.give_flower_sound_loading = false;
         self.join_sound_baseline_set = false;
         self.displayed_reactions.clear();
+        self.displayed_flowers.clear();
         self.last_emoji_at = None;
+        self.last_flower_send = None;
+        self.last_flower_effect_at = None;
         self.meet_token_prefetching = None;
         self.last_screen_share = None;
         self.link_copied = false;
+        self.recording = RecordingState::Idle;
+        self.recording_elapsed = Duration::ZERO;
+        self.recording_stalled = false;
+        self._recording_tick = None;
         self._link_copied_reset = None;
     }
 }

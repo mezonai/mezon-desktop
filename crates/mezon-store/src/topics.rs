@@ -152,7 +152,7 @@ impl TopicsData {
         self.resort_topics();
     }
 
-    fn upsert_topic(&mut self, topic: TopicDiscussion) {
+    fn merge_topic(&mut self, topic: TopicDiscussion) {
         let topic_id = topic.id.clone();
         if let Some(idx) = self.topic_index.get(&topic_id).copied() {
             let existing = &mut self.topics[idx];
@@ -172,6 +172,21 @@ impl TopicsData {
             }
         } else {
             self.topics.push(topic);
+            if let Some(last) = self.topics.last() {
+                self.topic_index
+                    .insert(last.id.clone(), self.topics.len() - 1);
+            }
+        }
+    }
+
+    fn upsert_topic(&mut self, topic: TopicDiscussion) {
+        self.merge_topic(topic);
+        self.resort_topics();
+    }
+
+    fn upsert_topics(&mut self, topics: impl IntoIterator<Item = TopicDiscussion>) {
+        for topic in topics {
+            self.merge_topic(topic);
         }
         self.resort_topics();
     }
@@ -258,10 +273,15 @@ impl TopicsData {
     }
 }
 
+const MAX_TOPIC_FETCH_FAILURES: u32 = 3;
+
 pub struct TopicsStore {
     data: TopicsData,
     clan_id: Option<String>,
     loading: bool,
+    has_more: bool,
+    next_page: i32,
+    fetch_failures: u32,
     fetch_generation: u64,
     fetched_at: Option<Instant>,
     panel_open: bool,
@@ -294,6 +314,9 @@ impl TopicsStore {
             data: TopicsData::default(),
             clan_id: None,
             loading: false,
+            has_more: true,
+            next_page: 1,
+            fetch_failures: 0,
             fetch_generation: 0,
             fetched_at: None,
             panel_open: false,
@@ -1255,6 +1278,10 @@ impl TopicsStore {
         self.loading
     }
 
+    pub fn has_more(&self) -> bool {
+        self.has_more
+    }
+
     fn is_fresh(&self, clan_id: &str) -> bool {
         self.clan_id.as_deref() == Some(clan_id)
             && self.fetched_at.is_some_and(|t| t.elapsed() < CACHE_TTL)
@@ -1276,6 +1303,23 @@ impl TopicsStore {
             self.clan_id = Some(clan_id.to_string());
             self.fetched_at = None;
         }
+        self.has_more = true;
+        self.next_page = 1;
+        self.fetch_failures = 0;
+        self.fetch_page(clan_id, 1, false, cx);
+    }
+
+    pub fn fetch_more(&mut self, clan_id: &str, cx: &mut Context<Self>) {
+        if self.loading || !self.has_more {
+            return;
+        }
+        if self.clan_id.as_deref() != Some(clan_id) {
+            return;
+        }
+        self.fetch_page(clan_id, self.next_page, true, cx);
+    }
+
+    fn fetch_page(&mut self, clan_id: &str, page: i32, append: bool, cx: &mut Context<Self>) {
         self.loading = true;
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
         let generation = self.fetch_generation;
@@ -1284,9 +1328,9 @@ impl TopicsStore {
         let api = self.api.clone();
         let clan_id = clan_id.to_string();
         cx.spawn(async move |this, cx| {
-            let result = api.list_sd_topics(&clan_id, TOPICS_LIMIT).await;
+            let result = api.list_sd_topics(&clan_id, TOPICS_LIMIT, page).await;
             let _ = this.update(cx, |this, cx| {
-                this.apply_fetch_result(&clan_id, generation, result, cx);
+                this.apply_fetch_result(&clan_id, generation, page, append, result, cx);
             });
         })
         .detach();
@@ -1296,6 +1340,8 @@ impl TopicsStore {
         &mut self,
         clan_id: &str,
         generation: u64,
+        page: i32,
+        append: bool,
         result: Result<Vec<TopicDiscussion>, anyhow::Error>,
         cx: &mut Context<Self>,
     ) {
@@ -1305,7 +1351,14 @@ impl TopicsStore {
         self.loading = false;
         match result {
             Ok(topics) => {
-                self.data.set_topics(topics);
+                self.fetch_failures = 0;
+                self.has_more = topics.len() >= TOPICS_LIMIT as usize;
+                self.next_page = page.saturating_add(1);
+                if append {
+                    self.data.upsert_topics(topics);
+                } else {
+                    self.data.set_topics(topics);
+                }
                 self.clan_id = Some(clan_id.to_string());
                 self.fetched_at = Some(Instant::now());
                 cx.emit(TopicsEvent::Updated);
@@ -1313,6 +1366,10 @@ impl TopicsStore {
             }
             Err(e) => {
                 tracing::error!("list_sd_topics failed: {e}");
+                self.fetch_failures = self.fetch_failures.saturating_add(1);
+                if self.fetch_failures >= MAX_TOPIC_FETCH_FAILURES {
+                    self.has_more = false;
+                }
                 cx.emit(TopicsEvent::Updated);
                 cx.notify();
             }
@@ -1695,6 +1752,32 @@ mod tests {
         ]);
 
         assert_eq!(topic_ids(&data), vec!["20", "30", "10"]);
+        assert_index_matches_topics(&data);
+    }
+
+    #[test]
+    fn upsert_topics_merges_a_page_then_resorts_once() {
+        let mut data = TopicsData::default();
+        data.upsert_topic(topic(10, 1, "8", "a", 100));
+        data.upsert_topics(vec![
+            topic(10, 1, "9", "a2", 150),
+            topic(20, 2, "8", "b", 300),
+            topic(30, 3, "8", "c", 200),
+        ]);
+
+        assert_eq!(topic_ids(&data), vec!["20", "30", "10"]);
+        assert_eq!(data.topic_by_id("10").expect("topic 10").content, "a2");
+        assert_eq!(
+            data.topic_by_id("10").expect("topic 10").last_sender_id,
+            "9"
+        );
+        assert_eq!(
+            data.topic_by_id("10")
+                .expect("topic 10")
+                .last_message_timestamp,
+            150
+        );
+        assert_sorted_by_timestamp_desc(&data);
         assert_index_matches_topics(&data);
     }
 
