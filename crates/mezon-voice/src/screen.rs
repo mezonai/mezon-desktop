@@ -1,11 +1,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use livekit::track::LocalVideoTrack;
-use livekit::webrtc::video_frame::{I420Buffer, VideoFrame, VideoRotation};
-use livekit::webrtc::video_source::native::NativeVideoSource;
-use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
+use mezon_codec::I420Frame;
 use parking_lot::{Condvar, Mutex};
 use scap::capturer::{Capturer, Options, Resolution};
 use scap::frame::FrameType;
@@ -115,31 +112,23 @@ pub fn start_screen(
     pick: PickedScreen,
 ) -> (
     ScreenStopper,
-    flume::Receiver<Result<LocalVideoTrack, String>>,
+    flume::Receiver<Result<(), String>>,
+    flume::Receiver<I420Frame>,
 ) {
     let stop = Arc::new(AtomicBool::new(false));
-    let (track_tx, track_rx) = flume::bounded(1);
+    let (ready_tx, ready_rx) = flume::bounded(1);
+    let (frame_tx, frame_rx) = flume::bounded::<I420Frame>(2);
 
     let thread_stop = stop.clone();
     let spawned = std::thread::Builder::new()
         .name("mezon-screen".into())
         .spawn(move || {
-            let _guard = crate::runtime::handle().enter();
-
             if !scap::is_supported() {
-                let _ = track_tx.send(Err("screen capture not supported".into()));
+                let _ = ready_tx.send(Err("screen capture not supported".into()));
                 return;
             }
             if !scap::has_permission() && !scap::request_permission() {
-                let _ = track_tx.send(Err("screen recording permission denied".into()));
-                return;
-            }
-
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            if crate::linux_session::is_wayland_session()
-                && !crate::pipewire_init::ensure_pipewire_stubs_armed()
-            {
-                let _ = track_tx.send(Err("PipeWire unavailable for screen capture".into()));
+                let _ = ready_tx.send(Err("screen recording permission denied".into()));
                 return;
             }
 
@@ -149,7 +138,7 @@ pub fn start_screen(
             let capture_target = match scap_target_for_pick(pick) {
                 Ok(target) => target,
                 Err(e) => {
-                    let _ = track_tx.send(Err(e));
+                    let _ = ready_tx.send(Err(e));
                     return;
                 }
             };
@@ -288,16 +277,14 @@ pub fn start_screen(
                     }
                 });
             if let Err(e) = pump {
-                let _ = track_tx.send(Err(format!("screen capture pump failed: {e}")));
+                let _ = ready_tx.send(Err(format!("screen capture pump failed: {e}")));
                 return;
             }
 
             let key = local_screen_key(&identity);
-            let started = Instant::now();
-            let mut source: Option<NativeVideoSource> = None;
             let mut src_w = 0u32;
             let mut src_h = 0u32;
-            let mut sent_track = false;
+            let mut started = false;
             let mut display_buf = Vec::new();
 
             while let Some(captured) = slot.take_latest(&thread_stop) {
@@ -320,7 +307,7 @@ pub fn start_screen(
                 }
 
                 #[cfg(not(target_os = "macos"))]
-                if source.is_some()
+                if started
                     && is_window_share
                     && bgra_frame_is_uniform(
                         &captured.data,
@@ -332,7 +319,7 @@ pub fn start_screen(
                     continue;
                 }
                 #[cfg(target_os = "macos")]
-                if source.is_some()
+                if started
                     && is_window_share
                     && captured
                         .planes()
@@ -342,25 +329,13 @@ pub fn start_screen(
                     continue;
                 }
 
-                if source.is_none() {
+                if !started {
                     src_w = width;
                     src_h = height;
-                    let new_source = NativeVideoSource::new(
-                        VideoResolution {
-                            width: src_w,
-                            height: src_h,
-                        },
-                        true,
-                    );
-                    let track = LocalVideoTrack::create_video_track(
-                        "screen",
-                        RtcVideoSource::Native(new_source.clone()),
-                    );
-                    source = Some(new_source);
-                    if track_tx.send(Ok(track)).is_err() {
+                    if ready_tx.send(Ok(())).is_err() {
                         return;
                     }
-                    sent_track = true;
+                    started = true;
                     tracing::info!("screen capture started: {src_w}x{src_h}");
                 }
 
@@ -370,76 +345,56 @@ pub fn start_screen(
                     tracing::info!("screen capture resized: {src_w}x{src_h}");
                 }
 
-                let mut i420 = I420Buffer::new(src_w, src_h);
+                let w = src_w as usize;
+                let h = src_h as usize;
+                let cw = w.div_ceil(2);
+                let ch = h.div_ceil(2);
+                let mut y = vec![0u8; w * h];
+                let mut u = vec![0u8; cw * ch];
+                let mut v = vec![0u8; cw * ch];
+                #[cfg(target_os = "macos")]
                 {
-                    let (sy, su, sv) = i420.strides();
-                    let (dy, du, dv) = i420.data_mut();
-                    #[cfg(target_os = "macos")]
-                    {
-                        let planes = captured.planes();
-                        if planes.len() < 2 {
-                            continue;
-                        }
-                        let y = planes[0].data();
-                        let uv = planes[1].data();
-                        nv12_full_to_i420(
-                            &y,
-                            &uv,
-                            planes[0].bytes_per_row(),
-                            planes[1].bytes_per_row(),
-                            src_w as usize,
-                            src_h as usize,
-                            dy,
-                            du,
-                            dv,
-                            sy as usize,
-                            su as usize,
-                            sv as usize,
-                        );
+                    let planes = captured.planes();
+                    if planes.len() < 2 {
+                        continue;
                     }
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        bgra_to_i420(
-                            &captured.data,
-                            src_w as usize,
-                            src_h as usize,
-                            row_stride,
-                            dy,
-                            du,
-                            dv,
-                            sy as usize,
-                            su as usize,
-                            sv as usize,
-                        );
-                    }
+                    let yp = planes[0].data();
+                    let uv = planes[1].data();
+                    nv12_full_to_i420(
+                        &yp,
+                        &uv,
+                        planes[0].bytes_per_row(),
+                        planes[1].bytes_per_row(),
+                        w,
+                        h,
+                        &mut y,
+                        &mut u,
+                        &mut v,
+                        w,
+                        cw,
+                        cw,
+                    );
                 }
-                let frame = VideoFrame {
-                    rotation: VideoRotation::VideoRotation0,
-                    timestamp_us: started.elapsed().as_micros() as i64,
-                    frame_metadata: None,
-                    buffer: i420,
-                };
-                if let Some(source) = &source {
-                    source.capture_frame(&frame);
+                #[cfg(not(target_os = "macos"))]
+                {
+                    bgra_to_i420(
+                        &captured.data,
+                        w,
+                        h,
+                        row_stride,
+                        &mut y,
+                        &mut u,
+                        &mut v,
+                        w,
+                        cw,
+                        cw,
+                    );
                 }
 
                 #[cfg(target_os = "macos")]
                 {
-                    let i420 = &frame.buffer;
-                    let (sy, su, sv) = i420.strides();
-                    let (y, u, v) = i420.data();
-                    display_buf.resize((src_w * src_h * 4) as usize, 0);
-                    i420_to_bgra_into(
-                        &mut display_buf,
-                        y,
-                        u,
-                        v,
-                        sy as usize,
-                        su as usize,
-                        sv as usize,
-                        src_w as usize,
-                        src_h as usize,
-                    );
+                    display_buf.resize(w * h * 4, 0);
+                    i420_to_bgra_into(&mut display_buf, &y, &u, &v, w, cw, cw, w, h);
                     if let Some(recycled) =
                         frame_store.publish(key, src_w, src_h, std::mem::take(&mut display_buf))
                     {
@@ -448,37 +403,38 @@ pub fn start_screen(
                 }
 
                 #[cfg(not(target_os = "macos"))]
-                let (pw, ph) = if _full_res.load(Ordering::Relaxed) {
-                    (src_w, src_h)
-                } else {
-                    scaled_dims(src_w, src_h, PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT)
-                };
-                #[cfg(not(target_os = "macos"))]
-                display_buf.resize((pw * ph * 4) as usize, 0);
-                #[cfg(not(target_os = "macos"))]
-                downscale_bgra_into(
-                    &mut display_buf,
-                    &captured.data,
-                    src_w as usize,
-                    src_h as usize,
-                    row_stride,
-                    pw as usize,
-                    ph as usize,
-                );
-                #[cfg(not(target_os = "macos"))]
-                if let Some(recycled) =
-                    frame_store.publish(key, pw, ph, std::mem::take(&mut display_buf))
                 {
-                    display_buf = recycled;
+                    let (pw, ph) = if _full_res.load(Ordering::Relaxed) {
+                        (src_w, src_h)
+                    } else {
+                        scaled_dims(src_w, src_h, PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT)
+                    };
+                    display_buf.resize((pw * ph * 4) as usize, 0);
+                    downscale_bgra_into(
+                        &mut display_buf,
+                        &captured.data,
+                        w,
+                        h,
+                        row_stride,
+                        pw as usize,
+                        ph as usize,
+                    );
+                    if let Some(recycled) =
+                        frame_store.publish(key, pw, ph, std::mem::take(&mut display_buf))
+                    {
+                        display_buf = recycled;
+                    }
                 }
+
+                let _ = frame_tx.try_send(I420Frame::tightly_packed(src_w, src_h, y, u, v));
             }
 
             frame_store.remove(local_screen_key(&identity));
-            if !sent_track {
+            if !started {
                 let msg = slot
                     .take_error()
                     .unwrap_or_else(|| "screen capture produced no frames".into());
-                let _ = track_tx.send(Err(msg));
+                let _ = ready_tx.send(Err(msg));
             }
             tracing::info!("screen capture stopped");
         });
@@ -486,7 +442,7 @@ pub fn start_screen(
         tracing::error!("failed to spawn screen capture thread: {e}");
     }
 
-    (ScreenStopper { stop }, track_rx)
+    (ScreenStopper { stop }, ready_rx, frame_rx)
 }
 
 #[cfg(any(not(target_os = "macos"), test))]

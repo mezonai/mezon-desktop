@@ -3,28 +3,27 @@ use std::sync::Arc;
 use anyhow::{Context as _, anyhow};
 use flume::{Receiver, Sender};
 use futures::{SinkExt, StreamExt};
-use livekit::webrtc::audio_stream::native::NativeAudioStream;
-use livekit::webrtc::ice_candidate::IceCandidate;
-use livekit::webrtc::media_stream_track::MediaStreamTrack;
-use livekit::webrtc::peer_connection::OfferOptions;
-use livekit::webrtc::peer_connection_factory::{
-    ContinualGatheringPolicy, IceServer, IceTransportsType, PeerConnectionFactory, RtcConfiguration,
-};
-use livekit::webrtc::prelude::MediaType;
-use livekit::webrtc::prelude::VideoBuffer;
-use livekit::webrtc::rtp_transceiver::{RtpTransceiverDirection, RtpTransceiverInit};
-use livekit::webrtc::session_description::{SdpType, SessionDescription};
-use livekit::webrtc::video_stream::native::NativeVideoStream;
-use mezon_voice::{StreamAudioOutput, VideoFrameStore, i420_to_bgra_into};
+use mezon_codec::{EncodedFrame, OpusDecoder, VpxCodec, VpxDecoder};
+use mezon_rtc::subscribe::{spawn_opus_receiver, spawn_video_receiver};
+use mezon_rtc::{PeerConnectionOpts, build_peer_connection};
+use mezon_voice::{AudioFormat, StreamAudioOutput, VideoFrameStore, i420_to_bgra_into};
 use parking_lot::Mutex;
+use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtc::peer_connection::transport::RTCIceCandidateInit;
+use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+use webrtc::media_stream::track_remote::TrackRemote;
+use webrtc::peer_connection::{PeerConnectionEventHandler, RTCPeerConnectionIceEvent};
 
 use crate::STREAM_FRAME_KEY;
 use crate::signaling::{
     InboundMessage, OutboundMessage, parse_channels, parse_ice_candidate, parse_sdp_answer,
     ws_connect_url,
 };
+
+const OPUS_DECODE_RATE: u32 = 48_000;
 
 #[derive(Debug, Clone)]
 pub struct StreamSessionConfig {
@@ -85,14 +84,12 @@ impl StreamSession {
                 let _ = event_tx.send(StreamEvent::Disconnected);
                 return;
             };
-            let runtime_handle = runtime.handle().clone();
             runtime.block_on(run_session(
                 config,
                 frame_store,
                 audio_output,
                 stop_rx,
                 event_tx,
-                runtime_handle,
             ));
         });
         Self {
@@ -127,22 +124,87 @@ async fn run_session(
     audio: Arc<StreamAudioOutput>,
     stop_rx: Receiver<()>,
     event_tx: Sender<StreamEvent>,
-    runtime_handle: tokio::runtime::Handle,
 ) {
-    if let Err(_err) = run_session_inner(
-        config,
-        frame_store,
-        audio,
-        stop_rx,
-        event_tx.clone(),
-        runtime_handle,
-    )
-    .await
+    if let Err(_err) =
+        run_session_inner(config, frame_store, audio, stop_rx, event_tx.clone()).await
     {
         tracing::warn!("stream session ended with error");
         let _ = event_tx.send(StreamEvent::Error("Stream connection failed".to_string()));
     }
     let _ = event_tx.send(StreamEvent::Disconnected);
+}
+
+struct StreamHandler {
+    outbound_tx: Sender<OutboundMessage>,
+    event_tx: Sender<StreamEvent>,
+    frame_store: Arc<VideoFrameStore>,
+    audio: Arc<StreamAudioOutput>,
+    out_fmt: AudioFormat,
+}
+
+#[async_trait::async_trait]
+impl PeerConnectionEventHandler for StreamHandler {
+    async fn on_ice_candidate(&self, event: RTCPeerConnectionIceEvent) {
+        let Ok(init) = event.candidate.to_json() else {
+            return;
+        };
+        if init.candidate.is_empty() {
+            return;
+        }
+        let value = serde_json::json!({
+            "candidate": init.candidate,
+            "sdpMid": init.sdp_mid,
+            "sdpMLineIndex": init.sdp_mline_index,
+        });
+        let _ = self.outbound_tx.send(OutboundMessage::ice_candidate(value));
+    }
+
+    async fn on_track(&self, track: Arc<dyn TrackRemote>) {
+        match track.kind().await {
+            RtpCodecKind::Video => {
+                let _ = self.event_tx.send(StreamEvent::RemoteVideo(true));
+                let codec = infer_vpx_codec(&track).await.unwrap_or(VpxCodec::Vp9);
+                let frames = spawn_video_receiver(track, codec);
+                tokio::spawn(decode_video(
+                    frames,
+                    codec,
+                    self.frame_store.clone(),
+                    self.event_tx.clone(),
+                ));
+            }
+            RtpCodecKind::Audio => {
+                let _ = self.event_tx.send(StreamEvent::RemoteAudio(true));
+                let packets = spawn_opus_receiver(track);
+                tokio::spawn(decode_audio(
+                    packets,
+                    self.audio.clone(),
+                    self.out_fmt,
+                    self.event_tx.clone(),
+                ));
+            }
+            RtpCodecKind::Unspecified => {}
+        }
+    }
+}
+
+async fn infer_vpx_codec(track: &Arc<dyn TrackRemote>) -> Option<VpxCodec> {
+    let ssrc = track.ssrcs().await.first().copied()?;
+    let mime = track.codec(ssrc).await?.mime_type.to_ascii_uppercase();
+    if mime.contains("VP8") {
+        Some(VpxCodec::Vp8)
+    } else if mime.contains("VP9") {
+        Some(VpxCodec::Vp9)
+    } else {
+        None
+    }
+}
+
+fn recvonly() -> Option<RTCRtpTransceiverInit> {
+    Some(RTCRtpTransceiverInit {
+        direction: RTCRtpTransceiverDirection::Recvonly,
+        streams: vec![],
+        send_encodings: vec![],
+    })
 }
 
 async fn run_session_inner(
@@ -151,7 +213,6 @@ async fn run_session_inner(
     audio: Arc<StreamAudioOutput>,
     stop_rx: Receiver<()>,
     event_tx: Sender<StreamEvent>,
-    runtime_handle: tokio::runtime::Handle,
 ) -> anyhow::Result<()> {
     let url = ws_connect_url(&config.ws_base_url, &config.username, &config.token)?;
     let (ws_stream, _) = connect_async(url.as_str())
@@ -160,82 +221,40 @@ async fn run_session_inner(
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
     let (outbound_tx, outbound_rx) = flume::unbounded::<OutboundMessage>();
 
-    let factory = PeerConnectionFactory::default();
-    let rtc_config = RtcConfiguration {
-        ice_servers: vec![IceServer {
-            urls: vec!["stun:stun.l.google.com:19302".into()],
-            username: String::new(),
-            password: String::new(),
-        }],
-        continual_gathering_policy: ContinualGatheringPolicy::GatherContinually,
-        ice_transport_type: IceTransportsType::All,
-    };
-    let pc = factory
-        .create_peer_connection(rtc_config)
-        .context("create peer connection failed")?;
+    let out_fmt = audio.format();
+    let handler = Arc::new(StreamHandler {
+        outbound_tx,
+        event_tx: event_tx.clone(),
+        frame_store,
+        audio,
+        out_fmt,
+    });
+    let pc = build_peer_connection(handler, PeerConnectionOpts { loopback: false })
+        .await
+        .context("build peer connection failed")?;
 
-    pc.on_ice_candidate(Some(Box::new(move |candidate| {
-        if candidate.candidate().is_empty() {
-            return;
-        }
-        let value = serde_json::json!({
-            "candidate": candidate.candidate(),
-            "sdpMid": candidate.sdp_mid(),
-            "sdpMLineIndex": candidate.sdp_mline_index(),
-        });
-        let _ = outbound_tx.send(OutboundMessage::ice_candidate(value));
-    })));
-
-    let event_for_track = event_tx.clone();
-    let frame_store_for_track = frame_store.clone();
-    let audio_for_track = audio.clone();
-    pc.on_track(Some(Box::new(move |track_event| match track_event.track {
-        MediaStreamTrack::Video(video_track) => {
-            let _ = event_for_track.send(StreamEvent::RemoteVideo(true));
-            let store = frame_store_for_track.clone();
-            let events = event_for_track.clone();
-            let runtime_handle = runtime_handle.clone();
-            std::thread::spawn(move || {
-                pump_video_track(video_track, store, events, runtime_handle);
-            });
-        }
-        MediaStreamTrack::Audio(audio_track) => {
-            let _ = event_for_track.send(StreamEvent::RemoteAudio(true));
-            let player = audio_for_track.clone();
-            let out_fmt = player.format();
-            let events = event_for_track.clone();
-            let runtime_handle = runtime_handle.clone();
-            std::thread::spawn(move || {
-                pump_audio_track(audio_track, player, out_fmt, events, runtime_handle);
-            });
-        }
-    })));
-
-    pc.add_transceiver_for_media(
-        MediaType::Audio,
-        RtpTransceiverInit {
-            direction: RtpTransceiverDirection::RecvOnly,
-            stream_ids: vec![],
-            send_encodings: vec![],
-        },
-    )
-    .context("add audio transceiver failed")?;
+    pc.add_transceiver_from_kind(RtpCodecKind::Audio, recvonly())
+        .await
+        .map_err(|e| anyhow!("add audio transceiver failed: {e}"))?;
+    pc.add_transceiver_from_kind(RtpCodecKind::Video, recvonly())
+        .await
+        .map_err(|e| anyhow!("add video transceiver failed: {e}"))?;
 
     let offer = pc
-        .create_offer(OfferOptions {
-            ice_restart: false,
-            offer_to_receive_audio: true,
-            offer_to_receive_video: true,
-        })
+        .create_offer(None)
         .await
-        .context("create offer failed")?;
-    pc.set_local_description(offer.clone())
+        .map_err(|e| anyhow!("create offer failed: {e}"))?;
+    pc.set_local_description(offer)
         .await
-        .context("set local description failed")?;
+        .map_err(|e| anyhow!("set local description failed: {e}"))?;
+    let local = pc
+        .local_description()
+        .await
+        .ok_or_else(|| anyhow!("missing local description"))?;
 
     let offer_value = serde_json::json!({
         "type": "offer",
-        "sdp": offer.to_string(),
+        "sdp": local.sdp,
     });
     send_ws(
         &mut ws_tx,
@@ -249,7 +268,6 @@ async fn run_session_inner(
     .await?;
     send_ws(&mut ws_tx, OutboundMessage::get_channels()).await?;
 
-    let pc = Arc::new(pc);
     let mut live = false;
 
     loop {
@@ -300,18 +318,23 @@ async fn run_session_inner(
                     "sd_answer" => {
                         let Some(value) = inbound.value.as_ref() else { continue; };
                         let Some(sdp) = parse_sdp_answer(value) else { continue; };
-                        let answer = SessionDescription::parse(&sdp, SdpType::Answer)
-                            .map_err(|e| anyhow!("sdp answer parse: {} {}", e.line, e.description))?;
+                        let answer = RTCSessionDescription::answer(sdp)
+                            .map_err(|e| anyhow!("sdp answer parse: {e}"))?;
                         pc.set_remote_description(answer)
                             .await
-                            .context("set remote description failed")?;
+                            .map_err(|e| anyhow!("set remote description failed: {e}"))?;
                     }
                     "ice_candidate" => {
                         let Some(value) = inbound.value.as_ref() else { continue; };
                         let Some((sdp_mid, sdp_mline_index, candidate)) = parse_ice_candidate(value) else { continue; };
-                        let ice = IceCandidate::parse(&sdp_mid, sdp_mline_index, &candidate)
-                            .map_err(|e| anyhow!("ice candidate parse: {} {}", e.line, e.description))?;
-                        pc.add_ice_candidate(ice).await.ok();
+                        let init = RTCIceCandidateInit {
+                            candidate,
+                            sdp_mid: Some(sdp_mid),
+                            sdp_mline_index: Some(sdp_mline_index.max(0) as u16),
+                            username_fragment: None,
+                            url: None,
+                        };
+                        pc.add_ice_candidate(init).await.ok();
                     }
                     "error" => {
                         let message = inbound
@@ -327,7 +350,7 @@ async fn run_session_inner(
         }
     }
 
-    pc.close();
+    let _ = pc.close().await;
     Ok(())
 }
 
@@ -348,61 +371,192 @@ async fn send_ws(
     Ok(())
 }
 
-fn pump_video_track(
-    video_track: livekit::webrtc::video_track::RtcVideoTrack,
+async fn decode_video(
+    frames: Receiver<EncodedFrame>,
+    codec: VpxCodec,
     frame_store: Arc<VideoFrameStore>,
     event_tx: Sender<StreamEvent>,
-    runtime_handle: tokio::runtime::Handle,
 ) {
-    runtime_handle.block_on(async {
-        let mut bgra: Vec<u8> = Vec::new();
-        let mut stream = NativeVideoStream::new(video_track);
-        while let Some(frame) = stream.next().await {
-            let buffer = frame.buffer.to_i420();
-            let width = buffer.width();
-            let height = buffer.height();
-            let (sy, su, sv) = buffer.strides();
-            let (y, u, v) = buffer.data();
-            bgra.clear();
-            bgra.resize(width as usize * height as usize * 4, 0);
+    let mut decoder = match VpxDecoder::new(codec) {
+        Ok(decoder) => decoder,
+        Err(e) => {
+            tracing::error!("stream vpx decoder unavailable: {e}");
+            let _ = event_tx.send(StreamEvent::RemoteVideo(false));
+            return;
+        }
+    };
+    let mut bgra: Vec<u8> = Vec::new();
+    while let Ok(frame) = frames.recv_async().await {
+        let images = match decoder.decode(&frame.data) {
+            Ok(images) => images,
+            Err(e) => {
+                tracing::warn!("stream vpx decode failed: {e}");
+                continue;
+            }
+        };
+        for image in images {
+            let w = image.width as usize;
+            let h = image.height as usize;
+            bgra.resize(w * h * 4, 0);
             i420_to_bgra_into(
                 &mut bgra,
-                y,
-                u,
-                v,
-                sy as usize,
-                su as usize,
-                sv as usize,
-                width as usize,
-                height as usize,
+                &image.y,
+                &image.u,
+                &image.v,
+                image.y_stride as usize,
+                image.u_stride as usize,
+                image.v_stride as usize,
+                w,
+                h,
             );
-            if let Some(recycled) =
-                frame_store.publish(STREAM_FRAME_KEY, width, height, std::mem::take(&mut bgra))
-            {
+            if let Some(recycled) = frame_store.publish(
+                STREAM_FRAME_KEY,
+                image.width,
+                image.height,
+                std::mem::take(&mut bgra),
+            ) {
                 bgra = recycled;
             }
         }
-        let _ = event_tx.send(StreamEvent::RemoteVideo(false));
-    });
+    }
+    let _ = event_tx.send(StreamEvent::RemoteVideo(false));
 }
 
-fn pump_audio_track(
-    audio_track: livekit::webrtc::audio_track::RtcAudioTrack,
+async fn decode_audio(
+    packets: Receiver<Vec<u8>>,
     player: Arc<StreamAudioOutput>,
-    out_fmt: mezon_voice::AudioFormat,
+    out_fmt: AudioFormat,
     event_tx: Sender<StreamEvent>,
-    runtime_handle: tokio::runtime::Handle,
 ) {
-    runtime_handle.block_on(async {
-        let mut stream = NativeAudioStream::new(
-            audio_track,
-            out_fmt.sample_rate as i32,
-            out_fmt.channels as i32,
-        );
-        while let Some(frame) = stream.next().await {
-            player.push(&frame.data);
+    let mut decoder = match OpusDecoder::new(1) {
+        Ok(decoder) => decoder,
+        Err(e) => {
+            tracing::error!("stream opus decoder unavailable: {e}");
+            let _ = event_tx.send(StreamEvent::RemoteAudio(false));
+            return;
         }
-        player.clear();
-        let _ = event_tx.send(StreamEvent::RemoteAudio(false));
-    });
+    };
+    let channels = out_fmt.channels.max(1) as usize;
+    let mut resampler = LinearResampler::new(OPUS_DECODE_RATE, out_fmt.sample_rate);
+    let mut resampled: Vec<f32> = Vec::new();
+    let mut interleaved: Vec<i16> = Vec::new();
+    while let Ok(packet) = packets.recv_async().await {
+        let mono = match decoder.decode(&packet) {
+            Ok(mono) => mono,
+            Err(e) => {
+                tracing::warn!("stream opus decode failed: {e}");
+                continue;
+            }
+        };
+        resampled.clear();
+        resampler.process(&mono, &mut resampled);
+        interleaved.clear();
+        interleaved.reserve(resampled.len() * channels);
+        for sample in &resampled {
+            let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+            for _ in 0..channels {
+                interleaved.push(value);
+            }
+        }
+        player.push(&interleaved);
+    }
+    player.clear();
+    let _ = event_tx.send(StreamEvent::RemoteAudio(false));
+}
+
+struct LinearResampler {
+    ratio: f64,
+    passthrough: bool,
+    prev: f32,
+    primed: bool,
+    frac: f64,
+}
+
+impl LinearResampler {
+    fn new(src_rate: u32, dst_rate: u32) -> Self {
+        Self {
+            ratio: if dst_rate == 0 {
+                1.0
+            } else {
+                src_rate as f64 / dst_rate as f64
+            },
+            passthrough: dst_rate == 0 || src_rate == dst_rate,
+            prev: 0.0,
+            primed: false,
+            frac: 0.0,
+        }
+    }
+
+    fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
+        if self.passthrough {
+            out.extend_from_slice(input);
+            return;
+        }
+        for &sample in input {
+            if !self.primed {
+                self.prev = sample;
+                self.primed = true;
+                continue;
+            }
+            while self.frac < 1.0 {
+                let interp = self.prev + (sample - self.prev) * self.frac as f32;
+                out.push(interp);
+                self.frac += self.ratio;
+            }
+            self.frac -= 1.0;
+            self.prev = sample;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resampler_passthrough_preserves_samples() {
+        let mut resampler = LinearResampler::new(48_000, 48_000);
+        let mut out = Vec::new();
+        resampler.process(&[0.1, 0.2, 0.3, 0.4], &mut out);
+        assert_eq!(out, vec![0.1, 0.2, 0.3, 0.4]);
+    }
+
+    #[test]
+    fn resampler_downsamples_roughly_by_ratio() {
+        let mut resampler = LinearResampler::new(48_000, 24_000);
+        let input: Vec<f32> = (0..4800).map(|n| (n as f32 * 0.01).sin()).collect();
+        let mut out = Vec::new();
+        resampler.process(&input, &mut out);
+        let ratio = out.len() as f32 / input.len() as f32;
+        assert!((ratio - 0.5).abs() < 0.02, "expected ~0.5, got {ratio}");
+    }
+
+    #[test]
+    fn resampler_upsamples_roughly_by_ratio() {
+        let mut resampler = LinearResampler::new(24_000, 48_000);
+        let input: Vec<f32> = (0..2400).map(|n| (n as f32 * 0.01).sin()).collect();
+        let mut out = Vec::new();
+        resampler.process(&input, &mut out);
+        let ratio = out.len() as f32 / input.len() as f32;
+        assert!((ratio - 2.0).abs() < 0.02, "expected ~2.0, got {ratio}");
+    }
+
+    #[test]
+    fn resampler_keeps_phase_across_chunks() {
+        let input: Vec<f32> = (0..9600).map(|n| (n as f32 * 0.005).sin()).collect();
+        let mut whole = LinearResampler::new(48_000, 44_100);
+        let mut whole_out = Vec::new();
+        whole.process(&input, &mut whole_out);
+
+        let mut split = LinearResampler::new(48_000, 44_100);
+        let mut split_out = Vec::new();
+        split.process(&input[..4800], &mut split_out);
+        split.process(&input[4800..], &mut split_out);
+
+        let diff = (whole_out.len() as i64 - split_out.len() as i64).abs();
+        assert!(
+            diff <= 1,
+            "chunked output length must match whole within 1: {diff}"
+        );
+    }
 }

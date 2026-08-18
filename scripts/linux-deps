@@ -33,6 +33,12 @@ install_apt() {
     libva-dev
     libpipewire-0.3-dev
     libdbus-1-dev
+    # first-party WebRTC voice/video stack (mezon-codec / mezon-rtc):
+    # libvpx + dav1d are probed via pkg-config; old dav1d versions fall back to
+    # a source build (nasm on x86).
+    libvpx-dev
+    libdav1d-dev
+    nasm
     libxcb1-dev
     libxcb-render0-dev
     libxcb-shape0-dev
@@ -90,6 +96,12 @@ install_dnf() {
     libva-devel
     pipewire-devel
     dbus-devel
+    # first-party WebRTC voice/video stack (mezon-codec / mezon-rtc):
+    # libvpx + dav1d are probed via pkg-config; old dav1d versions fall back to
+    # a source build (nasm on x86).
+    libvpx-devel
+    dav1d-devel
+    nasm
     libxcb-devel
     libX11-devel
     libx11-xcb-devel

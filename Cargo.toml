@@ -21,6 +21,9 @@ members = [
     "crates/mezon-widgets",
     "crates/mezon-canvas",
     "crates/mmn-client",
+    "crates/rtc/mezon-codec",
+    "crates/rtc/mezon-rtc",
+    "crates/rtc/mezon-sfu-client",
     # "crates/mezon-active-windows" excluded: orphan (unused) + does not compile (Rust 2024
     # `unsafe extern` + core_foundation API mismatch). Re-add once fixed & wired for rich-presence.
     # Vendored GPUI crates
@@ -303,8 +306,6 @@ chrono               = { version = "0.4", features = ["serde"] }
 cpal                 = "0.17.3"
 ogg                  = "0.9"
 rodio                = { git = "https://github.com/RustAudio/rodio", rev = "e50e726ddd0292f6ef9de0dda6b90af4ed1fb66a", default-features = false, features = ["playback"] }
-livekit              = { version = "0.8", features = ["rustls-tls-native-roots"] }
-livekit-protocol     = "0.7"
 libwebrtc            = "0.3.44"
 flume                = "0.11"
 rayon                = "1.8"

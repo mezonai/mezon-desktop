@@ -12,7 +12,7 @@ use gpui::{
 };
 use mezon_audio::{AudioPlayer, DecodedPcm};
 use mezon_client::{AppApi, RealtimeEvent};
-use mezon_voice::{IceServerConfig, VoiceEvent, VoiceSession};
+use mezon_voice::{IceServerConfig, VoiceConnectConfig, VoiceEvent, VoiceSession};
 use parking_lot::Mutex;
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -169,6 +169,8 @@ pub struct VoiceStore {
     connection: VoiceConnection,
     call_status: VoiceCallStatus,
     channel_label: String,
+    role: String,
+    push_to_talk_active: bool,
     mic_enabled: bool,
     mic_permission_denied: bool,
     camera_enabled: bool,
@@ -231,6 +233,8 @@ pub struct VoiceStore {
     recording_avatars: HashMap<String, Option<Arc<mezon_voice::compose::AvatarImage>>>,
     _recording_tick: Option<Task<()>>,
     _recording_start: Option<Task<()>>,
+    join_role_menu_open: bool,
+    codec_config_open: bool,
     _events_task: Option<Task<()>>,
     _reconnect_watch_task: Option<Task<()>>,
     _link_copied_reset: Option<Task<()>>,
@@ -245,6 +249,7 @@ struct VoiceReconnectSnapshot {
     input_device_id: Option<String>,
     output_device_id: Option<String>,
     camera_device_id: Option<String>,
+    role: String,
     mic_enabled: bool,
     camera_enabled: bool,
     screen_share: Option<(PickedScreen, bool)>,
@@ -437,6 +442,8 @@ impl VoiceStore {
             connection: VoiceConnection::Idle,
             call_status: VoiceCallStatus::Stable,
             channel_label: String::new(),
+            role: "speaker".to_string(),
+            push_to_talk_active: false,
             mic_enabled: false,
             mic_permission_denied: false,
             camera_enabled: false,
@@ -499,6 +506,8 @@ impl VoiceStore {
             recording_avatars: HashMap::new(),
             _recording_tick: None,
             _recording_start: None,
+            join_role_menu_open: false,
+            codec_config_open: false,
             _events_task: None,
             _reconnect_watch_task: None,
             _link_copied_reset: None,
@@ -2054,6 +2063,7 @@ impl VoiceStore {
         input_device_id: Option<String>,
         output_device_id: Option<String>,
         camera_device_id: Option<String>,
+        role: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2063,8 +2073,9 @@ impl VoiceStore {
 
         self.teardown(Some(window), cx);
         self.channel_label = channel_label;
+        self.role = role;
 
-        let ws_url = AppConfig::global(cx).meet_ws_url.clone();
+        let ws_url = AppConfig::global(cx).sfu_ws_url.clone();
         if ws_url.is_empty() {
             self.connection = VoiceConnection::Failed {
                 channel_id,
@@ -2086,9 +2097,8 @@ impl VoiceStore {
         self.speak_ranks.clear();
         cx.notify();
 
-        let api = self.api.clone();
-        let cached_token = self.cached_token_for(&channel_id);
-        if let Some(token) = cached_token {
+        let role = self.role.clone();
+        if let Some(token) = self.cached_token_for(&channel_id) {
             self.start_session(
                 ws_url,
                 token,
@@ -2096,10 +2106,12 @@ impl VoiceStore {
                 input_device_id,
                 output_device_id,
                 camera_device_id,
+                role,
                 cx,
             );
             return;
         }
+        let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let token = api.generate_meet_token(&channel_id, "").await;
             let _ = this.update(cx, |this, cx| match token {
@@ -2116,14 +2128,14 @@ impl VoiceStore {
                         input_device_id,
                         output_device_id,
                         camera_device_id,
+                        role,
                         cx,
                     );
                 }
                 Err(e) => {
-                    tracing::error!("failed to generate meet token: {e:#}");
                     this.connection = VoiceConnection::Failed {
                         channel_id,
-                        message: e.to_string(),
+                        message: format!("voice token fetch failed: {e}"),
                     };
                     cx.notify();
                 }
@@ -2132,6 +2144,7 @@ impl VoiceStore {
         .detach();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_session(
         &mut self,
         ws_url: String,
@@ -2140,6 +2153,7 @@ impl VoiceStore {
         input_device_id: Option<String>,
         output_device_id: Option<String>,
         camera_device_id: Option<String>,
+        role: String,
         cx: &mut Context<Self>,
     ) {
         if self.connection.active_channel_id() != Some(channel_id.as_str()) {
@@ -2156,13 +2170,33 @@ impl VoiceStore {
         self._events_task = None;
         self.session = None;
         let ice_servers = Self::ice_servers(cx);
+        // TODO(backend): finalize channel->SFU room-id mapping (channel id used as room id for now).
+        let room = channel_id.clone();
+        let (video_codec, svc_mode) = crate::Settings::try_global(cx)
+            .map(|settings| {
+                let s = settings.read(cx);
+                (s.video_codec.clone(), s.svc_mode.clone())
+            })
+            .unwrap_or_else(|| ("vp9".to_string(), "l3t3".to_string()));
+        let local_identity = crate::BadgeService::try_global(cx)
+            .and_then(|badges| badges.read(cx).current_user_id(cx))
+            .map(|uid| uid.0.to_string())
+            .unwrap_or_default();
+        let config = VoiceConnectConfig {
+            role,
+            video_codec,
+            svc_mode,
+            local_identity,
+        };
         let session = VoiceSession::connect(
             ws_url,
             token,
+            room,
             input_device_id,
             output_device_id,
             camera_device_id,
             ice_servers,
+            config,
         );
         let events = session.events();
         self.frame_store = Some(session.frame_store());
@@ -2263,7 +2297,7 @@ impl VoiceStore {
 
     fn reconnect_snapshot(&self, cx: &App) -> Option<VoiceReconnectSnapshot> {
         let (channel_id, clan_id) = self.active_connection_ids()?;
-        let ws_url = AppConfig::global(cx).meet_ws_url.clone();
+        let ws_url = AppConfig::global(cx).sfu_ws_url.clone();
         if ws_url.is_empty() {
             return None;
         }
@@ -2283,6 +2317,7 @@ impl VoiceStore {
             input_device_id,
             output_device_id,
             camera_device_id,
+            role: self.role.clone(),
             mic_enabled: self.mic_enabled,
             camera_enabled: self.camera_enabled,
             screen_share,
@@ -2338,7 +2373,7 @@ impl VoiceStore {
                 match token {
                     Ok(token) => {
                         tracing::info!(
-                            "voice reconnect watchdog rebuilding LiveKit session for channel {}",
+                            "voice reconnect watchdog rebuilding voice session for channel {}",
                             snapshot.channel_id
                         );
                         this.cached_meet_token = Some(CachedMeetToken {
@@ -2346,7 +2381,7 @@ impl VoiceStore {
                             token: token.clone(),
                             fetched_at: Instant::now(),
                         });
-                        this.restart_livekit_session(generation, snapshot, token, cx);
+                        this.restart_voice_session(generation, snapshot, token, cx);
                     }
                     Err(e) => {
                         tracing::warn!("voice reconnect token refresh failed: {e:#}");
@@ -2385,7 +2420,7 @@ impl VoiceStore {
         self.flush_texture_drops(window, cx);
     }
 
-    fn restart_livekit_session(
+    fn restart_voice_session(
         &mut self,
         generation: u64,
         snapshot: VoiceReconnectSnapshot,
@@ -2412,6 +2447,7 @@ impl VoiceStore {
             snapshot.input_device_id,
             snapshot.output_device_id,
             snapshot.camera_device_id,
+            snapshot.role,
             cx,
         );
         self.restore_media_after_reconnect(
@@ -2617,6 +2653,85 @@ impl VoiceStore {
         cx.notify();
     }
 
+    pub fn role(&self) -> &str {
+        &self.role
+    }
+
+    pub fn is_audience(&self) -> bool {
+        self.role == "audience"
+    }
+
+    pub fn join_role_menu_open(&self) -> bool {
+        self.join_role_menu_open
+    }
+
+    pub fn toggle_join_role_menu(&mut self, cx: &mut Context<Self>) {
+        self.join_role_menu_open = !self.join_role_menu_open;
+        cx.notify();
+    }
+
+    pub fn close_join_role_menu(&mut self, cx: &mut Context<Self>) {
+        if self.join_role_menu_open {
+            self.join_role_menu_open = false;
+            cx.notify();
+        }
+    }
+
+    pub fn codec_config_open(&self) -> bool {
+        self.codec_config_open
+    }
+
+    pub fn toggle_codec_config(&mut self, cx: &mut Context<Self>) {
+        self.codec_config_open = !self.codec_config_open;
+        cx.notify();
+    }
+
+    pub fn close_codec_config(&mut self, cx: &mut Context<Self>) {
+        if self.codec_config_open {
+            self.codec_config_open = false;
+            cx.notify();
+        }
+    }
+
+    pub fn set_role(&mut self, role: String, cx: &mut Context<Self>) {
+        if self.role == role {
+            return;
+        }
+        self.role = role.clone();
+        if let Some(session) = &self.session {
+            session.set_role(role);
+        }
+        cx.notify();
+    }
+
+    pub fn push_to_talk_active(&self) -> bool {
+        self.push_to_talk_active
+    }
+
+    pub fn begin_push_to_talk(&mut self, cx: &mut Context<Self>) {
+        if self.push_to_talk_active {
+            return;
+        }
+        self.push_to_talk_active = true;
+        if let Some(session) = &self.session {
+            session.push_to_talk();
+        }
+        self.set_mic_enabled(true, cx);
+    }
+
+    pub fn end_push_to_talk(&mut self, cx: &mut Context<Self>) {
+        if !self.push_to_talk_active {
+            return;
+        }
+        self.push_to_talk_active = false;
+        self.set_mic_enabled(false, cx);
+        self.role = "audience".to_string();
+        if let Some(session) = &self.session {
+            session.set_role("audience".to_string());
+        }
+        cx.notify();
+    }
+
     pub fn toggle_camera(&mut self, cx: &mut Context<Self>) {
         self.set_camera_enabled(!self.camera_enabled, cx);
     }
@@ -2668,6 +2783,34 @@ impl VoiceStore {
             DeviceKind::VideoInput => s.camera_device_id = device_id,
         });
         crate::schedule_settings_save(&settings, cx);
+    }
+
+    pub fn video_codec(cx: &App) -> String {
+        crate::Settings::try_global(cx)
+            .map(|s| s.read(cx).video_codec.clone())
+            .unwrap_or_else(|| "vp9".to_string())
+    }
+
+    pub fn svc_mode(cx: &App) -> String {
+        crate::Settings::try_global(cx)
+            .map(|s| s.read(cx).svc_mode.clone())
+            .unwrap_or_else(|| "l3t3".to_string())
+    }
+
+    pub fn set_video_codec(&mut self, codec: String, cx: &mut Context<Self>) {
+        if let Some(settings) = crate::Settings::try_global(cx) {
+            settings.update(cx, |s, _| s.video_codec = codec);
+            crate::schedule_settings_save(&settings, cx);
+        }
+        cx.notify();
+    }
+
+    pub fn set_svc_mode(&mut self, mode: String, cx: &mut Context<Self>) {
+        if let Some(settings) = crate::Settings::try_global(cx) {
+            settings.update(cx, |s, _| s.svc_mode = mode);
+            crate::schedule_settings_save(&settings, cx);
+        }
+        cx.notify();
     }
 
     pub fn device_menu(&self) -> Option<DeviceMenuKind> {

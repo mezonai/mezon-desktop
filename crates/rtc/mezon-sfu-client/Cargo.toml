@@ -1,0 +1,29 @@
+[package]
+name = "mezon-sfu-client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mezon-rtc = { path = "../mezon-rtc" }
+# `rtc` is webrtc-rs's Sans-I/O protocol core (same 0.20.2 as mezon-rtc's `webrtc`). We
+# depend on it directly only to name `RtpCodecKind` when mapping `RtcEvent::TrackAdded`.
+rtc = "0.20.2"
+tokio = { workspace = true }
+futures = { workspace = true }
+flume = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+url = { workspace = true }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+
+[dev-dependencies]
+mezon-codec = { path = "../mezon-codec" }
+webrtc = "0.20.2"

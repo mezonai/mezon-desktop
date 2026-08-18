@@ -3,56 +3,36 @@ mod camera;
 pub mod compose;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod linux_session;
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-mod pipewire_init;
 mod record;
 mod runtime;
 mod screen;
-mod screen_audio;
 mod screen_picker;
 mod screen_previews;
 mod screen_targets;
 mod stream_playback;
 mod video;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
-use futures::StreamExt;
-use livekit::options::{DegradationPreference, TrackPublishOptions, VideoEncoding};
-use livekit::participant::ParticipantKind;
-use livekit::prelude::*;
-use livekit::track::{
-    LocalAudioTrack, LocalTrack, LocalVideoTrack, RemoteVideoTrack, TrackKind, TrackSource,
+use anyhow::{Result, anyhow};
+use mezon_codec::{
+    AudioFrame, I420Frame, OpusDecoder, OpusEncoder, SvcConfig, VpxCodec, VpxDecoder, VpxEncoder,
 };
-use livekit::webrtc::audio_source::native::NativeAudioSource;
-use livekit::webrtc::audio_stream::native::NativeAudioStream;
-use livekit::webrtc::peer_connection_factory::IceServer;
-use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions, RtcAudioSource, VideoBuffer};
-use livekit::webrtc::stats::RtcStats;
-use livekit::webrtc::video_frame::I420Buffer;
-use livekit::webrtc::video_stream::native::NativeVideoStream;
-use parking_lot::{Condvar, Mutex};
+use mezon_rtc::codecs::{PT_OPUS, PT_VP8, PT_VP9};
+use mezon_rtc::{
+    LocalAudio, LocalVideo, PeerConnectionOpts, RemoteAudio, RemoteVideo, RemoteVideoKind,
+    RtcSession,
+};
+use mezon_sfu_client::{SfuClient, SfuClientEvent, SfuConfig, TungsteniteTransport};
 
 pub use audio::{AudioFormat, AudioIo, DeviceResetKind, PlaybackMixer};
-pub use camera::{
-    CameraController, CameraDeviceInfo, camera_denied, enumerate_cameras, start_camera,
-    start_camera_into,
-};
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-pub use linux_session::record_wayland_session;
 pub use mezon_record::{RecordError, RecordStats};
 pub use record::{
     RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter, RecordTaps,
 };
-pub use stream_playback::StreamAudioOutput;
-
-pub fn microphone_denied() -> bool {
-    audio::microphone_denied()
-}
 
 pub fn record_supported() -> bool {
     mezon_record::is_supported()
@@ -61,7 +41,16 @@ pub fn record_supported() -> bool {
 pub fn record_file_extension() -> &'static str {
     mezon_record::file_extension()
 }
+pub use camera::{
+    CameraController, CameraDeviceInfo, camera_denied, enumerate_cameras, start_camera_into,
+};
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub use linux_session::record_wayland_session;
+pub use stream_playback::StreamAudioOutput;
 
+pub fn microphone_denied() -> bool {
+    audio::microphone_denied()
+}
 pub use screen_picker::{PickedScreen, system_screen_share_pick};
 pub use screen_previews::{ScreenSharePreview, capture_screen_share_preview};
 pub use screen_targets::{
@@ -73,18 +62,28 @@ pub use video::VideoSurface;
 pub use video::{VideoFrameData, VideoFrameStore, i420_to_bgra_into, local_camera_key};
 
 use crate::screen::ScreenStopper;
-use crate::video::{local_screen_key, track_frame_key};
+use crate::video::{local_screen_key, remote_camera_key, remote_screen_key, track_frame_key};
 
-const MAX_REMOTE_VIDEO_WIDTH: u32 = 1920;
-const MAX_REMOTE_VIDEO_HEIGHT: u32 = 1080;
+const MIC_SSRC: u32 = 0x1111_1111;
+const CAMERA_SSRC: u32 = 0x2222_2222;
+const SCREEN_SSRC: u32 = 0x3333_3333;
 
-const AUDIO_SOURCE_QUEUE_SIZE_MS: u32 = 100;
-const MIC_PUBLISH_RETRY_INTERVAL: Duration = Duration::from_secs(2);
-const MIC_EGRESS_POLL_INTERVAL: Duration = Duration::from_secs(2);
-const MIC_EGRESS_PUBLISH_GRACE: Duration = Duration::from_secs(3);
-const MIC_EGRESS_STALL_LIMIT: u32 = 3;
-const PLAYBACK_RESTART_DELAY: Duration = Duration::from_millis(500);
-const MAX_PLAYBACK_RESTARTS: u32 = 3;
+const OPUS_BITRATE_BPS: i32 = 32_000;
+const CAMERA_BITRATE_KBPS: u32 = 1_200;
+const SCREEN_BITRATE_KBPS: u32 = 2_500;
+
+const OPUS_FRAME_SAMPLES: usize = 960;
+const OPUS_FRAME_DURATION: Duration = Duration::from_millis(20);
+const OPUS_SAMPLE_RATE: u32 = 48_000;
+
+const VIDEO_FRAME_DURATION: Duration = Duration::from_millis(33);
+const VIDEO_PTS_STEP: i64 = 3_000;
+
+const I16_TO_F32: f32 = 1.0 / 32_768.0;
+
+fn remote_audio_key(user_id: &str) -> u64 {
+    track_frame_key(user_id, "__mezon_remote_audio__")
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct IceServerConfig {
@@ -130,6 +129,8 @@ pub enum VoiceEvent {
 
 enum Command {
     SetMicEnabled(bool),
+    SetRole(String),
+    PushToTalk,
     SetCameraEnabled(bool),
     SetInputDevice(Option<String>),
     SetOutputDevice(Option<String>),
@@ -138,6 +139,25 @@ enum Command {
     StartScreenShare(PickedScreen, bool),
     StopScreenShare,
     Disconnect,
+}
+
+#[derive(Clone, Debug)]
+pub struct VoiceConnectConfig {
+    pub role: String,
+    pub video_codec: String,
+    pub svc_mode: String,
+    pub local_identity: String,
+}
+
+impl Default for VoiceConnectConfig {
+    fn default() -> Self {
+        Self {
+            role: "speaker".to_string(),
+            video_codec: "vp9".to_string(),
+            svc_mode: "l3t3".to_string(),
+            local_identity: String::new(),
+        }
+    }
 }
 
 pub struct VoiceSession {
@@ -151,32 +171,36 @@ pub struct VoiceSession {
 }
 
 impl VoiceSession {
+    #[allow(clippy::too_many_arguments)]
     pub fn connect(
         url: String,
         token: String,
+        room: String,
         input_device_id: Option<String>,
         output_device_id: Option<String>,
         camera_device_id: Option<String>,
         ice_servers: Vec<IceServerConfig>,
+        config: VoiceConnectConfig,
     ) -> Self {
         let (cmd_tx, cmd_rx) = flume::unbounded();
         let (evt_tx, evt_rx) = flume::unbounded();
         let frame_store = Arc::new(VideoFrameStore::default());
         let screen_full_res = Arc::new(AtomicBool::new(false));
 
-        let record_taps = record::RecordTaps::default();
-
         let store = frame_store.clone();
         let screen_full_res_task = screen_full_res.clone();
+        let record_taps = record::RecordTaps::default();
         let record_taps_task = record_taps.clone();
         runtime::runtime().spawn(async move {
             if let Err(e) = session_main(
                 url,
                 token,
+                room,
                 input_device_id,
                 output_device_id,
                 camera_device_id,
                 ice_servers,
+                config,
                 cmd_rx,
                 &evt_tx,
                 store,
@@ -224,18 +248,18 @@ impl VoiceSession {
         self.record.read().as_ref().map(|session| session.stats())
     }
 
-    pub fn recording_video_unavailable(&self) -> bool {
-        self.record
-            .read()
-            .as_ref()
-            .is_some_and(|session| session.video_unavailable())
-    }
-
     pub fn recording_failed(&self) -> bool {
         self.record
             .read()
             .as_ref()
             .is_some_and(|session| session.failed())
+    }
+
+    pub fn recording_video_unavailable(&self) -> bool {
+        self.record
+            .read()
+            .as_ref()
+            .is_some_and(|session| session.video_unavailable())
     }
 
     pub fn events(&self) -> flume::Receiver<VoiceEvent> {
@@ -248,6 +272,14 @@ impl VoiceSession {
 
     pub fn set_mic_enabled(&self, enabled: bool) {
         let _ = self.cmd_tx.send(Command::SetMicEnabled(enabled));
+    }
+
+    pub fn set_role(&self, role: String) {
+        let _ = self.cmd_tx.send(Command::SetRole(role));
+    }
+
+    pub fn push_to_talk(&self) {
+        let _ = self.cmd_tx.send(Command::PushToTalk);
     }
 
     pub fn set_camera_enabled(&self, enabled: bool) {
@@ -294,272 +326,313 @@ impl Drop for VoiceSession {
 }
 
 struct CameraSession {
-    track: LocalVideoTrack,
     controller: CameraController,
+    encode_task: tokio::task::JoinHandle<()>,
 }
 
-struct ScreenSession {
-    track: LocalVideoTrack,
-    stopper: ScreenStopper,
-    audio: Option<ScreenAudioSession>,
-}
-
-struct ScreenAudioSession {
-    track: LocalAudioTrack,
-    _capture: screen_audio::ScreenAudioCapture,
-    pump: tokio::task::JoinHandle<()>,
-}
-
-impl ScreenSession {
-    async fn stop(self, room: &Room) {
-        self.stopper.stop();
-        let _ = room
-            .local_participant()
-            .unpublish_track(&self.track.sid())
-            .await;
-        if let Some(audio) = self.audio {
-            audio.pump.abort();
-            let _ = room
-                .local_participant()
-                .unpublish_track(&audio.track.sid())
-                .await;
-        }
+impl CameraSession {
+    fn stop(self) {
+        self.controller.stop();
+        self.encode_task.abort();
     }
 }
 
-fn room_options(ice_servers: Vec<IceServerConfig>) -> RoomOptions {
-    let ice_servers: Vec<IceServer> = ice_servers
-        .into_iter()
-        .filter(|s| !s.urls.is_empty())
-        .map(|s| IceServer {
-            urls: s.urls,
-            username: s.username,
-            password: s.credential,
-        })
-        .collect();
+struct ScreenSession {
+    stopper: ScreenStopper,
+    encode_task: tokio::task::JoinHandle<()>,
+}
 
-    let mut options = RoomOptions::default();
-    options.adaptive_stream = true;
-    options.dynacast = true;
-    options.rtc_config.ice_servers = ice_servers;
-    options
+impl ScreenSession {
+    fn stop(self) {
+        self.stopper.stop();
+        self.encode_task.abort();
+    }
+}
+
+#[derive(Default)]
+struct RemoteRoster {
+    peers: BTreeSet<String>,
+}
+
+#[derive(Default, Clone, Copy)]
+struct RemoteTimes {
+    audio_ms: u64,
+    speaking_ms: u64,
+    camera_ms: u64,
+    screen_ms: u64,
+}
+
+#[derive(Default)]
+struct RemoteMediaState {
+    inner: parking_lot::Mutex<HashMap<String, RemoteTimes>>,
+}
+
+impl RemoteMediaState {
+    fn mark_audio(&self, user: &str, now: u64, speaking: bool) {
+        let mut m = self.inner.lock();
+        let t = m.entry(user.to_string()).or_default();
+        t.audio_ms = now;
+        if speaking {
+            t.speaking_ms = now;
+        }
+    }
+
+    fn mark_video(&self, user: &str, kind: RemoteVideoKind, now: u64) {
+        let mut m = self.inner.lock();
+        let t = m.entry(user.to_string()).or_default();
+        match kind {
+            RemoteVideoKind::Camera => t.camera_ms = now,
+            RemoteVideoKind::Screen => t.screen_ms = now,
+        }
+    }
+
+    fn snapshot(&self) -> HashMap<String, RemoteTimes> {
+        self.inner.lock().clone()
+    }
+}
+
+fn lifecycle_event(event: &SfuClientEvent, room: &str) -> Option<VoiceEvent> {
+    match event {
+        SfuClientEvent::Connected => Some(VoiceEvent::Connected {
+            room_name: room.to_string(),
+        }),
+        SfuClientEvent::Disconnected => Some(VoiceEvent::Disconnected {
+            reason: "disconnected".to_string(),
+        }),
+        SfuClientEvent::Error(message) => Some(VoiceEvent::Error(message.clone())),
+        _ => None,
+    }
+}
+
+fn apply_roster_event(roster: &mut RemoteRoster, event: &SfuClientEvent, self_id: &str) -> bool {
+    match event {
+        SfuClientEvent::RoleChanged { user_id, .. } | SfuClientEvent::PeerJoined { user_id }
+            if user_id == self_id =>
+        {
+            false
+        }
+        SfuClientEvent::RoleChanged { user_id, .. } | SfuClientEvent::PeerJoined { user_id } => {
+            roster.peers.insert(user_id.clone())
+        }
+        SfuClientEvent::PeerLeft { user_id } => roster.peers.remove(user_id),
+        SfuClientEvent::RoomSnapshot { user_ids } => {
+            let mut changed = false;
+            for uid in user_ids {
+                if uid != self_id {
+                    changed |= roster.peers.insert(uid.clone());
+                }
+            }
+            changed
+        }
+        _ => false,
+    }
+}
+
+const MEDIA_HANGOVER_MS: u64 = 1_000;
+
+fn media_recent(last_ms: u64, now_ms: u64) -> bool {
+    last_ms != 0 && now_ms.saturating_sub(last_ms) < MEDIA_HANGOVER_MS
+}
+
+const SPEAK_TICK_MS: u64 = 120;
+const SPEAK_HANGOVER_MS: u64 = 250;
+const MIC_SPEAK_RMS: f32 = 600.0;
+const REMOTE_SPEAK_RMS: f32 = 0.02;
+
+fn recent_voice(last_ms: u64, now_ms: u64) -> bool {
+    last_ms != 0 && now_ms.saturating_sub(last_ms) < SPEAK_HANGOVER_MS
+}
+
+fn rms_i16(samples: &[i16]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
+    (sum / samples.len() as f64).sqrt() as f32
+}
+
+fn rms_f32(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
+    (sum / samples.len() as f64).sqrt() as f32
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_participants(
+    local_identity: &str,
+    mic_on: bool,
+    camera_on: bool,
+    screen_on: bool,
+    connected: bool,
+    local_speaking: bool,
+    peers: &BTreeSet<String>,
+    media: &HashMap<String, RemoteTimes>,
+    now_ms: u64,
+) -> Vec<VoiceParticipant> {
+    let quality = if connected {
+        NetworkQuality::Good
+    } else {
+        NetworkQuality::Unknown
+    };
+
+    let mut participants = vec![VoiceParticipant {
+        identity: local_identity.to_string(),
+        name: local_identity.to_string(),
+        is_local: true,
+        is_agent: false,
+        speaking: local_speaking && mic_on,
+        muted: !mic_on,
+        camera: camera_on.then(|| local_camera_key(local_identity)),
+        screenshare: screen_on.then(|| local_screen_key(local_identity)),
+        quality,
+    }];
+
+    let mut remotes: BTreeSet<&String> = peers.iter().collect();
+    remotes.extend(media.keys());
+    for user in remotes {
+        if user == local_identity {
+            continue;
+        }
+        let times = media.get(user).copied().unwrap_or_default();
+        participants.push(VoiceParticipant {
+            camera: media_recent(times.camera_ms, now_ms).then(|| remote_camera_key(user)),
+            screenshare: media_recent(times.screen_ms, now_ms).then(|| remote_screen_key(user)),
+            name: user.clone(),
+            identity: user.clone(),
+            is_local: false,
+            is_agent: false,
+            speaking: recent_voice(times.speaking_ms, now_ms),
+            muted: !media_recent(times.audio_ms, now_ms),
+            quality,
+        });
+    }
+    participants
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn session_main(
     url: String,
     token: String,
+    room: String,
     input_device_id: Option<String>,
     output_device_id: Option<String>,
     camera_device_id: Option<String>,
     ice_servers: Vec<IceServerConfig>,
+    config: VoiceConnectConfig,
     cmd_rx: flume::Receiver<Command>,
     evt_tx: &flume::Sender<VoiceEvent>,
     frame_store: Arc<VideoFrameStore>,
     screen_full_res: Arc<AtomicBool>,
     session_record_taps: record::RecordTaps,
 ) -> Result<()> {
-    let options = room_options(ice_servers);
-    let (room, mut room_events) = Room::connect(&url, &token, options).await?;
-    let room = Arc::new(room);
-    tracing::info!("voice connected to room: {}", room.name());
-    let local_identity = room.local_participant().identity().as_str().to_string();
-    let _ = evt_tx.send(VoiceEvent::Connected {
-        room_name: room.name(),
-    });
+    let _ = ice_servers;
 
-    let mic_enabled = Arc::new(AtomicBool::new(false));
-    let mic_publication: Arc<Mutex<Option<LocalTrackPublication>>> = Arc::new(Mutex::new(None));
-    let mut audio_mixer = None;
-    let mut record_taps: Option<record::RecordTaps> = None;
-    let mut out_fmt = None;
-    let mut audio_io: Option<audio::AudioIo> = None;
-    let mut out_change_rx: Option<flume::Receiver<AudioFormat>> = None;
-    let mut device_reset_rx: Option<flume::Receiver<audio::DeviceResetKind>> = None;
-    let mut microphone_task: Option<tokio::task::JoinHandle<()>> = None;
+    let (video_codec, video_pt) = match config.video_codec.as_str() {
+        "vp8" => (VpxCodec::Vp8, PT_VP8),
+        _ => (VpxCodec::Vp9, PT_VP9),
+    };
+    let svc = if video_codec == VpxCodec::Vp9 {
+        match config.svc_mode.as_str() {
+            "l3t3" => Some(SvcConfig {
+                spatial_layers: 3,
+                temporal_layers: 3,
+                ksvc: false,
+            }),
+            "l3t3_key" => Some(SvcConfig {
+                spatial_layers: 3,
+                temporal_layers: 3,
+                ksvc: true,
+            }),
+            "l2t2" => Some(SvcConfig {
+                spatial_layers: 2,
+                temporal_layers: 2,
+                ksvc: false,
+            }),
+            "l1t3" => Some(SvcConfig {
+                spatial_layers: 1,
+                temporal_layers: 3,
+                ksvc: false,
+            }),
+            "l1t2" => Some(SvcConfig {
+                spatial_layers: 1,
+                temporal_layers: 2,
+                ksvc: false,
+            }),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    tracing::info!(
+        "voice video codec={:?} pt={} svc={:?}",
+        video_codec,
+        video_pt,
+        svc
+    );
+
+    let rtc = RtcSession::new(PeerConnectionOpts { loopback: false }).await?;
+    let audio_pub = rtc.publish_audio(MIC_SSRC, PT_OPUS).await?;
+    let camera_pub = rtc
+        .publish_video(CAMERA_SSRC, video_pt, video_codec)
+        .await?;
+    let screen_pub = rtc
+        .publish_video(SCREEN_SSRC, video_pt, video_codec)
+        .await?;
+    let audio_packets = rtc.subscribe_audio();
+    let video_frames = rtc.subscribe_video();
+
+    let local_identity = if config.local_identity.is_empty() {
+        "local".to_string()
+    } else {
+        config.local_identity.clone()
+    };
+    let sfu_user_id = (!config.local_identity.is_empty()).then(|| config.local_identity.clone());
+    let self_sfu_id = sfu_user_id.clone().unwrap_or_else(|| "0".to_string());
 
     let audio = tokio::task::spawn_blocking(move || {
         audio::AudioIo::start(input_device_id, output_device_id, session_record_taps)
     })
     .await
-    .map_err(|e| anyhow::anyhow!("audio init task failed: {e}"))?;
+    .map_err(|e| anyhow!("audio init task failed: {e}"))?;
+
+    let mic_enabled = Arc::new(AtomicBool::new(false));
+    let out_channels = Arc::new(AtomicU32::new(2));
+    let mut audio_io: Option<audio::AudioIo> = None;
+    let mut out_change_rx: Option<flume::Receiver<AudioFormat>> = None;
+    let mut device_reset_rx: Option<flume::Receiver<audio::DeviceResetKind>> = None;
+    let mut mic_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut audio_decode_task: Option<tokio::task::JoinHandle<()>> = None;
+
+    let local_voice_ms = Arc::new(AtomicU64::new(0));
+    let speak_epoch = Instant::now();
+    let remote_media = Arc::new(RemoteMediaState::default());
 
     match audio {
-        Ok(audio) => {
-            audio_mixer = Some(audio.mixer.clone());
-            out_fmt = Some(audio.output_format);
-            out_change_rx = Some(audio.output_format_rx.clone());
-            device_reset_rx = Some(audio.device_reset_rx.clone());
+        Ok(io) => {
+            out_channels.store(io.output_format.channels.max(1), Ordering::Relaxed);
+            out_change_rx = Some(io.output_format_rx.clone());
+            device_reset_rx = Some(io.device_reset_rx.clone());
 
-            record_taps = Some(audio.mixer.record_taps());
+            mic_task = Some(runtime::runtime().spawn(publish_microphone(
+                io.mic_rx.clone(),
+                io.input_format_rx.clone(),
+                mic_enabled.clone(),
+                audio_pub.clone(),
+                local_voice_ms.clone(),
+                speak_epoch,
+            )));
 
-            let mic_enabled = mic_enabled.clone();
-            let mic_publication_task = mic_publication.clone();
-            let mic_record_taps = audio.mixer.record_taps();
-            let mic_rx = audio.mic_rx.clone();
-            let input_format_rx = audio.input_format_rx.clone();
-            let room_for_mic = room.clone();
-            microphone_task = Some(runtime::runtime().spawn(async move {
-                let mut source: Option<NativeAudioSource> = None;
-                let mut channels: u32 = 1;
-                let mut sample_rate: u32 = 48_000;
-                let mut current_in_fmt: Option<AudioFormat> = None;
-                let mut last_publish_attempt: Option<Instant> = None;
-                let mut egress_timer = tokio::time::interval(MIC_EGRESS_POLL_INTERVAL);
-                egress_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                let mut last_egress_packets: u64 = 0;
-                let mut egress_stall_polls: u32 = 0;
-                let mut frames_since_poll: u64 = 0;
-                let mut egress_recovering = false;
-                let mut egress_grace_until: Option<Instant> = None;
-                loop {
-                    tokio::select! {
-                        biased;
-                        reconfigure = input_format_rx.recv_async() => {
-                            let Ok(in_fmt) = reconfigure else { break };
-                            current_in_fmt = Some(in_fmt);
-                            last_publish_attempt = Some(Instant::now());
-                            match publish_microphone_track(
-                                &room_for_mic,
-                                &mic_publication_task,
-                                &mic_enabled,
-                                in_fmt,
-                            )
-                            .await
-                            {
-                                Ok(new_source) => {
-                                    channels = new_source.channels;
-                                    sample_rate = new_source.sample_rate;
-                                    source = Some(new_source.source);
-                                    last_egress_packets = 0;
-                                    egress_stall_polls = 0;
-                                    egress_grace_until =
-                                        Some(Instant::now() + MIC_EGRESS_PUBLISH_GRACE);
-                                }
-                                Err(e) => {
-                                    tracing::warn!("failed to publish mic track: {e:#}");
-                                    source = None;
-                                }
-                            }
-                        }
-                        captured = mic_rx.recv_async() => {
-                            let Ok(samples) = captured else { break };
-                            if !mic_enabled.load(Ordering::Relaxed) {
-                                continue;
-                            }
-                            if let Some(in_fmt) = current_in_fmt {
-                                mic_record_taps.push(
-                                    mezon_record::AudioSource::Mic,
-                                    &samples,
-                                    in_fmt.sample_rate,
-                                    in_fmt.channels,
-                                );
-                            }
-                            if source.is_none()
-                                && last_publish_attempt
-                                    .is_none_or(|at| at.elapsed() >= MIC_PUBLISH_RETRY_INTERVAL)
-                                && let Some(in_fmt) = current_in_fmt
-                            {
-                                last_publish_attempt = Some(Instant::now());
-                                match publish_microphone_track(
-                                    &room_for_mic,
-                                    &mic_publication_task,
-                                    &mic_enabled,
-                                    in_fmt,
-                                )
-                                .await
-                                {
-                                    Ok(new_source) => {
-                                        channels = new_source.channels;
-                                        sample_rate = new_source.sample_rate;
-                                        source = Some(new_source.source);
-                                        last_egress_packets = 0;
-                                        egress_stall_polls = 0;
-                                        egress_grace_until =
-                                            Some(Instant::now() + MIC_EGRESS_PUBLISH_GRACE);
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("failed to retry mic track publish: {e:#}");
-                                    }
-                                }
-                            }
-                            let Some(mic_source) = source.as_ref() else {
-                                continue;
-                            };
-                            let samples_per_channel = samples.len() as u32 / channels;
-                            if samples_per_channel == 0 {
-                                continue;
-                            }
-                            let frame = AudioFrame {
-                                data: samples.into(),
-                                num_channels: channels,
-                                sample_rate,
-                                samples_per_channel,
-                            };
-                            if let Err(e) = mic_source.capture_frame(&frame).await {
-                                tracing::warn!("failed to capture mic frame: {e}");
-                                source = None;
-                            } else {
-                                frames_since_poll += 1;
-                            }
-                        }
-                        _ = egress_timer.tick() => {
-                            let fed = std::mem::take(&mut frames_since_poll);
-                            if !mic_enabled.load(Ordering::Relaxed) || source.is_none() {
-                                egress_stall_polls = 0;
-                                continue;
-                            }
-                            if egress_grace_until.is_some_and(|until| Instant::now() < until) {
-                                continue;
-                            }
-                            if fed == 0 {
-                                egress_stall_polls = 0;
-                                continue;
-                            }
-                            let track = mic_publication_task
-                                .lock()
-                                .as_ref()
-                                .and_then(|publication| publication.track());
-                            let Some(LocalTrack::Audio(track)) = track else {
-                                continue;
-                            };
-                            let packets = match tokio::time::timeout(
-                                Duration::from_millis(500),
-                                track.get_stats(),
-                            )
-                            .await
-                            {
-                                Ok(Ok(stats)) => outbound_audio_packets_sent(&stats),
-                                _ => continue,
-                            };
-                            if packets > last_egress_packets {
-                                last_egress_packets = packets;
-                                egress_stall_polls = 0;
-                                if egress_recovering {
-                                    tracing::info!("voice mic egress recovered after republish");
-                                    egress_recovering = false;
-                                }
-                                continue;
-                            }
-                            egress_stall_polls += 1;
-                            if egress_stall_polls < MIC_EGRESS_STALL_LIMIT {
-                                continue;
-                            }
-                            tracing::warn!(
-                                packets_sent = packets,
-                                "voice mic published but no RTP egress while unmuted; republishing track"
-                            );
-                            source = None;
-                            last_publish_attempt = None;
-                            egress_stall_polls = 0;
-                            egress_recovering = true;
-                            egress_grace_until = Some(Instant::now() + MIC_EGRESS_PUBLISH_GRACE);
-                        }
-                    }
-                }
-            }));
+            audio_decode_task = Some(runtime::runtime().spawn(play_remote_audio(
+                audio_packets,
+                io.mixer.clone(),
+                out_channels.clone(),
+                remote_media.clone(),
+                speak_epoch,
+            )));
 
-            audio_io = Some(audio);
+            audio_io = Some(io);
         }
         Err(e) => {
             tracing::error!("voice audio unavailable: {e:#}");
@@ -569,47 +642,82 @@ async fn session_main(
         }
     }
 
+    let video_decode = spawn_remote_video(
+        video_frames,
+        frame_store.clone(),
+        remote_media.clone(),
+        speak_epoch,
+    );
+
+    let connect_url = if url.contains('?') {
+        format!("{url}&access_token={token}")
+    } else {
+        format!("{url}?access_token={token}")
+    };
+    let transport = TungsteniteTransport::connect(&connect_url).await?;
+    let config = SfuConfig {
+        ws_url: url.clone(),
+        room: room.clone(),
+        role: config.role.clone(),
+        token: Some(token),
+        user_id: sfu_user_id,
+    };
+    let client = SfuClient::start(config, transport, rtc);
+    let sfu_events = client.events();
+
+    let mut roster = RemoteRoster::default();
     let mut mic_on = false;
+    let mut camera_on = false;
+    let mut screen_on = false;
+    let mut connected = false;
+    let mut local_speaking = false;
     let mut camera_device_id = camera_device_id;
-    let mut camera_switch_pending = false;
     let mut camera_session: Option<CameraSession> = None;
     let mut screen_session: Option<ScreenSession> = None;
-    let (cam_tx, cam_rx) = flume::bounded::<(u64, Result<CameraSession>)>(1);
-    let (screen_tx, screen_rx) = flume::bounded::<(u64, Result<ScreenSession>)>(1);
     let mut camera_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut screen_task: Option<tokio::task::JoinHandle<()>> = None;
-    let mut camera_gen: u64 = 0;
-    let mut screen_gen: u64 = 0;
-    let mut audio_tracks: HashMap<u64, tokio::task::JoinHandle<()>> = HashMap::new();
-    let mut video_tracks: HashMap<u64, VideoTrackHandle> = HashMap::new();
-
+    let (cam_tx, cam_rx) = flume::bounded::<Result<CameraSession>>(1);
+    let (screen_tx, screen_rx) = flume::bounded::<Result<ScreenSession>>(1);
     let mut last_participants: Vec<VoiceParticipant> = Vec::new();
-    let emit = |room: &Room,
-                mic: bool,
-                camera: &Option<CameraSession>,
-                screen: &Option<ScreenSession>,
+
+    let emit = |mic: bool,
+                camera: bool,
+                screen: bool,
+                connected: bool,
+                local_speaking: bool,
+                peers: &BTreeSet<String>,
                 last: &mut Vec<VoiceParticipant>| {
-        emit_participants(
-            room,
-            evt_tx,
+        let now = speak_epoch.elapsed().as_millis() as u64;
+        let media = remote_media.snapshot();
+        let current = build_participants(
             &local_identity,
             mic,
-            camera.is_some(),
-            screen.is_some(),
-            last,
+            camera,
+            screen,
+            connected,
+            local_speaking,
+            peers,
+            &media,
+            now,
         );
+        if *last != current {
+            *last = current.clone();
+            let _ = evt_tx.send(VoiceEvent::Participants(current));
+        }
     };
     emit(
-        &room,
         mic_on,
-        &camera_session,
-        &screen_session,
+        camera_on,
+        screen_on,
+        connected,
+        local_speaking,
+        &roster.peers,
         &mut last_participants,
     );
 
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     let trim_task = runtime::runtime().spawn(async {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
@@ -617,125 +725,32 @@ async fn session_main(
         }
     });
 
+    let mut speak_tick = tokio::time::interval(Duration::from_millis(SPEAK_TICK_MS));
+    speak_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         tokio::select! {
-            event = room_events.recv() => {
-                let Some(event) = event else { break };
-                match event {
-                    RoomEvent::TrackSubscribed { track, publication, participant } => {
-                        match track {
-                            RemoteTrack::Audio(audio_track) => {
-                                // Screen-share audio and a plain microphone are
-                                // the same kind of remote track here, so the
-                                // source is the only way to tell from a log
-                                // whether the shared sound ever reached the mix
-                                // the recorder tees from.
-                                tracing::info!(
-                                    "playing remote {:?} audio from {}",
-                                    publication.source(),
-                                    participant.identity().as_str()
-                                );
-                                if let (Some(mixer), Some(out_fmt)) = (&audio_mixer, out_fmt) {
-                                    let key = track_frame_key(participant.identity().as_str(), audio_track.sid().as_str());
-                                    if let Some(handle) = audio_tracks.remove(&key) {
-                                        handle.abort();
-                                    }
-                                    let handle = spawn_playback(audio_track, key, mixer.clone(), out_fmt);
-                                    audio_tracks.insert(key, handle);
-                                }
-                            }
-                            RemoteTrack::Video(video_track) => {
-                                let key = track_frame_key(participant.identity().as_str(), video_track.sid().as_str());
-                                if let Some(handle) = video_tracks.remove(&key) {
-                                    handle.stop();
-                                }
-                                let handle = spawn_video(video_track, key, frame_store.clone());
-                                video_tracks.insert(key, handle);
-                            }
-                        }
-                        emit(
-                            &room,
-                            mic_on,
-                            &camera_session,
-                            &screen_session,
-                            &mut last_participants,
-                        );
+            _ = speak_tick.tick() => {
+                let now = speak_epoch.elapsed().as_millis() as u64;
+                local_speaking = mic_on && recent_voice(local_voice_ms.load(Ordering::Relaxed), now);
+                emit(mic_on, camera_on, screen_on, connected, local_speaking, &roster.peers, &mut last_participants);
+            }
+            event = sfu_events.recv_async() => {
+                let Ok(event) = event else { break };
+                if let Some(voice_event) = lifecycle_event(&event, &room) {
+                    match event {
+                        SfuClientEvent::Connected => connected = true,
+                        SfuClientEvent::Disconnected => connected = false,
+                        _ => {}
                     }
-                    RoomEvent::TrackUnsubscribed { track, participant, .. } => {
-                        let key = track_frame_key(participant.identity().as_str(), track.sid().as_str());
-                        if let Some(handle) = audio_tracks.remove(&key) {
-                            handle.abort();
-                        }
-                        if let Some(handle) = video_tracks.remove(&key) {
-                            handle.stop();
-                        }
-                        if let Some(mixer) = &audio_mixer {
-                            mixer.remove(key);
-                        }
-                        frame_store.remove(key);
-                        emit(
-                            &room,
-                            mic_on,
-                            &camera_session,
-                            &screen_session,
-                            &mut last_participants,
-                        );
-                    }
-                    RoomEvent::ConnectionQualityChanged { quality, participant } => {
-                        if participant.identity().as_str() == local_identity {
-                            match quality {
-                                ConnectionQuality::Excellent | ConnectionQuality::Good => {
-                                    let _ = evt_tx.send(VoiceEvent::NetworkRecovered);
-                                }
-                                ConnectionQuality::Poor | ConnectionQuality::Lost => {
-                                    let _ = evt_tx.send(VoiceEvent::NetworkWeak);
-                                }
-                            }
-                        }
-                        emit(
-                            &room,
-                            mic_on,
-                            &camera_session,
-                            &screen_session,
-                            &mut last_participants,
-                        );
-                    }
-                    RoomEvent::ConnectionStateChanged(ConnectionState::Reconnecting) => {
-                        let _ = evt_tx.send(VoiceEvent::Reconnecting);
-                    }
-                    RoomEvent::ConnectionStateChanged(ConnectionState::Connected) => {
-                        let _ = evt_tx.send(VoiceEvent::Reconnected);
-                    }
-                    RoomEvent::ConnectionStateChanged(ConnectionState::Disconnected) => {}
-                    RoomEvent::Reconnecting => {
-                        let _ = evt_tx.send(VoiceEvent::Reconnecting);
-                    }
-                    RoomEvent::Reconnected => {
-                        let _ = evt_tx.send(VoiceEvent::Reconnected);
-                    }
-                    RoomEvent::Disconnected { reason } => {
-                        let _ = evt_tx.send(VoiceEvent::Disconnected { reason: format!("{reason:?}") });
+                    let is_disconnect = matches!(event, SfuClientEvent::Disconnected);
+                    let _ = evt_tx.send(voice_event);
+                    emit(mic_on, camera_on, screen_on, connected, local_speaking, &roster.peers, &mut last_participants);
+                    if is_disconnect {
                         break;
                     }
-                    RoomEvent::ParticipantConnected(..)
-                    | RoomEvent::ParticipantActive(..)
-                    | RoomEvent::ParticipantDisconnected(..)
-                    | RoomEvent::TrackPublished { .. }
-                    | RoomEvent::TrackUnpublished { .. }
-                    | RoomEvent::TrackMuted { .. }
-                    | RoomEvent::TrackUnmuted { .. }
-                    | RoomEvent::ActiveSpeakersChanged { .. }
-                    | RoomEvent::ParticipantNameChanged { .. }
-                    | RoomEvent::ParticipantsUpdated { .. } => {
-                        emit(
-                            &room,
-                            mic_on,
-                            &camera_session,
-                            &screen_session,
-                            &mut last_participants,
-                        );
-                    }
-                    _ => {}
+                } else if apply_roster_event(&mut roster, &event, &self_sfu_id) {
+                    emit(mic_on, camera_on, screen_on, connected, local_speaking, &roster.peers, &mut last_participants);
                 }
             }
             command = cmd_rx.recv_async() => {
@@ -746,39 +761,21 @@ async fn session_main(
                         if let Some(io) = &audio_io {
                             io.set_input_active(enabled);
                         }
-                        if let Some(publication) = mic_publication.lock().as_ref() {
-                            if enabled {
-                                publication.unmute();
-                            } else {
-                                publication.mute();
-                            }
+                        emit(mic_on, camera_on, screen_on, connected, local_speaking, &roster.peers, &mut last_participants);
+                    }
+                    Ok(Command::SetRole(role)) => {
+                        if let Err(e) = client.set_role(role) {
+                            tracing::warn!("voice set_role failed: {e}");
                         }
-                        emit(
-                            &room,
-                            mic_on,
-                            &camera_session,
-                            &screen_session,
-                            &mut last_participants,
-                        );
+                    }
+                    Ok(Command::PushToTalk) => {
+                        if let Err(e) = client.push_to_talk() {
+                            tracing::warn!("voice push_to_talk failed: {e}");
+                        }
                     }
                     Ok(Command::SetNoiseSuppression(enabled, level)) => {
                         if let Some(io) = &audio_io {
                             io.set_noise_suppression(enabled, level);
-                        }
-                    }
-                    Ok(Command::SetCameraEnabled(true)) => {
-                        if camera_session.is_none() && camera_task.is_none() {
-                            camera_switch_pending = false;
-                            let room = room.clone();
-                            let identity = local_identity.clone();
-                            let store = frame_store.clone();
-                            let tx = cam_tx.clone();
-                            let generation = camera_gen;
-                            let device = camera_device_id.clone();
-                            camera_task = Some(runtime::runtime().spawn(async move {
-                                let result = start_camera_track(&room, &identity, store, device).await;
-                                let _ = tx.send_async((generation, result)).await;
-                            }));
                         }
                     }
                     Ok(Command::SetInputDevice(id)) => {
@@ -796,164 +793,130 @@ async fn session_main(
                             camera_device_id = id;
                             if let Some(session) = &camera_session {
                                 session.controller.switch(camera_device_id.clone());
-                            } else if camera_task.is_some() {
-                                camera_switch_pending = true;
                             }
                         }
                     }
+                    Ok(Command::SetCameraEnabled(true)) => {
+                        if camera_session.is_none() && camera_task.is_none() {
+                            let identity = local_identity.clone();
+                            let store = frame_store.clone();
+                            let publisher = camera_pub.clone();
+                            let device = camera_device_id.clone();
+                            let tx = cam_tx.clone();
+                            camera_task = Some(runtime::runtime().spawn(async move {
+                                let result = start_camera_track(
+                                    publisher,
+                                    identity,
+                                    store,
+                                    device,
+                                    video_codec,
+                                    svc,
+                                )
+                                .await;
+                                let _ = tx.send_async(result).await;
+                            }));
+                        }
+                    }
                     Ok(Command::SetCameraEnabled(false)) => {
-                        let mut changed = false;
-                        camera_gen = camera_gen.wrapping_add(1);
-                        camera_switch_pending = false;
                         if let Some(task) = camera_task.take() {
                             task.abort();
-                            changed = true;
                         }
                         if let Some(session) = camera_session.take() {
-                            session.controller.stop();
-                            let _ = room.local_participant().unpublish_track(&session.track.sid()).await;
+                            session.stop();
                             frame_store.remove(local_camera_key(&local_identity));
-                            changed = true;
                         }
-                        if changed {
-                            emit(
-                            &room,
-                            mic_on,
-                            &camera_session,
-                            &screen_session,
-                            &mut last_participants,
-                        );
-                        }
+                        camera_on = false;
+                        emit(mic_on, camera_on, screen_on, connected, local_speaking, &roster.peers, &mut last_participants);
                     }
                     Ok(Command::StartScreenShare(pick, share_audio)) => {
                         if screen_session.is_none() && screen_task.is_none() {
                             screen_full_res.store(false, Ordering::Relaxed);
-                            let room = room.clone();
+                            if share_audio {
+                                tracing::warn!(
+                                    "voice screen-audio sharing is not yet supported by the SFU engine"
+                                );
+                                let _ = evt_tx.send(VoiceEvent::Error(
+                                    "screen audio: sharing system audio is not supported yet"
+                                        .to_owned(),
+                                ));
+                            }
                             let identity = local_identity.clone();
                             let store = frame_store.clone();
+                            let publisher = screen_pub.clone();
                             let full_res = screen_full_res.clone();
                             let tx = screen_tx.clone();
-                            let generation = screen_gen;
-                            let taps = record_taps.clone();
-                            let events = evt_tx.clone();
                             screen_task = Some(runtime::runtime().spawn(async move {
-                                let result =
-                                    start_screen_track(&room, &identity, store, full_res, pick, share_audio, taps, events).await;
-                                let _ = tx.send_async((generation, result)).await;
+                                let result = start_screen_track(
+                                    publisher,
+                                    identity,
+                                    store,
+                                    full_res,
+                                    pick,
+                                    video_codec,
+                                    svc,
+                                )
+                                .await;
+                                let _ = tx.send_async(result).await;
                             }));
                         }
                     }
                     Ok(Command::StopScreenShare) => {
-                        let mut changed = false;
-                        screen_gen = screen_gen.wrapping_add(1);
                         if let Some(task) = screen_task.take() {
                             task.abort();
-                            changed = true;
                         }
                         if let Some(session) = screen_session.take() {
-                            session.stop(&room).await;
+                            session.stop();
                             frame_store.remove(local_screen_key(&local_identity));
-                            changed = true;
                         }
-                        if changed {
-                            emit(
-                            &room,
-                            mic_on,
-                            &camera_session,
-                            &screen_session,
-                            &mut last_participants,
-                        );
-                        }
+                        screen_on = false;
+                        emit(mic_on, camera_on, screen_on, connected, local_speaking, &roster.peers, &mut last_participants);
                     }
                     Ok(Command::Disconnect) | Err(_) => {
-                        abort_task(&mut microphone_task).await;
-                        shutdown_audio_io(&mut audio_io).await;
-                        if let Some(task) = camera_task.take() {
-                            task.abort();
-                        }
-                        if let Some(task) = screen_task.take() {
-                            task.abort();
-                        }
-                        if let Some(session) = camera_session.take() {
-                            session.controller.stop();
-                        }
-                        if let Some(session) = screen_session.take() {
-                            session.stopper.stop();
-                            if let Some(audio) = &session.audio {
-                                audio.pump.abort();
-                            }
-                        }
-                        let _ = room.close().await;
-                        let _ = evt_tx.send(VoiceEvent::Disconnected { reason: "left".into() });
+                        let _ = evt_tx.send(VoiceEvent::Disconnected {
+                            reason: "left".into(),
+                        });
                         break;
                     }
                 }
             }
             result = cam_rx.recv_async() => {
                 match result {
-                    Ok((generation, Ok(session))) if generation == camera_gen => {
+                    Ok(Ok(session)) if camera_task.is_some() => {
                         camera_task = None;
-                        if camera_switch_pending {
-                            camera_switch_pending = false;
-                            session.controller.switch(camera_device_id.clone());
-                        }
                         camera_session = Some(session);
-                        emit(
-                            &room,
-                            mic_on,
-                            &camera_session,
-                            &screen_session,
-                            &mut last_participants,
-                        );
+                        camera_on = true;
+                        emit(mic_on, camera_on, screen_on, connected, local_speaking, &roster.peers, &mut last_participants);
                     }
-                    Ok((_, Ok(session))) => {
-                        session.controller.stop();
-                        let _ = room.local_participant().unpublish_track(&session.track.sid()).await;
-                        if camera_session.is_none() {
-                            frame_store.remove(local_camera_key(&local_identity));
-                        }
+                    Ok(Ok(session)) => {
+                        session.stop();
+                        frame_store.remove(local_camera_key(&local_identity));
                     }
-                    Ok((generation, Err(e))) if generation == camera_gen => {
+                    Ok(Err(e)) => {
                         camera_task = None;
                         tracing::warn!("camera enable failed: {e:#}");
                         let _ = evt_tx.send(VoiceEvent::Error(format!("camera: {e}")));
                     }
-                    Ok((_, Err(_))) => {}
                     Err(_) => {}
                 }
             }
             result = screen_rx.recv_async() => {
                 match result {
-                    Ok((generation, Ok(session))) if generation == screen_gen => {
+                    Ok(Ok(session)) if screen_task.is_some() => {
                         screen_task = None;
                         screen_session = Some(session);
-                        emit(
-                            &room,
-                            mic_on,
-                            &camera_session,
-                            &screen_session,
-                            &mut last_participants,
-                        );
+                        screen_on = true;
+                        emit(mic_on, camera_on, screen_on, connected, local_speaking, &roster.peers, &mut last_participants);
                     }
-                    Ok((_, Ok(session))) => {
-                        session.stop(&room).await;
-                        if screen_session.is_none() {
-                            frame_store.remove(local_screen_key(&local_identity));
-                        }
+                    Ok(Ok(session)) => {
+                        session.stop();
+                        frame_store.remove(local_screen_key(&local_identity));
                     }
-                    Ok((generation, Err(e))) if generation == screen_gen => {
+                    Ok(Err(e)) => {
                         screen_task = None;
                         tracing::warn!("screen share enable failed: {e:#}");
                         let _ = evt_tx.send(VoiceEvent::Error(format!("screen: {e}")));
                     }
-                    Ok((_, Err(_))) => {}
                     Err(_) => {}
-                }
-            }
-            change = recv_output_change(&out_change_rx) => {
-                if let (Some(new_fmt), Some(mixer)) = (change, &audio_mixer) {
-                    out_fmt = Some(new_fmt);
-                    respawn_audio_playback(&room, mixer, new_fmt, &mut audio_tracks);
                 }
             }
             reset = recv_device_reset(&device_reset_rx) => {
@@ -963,16 +926,34 @@ async fn session_main(
                     });
                 }
             }
+            change = recv_output_change(&out_change_rx) => {
+                if let Some(fmt) = change {
+                    out_channels.store(fmt.channels.max(1), Ordering::Relaxed);
+                }
+            }
         }
     }
 
-    for handle in audio_tracks.into_values() {
-        handle.abort();
+    if let Some(task) = camera_task.take() {
+        task.abort();
     }
-    for handle in video_tracks.into_values() {
-        handle.stop();
+    if let Some(task) = screen_task.take() {
+        task.abort();
     }
-    abort_task(&mut microphone_task).await;
+    if let Some(session) = camera_session.take() {
+        session.stop();
+    }
+    if let Some(session) = screen_session.take() {
+        session.stop();
+    }
+    if let Some(task) = mic_task.take() {
+        task.abort();
+    }
+    if let Some(task) = audio_decode_task.take() {
+        task.abort();
+    }
+    video_decode.abort();
+    client.close();
     shutdown_audio_io(&mut audio_io).await;
 
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -981,10 +962,304 @@ async fn session_main(
     Ok(())
 }
 
-async fn abort_task(task: &mut Option<tokio::task::JoinHandle<()>>) {
-    if let Some(task) = task.take() {
-        task.abort();
-        let _ = task.await;
+async fn publish_microphone(
+    mic_rx: flume::Receiver<Vec<i16>>,
+    input_format_rx: flume::Receiver<AudioFormat>,
+    mic_enabled: Arc<AtomicBool>,
+    publisher: Arc<LocalAudio>,
+    voice_ms: Arc<AtomicU64>,
+    speak_epoch: Instant,
+) {
+    let mut encoder = match OpusEncoder::new(1, OPUS_BITRATE_BPS) {
+        Ok(encoder) => encoder,
+        Err(e) => {
+            tracing::error!("voice opus encoder unavailable: {e}");
+            return;
+        }
+    };
+    let mut resampler = MicResampler::new();
+    loop {
+        tokio::select! {
+            biased;
+            fmt = input_format_rx.recv_async() => {
+                let Ok(fmt) = fmt else { break };
+                resampler.set_source(fmt.sample_rate, fmt.channels);
+            }
+            captured = mic_rx.recv_async() => {
+                let Ok(samples) = captured else { break };
+                if !mic_enabled.load(Ordering::Relaxed) {
+                    resampler.reset();
+                    continue;
+                }
+                if rms_i16(&samples) > MIC_SPEAK_RMS {
+                    voice_ms.store(speak_epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
+                }
+                resampler.push(&samples);
+                while let Some(frame) = resampler.take_frame() {
+                    match encoder.encode(AudioFrame { samples: &frame, channels: 1 }) {
+                        Ok(packet) => {
+                            if publisher
+                                .write_encoded(&packet, OPUS_FRAME_DURATION)
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        Err(e) => tracing::warn!("voice opus encode failed: {e}"),
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn play_remote_audio(
+    audio_packets: flume::Receiver<RemoteAudio>,
+    mixer: Arc<audio::PlaybackMixer>,
+    out_channels: Arc<AtomicU32>,
+    remote_media: Arc<RemoteMediaState>,
+    speak_epoch: Instant,
+) {
+    let mut decoders: HashMap<String, OpusDecoder> = HashMap::new();
+    let mut interleaved: Vec<i16> = Vec::new();
+    while let Ok(RemoteAudio { user_id, opus }) = audio_packets.recv_async().await {
+        let decoder = if let Some(decoder) = decoders.get_mut(&user_id) {
+            decoder
+        } else {
+            match OpusDecoder::new(1) {
+                Ok(decoder) => decoders.entry(user_id.clone()).or_insert(decoder),
+                Err(e) => {
+                    tracing::error!("voice opus decoder unavailable: {e}");
+                    continue;
+                }
+            }
+        };
+        match decoder.decode(&opus) {
+            Ok(mono) => {
+                let now = speak_epoch.elapsed().as_millis() as u64;
+                remote_media.mark_audio(&user_id, now, rms_f32(&mono) > REMOTE_SPEAK_RMS);
+                let channels = out_channels.load(Ordering::Relaxed).max(1) as usize;
+                interleaved.clear();
+                interleaved.reserve(mono.len() * channels);
+                for sample in mono {
+                    let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                    for _ in 0..channels {
+                        interleaved.push(value);
+                    }
+                }
+                mixer.push(remote_audio_key(&user_id), &interleaved);
+            }
+            Err(e) => tracing::warn!("voice opus decode failed: {e}"),
+        }
+    }
+    for user_id in decoders.keys() {
+        mixer.remove(remote_audio_key(user_id));
+    }
+}
+
+fn spawn_remote_video(
+    video_frames: flume::Receiver<RemoteVideo>,
+    frame_store: Arc<VideoFrameStore>,
+    remote_media: Arc<RemoteMediaState>,
+    speak_epoch: Instant,
+) -> tokio::task::JoinHandle<()> {
+    runtime::runtime().spawn(async move {
+        let mut decoders: HashMap<(String, RemoteVideoKind), VpxDecoder> = HashMap::new();
+        let mut bgra: Vec<u8> = Vec::new();
+        while let Ok(RemoteVideo {
+            user_id,
+            kind,
+            codec,
+            frame,
+        }) = video_frames.recv_async().await
+        {
+            let decoder = if let Some(decoder) = decoders.get_mut(&(user_id.clone(), kind)) {
+                decoder
+            } else {
+                match VpxDecoder::new(codec) {
+                    Ok(decoder) => decoders.entry((user_id.clone(), kind)).or_insert(decoder),
+                    Err(e) => {
+                        tracing::error!("voice vpx decoder unavailable: {e}");
+                        continue;
+                    }
+                }
+            };
+            let images = match decoder.decode(&frame.data) {
+                Ok(images) => images,
+                Err(e) => {
+                    tracing::warn!("voice vpx decode failed: {e}");
+                    continue;
+                }
+            };
+            let now = speak_epoch.elapsed().as_millis() as u64;
+            remote_media.mark_video(&user_id, kind, now);
+            let key = match kind {
+                RemoteVideoKind::Camera => remote_camera_key(&user_id),
+                RemoteVideoKind::Screen => remote_screen_key(&user_id),
+            };
+            for image in images {
+                let w = image.width as usize;
+                let h = image.height as usize;
+                bgra.resize(w * h * 4, 0);
+                i420_to_bgra_into(
+                    &mut bgra,
+                    &image.y,
+                    &image.u,
+                    &image.v,
+                    image.y_stride as usize,
+                    image.u_stride as usize,
+                    image.v_stride as usize,
+                    w,
+                    h,
+                );
+                if let Some(recycled) =
+                    frame_store.publish(key, image.width, image.height, std::mem::take(&mut bgra))
+                {
+                    bgra = recycled;
+                }
+            }
+        }
+    })
+}
+
+fn svc_layer_kbps(total_kbps: u32, spatial_layers: u8) -> Vec<u32> {
+    match spatial_layers {
+        0 | 1 => vec![total_kbps],
+        2 => vec![total_kbps * 3 / 8, total_kbps - total_kbps * 3 / 8],
+        _ => {
+            let base = total_kbps / 4;
+            vec![base, base, total_kbps - 2 * base]
+        }
+    }
+}
+
+async fn encode_video_loop(
+    frame_rx: flume::Receiver<I420Frame>,
+    publisher: Arc<LocalVideo>,
+    bitrate_kbps: u32,
+    codec: VpxCodec,
+    svc: Option<SvcConfig>,
+) {
+    let mut encoder: Option<VpxEncoder> = None;
+    let mut dims: (u32, u32) = (0, 0);
+    let mut pts: i64 = 0;
+    while let Ok(frame) = frame_rx.recv_async().await {
+        let mut force_keyframe = false;
+        if encoder.is_none() || dims != (frame.width, frame.height) {
+            match VpxEncoder::new(codec, frame.width, frame.height, bitrate_kbps) {
+                Ok(mut new_encoder) => {
+                    if let Some(svc_cfg) = svc
+                        && (svc_cfg.spatial_layers >= 2 || svc_cfg.temporal_layers >= 2)
+                    {
+                        let per_layer = svc_layer_kbps(bitrate_kbps, svc_cfg.spatial_layers);
+                        if let Err(e) = new_encoder.enable_vp9_svc(svc_cfg, &per_layer) {
+                            tracing::warn!("voice vp9 svc enable failed: {e}");
+                        }
+                    }
+                    encoder = Some(new_encoder);
+                    dims = (frame.width, frame.height);
+                    force_keyframe = true;
+                }
+                Err(e) => {
+                    tracing::warn!("voice video encoder init failed: {e}");
+                    continue;
+                }
+            }
+        }
+        let Some(encoder) = encoder.as_mut() else {
+            continue;
+        };
+        let encoded = match encoder.encode(&frame, force_keyframe, pts) {
+            Ok(encoded) => encoded,
+            Err(e) => {
+                tracing::warn!("voice vp9 encode failed: {e}");
+                continue;
+            }
+        };
+        pts += VIDEO_PTS_STEP;
+        for encoded_frame in &encoded {
+            if publisher
+                .write_encoded(encoded_frame, VIDEO_FRAME_DURATION)
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_camera_track(
+    publisher: Arc<LocalVideo>,
+    identity: String,
+    frame_store: Arc<VideoFrameStore>,
+    device_id: Option<String>,
+    codec: VpxCodec,
+    svc: Option<SvcConfig>,
+) -> Result<CameraSession> {
+    let (controller, ready_rx, frame_rx) = camera::start_camera(identity, frame_store, device_id);
+    ready_rx
+        .recv_async()
+        .await
+        .map_err(|_| anyhow!("camera thread exited"))?
+        .map_err(|e| anyhow!(e))?;
+    let encode_task = runtime::runtime().spawn(encode_video_loop(
+        frame_rx,
+        publisher,
+        CAMERA_BITRATE_KBPS,
+        codec,
+        svc,
+    ));
+    Ok(CameraSession {
+        controller,
+        encode_task,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_screen_track(
+    publisher: Arc<LocalVideo>,
+    identity: String,
+    frame_store: Arc<VideoFrameStore>,
+    full_res: Arc<AtomicBool>,
+    pick: PickedScreen,
+    codec: VpxCodec,
+    svc: Option<SvcConfig>,
+) -> Result<ScreenSession> {
+    let (stopper, ready_rx, frame_rx) = screen::start_screen(identity, frame_store, full_res, pick);
+    ready_rx
+        .recv_async()
+        .await
+        .map_err(|_| anyhow!("screen thread exited"))?
+        .map_err(|e| anyhow!(e))?;
+    let encode_task = runtime::runtime().spawn(encode_video_loop(
+        frame_rx,
+        publisher,
+        SCREEN_BITRATE_KBPS,
+        codec,
+        svc,
+    ));
+    Ok(ScreenSession {
+        stopper,
+        encode_task,
+    })
+}
+
+async fn recv_device_reset(
+    rx: &Option<flume::Receiver<audio::DeviceResetKind>>,
+) -> Option<audio::DeviceResetKind> {
+    match rx {
+        Some(rx) => rx.recv_async().await.ok(),
+        None => std::future::pending().await,
+    }
+}
+
+async fn recv_output_change(rx: &Option<flume::Receiver<AudioFormat>>) -> Option<AudioFormat> {
+    match rx {
+        Some(rx) => rx.recv_async().await.ok(),
+        None => std::future::pending().await,
     }
 }
 
@@ -997,549 +1272,275 @@ async fn shutdown_audio_io(audio_io: &mut Option<audio::AudioIo>) {
     }
 }
 
-struct PublishedMicSource {
-    source: NativeAudioSource,
-    channels: u32,
-    sample_rate: u32,
+struct MicResampler {
+    source_rate: u32,
+    channels: usize,
+    cursor: f64,
+    src: Vec<f32>,
+    frame: Vec<f32>,
 }
 
-fn outbound_audio_packets_sent(stats: &[RtcStats]) -> u64 {
-    stats
-        .iter()
-        .filter_map(|stat| match stat {
-            RtcStats::OutboundRtp(outbound) => Some(outbound.sent.packets_sent),
-            _ => None,
-        })
-        .sum()
-}
-
-async fn publish_microphone_track(
-    room: &Room,
-    mic_publication: &Arc<Mutex<Option<LocalTrackPublication>>>,
-    mic_enabled: &Arc<AtomicBool>,
-    in_fmt: AudioFormat,
-) -> Result<PublishedMicSource> {
-    let previous = mic_publication.lock().take();
-    if let Some(previous) = previous {
-        let _ = room
-            .local_participant()
-            .unpublish_track(&previous.sid())
-            .await;
-    }
-
-    let source = NativeAudioSource::new(
-        AudioSourceOptions::default(),
-        in_fmt.sample_rate,
-        in_fmt.channels,
-        AUDIO_SOURCE_QUEUE_SIZE_MS,
-    );
-    let mic_track =
-        LocalAudioTrack::create_audio_track("microphone", RtcAudioSource::Native(source.clone()));
-    let publication = room
-        .local_participant()
-        .publish_track(
-            LocalTrack::Audio(mic_track),
-            TrackPublishOptions {
-                source: TrackSource::Microphone,
-                ..Default::default()
-            },
-        )
-        .await?;
-    if !mic_enabled.load(Ordering::Relaxed) {
-        publication.mute();
-    }
-    *mic_publication.lock() = Some(publication);
-    Ok(PublishedMicSource {
-        source,
-        channels: in_fmt.channels.max(1),
-        sample_rate: in_fmt.sample_rate,
-    })
-}
-
-async fn start_camera_track(
-    room: &Room,
-    identity: &str,
-    frame_store: Arc<VideoFrameStore>,
-    device_id: Option<String>,
-) -> Result<CameraSession> {
-    let (controller, track_rx) = camera::start_camera(identity.to_string(), frame_store, device_id);
-    let track = track_rx
-        .recv_async()
-        .await
-        .map_err(|_| anyhow::anyhow!("camera thread exited"))?
-        .map_err(|e| anyhow::anyhow!(e))?;
-    room.local_participant()
-        .publish_track(
-            LocalTrack::Video(track.clone()),
-            TrackPublishOptions {
-                source: TrackSource::Camera,
-                simulcast: true,
-                video_encoding: Some(VideoEncoding {
-                    max_bitrate: 1_200_000,
-                    max_framerate: 30.0,
-                }),
-                ..Default::default()
-            },
-        )
-        .await?;
-    Ok(CameraSession { track, controller })
-}
-
-async fn start_screen_track(
-    room: &Room,
-    identity: &str,
-    frame_store: Arc<VideoFrameStore>,
-    full_res: Arc<AtomicBool>,
-    pick: PickedScreen,
-    share_audio: bool,
-    record_taps: Option<record::RecordTaps>,
-    evt_tx: flume::Sender<VoiceEvent>,
-) -> Result<ScreenSession> {
-    // Whether the switch in the picker was on is the first thing to know when a
-    // recording comes out silent, and it left no trace anywhere before.
-    tracing::info!("starting screen share (share system audio: {share_audio})");
-    let (stopper, track_rx) =
-        screen::start_screen(identity.to_string(), frame_store, full_res, pick);
-    let track = track_rx
-        .recv_async()
-        .await
-        .map_err(|_| anyhow::anyhow!("screen thread exited"))?
-        .map_err(|e| anyhow::anyhow!(e))?;
-    room.local_participant()
-        .publish_track(
-            LocalTrack::Video(track.clone()),
-            TrackPublishOptions {
-                source: TrackSource::Screenshare,
-                simulcast: false,
-                video_encoding: Some(VideoEncoding {
-                    max_bitrate: 2_500_000,
-                    max_framerate: 15.0,
-                }),
-                degradation_preference: Some(DegradationPreference::MaintainResolution),
-                ..Default::default()
-            },
-        )
-        .await?;
-    let audio = if share_audio {
-        match start_screen_audio_track(room, record_taps).await {
-            Ok(audio) => {
-                tracing::info!("sharing this machine's system audio with the call");
-                Some(audio)
-            }
-            Err(e) => {
-                // The screen keeps sharing without it, so a log line was the
-                // only sign — nobody in the call hears the shared sound and the
-                // recording has none either, with nothing to explain why.
-                tracing::warn!("system audio share unavailable: {e:#}");
-                let _ = evt_tx.send(VoiceEvent::Error(format!("screen audio: {e}")));
-                None
-            }
-        }
-    } else {
-        None
-    };
-    Ok(ScreenSession {
-        track,
-        stopper,
-        audio,
-    })
-}
-
-async fn start_screen_audio_track(
-    room: &Room,
-    record_taps: Option<record::RecordTaps>,
-) -> Result<ScreenAudioSession> {
-    let capture = tokio::task::spawn_blocking(screen_audio::start_screen_audio)
-        .await
-        .map_err(|e| anyhow::anyhow!("screen audio init task failed: {e}"))?
-        .map_err(|e| anyhow::anyhow!(e))?;
-
-    let source = NativeAudioSource::new(
-        AudioSourceOptions::default(),
-        screen_audio::SCREEN_AUDIO_SAMPLE_RATE,
-        screen_audio::SCREEN_AUDIO_CHANNELS,
-        AUDIO_SOURCE_QUEUE_SIZE_MS,
-    );
-    let track =
-        LocalAudioTrack::create_audio_track("screen-audio", RtcAudioSource::Native(source.clone()));
-    room.local_participant()
-        .publish_track(
-            LocalTrack::Audio(track.clone()),
-            TrackPublishOptions {
-                source: TrackSource::ScreenshareAudio,
-                dtx: false,
-                audio_encoding: Some(livekit::options::audio::SPEECH.encoding.clone()),
-                ..Default::default()
-            },
-        )
-        .await?;
-
-    let rx = capture.rx.clone();
-    let pump = runtime::runtime().spawn(async move {
-        let channels = screen_audio::SCREEN_AUDIO_CHANNELS;
-        while let Ok(samples) = rx.recv_async().await {
-            let samples_per_channel = samples.len() as u32 / channels;
-            if samples_per_channel == 0 {
-                continue;
-            }
-            if let Some(taps) = &record_taps {
-                taps.push(
-                    mezon_record::AudioSource::Screen,
-                    &samples,
-                    screen_audio::SCREEN_AUDIO_SAMPLE_RATE,
-                    channels,
-                );
-            }
-            let frame = AudioFrame {
-                data: samples.into(),
-                num_channels: channels,
-                sample_rate: screen_audio::SCREEN_AUDIO_SAMPLE_RATE,
-                samples_per_channel,
-            };
-            let _ = source.capture_frame(&frame).await;
-        }
-    });
-
-    Ok(ScreenAudioSession {
-        track,
-        _capture: capture,
-        pump,
-    })
-}
-
-fn spawn_playback(
-    track: RemoteAudioTrack,
-    key: u64,
-    mixer: Arc<audio::PlaybackMixer>,
-    out_fmt: AudioFormat,
-) -> tokio::task::JoinHandle<()> {
-    runtime::runtime().spawn(async move {
-        let mut restart_attempts = 0;
-        loop {
-            let rtc_track = track.rtc_track();
-            let mut stream = NativeAudioStream::new(
-                rtc_track,
-                out_fmt.sample_rate as i32,
-                out_fmt.channels as i32,
-            );
-            let mut saw_frame = false;
-            while let Some(frame) = stream.next().await {
-                saw_frame = true;
-                mixer.push(key, &frame.data);
-            }
-            mixer.remove(key);
-
-            if restart_attempts >= MAX_PLAYBACK_RESTARTS {
-                tracing::warn!(
-                    "remote audio stream ended after {MAX_PLAYBACK_RESTARTS} restart attempts; stopping playback reader"
-                );
-                break;
-            }
-
-            let delay = PLAYBACK_RESTART_DELAY * 2u32.pow(restart_attempts);
-            restart_attempts += 1;
-            tracing::warn!(
-                "remote audio stream ended (received_frames={saw_frame}); restart attempt {restart_attempts}/{MAX_PLAYBACK_RESTARTS} in {}ms",
-                delay.as_millis()
-            );
-            tokio::time::sleep(delay).await;
-        }
-    })
-}
-
-async fn recv_output_change(rx: &Option<flume::Receiver<AudioFormat>>) -> Option<AudioFormat> {
-    match rx {
-        Some(rx) => rx.recv_async().await.ok(),
-        None => std::future::pending().await,
-    }
-}
-
-async fn recv_device_reset(
-    rx: &Option<flume::Receiver<audio::DeviceResetKind>>,
-) -> Option<audio::DeviceResetKind> {
-    match rx {
-        Some(rx) => rx.recv_async().await.ok(),
-        None => std::future::pending().await,
-    }
-}
-
-fn respawn_audio_playback(
-    room: &Room,
-    mixer: &Arc<audio::PlaybackMixer>,
-    out_fmt: AudioFormat,
-    audio_tracks: &mut HashMap<u64, tokio::task::JoinHandle<()>>,
-) {
-    for (_, handle) in audio_tracks.drain() {
-        handle.abort();
-    }
-    for participant in room.remote_participants().values() {
-        let identity = participant.identity().as_str().to_string();
-        for publication in participant.track_publications().values() {
-            if publication.kind() != TrackKind::Audio || !publication.is_subscribed() {
-                continue;
-            }
-            let Some(RemoteTrack::Audio(track)) = publication.track() else {
-                continue;
-            };
-            let key = track_frame_key(&identity, publication.sid().as_str());
-            mixer.remove(key);
-            let handle = spawn_playback(track, key, mixer.clone(), out_fmt);
-            audio_tracks.insert(key, handle);
+impl MicResampler {
+    fn new() -> Self {
+        Self {
+            source_rate: OPUS_SAMPLE_RATE,
+            channels: 1,
+            cursor: 0.0,
+            src: Vec::new(),
+            frame: Vec::new(),
         }
     }
-}
 
-#[derive(Default)]
-struct VideoConvertState {
-    latest: Option<I420Buffer>,
-    closed: bool,
-}
-
-#[derive(Default)]
-struct VideoConvertSlot {
-    state: Mutex<VideoConvertState>,
-    cond: Condvar,
-}
-
-impl VideoConvertSlot {
-    fn put(&self, buffer: I420Buffer) {
-        self.state.lock().latest = Some(buffer);
-        self.cond.notify_one();
+    fn set_source(&mut self, source_rate: u32, channels: u32) {
+        let channels = channels.max(1) as usize;
+        if source_rate == self.source_rate && channels == self.channels {
+            return;
+        }
+        self.source_rate = source_rate.max(1);
+        self.channels = channels;
+        self.reset();
     }
 
-    fn close(&self) {
-        self.state.lock().closed = true;
-        self.cond.notify_one();
+    fn reset(&mut self) {
+        self.cursor = 0.0;
+        self.src.clear();
+        self.frame.clear();
     }
 
-    fn take_latest(&self) -> Option<I420Buffer> {
-        let mut state = self.state.lock();
-        loop {
-            if let Some(buffer) = state.latest.take() {
-                return Some(buffer);
-            }
-            if state.closed {
-                return None;
-            }
-            self.cond.wait(&mut state);
+    fn push(&mut self, interleaved: &[i16]) {
+        for chunk in interleaved.chunks(self.channels) {
+            let sum: i32 = chunk.iter().map(|&s| s as i32).sum();
+            self.src
+                .push(sum as f32 * I16_TO_F32 / self.channels as f32);
+        }
+        self.resample();
+    }
+
+    fn resample(&mut self) {
+        if self.source_rate == OPUS_SAMPLE_RATE {
+            self.frame.append(&mut self.src);
+            return;
+        }
+        let step = self.source_rate as f64 / OPUS_SAMPLE_RATE as f64;
+        while self.cursor + 1.0 < self.src.len() as f64 {
+            let index = self.cursor as usize;
+            let fraction = (self.cursor - index as f64) as f32;
+            let sample = self.src[index] * (1.0 - fraction) + self.src[index + 1] * fraction;
+            self.frame.push(sample);
+            self.cursor += step;
+        }
+        let consumed = self.cursor as usize;
+        if consumed > 0 {
+            self.src.drain(..consumed);
+            self.cursor -= consumed as f64;
         }
     }
-}
 
-struct VideoTrackHandle {
-    task: tokio::task::JoinHandle<()>,
-    slot: Arc<VideoConvertSlot>,
-}
-
-impl VideoTrackHandle {
-    fn stop(self) {
-        self.task.abort();
-        self.slot.close();
-    }
-}
-
-fn spawn_video(
-    track: RemoteVideoTrack,
-    key: u64,
-    frame_store: Arc<VideoFrameStore>,
-) -> VideoTrackHandle {
-    let rtc_track = track.rtc_track();
-    let slot = Arc::new(VideoConvertSlot::default());
-
-    let convert_slot = slot.clone();
-    let convert_store = frame_store;
-    if let Err(e) = std::thread::Builder::new()
-        .name("mezon-video-convert".into())
-        .spawn(move || {
-            let mut bgra: Vec<u8> = Vec::new();
-            while let Some(buffer) = convert_slot.take_latest() {
-                let width = buffer.width();
-                let height = buffer.height();
-                let (sy, su, sv) = buffer.strides();
-                let (y, u, v) = buffer.data();
-                bgra.clear();
-                bgra.resize(width as usize * height as usize * 4, 0);
-                i420_to_bgra_into(
-                    &mut bgra,
-                    y,
-                    u,
-                    v,
-                    sy as usize,
-                    su as usize,
-                    sv as usize,
-                    width as usize,
-                    height as usize,
-                );
-                if let Some(recycled) =
-                    convert_store.publish(key, width, height, std::mem::take(&mut bgra))
-                {
-                    bgra = recycled;
-                }
-            }
-            convert_store.remove(key);
-        })
-    {
-        tracing::error!("failed to spawn video convert thread: {e}");
-    }
-
-    let task_slot = slot.clone();
-    let task = runtime::runtime().spawn(async move {
-        let mut stream = NativeVideoStream::new(rtc_track);
-        while let Some(frame) = stream.next().await {
-            let mut buffer = frame.buffer.to_i420();
-            let (width, height) = bounded_dimensions(
-                buffer.width(),
-                buffer.height(),
-                MAX_REMOTE_VIDEO_WIDTH,
-                MAX_REMOTE_VIDEO_HEIGHT,
-            );
-            if width != buffer.width() || height != buffer.height() {
-                buffer = buffer.scale(width as i32, height as i32);
-            }
-            task_slot.put(buffer);
+    fn take_frame(&mut self) -> Option<Vec<f32>> {
+        if self.frame.len() < OPUS_FRAME_SAMPLES {
+            return None;
         }
-        task_slot.close();
-    });
-
-    VideoTrackHandle { task, slot }
-}
-
-fn bounded_dimensions(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
-    if width <= max_width && height <= max_height {
-        return (width, height);
-    }
-    let scale =
-        (max_width as f64 / width.max(1) as f64).min(max_height as f64 / height.max(1) as f64);
-    let width = ((width as f64 * scale).floor() as u32 & !1).max(2);
-    let height = ((height as f64 * scale).floor() as u32 & !1).max(2);
-    (width, height)
-}
-
-fn is_agent_participant(
-    kind: ParticipantKind,
-    permission: Option<livekit_protocol::ParticipantPermission>,
-) -> bool {
-    #[allow(deprecated)]
-    let legacy_agent_permission = permission.is_some_and(|p| p.agent);
-    legacy_agent_permission || kind == ParticipantKind::Agent
-}
-
-fn emit_participants(
-    room: &Room,
-    evt_tx: &flume::Sender<VoiceEvent>,
-    local_identity: &str,
-    local_mic_enabled: bool,
-    local_camera_on: bool,
-    local_screen_on: bool,
-    last: &mut Vec<VoiceParticipant>,
-) {
-    let mut participants = Vec::new();
-
-    let local = room.local_participant();
-    participants.push(VoiceParticipant {
-        identity: local.identity().as_str().to_string(),
-        name: display_name(&local.name(), local.identity().as_str()),
-        is_local: true,
-        is_agent: is_agent_participant(local.kind(), local.permission()),
-        speaking: local.is_speaking(),
-        muted: !local_mic_enabled || local_mic_muted(&local),
-        camera: local_camera_on.then(|| local_camera_key(local_identity)),
-        screenshare: local_screen_on.then(|| local_screen_key(local_identity)),
-        quality: network_quality(local.connection_quality()),
-    });
-
-    let mut remotes: Vec<RemoteParticipant> = room.remote_participants().into_values().collect();
-    remotes.sort_by(|a, b| a.identity().as_str().cmp(b.identity().as_str()));
-    for participant in &remotes {
-        let identity = participant.identity().as_str().to_string();
-        let (camera, screenshare) = remote_video_keys(participant, &identity);
-        participants.push(VoiceParticipant {
-            name: display_name(&participant.name(), &identity),
-            is_local: false,
-            is_agent: is_agent_participant(participant.kind(), participant.permission()),
-            speaking: participant.is_speaking(),
-            muted: remote_mic_muted(participant),
-            camera,
-            screenshare,
-            quality: network_quality(participant.connection_quality()),
-            identity,
-        });
-    }
-
-    if *last == participants {
-        return;
-    }
-    last.clone_from(&participants);
-    let _ = evt_tx.send(VoiceEvent::Participants(participants));
-}
-
-fn remote_video_keys(
-    participant: &RemoteParticipant,
-    identity: &str,
-) -> (Option<u64>, Option<u64>) {
-    let mut camera = None;
-    let mut screenshare = None;
-    for publication in participant.track_publications().values() {
-        if publication.kind() != TrackKind::Video
-            || !publication.is_subscribed()
-            || publication.is_muted()
-        {
-            continue;
-        }
-        let key = track_frame_key(identity, publication.sid().as_str());
-        match publication.source() {
-            TrackSource::Screenshare => screenshare = Some(key),
-            _ => camera = Some(key),
-        }
-    }
-    (camera, screenshare)
-}
-
-fn network_quality(quality: ConnectionQuality) -> NetworkQuality {
-    match quality {
-        ConnectionQuality::Excellent => NetworkQuality::Excellent,
-        ConnectionQuality::Good => NetworkQuality::Good,
-        ConnectionQuality::Poor => NetworkQuality::Poor,
-        ConnectionQuality::Lost => NetworkQuality::Unknown,
-    }
-}
-
-fn local_mic_muted(local: &LocalParticipant) -> bool {
-    local
-        .track_publications()
-        .values()
-        .find(|publication| publication.source() == TrackSource::Microphone)
-        .is_some_and(|publication| publication.is_muted())
-}
-
-fn remote_mic_muted(participant: &RemoteParticipant) -> bool {
-    participant
-        .track_publications()
-        .values()
-        .find(|publication| publication.source() == TrackSource::Microphone)
-        .is_none_or(|publication| publication.is_muted())
-}
-
-fn display_name(name: &str, identity: &str) -> String {
-    if name.trim().is_empty() {
-        identity.to_string()
-    } else {
-        name.to_string()
+        let rest = self.frame.split_off(OPUS_FRAME_SAMPLES);
+        Some(std::mem::replace(&mut self.frame, rest))
     }
 }
 
 #[cfg(test)]
-mod remote_video_tests {
-    use super::bounded_dimensions;
+mod tests {
+    use super::*;
 
-    #[test]
-    fn bounded_dimensions_preserve_small_frames() {
-        assert_eq!(bounded_dimensions(1280, 720, 1920, 1080), (1280, 720));
+    fn peers_of(users: &[&str]) -> BTreeSet<String> {
+        users.iter().map(|u| u.to_string()).collect()
     }
 
     #[test]
-    fn bounded_dimensions_cap_large_frames_evenly() {
-        assert_eq!(bounded_dimensions(3840, 2160, 1920, 1080), (1920, 1080));
-        assert_eq!(bounded_dimensions(2560, 1600, 1920, 1080), (1728, 1080));
+    fn local_participant_reflects_local_state() {
+        let list = build_participants(
+            "me",
+            true,
+            true,
+            false,
+            true,
+            false,
+            &BTreeSet::new(),
+            &HashMap::new(),
+            1000,
+        );
+        let local = &list[0];
+        assert!(local.is_local);
+        assert!(!local.muted, "mic on means not muted");
+        assert_eq!(local.camera, Some(local_camera_key("me")));
+        assert_eq!(local.screenshare, None);
+        assert_eq!(local.quality, NetworkQuality::Good);
+        assert_eq!(list.len(), 1, "no remotes when roster empty and no media");
+    }
+
+    #[test]
+    fn muted_and_disconnected_local() {
+        let list = build_participants(
+            "me",
+            false,
+            false,
+            false,
+            false,
+            false,
+            &BTreeSet::new(),
+            &HashMap::new(),
+            1000,
+        );
+        assert!(list[0].muted);
+        assert_eq!(list[0].quality, NetworkQuality::Unknown);
+    }
+
+    #[test]
+    fn remote_camera_attaches_to_the_sending_user() {
+        let peers = peers_of(&["alice", "bob"]);
+        let mut media = HashMap::new();
+        media.insert(
+            "alice".to_string(),
+            RemoteTimes {
+                audio_ms: 1000,
+                speaking_ms: 0,
+                camera_ms: 1000,
+                screen_ms: 0,
+            },
+        );
+        let list = build_participants("me", false, false, false, true, false, &peers, &media, 1000);
+        assert_eq!(list.len(), 3);
+        let alice = list.iter().find(|p| p.identity == "alice").unwrap();
+        assert_eq!(alice.camera, Some(remote_camera_key("alice")));
+        assert!(!alice.muted, "recent audio means not muted");
+        let bob = list.iter().find(|p| p.identity == "bob").unwrap();
+        assert_eq!(bob.camera, None);
+        assert!(bob.muted, "no audio means muted");
+    }
+
+    #[test]
+    fn remote_appears_from_media_without_roster_membership() {
+        let mut media = HashMap::new();
+        media.insert(
+            "77".to_string(),
+            RemoteTimes {
+                audio_ms: 0,
+                speaking_ms: 0,
+                camera_ms: 0,
+                screen_ms: 1000,
+            },
+        );
+        let list = build_participants(
+            "me",
+            false,
+            false,
+            false,
+            true,
+            false,
+            &BTreeSet::new(),
+            &media,
+            1000,
+        );
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[1].identity, "77");
+        assert_eq!(list[1].screenshare, Some(remote_screen_key("77")));
+        assert_eq!(list[1].camera, None);
+    }
+
+    #[test]
+    fn lifecycle_maps_connect_disconnect_error() {
+        assert!(matches!(
+            lifecycle_event(&SfuClientEvent::Connected, "42"),
+            Some(VoiceEvent::Connected { room_name }) if room_name == "42"
+        ));
+        assert!(matches!(
+            lifecycle_event(&SfuClientEvent::Disconnected, "42"),
+            Some(VoiceEvent::Disconnected { .. })
+        ));
+        assert!(matches!(
+            lifecycle_event(&SfuClientEvent::Error("boom".into()), "42"),
+            Some(VoiceEvent::Error(msg)) if msg == "boom"
+        ));
+        assert!(lifecycle_event(&SfuClientEvent::RemoteAudio, "42").is_none());
+        assert!(lifecycle_event(&SfuClientEvent::Joined, "42").is_none());
+    }
+
+    #[test]
+    fn roster_events_fold_and_report_change() {
+        let mut roster = RemoteRoster::default();
+        let me = "me";
+        assert!(apply_roster_event(
+            &mut roster,
+            &SfuClientEvent::RoleChanged {
+                user_id: "alice".into(),
+                role: "speaker".into(),
+            },
+            me
+        ));
+        assert!(roster.peers.contains("alice"));
+        assert!(!apply_roster_event(
+            &mut roster,
+            &SfuClientEvent::RoleChanged {
+                user_id: "alice".into(),
+                role: "audience".into(),
+            },
+            me
+        ));
+        assert!(apply_roster_event(
+            &mut roster,
+            &SfuClientEvent::PeerLeft {
+                user_id: "alice".into(),
+            },
+            me
+        ));
+        assert!(!roster.peers.contains("alice"));
+    }
+
+    #[test]
+    fn roster_drops_our_own_role_echo() {
+        let mut roster = RemoteRoster::default();
+        assert!(!apply_roster_event(
+            &mut roster,
+            &SfuClientEvent::RoleChanged {
+                user_id: "42".into(),
+                role: "speaker".into(),
+            },
+            "42"
+        ));
+        assert!(roster.peers.is_empty());
+    }
+
+    #[test]
+    fn mic_resampler_passthrough_yields_20ms_frames() {
+        let mut resampler = MicResampler::new();
+        resampler.set_source(48_000, 1);
+        let input: Vec<i16> = (0..OPUS_FRAME_SAMPLES as i16 * 2).collect();
+        resampler.push(&input);
+        assert!(resampler.take_frame().is_some());
+        assert!(resampler.take_frame().is_some());
+        assert!(resampler.take_frame().is_none());
+    }
+
+    #[test]
+    fn mic_resampler_downmixes_stereo() {
+        let mut resampler = MicResampler::new();
+        resampler.set_source(48_000, 2);
+        let input: Vec<i16> = (0..OPUS_FRAME_SAMPLES)
+            .flat_map(|_| [16_384, -16_384])
+            .collect();
+        resampler.push(&input);
+        let frame = resampler.take_frame().expect("one frame");
+        assert_eq!(frame.len(), OPUS_FRAME_SAMPLES);
+        assert!(
+            frame.iter().all(|s| s.abs() < 0.01),
+            "L/R cancel to silence"
+        );
+    }
+
+    #[test]
+    fn mic_resampler_downsamples_96k_to_48k() {
+        let mut resampler = MicResampler::new();
+        resampler.set_source(96_000, 1);
+        let input: Vec<i16> = vec![1000; OPUS_FRAME_SAMPLES * 4];
+        resampler.push(&input);
+        assert!(resampler.take_frame().is_some());
+        assert!(resampler.take_frame().is_some());
     }
 }

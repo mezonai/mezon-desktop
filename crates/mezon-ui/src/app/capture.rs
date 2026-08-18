@@ -886,6 +886,7 @@ pub fn join_voice(channel_id: i64, clan_id: i64, cx: &mut App) -> anyhow::Result
                     input,
                     output,
                     camera,
+                    "speaker".to_string(),
                     window,
                     cx,
                 );

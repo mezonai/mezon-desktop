@@ -1,0 +1,23 @@
+[package]
+name = "mezon-rtc"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mezon-codec = { path = "../mezon-codec" }
+tokio.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+async-trait.workspace = true
+flume.workspace = true
+webrtc = "0.20.2"
+# `rtc` is webrtc-rs's Sans-I/O protocol core (same 0.20.2 as `webrtc`). It is a
+# private dependency of `webrtc`, so we depend on it directly to name the codec
+# parameter types, DTLS/ICE enums, and SDP constants the factory configures.
+rtc = "0.20.2"

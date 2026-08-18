@@ -9,7 +9,6 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-livekit = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures = { workspace = true }
@@ -20,4 +19,9 @@ tracing.workspace = true
 flume.workspace = true
 url.workspace = true
 parking_lot.workspace = true
+async-trait = { workspace = true }
+webrtc = "0.20.2"
+rtc = "0.20.2"
 mezon-voice = { path = "../mezon-voice" }
+mezon-rtc = { path = "../rtc/mezon-rtc" }
+mezon-codec = { path = "../rtc/mezon-codec" }

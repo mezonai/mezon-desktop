@@ -359,6 +359,11 @@ pub struct Settings {
     pub output_device_id: Option<String>,
     /// Selected camera (video input) device identifier
     pub camera_device_id: Option<String>,
+    /// Video codec for outgoing camera/screen: "vp8" | "vp9". Applied on next join.
+    pub video_codec: String,
+    /// VP9 SVC scalability mode: "l3t3" | "l1t3" | "none". Ignored for VP8. Applied
+    /// on next join.
+    pub svc_mode: String,
     /// User-defined clan ordering: list of clan_ids in display order
     #[serde(default)]
     pub clan_order: Vec<ClanId>,
@@ -390,6 +395,8 @@ impl Default for Settings {
             input_device_id: None,
             output_device_id: None,
             camera_device_id: None,
+            video_codec: "vp9".to_string(),
+            svc_mode: "l3t3".to_string(),
             clan_order: Vec::new(),
             last_clan_id: None,
             last_channel_id: None,

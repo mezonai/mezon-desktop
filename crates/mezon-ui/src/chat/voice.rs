@@ -526,6 +526,8 @@ fn voice_header(
             )
     });
 
+    let status_pill = voice.and_then(|v| connection_status_pill(theme, v.read(cx)));
+
     div()
         .flex()
         .flex_row()
@@ -554,10 +556,45 @@ fn voice_header(
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.text_primary)
                         .child(name.to_string()),
-                ),
+                )
+                .children(status_pill),
         )
         .children(right)
         .into_any_element()
+}
+
+fn connection_status_pill(theme: &Theme, store: &VoiceStore) -> Option<AnyElement> {
+    let (label, dot): (&str, Rgba) = match store.connection() {
+        VoiceConnection::Idle => return None,
+        VoiceConnection::Connecting { .. } => ("Connecting…", theme.status_idle),
+        VoiceConnection::Failed { .. } => ("Failed", theme.danger),
+        VoiceConnection::Connected { .. } => match store.call_status() {
+            VoiceCallStatus::Stable => ("Connected", theme.status_online),
+            VoiceCallStatus::WeakNetwork => ("Weak network", theme.status_idle),
+            VoiceCallStatus::Reconnecting => ("Reconnecting…", theme.status_idle),
+        },
+    };
+    Some(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.))
+            .px_2()
+            .py(px(2.))
+            .rounded_full()
+            .bg(theme.bg_secondary)
+            .border_1()
+            .border_color(theme.border)
+            .child(div().size(px(8.)).rounded_full().bg(dot))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.text_secondary)
+                    .child(label.to_string()),
+            )
+            .into_any_element(),
+    )
 }
 
 fn voice_inbox_button(
@@ -771,8 +808,6 @@ fn render_pre_join(
             })
     });
 
-    // A single shared closure builds a join action so both the primary "Join"
-    // button and the error-state "Retry" button trigger the same (re)join.
     let make_join_action = {
         let voice = voice.clone();
         let channel_id = channel.id.to_string();
@@ -781,7 +816,7 @@ fn render_pre_join(
         let input_device_id = input_device_id.clone();
         let output_device_id = output_device_id.clone();
         let camera_device_id = camera_device_id.clone();
-        move || {
+        move |role: &'static str| {
             let voice = voice.clone();
             let channel_id = channel_id.clone();
             let clan_id = clan_id.clone();
@@ -791,6 +826,7 @@ fn render_pre_join(
             let camera_device_id = camera_device_id.clone();
             move |_: &gpui::ClickEvent, window: &mut gpui::Window, cx: &mut gpui::App| {
                 voice.update(cx, |store, cx| {
+                    store.close_join_role_menu(cx);
                     store.join(
                         channel_id.clone(),
                         clan_id.clone(),
@@ -798,6 +834,7 @@ fn render_pre_join(
                         input_device_id.clone(),
                         output_device_id.clone(),
                         camera_device_id.clone(),
+                        role.to_string(),
                         window,
                         cx,
                     );
@@ -806,25 +843,158 @@ fn render_pre_join(
         }
     };
 
+    let menu_open = voice.read(cx).join_role_menu_open();
+    let green = theme.status_online;
+    let green_hover = darken(theme.status_online, 0.12);
+    let caret_divider = darken(theme.status_online, 0.22);
+
     let join = {
-        let green = theme.status_online;
-        let green_hover = darken(theme.status_online, 0.12);
-        div()
+        let primary = div()
             .id("voice-join-btn")
             .flex()
             .items_center()
             .justify_center()
             .px_5()
             .py(px(10.))
-            .rounded_full()
+            .rounded_l(px(24.))
             .bg(green)
             .cursor_pointer()
             .hover(move |s| s.bg(green_hover))
             .text_color(gpui::rgb(0xffffff))
             .text_sm()
             .font_weight(FontWeight::MEDIUM)
-            .child(mezon_i18n::t(locale, "channelVoice.joinChannelVoiceBS.joinVoice").to_string())
-            .on_click(make_join_action())
+            .child("Join as speaker".to_string())
+            .on_click(make_join_action("speaker"));
+
+        let caret = {
+            let voice = voice.clone();
+            div()
+                .id("voice-join-caret")
+                .flex()
+                .items_center()
+                .justify_center()
+                .px_3()
+                .py(px(10.))
+                .rounded_r(px(24.))
+                .bg(green)
+                .border_l_1()
+                .border_color(caret_divider)
+                .cursor_pointer()
+                .hover(move |s| s.bg(green_hover))
+                .child(
+                    Icon::new(if menu_open {
+                        IconName::VoiceArowUpIcon
+                    } else {
+                        IconName::VoiceArowDownIcon
+                    })
+                    .size(px(12.))
+                    .text_color(gpui::rgb(0xffffff)),
+                )
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    voice.update(cx, |store, cx| store.toggle_join_role_menu(cx));
+                })
+        };
+
+        let flyout = menu_open.then(|| {
+            let voice = voice.clone();
+            let hover_bg = theme.bg_hover;
+            let row = |id: &'static str,
+                       icon: IconName,
+                       label: &'static str,
+                       subtitle: &'static str,
+                       on_click: _|
+             -> AnyElement {
+                div()
+                    .id(id)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover_bg))
+                    .child(
+                        Icon::new(icon)
+                            .size(px(18.))
+                            .text_color(theme.text_secondary),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.text_primary)
+                                    .child(label.to_string()),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(1.))
+                                    .text_xs()
+                                    .text_color(theme.text_muted)
+                                    .child(subtitle.to_string()),
+                            ),
+                    )
+                    .on_click(on_click)
+                    .into_any_element()
+            };
+
+            deferred(
+                div()
+                    .id("voice-join-role-flyout")
+                    .absolute()
+                    .top(px(50.))
+                    .left(px(0.))
+                    .w(px(240.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .p_2()
+                    .rounded_md()
+                    .bg(theme.tokens.bg_theme_contexify)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow_lg()
+                    .occlude()
+                    .on_mouse_down_out({
+                        let voice = voice.clone();
+                        move |_: &MouseDownEvent, _, cx: &mut App| {
+                            voice.update(cx, |store, cx| store.close_join_role_menu(cx));
+                        }
+                    })
+                    .child(row(
+                        "voice-join-role-speaker",
+                        IconName::VoiceMicIcon,
+                        "Join as speaker",
+                        "Talk and share media",
+                        make_join_action("speaker"),
+                    ))
+                    .child(row(
+                        "voice-join-role-audience",
+                        IconName::Speaker,
+                        "Join as audience",
+                        "Listen only, hold mic to talk",
+                        make_join_action("audience"),
+                    )),
+            )
+            .into_any_element()
+        });
+
+        div()
+            .relative()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_stretch()
+                    .child(primary)
+                    .child(caret),
+            )
+            .children(flyout)
     };
 
     let body = div()
@@ -853,7 +1023,15 @@ fn render_pre_join(
         .when_some(error, |this, message| {
             this.child(div().text_color(theme.danger_text).text_sm().child(message))
         })
-        .child(join);
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .child(join)
+                .child(codec_config_control(theme, voice, cx)),
+        );
 
     div()
         .flex()
@@ -873,6 +1051,166 @@ fn render_pre_join(
         ))
         .child(body)
         .into_any_element()
+}
+
+#[derive(Clone, Copy)]
+enum CodecSetting {
+    Codec,
+    Svc,
+}
+
+fn codec_config_control(theme: &Theme, voice: &Entity<VoiceStore>, cx: &App) -> AnyElement {
+    let open = voice.read(cx).codec_config_open();
+    let codec = VoiceStore::video_codec(cx);
+    let svc = VoiceStore::svc_mode(cx);
+    let vp9_selected = codec == "vp9";
+
+    let gear = {
+        let voice = voice.clone();
+        let hover_bg = theme.bg_hover;
+        div()
+            .id("voice-codec-gear")
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(40.))
+            .rounded_full()
+            .bg(theme.bg_secondary)
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover_bg))
+            .tooltip(Tooltip::text("Video codec & scalability"))
+            .child(
+                Icon::new(IconName::CallSetting)
+                    .size(px(18.))
+                    .text_color(theme.text_secondary),
+            )
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                voice.update(cx, |store, cx| store.toggle_codec_config(cx));
+            })
+    };
+
+    let popover = open.then(|| {
+        deferred(
+            div()
+                .id("voice-codec-popover")
+                .absolute()
+                .bottom(px(48.))
+                .left(px(0.))
+                .w(px(260.))
+                .flex()
+                .flex_col()
+                .gap_3()
+                .p_3()
+                .rounded_md()
+                .bg(theme.tokens.bg_theme_contexify)
+                .border_1()
+                .border_color(theme.border)
+                .shadow_lg()
+                .occlude()
+                .on_mouse_down_out({
+                    let voice = voice.clone();
+                    move |_: &MouseDownEvent, _, cx: &mut App| {
+                        voice.update(cx, |store, cx| store.close_codec_config(cx));
+                    }
+                })
+                .child(codec_selector_section(
+                    theme,
+                    voice,
+                    "Video Codec",
+                    CodecSetting::Codec,
+                    &[("vp9", "VP9 (SVC capable)"), ("vp8", "VP8 (no SVC)")],
+                    &codec,
+                    false,
+                ))
+                .child(codec_selector_section(
+                    theme,
+                    voice,
+                    "SVC Scalability Mode",
+                    CodecSetting::Svc,
+                    &[
+                        ("none", "Disabled (single stream)"),
+                        ("l3t3", "L3T3 (3 Spatial, 3 Temporal)"),
+                        ("l3t3_key", "L3T3_KEY (3 Spatial, Keyframe)"),
+                        ("l2t2", "L2T2 (2 Spatial, 2 Temporal)"),
+                        ("l1t3", "L1T3 (1 Spatial, 3 Temporal)"),
+                        ("l1t2", "L1T2 (1 Spatial, 2 Temporal)"),
+                    ],
+                    &svc,
+                    !vp9_selected,
+                )),
+        )
+        .into_any_element()
+    });
+
+    div()
+        .relative()
+        .child(gear)
+        .children(popover)
+        .into_any_element()
+}
+
+fn codec_selector_section(
+    theme: &Theme,
+    voice: &Entity<VoiceStore>,
+    title: &str,
+    setting: CodecSetting,
+    options: &[(&'static str, &'static str)],
+    current: &str,
+    disabled: bool,
+) -> AnyElement {
+    let mut section = div().flex().flex_col().gap_1().child(
+        div()
+            .text_xs()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme.text_muted)
+            .child(title.to_string()),
+    );
+
+    for (value, label) in options {
+        let value = *value;
+        let selected = value == current;
+        let label_color = if disabled {
+            theme.text_muted
+        } else {
+            theme.text_primary
+        };
+        let base = div()
+            .id(SharedString::from(format!("codec-opt-{value}")))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px_2()
+            .py(px(6.))
+            .rounded(px(6.))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(label_color)
+                    .child(label.to_string()),
+            )
+            .child(device_radio(theme, selected));
+
+        let row = if disabled {
+            base
+        } else {
+            let voice = voice.clone();
+            let hover_bg = theme.bg_hover;
+            base.cursor_pointer()
+                .hover(move |s| s.bg(hover_bg))
+                .on_click(move |_, _, cx| {
+                    voice.update(cx, |store, cx| match setting {
+                        CodecSetting::Codec => store.set_video_codec(value.to_string(), cx),
+                        CodecSetting::Svc => store.set_svc_mode(value.to_string(), cx),
+                    });
+                })
+        };
+        section = section.child(row);
+    }
+
+    section.into_any_element()
 }
 
 struct VideoCell {
@@ -3031,9 +3369,9 @@ fn control_bar(
     );
     let leave_tooltip = mezon_i18n::t(locale, "channelVoice.leave");
 
+    let ptt_mode = store.is_audience() || store.push_to_talk_active();
     let mic_button = {
-        let voice = voice.clone();
-        circle_button(
+        let button = circle_button(
             "voice-mic-btn",
             neutral_bg,
             neutral_hover,
@@ -3043,9 +3381,28 @@ fn control_bar(
                 IconName::VoiceMicDisabledIcon
             },
             theme.text_primary,
-        )
-        .tooltip(Tooltip::text(mic_tooltip))
-        .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.toggle_mic(cx)))
+        );
+        if ptt_mode {
+            let down_voice = voice.clone();
+            let up_voice = voice.clone();
+            let up_out_voice = voice.clone();
+            button
+                .tooltip(Tooltip::text("Hold to talk"))
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    down_voice.update(cx, |store, cx| store.begin_push_to_talk(cx));
+                })
+                .on_mouse_up(MouseButton::Left, move |_: &gpui::MouseUpEvent, _, cx| {
+                    up_voice.update(cx, |store, cx| store.end_push_to_talk(cx));
+                })
+                .on_mouse_up_out(MouseButton::Left, move |_: &gpui::MouseUpEvent, _, cx| {
+                    up_out_voice.update(cx, |store, cx| store.end_push_to_talk(cx));
+                })
+        } else {
+            let voice = voice.clone();
+            button
+                .tooltip(Tooltip::text(mic_tooltip))
+                .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.toggle_mic(cx)))
+        }
     };
 
     let camera_button = {
@@ -3065,16 +3422,49 @@ fn control_bar(
         .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.toggle_camera(cx)))
     };
 
-    let mic_button = device_control(
-        mic_button.into_any_element(),
-        theme,
-        locale,
-        voice,
-        settings,
-        store,
-        DeviceMenuKind::Microphone,
-        cx,
-    );
+    let mic_button = if ptt_mode {
+        div()
+            .relative()
+            .child(mic_button)
+            .child(
+                div()
+                    .absolute()
+                    .bottom(px(0.))
+                    .right(px(0.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(18.))
+                    .rounded_full()
+                    .bg(theme.bg_tertiary)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(15.))
+                            .rounded_full()
+                            .bg(gpui::rgb(ACCENT_BLUE))
+                            .child(
+                                Icon::new(IconName::VoiceRaiseHandIcon)
+                                    .size(px(9.))
+                                    .text_color(gpui::rgb(0xffffff)),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    } else {
+        device_control(
+            mic_button.into_any_element(),
+            theme,
+            locale,
+            voice,
+            settings,
+            store,
+            DeviceMenuKind::Microphone,
+            cx,
+        )
+    };
     let camera_button = device_control(
         camera_button.into_any_element(),
         theme,
@@ -3406,12 +3796,17 @@ fn control_bar(
         .items_center()
         .justify_center()
         .gap_3()
-        .child(mic_button)
-        .child(camera_button)
-        .child(screen_button)
-        .children(agent_button)
-        .child(raise_hand_button)
-        .child(leave_button);
+        .child(mic_button);
+    let center = if ptt_mode {
+        center.child(leave_button)
+    } else {
+        center
+            .child(camera_button)
+            .child(screen_button)
+            .children(agent_button)
+            .child(raise_hand_button)
+            .child(leave_button)
+    };
 
     div()
         .flex()

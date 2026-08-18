@@ -1,0 +1,30 @@
+[package]
+name = "mezon-codec"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+build = "build.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+dav1d = "0.11.1"
+thiserror.workspace = true
+tracing.workspace = true
+unsafe-libopus = "0.2"
+
+# VP8/VP9 (incl. SVC) link against the SYSTEM libvpx via pkg-config + a small C
+# shim generated in build.rs (bindgen). AV1 decode uses the safe `dav1d` crate,
+# which links the system libdav1d via pkg-config.
+
+[build-dependencies]
+bindgen = "0.71"
+pkg-config = "0.3"
+cc = "1"
+
+[dev-dependencies]
+# Pure-Rust AV1 encoder, used only to synthesize a keyframe OBU for the AV1
+# decode test. `default-features = false` drops the CLI binary deps (clap,
+# git2, nasm, ...) and asm so it builds as a lean library everywhere.
+rav1e = { version = "0.8", default-features = false }

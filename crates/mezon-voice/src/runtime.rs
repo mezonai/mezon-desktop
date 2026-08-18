@@ -16,7 +16,3 @@ pub(crate) fn runtime() -> &'static Runtime {
             .expect("failed to build mezon-voice runtime")
     })
 }
-
-pub(crate) fn handle() -> tokio::runtime::Handle {
-    runtime().handle().clone()
-}

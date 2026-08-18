@@ -738,7 +738,7 @@ mod tests {
     #[test]
     fn online_ids_without_self_returns_only_online_users() {
         let ids = online_ids_from_users(&[api_user(3, true)], None);
-        assert_eq!(ids, [3].into_iter().collect());
+        assert_eq!(ids, [3].into_iter().collect::<HashSet<i64>>());
     }
 
     #[test]

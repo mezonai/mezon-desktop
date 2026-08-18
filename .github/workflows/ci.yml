@@ -111,6 +111,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.95.0
+          components: llvm-tools
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2

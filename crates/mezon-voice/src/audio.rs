@@ -5,20 +5,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use livekit::webrtc::native::apm::AudioProcessingModule;
 use parking_lot::Mutex;
 
 struct CaptureChunk {
     data: Vec<i16>,
-    rate: i32,
-    channels: i32,
-    delay_ms: i32,
-}
-
-struct ReverseChunk {
-    data: Vec<i16>,
-    rate: i32,
-    channels: i32,
 }
 
 struct WorkerExitSignal(flume::Sender<()>);
@@ -32,9 +22,9 @@ impl Drop for WorkerExitSignal {
 fn flush_capture(
     acc: &mut Vec<i16>,
     frame: usize,
-    rate: i32,
-    channels: i32,
-    delay_ms: i32,
+    _rate: i32,
+    _channels: i32,
+    _delay_ms: i32,
     tx: &flume::Sender<CaptureChunk>,
 ) {
     if frame == 0 {
@@ -42,12 +32,7 @@ fn flush_capture(
     }
     while acc.len() >= frame {
         let data: Vec<i16> = acc.drain(..frame).collect();
-        let _ = tx.try_send(CaptureChunk {
-            data,
-            rate,
-            channels,
-            delay_ms,
-        });
+        let _ = tx.try_send(CaptureChunk { data });
     }
 }
 
@@ -163,133 +148,9 @@ impl StallRecovery {
     }
 }
 
-fn flush_reverse(
-    acc: &mut Vec<i16>,
-    frame: usize,
-    rate: i32,
-    channels: i32,
-    tx: &flume::Sender<ReverseChunk>,
-) {
-    if frame == 0 {
-        return;
-    }
-    while acc.len() >= frame {
-        let data: Vec<i16> = acc.drain(..frame).collect();
-        let _ = tx.try_send(ReverseChunk {
-            data,
-            rate,
-            channels,
-        });
-    }
-}
-
-fn mix_noise_suppression(dry: &mut [i16], wet: &[i16], level: u32) {
-    for (d, w) in dry.iter_mut().zip(wet) {
-        let dry_val = *d as i32;
-        *d = (dry_val + ((*w as i32 - dry_val) * level as i32) / 100) as i16;
-    }
-}
-
-fn process_reverse(apm: &mut AudioProcessingModule, mut chunk: ReverseChunk) {
-    let _ = apm.process_reverse_stream(&mut chunk.data, chunk.rate, chunk.channels);
-}
-
-fn drain_reverse(apm: &mut AudioProcessingModule, reverse_rx: &flume::Receiver<ReverseChunk>) {
-    for _ in 0..MAX_REVERSE_DRAIN_PER_CAPTURE {
-        let Ok(render) = reverse_rx.try_recv() else {
-            break;
-        };
-        process_reverse(apm, render);
-    }
-}
-
-fn process_capture(
-    apm: &mut AudioProcessingModule,
-    ns: &mut AudioProcessingModule,
-    wet: &mut Vec<i16>,
-    reverse_rx: &flume::Receiver<ReverseChunk>,
-    mic_tx: &flume::Sender<Vec<i16>>,
-    ns_enabled: &AtomicBool,
-    ns_level: &AtomicU32,
-    mut chunk: CaptureChunk,
-) {
-    drain_reverse(apm, reverse_rx);
-    let _ = apm.set_stream_delay_ms(chunk.delay_ms);
-    let _ = apm.process_stream(&mut chunk.data, chunk.rate, chunk.channels);
-    let level = ns_level.load(Ordering::Relaxed).min(100);
-    if ns_enabled.load(Ordering::Relaxed) && level > 0 {
-        wet.clear();
-        wet.extend_from_slice(&chunk.data);
-        if ns.process_stream(wet, chunk.rate, chunk.channels).is_ok() {
-            if level >= 100 {
-                chunk.data.copy_from_slice(wet);
-            } else {
-                mix_noise_suppression(&mut chunk.data, wet, level);
-            }
-        }
-    }
-    let _ = mic_tx.try_send(chunk.data);
-}
-
-fn run_apm(
-    capture_rx: flume::Receiver<CaptureChunk>,
-    reverse_rx: flume::Receiver<ReverseChunk>,
-    mic_tx: flume::Sender<Vec<i16>>,
-    ns_enabled: Arc<AtomicBool>,
-    ns_level: Arc<AtomicU32>,
-) {
-    enum Event {
-        Capture(CaptureChunk),
-        Reverse(ReverseChunk),
-        Stop,
-    }
-    let mut apm = AudioProcessingModule::new(true, true, true, false);
-    let mut ns = AudioProcessingModule::new(false, false, false, true);
-    let mut wet: Vec<i16> = Vec::new();
-    loop {
-        match capture_rx.try_recv() {
-            Ok(chunk) => {
-                process_capture(
-                    &mut apm,
-                    &mut ns,
-                    &mut wet,
-                    &reverse_rx,
-                    &mic_tx,
-                    &ns_enabled,
-                    &ns_level,
-                    chunk,
-                );
-                continue;
-            }
-            Err(flume::TryRecvError::Disconnected) => break,
-            Err(flume::TryRecvError::Empty) => {}
-        }
-        let event = flume::Selector::new()
-            .recv(&capture_rx, |r| {
-                r.map(Event::Capture).unwrap_or(Event::Stop)
-            })
-            .recv(&reverse_rx, |r| {
-                r.map(Event::Reverse).unwrap_or(Event::Stop)
-            })
-            .wait();
-        match event {
-            Event::Reverse(chunk) => {
-                process_reverse(&mut apm, chunk);
-            }
-            Event::Capture(chunk) => {
-                process_capture(
-                    &mut apm,
-                    &mut ns,
-                    &mut wet,
-                    &reverse_rx,
-                    &mic_tx,
-                    &ns_enabled,
-                    &ns_level,
-                    chunk,
-                );
-            }
-            Event::Stop => break,
-        }
+fn run_capture_forward(capture_rx: flume::Receiver<CaptureChunk>, mic_tx: flume::Sender<Vec<i16>>) {
+    while let Ok(chunk) = capture_rx.recv() {
+        let _ = mic_tx.try_send(chunk.data);
     }
 }
 
@@ -386,15 +247,13 @@ pub enum DeviceResetKind {
 pub struct AudioIo {
     ctrl_tx: flume::Sender<AudioCmd>,
     audio_stopped_rx: flume::Receiver<()>,
-    apm_stopped_rx: flume::Receiver<()>,
+    capture_stopped_rx: flume::Receiver<()>,
     pub output_format: AudioFormat,
     pub mic_rx: flume::Receiver<Vec<i16>>,
     pub input_format_rx: flume::Receiver<AudioFormat>,
     pub output_format_rx: flume::Receiver<AudioFormat>,
     pub device_reset_rx: flume::Receiver<DeviceResetKind>,
     pub mixer: Arc<PlaybackMixer>,
-    ns_enabled: Arc<AtomicBool>,
-    ns_level: Arc<AtomicU32>,
 }
 
 impl AudioIo {
@@ -410,11 +269,7 @@ impl AudioIo {
         let _ = self.ctrl_tx.send(AudioCmd::SetOutputDevice(device_id));
     }
 
-    pub fn set_noise_suppression(&self, enabled: bool, level: u8) {
-        self.ns_enabled.store(enabled, Ordering::Relaxed);
-        self.ns_level
-            .store(level.min(100) as u32, Ordering::Relaxed);
-    }
+    pub fn set_noise_suppression(&self, _enabled: bool, _level: u8) {}
 
     pub fn start(
         input_device_id: Option<String>,
@@ -424,24 +279,19 @@ impl AudioIo {
         let mixer = Arc::new(PlaybackMixer::new(record_taps));
         let (mic_tx, mic_rx) = flume::bounded::<Vec<i16>>(128);
         let (capture_tx, capture_rx) = flume::bounded::<CaptureChunk>(128);
-        let (reverse_tx, reverse_rx) = flume::bounded::<ReverseChunk>(128);
         let (ctrl_tx, ctrl_rx) = flume::unbounded::<AudioCmd>();
         let (out_fmt_tx, out_fmt_rx) = flume::bounded::<Result<AudioFormat, String>>(1);
         let (in_fmt_tx, in_fmt_rx) = flume::unbounded::<AudioFormat>();
         let (out_change_tx, out_change_rx) = flume::unbounded::<AudioFormat>();
         let (device_reset_tx, device_reset_rx) = flume::unbounded::<DeviceResetKind>();
         let (audio_stopped_tx, audio_stopped_rx) = flume::bounded::<()>(1);
-        let (apm_stopped_tx, apm_stopped_rx) = flume::bounded::<()>(1);
-        let ns_enabled = Arc::new(AtomicBool::new(false));
-        let ns_level = Arc::new(AtomicU32::new(20));
+        let (capture_stopped_tx, capture_stopped_rx) = flume::bounded::<()>(1);
 
-        let ns_enabled_apm = ns_enabled.clone();
-        let ns_level_apm = ns_level.clone();
         std::thread::Builder::new()
-            .name("mezon-voice-apm".into())
+            .name("mezon-voice-capture".into())
             .spawn(move || {
-                let _exit = WorkerExitSignal(apm_stopped_tx);
-                run_apm(capture_rx, reverse_rx, mic_tx, ns_enabled_apm, ns_level_apm);
+                let _exit = WorkerExitSignal(capture_stopped_tx);
+                run_capture_forward(capture_rx, mic_tx);
             })?;
 
         let mixer_for_thread = mixer.clone();
@@ -462,7 +312,6 @@ impl AudioIo {
                 let prepared = open_output_for_startup(
                     current_output_id.as_deref(),
                     &mixer_for_thread,
-                    &reverse_tx,
                     &out_latency_ms,
                     &output_heartbeat,
                     &OutputErrorHook {
@@ -659,7 +508,6 @@ impl AudioIo {
                             match prepare_output(
                                 current_output_id.as_deref(),
                                 mixer_for_thread.clone(),
-                                reverse_tx.clone(),
                                 out_latency_ms.clone(),
                                 output_heartbeat.clone(),
                                 OutputErrorHook {
@@ -787,7 +635,6 @@ impl AudioIo {
                                 current_output_id.as_deref(),
                                 output_absent_streak,
                                 &mixer_for_thread,
-                                &reverse_tx,
                                 &out_latency_ms,
                                 &output_heartbeat,
                                 &OutputErrorHook {
@@ -868,15 +715,13 @@ impl AudioIo {
         Ok(Self {
             ctrl_tx,
             audio_stopped_rx,
-            apm_stopped_rx,
+            capture_stopped_rx,
             output_format,
             mic_rx,
             input_format_rx: in_fmt_rx,
             output_format_rx: out_change_rx,
             device_reset_rx,
             mixer,
-            ns_enabled,
-            ns_level,
         })
     }
 }
@@ -887,8 +732,8 @@ impl Drop for AudioIo {
         let deadline = started + AUDIO_SHUTDOWN_TIMEOUT;
         let _ = self.ctrl_tx.send(AudioCmd::Shutdown);
         let audio_stopped = wait_for_worker(&self.audio_stopped_rx, deadline);
-        let apm_stopped = wait_for_worker(&self.apm_stopped_rx, deadline);
-        if audio_stopped && apm_stopped {
+        let capture_stopped = wait_for_worker(&self.capture_stopped_rx, deadline);
+        if audio_stopped && capture_stopped {
             tracing::debug!(
                 elapsed_ms = started.elapsed().as_millis(),
                 "voice audio workers stopped"
@@ -896,7 +741,7 @@ impl Drop for AudioIo {
         } else {
             tracing::warn!(
                 audio_stopped,
-                apm_stopped,
+                capture_stopped,
                 "voice audio workers did not stop within {}ms",
                 AUDIO_SHUTDOWN_TIMEOUT.as_millis(),
             );
@@ -950,7 +795,6 @@ const INITIAL_OUTPUT_RETRY_INTERVAL: Duration = Duration::from_millis(300);
 const OUTPUT_DISCONNECT_CONFIRM: u32 = 2;
 const INPUT_DISCONNECT_CONFIRM: u32 = 2;
 const AUDIO_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
-const MAX_REVERSE_DRAIN_PER_CAPTURE: usize = 8;
 
 #[derive(Clone)]
 struct OutputErrorHook {
@@ -1056,27 +900,33 @@ fn i16_to_f32(s: i16) -> f32 {
 fn prepare_output(
     output_device_id: Option<&str>,
     mixer: Arc<PlaybackMixer>,
-    reverse_tx: flume::Sender<ReverseChunk>,
     out_latency_ms: Arc<AtomicU32>,
     heartbeat: CallbackHeartbeat,
     err_hook: OutputErrorHook,
 ) -> Result<(cpal::Stream, AudioFormat)> {
     let host = cpal::default_host();
-    let device = select_output(&host, output_device_id)?;
-    open_output(
-        &device,
-        mixer,
-        reverse_tx,
-        out_latency_ms,
-        heartbeat,
-        err_hook,
-    )
+    if let Some(id) = output_device_id {
+        let opened = select_output(&host, Some(id)).and_then(|device| {
+            open_output(
+                &device,
+                mixer.clone(),
+                out_latency_ms.clone(),
+                heartbeat.clone(),
+                err_hook.clone(),
+            )
+        });
+        match opened {
+            Ok(ready) => return Ok(ready),
+            Err(e) => tracing::warn!("voice output device unusable, falling back to default: {e}"),
+        }
+    }
+    let device = select_output(&host, None)?;
+    open_output(&device, mixer, out_latency_ms, heartbeat, err_hook)
 }
 
 fn open_output_for_startup(
     output_device_id: Option<&str>,
     mixer: &Arc<PlaybackMixer>,
-    reverse_tx: &flume::Sender<ReverseChunk>,
     out_latency_ms: &Arc<AtomicU32>,
     heartbeat: &CallbackHeartbeat,
     err_hook: &OutputErrorHook,
@@ -1086,7 +936,6 @@ fn open_output_for_startup(
             match prepare_output(
                 Some(id),
                 mixer.clone(),
-                reverse_tx.clone(),
                 out_latency_ms.clone(),
                 heartbeat.clone(),
                 err_hook.clone(),
@@ -1110,7 +959,6 @@ fn open_output_for_startup(
     let (stream, fmt) = prepare_output(
         None,
         mixer.clone(),
-        reverse_tx.clone(),
         out_latency_ms.clone(),
         heartbeat.clone(),
         err_hook.clone(),
@@ -1143,7 +991,6 @@ fn rebuild_output_stream(
     desired_id: Option<&str>,
     absent_streak: u32,
     mixer: &Arc<PlaybackMixer>,
-    reverse_tx: &flume::Sender<ReverseChunk>,
     out_latency_ms: &Arc<AtomicU32>,
     heartbeat: &CallbackHeartbeat,
     err_hook: &OutputErrorHook,
@@ -1151,7 +998,6 @@ fn rebuild_output_stream(
     match prepare_output(
         desired_id,
         mixer.clone(),
-        reverse_tx.clone(),
         out_latency_ms.clone(),
         heartbeat.clone(),
         err_hook.clone(),
@@ -1178,7 +1024,6 @@ fn rebuild_output_stream(
     match prepare_output(
         None,
         mixer.clone(),
-        reverse_tx.clone(),
         out_latency_ms.clone(),
         heartbeat.clone(),
         err_hook.clone(),
@@ -1203,7 +1048,6 @@ fn rebuild_output_stream(
 fn open_output(
     device: &cpal::Device,
     mixer: Arc<PlaybackMixer>,
-    reverse_tx: flume::Sender<ReverseChunk>,
     out_latency_ms: Arc<AtomicU32>,
     heartbeat: CallbackHeartbeat,
     err_hook: OutputErrorHook,
@@ -1217,7 +1061,6 @@ fn open_output(
         device,
         &supported,
         mixer,
-        reverse_tx,
         out_latency_ms,
         heartbeat,
         err_hook,
@@ -1457,22 +1300,16 @@ fn build_output(
     device: &cpal::Device,
     supported: &cpal::SupportedStreamConfig,
     mixer: Arc<PlaybackMixer>,
-    reverse_tx: flume::Sender<ReverseChunk>,
     out_latency_ms: Arc<AtomicU32>,
     heartbeat: CallbackHeartbeat,
     err_hook: OutputErrorHook,
 ) -> Result<cpal::Stream> {
     let mut config: cpal::StreamConfig = supported.config();
     config.buffer_size = playback_buffer(supported);
-    let rate = supported.sample_rate() as i32;
-    let channels = supported.channels().max(1) as i32;
-    let frame = (supported.sample_rate() as usize / 100) * supported.channels().max(1) as usize;
-    mixer.set_output_format(rate as u32, channels as u32);
+    mixer.set_output_format(supported.sample_rate(), supported.channels().max(1) as u32);
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => {
             let mut tmp: Vec<i16> = Vec::new();
-            let mut rev: Vec<i16> = Vec::new();
-            let tx = reverse_tx;
             device.build_output_stream(
                 &config,
                 move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
@@ -1481,8 +1318,6 @@ fn build_output(
                     tmp.clear();
                     tmp.resize(out.len(), 0);
                     mixer.mix_into(&mut tmp);
-                    rev.extend_from_slice(&tmp);
-                    flush_reverse(&mut rev, frame, rate, channels, &tx);
                     for (o, s) in out.iter_mut().zip(tmp.iter().copied()) {
                         *o = i16_to_f32(s);
                     }
@@ -1491,26 +1326,18 @@ fn build_output(
                 None,
             )?
         }
-        cpal::SampleFormat::I16 => {
-            let mut rev: Vec<i16> = Vec::new();
-            let tx = reverse_tx;
-            device.build_output_stream(
-                &config,
-                move |out: &mut [i16], info: &cpal::OutputCallbackInfo| {
-                    heartbeat.mark();
-                    update_out_latency(info, &out_latency_ms);
-                    mixer.mix_into(out);
-                    rev.extend_from_slice(out);
-                    flush_reverse(&mut rev, frame, rate, channels, &tx);
-                },
-                output_err_fn(err_hook),
-                None,
-            )?
-        }
+        cpal::SampleFormat::I16 => device.build_output_stream(
+            &config,
+            move |out: &mut [i16], info: &cpal::OutputCallbackInfo| {
+                heartbeat.mark();
+                update_out_latency(info, &out_latency_ms);
+                mixer.mix_into(out);
+            },
+            output_err_fn(err_hook),
+            None,
+        )?,
         cpal::SampleFormat::U16 => {
             let mut tmp: Vec<i16> = Vec::new();
-            let mut rev: Vec<i16> = Vec::new();
-            let tx = reverse_tx;
             device.build_output_stream(
                 &config,
                 move |out: &mut [u16], info: &cpal::OutputCallbackInfo| {
@@ -1519,8 +1346,6 @@ fn build_output(
                     tmp.clear();
                     tmp.resize(out.len(), 0);
                     mixer.mix_into(&mut tmp);
-                    rev.extend_from_slice(&tmp);
-                    flush_reverse(&mut rev, frame, rate, channels, &tx);
                     for (o, s) in out.iter_mut().zip(tmp.iter().copied()) {
                         *o = (s as i32 + 32768) as u16;
                     }

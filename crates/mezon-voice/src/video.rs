@@ -182,6 +182,14 @@ pub fn local_screen_key(identity: &str) -> u64 {
     track_frame_key(identity, "__local_screen__")
 }
 
+pub fn remote_camera_key(user_id: &str) -> u64 {
+    track_frame_key(user_id, "__remote_camera__")
+}
+
+pub fn remote_screen_key(user_id: &str) -> u64 {
+    track_frame_key(user_id, "__remote_screen__")
+}
+
 #[inline]
 fn clamp_u8(v: i32) -> u8 {
     v.clamp(0, 255) as u8

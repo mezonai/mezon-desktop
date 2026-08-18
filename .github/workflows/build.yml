@@ -68,6 +68,7 @@ jobs:
       NX_CHAT_APP_ANNONYMOUS_USER_ID: "1767478432163172999"
       NX_MAX_LENGTH_NAME_ALLOWED: "64"
       NX_UPDATE_URL: ${{ secrets.NX_UPDATE_URL }}
+      SYSTEM_DEPS_DAV1D_BUILD_INTERNAL: ${{ matrix.name == 'Linux' && 'auto' || 'never' }}
     strategy:
       fail-fast: false
       matrix:
@@ -111,6 +112,7 @@ jobs:
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master @ 2026-07-12
         with:
           toolchain: 1.95.0
+          components: llvm-tools
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
