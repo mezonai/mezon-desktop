@@ -2,11 +2,12 @@ use gpui::{
     AnyElement, App, ClickEvent, ElementId, FontWeight, SharedString, Window, div, prelude::*, px,
     rgba,
 };
-use mezon_store::{DirectMessageStore, Embed, PresenceStore, UserId};
+use mezon_store::{DirectMessageStore, Embed, FriendState, FriendStore, PresenceStore, UserId};
 
 use super::content::{SelectableSectionCursor, SelectableTextContext};
 use super::context::RowCtx;
 use crate::app::shell::Shell;
+use crate::chat::call_actions::{CallTarget, call_user};
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::router::{Route, navigate};
 
@@ -22,24 +23,24 @@ pub fn render_share_contact_card(
     ctx: &RowCtx,
 ) -> AnyElement {
     let theme = ctx.theme;
-    let user_id = field_value(embed, "user_id");
-    let username = field_value(embed, "username");
-    let display_name = field_value(embed, "display_name");
-    let avatar = field_value(embed, "avatar");
+    let user_id = shared_field(embed, "user_id");
+    let username = shared_field(embed, "username");
+    let display_name = shared_field(embed, "display_name");
+    let avatar = shared_field(embed, "avatar");
 
     if user_id.is_empty() || username.is_empty() {
         return div().into_any_element();
     }
 
     let name = if display_name.is_empty() {
-        username
+        username.clone()
     } else {
         display_name
     };
     let mut selection_cursor = SelectableSectionCursor::new(base);
     let name_text = selection_cursor
-        .section(name)
-        .map(|range| selection_context.end_truncated_text_node(name, range))
+        .section(&name)
+        .map(|range| selection_context.end_truncated_text_node(&name, range))
         .unwrap_or_else(|| gpui::StyledText::new(name.to_string()));
     let username_label = format!("@{username}");
     let username_text = selection_cursor
@@ -67,7 +68,7 @@ pub fn render_share_contact_card(
         .size_px(px(AVATAR_SIZE))
         .image_cache(ctx.avatar_cache.clone());
     if !avatar.is_empty() {
-        let proxied = crate::util::imgproxy::avatar_url(ctx.app, avatar);
+        let proxied = crate::util::imgproxy::avatar_url(ctx.app, &avatar);
         avatar_view = avatar_view.src(proxied).fallback_src(avatar.to_string());
     }
 
@@ -122,15 +123,41 @@ pub fn render_share_contact_card(
             ),
     );
 
-    let coming_soon = ctx.coming_soon.clone();
-    let on_call = move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
-        let message = coming_soon.clone();
-        Shell::global(cx).update(cx, move |shell, cx| shell.info(message, cx));
-    };
-
     let target_user = user_id.parse::<i64>().ok().map(UserId);
     let message_error: SharedString =
         mezon_i18n::t(ctx.locale, "shareContact.card.messageError").into();
+    let call_error: SharedString = mezon_i18n::t(ctx.locale, "shareContact.card.callError").into();
+    let is_self = user_id.as_ref() == ctx.current_user_id;
+    let call_label = name.clone();
+    let call_avatar = avatar.clone();
+    let call_username = username.clone();
+    let cannot_call_self: SharedString =
+        mezon_i18n::t(ctx.locale, "shareContact.card.cannotCallSelf").into();
+    let blocked_action: SharedString =
+        mezon_i18n::t(ctx.locale, "shareContact.card.blockedAction").into();
+    let on_call = move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+        let Some(user) = target_user else {
+            return;
+        };
+        if is_self {
+            let message = cannot_call_self.clone();
+            Shell::global(cx).update(cx, move |shell, cx| shell.error(message, cx));
+            return;
+        }
+        if is_blocked(user, cx) {
+            let message = blocked_action.clone();
+            Shell::global(cx).update(cx, move |shell, cx| shell.error(message, cx));
+            return;
+        }
+        let target = CallTarget {
+            user,
+            label: call_label.clone(),
+            avatar: call_avatar.clone(),
+            username: call_username.clone(),
+        };
+        call_user(target, false, call_error.clone(), cx);
+    };
+
     let on_message = move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
         let Some(user) = target_user else {
             return;
@@ -211,6 +238,15 @@ fn contact_action_button(
         .into_any_element()
 }
 
+fn is_blocked(user: UserId, cx: &App) -> bool {
+    FriendStore::try_global(cx).is_some_and(|store| {
+        store
+            .read(cx)
+            .friend(user)
+            .is_some_and(|friend| friend.state == FriendState::Blocked)
+    })
+}
+
 fn open_dm_with_user(user: UserId, error_message: SharedString, cx: &mut App) {
     let Some(store) = DirectMessageStore::try_global(cx) else {
         return;
@@ -240,11 +276,11 @@ fn open_dm_with_user(user: UserId, error_message: SharedString, cx: &mut App) {
     .detach();
 }
 
-fn field_value<'a>(embed: &'a Embed, name: &str) -> &'a str {
+fn shared_field(embed: &Embed, name: &str) -> SharedString {
     embed
         .fields
         .iter()
         .find(|field| field.name.as_ref() == name)
-        .map(|field| field.value.as_ref())
-        .unwrap_or("")
+        .map(|field| field.value.clone())
+        .unwrap_or_default()
 }

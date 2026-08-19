@@ -1328,7 +1328,6 @@ pub struct ChannelMessages {
     _reaction_picker_sub: Option<Subscription>,
     _reaction_picker_dismiss_sub: Option<Subscription>,
     cached_locale: SharedString,
-    cached_coming_soon: SharedString,
     cached_current_user_id: SharedString,
     cached_role_ids: Rc<Vec<i64>>,
     cached_is_clan_owner: bool,
@@ -1399,8 +1398,6 @@ impl ChannelMessages {
         let mut subs: Vec<Subscription> = Vec::new();
         subs.push(cx.observe(&settings, |this, settings, cx| {
             this.cached_locale = settings.read(cx).language.clone().into();
-            this.cached_coming_soon =
-                mezon_i18n::t(&this.cached_locale, "common.comingSoon").into();
             let mut memo = this.row_memo.borrow_mut();
             memo.time_labels.clear();
             memo.rich_text.clear();
@@ -1842,7 +1839,6 @@ impl ChannelMessages {
         let (welcome, onboarding) = Self::compute_indicator_contexts(cx);
         let cached_unread_boundary = unread_boundary(&MessagesStore::global(cx), None, cx);
         let cached_locale: SharedString = settings.read(cx).language.clone().into();
-        let cached_coming_soon = mezon_i18n::t(&cached_locale, "common.comingSoon").into();
         let (identity_inputs, cached_current_user_id, cached_role_ids, cached_is_clan_owner) =
             Self::compute_identity(cx);
         let emoji_store = EmojiStore::global(cx);
@@ -1969,7 +1965,6 @@ impl ChannelMessages {
             _reaction_picker_sub: None,
             _reaction_picker_dismiss_sub: None,
             cached_locale,
-            cached_coming_soon,
             cached_current_user_id,
             cached_role_ids,
             cached_is_clan_owner,
@@ -4339,7 +4334,6 @@ impl ChannelMessages {
         };
 
         let locale = self.cached_locale.clone();
-        let coming_soon: SharedString = mezon_i18n::t(&locale, "common.comingSoon").into();
         let frame_now = chrono::Local::now();
         let today = frame_now.date_naive();
         if self.row_memo_day != Some(today) {
@@ -4438,7 +4432,6 @@ impl ChannelMessages {
                         editing_id,
                         edit_input: edit_input.clone(),
                         emoji_recent: &emoji_recent,
-                        coming_soon: coming_soon.clone(),
                         row_memo: row_memo.clone(),
                         content_width,
                         selection: selection.clone(),
@@ -4594,7 +4587,6 @@ impl Render for ChannelMessages {
         }
 
         let locale = self.cached_locale.clone();
-        let coming_soon = self.cached_coming_soon.clone();
         let frame_now = chrono::Local::now();
         let today = frame_now.date_naive();
         if self.row_memo_day != Some(today) {
@@ -4701,7 +4693,6 @@ impl Render for ChannelMessages {
                         editing_id,
                         edit_input: edit_input.clone(),
                         emoji_recent: &emoji_recent,
-                        coming_soon: coming_soon.clone(),
                         row_memo: row_memo.clone(),
                         content_width,
                         selection: selection.clone(),

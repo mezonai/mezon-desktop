@@ -96,8 +96,6 @@ pub struct RowCtx<'a> {
     pub edit_input: Option<Entity<MentionInput>>,
     /// Up to 3 most-recently-used emoji for the hover toolbar's quick-react pills.
     pub emoji_recent: &'a [RecentEmojiCell],
-    /// `common.comingSoon`, resolved once per render pass (not per row).
-    pub coming_soon: SharedString,
     /// Cross-frame memo for per-row derived values that are expensive to
     /// recompute every frame (live avatar resolution, formatted time labels).
     /// Owned by the view; invalidated on member-store change, channel switch,

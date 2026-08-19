@@ -14,6 +14,7 @@ use mezon_store::{
 
 use crate::app::shell::{FriendRemovalKind, Shell};
 use crate::app::window_controls::APP_HEADER_HEIGHT;
+use crate::chat::call_actions::{CallTarget, call_user};
 use crate::chat::message::{ShareContactModal, share_contact_subject};
 use crate::components::primitives::{
     Avatar, ContextMenu, Icon, IconName, Input, InputEvent, InputState, ToastKind, context_menu_at,
@@ -630,6 +631,17 @@ fn open_remove_friend_modal(
     });
 }
 
+fn friend_call_target(user_id: UserId, cx: &App) -> Option<CallTarget> {
+    let friend = FriendStore::try_global(cx)?;
+    let friend = friend.read(cx).friend(user_id)?;
+    Some(CallTarget {
+        user: user_id,
+        label: friend.label().into(),
+        avatar: friend.avatar_url.clone().into(),
+        username: friend.username.clone().into(),
+    })
+}
+
 pub(crate) fn open_dm_with_user(user: UserId, error_message: SharedString, cx: &mut App) {
     let Some(store) = DirectMessageStore::try_global(cx) else {
         return;
@@ -998,12 +1010,16 @@ impl FriendsPage {
                 }
             }
         };
-        let coming_soon = {
+        let call_friend = |video: bool| {
             let settings = self.settings.clone();
             move |_window: &mut Window, cx: &mut App| {
-                let msg =
-                    mezon_i18n::t(&settings.read(cx).language, "common.comingSoon").to_string();
-                Shell::global(cx).update(cx, |shell, cx| shell.info(msg, cx));
+                let locale = settings.read(cx).language.clone();
+                let Some(target) = friend_call_target(user_id, cx) else {
+                    return;
+                };
+                let error =
+                    SharedString::from(mezon_i18n::t(&locale, "shareContact.card.callError"));
+                call_user(target, video, error, cx);
             }
         };
 
@@ -1026,11 +1042,11 @@ impl FriendsPage {
             .on_dismiss(dismiss)
             .item(
                 t("friendsPage.friendMenu.startVideoCall"),
-                coming_soon.clone(),
+                call_friend(true),
             )
             .item(
                 t("friendsPage.friendMenu.startVoiceCall"),
-                coming_soon.clone(),
+                call_friend(false),
             )
             .item(t("contextMenu.member.shareContact"), {
                 let panel = panel.clone();

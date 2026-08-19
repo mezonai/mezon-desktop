@@ -886,16 +886,13 @@ impl Render for UserProfilePopover {
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.tokens.text_theme_primary)
                                     .child(mezon_i18n::t(&locale, "userProfile.labels.editProfile"))
-                                    .on_click({
-                                        let locale = locale.clone();
-                                        move |_: &ClickEvent, _window, cx| {
-                                            let msg = mezon_i18n::t(&locale, "common.comingSoon")
-                                                .to_string();
-                                            Shell::global(cx).update(cx, move |shell, cx| {
-                                                shell.info(msg, cx);
-                                            });
-                                        }
-                                    }),
+                                    .on_click(cx.listener(|_, _: &ClickEvent, _window, cx| {
+                                        cx.emit(gpui::DismissEvent);
+                                        crate::router::navigate(
+                                            cx,
+                                            crate::router::Route::SettingsProfile,
+                                        );
+                                    })),
                             )
                         }),
                 ),

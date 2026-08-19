@@ -6,13 +6,14 @@ use gpui::{
     Window, div, point, prelude::*, px,
 };
 use mezon_store::{
-    CallPeer, CallStore, ChannelId, DirectKind, DirectMessageStore, DmAvatarPresence, InVoiceInfo,
-    PinnedMessagesStore, Settings, StreamStore, ThreadsStore,
+    ChannelId, DirectKind, DirectMessageStore, DmAvatarPresence, InVoiceInfo, PinnedMessagesStore,
+    Settings, StreamStore, ThreadsStore,
 };
 use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable, Tooltip};
 
 use crate::app::shell::Shell;
 use crate::app::window_controls;
+use crate::chat::call_actions::call_current_dm;
 use crate::chat::edit_group_modal::EditGroupModal;
 use crate::chat::files_popover::{FilesPopoverPanel, files_popover_on_open};
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
@@ -655,12 +656,7 @@ impl ChannelHeader {
                     .tooltip(Tooltip::text(tooltip))
                     .occlude()
                     .child(Icon::new(icon).size(px(20.)).text_color(icon_color))
-                    .on_click(move |_, _, cx| {
-                        if let Some(peer) = current_dm_call_peer(cx) {
-                            CallStore::global(cx)
-                                .update(cx, |store, cx| store.start_call(peer, video, cx));
-                        }
-                    });
+                    .on_click(move |_, _, cx| call_current_dm(video, cx));
                 buttons.push(button.into_any_element());
                 continue;
             }
@@ -957,27 +953,6 @@ pub struct ChatHeader {
     _direct_observe: Subscription,
     _group_members_observe: Subscription,
     _presence_subscribe: Subscription,
-}
-
-fn current_dm_call_peer(cx: &App) -> Option<CallPeer> {
-    let crate::router::Route::DirectMessage { direct_id, .. } =
-        crate::router::Router::global(cx).read(cx).route()
-    else {
-        return None;
-    };
-    let store = DirectMessageStore::try_global(cx)?;
-    let store = store.read(cx);
-    let dm = store.find(direct_id)?;
-    if dm.kind != DirectKind::Dm {
-        return None;
-    }
-    let peer_user_id = dm.peer_user_id?;
-    Some(CallPeer {
-        user_id: peer_user_id.get(),
-        channel_id: dm.id.get(),
-        name: dm.label.clone(),
-        avatar: (!dm.avatar.is_empty()).then(|| dm.avatar.clone()),
-    })
 }
 
 impl ChatHeader {

@@ -1,9 +1,9 @@
 use gpui::{AnyElement, FontWeight, SharedString, div, prelude::*, px, rgb};
 use mezon_store::{CallLog, CallLogType, Message};
 
-use super::coming_soon_toast;
 use super::content::{SelectableSectionCursor, SelectableTextContext};
 use super::context::RowCtx;
+use crate::chat::call_actions::call_current_dm;
 use crate::components::primitives::{Icon, IconName};
 
 const RED_500: u32 = 0xef_44_44;
@@ -82,7 +82,7 @@ pub fn render_call_log_card(
 
     if call_log.show_call_back {
         let label = mezon_i18n::t(ctx.locale, "message.callLog.CALL_BACK").to_uppercase();
-        let locale = SharedString::from(ctx.locale);
+        let video = call_log.is_video;
         let selection = ctx.selection.clone();
         card = card.child(
             div()
@@ -97,7 +97,7 @@ pub fn render_call_log_card(
                 .child(label)
                 .on_click(move |_, _, cx| {
                     if !selection.borrow().has_selection() {
-                        coming_soon_toast(&locale, cx);
+                        call_current_dm(video, cx);
                     }
                 }),
         );

@@ -6,7 +6,7 @@ use gpui::{
 };
 use mezon_store::{
     AccountStore, ClanId, ClanList, DirectMessageStore, FriendStore, NotificationSettingStore,
-    Settings,
+    PlatformStore, Settings,
 };
 use ui::Tooltip;
 
@@ -19,6 +19,8 @@ use crate::theme::{ActiveTheme, Theme};
 mod clan_row;
 mod direct_unread_list;
 use clan_row::{CLAN_ROW_HEIGHT, ClanRow, build_clan_rail_menu, render_clan_row, render_pill};
+
+const DISCOVER_URL: &str = "https://mezon.ai/clans";
 
 pub(super) struct ClanMenuArgs {
     pub(super) position: Point<Pixels>,
@@ -345,7 +347,6 @@ impl Render for ClanSidebar {
         let clan_list_handle = self.clan_list.clone();
         let list_state = self.list_state.clone();
         let suppress_hover = self.list_state.is_scroll_hover_suppressed();
-        let locale = self.settings.read(cx).language.clone();
         let discover_title = self.discover_title.clone();
         let create_clan_title = self.create_clan_title.clone();
         let clan_list_for_modal = self.clan_list.clone();
@@ -369,7 +370,6 @@ impl Render for ClanSidebar {
             } else {
                 render_clan_footer(
                     cx,
-                    &locale,
                     discover_title.clone(),
                     create_clan_title.clone(),
                     clan_list_for_modal.clone(),
@@ -520,7 +520,6 @@ fn nav_arrow(id: &'static str, enabled: bool, is_back: bool, theme: &Theme) -> A
 
 fn render_clan_footer(
     cx: &App,
-    locale: &str,
     discover_title: SharedString,
     create_clan_title: SharedString,
     clan_list_for_modal: Entity<ClanList>,
@@ -552,12 +551,9 @@ fn render_clan_footer(
                         })
                         .tooltip(Tooltip::text(discover_title))
                 })
-                .on_click({
-                    let locale = locale.to_string();
-                    move |_, _, cx| {
-                        Shell::global(cx).update(cx, |shell, cx| {
-                            shell.info(mezon_i18n::t(&locale, "common.comingSoon").to_string(), cx);
-                        });
+                .on_click(|_, _, cx| {
+                    if let Some(store) = PlatformStore::try_global(cx) {
+                        let _ = store.read(cx).open_url_external(DISCOVER_URL);
                     }
                 })
                 .child(

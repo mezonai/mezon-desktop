@@ -4048,6 +4048,7 @@
   "setting.whatsNew.whatsNew": "Có gì mới",
   "shareContact.card.blockedAction": "Bạn không thể thực hiện hành động này.",
   "shareContact.card.call": "Gọi",
+  "shareContact.card.callError": "Không thể bắt đầu cuộc gọi.",
   "shareContact.card.cannotCallSelf": "Bạn không thể gọi chính mình.",
   "shareContact.card.message": "Nhắn tin",
   "shareContact.card.messageError": "Không thể mở cuộc trò chuyện.",

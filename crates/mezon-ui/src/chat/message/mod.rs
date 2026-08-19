@@ -60,12 +60,3 @@ pub(crate) use time::format_message_time;
 pub use time::format_relative_time_from_seconds;
 pub(crate) use transaction_history_modal::TransactionHistoryModal;
 pub use video_player::{VideoActivation, VideoFullscreenMode, VideoLayout, VideoPlayerView};
-
-use gpui::{App, SharedString};
-
-use crate::app::shell::Shell;
-
-pub(crate) fn coming_soon_toast(locale: &str, cx: &mut App) {
-    let message = SharedString::from(mezon_i18n::t(locale, "common.comingSoon").to_string());
-    Shell::global(cx).update(cx, move |shell, cx| shell.info(message, cx));
-}

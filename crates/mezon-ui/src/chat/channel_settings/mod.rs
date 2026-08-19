@@ -10,7 +10,7 @@ use gpui::{
     Subscription, Window, deferred, div, point, prelude::*, px,
 };
 use mezon_store::{
-    Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, PERMISSION_MANAGE_CHANNEL,
+    ChannelId, ChannelList, ChannelType, ClanId, ClanList, PERMISSION_MANAGE_CHANNEL,
     PERMISSION_MANAGE_CLAN, PermissionStore, Settings, can_delete_channel,
 };
 
@@ -681,6 +681,7 @@ impl Render for ChannelSettingScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mezon_store::Channel;
 
     fn ctx(
         channel_type: ChannelType,
