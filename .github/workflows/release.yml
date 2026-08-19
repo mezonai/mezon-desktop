@@ -67,6 +67,7 @@ env:
 jobs:
   linux:
     name: Linux artifacts (${{ matrix.arch }})
+    if: ${{ false }}
     runs-on: ${{ matrix.runner }}
     container: ubuntu:22.04
     strategy:
@@ -118,6 +119,42 @@ jobs:
         with:
           name: update-feed-linux-${{ matrix.arch }}
           path: target/update-feed/*
+          if-no-files-found: error
+
+  windows:
+    name: Windows Store package (appx)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master @ 2026-07-12
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          MEZON_STORE_VERSION="$VERSION" cargo build --release -p mezon-app --locked
+
+      - name: Build Microsoft Store package
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          & .\packaging\windows\build-appx.ps1 -Version $version
+
+      - name: Upload Store package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: appx-store
+          path: target/appx/*.appx
           if-no-files-found: error
 
 #   windows:
