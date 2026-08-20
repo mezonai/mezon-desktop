@@ -437,6 +437,7 @@ pub enum ClanEvent {
     ActiveClanChanged(Option<ClanId>),
     /// A clan was removed (server push).
     Deleted(ClanId),
+    Joined(ClanId),
 }
 
 /// Clan store — owns the clan list, fetches it over REST, and self-subscribes to realtime
@@ -950,6 +951,7 @@ impl ClanList {
 
     pub fn update_clans(&mut self, mut clans: Vec<Clan>, cx: &mut Context<Self>) {
         let prev_active = self.active_clan_id;
+        let previous: HashSet<ClanId> = self.clans.iter().map(|clan| clan.id).collect();
         carry_live_badges(&self.clans, &mut clans);
         self.clans = clans;
         self.apply_saved_order_internal();
@@ -961,6 +963,11 @@ impl ClanList {
         }
         if self.active_clan_id != prev_active {
             cx.emit(ClanEvent::ActiveClanChanged(self.active_clan_id));
+        }
+        for clan in &self.clans {
+            if !previous.contains(&clan.id) {
+                cx.emit(ClanEvent::Joined(clan.id));
+            }
         }
         cx.notify();
     }

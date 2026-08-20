@@ -14,8 +14,8 @@ use gpui::{
     MouseDownEvent, Render, Rgba, Subscription, Task, Window, deferred, div, prelude::*, px,
 };
 use mezon_store::{
-    AccountStore, BadgeService, ClanId, ClanMembersStore, FriendState, FriendStore, PresenceStore,
-    ProfileContext, Settings, UserId,
+    AccountStore, BadgeService, ChannelId, ClanId, ClanMembersStore, DirectChannel,
+    DirectMessageStore, FriendState, FriendStore, PresenceStore, ProfileContext, Settings, UserId,
 };
 use ui::Tooltip;
 
@@ -23,6 +23,7 @@ pub struct UserProfileModal {
     focus_handle: FocusHandle,
     user_id: UserId,
     clan_id: ClanId,
+    direct_id: Option<ChannelId>,
     settings: Entity<Settings>,
     avatar_image_cache: Entity<LruImageCache>,
     banner_color: Option<Rgba>,
@@ -43,6 +44,34 @@ impl UserProfileModal {
     pub fn new(
         user_id: UserId,
         clan_id: ClanId,
+        settings: Entity<Settings>,
+        avatar_image_cache: Entity<LruImageCache>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_in(user_id, clan_id, None, settings, avatar_image_cache, cx)
+    }
+
+    pub fn new_for_direct(
+        user_id: UserId,
+        direct_id: ChannelId,
+        settings: Entity<Settings>,
+        avatar_image_cache: Entity<LruImageCache>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_in(
+            user_id,
+            ClanId(0),
+            Some(direct_id),
+            settings,
+            avatar_image_cache,
+            cx,
+        )
+    }
+
+    fn new_in(
+        user_id: UserId,
+        clan_id: ClanId,
+        direct_id: Option<ChannelId>,
         settings: Entity<Settings>,
         avatar_image_cache: Entity<LruImageCache>,
         cx: &mut Context<Self>,
@@ -98,6 +127,7 @@ impl UserProfileModal {
             focus_handle: cx.focus_handle(),
             user_id,
             clan_id,
+            direct_id,
             settings,
             avatar_image_cache,
             banner_color: None,
@@ -115,6 +145,42 @@ impl UserProfileModal {
         };
         modal.load_banner_color(source_avatar, cx);
         modal
+    }
+
+    fn direct_peer(
+        direct_id: Option<ChannelId>,
+        user_id: UserId,
+        cx: &App,
+    ) -> Option<DirectChannel> {
+        let direct_id = direct_id?;
+        let store = DirectMessageStore::try_global(cx)?;
+        let channel = store.read(cx).find(direct_id)?;
+        (channel.peer_user_id == Some(user_id)).then(|| channel.clone())
+    }
+
+    fn identity(&self, cx: &App) -> (String, String, String, String, u32) {
+        if let Some(peer) = Self::direct_peer(self.direct_id, self.user_id, cx) {
+            return (
+                peer.label.clone(),
+                peer.peer_username.clone(),
+                peer.avatar.clone(),
+                String::new(),
+                0,
+            );
+        }
+        ClanMembersStore::global(cx)
+            .read(cx)
+            .member(self.clan_id, self.user_id)
+            .map(|member| {
+                (
+                    member.name().to_string(),
+                    member.user.username.clone(),
+                    member.avatar().to_string(),
+                    member.user.about_me.clone(),
+                    member.user.create_time_seconds,
+                )
+            })
+            .unwrap_or_default()
     }
 
     fn resolve_is_self(user_id: UserId, clan_id: ClanId, cx: &App) -> bool {
@@ -243,22 +309,7 @@ impl Render for UserProfileModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
-        let member = ClanMembersStore::global(cx)
-            .read(cx)
-            .member(self.clan_id, self.user_id)
-            .cloned();
-        let (display_name, username, raw_avatar, about_me, created_at) = member
-            .as_ref()
-            .map(|member| {
-                (
-                    member.name().to_string(),
-                    member.user.username.clone(),
-                    member.avatar().to_string(),
-                    member.user.about_me.clone(),
-                    member.user.create_time_seconds,
-                )
-            })
-            .unwrap_or_default();
+        let (display_name, username, raw_avatar, about_me, created_at) = self.identity(cx);
         let avatar = crate::util::imgproxy::avatar_url(cx, &raw_avatar);
         let is_self = self.is_self;
         let custom_status = self.live_custom_status.clone();

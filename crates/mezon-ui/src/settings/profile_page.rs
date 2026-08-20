@@ -7,7 +7,9 @@ use gpui::{
     Context, Entity, FontWeight, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point,
     Rgba, SharedString, Subscription, Task, Window, anchored, deferred, div, img, prelude::*, px,
 };
-use mezon_store::{AccountEvent, AccountStore, AppConfig, ClanList, Settings, UserAccount};
+use mezon_store::{
+    AccountEvent, AccountStore, AppConfig, ClanList, LoginStore, Settings, UserAccount,
+};
 
 use super::clan_profile_section::ClanProfileSection;
 use super::edit_avatar::EditAvatar;
@@ -185,6 +187,25 @@ impl ProfilePage {
                 AccountEvent::DirectMessageIconUploadFailed(msg) => {
                     Shell::global(cx).update(cx, |shell, cx| {
                         shell.error(format!("Failed to upload direct message icon: {}", msg), cx)
+                    });
+                }
+                AccountEvent::AccountDeleted => {
+                    let locale = this.settings.read(cx).language.clone();
+                    let message =
+                        mezon_i18n::t(&locale, "accountSetting.toast.deleteAccount.success");
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.close_modal(cx);
+                        shell.success(message, cx);
+                    });
+                    LoginStore::global(cx).update(cx, |store, cx| store.logout(cx));
+                }
+                AccountEvent::AccountDeleteFailed => {
+                    let locale = this.settings.read(cx).language.clone();
+                    let message =
+                        mezon_i18n::t(&locale, "accountSetting.toast.deleteAccount.error");
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.close_modal(cx);
+                        shell.error(message, cx);
                     });
                 }
                 _ => {}
@@ -696,14 +717,11 @@ impl Render for ProfilePage {
                                 GpuiButton::new("delete-account-btn")
                                     .label(mezon_i18n::t(&locale, "setting.profile.deleteAccount"))
                                     .danger()
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         let locale = this.settings.read(cx).language.clone();
-                                        let message = mezon_i18n::t(
-                                            &locale,
-                                            "setting.profile.deleteComingSoon",
-                                        );
-                                        Shell::global(cx)
-                                            .update(cx, |shell, cx| shell.info(message, cx));
+                                        Shell::global(cx).update(cx, |shell, cx| {
+                                            shell.confirm_delete_account(&locale, window, cx)
+                                        });
                                     })),
                             ),
                         )

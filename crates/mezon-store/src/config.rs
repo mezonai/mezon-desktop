@@ -343,6 +343,11 @@ impl AppConfig {
         &self.api_gw_host
     }
 
+    pub fn client_base_url(&self) -> String {
+        let scheme = if self.api_secure { "https" } else { "http" };
+        format!("{scheme}://{}:{}", self.api_gw_host, self.api_gw_port)
+    }
+
     /// REST client bootstrap port — mirrors `getMezonConfig()` in the web app.
     pub fn client_port(&self) -> u16 {
         self.api_gw_port

@@ -455,6 +455,7 @@ pub struct ChannelList {
     user_channels: HashMap<ChannelId, Channel>,
     user_channels_order: Vec<ChannelId>,
     user_channels_loading: bool,
+    user_channels_generation: u64,
     in_voice: HashMap<UserId, InVoiceInfo>,
     user_channels_loaded: bool,
     loading: HashMap<ClanId, Shared<Task<()>>>,
@@ -631,6 +632,7 @@ impl ChannelList {
         self.user_channels.clear();
         self.user_channels_order.clear();
         self.user_channels_loading = false;
+        self.user_channels_generation = self.user_channels_generation.wrapping_add(1);
         self.in_voice.clear();
         self.user_channels_loaded = false;
         self.loading.clear();
@@ -677,6 +679,7 @@ impl ChannelList {
                     }
                 },
                 ClanEvent::Deleted(clan_id) => this.forget_clan(*clan_id, cx),
+                ClanEvent::Joined(clan_id) => this.on_rejoined_clan(*clan_id, cx),
             },
         );
 
@@ -720,6 +723,7 @@ impl ChannelList {
             user_channels: HashMap::new(),
             user_channels_order: Vec::new(),
             user_channels_loading: false,
+            user_channels_generation: 0,
             in_voice: HashMap::new(),
             user_channels_loaded: false,
             loading: HashMap::new(),
@@ -748,8 +752,34 @@ impl ChannelList {
         }
     }
 
+    fn unforget_clan(&mut self, clan_id: ClanId, cx: &App) {
+        if ClanList::global(cx).read(cx).clan(clan_id).is_none() {
+            return;
+        }
+        self.forgotten_clans.remove(&clan_id);
+    }
+
+    fn on_rejoined_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        if !self.forgotten_clans.remove(&clan_id) {
+            return;
+        }
+        self.user_channels_generation = self.user_channels_generation.wrapping_add(1);
+        self.user_channels_loading = false;
+        self.user_channels_loaded = false;
+        self.fetch_user_channels(cx);
+        let active = self
+            .active_clan_id
+            .or_else(|| ClanList::global(cx).read(cx).active_clan_id);
+        if active == Some(clan_id) {
+            self.load_for_clan(clan_id, cx);
+            self.seed_badges(clan_id, cx).detach();
+        }
+    }
+
     pub fn forget_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         self.forgotten_clans.insert(clan_id);
+        self.user_channels_generation = self.user_channels_generation.wrapping_add(1);
+        self.user_channels_loading = false;
         let channel_ids: Vec<ChannelId> = self
             .cache
             .get(&clan_id)
@@ -1008,6 +1038,10 @@ impl ChannelList {
     }
 
     pub fn load_for_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.unforget_clan(clan_id, cx);
+        if self.forgotten_clans.contains(&clan_id) {
+            return;
+        }
         self.want_extras.insert(clan_id);
         if self.cache.is_fresh(&clan_id, crate::CACHE_TTL) {
             self.ensure_extras(clan_id, cx);
@@ -1017,6 +1051,10 @@ impl ChannelList {
     }
 
     pub fn load_structure_for_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.unforget_clan(clan_id, cx);
+        if self.forgotten_clans.contains(&clan_id) {
+            return;
+        }
         if self.cache.is_fresh(&clan_id, crate::CACHE_TTL) {
             return;
         }
@@ -1051,6 +1089,10 @@ impl ChannelList {
     }
 
     pub fn refresh_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.unforget_clan(clan_id, cx);
+        if self.forgotten_clans.contains(&clan_id) {
+            return;
+        }
         self.want_extras.insert(clan_id);
         self.extras_loaded.remove(&clan_id);
         self.fetch_clan(clan_id, cx);
@@ -1314,14 +1356,17 @@ impl ChannelList {
         }
         self.user_channels_loading = true;
         let api = self.api.clone();
-        let generation = self.reset_generation;
+        let reset_generation = self.reset_generation;
+        let user_channels_generation = self.user_channels_generation;
         cx.spawn(async move |this, cx| {
             let result = api.list_channel_by_user_id().await;
             let _ = this.update(cx, |this, cx| {
-                this.user_channels_loading = false;
-                if this.reset_generation != generation {
+                if this.reset_generation != reset_generation
+                    || this.user_channels_generation != user_channels_generation
+                {
                     return;
                 }
+                this.user_channels_loading = false;
                 match result {
                     Ok(descs) => {
                         this.merge_user_channels_from_api_descs(descs, cx);
@@ -1906,6 +1951,9 @@ impl ChannelList {
         self.user_channels_order.clear();
         for d in descs {
             let channel = channel_from_desc(d, 0, Vec::new(), false);
+            if self.forgotten_clans.contains(&channel.clan_id) {
+                continue;
+            }
             upsert_user_channel(
                 &mut self.user_channels,
                 &mut self.user_channels_order,
@@ -2978,6 +3026,9 @@ impl ChannelList {
                 if self.is_locally_archived(channel_id) {
                     return;
                 }
+                if e.parent_id != 0 {
+                    return;
+                }
                 if self.cache.contains(&clan_id) {
                     let channel = Channel {
                         id: ChannelId(e.channel_id),
@@ -2992,7 +3043,7 @@ impl ChannelList {
                         member_count: 0,
                         badge_count: 0,
                         muted: false,
-                        parent_id: Some(ChannelId(e.parent_id)).filter(|c| !c.is_zero()),
+                        parent_id: None,
                         last_seen_message_id: MessageId(0),
                         last_seen_timestamp: 0,
                         last_sent_message_id: MessageId(0),
@@ -6684,6 +6735,8 @@ mod tests {
             });
             channels.update(cx, |channels, cx| {
                 channels.seed_clan_channels_for_test(ClanId(1), categories());
+                channels.apply_clan_structure(ClanId(1), categories(), None, cx);
+                channels.user_channels_loaded = true;
                 channels.show_empty_categories.insert(ClanId(1));
                 channels
                     .remembered_channels
@@ -6714,6 +6767,213 @@ mod tests {
             assert!(!channels.show_empty_categories.contains(&ClanId(1)));
             assert!(!channels.remembered_channels.contains_key(&ClanId(1)));
             assert_eq!(channels.active_channel_id, None);
+            assert!(channels.forgotten_clans.contains(&ClanId(1)));
+            assert!(
+                channels.user_channels_loaded,
+                "leave must not reset user_channels_loaded; a palette open would refetch and mark it loaded again"
+            );
+            assert!(!channels.user_channels_loading);
+            assert!(channels.user_channel(ChannelId(10)).is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn rejoining_a_forgotten_clan_applies_channel_structure(cx: &mut gpui::TestAppContext) {
+        let channels = cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
+                clans.update_clans(vec![test_clan(ClanId(1), "One")], cx);
+            });
+            channels.update(cx, |channels, _cx| {
+                channels.seed_clan_channels_for_test(ClanId(1), categories());
+            });
+            channels
+        });
+
+        cx.update(|cx| {
+            crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
+                clans.handle_event(
+                    &RealtimeEvent::UserClanRemoved(mezon_proto::realtime::UserClanRemoved {
+                        clan_id: 1,
+                        user_ids: vec![REMOVED_SELF],
+                    }),
+                    cx,
+                );
+            });
+        });
+
+        cx.update(|cx| {
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), categories(), None, cx);
+                assert!(
+                    channels.cache.get(&ClanId(1)).is_none(),
+                    "a late structure fetch after leave must not restore the clan"
+                );
+
+                channels.load_for_clan(ClanId(1), cx);
+                assert!(
+                    channels.forgotten_clans.contains(&ClanId(1)),
+                    "a leftover route load after leave must not clear the forgotten guard"
+                );
+                channels.apply_clan_structure(ClanId(1), categories(), None, cx);
+                assert!(channels.cache.get(&ClanId(1)).is_none());
+            });
+        });
+
+        cx.update(|cx| {
+            crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
+                clans.update_clans(vec![test_clan(ClanId(1), "One")], cx);
+            });
+        });
+
+        cx.update(|cx| {
+            channels.update(cx, |channels, cx| {
+                assert!(
+                    !channels.forgotten_clans.contains(&ClanId(1)),
+                    "ClanEvent::Joined must clear the forgotten guard when the clan list lands"
+                );
+                assert!(
+                    !channels.user_channels_loaded,
+                    "rejoin must reset user_channels_loaded so the new clan is fetched"
+                );
+                channels.load_for_clan(ClanId(1), cx);
+                channels.apply_clan_structure(ClanId(1), categories(), None, cx);
+                assert!(
+                    channels.cache.get(&ClanId(1)).is_some(),
+                    "joining a clan again must show its channels without restarting the app"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn invite_accept_before_clan_list_reload_unforgets_when_joined_lands(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let channels = cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
+                clans.update_clans(vec![test_clan(ClanId(1), "One")], cx);
+            });
+            channels.update(cx, |channels, _cx| {
+                channels.seed_clan_channels_for_test(ClanId(1), categories());
+            });
+            channels
+        });
+
+        cx.update(|cx| {
+            crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
+                clans.handle_event(
+                    &RealtimeEvent::UserClanRemoved(mezon_proto::realtime::UserClanRemoved {
+                        clan_id: 1,
+                        user_ids: vec![REMOVED_SELF],
+                    }),
+                    cx,
+                );
+            });
+        });
+
+        cx.update(|cx| {
+            crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
+                clans.select_clan(ClanId(1), cx);
+            });
+            channels.update(cx, |channels, cx| {
+                channels.load_for_clan(ClanId(1), cx);
+                assert!(
+                    channels.forgotten_clans.contains(&ClanId(1)),
+                    "select_clan before the clan list reload must not unforget"
+                );
+                channels.apply_clan_structure(ClanId(1), categories(), None, cx);
+                assert!(channels.cache.get(&ClanId(1)).is_none());
+            });
+        });
+
+        cx.update(|cx| {
+            crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
+                clans.update_clans(vec![test_clan(ClanId(1), "One")], cx);
+            });
+        });
+
+        cx.update(|cx| {
+            channels.update(cx, |channels, cx| {
+                assert!(!channels.forgotten_clans.contains(&ClanId(1)));
+                channels.apply_clan_structure(ClanId(1), categories(), None, cx);
+                assert!(
+                    channels.cache.get(&ClanId(1)).is_some(),
+                    "Joined after invite accept must load channels without switching clans"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn in_flight_user_channels_after_leave_do_not_restore_the_left_clan(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let channels = cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
+                clans.update_clans(vec![test_clan(ClanId(1), "One")], cx);
+            });
+            channels.update(cx, |channels, cx| {
+                channels.seed_clan_channels_for_test(ClanId(1), categories());
+                channels.apply_clan_structure(ClanId(1), categories(), None, cx);
+                channels.user_channels_loaded = true;
+                channels.user_channels_loading = true;
+            });
+            channels
+        });
+
+        cx.update(|cx| {
+            crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
+                clans.handle_event(
+                    &RealtimeEvent::UserClanRemoved(mezon_proto::realtime::UserClanRemoved {
+                        clan_id: 1,
+                        user_ids: vec![REMOVED_SELF],
+                    }),
+                    cx,
+                );
+            });
+        });
+
+        cx.update(|cx| {
+            channels.update(cx, |channels, cx| {
+                assert!(!channels.user_channels_loading);
+                assert!(channels.user_channels_loaded);
+                channels.merge_user_channels_from_api_descs(
+                    vec![ApiChannelDesc {
+                        channel_id: 10,
+                        channel_label: "alpha".into(),
+                        channel_type: 1,
+                        clan_id: 1,
+                        category_name: String::new(),
+                        category_id: 0,
+                        channel_private: 0,
+                        count_mess_unread: 0,
+                        member_count: 0,
+                        parent_id: 0,
+                        is_mute: false,
+                        last_seen_message_id: 0,
+                        last_seen_timestamp: 0,
+                        last_sent_message_id: 0,
+                        last_sent_timestamp: 0,
+                        badge_count: 0,
+                        active: CHANNEL_ACTIVE_JOINED,
+                        creator_id: 0,
+                        clan_name: String::new(),
+                        channel_avatar: String::new(),
+                        topic: String::new(),
+                        age_restricted: 0,
+                        e2ee: 0,
+                        app_id: 0,
+                    }],
+                    cx,
+                );
+                assert!(
+                    channels.user_channel(ChannelId(10)).is_none(),
+                    "a list_channel_by_user_id that resolves after leave must not restore the left clan"
+                );
+            });
         });
     }
 
@@ -6828,6 +7088,20 @@ mod tests {
         })
     }
 
+    fn channel_created_event(channel_id: i64, parent_id: i64, channel_type: i32) -> RealtimeEvent {
+        RealtimeEvent::ChannelCreated(mezon_proto::realtime::ChannelCreatedEvent {
+            clan_id: 1,
+            channel_id,
+            parent_id,
+            channel_type,
+            channel_label: "created".into(),
+            channel_private: 0,
+            creator_id: 99,
+            status: 1,
+            ..Default::default()
+        })
+    }
+
     fn added_to_channel(channel_id: i64, parent_id: i64, user_ids: &[i64]) -> RealtimeEvent {
         RealtimeEvent::UserChannelAdded(mezon_proto::realtime::UserChannelAdded {
             channel_desc: Some(mezon_proto::api::ChannelDescription {
@@ -6907,6 +7181,44 @@ mod tests {
                     .expect("reactivated thread");
                 assert!(!joined.is_archived());
                 assert_eq!(joined.active, CHANNEL_ACTIVE_JOINED);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn channel_created_does_not_put_unjoined_thread_on_sidebar(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(42)));
+
+                channels.handle_event(
+                    &channel_created_event(42, 1, crate::threads::CHANNEL_TYPE_THREAD as i32),
+                    cx,
+                );
+
+                assert!(
+                    !channels.channel_in_clan(ClanId(1), ChannelId(42)),
+                    "ChannelCreated must not insert a thread the viewer has not joined"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn channel_created_still_inserts_top_level_public_channel(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
+
+                channels.handle_event(
+                    &channel_created_event(20, 0, ChannelType::Text.as_raw() as i32),
+                    cx,
+                );
+
+                assert!(channels.channel_in_clan(ClanId(1), ChannelId(20)));
             });
         });
     }

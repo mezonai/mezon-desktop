@@ -3310,6 +3310,58 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn is_follower(&self, follow_id: i64) -> Result<bool> {
+        let transport = self.inner.clone();
+        let response = runtime()
+            .spawn(async move { transport.is_follower(follow_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))??;
+        Ok(response.is_follower)
+    }
+
+    pub async fn delete_account(&self) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.delete_account().await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn link_phone(
+        &self,
+        phone_number: &str,
+    ) -> std::result::Result<String, crate::transport::LinkPhoneError> {
+        let transport = self.inner.clone();
+        let request = mezon_proto::api::AccountMezon {
+            phone_number: phone_number.to_string(),
+            ..Default::default()
+        };
+        let confirm = runtime()
+            .spawn(async move { transport.link_sms(request).await })
+            .await
+            .map_err(|e| {
+                crate::transport::LinkPhoneError::Transport(format!("transport task failed: {e}"))
+            })??;
+        Ok(confirm.req_id)
+    }
+
+    pub async fn confirm_phone_otp(
+        &self,
+        req_id: &str,
+        otp_code: &str,
+    ) -> Result<crate::transport::ApiSession> {
+        let transport = self.inner.clone();
+        let request = mezon_proto::api::LinkAccountConfirmRequest {
+            req_id: req_id.to_string(),
+            otp_code: otp_code.to_string(),
+            ..Default::default()
+        };
+        runtime()
+            .spawn(async move { transport.confirm_link_mezon_otp(request).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn get_list_favorite_channel(
         &self,
         clan_id: i64,

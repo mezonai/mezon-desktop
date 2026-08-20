@@ -12,6 +12,7 @@ use gpui::{
 use mezon_store::{AccountStore, AppConfig, Settings, UserAccount};
 
 use super::password_modal::PasswordModal;
+use super::phone_modal::PhoneModal;
 
 use crate::app::shell::Shell;
 use crate::image_cache::LruImageCache;
@@ -210,7 +211,6 @@ pub struct AccountPage {
     banner_color: Option<Rgba>,
     banner_source: String,
     banner_task: Option<Task<()>>,
-    toast_message: Option<SharedString>,
 }
 
 impl AccountPage {
@@ -228,25 +228,9 @@ impl AccountPage {
             banner_color: None,
             banner_source: String::new(),
             banner_task: None,
-            toast_message: None,
         };
         page.refresh_banner_source(cx);
         page
-    }
-
-    fn show_toast(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.toast_message = Some(message.into());
-        cx.notify();
-
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(2)).await;
-            this.update(cx, |this, cx| {
-                this.toast_message = None;
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
     }
 
     /// Must stay the single source of the avatar url: the banner reads its color
@@ -579,15 +563,9 @@ impl Render for AccountPage {
                                         phone_display,
                                     ))
                                     .child(outlined_button("phone-btn", phone_label).on_click(
-                                        cx.listener(|this, _, _, cx| {
+                                        cx.listener(|this, _, window, cx| {
                                             let locale = this.settings.read(cx).language.clone();
-                                            this.show_toast(
-                                                mezon_i18n::t(
-                                                    &locale,
-                                                    "setting.account.phoneComingSoon",
-                                                ),
-                                                cx,
-                                            );
+                                            PhoneModal::open(locale, window, cx);
                                         }),
                                     )),
                             ),
@@ -614,9 +592,6 @@ impl Render for AccountPage {
                             ),
                     ),
             )
-            .when_some(self.toast_message.clone(), |this, msg| {
-                this.child(div().text_sm().text_color(theme.text_muted).child(msg))
-            })
             .into_any_element()
     }
 }

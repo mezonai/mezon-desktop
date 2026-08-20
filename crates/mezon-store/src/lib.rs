@@ -33,6 +33,7 @@ pub mod gifts;
 pub mod group_members;
 pub mod ids;
 pub mod inbox;
+pub mod invite;
 pub mod login;
 pub mod message;
 pub mod message_search;
@@ -157,6 +158,7 @@ pub use gifts::{
 pub use group_members::{GroupMember, GroupMembersEvent, GroupMembersStore};
 pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};
 pub use inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxEvent, InboxStore};
+pub use invite::{InviteDetails, InviteEvent, InviteState, InviteStore};
 pub use login::{LoginStore, token_from_oauth_callback_url};
 pub use message::*;
 pub use message::{
@@ -236,7 +238,7 @@ pub use wallet::{
 };
 pub use webhook::{
     ChannelWebhook, ClanWebhook, MAX_WEBHOOK_AVATAR_BYTES, WEBHOOK_NAME_MAX_LENGTH, WebhookEvent,
-    WebhookStore,
+    WebhookStore, webhook_name_is_valid,
 };
 pub use winstore_update::{
     WinstoreUpdateStore, effective_update_status, update_available_clicked, update_check_clicked,
@@ -344,6 +346,10 @@ pub struct Settings {
     pub zoom_factor: f32,
     /// Last window bounds [x, y, width, height]
     pub window_bounds: Option<[i32; 4]>,
+    /// Conversation ids the signed-in user pinned to the top of the DM list.
+    /// Cleared on logout so the next account does not inherit them.
+    #[serde(default)]
+    pub pinned_dms: Vec<i64>,
     /// UI theme key: "purple_haze" (default) | "dark" | "light" | "sunrise" | "redDark"
     /// | "abyss_dark" | "berrynade" | "cisher" | "sunset"
     pub theme: String,
@@ -386,6 +392,7 @@ impl Default for Settings {
             hardware_acceleration: true,
             zoom_factor: 1.0,
             window_bounds: None,
+            pinned_dms: Vec::new(),
             theme: "purple_haze".to_string(),
             language: "en".to_string(),
             notifications_enabled: true,

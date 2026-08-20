@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::transport::ApiAccount;
+use mezon_client::transport::LinkPhoneError;
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent, RegistrationPasswordError};
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +67,18 @@ pub enum AccountEvent {
     ClanProfileSaveFailed(String),
     NicknameDuplicateChecked(bool),
     StatusUpdated,
+    AccountDeleted,
+    AccountDeleteFailed,
+    PhoneOtpSent(String),
+    PhoneOtpFailed(PhoneLinkError),
+    PhoneVerified,
+    PhoneVerifyFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhoneLinkError {
+    AlreadyLinkedToAnother,
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -472,6 +485,133 @@ impl AccountStore {
                     };
                     cx.emit(AccountEvent::PasswordSaveFailed(error));
                     cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn apply_rotated_session(
+        rotated: mezon_client::transport::ApiSession,
+        user_id: Option<i64>,
+        cx: &mut Context<Self>,
+    ) {
+        if rotated.token.is_empty()
+            || user_id.is_none_or(|id| rotated.user_id != 0 && rotated.user_id != id)
+        {
+            return;
+        }
+        let auth_state = crate::login::LoginStore::global(cx).read(cx).auth_state();
+        let applied = auth_state.update(cx, |state, cx| {
+            let session = match state {
+                crate::AuthState::Authenticated(session)
+                | crate::AuthState::Connecting(session) => session,
+                _ => return None,
+            };
+            if user_id.is_some_and(|id| session.user_id != id.to_string()) {
+                return None;
+            }
+            session.apply_refresh(
+                &rotated.token,
+                &rotated.refresh_token,
+                &rotated.session_id,
+                "",
+            );
+            cx.notify();
+            Some(session.clone())
+        });
+        let Some(session) = applied else {
+            return;
+        };
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(error) = crate::login::LoginStore::persist_session(&session) {
+                    tracing::warn!("Failed to persist phone-rotated session: {error}");
+                }
+            })
+            .detach();
+    }
+
+    pub fn delete_account(&mut self, cx: &mut Context<Self>) {
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        cx.spawn(async move |this, cx| {
+            let result = api.delete_account().await;
+            let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(()) => cx.emit(AccountEvent::AccountDeleted),
+                    Err(error) => {
+                        tracing::warn!("delete account failed: {error}");
+                        cx.emit(AccountEvent::AccountDeleteFailed);
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub fn link_phone(&mut self, phone_number: String, cx: &mut Context<Self>) {
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        cx.spawn(async move |this, cx| {
+            let result = api.link_phone(&phone_number).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(req_id) if !req_id.is_empty() => cx.emit(AccountEvent::PhoneOtpSent(req_id)),
+                    Ok(_) => cx.emit(AccountEvent::PhoneOtpFailed(PhoneLinkError::Failed)),
+                    Err(LinkPhoneError::AlreadyLinked) => cx.emit(AccountEvent::PhoneOtpFailed(
+                        PhoneLinkError::AlreadyLinkedToAnother,
+                    )),
+                    Err(error) => {
+                        tracing::warn!("link phone failed: {error}");
+                        cx.emit(AccountEvent::PhoneOtpFailed(PhoneLinkError::Failed));
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub fn verify_phone(
+        &mut self,
+        req_id: String,
+        otp_code: String,
+        phone_number: String,
+        cx: &mut Context<Self>,
+    ) {
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        let user_id = self.account.as_ref().map(|account| account.user_id);
+        cx.spawn(async move |this, cx| {
+            let result = api.confirm_phone_otp(&req_id, &otp_code).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != generation
+                    || this.account.as_ref().map(|account| account.user_id) != user_id
+                {
+                    return;
+                }
+                match result {
+                    Ok(rotated) => {
+                        if let Some(account) = &mut this.account {
+                            account.phone_number = Some(phone_number);
+                        }
+                        if let Some(account) = &this.account {
+                            Self::spawn_persist_cache(account, cx);
+                        }
+                        Self::apply_rotated_session(rotated, user_id, cx);
+                        cx.emit(AccountEvent::PhoneVerified);
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        tracing::warn!("verify phone failed: {error}");
+                        cx.emit(AccountEvent::PhoneVerifyFailed);
+                    }
                 }
             });
         })

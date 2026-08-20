@@ -8,6 +8,7 @@ mod edit_avatar;
 mod language_page;
 mod notifications_page;
 mod password_modal;
+mod phone_modal;
 mod profile_page;
 mod screen;
 mod voice_page;

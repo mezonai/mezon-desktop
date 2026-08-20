@@ -10,6 +10,7 @@ use crate::components::primitives::{Button, Icon, IconName};
 use crate::image_cache::{
     LruImageCache, SHARED_ENTRY_MAX_BYTES, SHARED_IMAGE_CACHE_BYTES, SHARED_IMAGE_CACHE_CAPACITY,
 };
+use crate::invite::{AddFriendPage, InvitePage};
 use crate::router::{Route, Router};
 use crate::settings::SettingsScreen;
 use crate::theme::{ActiveTheme, Theme, resolve_theme};
@@ -28,6 +29,8 @@ pub struct RootView {
     settings_screen: Entity<SettingsScreen>,
     clan_setting_screen: Entity<ClanSettingScreen>,
     channel_setting_screen: Entity<ChannelSettingScreen>,
+    invite_page: Entity<InvitePage>,
+    add_friend_page: Entity<AddFriendPage>,
     shell: Entity<Shell>,
     applied_theme: String,
     cached_locale: String,
@@ -237,6 +240,16 @@ impl RootView {
             move |cx| ChannelSettingScreen::new(settings.clone(), cx)
         });
 
+        let invite_page = cx.new({
+            let settings = settings.clone();
+            move |cx| InvitePage::new(settings.clone(), cx)
+        });
+
+        let add_friend_page = cx.new({
+            let settings = settings.clone();
+            move |cx| AddFriendPage::new(settings.clone(), cx)
+        });
+
         let applied_theme = settings.read(cx).theme.clone();
         let cached_locale = settings.read(cx).language.clone();
         crate::image_cache::start_idle_trim(cx);
@@ -264,6 +277,8 @@ impl RootView {
             login_view,
             chat_layout,
             settings_screen,
+            invite_page,
+            add_friend_page,
             clan_setting_screen,
             channel_setting_screen,
             shell,
@@ -386,8 +401,8 @@ impl Render for RootView {
                         uncached_fill(self.channel_setting_screen.clone())
                     }
                     Route::NotFound { .. } => render_not_found(theme, locale),
-                    Route::AddFriend { .. } => render_placeholder(theme, "Add Friend"),
-                    Route::Invite { .. } => render_placeholder(theme, "Accept Invite"),
+                    Route::AddFriend { .. } => uncached_fill(self.add_friend_page.clone()),
+                    Route::Invite { .. } => uncached_fill(self.invite_page.clone()),
                     _ => cached_fill(self.chat_layout.clone()),
                 }
             }
@@ -651,30 +666,6 @@ fn render_connecting(locale: &str, attempt: u32, online: bool, animate: bool) ->
                         .child(label),
                 )
                 .with_animation(body_id, body_anim, |el, delta| el.opacity(delta)),
-        )
-        .into_any_element()
-}
-
-fn render_placeholder(theme: &Theme, label: &str) -> gpui::AnyElement {
-    div()
-        .flex()
-        .flex_1()
-        .items_center()
-        .justify_center()
-        .flex_col()
-        .gap_4()
-        .child(
-            div()
-                .text_xl()
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme.text_primary)
-                .child(label.to_string()),
-        )
-        .child(
-            div()
-                .text_sm()
-                .text_color(theme.text_secondary)
-                .child("Coming soon"),
         )
         .into_any_element()
 }

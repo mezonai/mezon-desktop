@@ -3654,6 +3654,7 @@ fn toggle_mark_on_line(line: &mut EditorLine, range: Range<usize>, kind: MarkKin
     }
 }
 
+#[cfg(test)]
 fn lines_from_tiptap(raw: &str) -> Vec<EditorLine> {
     match parse_tiptap_doc(raw) {
         Some(doc) => lines_from_tiptap_doc(&doc),

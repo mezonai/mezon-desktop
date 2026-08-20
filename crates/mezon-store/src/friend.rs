@@ -68,6 +68,10 @@ pub enum FriendEvent {
     BlockFailed,
     UnblockSucceeded,
     UnblockFailed,
+    FollowerChecked {
+        user: UserId,
+        is_follower: bool,
+    },
 }
 
 fn friend_from_api(f: ApiFriend) -> Friend {
@@ -354,6 +358,28 @@ impl FriendStore {
 
     /// Send a friend request by username (React add-friend modal). Optimistically inserts
     /// an outgoing request on success so the Pending tab reflects it immediately.
+    pub fn check_is_follower(&mut self, user: UserId, cx: &mut Context<Self>) {
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        cx.spawn(async move |this, cx| {
+            let result = api.is_follower(user.0).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != generation {
+                    return;
+                }
+                let is_follower = match result {
+                    Ok(is_follower) => is_follower,
+                    Err(error) => {
+                        tracing::warn!("is_follower check failed: {error}");
+                        false
+                    }
+                };
+                cx.emit(FriendEvent::FollowerChecked { user, is_follower });
+            });
+        })
+        .detach();
+    }
+
     pub fn add_friend_by_username(&mut self, username: String, cx: &mut Context<Self>) {
         if self.adding || username.is_empty() {
             return;

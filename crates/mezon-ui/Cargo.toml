@@ -37,6 +37,7 @@ indexmap.workspace = true
 image.workspace = true
 base64.workspace = true
 qrcode.workspace = true
+percent-encoding.workspace = true
 smallvec.workspace = true
 scap.workspace = true
 

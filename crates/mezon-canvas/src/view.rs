@@ -1,6 +1,6 @@
 use gpui::{
-    App, ClickEvent, Context, DefiniteLength, Entity, Focusable, FontWeight, Hsla, Pixels,
-    ScrollHandle, SharedString, Window, div, prelude::*, px, relative,
+    App, ClickEvent, Context, DefiniteLength, Entity, FontWeight, Hsla, Pixels, ScrollHandle,
+    SharedString, Window, div, prelude::*, px, relative,
 };
 use mezon_store::{BadgeService, CanvasDetail, CanvasStore, ChannelId, ClanId, Settings, UserId};
 use serde::Deserialize;

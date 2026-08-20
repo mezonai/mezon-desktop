@@ -1,5 +1,5 @@
 use crate::components::primitives::{Input, InputEvent, InputState};
-use gpui::{App, Context, Entity, Subscription, Window, div, prelude::*};
+use gpui::{App, Context, Entity, KeyDownEvent, Subscription, Window, div, prelude::*};
 
 use crate::components::OtpCompleteHandler;
 use crate::theme::ActiveTheme;
@@ -151,19 +151,29 @@ impl Render for OtpInput {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let theme = _cx.theme();
 
-        div()
-            .flex()
-            .flex_row()
-            .gap_2()
-            .justify_center()
-            .children(self.inputs.iter().map(|input| {
+        div().flex().flex_row().gap_2().justify_center().children(
+            self.inputs.iter().enumerate().map(|(index, input)| {
+                let current = input.clone();
+                let previous = index.checked_sub(1).map(|prev| self.inputs[prev].clone());
                 div()
                     .w(gpui::px(44.0))
                     .bg(theme.bg_primary)
                     .rounded_md()
                     .border_1()
                     .border_color(theme.border)
+                    .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                        if event.keystroke.key != "backspace" {
+                            return;
+                        }
+                        if !current.read(cx).value().is_empty() {
+                            return;
+                        }
+                        if let Some(previous) = &previous {
+                            previous.update(cx, |input, cx| input.focus(window, cx));
+                        }
+                    })
                     .child(Input::new(input))
-            }))
+            }),
+        )
     }
 }

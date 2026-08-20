@@ -42,14 +42,21 @@ impl ClanLoadScheduler {
     }
 
     fn new(cx: &mut Context<Self>) -> Self {
-        let clan_sub = cx.subscribe(&ClanList::global(cx), |this, _clan, event, cx| {
-            if let ClanEvent::ActiveClanChanged(active) = event {
-                match active {
+        let clan_sub = cx.subscribe(
+            &ClanList::global(cx),
+            |this, _clan, event, cx| match event {
+                ClanEvent::ActiveClanChanged(active) => match active {
                     Some(clan_id) => this.start(*clan_id, cx),
                     None => this.reset(cx),
+                },
+                ClanEvent::Joined(clan_id) => {
+                    if ClanList::global(cx).read(cx).active_clan_id == Some(*clan_id) {
+                        this.start(*clan_id, cx);
+                    }
                 }
-            }
-        });
+                ClanEvent::Deleted(_) => {}
+            },
+        );
 
         Self {
             generation: 0,

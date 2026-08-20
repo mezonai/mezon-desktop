@@ -958,6 +958,7 @@ fn open_main_window(
     mezon_store::WinstoreUpdateStore::init(cx);
     let title_bar = cx.new(|cx| TitleBar::new(settings_entity.clone(), cx));
 
+    mezon_store::InviteStore::init(client.clone(), cx);
     mezon_store::LoginStore::init(client, api.clone(), auth_state.clone(), cx);
     mezon_store::RealtimeDispatch::init(api.clone(), cx);
     mezon_store::ConnectionStore::init(transport, api.clone(), auth_state.clone(), cx);

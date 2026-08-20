@@ -3237,18 +3237,6 @@ impl ChatLayout {
                 &format!("Canvas #{channel_id}"),
                 &current_path,
             ),
-            Route::AddFriend { username } => self.render_placeholder(
-                theme,
-                crate::components::primitives::IconName::People,
-                &format!("Add Friend: {username}"),
-                &current_path,
-            ),
-            Route::Invite { invite_id } => self.render_placeholder(
-                theme,
-                crate::components::primitives::IconName::People,
-                &format!("Invite: {invite_id}"),
-                &current_path,
-            ),
             Route::SettingsAccount
             | Route::SettingsProfile
             | Route::SettingsClanProfile { .. }
@@ -3261,6 +3249,8 @@ impl ChatLayout {
             | Route::SettingsAdvanced
             | Route::ClanSettings { .. }
             | Route::ChannelSettings { .. }
+            | Route::AddFriend { .. }
+            | Route::Invite { .. }
             | Route::NotFound { .. } => div().into_any_element(),
         };
 

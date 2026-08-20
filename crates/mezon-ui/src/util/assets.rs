@@ -11,6 +11,7 @@ pub const MEZON_COMMUNITY: &str = "images/mezon-community.png";
 pub const CHANNEL_SETTING_LOGO_LIGHT: &str = "images/channel_setting_logo_light.svg";
 pub const CHANNEL_SETTING_LOGO_DARK: &str = "images/channel_setting_logo_dark.svg";
 pub const ONBOARDING: &str = "images/onboarding.png";
+pub const EMPTY_WEBHOOK: &str = "images/empty-webhook.svg";
 
 #[derive(RustEmbed)]
 #[folder = "assets"]
@@ -51,6 +52,7 @@ mod tests {
             CHANNEL_SETTING_LOGO_LIGHT,
             CHANNEL_SETTING_LOGO_DARK,
             ONBOARDING,
+            EMPTY_WEBHOOK,
             "icons/flower.svg",
             "icons/flower-rose-line.svg",
             "icons/flower-peony.svg",

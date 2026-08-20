@@ -1,4 +1,4 @@
-use chrono::{DateTime, Datelike, Duration, Local, NaiveDate};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, Timelike};
 use gpui::SharedString;
 use mezon_store::message_time::local_datetime;
 use ui::utils::{DateTimeType, format_distance};
@@ -60,6 +60,27 @@ pub fn format_message_time(
         )
         .into()
     }
+}
+
+pub fn format_i18n_full_date_from_seconds(timestamp_sec: i64, locale: &str) -> String {
+    let timestamp_sec = mezon_store::message_time::normalize_unix_seconds(timestamp_sec);
+    if timestamp_sec <= 0 {
+        return String::new();
+    }
+    let Some(target) = local_datetime(timestamp_sec) else {
+        return String::new();
+    };
+    let day_name = mezon_i18n::t(
+        locale,
+        WEEKDAY_KEYS[target.weekday().num_days_from_sunday() as usize],
+    );
+    let month_name = mezon_i18n::t(locale, MONTH_KEYS[target.month0() as usize]);
+    mezon_i18n::t(locale, "common.timeFormat.fullDate")
+        .replace("{{dayName}}", day_name)
+        .replace("{{monthName}}", month_name)
+        .replace("{{day}}", &target.day().to_string())
+        .replace("{{hours}}", &format!("{:02}", target.hour()))
+        .replace("{{minutes}}", &format!("{:02}", target.minute()))
 }
 
 pub fn format_relative_time_from_seconds(
@@ -265,6 +286,11 @@ pub fn format_date_divider(ts: i64, locale: &str, now: DateTime<Local>) -> Strin
 mod tests {
     use super::*;
     use chrono::Timelike;
+
+    #[test]
+    fn i18n_full_date_is_empty_for_missing_timestamp() {
+        assert_eq!(format_i18n_full_date_from_seconds(0, "en"), "");
+    }
 
     #[test]
     fn message_time_today_is_hhmm_only() {

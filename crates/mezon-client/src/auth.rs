@@ -279,6 +279,62 @@ impl MezonClient {
             .with_context(|| format!("Failed to parse JSON response from POST {url}"))
     }
 
+    /// Fetch an invite's public details (clan name, logo, member count) without joining.
+    ///
+    /// `GetLinkInvite` has no socket API id — the web client reaches it over REST on the
+    /// gateway with the api key as basic auth, so this mirrors that. `gw_base` is passed in
+    /// rather than read from `self` because `set_api_url` repoints the client at the API host
+    /// after login, while this endpoint lives on the gateway.
+    pub async fn get_link_invite(
+        &self,
+        gw_base: &str,
+        invite_id: &str,
+    ) -> Result<mezon_proto::api::InviteUserRes> {
+        use prost::Message;
+
+        let encoded_id = invite_id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            .collect::<String>();
+        if encoded_id.is_empty() || encoded_id != invite_id {
+            bail!("invalid invite id");
+        }
+        let url = format!("{}/v2/invite/{encoded_id}", gw_base.trim_end_matches('/'));
+
+        let request = http::Request::builder()
+            .method(http::Method::GET)
+            .uri(&url)
+            .header("Authorization", self.basic_auth_header())
+            .header("Accept", "application/x-protobuf")
+            .body(AsyncBody::empty())
+            .context("Failed to build invite lookup request")?;
+
+        let mut response = self
+            .http
+            .send(request)
+            .await
+            .context("Network error fetching invite")?;
+        let status = response.status();
+
+        const MAX_INVITE_RESPONSE_BYTES: u64 = 256 * 1024;
+        let mut bytes: Vec<u8> = Vec::new();
+        response
+            .body_mut()
+            .take(MAX_INVITE_RESPONSE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .context("Failed to read invite response")?;
+        if bytes.len() as u64 > MAX_INVITE_RESPONSE_BYTES {
+            bail!("invite response exceeds {MAX_INVITE_RESPONSE_BYTES} bytes");
+        }
+        if !status.is_success() {
+            bail!("HTTP {} fetching invite", status.as_u16());
+        }
+
+        mezon_proto::api::InviteUserRes::decode(bytes.as_slice())
+            .context("Failed to decode invite response")
+    }
+
     /// Ask the API host whether this token is still accepted. Used only after both socket
     /// credentials have been refused, to tell "the account is gone" from "the gateway would not
     /// take the connection" — the gateway itself never delivers that distinction.

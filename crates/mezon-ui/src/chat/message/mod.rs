@@ -56,6 +56,7 @@ pub(crate) use reaction_picker::{ReactionPicker, ReactionPickerEvent};
 pub(crate) use send_token_modal::SendTokenModal;
 pub(crate) use share_location_modal::ShareLocationModal;
 pub(crate) use time::format_channel_setting_relative_time_from_seconds;
+pub(crate) use time::format_i18n_full_date_from_seconds;
 pub(crate) use time::format_message_time;
 pub use time::format_relative_time_from_seconds;
 pub(crate) use transaction_history_modal::TransactionHistoryModal;

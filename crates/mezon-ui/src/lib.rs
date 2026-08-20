@@ -11,6 +11,7 @@ pub mod dev;
 pub mod gallery;
 pub mod image_cache;
 pub mod image_viewer;
+pub mod invite;
 pub mod router;
 pub mod settings;
 pub mod sidebar;

@@ -14,8 +14,8 @@ use gpui::{
 use crate::components::primitives::{InputState, Toast, ToastKind};
 use crate::router::Route;
 
-mod coming_soon_modal;
 mod confirm_archive_channel_modal;
+mod confirm_delete_account_modal;
 mod confirm_delete_canvas_modal;
 mod confirm_delete_category_modal;
 mod confirm_delete_channel_modal;
@@ -29,13 +29,14 @@ mod confirm_delete_thread_modal;
 mod confirm_delete_webhook_modal;
 mod confirm_kick_member_modal;
 mod confirm_leave_clan_modal;
+mod confirm_leave_dm_group_modal;
 mod confirm_leave_thread_modal;
 mod confirm_remove_friend_modal;
 mod disable_clan_community_modal;
 mod upload_limit_modal;
 mod wallet_not_available_modal;
-use coming_soon_modal::ComingSoonModal;
 use confirm_archive_channel_modal::ConfirmArchiveChannelModal;
+use confirm_delete_account_modal::ConfirmDeleteAccountModal;
 use confirm_delete_canvas_modal::ConfirmDeleteCanvasModal;
 use confirm_delete_category_modal::ConfirmDeleteCategoryModal;
 use confirm_delete_channel_modal::ConfirmDeleteChannelModal;
@@ -49,6 +50,7 @@ use confirm_delete_thread_modal::ConfirmDeleteThreadModal;
 use confirm_delete_webhook_modal::{ConfirmDeleteWebhookModal, WebhookDeleteTarget};
 use confirm_kick_member_modal::ConfirmKickMemberModal;
 use confirm_leave_clan_modal::ConfirmLeaveClanModal;
+use confirm_leave_dm_group_modal::ConfirmLeaveDmGroupModal;
 use confirm_leave_thread_modal::ConfirmLeaveThreadModal;
 pub use confirm_remove_friend_modal::FriendRemovalKind;
 use confirm_remove_friend_modal::{ConfirmRemoveFriendModal, interpolate_username};
@@ -313,31 +315,6 @@ impl Shell {
 
     pub fn command_palette_open(&self) -> bool {
         self.command_palette_open
-    }
-
-    /// Open a placeholder modal for a not-yet-implemented feature: the given `title` plus a
-    /// "coming soon" body and a close button.
-    pub fn show_coming_soon(
-        &mut self,
-        title: impl Into<SharedString>,
-        locale: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let message: SharedString = mezon_i18n::t(locale, "common.comingSoon")
-            .to_string()
-            .into();
-        let close_label: SharedString = mezon_i18n::t(locale, "common.close").to_string().into();
-        let title = title.into();
-        let view = cx.new(|cx| ComingSoonModal {
-            focus_handle: cx.focus_handle(),
-            title,
-            message,
-            close_label,
-        });
-        let focus_handle = view.read(cx).focus_handle.clone();
-        window.focus(&focus_handle, cx);
-        self.show_modal(view.into(), cx);
     }
 
     /// Confirm-then-delete a message (mirrors React's `ModalDeleteMess`): shown when the
@@ -1118,6 +1095,52 @@ impl Shell {
         self.modal_fullscreen = false;
         self.modal = Some(host.into());
         cx.notify();
+    }
+
+    pub fn confirm_leave_dm_group(
+        &mut self,
+        channel_id: mezon_store::ChannelId,
+        group_name: &str,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let description =
+            mezon_i18n::t(locale, "leaveGroup.confirmMessage").replace("{{groupName}}", group_name);
+        let view = cx.new(|cx| ConfirmLeaveDmGroupModal {
+            focus_handle: cx.focus_handle(),
+            channel_id,
+            title: mezon_i18n::t(locale, "leaveGroup.title")
+                .replace("{{groupName}}", group_name)
+                .into(),
+            description: description.into(),
+            cancel_label: mezon_i18n::t(locale, "leaveGroup.cancel").into(),
+            confirm_label: mezon_i18n::t(locale, "leaveGroup.leaveGroup").into(),
+            failed_message: mezon_i18n::t(locale, "common.somethingWentWrong").into(),
+            leaving: false,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_delete_account(
+        &mut self,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = cx.new(|cx| ConfirmDeleteAccountModal {
+            focus_handle: cx.focus_handle(),
+            title: mezon_i18n::t(locale, "common.deleteAccount").into(),
+            description: mezon_i18n::t(locale, "common.confirmDeleteAccount").into(),
+            cancel_label: mezon_i18n::t(locale, "common.cancel").into(),
+            delete_label: mezon_i18n::t(locale, "common.delete").into(),
+            deleting: false,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
     }
 
     pub fn confirm_disable_clan_community(

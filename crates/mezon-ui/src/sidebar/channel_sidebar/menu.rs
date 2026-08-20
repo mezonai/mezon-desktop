@@ -7,6 +7,7 @@ use mezon_store::{
 
 use super::{CategoryMenuData, ChannelMenuData, ChannelSidebar};
 use crate::app::shell::Shell;
+use crate::clan::create_channel_modal::CreateChannelModal;
 use crate::clan::edit_category_modal::EditCategoryModal;
 use crate::components::primitives::{ContextMenu, SubmenuOption};
 
@@ -119,14 +120,51 @@ fn toggle_channel_favorite(
     }
 }
 
-fn coming_soon_modal(title: String, locale: String) -> impl Fn(&mut Window, &mut App) + 'static {
+fn open_create_channel(
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    locale: String,
+) -> impl Fn(&mut Window, &mut App) + 'static {
     move |window: &mut Window, cx: &mut App| {
-        let title = title.clone();
+        let Some(channel_list) = ChannelList::try_global(cx) else {
+            return;
+        };
+        let Some((category_id, category_name)) =
+            category_for_channel(&channel_list, clan_id, channel_id, cx)
+        else {
+            return;
+        };
         let locale = locale.clone();
-        Shell::global(cx).update(cx, |shell, cx| {
-            shell.show_coming_soon(title, &locale, window, cx);
+        let modal = cx.new(|cx| {
+            CreateChannelModal::new(
+                clan_id,
+                category_id,
+                category_name,
+                channel_list,
+                locale,
+                window,
+                cx,
+            )
         });
+        Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
     }
+}
+
+fn category_for_channel(
+    channel_list: &Entity<ChannelList>,
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    cx: &App,
+) -> Option<(String, String)> {
+    let list = channel_list.read(cx);
+    let categories = list.categories_for_clan(clan_id);
+    let channel_category = list
+        .channel(clan_id, channel_id)
+        .and_then(|channel| channel.category_id.clone());
+    channel_category
+        .and_then(|id| categories.iter().find(|category| category.id == id))
+        .or_else(|| categories.first())
+        .map(|category| (category.id.clone(), category.name.clone()))
 }
 
 fn copy_channel_link(
@@ -594,8 +632,8 @@ pub(super) fn build_channel_menu(
             };
             if let Some(create_label) = create_label {
                 menu = menu.item(
-                    create_label.clone(),
-                    coming_soon_modal(create_label, locale_owned.clone()),
+                    create_label,
+                    open_create_channel(clan_id, channel_id, locale_owned.clone()),
                 );
             }
 

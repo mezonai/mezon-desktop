@@ -36,6 +36,7 @@ pub enum Route {
     },
     AddFriend {
         username: String,
+        data: Option<String>,
     },
     Invite {
         invite_id: String,
@@ -106,7 +107,10 @@ impl Route {
                 channel_id,
                 canvas_id,
             } => format!("/chat/clans/{clan_id}/channels/{channel_id}/canvas/{canvas_id}"),
-            Route::AddFriend { username } => format!("/chat/{username}"),
+            Route::AddFriend { username, data } => match data {
+                Some(data) => format!("/chat/{username}?data={data}"),
+                None => format!("/chat/{username}"),
+            },
             Route::Invite { invite_id } => format!("/invite/{invite_id}"),
             Route::SettingsAccount => "/settings/account".to_string(),
             Route::SettingsProfile => "/settings/profile".to_string(),
@@ -138,6 +142,7 @@ impl Route {
     }
 
     pub fn from_path(path: &str) -> Route {
+        let (path, query) = split_query(path);
         let normalized = normalize_path(path);
         let segments = normalized
             .trim_start_matches('/')
@@ -145,7 +150,15 @@ impl Route {
             .filter(|segment| !segment.is_empty())
             .collect::<Vec<_>>();
 
-        Self::route_from_segments(&segments).unwrap_or(Route::NotFound { path: normalized })
+        let route =
+            Self::route_from_segments(&segments).unwrap_or(Route::NotFound { path: normalized });
+        match route {
+            Route::AddFriend { username, .. } => Route::AddFriend {
+                username,
+                data: query.and_then(query_param_data),
+            },
+            other => other,
+        }
     }
 
     /// Map URL segments to a [`Route`]. Snowflake ids are parsed with `.parse().ok()?`, so a
@@ -198,6 +211,7 @@ impl Route {
             },
             ["chat", username] if !matches!(username, "direct" | "clans") => Route::AddFriend {
                 username: username.to_string(),
+                data: None,
             },
             ["invite", invite_id] => Route::Invite {
                 invite_id: invite_id.to_string(),
@@ -399,6 +413,21 @@ pub fn go_forward(cx: &mut App) {
     });
 }
 
+fn split_query(path: &str) -> (&str, Option<&str>) {
+    match path.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (path, None),
+    }
+}
+
+fn query_param_data(query: &str) -> Option<String> {
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("data="))
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn normalize_path(path: &str) -> String {
     let trimmed = path.trim();
     if trimmed.is_empty() || trimmed == "/" {
@@ -544,6 +573,7 @@ mod tests {
             route,
             Route::AddFriend {
                 username: "alice".into(),
+                data: None,
             }
         );
     }
@@ -552,9 +582,42 @@ mod tests {
     fn to_path_roundtrip_add_friend() {
         let route = Route::AddFriend {
             username: "alice".into(),
+            data: None,
         };
         assert_eq!(route.to_path(), "/chat/alice");
         assert_eq!(Route::from_path(&route.to_path()), route);
+    }
+
+    #[test]
+    fn from_path_add_friend_keeps_data_param() {
+        let route = Route::from_path("/chat/alice?data=eyJpZCI6IjEifQ%3D%3D");
+        assert_eq!(
+            route,
+            Route::AddFriend {
+                username: "alice".into(),
+                data: Some("eyJpZCI6IjEifQ%3D%3D".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn to_path_roundtrip_add_friend_with_data() {
+        let route = Route::AddFriend {
+            username: "alice".into(),
+            data: Some("abc".into()),
+        };
+        assert_eq!(route.to_path(), "/chat/alice?data=abc");
+        assert_eq!(Route::from_path(&route.to_path()), route);
+    }
+
+    #[test]
+    fn query_string_does_not_leak_into_other_routes() {
+        assert_eq!(
+            Route::from_path("/invite/abc123?ref=mail"),
+            Route::Invite {
+                invite_id: "abc123".into(),
+            }
+        );
     }
 
     #[test]
