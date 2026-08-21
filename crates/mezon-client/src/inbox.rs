@@ -587,13 +587,15 @@ fn parse_notification_content(bytes: &[u8]) -> Option<InboxMessagePreview> {
         }
         return parse_message_preview_json(bytes);
     }
+    if let Ok(fcm) = api::DirectFcmProto::decode(bytes)
+        && fcm.message_id > 0
+    {
+        return Some(preview_from_fcm(fcm));
+    }
     if let Ok(message) = api::ChannelMessage::decode(bytes)
         && message.message_id > 0
     {
         return Some(preview_from_channel_message(message));
-    }
-    if let Ok(fcm) = api::DirectFcmProto::decode(bytes) {
-        return Some(preview_from_fcm(fcm));
     }
     parse_message_preview_json(bytes)
 }

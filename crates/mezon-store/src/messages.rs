@@ -20,9 +20,10 @@ use mezon_client::transport::{
     mention_content_tokens,
 };
 use mezon_client::{
-    AppApi, AttachmentUploadOutcome, ConnectionStatus, InboxCategory, InboxMentionSpan,
-    MarkedInboxMessageInput, MezonTransport, PresignedAttachment, RealtimeEvent, UploadFile,
-    UploadThumbnail, UrlAttachment, inbox_notification_from_marked_message_local,
+    ApiStatusError, AppApi, AttachmentUploadOutcome, ConnectionStatus, InboxCategory,
+    InboxMentionSpan, MarkedInboxMessageInput, MezonTransport, PresignedAttachment, RealtimeEvent,
+    UploadFile, UploadThumbnail, UrlAttachment, api_status_from_error,
+    inbox_notification_from_marked_message_local,
 };
 
 use crate::AppConfig;
@@ -1993,10 +1994,28 @@ impl MessagesStore {
         true
     }
 
-    /// Jump to a message (cf. React `jumpToMessage`, used by reply previews).
-    /// If the target is already in the buffer, emit [`MessagesEvent::JumpTo`] so
-    /// the UI scrolls to it. Otherwise fetch a window centered on it
-    /// (`AROUND_TIMESTAMP`), replace the buffer, and emit `Reset` then `JumpTo`.
+    pub fn topic_id_for_message(&self, message_id: MessageId) -> Option<i64> {
+        if let Some(topic) = self.active_topic_id
+            && self.bucket_contains(topic, message_id)
+        {
+            return Some(topic.get());
+        }
+        for (bucket_id, channel) in self.cache.iter() {
+            if !channel.messages.contains_id(message_id) {
+                continue;
+            }
+            if let Some(msg) = channel.messages.get_by_id(message_id)
+                && let Some(topic) = msg.topic_id.filter(|id| id.get() != 0)
+            {
+                return Some(topic.get());
+            }
+            if self.active_channel_id != Some(*bucket_id) {
+                return Some(bucket_id.get());
+            }
+        }
+        None
+    }
+
     pub fn request_jump(
         &mut self,
         channel_id: ChannelId,
@@ -3045,6 +3064,73 @@ impl MessagesStore {
         .detach();
     }
 
+    fn inbox_source_message(&self, message_id: MessageId, cx: &App) -> Option<Message> {
+        let storage_id = self.reaction_storage_channel(message_id);
+        if let Some(msg) = self
+            .cache
+            .get(&storage_id)
+            .and_then(|channel| channel.messages.get_by_id(message_id).cloned())
+        {
+            return Some(msg);
+        }
+        if let Some(parent) = self.active_channel_id
+            && parent != storage_id
+            && let Some(msg) = self
+                .cache
+                .get(&parent)
+                .and_then(|channel| channel.messages.get_by_id(message_id).cloned())
+        {
+            return Some(msg);
+        }
+        TopicsStore::try_global(cx).and_then(|topics| {
+            topics
+                .read(cx)
+                .origin_message()
+                .filter(|msg| msg.id == message_id)
+                .cloned()
+        })
+    }
+
+    async fn save_message_2_inbox(
+        api: &Arc<AppApi>,
+        request: mezon_proto::api::Message2InboxRequest,
+    ) -> bool {
+        let Err(error) = api.create_message_2_inbox(request.clone()).await else {
+            return true;
+        };
+        let refused_avatar =
+            api_status_from_error(&error).is_some_and(ApiStatusError::is_invalid_argument);
+        let Some(retry) = refused_avatar
+            .then(|| Self::message_2_inbox_without_avatar(&request))
+            .flatten()
+        else {
+            tracing::error!("add_to_inbox create_message_2_inbox failed: {error}");
+            return false;
+        };
+        match api.create_message_2_inbox(retry).await {
+            Ok(()) => {
+                tracing::warn!("add_to_inbox: the server refused the avatar url, saved without it");
+                true
+            }
+            Err(retry_error) => {
+                tracing::error!("add_to_inbox create_message_2_inbox retry failed: {retry_error}");
+                false
+            }
+        }
+    }
+
+    fn message_2_inbox_without_avatar(
+        request: &mezon_proto::api::Message2InboxRequest,
+    ) -> Option<mezon_proto::api::Message2InboxRequest> {
+        if request.avatar.is_empty() {
+            return None;
+        }
+        Some(mezon_proto::api::Message2InboxRequest {
+            avatar: String::new(),
+            ..request.clone()
+        })
+    }
+
     pub fn add_to_inbox(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
         let Some(channel_id) = self.active_channel_id else {
             return;
@@ -3052,12 +3138,28 @@ impl MessagesStore {
         let storage_id = self.reaction_storage_channel(message_id);
         let clan_id = self.active_clan_id.map_or(0, |c| c.get());
         let channel_type = self.mode;
-        let Some(channel) = self.cache.get(&storage_id) else {
+        let Some(msg) = self.inbox_source_message(message_id, cx) else {
+            tracing::warn!(
+                message_id = message_id.get(),
+                storage_id = storage_id.get(),
+                channel_id = channel_id.get(),
+                "add_to_inbox: message not in cache"
+            );
             return;
         };
-        let Some(msg) = channel.messages.get_by_id(message_id).cloned() else {
-            return;
-        };
+        let topic_id = msg
+            .topic_id
+            .map(|topic| topic.get())
+            .filter(|id| *id != 0)
+            .or_else(|| {
+                self.active_topic_id
+                    .filter(|topic| *topic == storage_id)
+                    .map(|topic| topic.get())
+            })
+            .or_else(|| {
+                (storage_id != channel_id && storage_id.get() != 0).then_some(storage_id.get())
+            })
+            .unwrap_or(0);
         let content_json = msg
             .raw_content
             .as_deref()
@@ -3123,7 +3225,10 @@ impl MessagesStore {
         let avatar = msg.avatar_url.to_string();
         let sender_id = msg.sender_id.parse().unwrap_or(0);
         let display_name = msg.sender_name.to_string();
-        let create_time_seconds = u32::try_from(msg.create_time.max(0)).unwrap_or(0);
+        let create_time_seconds = u32::try_from(msg.create_time.max(0))
+            .ok()
+            .filter(|ts| *ts > 0)
+            .unwrap_or_else(|| u32::try_from(unix_now_seconds().max(0)).unwrap_or(0));
         let mention_spans: Vec<InboxMentionSpan> = msg
             .mention_targets
             .iter()
@@ -3153,7 +3258,7 @@ impl MessagesStore {
             has_more_attachment,
             mention_spans,
             channel_type,
-            topic_id: msg.topic_id.map(|topic| topic.get()),
+            topic_id: (topic_id != 0).then_some(topic_id),
         };
         let request = mezon_proto::api::Message2InboxRequest {
             message_id: message_id.get(),
@@ -3163,30 +3268,43 @@ impl MessagesStore {
             content: content_json,
             mentions,
             attachments,
-            topic_id: msg.topic_id.map(|topic| topic.get()).unwrap_or(0),
+            topic_id,
             ..Default::default()
         };
+        tracing::info!(
+            message_id = message_id.get(),
+            channel_id = channel_id.get(),
+            storage_id = storage_id.get(),
+            topic_id,
+            "add_to_inbox"
+        );
+        let notification = inbox_notification_from_marked_message_local(&marked);
+        let pending_id = notification.id.clone();
+        InboxStore::global(cx).update(cx, |store, cx| {
+            store.prepend_local(
+                GLOBAL_INBOX_BUCKET_CLAN_ID,
+                InboxCategory::Messages,
+                notification,
+                cx,
+            );
+        });
         let api = self.api.clone();
-        cx.spawn(
-            async move |_this, cx| match api.create_message_2_inbox(request).await {
-                Ok(()) => {
-                    let notification = inbox_notification_from_marked_message_local(&marked);
-                    cx.update(|cx| {
-                        InboxStore::global(cx).update(cx, |store, cx| {
-                            store.prepend_local(
-                                GLOBAL_INBOX_BUCKET_CLAN_ID,
-                                InboxCategory::Messages,
-                                notification,
-                                cx,
-                            );
-                        });
-                    });
-                }
-                Err(e) => {
-                    tracing::error!("add_to_inbox create_message_2_inbox failed: {e}");
-                }
-            },
-        )
+        cx.spawn(async move |_this, cx| {
+            let saved = Self::save_message_2_inbox(&api, request).await;
+            cx.update(|cx| {
+                InboxStore::global(cx).update(cx, |store, cx| {
+                    if !saved {
+                        store.delete(
+                            GLOBAL_INBOX_BUCKET_CLAN_ID,
+                            &pending_id,
+                            InboxCategory::Messages,
+                            cx,
+                        );
+                    }
+                    store.refresh_category(InboxCategory::Messages, cx);
+                });
+            });
+        })
         .detach();
     }
 
@@ -3243,6 +3361,10 @@ impl MessagesStore {
 
     pub fn pending_topic_jump(&self) -> Option<MessageId> {
         self.pending_topic_jump
+    }
+
+    pub fn queue_topic_jump(&mut self, message_id: MessageId) {
+        self.pending_topic_jump = Some(message_id);
     }
 
     pub fn clear_pending_topic_jump(&mut self) {
@@ -3326,11 +3448,15 @@ impl MessagesStore {
                     cx.notify();
                     return;
                 }
-                this.set_channel(topic_key, parsed);
-                if let Some(channel) = this.cache.get_mut(&topic_key) {
-                    channel.has_more = fetched >= TOPIC_FULL_PAGE_LEN;
-                }
+                this.replace_channel(topic_key, parsed, fetched >= TOPIC_FULL_PAGE_LEN);
                 cx.emit(MessagesEvent::TopicUpdated { topic_id });
+                if let Some(jump_id) = this.pending_topic_jump {
+                    if this.bucket_contains(topic_key, jump_id) {
+                        this.emit_topic_jump(jump_id, cx);
+                    } else {
+                        this.request_topic_jump(topic_id, jump_id, cx);
+                    }
+                }
                 cx.notify();
             });
         })
@@ -3420,16 +3546,15 @@ impl MessagesStore {
                         message_id = anchor,
                         "request_topic_jump: target not in AROUND window"
                     );
-                    this.set_channel(topic_key, window);
+                    let has_more = window.len() >= TOPIC_FULL_PAGE_LEN;
+                    this.replace_channel(topic_key, window, has_more);
                     cx.emit(MessagesEvent::TopicUpdated { topic_id });
                     cx.notify();
                     return;
                 }
                 recompute_message_grouping(&mut window);
-                this.set_channel(topic_key, window);
-                if let Some(channel) = this.cache.get_mut(&topic_key) {
-                    channel.has_more = true;
-                }
+                let has_more = window.len() >= TOPIC_FULL_PAGE_LEN;
+                this.replace_channel(topic_key, window, has_more);
                 cx.emit(MessagesEvent::TopicUpdated { topic_id });
                 this.emit_topic_jump(message_id, cx);
                 cx.notify();
@@ -3715,7 +3840,7 @@ impl MessagesStore {
                 channel.messages.push_grouped(msg);
             }
         } else {
-            self.set_channel(topic_key, vec![msg]);
+            self.replace_channel(topic_key, vec![msg], false);
         }
         self.set_last_message(topic_key, message_id);
         let should_count_reply = topic_id != 0
@@ -6541,8 +6666,15 @@ impl MessagesStore {
     }
 
     fn set_channel(&mut self, channel_id: ChannelId, messages: Vec<Message>) {
-        let active = self.active_channel_id;
         let has_more = has_more_from_oldest(&messages);
+        self.replace_channel(channel_id, messages, has_more);
+    }
+
+    fn replace_channel(&mut self, channel_id: ChannelId, messages: Vec<Message>, has_more: bool) {
+        let protect = self
+            .active_topic_id
+            .filter(|topic| *topic != channel_id)
+            .or(self.active_channel_id.filter(|ch| *ch != channel_id));
         if let Some(newest) = messages.last()
             && !self.last_message_by_channel.contains_key(&channel_id)
         {
@@ -6554,7 +6686,7 @@ impl MessagesStore {
                 messages: MessageList::from_messages(messages),
                 has_more,
             },
-            active.as_ref(),
+            protect.as_ref(),
         );
     }
 }
@@ -7478,6 +7610,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
         .as_deref()
         .and_then(|s| s.parse::<i64>().ok())
         .filter(|&id| id != 0)
+        .or_else(|| (m.topic_id != 0).then_some(m.topic_id))
         .map(ChannelId);
     let topic_creator_id = m
         .content_tokens
@@ -8568,6 +8701,43 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_new_topic_reply_does_not_claim_older_history(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let clan = ClanId(1);
+            let parent = ChannelId(10);
+            let topic = ChannelId(77);
+
+            store.update(cx, |store, cx| {
+                store.activate(clan, parent, true, false, 1, 2, cx);
+                store.set_active_topic(Some(topic.get()), cx);
+                store.append_topic_message(
+                    topic.get(),
+                    api_page(&[5]).messages.into_iter().next().unwrap(),
+                    false,
+                    cx,
+                );
+                assert!(
+                    !store.topic_has_more_top(),
+                    "the first reply of a new topic has no older history"
+                );
+                assert!(
+                    !store.load_more_topic(cx),
+                    "a new topic must not page older replies"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
     fn a_topic_pages_newer_replies_once_its_tail_was_trimmed(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let api = Arc::new(mezon_client::AppApi::new(
@@ -8701,6 +8871,7 @@ mod tests {
                     references: vec![],
                     reactions: vec![],
                     entity_mentions: vec![],
+                    topic_id: 0,
                 })
                 .collect(),
             last_seen_message_id: 0,
@@ -9813,6 +9984,25 @@ mod tests {
     }
 
     #[test]
+    fn an_inbox_request_refused_for_its_avatar_is_retried_without_one() {
+        let request = mezon_proto::api::Message2InboxRequest {
+            message_id: 42,
+            channel_id: 7,
+            clan_id: 1,
+            avatar: "https://cdn.example/avatar.png".into(),
+            content: r#"{"t":"hi"}"#.into(),
+            topic_id: 88,
+            ..Default::default()
+        };
+        let retry = MessagesStore::message_2_inbox_without_avatar(&request).expect("retry request");
+        assert!(retry.avatar.is_empty());
+        assert_eq!(retry.message_id, 42);
+        assert_eq!(retry.topic_id, 88);
+        assert_eq!(retry.content, request.content);
+        assert!(MessagesStore::message_2_inbox_without_avatar(&retry).is_none());
+    }
+
+    #[test]
     fn message_from_api_maps_fields() {
         let m = message_from_api(
             ApiMessage {
@@ -9834,6 +10024,7 @@ mod tests {
                 references: vec![],
                 reactions: vec![],
                 entity_mentions: vec![],
+                topic_id: 0,
             },
             None,
             None,
@@ -9845,6 +10036,36 @@ mod tests {
         assert_eq!(m.sender_name, "Alice");
         assert_eq!(m.avatar_url, "av.png");
         assert_eq!(m.avatar_proxied, "av.png");
+    }
+
+    #[test]
+    fn message_from_api_uses_proto_topic_id_when_content_has_no_tp() {
+        let m = message_from_api(
+            ApiMessage {
+                message_id: 1,
+                content: "hi".into(),
+                content_raw: String::new(),
+                content_tokens: mezon_client::transport::ApiMessageContent {
+                    t: "hi".into(),
+                    ..Default::default()
+                },
+                code: 0,
+                sender_id: 1,
+                sender_name: "Alice".into(),
+                avatar: String::new(),
+                create_time: 100,
+                update_time: 0,
+                hide_editted: false,
+                attachments: vec![],
+                references: vec![],
+                reactions: vec![],
+                entity_mentions: vec![],
+                topic_id: 99,
+            },
+            None,
+            None,
+        );
+        assert_eq!(m.topic_id, Some(ChannelId(99)));
     }
 
     #[test]
@@ -9876,6 +10097,7 @@ mod tests {
                 references: vec![],
                 reactions: vec![],
                 entity_mentions: vec![],
+                topic_id: 0,
             },
             None,
             None,
@@ -9921,6 +10143,7 @@ mod tests {
             references: vec![],
             reactions: vec![],
             entity_mentions: vec![],
+            topic_id: 0,
         };
 
         let pending = message_from_api(msg(Some(vec![])), Some(&cfg), None);
@@ -10076,6 +10299,7 @@ mod tests {
             references,
             reactions: vec![],
             entity_mentions: vec![],
+            topic_id: 0,
         }
     }
 

@@ -275,11 +275,25 @@ impl TopicsData {
 
 const MAX_TOPIC_FETCH_FAILURES: u32 = 3;
 
+const INBOX_TOPIC_JUMP_TIMEOUT: Duration = Duration::from_secs(20);
+
 struct PendingInboxTopicJump {
     topic_id: i64,
     origin_id: MessageId,
     reply_id: MessageId,
     channel_id: ChannelId,
+    requested_at: Instant,
+}
+
+impl PendingInboxTopicJump {
+    fn matches(&self, message_id: MessageId, now: Instant) -> bool {
+        self.origin_id == message_id
+            && now.duration_since(self.requested_at) <= INBOX_TOPIC_JUMP_TIMEOUT
+    }
+
+    fn is_expired(&self, now: Instant) -> bool {
+        now.duration_since(self.requested_at) > INBOX_TOPIC_JUMP_TIMEOUT
+    }
 }
 
 pub struct TopicsStore {
@@ -666,10 +680,15 @@ impl TopicsStore {
         let MessagesEvent::JumpTo { message_id } = event else {
             return;
         };
+        let now = Instant::now();
         let Some(pending) = self.pending_inbox_jump.as_ref() else {
             return;
         };
-        if pending.origin_id != *message_id {
+        if pending.is_expired(now) {
+            self.pending_inbox_jump = None;
+            return;
+        }
+        if !pending.matches(*message_id, now) {
             return;
         }
         let Some(pending) = self.pending_inbox_jump.take() else {
@@ -691,6 +710,13 @@ impl TopicsStore {
         reply_id: MessageId,
         cx: &mut Context<Self>,
     ) {
+        if topic_id <= 0 {
+            return;
+        }
+        if let Some(origin_id) = self.known_topic_origin(topic_id) {
+            self.begin_inbox_topic_jump_to_origin(channel_id, topic_id, origin_id, reply_id, cx);
+            return;
+        }
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let detail = match api.get_topic_detail(&topic_id.to_string()).await {
@@ -703,23 +729,48 @@ impl TopicsStore {
             let Ok(origin_id) = detail.message_id.parse::<i64>() else {
                 return;
             };
-            if origin_id <= 0 {
-                return;
-            }
-            let origin_id = MessageId(origin_id);
             let _ = this.update(cx, |this, cx| {
-                this.pending_inbox_jump = Some(PendingInboxTopicJump {
-                    topic_id,
-                    origin_id,
-                    reply_id,
+                this.begin_inbox_topic_jump_to_origin(
                     channel_id,
-                });
-                MessagesStore::global(cx).update(cx, |store, cx| {
-                    store.request_jump(channel_id, origin_id, cx);
-                });
+                    topic_id,
+                    MessageId(origin_id),
+                    reply_id,
+                    cx,
+                );
             });
         })
         .detach();
+    }
+
+    pub fn begin_inbox_topic_jump_to_origin(
+        &mut self,
+        channel_id: ChannelId,
+        topic_id: i64,
+        origin_id: MessageId,
+        reply_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        if topic_id <= 0 || origin_id.get() <= 0 {
+            return;
+        }
+        self.pending_inbox_jump = Some(PendingInboxTopicJump {
+            topic_id,
+            origin_id,
+            reply_id,
+            channel_id,
+            requested_at: Instant::now(),
+        });
+        MessagesStore::global(cx).update(cx, |store, cx| {
+            store.request_jump(channel_id, origin_id, cx);
+        });
+    }
+
+    fn known_topic_origin(&self, topic_id: i64) -> Option<MessageId> {
+        self.data
+            .topic_by_id(&topic_id.to_string())
+            .and_then(|topic| topic.message_id.parse::<i64>().ok())
+            .filter(|origin_id| *origin_id > 0)
+            .map(MessageId)
     }
 
     pub fn start_create_for_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
@@ -803,15 +854,12 @@ impl TopicsStore {
 
         messages.update(cx, |store, cx| {
             store.set_active_topic(topic_id, cx);
+            if let Some(reply_id) = jump_reply {
+                store.queue_topic_jump(reply_id);
+            }
         });
         cx.emit(TopicsEvent::Opened);
-        if let Some(reply_id) = jump_reply
-            && let Some(topic_id) = topic_id
-        {
-            messages.update(cx, |store, cx| {
-                store.request_topic_jump(topic_id, reply_id, cx);
-            });
-        } else if let Some(topic_id) = topic_id {
+        if let Some(topic_id) = topic_id {
             messages.update(cx, |store, cx| {
                 store.fetch_topic_messages(clan_id, parent_channel_id, topic_id, cx);
             });
@@ -1564,6 +1612,33 @@ fn sd_topic_from_event(ev: &realtime::SdTopicEvent) -> api::SdTopic {
 mod tests {
     use super::*;
     use crate::message::MessageCode;
+
+    fn pending_jump(requested_at: Instant) -> PendingInboxTopicJump {
+        PendingInboxTopicJump {
+            topic_id: 99,
+            origin_id: MessageId(7),
+            reply_id: MessageId(8),
+            channel_id: ChannelId(3),
+            requested_at,
+        }
+    }
+
+    #[test]
+    fn a_pending_inbox_jump_only_opens_its_own_origin() {
+        let now = Instant::now();
+        let pending = pending_jump(now);
+        assert!(pending.matches(MessageId(7), now));
+        assert!(!pending.matches(MessageId(8), now));
+    }
+
+    #[test]
+    fn a_stale_pending_inbox_jump_is_dropped_instead_of_hijacking_a_later_jump() {
+        let requested_at = Instant::now();
+        let pending = pending_jump(requested_at);
+        let later = requested_at + INBOX_TOPIC_JUMP_TIMEOUT + Duration::from_secs(1);
+        assert!(pending.is_expired(later));
+        assert!(!pending.matches(MessageId(7), later));
+    }
 
     fn sample_message(code: MessageCode) -> Message {
         Message::new(MessageId(1), "hello", "1", "user", 0).with_code(code)

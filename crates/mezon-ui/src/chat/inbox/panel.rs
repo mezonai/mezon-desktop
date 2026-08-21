@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{
@@ -8,9 +7,8 @@ use gpui::{
 };
 use mezon_store::{
     ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, InboxCategory, InboxEvent,
-    InboxNotification, InboxStore, MessageId, MessagesEvent, MessagesStore, RolesStore,
-    TopicBadgeEvent, TopicBadgeStore, TopicDiscussion, TopicsEvent, TopicsStore, UsersByUserEvent,
-    UsersByUserStore,
+    InboxNotification, InboxStore, MessageId, MessagesStore, RolesStore, TopicBadgeEvent,
+    TopicBadgeStore, TopicDiscussion, TopicsEvent, TopicsStore, UsersByUserEvent, UsersByUserStore,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -103,6 +101,11 @@ impl InboxPopoverPanel {
         }
 
         if let Some(category) = InboxTab::Mentions.category() {
+            inbox_store.update(cx, |store, cx| {
+                store.fetch_if_empty(&clan_id, category, cx);
+            });
+        }
+        if let Some(category) = InboxTab::Messages.category() {
             inbox_store.update(cx, |store, cx| {
                 store.fetch_if_empty(&clan_id, category, cx);
             });
@@ -233,8 +236,14 @@ impl InboxPopoverPanel {
     }
 
     fn sync_from_store(&mut self, cx: &App) {
+        let old_first = self
+            .cached_items
+            .first()
+            .map(ListRow::id)
+            .map(str::to_string);
         self.cached_items = Self::build_items(self.tab, &self.clan_id, &self.locale, cx);
-        self.sync_list_state(false);
+        let new_first = self.cached_items.first().map(ListRow::id);
+        self.sync_list_state(old_first.as_deref() != new_first);
     }
 
     fn build_items(
@@ -336,6 +345,15 @@ enum ListRow {
         topic: Box<TopicDiscussion>,
         view: Box<TopicRowView>,
     },
+}
+
+impl ListRow {
+    fn id(&self) -> &str {
+        match self {
+            Self::Notification { notification, .. } => notification.id.as_str(),
+            Self::Topic { topic, .. } => topic.id.as_str(),
+        }
+    }
 }
 
 impl EventEmitter<DismissEvent> for InboxPopoverPanel {}
@@ -769,11 +787,37 @@ fn schedule_notification_jump(
         } => *channel_id,
         _ => return,
     };
-    if let Some(topic_id) = notification
-        .effective_topic_id()
+    let mut effective_topic_id = notification.effective_topic_id();
+    if effective_topic_id.is_none() {
+        let key = message_id.get().to_string();
+        if let Some(topic_id) = InboxStore::global(cx).read(cx).remembered_topic_id(&key) {
+            effective_topic_id = Some(topic_id.to_string());
+        } else if let Some(topic_id) = MessagesStore::global(cx)
+            .read(cx)
+            .topic_id_for_message(message_id)
+            .filter(|id| *id > 0)
+        {
+            effective_topic_id = Some(topic_id.to_string());
+        }
+    }
+    tracing::debug!(
+        notification_id = %notification.id,
+        message_id = message_id.get(),
+        channel_id = channel_id.get(),
+        notification_topic_id = ?notification.topic_id,
+        preview_topic_id = ?notification
+            .message
+            .as_ref()
+            .and_then(|preview| preview.topic_id.clone()),
+        effective_topic_id = ?effective_topic_id,
+        "inbox notification jump"
+    );
+    if let Some(topic_id) = effective_topic_id
+        .as_deref()
         .and_then(|id| id.parse::<i64>().ok())
         .filter(|id| *id > 0)
     {
+        tracing::debug!(topic_id, reply_id = message_id.get(), "inbox topic jump");
         navigate(cx, route);
         inbox_handle.hide(cx);
         TopicsStore::global(cx).update(cx, |store, cx| {
@@ -781,34 +825,8 @@ fn schedule_notification_jump(
         });
         return;
     }
+    tracing::debug!(message_id = message_id.get(), "inbox channel jump");
     schedule_inbox_jump(cx, inbox_handle, route, channel_id, message_id);
-}
-
-const PENDING_TOPIC_OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-thread_local! {
-    static PENDING_TOPIC_OPEN: RefCell<Option<Subscription>> = const { RefCell::new(None) };
-}
-
-fn open_topic_panel_when_jump_lands(cx: &mut App, origin_message_id: MessageId) {
-    let subscription = cx.subscribe(&MessagesStore::global(cx), move |_, event, cx| {
-        if !matches!(event, MessagesEvent::JumpTo { message_id } if *message_id == origin_message_id)
-        {
-            return;
-        }
-        PENDING_TOPIC_OPEN.with(|pending| pending.borrow_mut().take());
-        TopicsStore::global(cx).update(cx, |store, cx| {
-            store.start_create_for_message(origin_message_id, cx);
-        });
-    });
-    PENDING_TOPIC_OPEN.with(|pending| *pending.borrow_mut() = Some(subscription));
-    cx.spawn(async move |cx| {
-        cx.background_executor()
-            .timer(PENDING_TOPIC_OPEN_TIMEOUT)
-            .await;
-        PENDING_TOPIC_OPEN.with(|pending| pending.borrow_mut().take());
-    })
-    .detach();
 }
 
 fn schedule_topic_jump(
@@ -816,9 +834,6 @@ fn schedule_topic_jump(
     inbox_handle: ui::PopoverMenuHandle<InboxPopoverPanel>,
     topic: TopicDiscussion,
 ) {
-    if topic.message_id.is_empty() || topic.channel_id.is_empty() {
-        return;
-    }
     let Ok(clan) = topic.clan_id.parse::<ClanId>() else {
         return;
     };
@@ -828,17 +843,26 @@ fn schedule_topic_jump(
     let Ok(origin_message_id) = topic.message_id.parse::<MessageId>() else {
         return;
     };
-    open_topic_panel_when_jump_lands(cx, origin_message_id);
-    schedule_inbox_jump(
+    let Ok(topic_id) = topic.id.parse::<i64>() else {
+        return;
+    };
+    navigate(
         cx,
-        inbox_handle,
         Route::Channel {
             clan_id: clan,
             channel_id: channel,
         },
-        channel,
-        origin_message_id,
     );
+    inbox_handle.hide(cx);
+    TopicsStore::global(cx).update(cx, |store, cx| {
+        store.begin_inbox_topic_jump_to_origin(
+            channel,
+            topic_id,
+            origin_message_id,
+            origin_message_id,
+            cx,
+        );
+    });
 }
 
 fn render_inbox_jump_overlay(
