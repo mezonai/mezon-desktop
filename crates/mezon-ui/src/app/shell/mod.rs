@@ -15,6 +15,7 @@ use crate::components::primitives::{InputState, Toast, ToastKind};
 use crate::router::Route;
 
 mod confirm_archive_channel_modal;
+mod confirm_close_dm_modal;
 mod confirm_delete_account_modal;
 mod confirm_delete_canvas_modal;
 mod confirm_delete_category_modal;
@@ -36,6 +37,7 @@ mod disable_clan_community_modal;
 mod upload_limit_modal;
 mod wallet_not_available_modal;
 use confirm_archive_channel_modal::ConfirmArchiveChannelModal;
+use confirm_close_dm_modal::ConfirmCloseDmModal;
 use confirm_delete_account_modal::ConfirmDeleteAccountModal;
 use confirm_delete_canvas_modal::ConfirmDeleteCanvasModal;
 use confirm_delete_category_modal::ConfirmDeleteCategoryModal;
@@ -59,6 +61,16 @@ use upload_limit_modal::UploadLimitModal;
 use wallet_not_available_modal::WalletNotAvailableModal;
 
 const TOAST_TTL: Duration = Duration::from_secs(4);
+
+pub(super) fn leave_open_conversation(channel_id: mezon_store::ChannelId, cx: &mut App) {
+    let viewing = matches!(
+        crate::router::Router::global(cx).read(cx).route(),
+        Route::DirectMessage { direct_id, .. } if direct_id == channel_id
+    );
+    if viewing {
+        crate::router::navigate(cx, Route::Friends);
+    }
+}
 
 struct ToastItem {
     id: usize,
@@ -1095,6 +1107,28 @@ impl Shell {
         self.modal_fullscreen = false;
         self.modal = Some(host.into());
         cx.notify();
+    }
+
+    pub fn confirm_close_dm(
+        &mut self,
+        channel_id: mezon_store::ChannelId,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = cx.new(|cx| ConfirmCloseDmModal {
+            focus_handle: cx.focus_handle(),
+            channel_id,
+            title: mezon_i18n::t(locale, "dmMessage.closeDmConfirm.title").into(),
+            description: mezon_i18n::t(locale, "dmMessage.closeDmConfirm.content").into(),
+            cancel_label: mezon_i18n::t(locale, "common.cancel").into(),
+            confirm_label: mezon_i18n::t(locale, "dmMessage.closeDmConfirm.confirmText").into(),
+            failed_message: mezon_i18n::t(locale, "dmMessage.closeDmConfirm.error").into(),
+            closing: false,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
     }
 
     pub fn confirm_leave_dm_group(

@@ -24,6 +24,7 @@ pub struct DmRow {
     suppress_hover: bool,
     in_voice_label: Option<SharedString>,
     image_cache: Option<gpui::Entity<crate::image_cache::LruImageCache>>,
+    on_close: Option<Box<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>>,
 }
 
 impl DmRow {
@@ -63,6 +64,7 @@ impl DmRow {
             suppress_hover: false,
             in_voice_label: None,
             image_cache: None,
+            on_close: None,
         }
     }
 
@@ -106,6 +108,14 @@ impl DmRow {
         self
     }
 
+    pub fn on_close(
+        mut self,
+        handler: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+    ) -> Self {
+        self.on_close = Some(Box::new(handler));
+        self
+    }
+
     pub fn render(self, theme: &Theme) -> impl IntoElement {
         let nav_id = self.id.to_string();
         let channel_type = self.kind.channel_type();
@@ -121,6 +131,7 @@ impl DmRow {
 
         let avatar_slot = self.render_avatar(theme);
         let suppress_hover = self.suppress_hover;
+        let on_close = self.on_close;
 
         let close_btn = div()
             .id(self.close_id.clone())
@@ -136,7 +147,12 @@ impl DmRow {
                 this.group_hover(self.group_name.clone(), |this| this.opacity(1.))
                     .hover(move |this| this.text_color(gpui::rgb(0xef4444)))
             })
-            .on_click(|_, _window, cx| cx.stop_propagation())
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                if let Some(handler) = on_close.as_ref() {
+                    handler(window, cx);
+                }
+            })
             .child("×");
 
         div()

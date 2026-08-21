@@ -5,7 +5,7 @@ use super::{Shell, leave_open_conversation};
 use crate::components::primitives::{Button, ButtonVariants, h_flex, v_flex};
 use crate::theme::ActiveTheme;
 
-pub(super) struct ConfirmLeaveDmGroupModal {
+pub(super) struct ConfirmCloseDmModal {
     pub(super) focus_handle: FocusHandle,
     pub(super) channel_id: ChannelId,
     pub(super) title: SharedString,
@@ -13,13 +13,13 @@ pub(super) struct ConfirmLeaveDmGroupModal {
     pub(super) cancel_label: SharedString,
     pub(super) confirm_label: SharedString,
     pub(super) failed_message: SharedString,
-    pub(super) leaving: bool,
+    pub(super) closing: bool,
 }
 
-impl Render for ConfirmLeaveDmGroupModal {
+impl Render for ConfirmCloseDmModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let leaving = self.leaving;
+        let closing = self.closing;
 
         v_flex()
             .track_focus(&self.focus_handle)
@@ -53,7 +53,7 @@ impl Render for ConfirmLeaveDmGroupModal {
                     .justify_end()
                     .gap_2()
                     .child(
-                        Button::new("confirm-leave-dm-group-cancel")
+                        Button::new("confirm-close-dm-cancel")
                             .label(self.cancel_label.clone())
                             .ghost()
                             .on_click(|_, _window, cx| {
@@ -61,25 +61,27 @@ impl Render for ConfirmLeaveDmGroupModal {
                             }),
                     )
                     .child(
-                        Button::new("confirm-leave-dm-group-confirm")
+                        Button::new("confirm-close-dm-confirm")
                             .label(self.confirm_label.clone())
                             .danger()
-                            .disabled(leaving)
+                            .disabled(closing)
                             .on_click(cx.listener(|this, _, _window, cx| {
-                                if this.leaving {
+                                if this.closing {
                                     return;
                                 }
-                                this.leaving = true;
+                                this.closing = true;
                                 cx.notify();
                                 let channel_id = this.channel_id;
                                 let failed = this.failed_message.clone();
                                 let task = DirectMessageStore::global(cx)
-                                    .update(cx, |store, cx| store.leave_group(channel_id, cx));
+                                    .update(cx, |store, cx| {
+                                        store.close_conversation(channel_id, cx)
+                                    });
                                 cx.spawn(async move |this, cx| {
                                     let result = task.await;
                                     let still_mounted = this
                                         .update(cx, |this, cx| {
-                                            this.leaving = false;
+                                            this.closing = false;
                                             cx.notify();
                                         })
                                         .is_ok();

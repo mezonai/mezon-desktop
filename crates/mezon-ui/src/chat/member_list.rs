@@ -718,6 +718,7 @@ fn member_menu_json(panel: &Entity<MemberListPanel>, cx: &App) -> serde_json::Va
             "show_ban": permissions.show_ban,
             "show_kick": permissions.show_kick,
             "show_remove_from_thread": permissions.show_remove_from_thread,
+            "show_remove_from_group": permissions.show_remove_from_group,
             "clan_id": permissions.clan_id.map(|id| id.to_string()),
             "channel_id": permissions.channel_id.map(|id| id.to_string()),
         },
@@ -1331,6 +1332,7 @@ struct MemberMenuPermissions {
     show_ban: bool,
     show_kick: bool,
     show_remove_from_thread: bool,
+    show_remove_from_group: bool,
     is_friend: bool,
     is_blocked: bool,
     blocked_by_me: bool,
@@ -1356,11 +1358,23 @@ impl MemberMenuPermissions {
             })
             .unwrap_or((false, false, false));
         let Some(ProfileContext::Clan(clan_id)) = context else {
+            let group_channel_id = match context {
+                Some(ProfileContext::Direct(channel_id)) => DirectMessageStore::try_global(cx)
+                    .and_then(|store| {
+                        let store = store.read(cx);
+                        let dm = store.find(channel_id)?;
+                        (dm.kind == DirectKind::Group && me.is_some() && dm.creator_id == me)
+                            .then_some(channel_id)
+                    }),
+                _ => None,
+            };
             return Self {
                 is_self,
                 is_friend,
                 is_blocked,
                 blocked_by_me,
+                show_remove_from_group: !is_self && group_channel_id.is_some(),
+                channel_id: group_channel_id,
                 ..Default::default()
             };
         };
@@ -1397,6 +1411,7 @@ impl MemberMenuPermissions {
             show_ban: has_administrator && !is_self,
             show_kick: !is_self && elevated,
             show_remove_from_thread: !is_self && is_thread && (is_channel_creator || elevated),
+            show_remove_from_group: false,
             is_friend,
             is_blocked,
             blocked_by_me,
@@ -1614,6 +1629,21 @@ fn build_member_menu(args: MemberMenuArgs) -> ContextMenu {
         }
     }
 
+    if permissions.show_remove_from_group
+        && let Some(channel_id) = permissions.channel_id
+    {
+        menu = menu
+            .separator()
+            .danger_item(t("directMessage.contextMenu.removeFromGroup"), {
+                let panel = panel.clone();
+                let locale = locale.clone();
+                move |_window: &mut Window, cx: &mut App| {
+                    remove_member_from_group(channel_id, user_id, &locale, cx);
+                    close_member_menu(&panel, cx);
+                }
+            });
+    }
+
     let can_ban =
         permissions.show_ban && permissions.clan_id.is_some() && permissions.channel_id.is_some();
     let can_kick = permissions.show_kick && permissions.clan_id.is_some();
@@ -1702,6 +1732,22 @@ fn build_member_menu(args: MemberMenuArgs) -> ContextMenu {
     }
 
     menu
+}
+
+fn remove_member_from_group(channel_id: ChannelId, user_id: UserId, locale: &str, cx: &mut App) {
+    let failure: SharedString = mezon_i18n::t(locale, "common.somethingWentWrong").into();
+    let task = GroupMembersStore::global(cx)
+        .update(cx, |store, cx| store.remove_member(channel_id, user_id, cx));
+    cx.spawn(async move |cx| {
+        let result = task.await;
+        cx.update(|cx| {
+            if let Err(error) = result {
+                tracing::error!("remove member {user_id} from group {channel_id} failed: {error}");
+                Shell::global(cx).update(cx, |shell, cx| shell.error(failure, cx));
+            }
+        });
+    })
+    .detach();
 }
 
 fn remove_member_from_thread(channel_id: ChannelId, user_id: UserId, locale: &str, cx: &mut App) {

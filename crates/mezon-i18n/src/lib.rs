@@ -92,6 +92,28 @@ mod tests {
     }
 
     #[test]
+    fn close_dm_confirm_resolves_in_every_locale() {
+        for locale in LOCALES {
+            for key in [
+                "dmMessage.closeDmConfirm.title",
+                "dmMessage.closeDmConfirm.content",
+                "dmMessage.closeDmConfirm.confirmText",
+                "dmMessage.closeDmConfirm.error",
+            ] {
+                assert_ne!(t(locale, key), key, "locale {locale} is missing {key}");
+            }
+        }
+        assert_eq!(
+            t("en", "dmMessage.closeDmConfirm.title"),
+            "Close Direct Message"
+        );
+        assert_eq!(
+            t("vi", "dmMessage.closeDmConfirm.title"),
+            "Đóng cuộc trò chuyện"
+        );
+    }
+
+    #[test]
     fn full_react_corpus_present() {
         assert_eq!(t("en", "clan.title"), "Customize Your Clan");
         assert_eq!(t("en", "channelCreator.monthsShort.0"), "JAN");

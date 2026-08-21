@@ -982,6 +982,26 @@ impl DirectMessageStore {
         })
     }
 
+    pub fn close_conversation(
+        &mut self,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        if self.channels.find(channel_id).is_none() {
+            return Task::ready(Err(anyhow::anyhow!("conversation not found")));
+        }
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let result = api.close_dm_by_channel_id(0, channel_id.get()).await;
+            let _ = this.update(cx, |this, cx| {
+                if result.is_ok() {
+                    this.forget_conversation(channel_id, cx);
+                }
+            });
+            result
+        })
+    }
+
     pub fn mark_as_read(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
         if channel_id.is_zero() {
             return;
@@ -2482,6 +2502,25 @@ mod tests {
                 assert!(!channel.is_unread());
                 store.note_message(ChannelId(1), 200, false, true, cx);
                 assert_eq!(unread_of(store, 1), 1);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn closing_an_unknown_conversation_is_rejected_and_leaves_the_list_alone(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = dm_store(cx);
+            store.update(cx, |store, cx| {
+                seed(store, &[(1, 10), (2, 20)]);
+
+                let task = store.close_conversation(ChannelId(99), cx);
+                drop(task);
+
+                assert!(store.find(ChannelId(1)).is_some());
+                assert!(store.find(ChannelId(2)).is_some());
+                assert_eq!(store.channels().len(), 2);
             });
         });
     }
