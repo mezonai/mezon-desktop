@@ -769,6 +769,18 @@ fn schedule_notification_jump(
         } => *channel_id,
         _ => return,
     };
+    if let Some(topic_id) = notification
+        .effective_topic_id()
+        .and_then(|id| id.parse::<i64>().ok())
+        .filter(|id| *id > 0)
+    {
+        navigate(cx, route);
+        inbox_handle.hide(cx);
+        TopicsStore::global(cx).update(cx, |store, cx| {
+            store.begin_inbox_topic_jump(channel_id, topic_id, message_id, cx);
+        });
+        return;
+    }
     schedule_inbox_jump(cx, inbox_handle, route, channel_id, message_id);
 }
 

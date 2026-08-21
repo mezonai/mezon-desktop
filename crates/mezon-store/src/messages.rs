@@ -62,6 +62,10 @@ const DIRECTION_AFTER: i32 = 1;
 /// `Direction_Mode.AROUND_TIMESTAMP` — fetch a window centered on a message
 /// (used by jump-to-message when the target is not loaded).
 const DIRECTION_AROUND: i32 = 2;
+
+fn topic_jump_needs_around_fetch(found_in_cache: bool) -> bool {
+    !found_in_cache
+}
 const CHANNEL_TYPE_CHANNEL: i32 = 1;
 const CHANNEL_TYPE_THREAD: i32 = 7;
 use crate::message::STICKER_FILETYPE;
@@ -572,6 +576,7 @@ pub struct MessagesStore {
     active_topic_id: Option<ChannelId>,
     active_topic_parent: Option<ChannelId>,
     pending_jump: Option<(ChannelId, MessageId)>,
+    pending_topic_jump: Option<MessageId>,
     is_public: bool,
     is_dm: bool,
     mode: i32,
@@ -953,6 +958,7 @@ impl MessagesStore {
         self.active_clan_id = None;
         self.active_topic_id = None;
         self.active_topic_parent = None;
+        self.pending_topic_jump = None;
         self.is_public = true;
         self.is_dm = false;
         self.mode = STREAM_MODE_CHANNEL;
@@ -1016,6 +1022,7 @@ impl MessagesStore {
             active_topic_id: None,
             active_topic_parent: None,
             pending_jump: None,
+            pending_topic_jump: None,
             is_public: true,
             is_dm: false,
             mode: STREAM_MODE_CHANNEL,
@@ -3156,6 +3163,7 @@ impl MessagesStore {
             content: content_json,
             mentions,
             attachments,
+            topic_id: msg.topic_id.map(|topic| topic.get()).unwrap_or(0),
             ..Default::default()
         };
         let api = self.api.clone();
@@ -3228,8 +3236,17 @@ impl MessagesStore {
         }
         self.active_topic_id = next;
         self.active_topic_parent = None;
+        self.pending_topic_jump = None;
         self.sync_anonymous_mode(cx);
         cx.notify();
+    }
+
+    pub fn pending_topic_jump(&self) -> Option<MessageId> {
+        self.pending_topic_jump
+    }
+
+    pub fn clear_pending_topic_jump(&mut self) {
+        self.pending_topic_jump = None;
     }
 
     fn drop_topic_bucket(&mut self, topic_id: ChannelId) {
@@ -3314,6 +3331,107 @@ impl MessagesStore {
                     channel.has_more = fetched >= TOPIC_FULL_PAGE_LEN;
                 }
                 cx.emit(MessagesEvent::TopicUpdated { topic_id });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn emit_topic_jump(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        self.pending_topic_jump = Some(message_id);
+        cx.emit(MessagesEvent::JumpTo { message_id });
+    }
+
+    pub fn request_topic_jump(
+        &mut self,
+        topic_id: i64,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        if message_id.is_optimistic() {
+            return;
+        }
+        let topic_key = ChannelId(topic_id);
+        if !topic_jump_needs_around_fetch(
+            self.cache
+                .get(&topic_key)
+                .is_some_and(|channel| channel.messages.contains_id(message_id)),
+        ) {
+            self.emit_topic_jump(message_id, cx);
+            return;
+        }
+        let Some(clan_id) = self.active_clan_id else {
+            return;
+        };
+        let Some(parent_channel_id) = self.active_topic_parent.or(self.active_channel_id) else {
+            return;
+        };
+        self.active_topic_parent = Some(parent_channel_id);
+        self.topic_loading = true;
+        cx.notify();
+        let api = self.api.clone();
+        let cfg = AppConfig::try_global(cx).cloned();
+        let viewer_id = viewer_user_id(cx);
+        let anchor = message_id.get();
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .list_topic_messages(
+                    clan_id.get(),
+                    parent_channel_id.get(),
+                    topic_id,
+                    anchor,
+                    DIRECTION_AROUND,
+                    MESSAGE_PAGE_LIMIT,
+                )
+                .await;
+            let msgs = match result {
+                Ok(page) => page.messages,
+                Err(e) => {
+                    tracing::error!(
+                        "request_topic_jump AROUND fetch failed for topic {topic_id}: {e}"
+                    );
+                    let _ = this.update(cx, |this, cx| {
+                        this.topic_loading = false;
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let parsed = prepare_messages(msgs, cfg.as_ref(), viewer_id);
+            let _ = this.update(cx, |this, cx| {
+                this.topic_loading = false;
+                if this.active_topic_id != Some(topic_key) {
+                    cx.notify();
+                    return;
+                }
+                let mut window = parsed;
+                sort_messages(&mut window);
+                if window.len() > MAX_MESSAGES_PER_CHANNEL {
+                    let target = window.iter().position(|m| m.id == message_id).unwrap_or(0);
+                    let half = MAX_MESSAGES_PER_CHANNEL / 2;
+                    let start = target
+                        .saturating_sub(half)
+                        .min(window.len() - MAX_MESSAGES_PER_CHANNEL);
+                    window = window[start..start + MAX_MESSAGES_PER_CHANNEL].to_vec();
+                }
+                let found = window.iter().any(|m| m.id == message_id);
+                if !found {
+                    tracing::warn!(
+                        message_id = anchor,
+                        "request_topic_jump: target not in AROUND window"
+                    );
+                    this.set_channel(topic_key, window);
+                    cx.emit(MessagesEvent::TopicUpdated { topic_id });
+                    cx.notify();
+                    return;
+                }
+                recompute_message_grouping(&mut window);
+                this.set_channel(topic_key, window);
+                if let Some(channel) = this.cache.get_mut(&topic_key) {
+                    channel.has_more = true;
+                }
+                cx.emit(MessagesEvent::TopicUpdated { topic_id });
+                this.emit_topic_jump(message_id, cx);
                 cx.notify();
             });
         })
@@ -8381,6 +8499,13 @@ mod tests {
         let plan = plan_thread_membership(None, &[UserId(2)], &[UserId(2)], &[UserId(1)]);
 
         assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn topic_jump_fetches_around_when_reply_is_not_cached() {
+        assert!(!topic_jump_needs_around_fetch(true));
+        assert!(topic_jump_needs_around_fetch(false));
+        assert_eq!(DIRECTION_AROUND, 2);
     }
 
     #[test]
