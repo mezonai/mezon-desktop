@@ -285,18 +285,10 @@ fn ensure_fcitx_xim_on_the_spot() {
         return;
     }
     tracing::info!(
-        "Enabled fcitx5 XIM UseOnTheSpot for inline preedit; restarting fcitx5 once \
-         (the xim addon only reads this setting at startup)"
+        "Enabled fcitx5 XIM UseOnTheSpot for inline preedit; the xim addon only reads \
+         this setting at startup, so it applies the next time fcitx5 starts. Until then \
+         fcitx5 keeps its default over-the-spot preedit, which still commits correctly."
     );
-    match std::process::Command::new("fcitx5").args(["-rd"]).spawn() {
-        Ok(mut child) => {
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-            std::thread::sleep(std::time::Duration::from_millis(1200));
-        }
-        Err(error) => tracing::debug!("fcitx5 not available for restart: {error}"),
-    }
 }
 
 #[cfg(target_os = "linux")]
