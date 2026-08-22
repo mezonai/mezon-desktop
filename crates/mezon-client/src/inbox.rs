@@ -54,6 +54,7 @@ pub struct InboxMessagePreview {
     pub attachment_thumbnail: String,
     pub has_more_attachment: bool,
     pub mention_spans: Vec<InboxMentionSpan>,
+    pub topic_id: Option<String>,
 }
 
 impl InboxMessagePreview {
@@ -91,6 +92,7 @@ impl InboxMessagePreview {
             attachment_thumbnail: String::new(),
             has_more_attachment: false,
             mention_spans: Vec::new(),
+            topic_id: None,
         }
     }
 }
@@ -136,6 +138,15 @@ fn optional_id_str(value: i64) -> Option<String> {
         None
     } else {
         Some(value.to_string())
+    }
+}
+
+fn topic_id_from_raw_content(raw: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(raw.trim()).ok()?;
+    match value.get("tp")? {
+        serde_json::Value::String(id) => is_valid_inbox_message_id(id).then(|| id.clone()),
+        serde_json::Value::Number(n) => n.as_i64().filter(|id| *id > 0).map(|id| id.to_string()),
+        _ => None,
     }
 }
 
@@ -286,6 +297,7 @@ fn preview_from_fcm(fcm: api::DirectFcmProto) -> InboxMessagePreview {
         attachment_thumbnail: String::new(),
         has_more_attachment: fcm.has_more_attachment,
         mention_spans,
+        topic_id: optional_id_str(fcm.topic_id),
     };
     apply_preview_attachments(&mut preview);
     preview
@@ -310,6 +322,7 @@ fn preview_from_channel_message(message: api::ChannelMessage) -> InboxMessagePre
         attachment_thumbnail: String::new(),
         has_more_attachment: false,
         mention_spans: Vec::new(),
+        topic_id: optional_id_str(message.topic_id),
     };
     apply_preview_attachments(&mut preview);
     if preview.attachment_link.is_empty() && !message.attachments.is_empty() {
@@ -574,13 +587,15 @@ fn parse_notification_content(bytes: &[u8]) -> Option<InboxMessagePreview> {
         }
         return parse_message_preview_json(bytes);
     }
+    if let Ok(fcm) = api::DirectFcmProto::decode(bytes)
+        && fcm.message_id > 0
+    {
+        return Some(preview_from_fcm(fcm));
+    }
     if let Ok(message) = api::ChannelMessage::decode(bytes)
         && message.message_id > 0
     {
         return Some(preview_from_channel_message(message));
-    }
-    if let Ok(fcm) = api::DirectFcmProto::decode(bytes) {
-        return Some(preview_from_fcm(fcm));
     }
     parse_message_preview_json(bytes)
 }
@@ -643,6 +658,7 @@ fn parse_message_preview_json(bytes: &[u8]) -> Option<InboxMessagePreview> {
         attachment_thumbnail: String::new(),
         has_more_attachment: raw.has_more_attachment,
         mention_spans: mention_spans_from_json_content(&raw.content),
+        topic_id: topic_id_from_raw_content(&raw.content),
     };
     if preview.content.is_empty() && !preview.raw_content.is_empty() {
         preview.content = display_text_from_message_content(&preview.raw_content);
@@ -660,6 +676,25 @@ impl InboxNotification {
         self.message.as_ref().and_then(|preview| {
             is_valid_inbox_message_id(&preview.message_id).then(|| preview.message_id.clone())
         })
+    }
+
+    pub fn effective_topic_id(&self) -> Option<String> {
+        self.topic_id
+            .clone()
+            .filter(|id| is_valid_inbox_message_id(id))
+            .or_else(|| {
+                self.message.as_ref().and_then(|preview| {
+                    preview
+                        .topic_id
+                        .clone()
+                        .filter(|id| is_valid_inbox_message_id(id))
+                })
+            })
+            .or_else(|| {
+                self.message
+                    .as_ref()
+                    .and_then(|preview| topic_id_from_raw_content(&preview.raw_content))
+            })
     }
 
     pub fn effective_clan_id(&self) -> Option<String> {
@@ -774,6 +809,10 @@ pub fn inbox_notification_from_marked_message(
         attachment_thumbnail: marked.attachment_thumbnail.clone(),
         has_more_attachment: marked.has_more_attachment,
         mention_spans: marked.mention_spans.clone(),
+        topic_id: marked
+            .topic_id
+            .filter(|id| *id != 0)
+            .map(|id| id.to_string()),
     };
     apply_preview_attachments(&mut preview);
     InboxNotification {
@@ -867,7 +906,20 @@ pub fn inbox_notification_from_api(n: api::Notification) -> Result<InboxNotifica
         sender_id: id_str(n.sender_id),
         clan_id: id_str(n.clan_id),
         channel_id: id_str(n.channel_id),
-        topic_id: optional_id_str(n.topic_id),
+        topic_id: optional_id_str(n.topic_id)
+            .or_else(|| {
+                message.as_ref().and_then(|preview| {
+                    preview
+                        .topic_id
+                        .clone()
+                        .filter(|id| is_valid_inbox_message_id(id))
+                })
+            })
+            .or_else(|| {
+                message
+                    .as_ref()
+                    .and_then(|preview| topic_id_from_raw_content(&preview.raw_content))
+            }),
         channel_type: n.channel_type,
         avatar_url: n.avatar_url,
         create_time_seconds: n.create_time_seconds,
@@ -1126,6 +1178,115 @@ mod tests {
             message: Some(preview),
         };
         assert!(notification.effective_message_id().is_none());
+    }
+
+    #[test]
+    fn effective_topic_id_uses_notification_field() {
+        let notification = InboxNotification {
+            id: "1".into(),
+            category: InboxCategory::Mentions,
+            subject: String::new(),
+            sender_id: String::new(),
+            clan_id: "1".into(),
+            channel_id: "2".into(),
+            topic_id: Some("99".into()),
+            channel_type: 0,
+            avatar_url: String::new(),
+            create_time_seconds: 0,
+            code: 0,
+            message: None,
+        };
+        assert_eq!(notification.effective_topic_id().as_deref(), Some("99"));
+    }
+
+    #[test]
+    fn effective_topic_id_uses_direct_fcm_topic_id() {
+        let fcm = api::DirectFcmProto {
+            message_id: 42,
+            channel_id: 7,
+            clan_id: 1,
+            sender_id: 9,
+            content: r#"{"t":"hello"}"#.into(),
+            topic_id: 88,
+            ..Default::default()
+        };
+        let notification = inbox_notification_from_api(api::Notification {
+            id: 1,
+            category: InboxCategory::Mentions as i32,
+            content: fcm.encode_to_vec(),
+            channel_id: 7,
+            clan_id: 1,
+            ..Default::default()
+        })
+        .expect("notification");
+        assert_eq!(notification.effective_topic_id().as_deref(), Some("88"));
+    }
+
+    #[test]
+    fn effective_topic_id_uses_channel_message_topic_id() {
+        let message = api::ChannelMessage {
+            message_id: 99,
+            channel_id: 7,
+            clan_id: 1,
+            sender_id: 9,
+            content: r#"{"t":"hello"}"#.into(),
+            topic_id: 77,
+            ..Default::default()
+        };
+        let notification = inbox_notification_from_api(api::Notification {
+            id: 1,
+            category: InboxCategory::Mentions as i32,
+            content: message.encode_to_vec(),
+            channel_id: 7,
+            clan_id: 1,
+            ..Default::default()
+        })
+        .expect("notification");
+        assert_eq!(notification.effective_topic_id().as_deref(), Some("77"));
+    }
+
+    #[test]
+    fn effective_topic_id_falls_back_to_content_tp() {
+        let fcm = api::DirectFcmProto {
+            message_id: 42,
+            channel_id: 7,
+            clan_id: 1,
+            sender_id: 9,
+            content: r#"{"t":"hello","tp":"55"}"#.into(),
+            ..Default::default()
+        };
+        let notification = inbox_notification_from_api(api::Notification {
+            id: 1,
+            category: InboxCategory::Mentions as i32,
+            content: fcm.encode_to_vec(),
+            channel_id: 7,
+            clan_id: 1,
+            ..Default::default()
+        })
+        .expect("notification");
+        assert_eq!(notification.effective_topic_id().as_deref(), Some("55"));
+    }
+
+    #[test]
+    fn effective_topic_id_rejects_zero() {
+        let notification = InboxNotification {
+            id: "1".into(),
+            category: InboxCategory::Mentions,
+            subject: String::new(),
+            sender_id: String::new(),
+            clan_id: "1".into(),
+            channel_id: "2".into(),
+            topic_id: Some("0".into()),
+            channel_type: 0,
+            avatar_url: String::new(),
+            create_time_seconds: 0,
+            code: 0,
+            message: Some(InboxMessagePreview {
+                raw_content: r#"{"t":"hello","tp":"0"}"#.into(),
+                ..InboxMessagePreview::empty_content(String::new())
+            }),
+        };
+        assert!(notification.effective_topic_id().is_none());
     }
 
     #[test]

@@ -56,6 +56,7 @@ pub struct InboxStore {
     buckets: HashMap<BucketKey, CategoryBucket>,
     active_clan_id: Option<String>,
     active_channel_id: Option<String>,
+    topic_by_message: HashMap<String, String>,
     api: Arc<AppApi>,
     reset_generation: u64,
     _conn_watch: Task<()>,
@@ -83,6 +84,7 @@ impl InboxStore {
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.buckets.clear();
+        self.topic_by_message.clear();
         self.active_clan_id = None;
         self.active_channel_id = None;
         self.reset_generation = self.reset_generation.wrapping_add(1);
@@ -97,6 +99,7 @@ impl InboxStore {
             buckets: HashMap::new(),
             active_clan_id: None,
             active_channel_id: None,
+            topic_by_message: HashMap::new(),
             api,
             reset_generation: 0,
             _conn_watch: conn_watch,
@@ -211,6 +214,16 @@ impl InboxStore {
         self.fetch_page(clan_id, category, None, cx);
     }
 
+    fn invalidate(bucket: &mut CategoryBucket) {
+        bucket.fetched_at = None;
+        bucket.server_loaded = false;
+    }
+
+    pub fn refresh_category(&mut self, category: InboxCategory, cx: &mut Context<Self>) {
+        Self::invalidate(self.bucket_mut(category));
+        self.fetch_page(GLOBAL_INBOX_BUCKET_CLAN_ID, category, None, cx);
+    }
+
     pub fn fetch_more(&mut self, clan_id: &str, category: InboxCategory, cx: &mut Context<Self>) {
         let Some(last_id) = self.bucket(category).and_then(|b| b.last_id.clone()) else {
             return;
@@ -268,15 +281,28 @@ impl InboxStore {
         notification: InboxNotification,
         cx: &mut Context<Self>,
     ) {
+        self.remember_topic_id(&notification);
         let bucket = self.bucket_mut(category);
-        if bucket.items.iter().any(|n| n.id == notification.id) {
-            return;
-        }
-        if let Some(message_id) = notification.effective_message_id()
-            && bucket.items.iter().any(|existing| {
-                existing.effective_message_id().as_deref() == Some(message_id.as_str())
-            })
-        {
+        let incoming_message_id = notification.effective_message_id();
+        if let Some(pos) = bucket.items.iter().position(|existing| {
+            existing.id == notification.id
+                || incoming_message_id.as_deref().is_some_and(|message_id| {
+                    existing.effective_message_id().as_deref() == Some(message_id)
+                })
+        }) {
+            let mut existing = bucket.items.remove(pos);
+            if existing.topic_id.is_none() {
+                existing.topic_id = notification.topic_id.clone();
+            }
+            if let (Some(preview), Some(incoming_preview)) =
+                (existing.message.as_mut(), notification.message.as_ref())
+                && preview.topic_id.is_none()
+            {
+                preview.topic_id = incoming_preview.topic_id.clone();
+            }
+            bucket.items.insert(0, existing);
+            self.emit_updated(cx);
+            cx.notify();
             return;
         }
         bucket.items.insert(0, notification);
@@ -285,6 +311,41 @@ impl InboxStore {
         }
         self.emit_updated(cx);
         cx.notify();
+    }
+
+    fn remember_topic_id(&mut self, notification: &InboxNotification) {
+        let Some(message_id) = notification.effective_message_id() else {
+            return;
+        };
+        let Some(topic_id) = notification.effective_topic_id() else {
+            return;
+        };
+        self.topic_by_message.insert(message_id, topic_id);
+    }
+
+    pub fn remembered_topic_id(&self, message_id: &str) -> Option<&str> {
+        self.topic_by_message.get(message_id).map(String::as_str)
+    }
+
+    fn apply_remembered_topic_ids(
+        items: &mut [InboxNotification],
+        remembered: &HashMap<String, String>,
+    ) {
+        for item in items {
+            if item.effective_topic_id().is_some() {
+                continue;
+            }
+            let Some(message_id) = item.effective_message_id() else {
+                continue;
+            };
+            let Some(topic_id) = remembered.get(&message_id) else {
+                continue;
+            };
+            item.topic_id = Some(topic_id.clone());
+            if let Some(preview) = item.message.as_mut() {
+                preview.topic_id = Some(topic_id.clone());
+            }
+        }
     }
 
     fn drop_pending_duplicates(items: &mut Vec<InboxNotification>, incoming: &[InboxNotification]) {
@@ -305,6 +366,27 @@ impl InboxStore {
         });
     }
 
+    fn page_cursor(items: &[InboxNotification]) -> Option<String> {
+        items
+            .iter()
+            .rev()
+            .find(|item| !is_pending_inbox_notification_id(&item.id))
+            .map(|item| item.id.clone())
+    }
+
+    fn sort_items(items: &mut [InboxNotification]) {
+        items.sort_by(|a, b| {
+            match (
+                is_pending_inbox_notification_id(&a.id),
+                is_pending_inbox_notification_id(&b.id),
+            ) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => b.create_time_seconds.cmp(&a.create_time_seconds),
+            }
+        });
+    }
+
     fn apply_fetch_result(
         &mut self,
         category: InboxCategory,
@@ -312,6 +394,7 @@ impl InboxStore {
         result: Result<Vec<InboxNotification>, anyhow::Error>,
         cx: &mut Context<Self>,
     ) {
+        let remembered = self.topic_by_message.clone();
         let bucket = self.bucket_mut(category);
         if bucket.fetch_generation != generation {
             return;
@@ -330,10 +413,9 @@ impl InboxStore {
                         .items
                         .extend(items.into_iter().filter(|n| !existing.contains(&n.id)));
                 }
-                bucket
-                    .items
-                    .sort_by_key(|n| std::cmp::Reverse(n.create_time_seconds));
-                bucket.last_id = bucket.items.last().map(|n| n.id.clone());
+                Self::sort_items(&mut bucket.items);
+                Self::apply_remembered_topic_ids(&mut bucket.items, &remembered);
+                bucket.last_id = Self::page_cursor(&bucket.items);
                 bucket.fetched_at = Some(Instant::now());
                 bucket.server_loaded = true;
                 self.emit_updated(cx);
@@ -409,7 +491,6 @@ impl InboxStore {
         let RealtimeEvent::Notifications(batch) = event else {
             return;
         };
-        let mut changed = false;
         for raw in &batch.notifications {
             let Ok(notification) = inbox_notification_from_api(raw.clone()) else {
                 continue;
@@ -417,27 +498,12 @@ impl InboxStore {
             if self.should_skip_realtime(&notification) {
                 continue;
             }
-            let Some(bucket) = self
-                .buckets
-                .get_mut(&Self::bucket_key("", notification.category))
-            else {
-                continue;
-            };
-            if bucket.fetched_at.is_none() {
-                continue;
-            }
-            if bucket.items.iter().any(|n| n.id == notification.id) {
-                continue;
-            }
-            bucket.items.insert(0, notification);
-            if bucket.items.len() > REALTIME_BUCKET_CAP {
-                bucket.items.truncate(REALTIME_BUCKET_CAP);
-            }
-            changed = true;
-        }
-        if changed {
-            self.emit_updated(cx);
-            cx.notify();
+            self.prepend_local(
+                GLOBAL_INBOX_BUCKET_CLAN_ID,
+                notification.category,
+                notification,
+                cx,
+            );
         }
     }
 
@@ -499,6 +565,7 @@ mod tests {
             buckets: HashMap::new(),
             active_clan_id: Some("1".into()),
             active_channel_id: Some("7".into()),
+            topic_by_message: HashMap::new(),
             api: Arc::new(AppApi::new(
                 Arc::new(mezon_client::TransportClient::new(String::new())),
                 String::new(),
@@ -518,6 +585,59 @@ mod tests {
         };
         assert!(InboxStore::should_fetch_initial(Some(&local_only)));
         assert!(InboxStore::should_fetch_initial(None));
+    }
+
+    #[test]
+    fn pending_inbox_items_sort_ahead_of_older_server_items() {
+        let mut items = vec![
+            InboxNotification {
+                id: "10".into(),
+                create_time_seconds: 50,
+                ..sample_notification("7")
+            },
+            InboxNotification {
+                id: "pending-42".into(),
+                create_time_seconds: 1,
+                ..sample_notification("7")
+            },
+        ];
+        InboxStore::sort_items(&mut items);
+        assert_eq!(items[0].id, "pending-42");
+        assert_eq!(items[1].id, "10");
+    }
+
+    #[test]
+    fn invalidating_a_category_re_arms_the_initial_fetch() {
+        let mut loaded = CategoryBucket {
+            items: vec![sample_notification("7")],
+            last_id: Some("1".into()),
+            fetched_at: Some(Instant::now()),
+            server_loaded: true,
+            ..CategoryBucket::default()
+        };
+        assert!(!InboxStore::should_fetch_initial(Some(&loaded)));
+        InboxStore::invalidate(&mut loaded);
+        assert!(InboxStore::should_fetch_initial(Some(&loaded)));
+    }
+
+    #[test]
+    fn page_cursor_never_pages_from_an_optimistic_item() {
+        let items = vec![
+            InboxNotification {
+                id: "pending-42".into(),
+                ..sample_notification("7")
+            },
+            InboxNotification {
+                id: "20".into(),
+                ..sample_notification("7")
+            },
+            InboxNotification {
+                id: "10".into(),
+                ..sample_notification("7")
+            },
+        ];
+        assert_eq!(InboxStore::page_cursor(&items).as_deref(), Some("10"));
+        assert_eq!(InboxStore::page_cursor(&items[..1]), None);
     }
 
     #[test]

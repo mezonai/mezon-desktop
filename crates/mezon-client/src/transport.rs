@@ -42,10 +42,15 @@ pub struct ApiStatusError {
 }
 
 impl ApiStatusError {
+    pub const INVALID_ARGUMENT: u32 = 3;
     pub const OUT_OF_RANGE: u32 = 11;
 
     pub fn is_out_of_range(self) -> bool {
         self.code == Self::OUT_OF_RANGE
+    }
+
+    pub fn is_invalid_argument(self) -> bool {
+        self.code == Self::INVALID_ARGUMENT
     }
 
     pub fn is_create_channel_limit_exceeded(self) -> bool {
@@ -3310,6 +3315,7 @@ pub struct ApiMessage {
     pub references: Vec<ApiMessageRef>,
     pub reactions: Vec<ApiMessageReaction>,
     pub entity_mentions: Vec<ApiEntityMention>,
+    pub topic_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3874,6 +3880,7 @@ impl MezonTransport {
             references,
             reactions,
             entity_mentions,
+            topic_id: message.topic_id,
         }
     }
 
@@ -5211,6 +5218,7 @@ impl MezonTransport {
             references: Vec::new(),
             reactions: Vec::new(),
             entity_mentions: Vec::new(),
+            topic_id: 0,
         })
     }
 
@@ -8055,7 +8063,7 @@ impl MezonTransport {
             .send_api_request(cid, "CreateMessage2Inbox", body)
             .await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
         Ok(())
     }
@@ -8888,15 +8896,13 @@ impl MezonTransport {
         &self,
         channel_id: i64,
         clan_id: i64,
-        room_name: &str,
-        username: &str,
+        user_id: i64,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::MeetParticipantRequest {
+            user_id,
             channel_id,
             clan_id,
-            room_name: room_name.to_string(),
-            username: username.to_string(),
         }
         .encode_to_vec();
         let (code, _) = self
@@ -8913,15 +8919,13 @@ impl MezonTransport {
         &self,
         channel_id: i64,
         clan_id: i64,
-        room_name: &str,
-        username: &str,
+        user_id: i64,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::MeetParticipantRequest {
+            user_id,
             channel_id,
             clan_id,
-            room_name: room_name.to_string(),
-            username: username.to_string(),
         }
         .encode_to_vec();
         let (code, _) = self

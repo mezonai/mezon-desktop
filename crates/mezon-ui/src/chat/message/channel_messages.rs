@@ -1674,17 +1674,7 @@ impl ChannelMessages {
                     }
                 }
                 MessagesEvent::JumpTo { message_id } => {
-                    this.pending_jump = Some(*message_id);
-                    this.highlight_id = Some(*message_id);
-                    this._highlight_timer = Some(cx.spawn(async move |this, cx| {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(1500))
-                            .await;
-                        let _ = this.update(cx, |this, cx| {
-                            this.highlight_id = None;
-                            cx.notify();
-                        });
-                    }));
+                    this.begin_highlight(*message_id, cx);
                 }
                 MessagesEvent::UnreadBelowChanged => {
                     this.refresh_derived_state(cx);
@@ -2009,7 +1999,56 @@ impl ChannelMessages {
             }),
         );
         this.refresh_topic_messages(cx);
+        if let Some(target) = MessagesStore::global(cx).read(cx).pending_topic_jump() {
+            this.begin_highlight(target, cx);
+        }
         this
+    }
+
+    fn begin_highlight(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        self.pending_jump = Some(message_id);
+        self.highlight_id = Some(message_id);
+        self._highlight_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1500))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.highlight_id = None;
+                cx.notify();
+            });
+        }));
+    }
+
+    fn is_topic_jump_target(&self, message_id: MessageId, cx: &App) -> bool {
+        let Some(topic_id) = TopicsStore::global(cx).read(cx).active_topic_id() else {
+            return false;
+        };
+        MessagesStore::global(cx)
+            .read(cx)
+            .messages_in_channel(ChannelId(topic_id))
+            .iter()
+            .any(|m| m.id == message_id)
+    }
+
+    fn apply_topic_jump(&mut self, header_shown: bool, cx: &mut Context<Self>) {
+        let target = self
+            .pending_jump
+            .or_else(|| MessagesStore::global(cx).read(cx).pending_topic_jump());
+        let Some(target) = target else {
+            return;
+        };
+        let Some(pos) = self.topic_row_ids.iter().position(|id| *id == target) else {
+            return;
+        };
+        if self.highlight_id != Some(target) {
+            self.begin_highlight(target, cx);
+        }
+        self.pending_jump = None;
+        MessagesStore::global(cx).update(cx, |store, _| {
+            store.clear_pending_topic_jump();
+        });
+        self.list_state
+            .scroll_to_reveal_item(usize::from(header_shown) + pos);
     }
 
     fn collect_topic_messages(cx: &App) -> Vec<Message> {
@@ -2183,6 +2222,13 @@ impl ChannelMessages {
     }
 
     fn on_topic_store_event(&mut self, event: &MessagesEvent, cx: &mut Context<Self>) {
+        if let MessagesEvent::JumpTo { message_id } = event {
+            if self.is_topic_jump_target(*message_id, cx) {
+                self.begin_highlight(*message_id, cx);
+                cx.notify();
+            }
+            return;
+        }
         let concerns_topic = match event {
             MessagesEvent::TopicUpdated { topic_id } => {
                 TopicsStore::global(cx).read(cx).active_topic_id() == Some(*topic_id)
@@ -4300,6 +4346,7 @@ impl ChannelMessages {
         self.sync_topic_header(cx);
         self.maybe_paginate_topic(cx);
         let header_shown = self.header_shown;
+        self.apply_topic_jump(header_shown, cx);
         let topic_id = TopicsStore::global(cx).read(cx).active_topic_id();
         let first_load = {
             let store = MessagesStore::global(cx);
@@ -4353,6 +4400,7 @@ impl ChannelMessages {
         let small_avatar_image_cache = self.small_avatar_image_cache.clone();
         let ogp_image_cache = self.ogp_image_cache.clone();
         let icon_image_cache = self.icon_image_cache.clone();
+        let highlight_id = self.highlight_id;
         let reply_highlight_id = TopicsStore::global(cx)
             .read(cx)
             .reply_target()
@@ -4414,7 +4462,7 @@ impl ChannelMessages {
                         icon_cache: icon_image_cache.clone(),
                         ogp_cache: ogp_image_cache.clone(),
                         unread_boundary_id: None,
-                        highlight_id: None,
+                        highlight_id,
                         reply_highlight_id,
                         profile_context,
                         settings: settings.clone(),
@@ -4575,13 +4623,14 @@ impl Render for ChannelMessages {
         let skeleton_overlay = self.skeleton_overlay(cx.theme());
         let header_shown = self.header_shown;
 
-        if let Some(target) = self.pending_jump.take()
+        if let Some(target) = self.pending_jump
             && let Some(pos) = store
                 .read(cx)
                 .viewport_messages()
                 .iter()
                 .position(|m| m.id == target)
         {
+            self.pending_jump = None;
             self.list_state
                 .scroll_to_reveal_item(usize::from(header_shown) + pos);
         }
