@@ -220,8 +220,25 @@ list_messages (which reads the server) to tell a delivery failure apart from a m
 the server accepted but the list never rendered.
 
 Parameters:
-- limit (optional, default 50): return at most this many rows from each end of the buffer.",
+- limit (optional, default 50): return at most this many rows from each end of the buffer.
+- topic (optional, default false): read the open topic panel's buffer instead. The topic is
+  a bucket of its own and the parent channel stays active while it is open, so a reply sent
+  into a topic only shows up here with this set.",
         write: false,
+    },
+    ToolSpec {
+        name: "reply_begin",
+        description: "\
+Aim the composer at a message, the way the row's Reply action does. Nothing is sent.
+
+Use this when the reply must carry something the composer holds — an attachment from
+composer_drop_paths, a mention picked with composer_pick. `reply_to_message` posts a
+text-only reply in one call and cannot carry either. Send with composer_submit;
+composer_state reports the pending target under `reply_target`.
+
+Parameters:
+- message_id (required): must be in the open channel's loaded history.",
+        write: true,
     },
     ToolSpec {
         name: "jump_to_present",
@@ -642,6 +659,20 @@ channel's media itself, so it can be paged once open.
 
 Parameters:
 - message_id (required): message carrying the attachment.
+- attachment_index (optional): zero-based index on that message. Default 0.",
+        write: false,
+    },
+    ToolSpec {
+        name: "open_pdf_viewer",
+        description: "\
+Open the pdf viewer window on a message's pdf attachment.
+
+Same reach as open_image_viewer: the message must be in the open channel's loaded
+history (or the open topic's), so call open_channel and load_more_messages first.
+The row only offers this for a pdf attachment, and so does this tool.
+
+Parameters:
+- message_id (required): message carrying the pdf attachment.
 - attachment_index (optional): zero-based index on that message. Default 0.",
         write: false,
     },
@@ -1159,10 +1190,30 @@ Parameters:
         write: true,
     },
     ToolSpec {
+        name: "topic_drop_paths",
+        description: "\
+Drop local files onto the TOPIC panel's composer; send them with topic_submit.
+
+composer_drop_paths always targets the channel composer even while the topic
+panel is open, so use this one for attachments meant for a topic. Call
+open_topic first.
+
+Staging is asynchronous: this returns as soon as the paths are handed over, so
+poll topic_state until its `attachments` lists the files before topic_submit —
+submitting earlier sends the reply without them.
+
+Parameters:
+- paths (required): array of local file paths.",
+        write: true,
+    },
+    ToolSpec {
         name: "composer_drop_paths",
         description: "\
 Drop local files onto the composer, like a drag-and-drop. They become pending
 attachments; send them with composer_submit.
+
+The file is read on a background task, so poll composer_state until its
+`attachments` lists it before composer_submit.
 
 Parameters:
 - paths (required): array of local file paths.",

@@ -63,16 +63,22 @@ fn surface_recording_toast(
         mezon_store::VoiceStoreEvent::RecordingFinished(toast) => toast.clone(),
     };
     let (kind, message) = match toast {
-        mezon_store::RecordingToast::Saved(path) => (
-            crate::components::primitives::ToastKind::Success,
-            format!(
-                "{} {}",
-                mezon_i18n::t(&locale, "channelVoice.recordingSaved"),
-                path.file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_default()
-            ),
-        ),
+        mezon_store::RecordingToast::Saved(path) => {
+            // Hand the finished file straight to the system player — the desktop can do what the
+            // web app cannot. `Saved` already means playable: the recorder only reports it after
+            // `container::is_playable`, so there is nothing left to check here.
+            cx.open_with_system(&path);
+            (
+                crate::components::primitives::ToastKind::Success,
+                format!(
+                    "{} {}",
+                    mezon_i18n::t(&locale, "channelVoice.recordingSaved"),
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                ),
+            )
+        }
         mezon_store::RecordingToast::Failed(error) => (
             crate::components::primitives::ToastKind::Error,
             format!(
@@ -150,6 +156,7 @@ impl RootView {
             }
             if matches!(*auth_state.read(cx), AuthState::NotAuthenticated) {
                 crate::image_viewer::close_image_viewer(cx);
+                crate::pdf_viewer::close_pdf_viewer(cx);
                 crate::chat::media_channel::close_media_image_modal(cx);
                 crate::image_cache::clear_all_image_caches(cx);
                 mezon_canvas::reset_canvas_image_caches(cx);

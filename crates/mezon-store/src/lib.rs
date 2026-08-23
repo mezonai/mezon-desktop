@@ -42,6 +42,7 @@ pub mod messages;
 pub mod notification_push;
 pub mod notification_setting;
 pub mod ogp;
+pub mod onboarding;
 pub mod permissions;
 pub mod pinned;
 pub mod platform;
@@ -137,7 +138,7 @@ pub use emoji::{
 pub use events::{ClanEventItem, CreateEventDraft, EventsEvent, EventsStore};
 pub use files::{
     ChannelDocument, FILES_CACHE_TTL, FILES_PAGE_SIZE, FILES_QUERY, FilesEvent, FilesStore,
-    filename_matches_query, is_document, short_file_type_label, short_file_type_label_for,
+    filename_matches_query, is_document, is_pdf, short_file_type_label, short_file_type_label_for,
 };
 pub use friend::{Friend, FriendEvent, FriendState, FriendStore};
 pub use gallery::{
@@ -147,13 +148,11 @@ pub use gallery::{
 };
 pub use gif::{Gif, GifCategory, GifEvent, GifStore};
 pub use gifts::{
-    FLOWER_ANIMATION_TTL, FLOWER_GIFT_TYPE, FLOWER_PALETTE_SIZE, FLOWER_PARTICLE_COUNT,
-    FLOWER_PRICE, FLOWER_RATE_LIMIT, FLOWER_SPRITE_COUNT, FlowerInteractiveParams, FlowerParticle,
-    FlowerParticlePose, GiveFlowerDeny, VoiceInteractiveEventType, build_flower_transfer,
+    FLOWER_GIFT_TYPE, FLOWER_PRICE, FLOWER_RATE_LIMIT, FLOWER_SCENE_TTL, FlowerInteractiveParams,
+    GiveFlowerDeny, VoiceInteractiveApp, VoiceInteractiveEventType, build_flower_transfer,
     can_afford, can_give_flower, flower_effect_key, flower_event_from_payload, flower_menu_blocked,
-    flower_particle_pose, flower_particles, flower_price, format_flower_amount,
-    is_uncertain_transfer_error, parse_flower_interactive_params,
-    serialize_flower_interactive_params,
+    flower_price, format_flower_amount, is_uncertain_transfer_error,
+    parse_flower_interactive_params, serialize_flower_interactive_params,
 };
 pub use group_members::{GroupMember, GroupMembersEvent, GroupMembersStore};
 pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};
@@ -187,6 +186,11 @@ pub use notification_setting::{NotificationSettingEvent, NotificationSettingStor
 pub use ogp::{
     OgpResult, OutgoingOgp, fetch_invite_preview, fetch_ogp, first_previewable_url,
     internal_invite_id, invite_id_from_url, trusted_invite_id,
+};
+pub use onboarding::{
+    ClanOnboarding, DONE_ONBOARDING_STATUS, GUIDE_TYPE_GREETING, GUIDE_TYPE_QUESTION,
+    GUIDE_TYPE_RULE, GUIDE_TYPE_TASK, MISSION_DO_SOMETHING, MISSION_SEND_MESSAGE, MISSION_VISIT,
+    OnboardingStore,
 };
 pub use permissions::{
     ClanSettingsPermissions, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,

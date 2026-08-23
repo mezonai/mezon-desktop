@@ -18,6 +18,7 @@ install_apt() {
     clang
     libglib2.0-dev
     libgdk-pixbuf2.0-dev
+    libpoppler-glib8
     libasound2-dev
     libfontconfig-dev
     libfreetype-dev
@@ -76,6 +77,7 @@ install_dnf() {
     clang
     glib2-devel
     gdk-pixbuf2-devel
+    poppler-glib
     alsa-lib-devel
     fontconfig-devel
     freetype-devel

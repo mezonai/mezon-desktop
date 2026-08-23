@@ -31,6 +31,7 @@ pub enum RealtimeKind {
     CategoryEvent,
     ClanUpdated,
     ClanDeleted,
+    TransferOwnership,
     ClanEmoji,
     AddClanUser,
     ClanEventCreated,
@@ -87,6 +88,7 @@ impl RealtimeKind {
             RealtimeEvent::ChannelDeleted(_) => Self::ChannelDeleted,
             RealtimeEvent::CategoryEvent(_) => Self::CategoryEvent,
             RealtimeEvent::ClanUpdated(_) => Self::ClanUpdated,
+            RealtimeEvent::TransferOwnership(_) => Self::TransferOwnership,
             RealtimeEvent::ClanDeleted(_) => Self::ClanDeleted,
             RealtimeEvent::ClanEmoji(_) => Self::ClanEmoji,
             RealtimeEvent::AddClanUser(_) => Self::AddClanUser,
@@ -266,6 +268,12 @@ mod tests {
                 realtime::ClanUpdatedEvent::default()
             )),
             Some(RealtimeKind::ClanUpdated)
+        );
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::TransferOwnership(
+                realtime::TransferOwnershipEvent::default()
+            )),
+            Some(RealtimeKind::TransferOwnership)
         );
         assert_eq!(
             RealtimeKind::of(&RealtimeEvent::SessionRefreshed(api::Session::default())),

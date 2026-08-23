@@ -616,6 +616,12 @@ pub struct MessagesStore {
     forward_task: Option<Task<()>>,
     forward_in_flight: bool,
     presign_expiry_task: Option<Task<()>>,
+    /// Per-attachment-url backoff for the CDN existence probe. Keyed by url
+    /// because that is what uniquely identifies an object across the message
+    /// copies the caches may hold.
+    presign_probe: HashMap<String, PresignProbe>,
+    presign_probe_task: Option<Task<()>>,
+    presign_probe_running: bool,
     pending_send_payloads: HashMap<MessageId, PendingSendPayload>,
     anonymous_clans: HashSet<ClanId>,
     topic_anonymous_mode: bool,
@@ -988,6 +994,14 @@ impl MessagesStore {
         self.last_typing_sent = None;
         self.buzz_player = None;
         self.buzz_sound_loading = false;
+        // A probe round outlives the session it was started for: dropping the task
+        // stops it from spending requests on the previous account's CDN objects,
+        // and clearing the flag is what lets the next session arm a probe at all
+        // (the scheduler treats a set flag as "a round is already in flight").
+        self.presign_probe.clear();
+        self.presign_probe_task = None;
+        self.presign_probe_running = false;
+        self.presign_expiry_task = None;
         cx.notify();
     }
 
@@ -1050,6 +1064,9 @@ impl MessagesStore {
             embed_form: HashMap::new(),
             forward_task: None,
             presign_expiry_task: None,
+            presign_probe: HashMap::new(),
+            presign_probe_task: None,
+            presign_probe_running: false,
             forward_in_flight: false,
             pending_send_payloads: HashMap::new(),
             anonymous_clans: HashSet::new(),
@@ -3569,11 +3586,17 @@ impl MessagesStore {
         true
     }
 
+    /// `local_sources` is the sender's own copy of each attachment, in the order
+    /// they were sent — empty for a reply arriving from anyone else. A topic reply
+    /// has no optimistic row: it is built from the server's echo, which carries no
+    /// path, so without this the sender would fetch a proxied copy of the file
+    /// still sitting on their disk.
     pub fn append_topic_message(
         &mut self,
         topic_id: i64,
         api_msg: mezon_client::transport::ApiMessage,
         anonymous: bool,
+        local_sources: Vec<(String, Option<std::path::PathBuf>)>,
         cx: &mut Context<Self>,
     ) -> TopicAppend {
         let topic_key = ChannelId(topic_id);
@@ -3583,6 +3606,7 @@ impl MessagesStore {
         let masked = anonymous && anonymize_sender(&mut msg, cfg);
         enrich_sparse_topic_ack(&mut msg, viewer_id, self.active_clan_id, masked, cx);
         mark_pending_attachments_uploading(&mut msg.attachments);
+        apply_local_sources(&mut msg.attachments, &local_sources);
         let message_id = msg.id;
         let create_time = if msg.create_time > 0 {
             msg.create_time
@@ -3592,6 +3616,26 @@ impl MessagesStore {
         if self.cache.contains(&topic_key) {
             if let Some(channel) = self.cache.get_mut(&topic_key) {
                 if channel.messages.contains_id(msg.id) {
+                    // The socket delivered this reply before its own ack came back —
+                    // with a batch of attachments it usually does. Dropping the paths
+                    // here is what sent the sender to the proxy for files it is
+                    // holding: the row that survives is the socket's, and that one
+                    // never had them.
+                    let mut changed = false;
+                    if let Some(existing) = channel.messages.get_mut_by_id(msg.id) {
+                        changed = apply_local_sources(&mut existing.attachments, &local_sources);
+                    }
+                    if changed {
+                        // The topic list renders from a clone it only refreshes on
+                        // an event, so a silent change here is a store that is
+                        // right behind a view that is not. Measured, the row still
+                        // comes out right — it is uploading at this point, so
+                        // nothing is fetched, and the presign patch that follows
+                        // refreshes the view in time. This is here so that stays
+                        // true when the order those two arrive in changes.
+                        cx.emit(MessagesEvent::TopicUpdated { topic_id });
+                        cx.notify();
+                    }
                     return TopicAppend::default();
                 }
                 channel.messages.push_grouped(msg);
@@ -3727,10 +3771,6 @@ impl MessagesStore {
     /// channel happened to arrive.
     fn sweep_expired_presign(&mut self, cx: &mut Context<Self>) {
         let config = AppConfig::try_global(cx).cloned();
-        let base_img = config
-            .as_ref()
-            .map(|c| c.base_img_url.clone())
-            .unwrap_or_default();
         let now = now_unix_seconds();
         let mut changed = false;
         for channel in self.cache.values_mut() {
@@ -3738,17 +3778,20 @@ impl MessagesStore {
                 if !message.attachments.iter().any(|a| a.presign_pending) {
                     continue;
                 }
-                let Some(keys) = presign::parse_presign_finish_keys(&message.content) else {
+                // `presign_pending` is the gate's own verdict, already applied by
+                // whoever built or updated this row. Re-deriving it here from
+                // `message.content` was the bug: that field holds the display text,
+                // never the content JSON, so the parse returned None for every row
+                // and the sweep skipped all of them — leaving an attachment whose
+                // upload died pending forever, and the CDN probe polling it every
+                // 30s for as long as the channel stayed open.
+                if message.create_time <= 0
+                    || now - message.create_time < presign::PRESIGN_PENDING_MAX_AGE_SEC
+                {
                     continue;
-                };
+                }
                 let before = message.attachments.len();
-                apply_presign_gate_at(
-                    &mut message.attachments,
-                    &keys,
-                    &base_img,
-                    message.create_time,
-                    now,
-                );
+                message.attachments.retain(|a| !a.presign_pending);
                 if message.attachments.len() != before {
                     // The album layout and the viewer list are built from the
                     // attachments, so dropping one leaves them describing tiles
@@ -3765,6 +3808,168 @@ impl MessagesStore {
             cx.notify();
         }
         self.schedule_presign_expiry(cx);
+        self.schedule_presign_probe(cx);
+    }
+
+    /// Buckets a probe may look at: whatever the user is actually looking at.
+    /// Probing the whole cache would turn every scrollback message into CDN
+    /// traffic, and an attachment nobody can see does not need healing.
+    fn probe_buckets(&self) -> Vec<ChannelId> {
+        [self.active_channel_id, self.active_topic_id]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    /// Refresh the probe table from what is currently pending, then report how
+    /// long until the next attachment is due. `None` means nothing to probe.
+    fn refresh_presign_probes(&mut self) -> Option<std::time::Duration> {
+        let now = std::time::Instant::now();
+        let mut pending: HashSet<String> = HashSet::new();
+        for bucket in self.probe_buckets() {
+            let Some(channel) = self.cache.get(&bucket) else {
+                continue;
+            };
+            for message in channel.messages.items.iter() {
+                for att in message.attachments.iter() {
+                    // `uploading` means this client is still PUTting the bytes; it
+                    // knows the answer already and asking the CDN would only add
+                    // traffic to every message we send ourselves. `upload_failed`
+                    // means the bytes never left, so the object will never appear
+                    // and probing for it just burns requests until the expiry.
+                    if att.presign_pending
+                        && !att.uploading
+                        && !att.upload_failed
+                        && !att.url.is_empty()
+                    {
+                        pending.insert(att.url.clone());
+                    }
+                }
+            }
+        }
+        self.presign_probe.retain(|url, _| pending.contains(url));
+        for url in pending {
+            self.presign_probe.entry(url).or_insert(PresignProbe {
+                attempts: 0,
+                next_at: now + presign_probe_delay(0),
+            });
+        }
+        self.presign_probe
+            .values()
+            .map(|probe| probe.next_at.saturating_duration_since(now))
+            .min()
+    }
+
+    /// Urls whose turn it is, with their backoff already advanced so a slow
+    /// probe cannot be started twice.
+    ///
+    /// Capped: the round fires its requests together, so a channel that somehow
+    /// has many stuck attachments would otherwise open a connection per
+    /// attachment at once. Whatever is left over stays due and the next round —
+    /// scheduled the moment this one lands — picks it up.
+    fn take_due_probe_urls(&mut self) -> Vec<String> {
+        let now = std::time::Instant::now();
+        let mut due = Vec::new();
+        for (url, probe) in self.presign_probe.iter_mut() {
+            if due.len() >= PRESIGN_PROBE_BATCH {
+                break;
+            }
+            if probe.next_at <= now {
+                probe.attempts = probe.attempts.saturating_add(1);
+                probe.next_at = now + presign_probe_delay(probe.attempts);
+                due.push(url.clone());
+            }
+        }
+        due
+    }
+
+    /// The object answered, so the attachment can render even though the
+    /// presign_finish patch never reached us.
+    fn settle_presign_probes(&mut self, found: &[String], cx: &mut Context<Self>) {
+        if found.is_empty() {
+            return;
+        }
+        let mut touched: Vec<MessageId> = Vec::new();
+        for channel in self.cache.values_mut() {
+            for message in channel.messages.items.iter_mut() {
+                let mut hit = false;
+                for att in message.attachments.iter_mut() {
+                    if att.presign_pending && found.iter().any(|url| url == &att.url) {
+                        att.presign_pending = false;
+                        hit = true;
+                    }
+                }
+                if hit {
+                    touched.push(message.id);
+                }
+            }
+        }
+        for url in found {
+            self.presign_probe.remove(url);
+        }
+        if !touched.is_empty() {
+            tracing::info!(
+                count = found.len(),
+                "presign probe cleared pending attachments"
+            );
+            // The message list repaints on MessagesEvent, not on a bare notify: an
+            // Updated event per row is what re-measures and re-renders it, so the
+            // placeholder gives way to the image without waiting for some unrelated
+            // change to force a frame.
+            for message_id in touched {
+                cx.emit(MessagesEvent::Updated {
+                    message_id: Some(message_id),
+                });
+            }
+            cx.notify();
+        }
+    }
+
+    /// Ask the CDN whether the objects exist yet, for attachments still waiting
+    /// on a presign_finish that may never arrive. Runs only while something is
+    /// pending in the open channel or topic.
+    fn schedule_presign_probe(&mut self, cx: &mut Context<Self>) {
+        if self.presign_probe_running {
+            // A probe is in flight; it re-schedules itself when it lands. Restarting
+            // here would cancel it, and the busy callers below fire on every message.
+            return;
+        }
+        let Some(delay) = self.refresh_presign_probes() else {
+            self.presign_probe_task = None;
+            return;
+        };
+        self.presign_probe_running = true;
+        self.presign_probe_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let due = this
+                .update(cx, |this, _| this.take_due_probe_urls())
+                .unwrap_or_default();
+            // Together, not one after another: a HEAD that goes unanswered burns the
+            // full probe timeout, and a serial round would stack one timeout per
+            // attachment before the next round — and before a channel the user has
+            // since switched to — gets a turn.
+            let probes = due.into_iter().enumerate().map(|(index, url)| {
+                let nonce = unix_now_seconds() as u64 ^ ((index as u64) << 32);
+                async move {
+                    let exists = mezon_client::transport_runtime::object_exists(
+                        &presign_probe_url(&url, nonce),
+                    )
+                    .await;
+                    tracing::debug!(url = %url, exists, "presign probe");
+                    exists.then_some(url)
+                }
+            });
+            let found: Vec<String> = futures::future::join_all(probes)
+                .await
+                .into_iter()
+                .flatten()
+                .collect();
+            let _ = this.update(cx, |this, cx| {
+                this.presign_probe_running = false;
+                this.settle_presign_probes(&found, cx);
+                this.schedule_presign_probe(cx);
+            });
+        }));
     }
 
     fn schedule_presign_expiry(&mut self, cx: &mut Context<Self>) {
@@ -5086,6 +5291,7 @@ impl MessagesStore {
                     prepare_messages(page.messages, AppConfig::try_global(cx), viewer_user_id(cx));
                 self.set_channel(channel_id, messages);
                 self.schedule_presign_expiry(cx);
+                self.schedule_presign_probe(cx);
                 if is_current && self.messages().is_empty() {
                     self.mark_empty_channel_seen(channel_id, cx);
                 }
@@ -5300,6 +5506,7 @@ impl MessagesStore {
         self.set_last_message(storage_id, last_id);
         if arms_expiry {
             self.schedule_presign_expiry(cx);
+            self.schedule_presign_probe(cx);
         }
         if is_buzz && appended {
             self.play_buzz_sound(cx);
@@ -5353,6 +5560,7 @@ impl MessagesStore {
         patch_reply_previews_after_update(&mut channel.messages, message_id, &preview);
         if arms_expiry {
             self.schedule_presign_expiry(cx);
+            self.schedule_presign_probe(cx);
         }
         if self.active_topic_id == Some(storage_id) {
             cx.emit(MessagesEvent::TopicUpdated {
@@ -6339,6 +6547,9 @@ impl MessagesStore {
             });
             cx.notify();
         }
+        // Our own upload just finished, so the row is now pending on nothing but the
+        // presign_finish patch — which is exactly what can go missing.
+        self.schedule_presign_probe(cx);
     }
 
     pub fn apply_topic_attachment_outcome(
@@ -6355,6 +6566,7 @@ impl MessagesStore {
             cx.emit(MessagesEvent::TopicUpdated { topic_id });
             cx.notify();
         }
+        self.schedule_presign_probe(cx);
     }
 
     fn resync(&mut self, cx: &mut Context<Self>) {
@@ -6492,6 +6704,43 @@ fn carries_topic_marker(m: &mezon_proto::api::ChannelMessage) -> bool {
         .and_then(|content| content.tp)
         .and_then(|tp| tp.parse::<i64>().ok())
         .is_some_and(|id| id != 0)
+}
+
+/// Point a row's attachments at the sender's own copies. Matched by filename,
+/// because the echo is the server's list and nothing promises it comes back in
+/// the order it was sent — an index would then aim a row at the wrong picture.
+/// The same name twice in one message keeps its order within that name.
+///
+/// The count check stays as the outer guard: a different length means this echo
+/// is not the send those files belong to at all.
+/// Returns whether any attachment actually gained a path — the caller has to
+/// know, because a row that changed under a view holding its own clone is only
+/// redrawn if the store says so.
+fn apply_local_sources(
+    attachments: &mut [MessageAttachment],
+    local_sources: &[(String, Option<std::path::PathBuf>)],
+) -> bool {
+    if local_sources.len() != attachments.len() {
+        return false;
+    }
+    let mut by_name: HashMap<&str, std::collections::VecDeque<&Option<std::path::PathBuf>>> =
+        HashMap::new();
+    for (name, path) in local_sources {
+        by_name.entry(name.as_str()).or_default().push_back(path);
+    }
+    let mut changed = false;
+    for att in attachments.iter_mut() {
+        if att.local_source.is_some() {
+            continue;
+        }
+        if let Some(queue) = by_name.get_mut(att.filename.as_str())
+            && let Some(path) = queue.pop_front()
+        {
+            changed |= path.is_some();
+            att.local_source = path.clone();
+        }
+    }
+    changed
 }
 
 fn mark_pending_attachments_uploading(attachments: &mut [MessageAttachment]) {
@@ -7133,11 +7382,43 @@ fn apply_presign_gate(
 /// sweep would not touch it. It must agree with `sweep_expired_presign`: a
 /// message the sweep skips but this counts would be rescheduled at zero delay
 /// forever.
+/// Backoff between CDN existence probes for one attachment. The first wait is
+/// long enough that the normal path — the presign_finish update arriving a
+/// second or two after the message — costs no requests at all.
+const PRESIGN_PROBE_BACKOFF_SECS: [u64; 5] = [8, 15, 30, 30, 30];
+
+/// How many objects one probe round asks about at once.
+const PRESIGN_PROBE_BATCH: usize = 6;
+
+/// One attachment's probe schedule.
+#[derive(Debug, Clone, Copy)]
+struct PresignProbe {
+    attempts: u32,
+    next_at: std::time::Instant,
+}
+
+fn presign_probe_delay(attempts: u32) -> std::time::Duration {
+    let last = PRESIGN_PROBE_BACKOFF_SECS.len() - 1;
+    let idx = (attempts as usize).min(last);
+    std::time::Duration::from_secs(PRESIGN_PROBE_BACKOFF_SECS[idx])
+}
+
+/// The probe URL carries a nonce so that a not-found answer is cached under a
+/// key nothing renders from. Without it an early probe could pin a 404 onto the
+/// very URL the message is about to use.
+fn presign_probe_url(url: &str, nonce: u64) -> String {
+    let sep = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{sep}probe={nonce:x}")
+}
+
+/// When this row's pending attachments stop being worth waiting for. Reads the
+/// gate's verdict off the attachments rather than re-parsing the content: the
+/// row's `content` is display text, so a parse here answers None for every
+/// message and the timer is never armed at all.
 fn presign_expiry_deadline(message: &Message) -> Option<i64> {
     if message.create_time <= 0 || !message.attachments.iter().any(|a| a.presign_pending) {
         return None;
     }
-    presign::parse_presign_finish_keys(&message.content)?;
     Some(message.create_time + presign::PRESIGN_PENDING_MAX_AGE_SEC)
 }
 
@@ -8282,6 +8563,109 @@ mod tests {
     use super::*;
     use crate::ids::UserId;
     use crate::message::MessageSpan;
+
+    fn attachment(filename: &str) -> MessageAttachment {
+        MessageAttachment {
+            filename: filename.into(),
+            ..Default::default()
+        }
+    }
+
+    fn source(filename: &str, path: &str) -> (String, Option<std::path::PathBuf>) {
+        (filename.into(), Some(std::path::PathBuf::from(path)))
+    }
+
+    #[test]
+    fn local_sources_follow_the_filename_not_the_position() {
+        // The echo is the server's ordering of the batch, and nothing promises it
+        // matches the order they were handed to the upload.
+        let mut attachments = vec![
+            attachment("c.png"),
+            attachment("a.png"),
+            attachment("b.png"),
+        ];
+        let changed = apply_local_sources(
+            &mut attachments,
+            &[
+                source("a.png", "/disk/a.png"),
+                source("b.png", "/disk/b.png"),
+                source("c.png", "/disk/c.png"),
+            ],
+        );
+
+        assert!(changed);
+        let got: Vec<_> = attachments
+            .iter()
+            .map(|a| {
+                a.local_source
+                    .as_ref()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(got, vec!["/disk/c.png", "/disk/a.png", "/disk/b.png"]);
+    }
+
+    #[test]
+    fn repeated_filenames_keep_their_order_within_the_name() {
+        // Two files of the same name are indistinguishable, so the only sane rule
+        // is first-come inside that name.
+        let mut attachments = vec![attachment("shot.png"), attachment("shot.png")];
+        apply_local_sources(
+            &mut attachments,
+            &[
+                source("shot.png", "/disk/one/shot.png"),
+                source("shot.png", "/disk/two/shot.png"),
+            ],
+        );
+
+        assert_eq!(
+            attachments[0].local_source.as_ref().unwrap(),
+            &std::path::PathBuf::from("/disk/one/shot.png")
+        );
+        assert_eq!(
+            attachments[1].local_source.as_ref().unwrap(),
+            &std::path::PathBuf::from("/disk/two/shot.png")
+        );
+    }
+
+    #[test]
+    fn a_short_echo_applies_nothing_and_reports_no_change() {
+        let mut attachments = vec![attachment("a.png"), attachment("b.png")];
+        let changed = apply_local_sources(&mut attachments, &[source("a.png", "/disk/a.png")]);
+
+        assert!(
+            !changed,
+            "a count mismatch means the batch cannot be trusted"
+        );
+        assert!(attachments.iter().all(|a| a.local_source.is_none()));
+    }
+
+    #[test]
+    fn applying_paths_that_are_already_there_reports_no_change() {
+        // The caller redraws on `true`; saying so when nothing moved would repaint
+        // the topic list on every echo.
+        let mut attachments = vec![attachment("a.png")];
+        attachments[0].local_source = Some(std::path::PathBuf::from("/disk/a.png"));
+        let changed = apply_local_sources(&mut attachments, &[source("a.png", "/disk/other.png")]);
+
+        assert!(!changed);
+        assert_eq!(
+            attachments[0].local_source.as_ref().unwrap(),
+            &std::path::PathBuf::from("/disk/a.png"),
+            "a path already on the row wins over a late one"
+        );
+    }
+
+    #[test]
+    fn a_url_attachment_with_no_file_behind_it_is_not_a_change() {
+        let mut attachments = vec![attachment("tenor.gif")];
+        let changed = apply_local_sources(&mut attachments, &[("tenor.gif".into(), None)]);
+
+        assert!(!changed);
+        assert!(attachments[0].local_source.is_none());
+    }
 
     #[test]
     fn thread_send_joins_sender_when_not_a_member() {
@@ -11401,17 +11785,91 @@ mod tests {
         pending.attachments = vec![cdn_attachment("https://cdn.example/uploads/photo.png")];
         pending.attachments[0].presign_pending = true;
 
-        pending.content = r#"{"t":"hi","presign_finish":[]}"#.to_string();
         assert_eq!(
             presign_expiry_deadline(&pending),
             Some(1000 + presign::PRESIGN_PENDING_MAX_AGE_SEC),
-            "a pending message the sweep can act on arms the timer"
+            "a pending attachment arms the timer"
         );
 
-        // The sweep skips a message whose content no longer carries the field, so
-        // counting it here would re-arm the timer at zero delay forever.
-        pending.content = r#"{"t":"hi"}"#.to_string();
+        // What the sweep does when it fires: everything still pending goes. With
+        // nothing left pending there is no deadline, so the timer is not re-armed
+        // at zero delay — which is what would spin.
+        pending.attachments.retain(|a| !a.presign_pending);
         assert_eq!(presign_expiry_deadline(&pending), None);
+
+        // An optimistic row has no server timestamp yet; waiting on it would mean
+        // a deadline in 1970.
+        let mut no_time = pending.clone();
+        no_time.create_time = 0;
+        no_time.attachments = vec![cdn_attachment("https://cdn.example/uploads/photo.png")];
+        no_time.attachments[0].presign_pending = true;
+        assert_eq!(presign_expiry_deadline(&no_time), None);
+    }
+
+    #[test]
+    fn expiry_deadline_does_not_depend_on_the_row_carrying_content_json() {
+        // The row's `content` is display text — the content JSON with
+        // `presign_finish` never reaches it. Deriving the deadline from a parse of
+        // that field armed no timer at all, so a dead upload stayed pending
+        // forever and the probe polled it every 30s until the channel closed.
+        let mut msg = Message::new(MessageId(1), "just some text", "", "", 1000);
+        msg.attachments = vec![MessageAttachment {
+            url: "https://cdn.example/uploads/photo.png".into(),
+            presign_pending: true,
+            ..Default::default()
+        }];
+
+        assert_eq!(
+            presign_expiry_deadline(&msg),
+            Some(1000 + presign::PRESIGN_PENDING_MAX_AGE_SEC),
+            "a pending attachment arms the timer whatever the text says"
+        );
+
+        msg.attachments[0].presign_pending = false;
+        assert_eq!(
+            presign_expiry_deadline(&msg),
+            None,
+            "nothing pending, nothing to wait for"
+        );
+    }
+
+    #[test]
+    fn presign_probe_backoff_stretches_then_holds_at_thirty_seconds() {
+        let secs = |attempts| presign_probe_delay(attempts).as_secs();
+        // The first wait outlasts a healthy presign_finish, so the normal path
+        // never spends a request.
+        assert_eq!(secs(0), 8);
+        assert_eq!(secs(1), 15);
+        assert_eq!(secs(2), 30);
+        assert_eq!(secs(3), 30);
+        // A genuinely slow upload must not turn into a request storm: the delay
+        // stops growing but never shrinks back down.
+        assert_eq!(secs(4), 30);
+        assert_eq!(secs(50), 30);
+        assert_eq!(secs(u32::MAX), 30);
+    }
+
+    #[test]
+    fn presign_probe_batch_is_bounded_so_one_round_cannot_flood_the_cdn() {
+        // The round fires its requests together, so the cap is what keeps a channel
+        // full of stuck attachments from opening a connection per attachment.
+        const { assert!(PRESIGN_PROBE_BATCH > 0) };
+        const { assert!(PRESIGN_PROBE_BATCH <= 8) };
+    }
+
+    #[test]
+    fn presign_probe_url_never_reuses_the_clean_url() {
+        // A 404 must be cached under a key nothing renders from, otherwise an
+        // early probe poisons the URL the message is about to use.
+        let probed = presign_probe_url("https://cdn.mezon.ai/a/b.png", 0xdead);
+        assert_eq!(probed, "https://cdn.mezon.ai/a/b.png?probe=dead");
+        assert!(probed.starts_with("https://cdn.mezon.ai/a/b.png?"));
+
+        // An url that already carries a query keeps it.
+        assert_eq!(
+            presign_probe_url("https://cdn.mezon.ai/a/b.png?v=2", 1),
+            "https://cdn.mezon.ai/a/b.png?v=2&probe=1"
+        );
     }
 
     #[test]

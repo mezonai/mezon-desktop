@@ -12,6 +12,7 @@ members = [
     "crates/mezon-record",
     "crates/mezon-audio",
     "crates/mezon-native",
+    "crates/mezon-pdf",
     "crates/mezon-updater",
     "crates/mezon-proto",
     "crates/mezon-i18n",
@@ -60,7 +61,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "2.0.16"
+version = "2.0.17"
 edition = "2024"
 authors = ["Mezon Team"]
 license = "GPL-3.0-or-later"
@@ -125,6 +126,7 @@ mezon-stream  = { path = "crates/mezon-stream" }
 mezon-video   = { path = "crates/mezon-video" }
 mezon-audio   = { path = "crates/mezon-audio" }
 mezon-native  = { path = "crates/mezon-native" }
+mezon-pdf     = { path = "crates/mezon-pdf" }
 mezon-proto   = { path = "crates/mezon-proto" }
 mezon-updater = { path = "crates/mezon-updater" }
 mezon-i18n    = { path = "crates/mezon-i18n" }

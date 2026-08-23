@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use crate::instance::SingleInstance;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -405,27 +407,62 @@ const PIPE_NAME: &str = r"\\.\pipe\mezon-control";
 
 #[cfg(unix)]
 pub fn control_socket_paths() -> Vec<std::path::PathBuf> {
+    let user = std::env::var("USER")
+        .ok()
+        .filter(|user| !user.is_empty())
+        .unwrap_or_else(|| "user".to_owned());
+
+    control_socket_paths_for(
+        std::env::var("MEZON_CONTROL_SOCKET").ok().as_deref(),
+        dirs::runtime_dir().as_deref(),
+        &std::env::temp_dir(),
+        &user,
+    )
+}
+
+#[cfg(unix)]
+fn control_socket_paths_for(
+    override_path: Option<&str>,
+    runtime_dir: Option<&std::path::Path>,
+    tmp: &std::path::Path,
+    user: &str,
+) -> Vec<std::path::PathBuf> {
     let mut paths = Vec::new();
-    if let Ok(override_path) = std::env::var("MEZON_CONTROL_SOCKET")
-        && !override_path.is_empty()
-    {
+
+    // An explicit override is the caller's business: hand it back untouched and
+    // let `bind` report whatever is wrong with it.
+    if let Some(override_path) = override_path.filter(|path| !path.is_empty()) {
         let override_path = std::path::PathBuf::from(override_path);
         if override_path.is_absolute() {
             paths.push(override_path);
         }
     }
-    if let Some(runtime_dir) = dirs::runtime_dir() {
-        paths.push(runtime_dir.join("mezon-ctl.sock"));
+
+    let mut derived = Vec::new();
+    if let Some(runtime_dir) = runtime_dir {
+        derived.push(runtime_dir.join("mezon-ctl.sock"));
     }
-    let user = std::env::var("USER")
-        .ok()
-        .filter(|user| !user.is_empty())
-        .unwrap_or_else(|| "user".to_owned());
-    paths.push(
-        std::env::temp_dir()
-            .join(format!("mezon-desktop-{user}"))
+    derived.push(
+        tmp.join(format!("mezon-desktop-{user}"))
             .join("mezon-ctl.sock"),
     );
+
+    // Same `sun_path` cap as the single-instance socket: a sandboxed build runs
+    // with a container `$TMPDIR`, and a long login name pushes the readable
+    // path above past the limit — which would leave MCP silently unavailable.
+    // Keep a fixed-width per-user directory that fits, still 0700 via
+    // `create_secure_socket_dir`. The file name is shortened too: both halves
+    // count against the same 103 bytes.
+    derived.push(
+        tmp.join(format!(
+            "mezon-{:08x}",
+            SingleInstance::user_digest(user) as u32
+        ))
+        .join("ctl.sock"),
+    );
+    derived.retain(|path| path.as_os_str().len() <= SingleInstance::MAX_SOCKET_PATH);
+
+    paths.extend(derived);
     paths
 }
 
@@ -448,4 +485,75 @@ fn check_current_user_owned(path: &std::path::Path) -> std::io::Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::control_socket_paths_for;
+    use crate::instance::SingleInstance;
+    use std::path::PathBuf;
+
+    /// The container `$TMPDIR` a sandboxed macOS build actually runs with.
+    fn container_tmp(user: &str) -> PathBuf {
+        PathBuf::from(format!(
+            "/Users/{user}/Library/Containers/app.mezon.ai/Data/tmp"
+        ))
+    }
+
+    #[test]
+    fn derived_candidates_always_fit_sun_path() {
+        for len in 1..=30 {
+            let user = "u".repeat(len);
+            let paths = control_socket_paths_for(None, None, &container_tmp(&user), &user);
+            assert!(
+                !paths.is_empty(),
+                "no candidate for a {len}-char login name"
+            );
+            for path in paths {
+                assert!(
+                    path.as_os_str().len() <= SingleInstance::MAX_SOCKET_PATH,
+                    "{} is {} bytes",
+                    path.display(),
+                    path.as_os_str().len()
+                );
+            }
+        }
+    }
+
+    /// A long login name inside a sandbox container pushed the readable path
+    /// past `sun_path`, which used to leave MCP with nothing to bind.
+    #[test]
+    fn long_user_in_sandbox_container_still_has_a_candidate() {
+        let user = "hoangphuongnguyen";
+        let tmp = container_tmp(user);
+
+        let readable = tmp
+            .join(format!("mezon-desktop-{user}"))
+            .join("mezon-ctl.sock");
+        assert!(readable.as_os_str().len() > SingleInstance::MAX_SOCKET_PATH);
+
+        let paths = control_socket_paths_for(None, None, &tmp, user);
+        assert!(!paths.is_empty());
+        assert!(!paths.contains(&readable));
+    }
+
+    /// The length filter applies to what we derive, never to what the caller
+    /// asked for explicitly.
+    #[test]
+    fn explicit_override_is_never_filtered() {
+        let long = format!("/tmp/{}/mezon-ctl.sock", "d".repeat(120));
+        let paths = control_socket_paths_for(Some(&long), None, &container_tmp("ngoc"), "ngoc");
+        assert_eq!(paths.first(), Some(&PathBuf::from(&long)));
+    }
+
+    #[test]
+    fn relative_override_is_ignored() {
+        let paths = control_socket_paths_for(
+            Some("relative/mezon-ctl.sock"),
+            None,
+            &container_tmp("ngoc"),
+            "ngoc",
+        );
+        assert!(paths.iter().all(|path| path.is_absolute()));
+    }
 }

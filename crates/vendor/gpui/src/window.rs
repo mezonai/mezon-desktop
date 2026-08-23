@@ -2708,6 +2708,7 @@ impl Window {
             self.focus_listeners
                 .clone()
                 .retain(&(), |listener| listener(&event, self, cx));
+            self.invalidate_character_coordinates();
         }
 
         debug_assert!(self.rendered_entity_stack.is_empty());
@@ -5226,10 +5227,11 @@ impl Window {
     pub fn invalidate_character_coordinates(&self) {
         self.on_next_frame(|window, cx| {
             if let Some(mut input_handler) = window.platform_window.take_input_handler() {
-                if let Some(bounds) = input_handler.selected_bounds(window, cx) {
+                let bounds = input_handler.selected_bounds(window, cx);
+                window.platform_window.set_input_handler(input_handler);
+                if let Some(bounds) = bounds {
                     window.platform_window.update_ime_position(bounds);
                 }
-                window.platform_window.set_input_handler(input_handler);
             }
         });
     }

@@ -658,7 +658,7 @@ impl IntegrationsTab {
     fn render_discard_confirm(&self, locale: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let title = mezon_i18n::t(locale, "integrations.discardChangesConfirm");
         let entity = cx.entity();
-        Modal::new(title.clone())
+        Modal::new(title)
             .on_dismiss({
                 let entity = entity.clone();
                 move |_, cx| {

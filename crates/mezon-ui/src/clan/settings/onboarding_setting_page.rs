@@ -7,7 +7,7 @@ use gpui::{
 };
 use mezon_store::{
     ChannelList, ClanId, ClanList, ClanMembersStore, OnboardingAnswer, OnboardingContent,
-    OnboardingItem, Settings,
+    OnboardingItem, OnboardingStore, Settings,
 };
 
 use crate::app::shell::Shell;
@@ -39,6 +39,7 @@ enum Page {
 struct AnswerDraft {
     title: String,
     description: String,
+    emoji: String,
 }
 
 #[derive(Clone)]
@@ -356,7 +357,11 @@ impl OnboardingSettingPage {
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
                 match result {
-                    Ok(items) => this.apply_items(items),
+                    Ok(items) => {
+                        OnboardingStore::global(cx)
+                            .update(cx, |store, cx| store.set_items(clan_id, items.clone(), cx));
+                        this.apply_items(items);
+                    }
                     Err(error) => {
                         tracing::error!("fetch onboarding failed: {error}");
                         this.load_error = Some(error);
@@ -387,6 +392,7 @@ impl OnboardingSettingPage {
                         .map(|answer| AnswerDraft {
                             title: answer.title,
                             description: answer.description,
+                            emoji: answer.emoji,
                         })
                         .collect(),
                     expanded: false,
@@ -667,6 +673,7 @@ impl OnboardingSettingPage {
                     .map(|answer| OnboardingAnswer {
                         title: answer.title.clone(),
                         description: answer.description.clone(),
+                        emoji: answer.emoji.clone(),
                     })
                     .collect(),
                 ..Default::default()
@@ -2308,13 +2315,15 @@ impl OnboardingSettingPage {
                 description,
             }) => {
                 let title = title.read(cx).value().trim().to_string();
-                let value = AnswerDraft {
+                let mut value = AnswerDraft {
                     title,
                     description: description.read(cx).value().trim().to_string(),
+                    emoji: String::new(),
                 };
                 if let Some(question_draft) = self.questions.get_mut(question) {
                     if let Some(index) = answer {
                         if let Some(answer) = question_draft.answers.get_mut(index) {
+                            value.emoji.clone_from(&answer.emoji);
                             *answer = value;
                             applied = true;
                         }

@@ -39,6 +39,9 @@ pub struct AppConfig {
     pub stream_ws_url: String,
     pub meet_ws_url: String,
     pub notification_ws_url: String,
+    pub blackboard_url: String,
+    pub quiz_url: String,
+    pub interactive_url: String,
 
     // ── OAuth2 ────────────────────────────────────────────────────────────────
     pub oauth2_authorize_url: String,
@@ -121,6 +124,9 @@ impl AppConfig {
             stream_ws_url: "wss://stn.nccsoft.vn".into(),
             meet_ws_url: "wss://meet.nccsoft.vn".into(),
             notification_ws_url: "wss://gotify.mezon.ai".into(),
+            blackboard_url: "https://blackboard.mezon.ai".into(),
+            quiz_url: "https://quiz.mezon.ai".into(),
+            interactive_url: "https://interactive.mezon.ai".into(),
 
             oauth2_authorize_url: "https://oauth2.mezon.ai/oauth2/auth".into(),
             oauth2_client_id: "f049f29e-12a9-464c-938f-0a2f60c3210b".into(),
@@ -195,6 +201,15 @@ impl AppConfig {
             notification_ws_url: opt_str(
                 baked_env::NX_CHAT_APP_NOTIFICATION_WS_URL,
                 &defaults.notification_ws_url,
+            ),
+            blackboard_url: opt_str(
+                baked_env::NX_CHAT_APP_BLACKBOARD_URL,
+                &defaults.blackboard_url,
+            ),
+            quiz_url: opt_str(baked_env::NX_CHAT_APP_QUIZ_URL, &defaults.quiz_url),
+            interactive_url: opt_str(
+                baked_env::NX_CHAT_APP_INTERACTIVE_URL,
+                &defaults.interactive_url,
             ),
 
             oauth2_authorize_url: opt_str(

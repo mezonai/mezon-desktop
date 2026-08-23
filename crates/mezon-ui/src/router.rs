@@ -16,6 +16,9 @@ pub enum Route {
     ClanChannels {
         clan_id: ClanId,
     },
+    ClanGuide {
+        clan_id: ClanId,
+    },
     DirectMessage {
         direct_id: ChannelId,
         message_type: String,
@@ -72,6 +75,7 @@ impl Route {
         match self {
             Route::ClanMembers { clan_id }
             | Route::ClanChannels { clan_id }
+            | Route::ClanGuide { clan_id }
             | Route::Channel { clan_id, .. }
             | Route::Thread { clan_id, .. }
             | Route::Canvas { clan_id, .. }
@@ -89,6 +93,7 @@ impl Route {
             Route::Friends => "/chat/direct/friends".to_string(),
             Route::ClanMembers { clan_id } => format!("/chat/clans/{clan_id}/members"),
             Route::ClanChannels { clan_id } => format!("/chat/clans/{clan_id}/channel-setting"),
+            Route::ClanGuide { clan_id } => format!("/chat/clans/{clan_id}/guide"),
             Route::DirectMessage {
                 direct_id,
                 message_type,
@@ -173,6 +178,9 @@ impl Route {
                 clan_id: ClanId(clan_id.parse().ok()?),
             },
             ["chat", "clans", clan_id, "channel-setting"] => Route::ClanChannels {
+                clan_id: ClanId(clan_id.parse().ok()?),
+            },
+            ["chat", "clans", clan_id, "guide"] => Route::ClanGuide {
                 clan_id: ClanId(clan_id.parse().ok()?),
             },
             ["chat", "direct", "message", direct_id, message_type] => Route::DirectMessage {
@@ -456,6 +464,23 @@ mod tests {
                 channel_id: ChannelId(42),
             }
         );
+    }
+
+    #[test]
+    fn from_path_clan_guide_route() {
+        let route = Route::from_path("/chat/clans/1730/guide");
+        assert_eq!(
+            route,
+            Route::ClanGuide {
+                clan_id: ClanId(1730)
+            }
+        );
+        assert_eq!(route.to_path(), "/chat/clans/1730/guide");
+        assert!(route.targets_clan(ClanId(1730)));
+        assert!(matches!(
+            Route::from_path("/chat/clans/abc/guide"),
+            Route::NotFound { .. }
+        ));
     }
 
     #[test]

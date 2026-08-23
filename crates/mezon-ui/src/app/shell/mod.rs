@@ -33,6 +33,7 @@ mod confirm_leave_dm_group_modal;
 mod confirm_leave_thread_modal;
 mod confirm_remove_friend_modal;
 mod disable_clan_community_modal;
+mod transfer_owner_modal;
 mod upload_limit_modal;
 mod wallet_not_available_modal;
 use confirm_archive_channel_modal::ConfirmArchiveChannelModal;
@@ -55,6 +56,7 @@ use confirm_leave_thread_modal::ConfirmLeaveThreadModal;
 pub use confirm_remove_friend_modal::FriendRemovalKind;
 use confirm_remove_friend_modal::{ConfirmRemoveFriendModal, interpolate_username};
 use disable_clan_community_modal::DisableClanCommunityModal;
+use transfer_owner_modal::{TransferOwnerModal, TransferOwnerParty};
 use upload_limit_modal::UploadLimitModal;
 use wallet_not_available_modal::WalletNotAvailableModal;
 
@@ -871,6 +873,121 @@ impl Shell {
         self.show_modal(view.into(), cx);
     }
 
+    pub fn confirm_transfer_ownership(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        new_owner_id: mezon_store::UserId,
+        new_owner_name: &str,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let clan_name = mezon_store::ClanList::global(cx)
+            .read(cx)
+            .clan_by_id(clan_id)
+            .map(|clan| clan.name.clone())
+            .unwrap_or_default();
+        let members = mezon_store::ClanMembersStore::global(cx);
+        let party = |user_id: mezon_store::UserId, fallback_name: &str| {
+            let known =
+                members
+                    .read(cx)
+                    .member(clan_id, user_id)
+                    .map(|member| TransferOwnerParty {
+                        name: member.name().to_string().into(),
+                        avatar: member.avatar().to_string().into(),
+                    });
+            match known {
+                Some(party) if !party.name.is_empty() => party,
+                Some(party) => TransferOwnerParty {
+                    name: fallback_name.to_string().into(),
+                    ..party
+                },
+                None => TransferOwnerParty {
+                    name: fallback_name.to_string().into(),
+                    avatar: SharedString::default(),
+                },
+            }
+        };
+        let Some(current_user_id) = mezon_store::BadgeService::try_global(cx)
+            .and_then(|badges| badges.read(cx).current_user_id(cx))
+        else {
+            tracing::error!("transfer ownership of {clan_id}: no signed-in user");
+            let message = mezon_i18n::t(
+                locale,
+                "clanOverviewSetting.permissions.toast.transferOwnershipFailed",
+            )
+            .to_string();
+            self.error(message, cx);
+            return;
+        };
+        let self_account = mezon_store::AccountStore::try_global(cx)
+            .and_then(|store| store.read(cx).account.clone());
+        let self_name = self_account
+            .as_ref()
+            .map(|account| {
+                if account.display_name.is_empty() {
+                    account.username.clone()
+                } else {
+                    account.display_name.clone()
+                }
+            })
+            .unwrap_or_default();
+        let mut current_owner = party(current_user_id, &self_name);
+        if current_owner.avatar.is_empty()
+            && let Some(avatar) = self_account.and_then(|account| account.avatar_url)
+        {
+            current_owner.avatar = avatar.into();
+        }
+        let new_owner = party(new_owner_id, new_owner_name);
+        let title: SharedString = mezon_i18n::t(locale, "transferOwner.title")
+            .to_string()
+            .into();
+        let description: SharedString = mezon_i18n::t(locale, "transferOwner.description")
+            .replace("{{clanName}}", &clan_name)
+            .replace("{{memberName}}", &new_owner.name)
+            .into();
+        let confirmation: SharedString = mezon_i18n::t(locale, "transferOwner.confirmation")
+            .replace("{{memberName}}", &new_owner.name)
+            .into();
+        let transfer_label: SharedString = mezon_i18n::t(locale, "transferOwner.buttons.transfer")
+            .to_string()
+            .into();
+        let cancel_label: SharedString = mezon_i18n::t(locale, "transferOwner.buttons.cancel")
+            .to_string()
+            .into();
+        let success_message: SharedString = mezon_i18n::t(locale, "common.transferredSuccessfully")
+            .to_string()
+            .into();
+        let error_message: SharedString = mezon_i18n::t(
+            locale,
+            "clanOverviewSetting.permissions.toast.transferOwnershipFailed",
+        )
+        .to_string()
+        .into();
+        let avatar_cache = crate::image_cache::shared_avatar_cache(cx);
+        let view = cx.new(|cx| TransferOwnerModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            new_owner_id,
+            title,
+            description,
+            confirmation,
+            transfer_label,
+            cancel_label,
+            success_message,
+            error_message,
+            current_owner,
+            new_owner,
+            avatar_cache,
+            acknowledged: false,
+            pending: false,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
     pub fn confirm_delete_clan(
         &mut self,
         clan_id: mezon_store::ClanId,
@@ -1198,6 +1315,16 @@ impl Shell {
         };
         cx.notify();
         focus
+    }
+
+    pub fn close_modal_view(&mut self, view: gpui::EntityId, cx: &mut Context<Self>) {
+        if self
+            .modal
+            .as_ref()
+            .is_some_and(|modal| modal.entity_id() == view)
+        {
+            self.close_modal(cx);
+        }
     }
 
     pub fn close_modal(&mut self, cx: &mut Context<Self>) {

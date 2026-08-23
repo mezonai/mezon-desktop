@@ -179,6 +179,21 @@ impl McpRuntime {
                         });
                         let _ = reply.send(result);
                     }
+                    McpCommand::OpenPdfViewer {
+                        message_id,
+                        attachment_index,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::open_message_pdf_viewer(
+                                &settings,
+                                message_id,
+                                attachment_index,
+                                cx,
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
                     McpCommand::ScrollWheel {
                         delta_y,
                         ticks,
@@ -225,6 +240,11 @@ impl McpRuntime {
                     }
                     McpCommand::TopicType { text, reply } => {
                         let result = cx.update(|cx| mezon_ui::app::capture::topic_type(cx, &text));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::TopicDropPaths { paths, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::topic_drop_paths(cx, paths));
                         let _ = reply.send(result);
                     }
                     McpCommand::TopicSubmit { reply } => {
@@ -324,9 +344,19 @@ impl McpRuntime {
                         let result = cx.update(|cx| load_more_messages(cx, older));
                         let _ = reply.send(result);
                     }
-                    McpCommand::ListLoadedMessages { limit, reply } => {
+                    McpCommand::ListLoadedMessages {
+                        limit,
+                        topic,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::list_loaded_messages(cx, limit, topic)
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ReplyBegin { message_id, reply } => {
                         let result =
-                            cx.update(|cx| mezon_ui::app::capture::list_loaded_messages(cx, limit));
+                            cx.update(|cx| mezon_ui::app::capture::reply_begin(cx, message_id));
                         let _ = reply.send(result);
                     }
                     McpCommand::JumpToMessage { message_id, reply } => {

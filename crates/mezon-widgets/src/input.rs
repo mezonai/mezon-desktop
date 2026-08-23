@@ -5,10 +5,11 @@ use super::blink_manager::{CaretBlink, HasCaretBlink};
 use gpui::{
     App, Bounds, ClipboardItem, Context, Corners, CursorStyle, Div, Element, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce,
-    ShapedLine, SharedString, Style, StyleRefinement, Styled, TextAlign, TextRun, UTF16Selection,
-    UnderlineStyle, Window, WrappedLine, div, fill, point, prelude::*, px, size, svg,
+    FontWeight, GlobalElementId, Hsla, ImeSurroundingText, InspectorElementId, IntoElement,
+    KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
+    Pixels, Point, Render, RenderOnce, ShapedLine, SharedString, Style, StyleRefinement, Styled,
+    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, div, fill, point,
+    prelude::*, px, size, svg,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -24,8 +25,9 @@ use crate::text_actions::{
 };
 use crate::text_edit::{
     EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
-    granularity_for_click, home_target, line_end, line_start, next_word_boundary,
-    previous_word_boundary, range_for_granularity, should_coalesce,
+    granularity_for_click, home_target, ime_replace_range, line_end, line_start,
+    marked_caret_range, next_word_boundary, previous_word_boundary, range_for_granularity,
+    should_coalesce, surrounding_delete_range, swallow_discarded_ime_commit,
 };
 
 const MASK: char = '\u{2022}';
@@ -45,6 +47,7 @@ pub struct InputState {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
+    discard_ime_commit: Option<String>,
     last_layout: Option<ShapedLine>,
     last_lines: Vec<InputDocLine>,
     last_bounds: Option<Bounds<Pixels>>,
@@ -96,6 +99,7 @@ impl InputState {
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
+            discard_ime_commit: None,
             last_layout: None,
             last_lines: Vec::new(),
             last_bounds: None,
@@ -405,6 +409,7 @@ impl InputState {
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.marked_range = None;
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx)
     }
@@ -740,6 +745,10 @@ impl InputState {
         }
     }
 
+    fn on_key_down(&mut self, _: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {
+        self.discard_ime_commit = None;
+    }
+
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() && !self.masked {
             cx.write_to_clipboard(ClipboardItem::new_string(
@@ -979,6 +988,12 @@ impl EntityInputHandler for InputState {
     }
 
     fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        #[cfg(target_os = "linux")]
+        if let Some(marked) = self.marked_range.clone() {
+            let start = marked.start.min(self.content.len());
+            let end = marked.end.min(self.content.len()).max(start);
+            self.discard_ime_commit = self.content.get(start..end).map(str::to_string);
+        }
         self.marked_range = None;
     }
 
@@ -989,11 +1004,19 @@ impl EntityInputHandler for InputState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let range = range_utf16
-            .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
+        if swallow_discarded_ime_commit(
+            &mut self.discard_ime_commit,
+            range_utf16.as_ref(),
+            self.marked_range.is_some(),
+            new_text,
+        ) {
+            return;
+        }
+        let range = if let Some(range_utf16) = range_utf16.as_ref() {
+            self.range_from_utf16(range_utf16)
+        } else {
+            ime_replace_range(&self.selected_range, self.marked_range.as_ref())
+        };
 
         let candidate =
             self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
@@ -1034,6 +1057,17 @@ impl EntityInputHandler for InputState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if swallow_discarded_ime_commit(
+            &mut self.discard_ime_commit,
+            range_utf16.as_ref(),
+            self.marked_range.is_some(),
+            new_text,
+        ) {
+            return;
+        }
+        if new_text.is_empty() && range_utf16.is_none() && self.marked_range.is_none() {
+            return;
+        }
         let range = range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
@@ -1052,11 +1086,8 @@ impl EntityInputHandler for InputState {
         } else {
             self.marked_range = None;
         }
-        self.selected_range = new_selected_range_utf16
-            .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.start)
-            .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+        self.selected_range =
+            marked_caret_range(range.start, new_text, new_selected_range_utf16.as_ref());
 
         self.refresh_filter_token_chips(cx);
         self.pause_caret_blink(cx);
@@ -1126,6 +1157,44 @@ impl EntityInputHandler for InputState {
     ) -> Option<usize> {
         Some(self.offset_to_utf16(self.index_for_mouse_position(point)))
     }
+
+    fn surrounding_text(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<ImeSurroundingText> {
+        if self.masked {
+            return None;
+        }
+        Some(ImeSurroundingText::from_selection(
+            &self.content,
+            self.selected_range.clone(),
+            self.selection_reversed,
+            self.marked_range.clone(),
+        ))
+    }
+
+    fn delete_surrounding_text(
+        &mut self,
+        before_len: usize,
+        after_len: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = surrounding_delete_range(
+            &self.content,
+            &self.selected_range,
+            self.marked_range.as_ref(),
+            self.selection_reversed,
+            before_len,
+            after_len,
+        );
+        if range.is_empty() {
+            return;
+        }
+        let range_utf16 = self.range_to_utf16(&range);
+        self.replace_text_in_range(Some(range_utf16), "", window, cx);
+    }
 }
 
 impl Focusable for InputState {
@@ -1162,6 +1231,7 @@ impl Render for InputState {
             .key_context(TEXT_INPUT_CONTEXT)
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
+            .on_key_down(cx.listener(Self::on_key_down))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::enter))

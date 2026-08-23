@@ -54,7 +54,7 @@ impl ClanLoadScheduler {
                         this.start(*clan_id, cx);
                     }
                 }
-                ClanEvent::Deleted(_) => {}
+                ClanEvent::Deleted(_) | ClanEvent::OwnerChanged { .. } => {}
             },
         );
 

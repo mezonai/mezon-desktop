@@ -1,0 +1,23 @@
+[package]
+name = "mezon-pdf"
+version.workspace = true
+license.workspace = true
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24"
+foreign-types = "0.5"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+glib = "0.20"
+libloading = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+image.workspace = true
+windows = { workspace = true, features = ["Data_Pdf", "Storage_Streams"] }

@@ -189,6 +189,118 @@ pub fn should_coalesce(last: Option<EditKind>, kind: EditKind) -> bool {
     matches!(kind, EditKind::Insert | EditKind::Delete) && last == Some(kind)
 }
 
+pub fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let index = index.min(text.len());
+    if text.is_char_boundary(index) {
+        return index;
+    }
+    let mut i = index;
+    while i > 0 {
+        i -= 1;
+        if text.is_char_boundary(i) {
+            return i;
+        }
+    }
+    0
+}
+
+pub fn ceil_char_boundary(text: &str, index: usize) -> usize {
+    let index = index.min(text.len());
+    if text.is_char_boundary(index) {
+        return index;
+    }
+    let mut i = index + 1;
+    while i < text.len() {
+        if text.is_char_boundary(i) {
+            return i;
+        }
+        i += 1;
+    }
+    text.len()
+}
+
+pub fn ime_replace_range(selected: &Range<usize>, marked: Option<&Range<usize>>) -> Range<usize> {
+    marked.cloned().unwrap_or_else(|| selected.clone())
+}
+
+pub fn swallow_discarded_ime_commit(
+    discard: &mut Option<String>,
+    range_utf16: Option<&Range<usize>>,
+    has_marked: bool,
+    new_text: &str,
+) -> bool {
+    if range_utf16.is_some() || has_marked {
+        return false;
+    }
+    let Some(expected) = discard.as_deref() else {
+        return false;
+    };
+    if new_text == expected {
+        *discard = None;
+        return true;
+    }
+    if !new_text.is_empty() {
+        *discard = None;
+    }
+    false
+}
+
+pub fn surrounding_delete_range(
+    text: &str,
+    selected_range: &Range<usize>,
+    marked_range: Option<&Range<usize>>,
+    selection_reversed: bool,
+    before_len: usize,
+    after_len: usize,
+) -> Range<usize> {
+    if selected_range.start != selected_range.end {
+        return selected_range.start.min(text.len())..selected_range.end.min(text.len());
+    }
+    let (left, right) = if let Some(marked) = marked_range {
+        (marked.start.min(text.len()), marked.end.min(text.len()))
+    } else {
+        let caret = if selection_reversed {
+            selected_range.start
+        } else {
+            selected_range.end
+        }
+        .min(text.len());
+        (caret, caret)
+    };
+    let start = floor_char_boundary(text, left.saturating_sub(before_len));
+    let end = ceil_char_boundary(text, right.saturating_add(after_len));
+    start..end
+}
+
+pub fn utf16_offset_to_bytes(text: &str, utf16_offset: usize) -> usize {
+    let mut units = 0;
+    for (byte, ch) in text.char_indices() {
+        if units >= utf16_offset {
+            return byte;
+        }
+        units += ch.len_utf16();
+    }
+    text.len()
+}
+
+pub fn marked_caret_range(
+    marked_start: usize,
+    new_text: &str,
+    selected_utf16: Option<&Range<usize>>,
+) -> Range<usize> {
+    match selected_utf16 {
+        Some(range) => {
+            let start = marked_start + utf16_offset_to_bytes(new_text, range.start);
+            let end = marked_start + utf16_offset_to_bytes(new_text, range.end);
+            start..end
+        }
+        None => {
+            let end = marked_start + new_text.len();
+            end..end
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,6 +403,14 @@ mod tests {
     }
 
     #[test]
+    fn word_range_treats_vietnamese_letters_as_one_word() {
+        let text = "tiếng Việt";
+        assert_eq!(word_range_at(text, 2), 0.."tiếng".len());
+        assert_eq!(next_word_boundary(text, 0), "tiếng".len());
+        assert_eq!(previous_word_boundary(text, text.len()), "tiếng ".len());
+    }
+
+    #[test]
     fn word_range_on_empty_text_is_empty() {
         assert_eq!(word_range_at("", 0), 0..0);
         assert_eq!(word_range_at("   ", 1), 0..3);
@@ -335,5 +455,82 @@ mod tests {
             extend_range_for_granularity(text, &anchor, 5, SelectGranularity::Word, false);
         assert_eq!(range, 4..7);
         assert!(!reversed);
+    }
+
+    #[test]
+    fn ime_replace_uses_marked_when_selection_is_inside_preedit() {
+        assert_eq!(ime_replace_range(&(2..4), Some(&(0..5))), 0..5);
+    }
+
+    #[test]
+    fn ime_replace_uses_marked_when_preedit_is_present() {
+        assert_eq!(ime_replace_range(&(0..6), Some(&(3..5))), 3..5);
+    }
+
+    #[test]
+    fn discarded_ime_commit_swallows_the_echoed_preedit() {
+        let mut discard = Some("hoa".to_string());
+        assert!(swallow_discarded_ime_commit(
+            &mut discard,
+            None,
+            false,
+            "hoa"
+        ));
+        assert!(discard.is_none());
+    }
+
+    #[test]
+    fn discarded_ime_commit_clears_on_a_different_insert() {
+        let mut discard = Some("hoa".to_string());
+        assert!(!swallow_discarded_ime_commit(
+            &mut discard,
+            None,
+            false,
+            "h"
+        ));
+        assert!(discard.is_none());
+    }
+
+    #[test]
+    fn surrounding_delete_removes_the_vowel_before_a_telex_tone() {
+        assert_eq!(
+            surrounding_delete_range("hoa", &(3..3), None, false, 1, 0),
+            2..3
+        );
+    }
+
+    #[test]
+    fn surrounding_delete_keeps_a_full_selection_instead_of_the_last_marked_char() {
+        assert_eq!(
+            surrounding_delete_range("hoas", &(0..4), Some(&(3..4)), false, 1, 0),
+            0..4
+        );
+    }
+
+    #[test]
+    fn surrounding_delete_snaps_mid_character_offsets_to_utf8_boundaries() {
+        let text = "á";
+        let end = text.len();
+        let range = surrounding_delete_range(text, &(end..end), None, false, 1, 0);
+        assert!(text.is_char_boundary(range.start));
+        assert!(text.is_char_boundary(range.end));
+        assert_eq!(&text[range], "á");
+    }
+
+    #[test]
+    fn marked_caret_is_relative_to_preedit_not_the_document() {
+        let prefix = "câu có nhiều từ dễ gõ sai ";
+        let preedit = "dấu";
+        let vowel = marked_caret_range(prefix.len(), preedit, Some(&(2..2)));
+        assert_eq!(vowel, prefix.len() + "dấ".len()..prefix.len() + "dấ".len());
+        let at_end = marked_caret_range(prefix.len(), preedit, None);
+        assert_eq!(
+            at_end,
+            prefix.len() + preedit.len()..prefix.len() + preedit.len()
+        );
+        assert_eq!(
+            marked_caret_range(prefix.len(), preedit, Some(&(3..3))),
+            at_end
+        );
     }
 }

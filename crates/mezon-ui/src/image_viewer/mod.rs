@@ -437,6 +437,7 @@ impl ImageViewer {
             fullscreen_mode: VideoFullscreenMode::InPlaceTheater,
             layout: VideoLayout::Fixed,
             decode_max_size: None,
+            locale: SharedString::from(self.locale(cx)),
         };
         if let Some(view) = self.active_video.clone() {
             view.update(cx, |player, cx| player.reopen(activation, window, cx));

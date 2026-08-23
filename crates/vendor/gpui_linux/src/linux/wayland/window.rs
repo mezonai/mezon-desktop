@@ -30,12 +30,12 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1;
 use crate::linux::wayland::{display::WaylandDisplay, serial::SerialKind};
 use crate::linux::{Globals, Output, WaylandClientStatePtr, get_window};
 use gpui::{
-    AnyWindowHandle, Bounds, Capslock, Decorations, DevicePixels, GpuSpecs, Modifiers, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size, Tiling,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowControls,
-    WindowDecorations, WindowKind, WindowParams, layer_shell::LayerShellNotSupportedError, px,
-    size,
+    AnyWindowHandle, Bounds, Capslock, Decorations, DevicePixels, GpuSpecs, ImeSurroundingText,
+    Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
+    PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size,
+    Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
+    WindowControls, WindowDecorations, WindowKind, WindowParams,
+    layer_shell::LayerShellNotSupportedError, px, size,
 };
 use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 
@@ -456,6 +456,7 @@ pub enum ImeInput {
     SetMarkedText(String),
     UnmarkText,
     DeleteText,
+    DeleteSurrounding { before: usize, after: usize },
 }
 
 impl Drop for WaylandWindow {
@@ -966,6 +967,9 @@ impl WaylandWindowStatePtr {
                         input_handler.replace_text_in_range(Some(marked), "");
                     }
                 }
+                ImeInput::DeleteSurrounding { before, after } => {
+                    input_handler.delete_surrounding_text(before, after);
+                }
             }
             self.state.borrow_mut().input_handler = Some(input_handler);
         }
@@ -980,6 +984,18 @@ impl WaylandWindowStatePtr {
             self.state.borrow_mut().input_handler = Some(input_handler);
         }
         bounds
+    }
+
+    pub fn get_ime_surrounding(&self) -> Option<ImeSurroundingText> {
+        let mut state = self.state.borrow_mut();
+        if let Some(mut input_handler) = state.input_handler.take() {
+            drop(state);
+            let surrounding = input_handler.surrounding_text();
+            self.state.borrow_mut().input_handler = Some(input_handler);
+            surrounding
+        } else {
+            None
+        }
     }
 
     pub fn set_size_and_scale(&self, size: Option<Size<Pixels>>, scale: Option<f32>) {
@@ -1044,6 +1060,26 @@ impl WaylandWindowStatePtr {
         if let Some(fun) = callbacks.close.take() {
             fun()
         }
+    }
+
+    // mezon vendor edit: XDND-equivalent on Wayland also does not focus.
+    // xdg_activation_v1 with the data-device (drag Enter) serial — still
+    // rejected by some compositors without a token from the drag source.
+    pub fn request_dnd_activation(&self) {
+        let state = self.state.borrow();
+        let Some(activation) = state.globals.activation.clone() else {
+            return;
+        };
+        let Some(app_id) = state.app_id.clone() else {
+            return;
+        };
+        state.client.set_pending_activation(state.surface.id());
+        let token = activation.get_activation_token(&state.globals.qh, ());
+        let serial = state.client.get_serial(SerialKind::DataDevice);
+        token.set_app_id(app_id);
+        token.set_serial(serial, &state.globals.seat);
+        token.set_surface(&state.surface);
+        token.commit();
     }
 
     pub fn handle_input(&self, input: PlatformInput) {
@@ -1304,8 +1340,7 @@ impl PlatformWindow for WaylandWindow {
                 state.client.activation_token_for_raise(state.surface.id());
             token.set_app_id(app_id);
             token.set_serial(serial, &state.globals.seat);
-            let interaction_surface =
-                interaction_surface.unwrap_or_else(|| state.surface.clone());
+            let interaction_surface = interaction_surface.unwrap_or_else(|| state.surface.clone());
             token.set_surface(&interaction_surface);
             token.commit();
         }
@@ -1579,8 +1614,8 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn update_ime_position(&self, bounds: Bounds<Pixels>) {
-        let state = self.borrow();
-        state.client.update_ime_position(bounds);
+        let client = self.borrow().client.clone();
+        client.update_ime_position(bounds);
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {

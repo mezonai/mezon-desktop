@@ -177,7 +177,7 @@ impl UserProfileModal {
                     member.user.username.clone(),
                     member.avatar().to_string(),
                     member.user.about_me.clone(),
-                    member.user.create_time_seconds,
+                    member.user.join_time_seconds,
                 )
             })
             .unwrap_or_default()
