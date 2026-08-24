@@ -2147,6 +2147,17 @@ impl MentionInput {
         self.input.read(cx).value_shared()
     }
 
+    /// Names of the files staged on the composer, in the order they will be
+    /// sent. Reading a file off disk happens on a background task, so a drop
+    /// only shows up here once the attachment is actually staged — which is what
+    /// makes it the thing to poll before submitting.
+    pub(crate) fn probe_attachments(&self) -> Vec<String> {
+        self.pending_attachments
+            .iter()
+            .map(|att| att.filename.clone())
+            .collect()
+    }
+
     pub(crate) fn probe_suggestions(&self) -> (bool, usize, Vec<String>) {
         let labels = self
             .suggestions

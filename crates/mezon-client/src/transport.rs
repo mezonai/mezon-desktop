@@ -80,6 +80,87 @@ struct PromiseExecutor {
     sender: oneshot::Sender<(u32, Vec<u8>)>,
 }
 
+#[derive(Clone, PartialEq, Message)]
+struct LegacyVoiceInteractiveEvent {
+    #[prost(int64, tag = "1")]
+    clan_id: i64,
+    #[prost(int64, tag = "2")]
+    voice_channel_id: i64,
+    #[prost(int64, tag = "3")]
+    user_id: i64,
+    #[prost(int32, tag = "4")]
+    event_type: i32,
+    #[prost(string, tag = "5")]
+    params: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct LegacyVoiceInteractiveEnvelope {
+    #[prost(int32, tag = "1")]
+    cid: i32,
+    #[prost(message, optional, tag = "100")]
+    voice_interactive_event: Option<LegacyVoiceInteractiveEvent>,
+}
+
+fn is_supported_voice_interactive_event_type(event_type: i32) -> bool {
+    matches!(event_type, 1 | 2 | 10 | 11 | 12)
+}
+
+fn is_valid_voice_interactive_event(event: &realtime::VoiceInteractiveEvent) -> bool {
+    event.clan_id != 0
+        && event.voice_channel_id != 0
+        && is_supported_voice_interactive_event_type(event.event_type)
+}
+
+fn decode_realtime_envelope(payload: &[u8]) -> Result<realtime::Envelope, prost::DecodeError> {
+    match realtime::Envelope::decode(payload) {
+        Ok(envelope) => Ok(envelope),
+        Err(modern_error) => {
+            let Ok(legacy_envelope) = LegacyVoiceInteractiveEnvelope::decode(payload) else {
+                return Err(modern_error);
+            };
+            let Some(legacy) = legacy_envelope.voice_interactive_event else {
+                return Err(modern_error);
+            };
+            if !is_supported_voice_interactive_event_type(legacy.event_type) {
+                return Err(modern_error);
+            }
+            Ok(realtime::Envelope {
+                cid: legacy_envelope.cid,
+                message: Some(realtime::envelope::Message::VoiceInteractiveEvent(
+                    realtime::VoiceInteractiveEvent {
+                        clan_id: legacy.clan_id,
+                        voice_channel_id: legacy.voice_channel_id,
+                        sender_id: legacy.user_id,
+                        receiver_id: 0,
+                        event_type: legacy.event_type,
+                        params: legacy.params,
+                    },
+                )),
+            })
+        }
+    }
+}
+
+fn decode_voice_interactive_response(
+    response: &[u8],
+) -> Result<Option<realtime::VoiceInteractiveEvent>> {
+    if response.is_empty() {
+        return Ok(None);
+    }
+    if let Ok(envelope) = realtime::Envelope::decode(response)
+        && let Some(realtime::envelope::Message::VoiceInteractiveEvent(event)) = envelope.message
+    {
+        return Ok(is_valid_voice_interactive_event(&event).then_some(event));
+    }
+    if let Ok(event) = realtime::VoiceInteractiveEvent::decode(response)
+        && is_valid_voice_interactive_event(&event)
+    {
+        return Ok(Some(event));
+    }
+    Ok(None)
+}
+
 /// Represents real-time events pushed from the server.
 #[derive(Debug, Clone)]
 pub enum RealtimeEvent {
@@ -121,6 +202,7 @@ pub enum RealtimeEvent {
     ClanProfileUpdated(realtime::ClanProfileUpdatedEvent),
     UserProfileUpdated(realtime::UserProfileUpdatedEvent),
     ClanDeleted(realtime::ClanDeletedEvent),
+    TransferOwnership(realtime::TransferOwnershipEvent),
     ClanEmoji(realtime::EventEmoji),
     AddFriend(realtime::AddFriend),
     RemoveFriend(realtime::RemoveFriend),
@@ -136,6 +218,8 @@ pub enum RealtimeEvent {
     TokenSent(api::TokenSentEvent),
     GiveCoffee(api::GiveCoffeeEvent),
     WebrtcSignaling(realtime::WebrtcSignalingFwd),
+    IncomingCallPush(realtime::IncomingCallPush),
+    Webhook(api::Webhook),
     Unhandled(realtime::envelope::Message),
 }
 
@@ -177,6 +261,7 @@ impl RealtimeEvent {
             Self::UserClanRemoved(_) => "UserClanRemoved",
             Self::BanUser(_) => "BanUser",
             Self::ClanUpdated(_) => "ClanUpdated",
+            Self::TransferOwnership(_) => "TransferOwnership",
             Self::ClanProfileUpdated(_) => "ClanProfileUpdated",
             Self::UserProfileUpdated(_) => "UserProfileUpdated",
             Self::ClanDeleted(_) => "ClanDeleted",
@@ -193,6 +278,8 @@ impl RealtimeEvent {
             Self::TokenSent(_) => "TokenSent",
             Self::GiveCoffee(_) => "GiveCoffee",
             Self::WebrtcSignaling(_) => "WebrtcSignaling",
+            Self::IncomingCallPush(_) => "IncomingCallPush",
+            Self::Webhook(_) => "Webhook",
             Self::Unhandled(_) => "Unhandled",
         }
     }
@@ -240,6 +327,9 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::UserClanRemovedEvent(m) => Ok(Self::UserClanRemoved(m)),
             realtime::envelope::Message::BanUserEvent(m) => Ok(Self::BanUser(m)),
             realtime::envelope::Message::ClanUpdatedEvent(m) => Ok(Self::ClanUpdated(m)),
+            realtime::envelope::Message::TransferOwnershipEvent(m) => {
+                Ok(Self::TransferOwnership(m))
+            }
             realtime::envelope::Message::ClanProfileUpdatedEvent(m) => {
                 Ok(Self::ClanProfileUpdated(m))
             }
@@ -260,6 +350,8 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::TokenSentEvent(m) => Ok(Self::TokenSent(m)),
             realtime::envelope::Message::GiveCoffeeEvent(m) => Ok(Self::GiveCoffee(m)),
             realtime::envelope::Message::WebrtcSignalingFwd(m) => Ok(Self::WebrtcSignaling(m)),
+            realtime::envelope::Message::IncomingCallPush(m) => Ok(Self::IncomingCallPush(m)),
+            realtime::envelope::Message::WebhookEvent(m) => Ok(Self::Webhook(m)),
             other => Ok(Self::Unhandled(other)),
         }
     }
@@ -270,7 +362,7 @@ fn dispatch_realtime_push(
     payload: &[u8],
     on_event: &(dyn Fn(RealtimeEvent) + Send + Sync),
 ) {
-    match realtime::Envelope::decode(payload) {
+    match decode_realtime_envelope(payload) {
         Ok(envelope) => match envelope.message {
             Some(msg) => {
                 if let Ok(event) = RealtimeEvent::try_from(msg) {
@@ -704,6 +796,8 @@ pub struct ApiAccount {
     pub status: String,
     #[serde(default)]
     pub user_status: String,
+    #[serde(default)]
+    pub dob_seconds: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3625,6 +3719,7 @@ impl MezonTransport {
             logo,
             status: user.status,
             user_status: user.user_status,
+            dob_seconds: user.dob_seconds,
         }
     }
 
@@ -4451,7 +4546,7 @@ impl MezonTransport {
         Ok(())
     }
 
-    pub async fn write_voice_interactive(
+    pub async fn write_voice_interactive_event(
         &self,
         clan_id: i64,
         voice_channel_id: i64,
@@ -4459,7 +4554,7 @@ impl MezonTransport {
         receiver_id: i64,
         event_type: i32,
         params: String,
-    ) -> Result<()> {
+    ) -> Result<Option<realtime::VoiceInteractiveEvent>> {
         let cid = self.generate_cid();
         tracing::debug!(
             target: "socket",
@@ -4479,11 +4574,25 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        tracing::info!(
+            target: "socket",
+            cid = i32::from(cid),
+            clan_id,
+            voice_channel_id,
+            event_type,
+            "sending VoiceInteractiveEvent"
+        );
+        let (code, response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        tracing::info!(
+            target: "socket",
+            cid = i32::from(cid),
+            code,
+            "received VoiceInteractiveEvent CID response"
+        );
         if code != 0 {
-            anyhow::bail!("write_voice_interactive error: code={code}");
+            anyhow::bail!("write_voice_interactive_event error: code={code}");
         }
-        Ok(())
+        decode_voice_interactive_response(&response)
     }
 
     pub async fn make_call_push(
@@ -9261,6 +9370,7 @@ impl MezonTransport {
         avatar_url: Option<&str>,
         about_me: Option<&str>,
         logo: Option<&str>,
+        dob_seconds: Option<u32>,
     ) -> Result<()> {
         let cid = self.generate_cid();
 
@@ -9271,6 +9381,7 @@ impl MezonTransport {
             avatar_url: avatar_url.map(str::to_string),
             about_me: about_me.map(str::to_string),
             logo: logo.map(str::to_string),
+            dob_seconds: dob_seconds.unwrap_or_default(),
             ..Default::default()
         }
         .encode_to_vec();
@@ -9539,6 +9650,105 @@ impl MezonTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_gift_event_keeps_original_wire_fields() {
+        let payload = LegacyVoiceInteractiveEnvelope {
+            cid: 0,
+            voice_interactive_event: Some(LegacyVoiceInteractiveEvent {
+                clan_id: 10,
+                voice_channel_id: 20,
+                user_id: 30,
+                event_type: 1,
+                params: "gift-data".to_string(),
+            }),
+        }
+        .encode_to_vec();
+        let envelope = decode_realtime_envelope(&payload).expect("legacy envelope");
+        let Some(realtime::envelope::Message::VoiceInteractiveEvent(event)) = envelope.message
+        else {
+            panic!("voice interactive event");
+        };
+        assert_eq!(event.sender_id, 30);
+        assert_eq!(event.receiver_id, 0);
+        assert_eq!(event.event_type, 1);
+        assert_eq!(event.params, "gift-data");
+    }
+
+    #[test]
+    fn legacy_voice_interactive_accepts_supported_app_types() {
+        for event_type in [2, 10, 11, 12] {
+            let payload = LegacyVoiceInteractiveEnvelope {
+                cid: 0,
+                voice_interactive_event: Some(LegacyVoiceInteractiveEvent {
+                    clan_id: 10,
+                    voice_channel_id: 20,
+                    user_id: 30,
+                    event_type,
+                    params: "event-data".to_string(),
+                }),
+            }
+            .encode_to_vec();
+            let envelope = decode_realtime_envelope(&payload).expect("legacy envelope");
+            let Some(realtime::envelope::Message::VoiceInteractiveEvent(event)) = envelope.message
+            else {
+                panic!("voice interactive event");
+            };
+            assert_eq!(event.event_type, event_type);
+            assert_eq!(event.params, "event-data");
+        }
+    }
+
+    #[test]
+    fn voice_interactive_cid_response_returns_params() {
+        let expected = realtime::VoiceInteractiveEvent {
+            clan_id: 10,
+            voice_channel_id: 20,
+            sender_id: 30,
+            receiver_id: 30,
+            event_type: 10,
+            params: "signed-data".to_string(),
+        };
+        let decoded = decode_voice_interactive_response(&expected.encode_to_vec())
+            .expect("CID response")
+            .expect("event");
+        assert_eq!(decoded, expected);
+        let envelope = realtime::Envelope {
+            cid: 7,
+            message: Some(realtime::envelope::Message::VoiceInteractiveEvent(
+                expected.clone(),
+            )),
+        };
+        let decoded = decode_voice_interactive_response(&envelope.encode_to_vec())
+            .expect("CID envelope")
+            .expect("event");
+        assert_eq!(decoded, expected);
+        assert!(decode_voice_interactive_response(&[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn voice_interactive_cid_only_or_invalid_payload_is_no_event() {
+        let cid_only = realtime::Envelope {
+            cid: 7,
+            message: None,
+        }
+        .encode_to_vec();
+        assert!(
+            decode_voice_interactive_response(&cid_only)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            decode_voice_interactive_response(&[0x08, 0x07])
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            decode_voice_interactive_response(b"not protobuf")
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn a_null_blob_is_no_data_not_a_decode_error() {

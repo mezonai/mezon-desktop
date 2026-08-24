@@ -1,4 +1,3 @@
-use anyhow::Result;
 use url::Url;
 
 pub struct ChannelAppLaunchParams<'a> {
@@ -7,7 +6,7 @@ pub struct ChannelAppLaunchParams<'a> {
     pub clan_name: Option<&'a str>,
 }
 
-pub fn build_channel_app_url(app_url: &str, params: ChannelAppLaunchParams<'_>) -> Result<String> {
+pub fn build_channel_app_url(app_url: &str, params: ChannelAppLaunchParams<'_>) -> String {
     match Url::parse(app_url) {
         Ok(mut url) => {
             {
@@ -18,7 +17,7 @@ pub fn build_channel_app_url(app_url: &str, params: ChannelAppLaunchParams<'_>) 
                     pairs.append_pair("clanName", clan_name);
                 }
             }
-            Ok(url.to_string())
+            url.to_string()
         }
         Err(_) => {
             let sep = if app_url.contains('?') { '&' } else { '?' };
@@ -31,7 +30,7 @@ pub fn build_channel_app_url(app_url: &str, params: ChannelAppLaunchParams<'_>) 
                 query.push_str("&clanName=");
                 query.push_str(&encode_url_param(clan_name));
             }
-            Ok(format!("{app_url}{sep}{query}"))
+            format!("{app_url}{sep}{query}")
         }
     }
 }
@@ -53,8 +52,7 @@ mod tests {
                 clan_id: "42",
                 clan_name: Some("My Clan"),
             },
-        )
-        .unwrap();
+        );
         assert!(url.contains("data=hash123"));
         assert!(url.contains("clanId=42"));
         assert!(url.contains("clanName=My+Clan") || url.contains("clanName=My%20Clan"));
@@ -69,8 +67,7 @@ mod tests {
                 clan_id: "1",
                 clan_name: None,
             },
-        )
-        .unwrap();
+        );
         assert_eq!(url, "not-a-url?data=hash&clanId=1");
     }
 }

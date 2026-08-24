@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
-use mezon_client::{AppApi, ConnectionStatus};
-use mezon_proto::api;
+use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
+use mezon_proto::{api, realtime};
 
 use crate::Freshness;
 use crate::ids::UserId;
+use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 /// A user's current rich-presence activity, mirroring proto `UserActivity` and React `IActivity`.
 /// `activity_type` groups the activity (React `ActivitiesType`): `1` = coding/work (Visual Studio
@@ -71,6 +72,12 @@ impl ActivityStore {
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
+        let entity = cx.entity();
+        RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
+            dispatch.on(RealtimeKind::ListActivity, &entity, |this, event, cx| {
+                this.handle_list_activity(event, cx);
+            });
+        });
         Self {
             activities: Vec::new(),
             loading: false,
@@ -119,6 +126,25 @@ impl ActivityStore {
 
     pub fn activities(&self) -> &[UserActivity] {
         &self.activities
+    }
+
+    fn handle_list_activity(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::Unhandled(realtime::envelope::Message::ListActivity(list)) = event
+        else {
+            return;
+        };
+        let next = list
+            .acts
+            .iter()
+            .cloned()
+            .map(activity_from_api)
+            .collect::<Vec<_>>();
+        if next == self.activities {
+            return;
+        }
+        self.activities = next;
+        cx.emit(ActivityEvent::Changed);
+        cx.notify();
     }
 
     fn apply_activities(&mut self, next: Vec<UserActivity>, cx: &mut Context<Self>) {
@@ -179,6 +205,7 @@ mod tests {
             Arc::new(mezon_client::TransportClient::new(String::new())),
             String::new(),
         ));
+        RealtimeDispatch::init(api.clone(), cx);
         cx.new(|cx| ActivityStore::new(api, cx))
     }
 
@@ -222,6 +249,58 @@ mod tests {
                 store.apply_activities(vec![work(1, "Visual Studio Code")], cx);
                 store.apply_activities(vec![work(1, "Spotify")], cx);
                 assert_eq!(store.activities(), &[work(1, "Spotify")]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_pushed_list_activity_replaces_the_roster(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                store.apply_activities(vec![work(1, "Visual Studio Code")], cx);
+                let event = RealtimeEvent::Unhandled(realtime::envelope::Message::ListActivity(
+                    realtime::ListActivity {
+                        acts: vec![api::UserActivity {
+                            user_id: 2,
+                            activity_name: "Spotify".into(),
+                            activity_type: ACTIVITY_TYPE_WORK,
+                            ..Default::default()
+                        }],
+                    },
+                ));
+                store.handle_list_activity(&event, cx);
+                assert_eq!(store.activities(), &[work(2, "Spotify")]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_pushed_roster_does_not_satisfy_the_fetch_cache(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, _cx| {
+                assert!(
+                    !store.freshness.is_fresh(crate::CACHE_TTL),
+                    "precondition: a new store is stale"
+                );
+            });
+            store.update(cx, |store, cx| {
+                let event = RealtimeEvent::Unhandled(realtime::envelope::Message::ListActivity(
+                    realtime::ListActivity {
+                        acts: vec![api::UserActivity {
+                            user_id: 2,
+                            activity_name: "Spotify".into(),
+                            activity_type: ACTIVITY_TYPE_WORK,
+                            ..Default::default()
+                        }],
+                    },
+                ));
+                store.handle_list_activity(&event, cx);
+                assert!(
+                    !store.freshness.is_fresh(crate::CACHE_TTL),
+                    "a socket push must not stand in for a fetch — the push may be partial"
+                );
             });
         });
     }

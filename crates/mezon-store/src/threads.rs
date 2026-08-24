@@ -7,6 +7,7 @@ use mezon_client::ConnectionStatus;
 use mezon_client::MezonTransport;
 use mezon_client::RealtimeEvent;
 use mezon_client::is_channel_limit_api_error;
+use mezon_client::transport::api_status_from_error;
 use mezon_client::transport::{ApiThreadDesc, THREAD_LIST_LIMIT};
 use mezon_proto::{api, realtime};
 
@@ -63,6 +64,7 @@ pub enum ThreadsEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadCreateFailReason {
     ChannelLimitExceeded,
+    Api(u32),
     Other,
 }
 
@@ -1234,9 +1236,11 @@ impl ThreadsStore {
 
 fn thread_create_fail_reason(err: &anyhow::Error) -> ThreadCreateFailReason {
     if is_channel_limit_api_error(err) {
-        ThreadCreateFailReason::ChannelLimitExceeded
-    } else {
-        ThreadCreateFailReason::Other
+        return ThreadCreateFailReason::ChannelLimitExceeded;
+    }
+    match api_status_from_error(err) {
+        Some(status) => ThreadCreateFailReason::Api(status.code),
+        None => ThreadCreateFailReason::Other,
     }
 }
 
@@ -1735,6 +1739,11 @@ mod tests {
             ThreadCreateFailReason::ChannelLimitExceeded
         );
         let err: anyhow::Error = ApiStatusError { code: 13 }.into();
+        assert_eq!(
+            thread_create_fail_reason(&err),
+            ThreadCreateFailReason::Api(13)
+        );
+        let err = anyhow::anyhow!("socket closed");
         assert_eq!(
             thread_create_fail_reason(&err),
             ThreadCreateFailReason::Other

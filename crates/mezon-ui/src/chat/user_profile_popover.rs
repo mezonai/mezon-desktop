@@ -628,13 +628,13 @@ impl Render for UserProfilePopover {
             input.set_placeholder(message_placeholder, cx);
         });
 
-        let (display_name, username, avatar_raw, about_me, create_time, online) = match &profile {
+        let (display_name, username, avatar_raw, about_me, join_time, online) = match &profile {
             Some(p) => (
                 SharedString::from(p.display_name.as_str()),
                 SharedString::from(p.username.as_str()),
                 p.avatar_url.clone(),
                 SharedString::from(p.about_me.as_str()),
-                p.create_time_seconds,
+                p.join_time_seconds,
                 p.online,
             ),
             None => (
@@ -659,7 +659,7 @@ impl Render for UserProfilePopover {
                 .to_string(),
         };
 
-        let member_since = format_member_since(create_time);
+        let member_since = format_member_since(join_time);
         let status_presence = match &own_status {
             Some(status) => status.presence,
             None if online => mezon_store::UserPresence::Online,
@@ -814,7 +814,7 @@ impl Render for UserProfilePopover {
                                         .child(about_me.clone()),
                                 )
                         })
-                        .when(!is_dm && create_time > 0, |d| {
+                        .when(!is_dm && join_time > 0, |d| {
                             d.child(section_divider(theme.tokens.theme_border_input))
                                 .child(section_label(
                                     mezon_i18n::t(&locale, "userProfile.labels.memberSince"),

@@ -80,6 +80,11 @@ pub enum McpCommand {
         attachment_index: usize,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
+    OpenPdfViewer {
+        message_id: i64,
+        attachment_index: usize,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
     ScrollWheel {
         delta_y: f32,
         ticks: u32,
@@ -115,6 +120,10 @@ pub enum McpCommand {
     },
     TopicType {
         text: String,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    TopicDropPaths {
+        paths: Vec<String>,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
     TopicSubmit {
@@ -178,6 +187,11 @@ pub enum McpCommand {
     },
     ListLoadedMessages {
         limit: usize,
+        topic: bool,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ReplyBegin {
+        message_id: i64,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
     JumpToMessage {

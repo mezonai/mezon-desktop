@@ -60,6 +60,11 @@ impl ChannelDocument {
     }
 }
 
+pub fn is_pdf(filetype: &str, filename: &str) -> bool {
+    filetype.eq_ignore_ascii_case("application/pdf")
+        || filename.to_ascii_lowercase().ends_with(".pdf")
+}
+
 pub fn is_document(filetype: &str) -> bool {
     let ft = filetype.trim();
     if ft.is_empty() {
@@ -513,6 +518,15 @@ mod tests {
             create_time_seconds: ts,
             uploader_name: SharedString::default(),
         }
+    }
+
+    #[test]
+    fn is_pdf_accepts_mime_and_extension() {
+        assert!(is_pdf("application/pdf", "x.bin"));
+        assert!(is_pdf("APPLICATION/PDF", "x.bin"));
+        assert!(is_pdf("doc", "Report.PDF"));
+        assert!(!is_pdf("doc", "notes.txt"));
+        assert!(!is_pdf("image/png", "shot.png"));
     }
 
     #[test]

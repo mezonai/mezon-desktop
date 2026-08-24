@@ -115,6 +115,17 @@ impl DirectChannelList {
         self.channels.get(idx)
     }
 
+    fn remove(&mut self, id: ChannelId) {
+        let Some(idx) = self.by_id.get(&id).copied() else {
+            return;
+        };
+        self.channels.remove(idx);
+        if self.pending_created == Some(id) {
+            self.pending_created = None;
+        }
+        self.reindex();
+    }
+
     fn find_mut(&mut self, id: ChannelId) -> Option<&mut DirectChannel> {
         let idx = *self.by_id.get(&id)?;
         self.channels.get_mut(idx)
@@ -163,6 +174,11 @@ impl DirectChannelList {
             .iter()
             .map(|c| (c.id, c.unread_count))
             .collect();
+        let local_activity: HashMap<ChannelId, (i64, i64)> = self
+            .channels
+            .iter()
+            .map(|c| (c.id, (c.last_sent_timestamp, c.last_seen_timestamp)))
+            .collect();
         if let Some(id) = self.pending_created {
             if channels.iter().any(|remote| remote.id == id) {
                 self.pending_created = None;
@@ -170,6 +186,7 @@ impl DirectChannelList {
                 channels.push(local);
             }
         }
+        carry_local_activity(&mut channels, &local_activity);
         merge_dm_unread_counts(&mut channels, badge_map, &local_counts);
         self.channels = channels;
         self.sort_by_recent();
@@ -222,11 +239,14 @@ impl DirectChannelList {
     }
 }
 
+pub const MAX_PINNED_DMS: usize = 10;
+
 /// Holds the user's direct-message / group conversations (clan_id = 0). Self-subscribes to the
 /// realtime broadcast (cf. `ChannelStore`): fetches the list on connect and keeps it ordered by
 /// most-recent activity.
 pub struct DirectMessageStore {
     channels: DirectChannelList,
+    pinned: Vec<ChannelId>,
     loading: bool,
     freshness: Freshness,
     has_more: bool,
@@ -246,6 +266,7 @@ impl EventEmitter<DirectEvent> for DirectMessageStore {}
 impl DirectMessageStore {
     pub fn init(api: Arc<AppApi>, cx: &mut App) -> Entity<Self> {
         let entity = cx.new(|cx| Self::new(api, cx));
+        entity.update(cx, |this, cx| this.hydrate_pinned(cx));
         cx.set_global(GlobalDirectMessageStore(entity.clone()));
         entity
     }
@@ -266,6 +287,8 @@ impl DirectMessageStore {
         self.has_more = true;
         self.current_page = 1;
         self.current = None;
+        self.pinned.clear();
+        self.persist_pinned(cx);
         self.pending_changed.clear();
         self.changed_notify_task = None;
         cx.emit(DirectEvent::Changed { channel_id: None });
@@ -277,6 +300,7 @@ impl DirectMessageStore {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
         Self {
             channels: DirectChannelList::default(),
+            pinned: Vec::new(),
             loading: false,
             freshness: Freshness::new(),
             has_more: true,
@@ -668,6 +692,11 @@ impl DirectMessageStore {
                 api.list_dm_channels(next_page as i32),
                 api.list_channel_badge_counts(0),
             );
+            if let Err(e) = &badges {
+                tracing::warn!(
+                    "list_channel_badge_counts failed alongside DM page {next_page}: {e}"
+                );
+            }
             let badge_map = badge_map_from_descs(badges.unwrap_or_default());
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
@@ -705,6 +734,10 @@ impl DirectMessageStore {
         cx.spawn(async move |this, cx| {
             let (result, badges) =
                 tokio::join!(api.list_dm_channels(1), api.list_channel_badge_counts(0),);
+            let badges_complete = badges.is_ok();
+            if let Err(e) = &badges {
+                tracing::warn!("list_channel_badge_counts failed alongside the DM list: {e}");
+            }
             let badge_map = badge_map_from_descs(badges.unwrap_or_default());
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
@@ -714,18 +747,32 @@ impl DirectMessageStore {
                         let has_more = list.len() >= DM_PAGE_SIZE as usize;
                         let channels: Vec<DirectChannel> =
                             list.into_iter().map(direct_from_api).collect();
-                        this.channels.replace(channels, &badge_map);
-                        this.freshness.mark_fetched();
                         this.has_more = has_more;
                         this.current_page = 1;
-                        cx.emit(DirectEvent::Changed { channel_id: None });
-                        cx.notify();
+                        this.apply_fetched_page(channels, &badge_map, badges_complete, cx);
                     }
                     Err(e) => tracing::error!("list_dm_channels failed: {e}"),
                 }
             });
         })
         .detach();
+    }
+
+    fn apply_fetched_page(
+        &mut self,
+        channels: Vec<DirectChannel>,
+        badge_map: &HashMap<ChannelId, DmBadgeInfo>,
+        badges_complete: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.channels.replace(channels, badge_map);
+        if badges_complete {
+            self.freshness.mark_fetched();
+        } else {
+            self.freshness.mark_stale();
+        }
+        cx.emit(DirectEvent::Changed { channel_id: None });
+        cx.notify();
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
@@ -836,6 +883,105 @@ impl DirectMessageStore {
         true
     }
 
+    pub fn is_pinned(&self, channel_id: ChannelId) -> bool {
+        self.pinned.contains(&channel_id)
+    }
+
+    pub fn pinned(&self) -> &[ChannelId] {
+        &self.pinned
+    }
+
+    pub fn pinned_is_full(&self) -> bool {
+        self.pinned.len() >= MAX_PINNED_DMS
+    }
+
+    pub fn toggle_pin(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        match self.pinned.iter().position(|id| *id == channel_id) {
+            Some(index) => {
+                self.pinned.remove(index);
+            }
+            None => {
+                if self.pinned_is_full() {
+                    return;
+                }
+                self.pinned.push(channel_id);
+            }
+        }
+        self.persist_pinned(cx);
+        cx.emit(DirectEvent::Changed { channel_id: None });
+        cx.notify();
+    }
+
+    fn persist_pinned(&self, cx: &mut Context<Self>) {
+        let Some(settings) = crate::Settings::try_global(cx) else {
+            return;
+        };
+        let ids: Vec<i64> = self.pinned.iter().map(|id| id.get()).collect();
+        settings.update(cx, |settings, cx| {
+            if settings.pinned_dms == ids {
+                return;
+            }
+            settings.pinned_dms = ids;
+            cx.notify();
+        });
+        crate::schedule_settings_save(&settings, cx);
+    }
+
+    fn forget_conversation(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        self.channels.remove(channel_id);
+        let pinned_before = self.pinned.len();
+        self.pinned.retain(|id| *id != channel_id);
+        if self.pinned.len() != pinned_before {
+            self.persist_pinned(cx);
+        }
+        if self.current.map(|(id, _)| id) == Some(channel_id) {
+            self.current = None;
+        }
+        cx.emit(DirectEvent::Changed { channel_id: None });
+        cx.notify();
+    }
+
+    fn hydrate_pinned(&mut self, cx: &App) {
+        let Some(settings) = crate::Settings::try_global(cx) else {
+            return;
+        };
+        self.pinned = settings
+            .read(cx)
+            .pinned_dms
+            .iter()
+            .copied()
+            .map(ChannelId)
+            .take(MAX_PINNED_DMS)
+            .collect();
+    }
+
+    pub fn leave_group(
+        &mut self,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        if self.channels.find(channel_id).is_none() {
+            return Task::ready(Err(anyhow::anyhow!("group not found")));
+        }
+        let api = self.api.clone();
+        let me = crate::badge::BadgeService::try_global(cx)
+            .and_then(|badge| badge.read(cx).current_user_id(cx));
+        cx.spawn(async move |this, cx| {
+            let Some(me) = me else {
+                return Err(anyhow::anyhow!("no signed-in user"));
+            };
+            let result = api
+                .remove_channel_users(channel_id.get(), vec![me.to_string()])
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if result.is_ok() {
+                    this.forget_conversation(channel_id, cx);
+                }
+            });
+            result
+        })
+    }
+
     pub fn mark_as_read(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
         if channel_id.is_zero() {
             return;
@@ -918,6 +1064,19 @@ fn badge_map_from_descs(
         .collect()
 }
 
+fn carry_local_activity(
+    channels: &mut [DirectChannel],
+    local_activity: &HashMap<ChannelId, (i64, i64)>,
+) {
+    for ch in channels.iter_mut() {
+        let Some(&(last_sent, last_seen)) = local_activity.get(&ch.id) else {
+            continue;
+        };
+        ch.last_sent_timestamp = ch.last_sent_timestamp.max(last_sent);
+        ch.last_seen_timestamp = ch.last_seen_timestamp.max(last_seen);
+    }
+}
+
 /// Merge server badge counts + last-sent/seen timestamps with in-memory WS increments (React
 /// seeds its DM sort + unread state from `ListChannelBadgeCount`, not just `ListChannelDescs` —
 /// both timestamps must come from the same record or `is_unread` desyncs from reality).
@@ -932,7 +1091,9 @@ fn merge_dm_unread_counts(
         let from_badges = badge.map(|b| b.badge_count).unwrap_or(0).max(0) as u32;
         let from_local = local_counts.get(&ch.id).copied().unwrap_or(0);
         ch.unread_count = from_list.max(from_badges).max(from_local);
-        if let Some(b) = badge {
+        if let Some(b) = badge
+            && b.last_sent_timestamp >= ch.last_sent_timestamp
+        {
             ch.last_sent_timestamp = b.last_sent_timestamp;
             ch.last_seen_timestamp = b.last_seen_timestamp;
         }
@@ -976,13 +1137,26 @@ fn direct_from_created(
     peer_username: &str,
 ) -> DirectChannel {
     let kind = DirectKind::from_raw(desc.channel_type);
+    let is_dm = matches!(kind, DirectKind::Dm);
     DirectChannel {
         id: ChannelId(desc.channel_id),
-        label: label.to_string(),
+        label: if is_dm {
+            label.to_string()
+        } else {
+            desc.channel_label.clone()
+        },
         kind,
-        avatar: peer_avatar.to_string(),
-        peer_user_id: Some(peer_user_id),
-        peer_username: peer_username.to_string(),
+        avatar: if is_dm {
+            peer_avatar.to_string()
+        } else {
+            String::new()
+        },
+        peer_user_id: is_dm.then_some(peer_user_id),
+        peer_username: if is_dm {
+            peer_username.to_string()
+        } else {
+            String::new()
+        },
         creator_id: if desc.creator_id == 0 {
             None
         } else {
@@ -1584,6 +1758,86 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_badge_record_cannot_pull_a_just_bumped_dm_back_down() {
+        let mut channels = vec![DirectChannel {
+            id: ChannelId(1),
+            label: "a".into(),
+            kind: DirectKind::Dm,
+            avatar: String::new(),
+            peer_user_id: None,
+            peer_username: String::new(),
+            creator_id: None,
+            online: false,
+            member_count: 0,
+            unread_count: 1,
+            last_sent_timestamp: 500,
+            last_seen_timestamp: 400,
+        }];
+        let badges = HashMap::from([(
+            ChannelId(1),
+            DmBadgeInfo {
+                badge_count: 0,
+                last_sent_timestamp: 100,
+                last_seen_timestamp: 100,
+            },
+        )]);
+        merge_dm_unread_counts(&mut channels, &badges, &HashMap::new());
+        assert_eq!(channels[0].last_sent_timestamp, 500);
+        assert_eq!(channels[0].last_seen_timestamp, 400);
+    }
+
+    #[test]
+    fn a_fresher_badge_record_replaces_both_timestamps_together() {
+        let mut channels = vec![DirectChannel {
+            id: ChannelId(1),
+            label: "a".into(),
+            kind: DirectKind::Dm,
+            avatar: String::new(),
+            peer_user_id: None,
+            peer_username: String::new(),
+            creator_id: None,
+            online: false,
+            member_count: 0,
+            unread_count: 1,
+            last_sent_timestamp: 500,
+            last_seen_timestamp: 400,
+        }];
+        let badges = HashMap::from([(
+            ChannelId(1),
+            DmBadgeInfo {
+                badge_count: 0,
+                last_sent_timestamp: 900,
+                last_seen_timestamp: 900,
+            },
+        )]);
+        merge_dm_unread_counts(&mut channels, &badges, &HashMap::new());
+        assert_eq!(channels[0].last_sent_timestamp, 900);
+        assert_eq!(channels[0].last_seen_timestamp, 900);
+    }
+
+    #[test]
+    fn created_dm_keeps_the_caller_supplied_peer_identity() {
+        let desc = api_channel_desc(11, "server-label", 3, 2, 0);
+        let dm = direct_from_created(&desc, UserId(5), "Huy Le", "avatar.png", "huy4.dev");
+        assert_eq!(dm.kind, DirectKind::Dm);
+        assert_eq!(dm.label, "Huy Le");
+        assert_eq!(dm.avatar, "avatar.png");
+        assert_eq!(dm.peer_user_id, Some(UserId(5)));
+        assert_eq!(dm.peer_username, "huy4.dev");
+    }
+
+    #[test]
+    fn created_group_keeps_its_own_label_and_gains_no_peer() {
+        let desc = api_channel_desc(12, "thay tro cung nhau", 2, 5, 0);
+        let group = direct_from_created(&desc, UserId(5), "Huy Le", "avatar.png", "huy4.dev");
+        assert_eq!(group.kind, DirectKind::Group);
+        assert_eq!(group.label, "thay tro cung nhau");
+        assert!(group.avatar.is_empty());
+        assert_eq!(group.peer_user_id, None);
+        assert!(group.peer_username.is_empty());
+    }
+
+    #[test]
     fn sort_orders_most_recent_first() {
         let mut chans = vec![
             DirectChannel {
@@ -1774,6 +2028,46 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_page_cannot_sink_a_conversation_that_just_received_messages() {
+        let mut channels = vec![DirectChannel {
+            last_sent_timestamp: 10,
+            last_seen_timestamp: 10,
+            ..direct_from_api(api_dm(1, "a", 3))
+        }];
+        let local = HashMap::from([(ChannelId(1), (504, 10))]);
+        carry_local_activity(&mut channels, &local);
+        assert_eq!(channels[0].last_sent_timestamp, 504);
+        assert_eq!(channels[0].last_seen_timestamp, 10);
+        assert!(channels[0].is_unread());
+    }
+
+    #[test]
+    fn a_read_on_another_device_still_wins_over_the_local_seen_timestamp() {
+        let mut channels = vec![DirectChannel {
+            last_sent_timestamp: 900,
+            last_seen_timestamp: 900,
+            ..direct_from_api(api_dm(1, "a", 3))
+        }];
+        let local = HashMap::from([(ChannelId(1), (504, 10))]);
+        carry_local_activity(&mut channels, &local);
+        assert_eq!(channels[0].last_sent_timestamp, 900);
+        assert_eq!(channels[0].last_seen_timestamp, 900);
+        assert!(!channels[0].is_unread());
+    }
+
+    #[test]
+    fn a_conversation_absent_locally_keeps_the_page_timestamps() {
+        let mut channels = vec![DirectChannel {
+            last_sent_timestamp: 300,
+            last_seen_timestamp: 200,
+            ..direct_from_api(api_dm(9, "a", 3))
+        }];
+        carry_local_activity(&mut channels, &HashMap::new());
+        assert_eq!(channels[0].last_sent_timestamp, 300);
+        assert_eq!(channels[0].last_seen_timestamp, 200);
+    }
+
+    #[test]
     fn merge_dm_unread_counts_leaves_timestamp_when_channel_missing_from_badge_map() {
         let mut channels = vec![DirectChannel {
             id: ChannelId(1),
@@ -1904,6 +2198,397 @@ mod tests {
         assert_eq!(
             DirectMessageBody::ContentJson(structured.clone()).into_content_json(),
             structured
+        );
+    }
+
+    fn dm_store(cx: &mut App) -> Entity<DirectMessageStore> {
+        let api = Arc::new(mezon_client::AppApi::new(
+            Arc::new(mezon_client::TransportClient::new(String::new())),
+            String::new(),
+        ));
+        crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+        cx.new(|cx| DirectMessageStore::new(api, cx))
+    }
+
+    fn conversation(id: i64, ts: i64) -> DirectChannel {
+        DirectChannel {
+            id: ChannelId(id),
+            label: format!("dm-{id}"),
+            kind: DirectKind::Dm,
+            avatar: String::new(),
+            peer_user_id: Some(UserId(id)),
+            peer_username: format!("peer-{id}"),
+            creator_id: None,
+            online: false,
+            member_count: 0,
+            unread_count: 0,
+            last_sent_timestamp: ts,
+            last_seen_timestamp: ts,
+        }
+    }
+
+    fn seed(store: &mut DirectMessageStore, ids_and_timestamps: &[(i64, i64)]) {
+        let channels = ids_and_timestamps
+            .iter()
+            .map(|&(id, ts)| conversation(id, ts))
+            .collect();
+        store.channels.replace(channels, &HashMap::new());
+    }
+
+    fn order(store: &DirectMessageStore) -> Vec<i64> {
+        store.channels().iter().map(|c| c.id.get()).collect()
+    }
+
+    fn unread_of(store: &DirectMessageStore, id: i64) -> u32 {
+        store
+            .find(ChannelId(id))
+            .expect("conversation")
+            .unread_count
+    }
+
+    fn assert_index_agrees_with_order(store: &DirectMessageStore) {
+        for (position, channel) in store.channels.as_slice().iter().enumerate() {
+            assert_eq!(
+                store.channels.by_id.get(&channel.id),
+                Some(&position),
+                "id index disagrees with the position of {:?}",
+                channel.id
+            );
+        }
+        assert_eq!(store.channels.by_id.len(), store.channels.as_slice().len());
+        let mut previous = i64::MAX;
+        for channel in store.channels.as_slice() {
+            assert!(
+                channel.last_sent_timestamp <= previous,
+                "list is not ordered by recency"
+            );
+            previous = channel.last_sent_timestamp;
+        }
+    }
+
+    fn message_from(
+        channel_id: i64,
+        sender_id: i64,
+        ts: u32,
+        group: bool,
+    ) -> mezon_proto::api::ChannelMessage {
+        mezon_proto::api::ChannelMessage {
+            channel_id,
+            sender_id,
+            username: format!("sender-{sender_id}"),
+            display_name: format!("Sender {sender_id}"),
+            mode: if group { STREAM_MODE_GROUP } else { 4 },
+            create_time_seconds: ts,
+            ..Default::default()
+        }
+    }
+
+    #[gpui::test]
+    fn interleaved_messages_from_many_senders_leave_the_list_in_recency_order(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = dm_store(cx);
+            store.update(cx, |store, cx| {
+                seed(store, &[(1, 10), (2, 20), (3, 30), (4, 40), (5, 50)]);
+                for (round, ts) in (100..).step_by(10).take(4).enumerate() {
+                    for id in 1..=5i64 {
+                        store.note_message(ChannelId(id), ts + id, false, true, cx);
+                        assert_index_agrees_with_order(store);
+                    }
+                    assert_eq!(order(store), vec![5, 4, 3, 2, 1], "round {round}");
+                }
+                for id in 1..=5i64 {
+                    assert_eq!(unread_of(store, id), 4);
+                }
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_burst_to_one_conversation_counts_every_message_and_moves_it_once(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = dm_store(cx);
+            store.update(cx, |store, cx| {
+                seed(store, &[(1, 10), (2, 20), (3, 30)]);
+                for step in 1..=20i64 {
+                    store.note_message(ChannelId(1), 100 + step, false, true, cx);
+                }
+                assert_eq!(order(store), vec![1, 3, 2]);
+                assert_eq!(unread_of(store, 1), 20);
+                assert_eq!(unread_of(store, 2), 0);
+                assert_index_agrees_with_order(store);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn an_out_of_order_message_cannot_pull_a_conversation_backwards(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = dm_store(cx);
+            store.update(cx, |store, cx| {
+                seed(store, &[(1, 10), (2, 20)]);
+                store.note_message(ChannelId(1), 500, false, true, cx);
+                store.note_message(ChannelId(1), 300, false, true, cx);
+                let channel = store.find(ChannelId(1)).expect("conversation");
+                assert_eq!(channel.last_sent_timestamp, 500);
+                assert_eq!(channel.unread_count, 2);
+                assert_eq!(order(store), vec![1, 2]);
+                assert_index_agrees_with_order(store);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn every_bump_leaves_the_id_index_agreeing_with_the_positions(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = dm_store(cx);
+            store.update(cx, |store, cx| {
+                let seeded: Vec<(i64, i64)> = (1..=12).map(|id| (id, id * 10)).collect();
+                seed(store, &seeded);
+                let mut ts = 1_000i64;
+                for step in 0..120u32 {
+                    let id = i64::from(step * 7 % 12) + 1;
+                    ts += i64::from(step % 3);
+                    store.note_message(ChannelId(id), ts, false, true, cx);
+                    assert_index_agrees_with_order(store);
+                }
+                assert_eq!(store.channels().len(), 12);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn conversations_that_share_a_timestamp_keep_their_relative_order(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = dm_store(cx);
+            store.update(cx, |store, cx| {
+                seed(store, &[(1, 30), (2, 20), (3, 10)]);
+                store.note_message(ChannelId(3), 30, false, true, cx);
+                assert_eq!(order(store), vec![1, 3, 2]);
+                store.note_message(ChannelId(2), 30, false, true, cx);
+                assert_eq!(order(store), vec![1, 3, 2]);
+                assert_index_agrees_with_order(store);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_message_for_an_unknown_conversation_synthesizes_it_at_the_top(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = dm_store(cx);
+            store.update(cx, |store, cx| {
+                seed(store, &[(1, 900)]);
+                let m = message_from(77, 42, 1_000, false);
+                assert!(!store.note_message(ChannelId(77), 1_000, false, true, cx));
+                assert!(store.insert_from_message(&m, false, true, cx));
+                assert_eq!(order(store), vec![77, 1]);
+                assert_eq!(unread_of(store, 77), 1);
+                assert_index_agrees_with_order(store);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_second_message_updates_the_synthesized_conversation_instead_of_duplicating_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = dm_store(cx);
+            store.update(cx, |store, cx| {
+                seed(store, &[(1, 900)]);
+                let m = message_from(77, 42, 1_000, false);
+                store.insert_from_message(&m, false, true, cx);
+                assert!(!store.insert_from_message(&m, false, true, cx));
+                assert!(store.note_message(ChannelId(77), 1_100, false, true, cx));
+                assert_eq!(store.channels().len(), 2);
+                assert_eq!(unread_of(store, 77), 2);
+                assert_index_agrees_with_order(store);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_group_message_for_an_unknown_conversation_synthesizes_a_group(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = dm_store(cx);
+            store.update(cx, |store, cx| {
+                let m = message_from(88, 42, 1_000, true);
+                store.insert_from_message(&m, false, true, cx);
+                let channel = store.find(ChannelId(88)).expect("conversation");
+                assert_eq!(channel.kind, DirectKind::Group);
+                assert_eq!(channel.peer_user_id, None);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn my_own_message_bumps_the_conversation_without_raising_the_badge(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = dm_store(cx);
+            store.update(cx, |store, cx| {
+                seed(store, &[(1, 10), (2, 20)]);
+                store.note_message(ChannelId(1), 500, true, false, cx);
+                let channel = store.find(ChannelId(1)).expect("conversation");
+                assert_eq!(channel.unread_count, 0);
+                assert_eq!(channel.last_seen_timestamp, 500);
+                assert!(!channel.is_unread());
+                assert_eq!(order(store), vec![1, 2]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_muted_conversation_still_moves_but_gains_no_badge(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = dm_store(cx);
+            store.update(cx, |store, cx| {
+                seed(store, &[(1, 10), (2, 20)]);
+                store.note_message(ChannelId(1), 500, false, false, cx);
+                let channel = store.find(ChannelId(1)).expect("conversation");
+                assert_eq!(channel.unread_count, 0);
+                assert_eq!(channel.last_sent_timestamp, 500);
+                assert_eq!(order(store), vec![1, 2]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn marking_read_clears_the_badge_and_the_next_message_starts_over(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = dm_store(cx);
+            store.update(cx, |store, cx| {
+                seed(store, &[(1, 10)]);
+                for step in 1..=3i64 {
+                    store.note_message(ChannelId(1), 100 + step, false, true, cx);
+                }
+                assert_eq!(unread_of(store, 1), 3);
+                assert!(store.note_read(ChannelId(1), cx));
+                let channel = store.find(ChannelId(1)).expect("conversation");
+                assert_eq!(channel.unread_count, 0);
+                assert_eq!(channel.last_seen_timestamp, channel.last_sent_timestamp);
+                assert!(!channel.is_unread());
+                store.note_message(ChannelId(1), 200, false, true, cx);
+                assert_eq!(unread_of(store, 1), 1);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn leaving_a_pinned_group_frees_its_slot_on_disk_too(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let settings = cx.new(|_| crate::Settings::default());
+            crate::Settings::init_global(&settings, cx);
+            let store = dm_store(cx);
+            store.update(cx, |store, cx| {
+                seed(store, &[(1, 10), (2, 20)]);
+                store.toggle_pin(ChannelId(1), cx);
+                store.toggle_pin(ChannelId(2), cx);
+                assert_eq!(
+                    settings.read(cx).pinned_dms,
+                    vec![1, 2],
+                    "both pins reach the settings entity"
+                );
+
+                store.forget_conversation(ChannelId(1), cx);
+
+                assert_eq!(store.pinned, vec![ChannelId(2)]);
+                assert!(store.find(ChannelId(1)).is_none());
+                assert_eq!(
+                    settings.read(cx).pinned_dms,
+                    vec![2],
+                    "a slot freed in memory must be freed on disk, or a restart hydrates a dead id"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_page_that_arrived_without_its_badges_is_not_pinned_as_fresh(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = dm_store(cx);
+            store.update(cx, |store, cx| {
+                let page = vec![conversation(1, 10), conversation(2, 20)];
+                store.apply_fetched_page(page, &HashMap::new(), false, cx);
+                assert!(!store.freshness.is_fresh(crate::CACHE_TTL));
+                assert_eq!(store.channels().len(), 2);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_page_that_arrived_with_its_badges_is_pinned_as_fresh(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = dm_store(cx);
+            store.update(cx, |store, cx| {
+                let page = vec![conversation(1, 10)];
+                store.apply_fetched_page(page, &HashMap::new(), true, cx);
+                assert!(store.freshness.is_fresh(crate::CACHE_TTL));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_refetch_mid_burst_keeps_the_live_badge_and_position(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = dm_store(cx);
+            store.update(cx, |store, cx| {
+                seed(store, &[(1, 10), (2, 20)]);
+                for step in 1..=4i64 {
+                    store.note_message(ChannelId(1), 500 + step, false, true, cx);
+                }
+                let server_page = vec![conversation(2, 20), conversation(1, 10)];
+                store.channels.replace(server_page, &HashMap::new());
+                let channel = store.find(ChannelId(1)).expect("conversation");
+                assert_eq!(channel.unread_count, 4);
+                assert_eq!(order(store), vec![1, 2]);
+                assert_index_agrees_with_order(store);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_burst_emits_one_change_per_conversation_after_coalescing(cx: &mut gpui::TestAppContext) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (_store, _sub) = cx.update(|cx| {
+            let store = dm_store(cx);
+            let collected = seen.clone();
+            let sub = cx.subscribe(&store, move |_, event: &DirectEvent, _| {
+                let DirectEvent::Changed { channel_id } = event;
+                collected.lock().expect("lock").push(*channel_id);
+            });
+            store.update(cx, |store, cx| {
+                seed(store, &[(1, 10), (2, 20), (3, 30)]);
+                for step in 1..=10i64 {
+                    store.note_message(ChannelId(1), 100 + step, false, true, cx);
+                    store.note_message(ChannelId(2), 100 + step, false, true, cx);
+                }
+            });
+            (store, sub)
+        });
+
+        cx.executor().advance_clock(CHANGED_NOTIFY_COALESCE * 2);
+        cx.run_until_parked();
+
+        let emitted = seen.lock().expect("lock").clone();
+        assert_eq!(
+            emitted,
+            vec![Some(ChannelId(1)), Some(ChannelId(2))],
+            "20 messages must coalesce into one change per conversation"
         );
     }
 }

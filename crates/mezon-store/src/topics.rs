@@ -790,6 +790,19 @@ impl TopicsStore {
             message_code: 0,
         };
         let has_attachments = !attachments.is_empty();
+        // The reply row is built from the server's echo, which knows nothing about
+        // the file on this disk. Keep the paths so the sender sees the picture they
+        // just sent instead of fetching a proxied copy of it back — the same thing
+        // `MessageAttachment::optimistic_local` does for a channel send.
+        let local_sources: Vec<(String, Option<std::path::PathBuf>)> = attachments
+            .iter()
+            .map(|att| {
+                (
+                    att.filename.clone(),
+                    att.filetype.starts_with("image/").then(|| att.path.clone()),
+                )
+            })
+            .collect();
         let reply_ref =
             self.reply_target
                 .take()
@@ -1000,6 +1013,7 @@ impl TopicsStore {
                     generation,
                     ack,
                     anonymous,
+                    local_sources,
                     cx,
                 );
             });
@@ -1097,6 +1111,7 @@ impl TopicsStore {
         generation: u64,
         ack: mezon_client::transport::ApiMessage,
         anonymous: bool,
+        local_sources: Vec<(String, Option<std::path::PathBuf>)>,
         cx: &mut Context<Self>,
     ) {
         if self.compose_generation != generation {
@@ -1108,7 +1123,7 @@ impl TopicsStore {
         let creator_id = viewer_user_id(cx);
         let append = MessagesStore::global(cx).update(cx, |store, cx| {
             store.set_active_topic(Some(topic_id), cx);
-            let append = store.append_topic_message(topic_id, ack, anonymous, cx);
+            let append = store.append_topic_message(topic_id, ack, anonymous, local_sources, cx);
             if is_new_topic {
                 store.mark_message_as_topic(
                     ChannelId(parent_channel_id),
@@ -1251,6 +1266,9 @@ impl TopicsStore {
                     generation,
                     ack,
                     anonymous,
+                    // A url attachment (Tenor, a pasted link) has no file on this
+                    // disk to show.
+                    Vec::new(),
                     cx,
                 );
             });

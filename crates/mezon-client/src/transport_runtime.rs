@@ -17,6 +17,9 @@ use tokio::runtime::Runtime;
 static TRANSPORT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static HTTP_CLIENT: OnceLock<Arc<ReqwestClient>> = OnceLock::new();
 
+/// A probe must never hold a slot the way a transfer does; it is a liveness
+/// check, not a download.
+const OBJECT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const HTTP_TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 fn shared_http_client() -> &'static Arc<ReqwestClient> {
@@ -63,10 +66,6 @@ fn parse_optional_id(value: &str, field: &str) -> Result<i64> {
     value
         .parse::<i64>()
         .map_err(|e| anyhow::anyhow!("invalid {field}: {e}"))
-}
-
-pub async fn put_bytes_to_url(url: &str, data: Vec<u8>) -> Result<()> {
-    put_bytes_to_content_type(url, data, "application/octet-stream").await
 }
 
 pub async fn put_bytes_to_content_type(url: &str, data: Vec<u8>, content_type: &str) -> Result<()> {
@@ -147,6 +146,44 @@ pub async fn fetch_bytes(url: &str) -> Result<(Vec<u8>, Option<String>)> {
         })
         .await
         .map_err(|e| anyhow::anyhow!("fetch task failed: {e}"))?
+}
+
+/// Sleep on the transport runtime. Callers here are futures driven by that
+/// runtime, so they cannot reach for a GPUI timer.
+pub async fn sleep(duration: std::time::Duration) {
+    let _ = runtime()
+        .spawn(async move { tokio::time::sleep(duration).await })
+        .await;
+}
+
+/// HEAD the object and report whether it is already readable.
+///
+/// The presign_finish patch is a single realtime event: lose it — the sender's
+/// socket hiccuped, or the receiver was mid-reconnect — and the attachment sits
+/// in its loading state until the 10-minute expiry sweeps it, even though the
+/// bytes have been on the CDN the whole time. The object itself is the only
+/// authority on whether it can be rendered, so probe that instead of waiting.
+///
+/// The caller passes a cache-busting URL: a not-found answer is then cached
+/// under a key nothing else uses, so an early probe can never poison the clean
+/// URL the message renders with (imgproxy is never involved — this goes to the
+/// origin).
+pub async fn object_exists(url: &str) -> bool {
+    let url = url.to_string();
+    let task = runtime().spawn(async move {
+        let Ok(request) = http::Request::builder()
+            .method(http::Method::HEAD)
+            .uri(&url)
+            .body(AsyncBody::empty())
+        else {
+            return false;
+        };
+        match tokio::time::timeout(OBJECT_PROBE_TIMEOUT, http_client().send(request)).await {
+            Ok(Ok(response)) => response.status().is_success(),
+            _ => false,
+        }
+    });
+    task.await.unwrap_or(false)
 }
 
 const NOTIFICATION_ICON_MAX_PX: u32 = 64;
@@ -1008,7 +1045,7 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    pub async fn write_voice_interactive(
+    pub async fn write_voice_interactive_event(
         &self,
         clan_id: i64,
         voice_channel_id: i64,
@@ -1016,12 +1053,12 @@ impl TransportClient {
         receiver_id: i64,
         event_type: i32,
         params: String,
-    ) -> Result<()> {
+    ) -> Result<Option<mezon_proto::realtime::VoiceInteractiveEvent>> {
         let transport = self.inner.clone();
         runtime()
             .spawn(async move {
                 transport
-                    .write_voice_interactive(
+                    .write_voice_interactive_event(
                         clan_id,
                         voice_channel_id,
                         sender_id,
@@ -1358,6 +1395,29 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn list_onboarding_step(
+        &self,
+        clan_id: i64,
+    ) -> Result<mezon_proto::api::ListOnboardingStepResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.list_onboarding_step(clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_onboarding_step(&self, clan_id: i64, onboarding_step: i32) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .update_onboarding_step(clan_id, onboarding_step)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     /// Create a new clan.
     pub async fn create_clan_desc(
         &self,
@@ -1393,6 +1453,14 @@ impl TransportClient {
         let transport = self.inner.clone();
         runtime()
             .spawn(async move { transport.delete_clan_desc(clan_desc_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn transfer_ownership(&self, clan_id: i64, new_owner_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.transfer_ownership(clan_id, new_owner_id).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
@@ -3111,6 +3179,7 @@ impl TransportClient {
         avatar_url: Option<&str>,
         about_me: Option<&str>,
         logo: Option<&str>,
+        dob_seconds: Option<u32>,
     ) -> Result<()> {
         tracing::debug!("TransportClient::update_account() called");
 
@@ -3128,6 +3197,7 @@ impl TransportClient {
                         avatar_url.as_deref(),
                         about_me.as_deref(),
                         logo.as_deref(),
+                        dob_seconds,
                     )
                     .await
             })
@@ -3308,6 +3378,15 @@ impl TransportClient {
             })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn is_follower(&self, follow_id: i64) -> Result<bool> {
+        let transport = self.inner.clone();
+        let response = runtime()
+            .spawn(async move { transport.is_follower(follow_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))??;
+        Ok(response.is_follower)
     }
 
     pub async fn delete_account(&self) -> Result<()> {

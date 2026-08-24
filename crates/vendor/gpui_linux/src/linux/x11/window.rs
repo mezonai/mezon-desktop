@@ -290,6 +290,7 @@ pub struct X11WindowState {
     pub handle: AnyWindowHandle,
     last_insets: [u32; 4],
     accesskit_adapter: Option<accesskit_unix::Adapter>,
+    ime_root_origin: Option<(i32, i32)>,
 }
 
 impl X11WindowState {
@@ -451,9 +452,7 @@ impl X11WindowState {
             None => {
                 let software = gpui_wgpu::gpu_is_software(&gpu_context);
                 if software {
-                    eprintln!(
-                        "[x11] software-only rendering detected; using the opaque visual"
-                    );
+                    eprintln!("[x11] software-only rendering detected; using the opaque visual");
                 }
                 software
             }
@@ -839,6 +838,7 @@ impl X11WindowState {
                 accesskit_adapter: None,
                 counter_id: sync_request_counter,
                 last_sync_counter: None,
+                ime_root_origin: None,
             })
         });
 
@@ -1213,14 +1213,18 @@ impl X11WindowStatePtr {
         }
     }
 
-    pub fn handle_ime_preedit(&self, text: String) {
+    pub fn handle_ime_preedit(
+        &self,
+        text: String,
+        new_selected_range: Option<std::ops::Range<usize>>,
+    ) {
         if self.is_blocked() {
             return;
         }
         let mut state = self.state.borrow_mut();
         if let Some(mut input_handler) = state.input_handler.take() {
             drop(state);
-            input_handler.replace_and_mark_text_in_range(None, &text, None);
+            input_handler.replace_and_mark_text_in_range(None, &text, new_selected_range);
             let mut state = self.state.borrow_mut();
             state.input_handler = Some(input_handler);
             drop(state);
@@ -1253,6 +1257,46 @@ impl X11WindowStatePtr {
             }
             let mut state = self.state.borrow_mut();
             state.input_handler = Some(input_handler);
+            drop(state);
+            self.refresh(RequestFrameOptions::default());
+        }
+    }
+
+    pub fn has_text_selection(&self) -> bool {
+        let mut state = self.state.borrow_mut();
+        let Some(mut input_handler) = state.input_handler.take() else {
+            return false;
+        };
+        drop(state);
+        let selected = input_handler.selected_text_range(true);
+        self.state.borrow_mut().input_handler = Some(input_handler);
+        selected.is_some_and(|selection| selection.range.start != selection.range.end)
+    }
+
+    pub fn get_ime_surrounding(&self) -> Option<gpui::ImeSurroundingText> {
+        let mut state = self.state.borrow_mut();
+        if let Some(mut input_handler) = state.input_handler.take() {
+            drop(state);
+            let surrounding = input_handler.surrounding_text();
+            self.state.borrow_mut().input_handler = Some(input_handler);
+            surrounding
+        } else {
+            None
+        }
+    }
+
+    pub fn handle_ime_delete_surrounding(&self, before: usize, after: usize) {
+        if self.is_blocked() {
+            return;
+        }
+        let mut state = self.state.borrow_mut();
+        if let Some(mut input_handler) = state.input_handler.take() {
+            drop(state);
+            input_handler.delete_surrounding_text(before, after);
+            let mut state = self.state.borrow_mut();
+            state.input_handler = Some(input_handler);
+            drop(state);
+            self.refresh(RequestFrameOptions::default());
         }
     }
 
@@ -1267,6 +1311,60 @@ impl X11WindowStatePtr {
             return bounds.map(|b| b.scale(scale_factor));
         }
         None
+    }
+
+    pub fn ime_cursor_root_rect(&self) -> Option<(i32, i32, i32, i32)> {
+        let area = self.get_ime_area()?;
+        self.translate_scaled_origin_to_root(
+            area.origin.x.0,
+            area.origin.y.0,
+            area.size.width.0,
+            area.size.height.0,
+        )
+    }
+
+    pub fn ime_cursor_root_rect_from_bounds(
+        &self,
+        bounds: Bounds<Pixels>,
+    ) -> Option<(i32, i32, i32, i32)> {
+        let scale = self.state.borrow().scale_factor;
+        self.translate_scaled_origin_to_root(
+            f32::from(bounds.origin.x) * scale,
+            f32::from(bounds.origin.y) * scale,
+            f32::from(bounds.size.width) * scale,
+            f32::from(bounds.size.height) * scale,
+        )
+    }
+
+    fn window_origin_in_root(&self) -> Option<(i32, i32)> {
+        if let Some(origin) = self.state.borrow().ime_root_origin {
+            return Some(origin);
+        }
+        let root = self.state.borrow().x_root_window;
+        let reply = get_reply(
+            || "X11 TranslateCoordinates for IME cursor failed.",
+            self.xcb.translate_coordinates(self.x_window, root, 0, 0),
+        )
+        .ok()?;
+        let origin = (i32::from(reply.dst_x), i32::from(reply.dst_y));
+        self.state.borrow_mut().ime_root_origin = Some(origin);
+        Some(origin)
+    }
+
+    fn translate_scaled_origin_to_root(
+        &self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) -> Option<(i32, i32, i32, i32)> {
+        let (ox, oy) = self.window_origin_in_root()?;
+        Some((
+            ox + x.round() as i32,
+            oy + y.round() as i32,
+            width.round().max(1.0) as i32,
+            height.round().max(1.0) as i32,
+        ))
     }
 
     pub fn set_bounds(&self, bounds: Bounds<i32>) -> anyhow::Result<()> {
@@ -1284,6 +1382,7 @@ impl X11WindowStatePtr {
             } else {
                 state.bounds = bounds;
             }
+            state.ime_root_origin = None;
 
             let gpu_size = query_render_extent(&self.xcb, self.x_window)?;
             state.renderer.update_drawable_size(gpu_size);

@@ -31,6 +31,7 @@ pub enum RealtimeKind {
     CategoryEvent,
     ClanUpdated,
     ClanDeleted,
+    TransferOwnership,
     ClanEmoji,
     AddClanUser,
     ClanEventCreated,
@@ -66,7 +67,16 @@ pub enum RealtimeKind {
     UnblockFriend,
     TokenSent,
     RoleEvent,
+    PermissionSet,
+    PermissionChanged,
+    StickerCreate,
+    StickerUpdate,
+    StickerDelete,
+    CanvasEvent,
+    ListActivity,
     WebrtcSignaling,
+    IncomingCallPush,
+    Webhook,
 }
 
 impl RealtimeKind {
@@ -85,6 +95,7 @@ impl RealtimeKind {
             RealtimeEvent::ChannelDeleted(_) => Self::ChannelDeleted,
             RealtimeEvent::CategoryEvent(_) => Self::CategoryEvent,
             RealtimeEvent::ClanUpdated(_) => Self::ClanUpdated,
+            RealtimeEvent::TransferOwnership(_) => Self::TransferOwnership,
             RealtimeEvent::ClanDeleted(_) => Self::ClanDeleted,
             RealtimeEvent::ClanEmoji(_) => Self::ClanEmoji,
             RealtimeEvent::AddClanUser(_) => Self::AddClanUser,
@@ -120,8 +131,31 @@ impl RealtimeKind {
             RealtimeEvent::BlockFriend(_) => Self::BlockFriend,
             RealtimeEvent::UnblockFriend(_) => Self::UnblockFriend,
             RealtimeEvent::TokenSent(_) => Self::TokenSent,
+            RealtimeEvent::Webhook(_) => Self::Webhook,
             RealtimeEvent::Unhandled(realtime::envelope::Message::RoleEvent(_)) => Self::RoleEvent,
+            RealtimeEvent::Unhandled(realtime::envelope::Message::PermissionSetEvent(_)) => {
+                Self::PermissionSet
+            }
+            RealtimeEvent::Unhandled(realtime::envelope::Message::PermissionChangedEvent(_)) => {
+                Self::PermissionChanged
+            }
+            RealtimeEvent::Unhandled(realtime::envelope::Message::StickerCreateEvent(_)) => {
+                Self::StickerCreate
+            }
+            RealtimeEvent::Unhandled(realtime::envelope::Message::StickerUpdateEvent(_)) => {
+                Self::StickerUpdate
+            }
+            RealtimeEvent::Unhandled(realtime::envelope::Message::StickerDeleteEvent(_)) => {
+                Self::StickerDelete
+            }
+            RealtimeEvent::Unhandled(realtime::envelope::Message::CanvasEvent(_)) => {
+                Self::CanvasEvent
+            }
+            RealtimeEvent::Unhandled(realtime::envelope::Message::ListActivity(_)) => {
+                Self::ListActivity
+            }
             RealtimeEvent::WebrtcSignaling(_) => Self::WebrtcSignaling,
+            RealtimeEvent::IncomingCallPush(_) => Self::IncomingCallPush,
             _ => return None,
         })
     }
@@ -264,9 +298,69 @@ mod tests {
             Some(RealtimeKind::ClanUpdated)
         );
         assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::TransferOwnership(
+                realtime::TransferOwnershipEvent::default()
+            )),
+            Some(RealtimeKind::TransferOwnership)
+        );
+        assert_eq!(
             RealtimeKind::of(&RealtimeEvent::SessionRefreshed(api::Session::default())),
             Some(RealtimeKind::SessionRefreshed)
         );
+    }
+
+    #[test]
+    fn kind_of_maps_every_envelope_only_kind() {
+        use realtime::envelope::Message;
+        let cases: Vec<(Message, RealtimeKind)> = vec![
+            (
+                Message::PermissionSetEvent(realtime::PermissionSetEvent::default()),
+                RealtimeKind::PermissionSet,
+            ),
+            (
+                Message::PermissionChangedEvent(realtime::PermissionChangedEvent::default()),
+                RealtimeKind::PermissionChanged,
+            ),
+            (
+                Message::StickerCreateEvent(realtime::StickerCreateEvent::default()),
+                RealtimeKind::StickerCreate,
+            ),
+            (
+                Message::StickerUpdateEvent(realtime::StickerUpdateEvent::default()),
+                RealtimeKind::StickerUpdate,
+            ),
+            (
+                Message::StickerDeleteEvent(realtime::StickerDeleteEvent::default()),
+                RealtimeKind::StickerDelete,
+            ),
+            (
+                Message::CanvasEvent(realtime::ChannelCanvas::default()),
+                RealtimeKind::CanvasEvent,
+            ),
+            (
+                Message::ListActivity(realtime::ListActivity::default()),
+                RealtimeKind::ListActivity,
+            ),
+            (
+                Message::RoleEvent(realtime::RoleEvent::default()),
+                RealtimeKind::RoleEvent,
+            ),
+        ];
+        for (message, expected) in cases {
+            let event = RealtimeEvent::Unhandled(message);
+            assert_eq!(
+                RealtimeKind::of(&event),
+                Some(expected),
+                "{expected:?} is no longer routed; the store subscribed to it would go deaf"
+            );
+        }
+    }
+
+    #[test]
+    fn an_envelope_kind_no_store_wants_is_still_skipped() {
+        let event =
+            RealtimeEvent::Unhandled(realtime::envelope::Message::Ping(realtime::Ping::default()));
+        assert_eq!(RealtimeKind::of(&event), None);
     }
 
     #[test]
@@ -322,6 +416,14 @@ mod tests {
         assert_eq!(
             RealtimeKind::of(&RealtimeEvent::TokenSent(api::TokenSentEvent::default())),
             Some(RealtimeKind::TokenSent)
+        );
+    }
+
+    #[test]
+    fn kind_of_maps_webhook() {
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::Webhook(api::Webhook::default())),
+            Some(RealtimeKind::Webhook)
         );
     }
 

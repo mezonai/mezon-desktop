@@ -1542,6 +1542,47 @@ fn render_banner_and_events(
     let route = crate::router::Router::global(cx).read(cx).route();
     let members_active = matches!(route, crate::router::Route::ClanMembers { .. });
     let channels_active = matches!(route, crate::router::Route::ClanChannels { .. });
+    let guide_active = matches!(route, crate::router::Route::ClanGuide { .. });
+    let clan_has_onboarding = members_clan_id.is_some_and(|clan_id| {
+        ClanList::global(cx)
+            .read(cx)
+            .clan(clan_id)
+            .is_some_and(|clan| clan.is_onboarding)
+    });
+    let guide_row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .w_full()
+        .px_2()
+        .h(px(34.))
+        .gap_2()
+        .rounded(px(4.))
+        .cursor_pointer()
+        .when(guide_active, |element| element.bg(theme.bg_hover))
+        .hover(|style| style.bg(theme.bg_hover))
+        .text_color(if guide_active {
+            theme.text_primary
+        } else {
+            theme.text_secondary
+        })
+        .child(
+            gpui::img(IconName::GuideIcon.path())
+                .size(px(20.))
+                .flex_none(),
+        )
+        .child(
+            div()
+                .text_base()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(mezon_i18n::t(locale, "channelList.navigation.clanGuide")),
+        )
+        .id("clan-guide-nav")
+        .on_click(move |_, _, cx| {
+            if let Some(clan_id) = members_clan_id {
+                crate::router::navigate(cx, crate::router::Route::ClanGuide { clan_id });
+            }
+        });
     let members_row = nav_row(IconName::MemberList, "Members", theme, members_active)
         .id("clan-members-nav")
         .on_click(move |_, _, cx| {
@@ -1616,6 +1657,7 @@ fn render_banner_and_events(
         .w_full()
         .p_2()
         .gap_1()
+        .when(clan_has_onboarding, |element| element.child(guide_row))
         .child(events_row)
         .child(members_row)
         .when(can_view_channels, |element| element.child(channels_row));

@@ -36,18 +36,6 @@ const TRACK_BG: Rgba = Rgba {
     b: 1.0,
     a: 0.3,
 };
-const OVERLAY_BG: Rgba = Rgba {
-    r: 0.0,
-    g: 0.0,
-    b: 0.0,
-    a: 0.3,
-};
-const PLAY_DISC_BG: Rgba = Rgba {
-    r: 0.0,
-    g: 0.0,
-    b: 0.0,
-    a: 0.5,
-};
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum VideoFullscreenMode {
@@ -72,6 +60,9 @@ pub struct VideoActivation {
     pub fullscreen_mode: VideoFullscreenMode,
     pub layout: VideoLayout,
     pub decode_max_size: Option<(u32, u32)>,
+    /// Locale for the "cannot play" card — the view has no settings entity of
+    /// its own, so the caller hands its own locale down.
+    pub locale: SharedString,
 }
 
 #[derive(Default)]
@@ -105,6 +96,7 @@ pub struct VideoPlayerView {
     url: SharedString,
     filename: SharedString,
     poster: SharedString,
+    locale: SharedString,
     width: f32,
     height: f32,
     player: Option<Rc<VideoPlayer>>,
@@ -126,6 +118,7 @@ impl VideoPlayerView {
             fullscreen_mode,
             layout,
             decode_max_size,
+            locale,
         } = activation;
         let player = VideoPlayer::open(url.as_ref(), decode_max_size)
             .ok()
@@ -146,6 +139,7 @@ impl VideoPlayerView {
             url,
             filename,
             poster,
+            locale,
             width,
             height,
             player,
@@ -159,10 +153,14 @@ impl VideoPlayerView {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn open_theater(
         player: Rc<VideoPlayer>,
         shared: Shared,
+        url: SharedString,
+        filename: SharedString,
         poster: SharedString,
+        locale: SharedString,
         width: f32,
         height: f32,
         window: &mut Window,
@@ -173,9 +171,14 @@ impl VideoPlayerView {
             fullscreen_mode: VideoFullscreenMode::ShellModal,
             layout: VideoLayout::Fixed,
             focus_handle: cx.focus_handle(),
-            url: SharedString::default(),
-            filename: SharedString::default(),
+            // The theater plays a player that is already open, so it never needed
+            // the source — until decoding fails mid-playback and the error card
+            // offers Download and Open externally, which have nothing to act on
+            // without it.
+            url,
+            filename,
             poster,
+            locale,
             width,
             height,
             player: Some(player),
@@ -256,10 +259,12 @@ impl VideoPlayerView {
             fullscreen_mode,
             layout,
             decode_max_size,
+            locale,
         } = activation;
         self.url = url;
         self.filename = filename;
         self.poster = poster;
+        self.locale = locale;
         self.width = width;
         self.height = height;
         self.fullscreen_mode = fullscreen_mode;
@@ -384,7 +389,10 @@ impl VideoPlayerView {
                     Self::open_theater(
                         player,
                         self.shared.clone(),
+                        self.url.clone(),
+                        self.filename.clone(),
                         self.poster.clone(),
+                        self.locale.clone(),
                         self.width,
                         self.height,
                         window,
@@ -623,6 +631,80 @@ impl VideoPlayerView {
             })
     }
 
+    /// Shown when the platform player cannot open the file at all. Without it
+    /// the failed state renders exactly like the untouched poster — same play
+    /// circle, same overlay — so a video the demuxer rejects just looks frozen
+    /// and clicking it appears to do nothing.
+    fn unplayable_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (title_color, body_color, button_bg) = {
+            let theme = cx.theme();
+            (theme.text_primary, theme.text_secondary, theme.bg_floating)
+        };
+        let locale = self.locale.as_ref();
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .p_4()
+            .bg(SCRIM)
+            .child(
+                Icon::new(IconName::TriangleAlert)
+                    .size(px(22.))
+                    .text_color(body_color),
+            )
+            .child(
+                div()
+                    .text_size(px(14.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(title_color)
+                    .child(mezon_i18n::t(locale, "media.video.error.title")),
+            )
+            .child(
+                div()
+                    .max_w(px(240.))
+                    .text_size(px(12.))
+                    .text_color(body_color)
+                    .child(mezon_i18n::t(
+                        locale,
+                        "media.video.error.formatNotSupported",
+                    )),
+            )
+            .child(
+                h_flex()
+                    .id("video-unplayable-download")
+                    .gap_1p5()
+                    .px_3()
+                    .py_1p5()
+                    .rounded_md()
+                    .bg(button_bg)
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.85))
+                    .on_click(cx.listener(|view, _, _window, cx| {
+                        cx.stop_propagation();
+                        crate::util::download::save_with_progress_toast(
+                            view.url.clone(),
+                            view.filename.clone(),
+                            cx,
+                        );
+                    }))
+                    .child(
+                        Icon::new(IconName::Download)
+                            .size(px(14.))
+                            .text_color(title_color),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(title_color)
+                            .child(mezon_i18n::t(locale, "media.video.error.downloadButton")),
+                    ),
+            )
+    }
+
     fn download_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (bg, icon_color) = {
             let theme = cx.theme();
@@ -775,7 +857,7 @@ impl Render for VideoPlayerView {
                 .when(!self.poster.is_empty(), |d| {
                     d.child(img(self.poster.clone()).size_full().object_fit(poster_fit))
                 })
-                .child(play_circle())
+                .child(self.unplayable_card(cx))
                 .on_click(cx.listener(|view, _, _window, cx| view.open_external(cx)))
                 .into_any_element();
         }
@@ -828,30 +910,6 @@ fn control_button(
         .hover(|s| s.bg(CONTROL_TINT))
         .on_click(on_click)
         .child(Icon::new(icon).size(px(16.)).text_color(gpui::white()))
-}
-
-fn play_circle() -> impl IntoElement {
-    div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(OVERLAY_BG)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(48.))
-                .rounded_full()
-                .bg(PLAY_DISC_BG)
-                .child(
-                    Icon::new(IconName::PlayButton)
-                        .size(px(20.))
-                        .text_color(gpui::white()),
-                ),
-        )
 }
 
 fn should_replay_from_start(playing: bool, current_time: f64, duration: f64) -> bool {

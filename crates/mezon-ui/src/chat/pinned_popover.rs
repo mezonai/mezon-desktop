@@ -18,8 +18,8 @@ use crate::chat::message::parts::{
     effective_clan_id, resolve_pin_avatar_url, resolve_pin_sender_label_with_message,
 };
 use crate::chat::message::{
-    ConfirmUnpinMessageModal, heading_line_height, heading_size, pin_link_element,
-    render_ogp_preview, render_pin_rich_layout_element, resolve_message_link_url,
+    ConfirmUnpinMessageModal, code_block_copy_overlay, heading_line_height, heading_size,
+    pin_link_element, render_ogp_preview, render_pin_rich_layout_element, resolve_message_link_url,
     text_wrap_children,
 };
 use crate::components::primitives::{
@@ -654,7 +654,7 @@ fn render_pin_text_body(
     theme: &Theme,
 ) -> gpui::AnyElement {
     if !text_spans.is_empty() {
-        return render_pin_spans(text_spans, theme);
+        return render_pin_spans(text_spans, &pin.message_id, theme);
     }
     if let Some(layout) = pin.rich_layout.as_ref()
         && !layout.text.is_empty()
@@ -841,7 +841,7 @@ fn pin_plain_line(text: &str, color: gpui::Rgba, link_key: &mut usize) -> gpui::
         .into_any_element()
 }
 
-fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
+fn render_pin_spans(spans: &[MessageSpan], message_id: &str, theme: &Theme) -> gpui::AnyElement {
     let link_color = theme.tokens.mention_color;
     let mention_bg = theme.tokens.mention_primary;
     let mention_color = theme.tokens.mention_color;
@@ -851,6 +851,7 @@ fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
     let mut row = pin_inline_row();
     let mut has_inline = false;
     let mut link_key = 0usize;
+    let mut code_key = 0usize;
 
     for span in spans {
         match span {
@@ -967,7 +968,11 @@ fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
                         .child(text.clone()),
                 );
             }
-            MessageSpan::CodeBlock { text, .. } => {
+            MessageSpan::CodeBlock {
+                text,
+                fenced_source,
+                ..
+            } => {
                 if has_inline {
                     col = col.child(row);
                     row = pin_inline_row();
@@ -990,6 +995,8 @@ fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
                             .child(line.to_string()),
                     );
                 }
+                let copy_id = SharedString::from(format!("pin-code-copy-{message_id}-{code_key}"));
+                code_key += 1;
                 col = col.child(
                     div()
                         .w_full()
@@ -1002,7 +1009,12 @@ fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
                         .border_1()
                         .border_color(theme.tokens.border_primary)
                         .bg(code_bg)
-                        .child(code_col),
+                        .child(code_col)
+                        .child(code_block_copy_overlay(
+                            copy_id,
+                            fenced_source.clone(),
+                            theme,
+                        )),
                 );
             }
         }

@@ -110,8 +110,9 @@ mod tests {
         UserPresence::Invisible,
     ];
 
-    const LOCALES: [&str; 11] = [
-        "en", "vi", "ru", "es", "tt", "de", "it", "pt", "jpn", "kr", "swe",
+    const LOCALES: [&str; 16] = [
+        "en", "vi", "ru", "ukr", "es", "tt", "de", "it", "pt", "jpn", "pl", "kr", "swe", "blr",
+        "fr", "nl",
     ];
 
     fn themes() -> Vec<Theme> {

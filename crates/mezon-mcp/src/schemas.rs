@@ -340,6 +340,13 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["message_id"],
         )),
+        "open_pdf_viewer" => Arc::new(object(
+            json!({
+                "message_id": id("Message carrying the pdf attachment."),
+                "attachment_index": integer("Zero-based attachment index. Default 0.", Some(0)),
+            }),
+            &["message_id"],
+        )),
         "scroll_wheel" => Arc::new(object(
             json!({
                 "delta_y": { "type": "number", "description": "Pixels per tick. Negative scrolls toward older messages. Default -120.", "default": -120 },
@@ -483,6 +490,16 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["kind", "url"],
         )),
+        "topic_drop_paths" => Arc::new(object(
+            json!({
+                "paths": json!({
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Local file paths to drop on the topic composer."
+                }),
+            }),
+            &["paths"],
+        )),
         "composer_drop_paths" => Arc::new(object(
             json!({
                 "paths": json!({
@@ -542,8 +559,15 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
         "list_loaded_messages" => Arc::new(object(
             json!({
                 "limit": integer("Max rows from each end of the buffer. Default 50.", Some(50)),
+                "topic": bool("Read the open topic panel's buffer instead of the channel's. Default false."),
             }),
             &[],
+        )),
+        "reply_begin" => Arc::new(object(
+            json!({
+                "message_id": id("Message to reply to; must be in the open channel's loaded history."),
+            }),
+            &["message_id"],
         )),
         "jump_to_message" => Arc::new(object(
             json!({

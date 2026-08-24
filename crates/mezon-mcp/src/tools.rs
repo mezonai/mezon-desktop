@@ -146,6 +146,19 @@ impl McpBackend {
                 })
                 .await
             }
+            "open_pdf_viewer" => {
+                let message_id = parse_i64_field(&arguments, "message_id")?;
+                let attachment_index = arguments
+                    .get("attachment_index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                self.send_ui_result(|reply| McpCommand::OpenPdfViewer {
+                    message_id,
+                    attachment_index,
+                    reply,
+                })
+                .await
+            }
             "close_panel" => {
                 self.send_ui_result(|reply| McpCommand::SetPanel { kind: None, reply })
                     .await
@@ -224,7 +237,21 @@ impl McpBackend {
                     .and_then(Value::as_u64)
                     .unwrap_or(50)
                     .clamp(1, 500) as usize;
-                self.send_ui_result(|reply| McpCommand::ListLoadedMessages { limit, reply })
+                let topic = arguments
+                    .get("topic")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                self.send_ui_result(|reply| McpCommand::ListLoadedMessages {
+                    limit,
+                    topic,
+                    reply,
+                })
+                .await
+            }
+            "reply_begin" => {
+                self.require_write_mode("reply_begin")?;
+                let message_id = parse_i64_field(&arguments, "message_id")?;
+                self.send_ui_result(|reply| McpCommand::ReplyBegin { message_id, reply })
                     .await
             }
             "jump_to_message" => {
@@ -518,6 +545,25 @@ impl McpBackend {
                     reply,
                 })
                 .await
+            }
+            "topic_drop_paths" => {
+                self.require_write_mode("topic_drop_paths")?;
+                let paths: Vec<String> = arguments
+                    .get("paths")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if paths.is_empty() {
+                    anyhow::bail!("topic_drop_paths requires a non-empty paths array");
+                }
+                self.send_ui_result(|reply| McpCommand::TopicDropPaths { paths, reply })
+                    .await
             }
             "composer_drop_paths" => {
                 self.require_write_mode("composer_drop_paths")?;
@@ -2004,12 +2050,28 @@ fn parse_search_content(raw: &str) -> String {
 struct MessageDetail {
     id: i64,
     content: String,
+    /// The content JSON as the server stored it. This is where `presign_finish`
+    /// lives, and comparing its keys against the attachment urls below is the
+    /// only way to see why a receiver still treats an attachment as pending.
+    content_raw: String,
     sender_id: i64,
     sender_name: String,
     create_time: i64,
     has_attachments: bool,
+    attachments: Vec<AttachmentSummary>,
     embeds: Vec<EmbedSummary>,
     components: Vec<ComponentRowSummary>,
+}
+
+#[derive(Serialize)]
+struct AttachmentSummary {
+    filename: String,
+    filetype: String,
+    size: i32,
+    url: String,
+    thumbnail: String,
+    width: i32,
+    height: i32,
 }
 
 #[derive(Serialize)]
@@ -2070,10 +2132,24 @@ fn message_detail(message: &ApiMessage) -> MessageDetail {
     MessageDetail {
         id: message.message_id,
         content: message.content.clone(),
+        content_raw: message.content_raw.clone(),
         sender_id: message.sender_id,
         sender_name: message.sender_name.clone(),
         create_time: message.create_time,
         has_attachments: !message.attachments.is_empty(),
+        attachments: message
+            .attachments
+            .iter()
+            .map(|a| AttachmentSummary {
+                filename: a.filename.clone(),
+                filetype: a.filetype.clone(),
+                size: a.size,
+                url: a.url.clone(),
+                thumbnail: a.thumbnail.clone(),
+                width: a.width,
+                height: a.height,
+            })
+            .collect(),
         embeds: message
             .content_tokens
             .embed

@@ -16,6 +16,7 @@ PKGS=(
     -p mezon-store
     -p mezon-client
     -p mezon-native
+    -p mezon-pdf
     -p mezon-proto
     -p mezon-i18n
     -p mezon-theme

@@ -2,20 +2,24 @@ use std::sync::Arc;
 
 use crate::app::shell::Shell;
 use crate::chat::clan_management_page::{management_page, section_toolbar};
+use crate::chat::friends_page::open_dm_with_user;
 use crate::chat::role_style::role_fallback_color;
 use crate::chat::user_profile_modal::UserProfileModal;
 use crate::chat::user_profile_popover::role_is_assignable;
-use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, InputState};
+use crate::components::primitives::{
+    Avatar, ContextMenu, Icon, IconName, Input, InputEvent, InputState, context_menu_at,
+};
 use crate::image_cache::shared_avatar_cache;
 use crate::theme::{ActiveTheme, Theme};
 use crate::util::text_utils::normalize_diacritics;
 use gpui::{
-    AnyElement, Context, Entity, FontWeight, Hsla, ListAlignment, ListOffset, ListState,
-    MouseButton, Render, SharedString, Subscription, Window, deferred, div, img, list, prelude::*,
-    px, size,
+    AnyElement, App, Context, Entity, FontWeight, Hsla, ListAlignment, ListOffset, ListState,
+    MouseButton, MouseDownEvent, Pixels, Point, Render, SharedString, Subscription, Window,
+    deferred, div, img, list, prelude::*, px, size,
 };
 use mezon_store::{
-    ClanId, ClanMembersStore, PermissionStore, Role, RoleId, RolesStore, Settings, UserId,
+    BadgeService, ClanEvent, ClanId, ClanList, ClanMembersStore, PermissionStore, Role, RoleId,
+    RolesStore, Settings, UserId,
 };
 
 const PAGE_SIZES: [usize; 3] = [10, 50, 100];
@@ -44,10 +48,12 @@ pub struct ClanMembersPage {
     rows_dirty: bool,
     list_state: ListState,
     role_picker_open: Option<UserId>,
+    member_menu_open: Option<MemberMenu>,
     can_manage_clan: bool,
     role_options: Vec<RoleOption>,
     role_options_dirty: bool,
     _permission_sub: Option<Subscription>,
+    _clan_sub: Subscription,
 }
 
 #[derive(Clone)]
@@ -55,6 +61,13 @@ struct RoleOption {
     id: RoleId,
     name: SharedString,
     color: gpui::Rgba,
+}
+
+#[derive(Clone)]
+struct MemberMenu {
+    user_id: UserId,
+    position: Point<Pixels>,
+    username: SharedString,
 }
 
 #[derive(Clone)]
@@ -97,6 +110,12 @@ impl ClanMembersPage {
         })
         .detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        let clan_sub = cx.subscribe(&ClanList::global(cx), |this, _, event, cx| {
+            if matches!(event, ClanEvent::OwnerChanged { .. }) {
+                this.role_options_dirty = true;
+                cx.notify();
+            }
+        });
         let permission_sub = PermissionStore::try_global(cx).map(|store| {
             cx.observe(&store, |this: &mut Self, _, cx| {
                 this.role_options_dirty = true;
@@ -120,10 +139,12 @@ impl ClanMembersPage {
                 .smooth_line_scroll()
                 .suppress_hover_while_scrolling(),
             role_picker_open: None,
+            member_menu_open: None,
             can_manage_clan: false,
             role_options: Vec::new(),
             role_options_dirty: true,
             _permission_sub: permission_sub,
+            _clan_sub: clan_sub,
         }
     }
 
@@ -136,6 +157,7 @@ impl ClanMembersPage {
         self.rows_dirty = true;
         self.role_options_dirty = true;
         self.role_picker_open = None;
+        self.member_menu_open = None;
         self.page_size_picker_open = false;
         ClanMembersStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
         RolesStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
@@ -542,21 +564,30 @@ impl ClanMembersPage {
             .id(format!("member-row-{}", row.id.get()))
             .cursor_pointer()
             .hover(|style| style.bg(theme.bg_hover))
-            .on_click(move |_, _window, cx| {
-                let avatar_image_cache = shared_avatar_cache(cx);
-                let modal = cx.new(|cx| {
-                    UserProfileModal::new(
-                        user_id,
-                        clan_id,
-                        settings.clone(),
-                        avatar_image_cache,
-                        cx,
-                    )
-                });
-                Shell::global(cx).update(cx, |shell, cx| {
-                    shell.show_fullscreen_modal(modal.into(), cx);
-                });
+            .on_click({
+                let settings = settings.clone();
+                move |_, _window, cx| {
+                    open_member_profile(user_id, clan_id, &settings, cx);
+                }
             })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    let username = this
+                        .cached_rows
+                        .iter()
+                        .find(|row| row.id == user_id)
+                        .map(|row| SharedString::from(row.username.clone()))
+                        .unwrap_or_default();
+                    this.role_picker_open = None;
+                    this.member_menu_open = Some(MemberMenu {
+                        user_id,
+                        position: event.position,
+                        username,
+                    });
+                    cx.notify();
+                }),
+            )
             .child(name_column(
                 div()
                     .flex()
@@ -923,6 +954,112 @@ impl ClanMembersPage {
         .into_any_element()
     }
 
+    fn close_member_menu(&mut self, cx: &mut Context<Self>) {
+        if self.member_menu_open.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn build_member_menu(
+        &self,
+        menu_state: &MemberMenu,
+        locale: &str,
+        cx: &Context<Self>,
+    ) -> ContextMenu {
+        let t = |key: &'static str| mezon_i18n::t(locale, key);
+        let user_id = menu_state.user_id;
+        let page = cx.entity().downgrade();
+        let close = {
+            let page = page.clone();
+            move |cx: &mut App| {
+                if let Some(page) = page.upgrade() {
+                    page.update(cx, |this, cx| this.close_member_menu(cx));
+                }
+            }
+        };
+        let clan_id = self.clan_id;
+        let settings = self.settings.clone();
+        let current_user_id =
+            BadgeService::try_global(cx).and_then(|b| b.read(cx).current_user_id(cx));
+        let is_self = current_user_id == Some(user_id);
+        let creator_id = ClanList::global(cx)
+            .read(cx)
+            .clan_by_id(clan_id)
+            .map(|clan| clan.creator_id);
+        let is_clan_owner = current_user_id.is_some() && creator_id == current_user_id;
+        let member_name = menu_state.username.clone();
+
+        let mut menu = ContextMenu::new().on_dismiss({
+            let close = close.clone();
+            move |_window: &mut Window, cx: &mut App| close(cx)
+        });
+        menu = menu.item(t("memberTable.profile"), {
+            let close = close.clone();
+            let settings = settings.clone();
+            move |_window: &mut Window, cx: &mut App| {
+                open_member_profile(user_id, clan_id, &settings, cx);
+                close(cx);
+            }
+        });
+        if !is_self {
+            menu = menu.item(t("memberTable.message"), {
+                let close = close.clone();
+                let locale = SharedString::from(locale.to_string());
+                move |_window: &mut Window, cx: &mut App| {
+                    let error: SharedString =
+                        mezon_i18n::t(&locale, "shareContact.card.messageError").into();
+                    open_dm_with_user(user_id, error, cx);
+                    close(cx);
+                }
+            });
+        }
+        if is_clan_owner && !is_self {
+            menu = menu.danger_item(t("memberTable.transferOwnership"), {
+                let close = close.clone();
+                let locale = SharedString::from(locale.to_string());
+                let member_name = member_name.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    close(cx);
+                    let locale = locale.clone();
+                    let member_name = member_name.clone();
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.confirm_transfer_ownership(
+                            clan_id,
+                            user_id,
+                            &member_name,
+                            &locale,
+                            window,
+                            cx,
+                        );
+                    });
+                }
+            });
+        }
+        if self.can_manage_clan && !is_self && creator_id != Some(user_id) {
+            menu = menu.danger_item(t("memberTable.removeMember"), {
+                let close = close.clone();
+                let locale = SharedString::from(locale.to_string());
+                let member_name = member_name.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    close(cx);
+                    let locale = locale.clone();
+                    let member_name = member_name.clone();
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.confirm_kick_member(
+                            clan_id,
+                            user_id,
+                            &member_name,
+                            &locale,
+                            window,
+                            cx,
+                        );
+                    });
+                }
+            });
+        }
+        menu
+    }
+
     fn scroll_to_top(&self) {
         self.list_state.scroll_to(ListOffset {
             item_ix: 0,
@@ -1017,8 +1154,32 @@ impl Render for ClanMembersPage {
             )
             .child(self.render_footer(total, pages, &locale, cx))
             .into_any_element();
-        management_page(tr(&locale, "common.members"), body, theme)
+        management_page(tr(&locale, "common.members"), body, theme).when_some(
+            self.member_menu_open.clone(),
+            |el, menu_state| {
+                let position = menu_state.position;
+                el.child(context_menu_at(
+                    position,
+                    self.build_member_menu(&menu_state, &locale, cx),
+                ))
+            },
+        )
     }
+}
+
+fn open_member_profile(
+    user_id: UserId,
+    clan_id: ClanId,
+    settings: &Entity<Settings>,
+    cx: &mut App,
+) {
+    let avatar_image_cache = shared_avatar_cache(cx);
+    let settings = settings.clone();
+    let modal =
+        cx.new(|cx| UserProfileModal::new(user_id, clan_id, settings, avatar_image_cache, cx));
+    Shell::global(cx).update(cx, |shell, cx| {
+        shell.show_fullscreen_modal(modal.into(), cx);
+    });
 }
 
 fn table_row(theme: &crate::theme::Theme, header: bool, fill_available_height: bool) -> gpui::Div {

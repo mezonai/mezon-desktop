@@ -23,7 +23,7 @@ use super::selection::{
 };
 use crate::app::shell::Shell;
 use crate::chat::user_profile_popover::{ClickableContainer, UserProfilePopover};
-use crate::components::primitives::{Icon, IconName};
+use crate::components::primitives::{CopyButton, Icon, IconName};
 use crate::router::{Route, navigate};
 use crate::theme::Theme;
 
@@ -757,7 +757,11 @@ fn render_selectable_segmented_spans(
                 );
                 base = end;
             }
-            MessageSpan::CodeBlock { text, .. } => {
+            MessageSpan::CodeBlock {
+                text,
+                fenced_source,
+                ..
+            } => {
                 let end = base + text.len();
                 let styled = selectable_segment(text, base, selected.as_ref());
                 segments.push(TextSegment::text(styled.layout().clone(), base..end));
@@ -774,7 +778,12 @@ fn render_selectable_segmented_spans(
                         .bg(ctx.theme.tokens.bg_markdown_code)
                         .text_size(px(14.))
                         .text_color(ctx.theme.tokens.text_theme_message)
-                        .child(styled),
+                        .child(styled)
+                        .child(code_block_copy_overlay(
+                            SharedString::from(format!("code-copy-{}-{base}", msg.row_anchor_id.0)),
+                            fenced_source.clone(),
+                            ctx.theme,
+                        )),
                 );
                 base = end;
             }
@@ -1097,6 +1106,18 @@ pub(crate) fn selectable_spans_text(spans: &[MessageSpan], locale: &str, cx: &Ap
         }
     }
     text
+}
+
+pub(crate) fn code_block_copy_overlay(
+    id: impl Into<gpui::ElementId>,
+    text: SharedString,
+    theme: &Theme,
+) -> gpui::Div {
+    let overlay = div().absolute().top(px(8.)).right(px(8.));
+    if text.is_empty() {
+        return overlay;
+    }
+    overlay.child(CopyButton::new(id, text, theme.tokens.text_theme_message))
 }
 
 fn append_selectable_section(text: &mut String, section: &str) {

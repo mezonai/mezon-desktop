@@ -18,6 +18,9 @@ env:
   NX_CHAT_APP_API_GW_PORT: ${{ secrets.NX_CHAT_APP_API_GW_PORT || '443' }}
   NX_CHAT_APP_TCP_PORT: ${{ secrets.NX_CHAT_APP_TCP_PORT || '' }}
   NX_CHAT_APP_STREAM_WS_URL: ${{ secrets.NX_CHAT_APP_STREAM_WS_URL || 'wss://stn.mezon.ai' }}
+  NX_CHAT_APP_QUIZ_URL: ${{ secrets.NX_CHAT_APP_QUIZ_URL || 'https://quiz.mezon.ai' }}
+  NX_CHAT_APP_BLACKBOARD_URL: ${{ secrets.NX_CHAT_APP_BLACKBOARD_URL || 'https://blackboard.mezon.ai' }}
+  NX_CHAT_APP_INTERACTIVE_URL: ${{ secrets.NX_CHAT_APP_INTERACTIVE_URL || 'https://interactive.mezon.ai' }}
   NX_CHAT_APP_MEET_WS_URL: ${{ secrets.NX_CHAT_APP_MEET_WS_URL || 'wss://meet.mezon.ai' }}
   NX_CHAT_APP_NOTIFICATION_WS_URL: ${{ secrets.NX_CHAT_APP_NOTIFICATION_WS_URL || 'wss://gotify.mezon.ai' }}
   NX_CHAT_APP_OAUTH2_AUTHORIZE_URL: https://oauth2.mezon.ai/oauth2/auth

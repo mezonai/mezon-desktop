@@ -210,6 +210,23 @@ impl PlatformStore {
             .or_else(|| self.open_url.clone())
     }
 
+    pub fn open_app_window(url: String, cx: &App) {
+        let Some(platform) = Self::try_global(cx) else {
+            tracing::warn!("app window launch skipped: platform store is unavailable");
+            return;
+        };
+        let Some(open) = platform.read(cx).app_window_opener() else {
+            tracing::warn!("app window launch skipped: no URL opener is registered");
+            return;
+        };
+        cx.background_spawn(async move {
+            if let Err(error) = open(&url) {
+                tracing::warn!("app window launch failed: {error:#}");
+            }
+        })
+        .detach();
+    }
+
     pub fn open_url_external(&self, url: &str) -> anyhow::Result<()> {
         match &self.open_url {
             Some(f) => f(url),

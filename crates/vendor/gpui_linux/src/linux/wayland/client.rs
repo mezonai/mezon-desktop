@@ -47,7 +47,7 @@ use wayland_protocols::wp::primary_selection::zv1::client::{
     zwp_primary_selection_source_v1,
 };
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
-    ContentHint, ContentPurpose,
+    ChangeCause, ContentHint, ContentPurpose,
 };
 use wayland_protocols::wp::text_input::zv3::client::{
     zwp_text_input_manager_v3, zwp_text_input_v3,
@@ -94,11 +94,10 @@ use crate::linux::{
 use gpui::{
     AnyWindowHandle, Bounds, Capslock, CursorStyle, DevicePixels, DisplayId, FileDropEvent,
     ForegroundExecutor, ImageFormat, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers,
-    ModifiersChangedEvent,
-    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
-    Pixels, PlatformDisplay, PlatformInput, PlatformKeyboardLayout, PlatformWindow, Point,
-    ScrollDelta, ScrollWheelEvent, SharedString, Size, TouchPhase, WindowButtonLayout,
-    WindowParams, point, profiler, px, size,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    MouseUpEvent, NavigationDirection, Pixels, PlatformDisplay, PlatformInput,
+    PlatformKeyboardLayout, PlatformWindow, Point, ScrollDelta, ScrollWheelEvent, SharedString,
+    Size, TouchPhase, WindowButtonLayout, WindowParams, point, profiler, px, size,
 };
 use gpui_wgpu::{CompositorGpuHint, GpuContext};
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
@@ -229,7 +228,11 @@ pub(crate) struct WaylandClientState {
     text_input: Option<zwp_text_input_v3::ZwpTextInputV3>,
     pre_edit_text: Option<String>,
     ime_pre_edit: Option<String>,
+    pending_preedit: Option<String>,
+    pending_commit: Option<String>,
+    pending_delete: Option<(u32, u32)>,
     composing: bool,
+    text_input_commit_count: u32,
     // Surface to Window mapping
     windows: HashMap<ObjectId, WaylandWindowStatePtr>,
     // Output to scale mapping
@@ -305,6 +308,36 @@ struct ActivationContext {
     surface_window: Option<WaylandWindowStatePtr>,
 }
 
+fn sync_text_input(
+    text_input: &zwp_text_input_v3::ZwpTextInputV3,
+    window: &WaylandWindowStatePtr,
+    cause: ChangeCause,
+) {
+    text_input.set_text_change_cause(cause);
+    if let Some(surrounding) = window.get_ime_surrounding() {
+        let cursor = surrounding.cursor.min(i32::MAX as usize) as i32;
+        let anchor = surrounding.anchor.min(i32::MAX as usize) as i32;
+        text_input.set_surrounding_text(surrounding.text, cursor, anchor);
+    }
+    if let Some(area) = window.get_ime_area() {
+        text_input.set_cursor_rectangle(
+            f32::from(area.origin.x) as i32,
+            f32::from(area.origin.y) as i32,
+            f32::from(area.size.width) as i32,
+            f32::from(area.size.height) as i32,
+        );
+    }
+}
+
+fn commit_text_input(
+    client: &Rc<RefCell<WaylandClientState>>,
+    text_input: &zwp_text_input_v3::ZwpTextInputV3,
+) {
+    text_input.commit();
+    let mut state = client.borrow_mut();
+    state.text_input_commit_count = state.text_input_commit_count.wrapping_add(1);
+}
+
 /// This struct is required to conform to Rust's orphan rules, so we can dispatch on the state but hand the
 /// window to GPUI.
 #[derive(Clone)]
@@ -375,20 +408,13 @@ impl WaylandClientStatePtr {
 
         text_input.enable();
         text_input.set_content_type(ContentHint::None, ContentPurpose::Normal);
-        if let Some(window) = state.keyboard_focused_window.clone() {
-            drop(state);
-            if let Some(area) = window.get_ime_area() {
-                text_input.set_cursor_rectangle(
-                    f32::from(area.origin.x) as i32,
-                    f32::from(area.origin.y) as i32,
-                    f32::from(area.size.width) as i32,
-                    f32::from(area.size.height) as i32,
-                );
-            }
-            state = client.borrow_mut();
+        let window = state.keyboard_focused_window.clone();
+        drop(state);
+        if let Some(window) = window.as_ref() {
+            sync_text_input(&text_input, window, ChangeCause::Other);
         }
-        text_input.commit();
-        state.text_input = Some(text_input);
+        commit_text_input(&client, &text_input);
+        client.borrow_mut().text_input = Some(text_input);
     }
 
     pub fn disable_ime(&self) {
@@ -396,9 +422,11 @@ impl WaylandClientStatePtr {
         let mut state = client.borrow_mut();
         state.ime_enabled = Some(false);
         state.composing = false;
-        if let Some(text_input) = &state.text_input {
+        let text_input = state.text_input.clone();
+        drop(state);
+        if let Some(text_input) = text_input {
             text_input.disable();
-            text_input.commit();
+            commit_text_input(&client, &text_input);
         }
     }
 
@@ -409,19 +437,34 @@ impl WaylandClientStatePtr {
 
     pub fn update_ime_position(&self, bounds: Bounds<Pixels>) {
         let client = self.get_client();
-        let state = client.borrow_mut();
-        if state.composing || state.text_input.is_none() || state.pre_edit_text.is_some() {
+        let state = client.borrow();
+        let Some(text_input) = state.text_input.clone() else {
             return;
-        }
+        };
+        let composing = state.composing || state.pre_edit_text.is_some();
+        let window = state.keyboard_focused_window.clone();
+        drop(state);
 
-        let text_input = state.text_input.as_ref().unwrap();
-        text_input.set_cursor_rectangle(
-            bounds.origin.x.as_f32() as i32,
-            bounds.origin.y.as_f32() as i32,
-            bounds.size.width.as_f32() as i32,
-            bounds.size.height.as_f32() as i32,
-        );
-        text_input.commit();
+        if composing {
+            text_input.set_cursor_rectangle(
+                bounds.origin.x.as_f32() as i32,
+                bounds.origin.y.as_f32() as i32,
+                bounds.size.width.as_f32() as i32,
+                bounds.size.height.as_f32() as i32,
+            );
+            commit_text_input(&client, &text_input);
+        } else if let Some(window) = window {
+            sync_text_input(&text_input, &window, ChangeCause::Other);
+            commit_text_input(&client, &text_input);
+        } else {
+            text_input.set_cursor_rectangle(
+                bounds.origin.x.as_f32() as i32,
+                bounds.origin.y.as_f32() as i32,
+                bounds.size.width.as_f32() as i32,
+                bounds.size.height.as_f32() as i32,
+            );
+            commit_text_input(&client, &text_input);
+        }
     }
 
     pub fn handle_keyboard_layout_change(&self) {
@@ -725,7 +768,11 @@ impl WaylandClient {
             text_input: None,
             pre_edit_text: None,
             ime_pre_edit: None,
+            pending_preedit: None,
+            pending_commit: None,
+            pending_delete: None,
             composing: false,
+            text_input_commit_count: 0,
             outputs: HashMap::default(),
             in_progress_outputs,
             wl_outputs,
@@ -1448,6 +1495,9 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
                 if let Some(text_input) = state.text_input.take() {
                     text_input.destroy();
                     state.ime_pre_edit = None;
+                    state.pending_preedit = None;
+                    state.pending_commit = None;
+                    state.pending_delete = None;
                     state.composing = false;
                 }
 
@@ -1747,16 +1797,49 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandClientStatePtr {
                 this.disable_ime();
             }
             zwp_text_input_v3::Event::CommitString { text } => {
-                state.composing = false;
+                state.pending_commit = text;
+            }
+            zwp_text_input_v3::Event::PreeditString { text, .. } => {
+                state.pending_preedit = text;
+            }
+            zwp_text_input_v3::Event::DeleteSurroundingText {
+                before_length,
+                after_length,
+            } => {
+                state.pending_delete = Some((before_length, after_length));
+            }
+            zwp_text_input_v3::Event::Done { serial } => {
+                let commit_count = state.text_input_commit_count;
                 let Some(window) = state.keyboard_focused_window.clone() else {
+                    state.pending_preedit = None;
+                    state.pending_commit = None;
+                    state.pending_delete = None;
                     return;
                 };
 
-                if let Some(commit_text) = text {
-                    drop(state);
-                    // IBus Intercepts keys like `a`, `b`, but those keys are needed for vim mode.
-                    // We should only send ASCII characters to Zed, otherwise a user could remap a letter like `か` or `相`.
-                    if commit_text.len() == 1 {
+                let had_preedit = state.ime_pre_edit.take().is_some() || state.composing;
+                let pending_preedit = state.pending_preedit.take();
+                let pending_commit = state.pending_commit.take();
+                let pending_delete = state.pending_delete.take();
+                drop(state);
+
+                if had_preedit {
+                    window.handle_ime(ImeInput::DeleteText);
+                }
+                if let Some((before, after)) = pending_delete {
+                    if before > 0 || after > 0 {
+                        window.handle_ime(ImeInput::DeleteSurrounding {
+                            before: before as usize,
+                            after: after as usize,
+                        });
+                    }
+                }
+                if let Some(commit_text) = pending_commit.filter(|text| !text.is_empty()) {
+                    let use_keydown = commit_text.len() == 1
+                        && pending_delete.is_none()
+                        && !had_preedit
+                        && pending_preedit.is_none();
+                    if use_keydown {
                         window.handle_input(PlatformInput::KeyDown(KeyDownEvent {
                             keystroke: Keystroke {
                                 modifiers: Modifiers::default(),
@@ -1770,36 +1853,19 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandClientStatePtr {
                         window.handle_ime(ImeInput::InsertText(commit_text));
                     }
                 }
-            }
-            zwp_text_input_v3::Event::PreeditString { text, .. } => {
-                state.composing = true;
-                state.ime_pre_edit = text;
-            }
-            zwp_text_input_v3::Event::Done { serial } => {
-                let last_serial = state.serial_tracker.get(SerialKind::InputMethod);
-                state.serial_tracker.update(SerialKind::InputMethod, serial);
-                let Some(window) = state.keyboard_focused_window.clone() else {
-                    return;
-                };
-
-                if let Some(text) = state.ime_pre_edit.take() {
+                if let Some(text) = pending_preedit.filter(|text| !text.is_empty()) {
+                    let mut state = client.borrow_mut();
+                    state.composing = true;
+                    state.ime_pre_edit = Some(text.clone());
                     drop(state);
                     window.handle_ime(ImeInput::SetMarkedText(text));
-                    if let Some(area) = window.get_ime_area() {
-                        text_input.set_cursor_rectangle(
-                            f32::from(area.origin.x) as i32,
-                            f32::from(area.origin.y) as i32,
-                            f32::from(area.size.width) as i32,
-                            f32::from(area.size.height) as i32,
-                        );
-                        if last_serial == serial {
-                            text_input.commit();
-                        }
-                    }
                 } else {
-                    state.composing = false;
-                    drop(state);
-                    window.handle_ime(ImeInput::DeleteText);
+                    client.borrow_mut().composing = false;
+                }
+
+                sync_text_input(text_input, &window, ChangeCause::InputMethod);
+                if serial == commit_count {
+                    commit_text_input(&client, text_input);
                 }
             }
             _ => {}
@@ -2444,6 +2510,9 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                     position: state.drag.position,
                 });
                 drop(state);
+                // mezon vendor edit: request activation with the drag serial
+                // before dispatching the drop (see request_dnd_activation).
+                drag_window.request_dnd_activation();
                 drag_window.handle_input(input);
             }
             _ => {}

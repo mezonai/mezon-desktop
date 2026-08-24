@@ -316,6 +316,48 @@ impl ChatArea {
         canvas_body: gpui::AnyElement,
         cx: &mut Context<crate::ChatLayout>,
     ) -> gpui::AnyElement {
+        self.render_panel_body(
+            locale,
+            channel_name,
+            channel_icon,
+            channel_id,
+            show_members_button,
+            show_member_panel,
+            show_inbox,
+            inbox_handle,
+            clan_id,
+            pin_handle,
+            canvas_handle,
+            show_search_bar,
+            search_expanded,
+            show_search_options,
+            search_input,
+            canvas_body,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_panel_body(
+        &mut self,
+        locale: &str,
+        channel_name: Option<&str>,
+        channel_icon: Option<ChannelIcon>,
+        channel_id: Option<ChannelId>,
+        show_members_button: bool,
+        show_member_panel: bool,
+        show_inbox: bool,
+        inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
+        clan_id: Option<String>,
+        pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
+        canvas_handle: Option<PopoverMenuHandle<CanvasPopoverPanel>>,
+        show_search_bar: bool,
+        search_expanded: bool,
+        show_search_options: bool,
+        search_input: Option<Entity<InputState>>,
+        panel_body: gpui::AnyElement,
+        cx: &mut Context<crate::ChatLayout>,
+    ) -> gpui::AnyElement {
         self.header.update(cx, |header, cx| {
             header.sync(
                 channel_name,
@@ -351,14 +393,14 @@ impl ChatArea {
                 .flex_shrink_0(),
         );
 
-        let canvas_column = div()
+        let panel_column = div()
             .flex()
             .flex_col()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
-            .child(canvas_body);
+            .child(panel_body);
 
         let body = div()
             .flex()
@@ -368,7 +410,7 @@ impl ChatArea {
             .h_full()
             .min_h_0()
             .overflow_hidden()
-            .child(canvas_column)
+            .child(panel_column)
             .when(show_member_panel, |row| match &self.member_panel {
                 Some(panel) => row.child(
                     AnyView::from(panel.clone()).cached(

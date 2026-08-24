@@ -41,7 +41,7 @@ mod video_player;
 pub use channel_messages::{ChannelMessages, ChannelMessagesEvent};
 pub(crate) use content::open_message_link;
 pub(crate) use content::{RichRunPalette, rich_run_highlight_with_link_underline};
-pub(crate) use content::{heading_line_height, heading_size};
+pub(crate) use content::{code_block_copy_overlay, heading_line_height, heading_size};
 pub(crate) use content::{
     pin_link_element, render_pin_rich_layout_element, resolve_message_link_url, text_wrap_children,
 };
@@ -56,6 +56,7 @@ pub(crate) use reaction_picker::{ReactionPicker, ReactionPickerEvent};
 pub(crate) use send_token_modal::SendTokenModal;
 pub(crate) use share_location_modal::ShareLocationModal;
 pub(crate) use time::format_channel_setting_relative_time_from_seconds;
+pub(crate) use time::format_i18n_full_date_from_seconds;
 pub(crate) use time::format_message_time;
 pub use time::format_relative_time_from_seconds;
 pub(crate) use transaction_history_modal::TransactionHistoryModal;

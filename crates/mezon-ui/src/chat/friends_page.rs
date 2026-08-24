@@ -176,6 +176,7 @@ impl FriendsPage {
                         cx,
                     );
                 }
+                FriendEvent::FollowerChecked { .. } => {}
             }),
         );
         subs.push(cx.subscribe(

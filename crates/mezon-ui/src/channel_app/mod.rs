@@ -1,22 +1,5 @@
-use gpui::{App, AppContext};
+use gpui::App;
 use mezon_store::PlatformStore;
-
-fn open_in_browser(url: String, cx: &App) {
-    let Some(platform) = PlatformStore::try_global(cx) else {
-        tracing::warn!("channel app launch skipped — platform store is missing");
-        return;
-    };
-    let Some(open) = platform.read(cx).app_window_opener() else {
-        tracing::warn!("channel app launch skipped — no url opener is registered");
-        return;
-    };
-    cx.background_spawn(async move {
-        if let Err(error) = open(&url) {
-            tracing::warn!("channel app launch failed: {error:#}");
-        }
-    })
-    .detach();
-}
 
 /// Fetch a signed launch URL and open the app in the system browser.
 pub fn launch_channel_app_from_store(
@@ -34,7 +17,7 @@ pub fn launch_channel_app_from_store(
         let Some(url) = task.await else {
             return;
         };
-        cx.update(|cx| open_in_browser(url, cx));
+        cx.update(|cx| PlatformStore::open_app_window(url, cx));
     })
     .detach();
 }

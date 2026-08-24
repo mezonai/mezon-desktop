@@ -20,6 +20,7 @@ pub struct UserProfileView {
     pub about_me: String,
     pub role_ids: Vec<RoleId>,
     pub create_time_seconds: u32,
+    pub join_time_seconds: u32,
     pub online: bool,
 }
 
@@ -39,6 +40,7 @@ impl UserProfileView {
             about_me: member.user.about_me.clone(),
             role_ids: member.role_ids.clone(),
             create_time_seconds: member.user.create_time_seconds,
+            join_time_seconds: member.user.join_time_seconds,
             online,
         }
     }
@@ -52,6 +54,7 @@ impl UserProfileView {
             about_me: member.user.about_me.clone(),
             role_ids: Vec::new(),
             create_time_seconds: member.user.create_time_seconds,
+            join_time_seconds: member.user.join_time_seconds,
             online: online || member.online,
         }
     }
@@ -70,6 +73,7 @@ impl UserProfileView {
             about_me: user.about_me.clone(),
             role_ids: Vec::new(),
             create_time_seconds: user.create_time_seconds,
+            join_time_seconds: user.join_time_seconds,
             online,
         }
     }
@@ -83,6 +87,7 @@ impl UserProfileView {
             about_me: String::new(),
             role_ids: Vec::new(),
             create_time_seconds: 0,
+            join_time_seconds: 0,
             online: online || channel.online,
         }
     }
@@ -100,6 +105,7 @@ impl UserProfileView {
             about_me: account.about_me.clone().unwrap_or_default(),
             role_ids: Vec::new(),
             create_time_seconds: 0,
+            join_time_seconds: 0,
             online,
         }
     }
@@ -271,6 +277,7 @@ mod tests {
         assert_eq!(view.about_me, "hi there");
         assert_eq!(view.role_ids, vec![RoleId(3), RoleId(4)]);
         assert_eq!(view.create_time_seconds, 1_700_000_000);
+        assert_eq!(view.join_time_seconds, 1_700_000_100);
         assert!(view.online);
     }
 
@@ -300,6 +307,7 @@ mod tests {
             logo: None,
             status: String::new(),
             user_status: String::new(),
+            dob_seconds: 0,
         };
         let view = UserProfileView::from_account(UserId(1), &account, true);
         assert_eq!(view.display_name, "Hello Me");

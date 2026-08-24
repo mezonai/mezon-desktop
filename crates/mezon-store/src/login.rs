@@ -203,6 +203,9 @@ impl LoginStore {
         if let Some(e) = crate::events::EventsStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }
+        if let Some(e) = crate::onboarding::OnboardingStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
         if let Some(e) = crate::voice::VoiceStore::try_global(cx) {
             e.update(cx, |s, cx| s.logout_teardown(cx));
         }
