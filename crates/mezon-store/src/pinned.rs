@@ -13,10 +13,12 @@ use mezon_proto::realtime::LastPinMessageEvent;
 use crate::AppConfig;
 use crate::ids::{ChannelId, ClanId, MessageId, UserId};
 use crate::message::{
-    Embed, Message, MessageAttachment, MessageSpan, OgpPreview, RichLayout, build_rich_layout,
-    link_marker_from_kind, parse_spans,
+    Embed, Message, MessageAttachment, MessageSpan, OgpPreview, PollData, RichLayout,
+    build_rich_layout, link_marker_from_kind, parse_spans,
 };
-use crate::messages::{MessagesEvent, MessagesStore, build_embeds, build_ogp_preview};
+use crate::messages::{
+    MessagesEvent, MessagesStore, build_embeds, build_ogp_preview, build_poll_data,
+};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::user_profile::{ProfileContext, resolve_avatar_url};
 
@@ -35,6 +37,7 @@ pub struct PinnedMessage {
     pub ogp: Option<Box<OgpPreview>>,
     pub embeds: Arc<[Embed]>,
     pub attachments: Vec<MessageAttachment>,
+    pub poll: Option<Box<PollData>>,
     pub create_time: i64,
 }
 
@@ -447,6 +450,7 @@ impl PinnedMessagesStore {
                 ogp: body.ogp,
                 embeds: body.embeds,
                 attachments: body.attachments,
+                poll: body.poll,
                 create_time,
             },
         );
@@ -676,13 +680,19 @@ fn enrich_pin_body(
     let ogp = build_ogp_preview(&tokens, cfg);
     let embeds = build_embeds(&tokens, cfg);
     let text = if tokens.t.is_empty() {
-        serde_json::from_str::<serde_json::Value>(trimmed)
-            .ok()
-            .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
-            .unwrap_or_else(|| trimmed.to_string())
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(serde_json::Value::Object(fields)) => fields
+                .get("t")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            _ => trimmed.to_string(),
+        }
     } else {
-        tokens.t
+        tokens.t.clone()
     };
+    let poll = build_poll_data(&tokens, &text, cfg);
+    let text = if poll.is_some() { String::new() } else { text };
     EnrichedPinBody {
         text,
         spans: spans.into(),
@@ -690,6 +700,7 @@ fn enrich_pin_body(
         ogp,
         embeds,
         attachments,
+        poll,
     }
 }
 
@@ -700,6 +711,7 @@ struct EnrichedPinBody {
     ogp: Option<Box<OgpPreview>>,
     embeds: Arc<[Embed]>,
     attachments: Vec<MessageAttachment>,
+    poll: Option<Box<PollData>>,
 }
 
 fn pinned_from_api(m: ApiPinMessage, cfg: Option<&AppConfig>) -> PinnedMessage {
@@ -719,7 +731,9 @@ fn pinned_from_api(m: ApiPinMessage, cfg: Option<&AppConfig>) -> PinnedMessage {
         sender_name: m.sender_name,
         avatar_url: m.avatar,
         avatar_proxied: avatar_proxied.into(),
-        content: if body.text.is_empty() {
+        content: if body.poll.is_some() {
+            String::new()
+        } else if body.text.is_empty() {
             m.content_text
         } else {
             body.text
@@ -730,6 +744,7 @@ fn pinned_from_api(m: ApiPinMessage, cfg: Option<&AppConfig>) -> PinnedMessage {
         ogp: body.ogp,
         embeds: body.embeds,
         attachments: body.attachments,
+        poll: body.poll,
         create_time: m.create_time,
     }
 }
@@ -764,6 +779,7 @@ fn pinned_from_last_pin_event(pin: &LastPinMessageEvent, cfg: Option<&AppConfig>
         ogp: body.ogp,
         embeds: body.embeds,
         attachments: body.attachments,
+        poll: body.poll,
         create_time,
     }
 }
@@ -845,5 +861,44 @@ mod tests {
             )),
             "a pinned social link must stay classified when the message also carries markdown"
         );
+    }
+
+    #[test]
+    fn poll_pin_body_parses_poll_and_drops_raw_json() {
+        let raw = r#"{"poll_id":123,"question":"gg","answers":[{"index":0,"label":"1"},{"index":1,"label":"2"}],"answer_counts":[1,1],"total_votes":2,"type":1,"expire_at":0}"#;
+
+        let body = enrich_pin_body(raw, Vec::new(), None);
+
+        assert!(body.text.is_empty());
+        let poll = body.poll.expect("poll parsed from pin content");
+        assert_eq!(poll.question.as_ref(), "gg");
+        assert_eq!(poll.answers.len(), 2);
+        assert_eq!(poll.total_votes, 2);
+        assert!(poll.allow_multiple);
+    }
+
+    #[test]
+    fn embed_only_pin_body_never_shows_raw_json() {
+        let raw = r#"{"embed":[{"title":"hi","description":"there"}]}"#;
+
+        let body = enrich_pin_body(raw, Vec::new(), None);
+
+        assert!(body.text.is_empty());
+        assert_eq!(body.embeds.len(), 1);
+    }
+
+    #[test]
+    fn plain_text_pin_body_keeps_non_json_content() {
+        let body = enrich_pin_body("hello", Vec::new(), None);
+
+        assert_eq!(body.text, "hello");
+    }
+
+    #[test]
+    fn text_pin_body_keeps_text_and_has_no_poll() {
+        let body = enrich_pin_body(r#"{"t":"hello"}"#, Vec::new(), None);
+
+        assert_eq!(body.text, "hello");
+        assert!(body.poll.is_none());
     }
 }

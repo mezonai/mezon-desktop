@@ -48,6 +48,7 @@ pub struct ScreenShareModal {
     load_error: Option<ScreenShareListError>,
     selected: Option<SelectedTarget>,
     share_audio: bool,
+    portal: Option<PickedScreen>,
     load_started: bool,
     list_task: Option<Task<()>>,
     preview_task: Option<Task<()>>,
@@ -64,6 +65,7 @@ impl ScreenShareModal {
     pub fn new(
         voice: Entity<VoiceStore>,
         settings: Entity<Settings>,
+        portal: Option<PickedScreen>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -91,6 +93,7 @@ impl ScreenShareModal {
             load_error: None,
             selected: None,
             share_audio: false,
+            portal,
             load_started: false,
             list_task: None,
             preview_task: None,
@@ -227,6 +230,14 @@ impl ScreenShareModal {
     }
 
     fn confirm_share(&mut self, cx: &mut Context<Self>) {
+        if let Some(portal) = self.portal.clone() {
+            let share_audio = self.share_audio;
+            self.voice.update(cx, |store, cx| {
+                store.start_screen_share(portal, share_audio, cx)
+            });
+            self.close(cx);
+            return;
+        }
         let Some(selected) = self.selected else {
             return;
         };
@@ -243,6 +254,123 @@ impl ScreenShareModal {
             store.start_screen_share(pick, share_audio, cx)
         });
         self.close(cx);
+    }
+
+    fn render_portal(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let locale = self.settings.read(cx).language.clone();
+        let theme = cx.theme();
+        let border: gpui::Hsla = theme.border.into();
+        let text_primary: gpui::Hsla = theme.text_primary.into();
+        let text_muted: gpui::Hsla = theme.text_muted.into();
+        let bg: gpui::Hsla = theme.bg_secondary.into();
+
+        let title: SharedString = mezon_i18n::t(&locale, "screenShare.chooseWhatToShare").into();
+        let hint: SharedString = mezon_i18n::t(&locale, "screenShare.systemWillAsk").into();
+        let share_audio_label: SharedString =
+            mezon_i18n::t(&locale, "screenShare.alsoShareSystemAudio").into();
+        let cancel_label: SharedString = mezon_i18n::t(&locale, "screenShare.cancel").into();
+        let share_label: SharedString = mezon_i18n::t(&locale, "screenShare.share").into();
+
+        v_flex()
+            .track_focus(&self.focus_handle)
+            .key_context("menu")
+            .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| {
+                this.close(cx);
+            }))
+            .w(px(480.))
+            .rounded(px(12.))
+            .bg(bg)
+            .shadow_lg()
+            .overflow_hidden()
+            .child(
+                h_flex()
+                    .w_full()
+                    .flex_none()
+                    .justify_between()
+                    .items_center()
+                    .px(px(20.))
+                    .py(px(16.))
+                    .border_b_1()
+                    .border_color(border)
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(text_primary)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .id("screen-share-close")
+                            .w(px(24.))
+                            .h(px(24.))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .opacity(0.5)
+                            .hover(|s| s.opacity(1.0))
+                            .text_size(px(18.))
+                            .text_color(text_primary)
+                            .on_click(cx.listener(|this, _, _window, cx| this.close(cx)))
+                            .child("×"),
+                    ),
+            )
+            .child(
+                div()
+                    .px(px(20.))
+                    .pt(px(16.))
+                    .child(div().text_sm().text_color(text_muted).child(hint)),
+            )
+            .child(
+                v_flex()
+                    .w_full()
+                    .flex_none()
+                    .gap(px(16.))
+                    .px(px(20.))
+                    .py(px(16.))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(text_primary)
+                                    .child(share_audio_label),
+                            )
+                            .child(
+                                Switch::new("screen-share-audio")
+                                    .checked(self.share_audio)
+                                    .on_click(cx.listener(|this, checked: &bool, _window, cx| {
+                                        this.share_audio = *checked;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_end()
+                            .gap(px(8.))
+                            .child(
+                                Button::new("screen-share-cancel")
+                                    .label(cancel_label)
+                                    .ghost()
+                                    .on_click(cx.listener(|this, _, _window, cx| this.close(cx))),
+                            )
+                            .child(
+                                Button::new("screen-share-confirm")
+                                    .label(share_label)
+                                    .primary()
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        this.confirm_share(cx);
+                                    })),
+                            ),
+                    ),
+            )
     }
 
     fn filtered_options(&self) -> Vec<&ScreenShareOption> {
@@ -266,6 +394,9 @@ fn preview_to_render_image(preview: ScreenSharePreview) -> Option<Arc<RenderImag
 
 impl Render for ScreenShareModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.portal.is_some() {
+            return self.render_portal(cx).into_any_element();
+        }
         self.start_loading(cx);
         self.start_preview_loading(cx);
 
@@ -437,30 +568,33 @@ impl Render for ScreenShareModal {
                     .py(px(16.))
                     .border_t_1()
                     .border_color(border)
-                    .when(cfg!(target_os = "macos"), |footer| {
-                        footer.child(
-                            h_flex()
-                                .w_full()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(text_primary)
-                                        .child(share_audio_label),
-                                )
-                                .child(
-                                    Switch::new("screen-share-audio")
-                                        .checked(self.share_audio)
-                                        .on_click(cx.listener(
-                                            |this, checked: &bool, _window, cx| {
-                                                this.share_audio = *checked;
-                                                cx.notify();
-                                            },
-                                        )),
-                                ),
-                        )
-                    })
+                    .when(
+                        cfg!(any(target_os = "macos", target_os = "linux")),
+                        |footer| {
+                            footer.child(
+                                h_flex()
+                                    .w_full()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(text_primary)
+                                            .child(share_audio_label),
+                                    )
+                                    .child(
+                                        Switch::new("screen-share-audio")
+                                            .checked(self.share_audio)
+                                            .on_click(cx.listener(
+                                                |this, checked: &bool, _window, cx| {
+                                                    this.share_audio = *checked;
+                                                    cx.notify();
+                                                },
+                                            )),
+                                    ),
+                            )
+                        },
+                    )
                     .child(
                         h_flex()
                             .w_full()
@@ -483,6 +617,7 @@ impl Render for ScreenShareModal {
                             ),
                     ),
             )
+            .into_any_element()
     }
 }
 
@@ -671,10 +806,7 @@ pub fn start_screen_share_flow(
     window: &mut Window,
     cx: &mut App,
 ) {
-    if let Some(pick) = system_screen_share_pick() {
-        voice.update(cx, |store, cx| store.start_screen_share(pick, false, cx));
-        return;
-    }
-    let modal = cx.new(|cx| ScreenShareModal::new(voice, settings, window, cx));
+    let portal = system_screen_share_pick();
+    let modal = cx.new(|cx| ScreenShareModal::new(voice, settings, portal, window, cx));
     Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
 }

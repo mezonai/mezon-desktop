@@ -596,11 +596,7 @@ fn build_activity_rows(
             group.len()
         ))));
         for (a, f) in group {
-            let description = if a.activity_description.is_empty() {
-                a.activity_name.clone()
-            } else {
-                a.activity_description.clone()
-            };
+            let description = activity_row_subtitle(a, locale);
             rows.push(ActivityRow::Item {
                 label: SharedString::from(f.label().to_string()),
                 description: SharedString::from(description),
@@ -610,6 +606,24 @@ fn build_activity_rows(
         }
     }
     rows
+}
+
+fn activity_row_subtitle(activity: &UserActivity, locale: &str) -> String {
+    if !activity.activity_description.is_empty() {
+        return activity.activity_description.clone();
+    }
+    let kind_key = match activity.activity_type {
+        ACTIVITY_TYPE_WORK => "friendsPage.activity.codingStatus",
+        ACTIVITY_TYPE_LIVE => "friendsPage.activity.musicStatus",
+        ACTIVITY_TYPE_PLAY => "friendsPage.activity.gamingStatus",
+        _ => return activity.activity_name.clone(),
+    };
+    let kind_label = mezon_i18n::t(locale, kind_key);
+    if activity.activity_name.is_empty() {
+        kind_label.to_string()
+    } else {
+        format!("{kind_label} · {}", activity.activity_name)
+    }
 }
 
 fn is_valid_username(value: &str) -> bool {
@@ -938,7 +952,11 @@ impl FriendsPage {
                             .justify_center()
                             .text_center()
                             .mb(px(120.))
-                            .child(mezon_i18n::t(locale, key).to_string()),
+                            .child(
+                                div()
+                                    .max_w_full()
+                                    .child(mezon_i18n::t(locale, key).to_string()),
+                            ),
                     ),
             );
         }

@@ -223,6 +223,26 @@ pub fn ime_replace_range(selected: &Range<usize>, marked: Option<&Range<usize>>)
     marked.cloned().unwrap_or_else(|| selected.clone())
 }
 
+fn offset_after_delete(offset: usize, deleted: &Range<usize>) -> usize {
+    if offset <= deleted.start {
+        offset
+    } else if offset <= deleted.end {
+        deleted.start
+    } else {
+        offset - (deleted.end - deleted.start)
+    }
+}
+
+pub fn marked_range_after_delete(
+    marked: Option<&Range<usize>>,
+    deleted: &Range<usize>,
+) -> Option<Range<usize>> {
+    let marked = marked?;
+    let start = offset_after_delete(marked.start, deleted);
+    let end = offset_after_delete(marked.end, deleted);
+    (start < end).then_some(start..end)
+}
+
 pub fn swallow_discarded_ime_commit(
     discard: &mut Option<String>,
     range_utf16: Option<&Range<usize>>,
@@ -465,6 +485,63 @@ mod tests {
     #[test]
     fn ime_replace_uses_marked_when_preedit_is_present() {
         assert_eq!(ime_replace_range(&(0..6), Some(&(3..5))), 3..5);
+    }
+
+    #[test]
+    fn marked_range_shrinks_after_tail_delete_within_preedit() {
+        let text = "được";
+        let len = text.len();
+        assert_eq!(
+            marked_range_after_delete(Some(&(0..len)), &(len - 1..len)),
+            Some(0..len - 1)
+        );
+    }
+
+    #[test]
+    fn marked_range_clears_after_full_preedit_delete() {
+        let text = "được";
+        let len = text.len();
+        assert_eq!(marked_range_after_delete(Some(&(0..len)), &(0..len)), None);
+    }
+
+    #[test]
+    fn marked_range_shifts_left_when_delete_is_before_it() {
+        assert_eq!(
+            marked_range_after_delete(Some(&(2..5)), &(0..1)),
+            Some(1..4)
+        );
+        assert_eq!(
+            marked_range_after_delete(Some(&(2..5)), &(0..2)),
+            Some(0..3)
+        );
+    }
+
+    #[test]
+    fn marked_range_is_untouched_when_delete_is_after_it() {
+        assert_eq!(
+            marked_range_after_delete(Some(&(2..5)), &(5..8)),
+            Some(2..5)
+        );
+    }
+
+    #[test]
+    fn marked_range_keeps_the_surviving_side_on_partial_overlap() {
+        assert_eq!(
+            marked_range_after_delete(Some(&(2..6)), &(1..3)),
+            Some(1..4)
+        );
+        assert_eq!(
+            marked_range_after_delete(Some(&(2..6)), &(5..8)),
+            Some(2..5)
+        );
+    }
+
+    #[test]
+    fn ime_replace_with_none_deletes_whole_mark_not_partial_selection() {
+        let selected = 2..4;
+        let marked = 0..5;
+        assert_eq!(ime_replace_range(&selected, Some(&marked)), marked);
+        assert_ne!(ime_replace_range(&selected, Some(&marked)), selected);
     }
 
     #[test]

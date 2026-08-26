@@ -1,6 +1,8 @@
+use std::path::PathBuf;
+
 use gpui::{
-    AnyView, ClickEvent, Context, Entity, FontWeight, KeyDownEvent, SharedString, StyleRefinement,
-    Subscription, Window, div, prelude::*, px,
+    AnyView, App, ClickEvent, Context, Entity, ExternalPaths, FontWeight, KeyDownEvent,
+    SharedString, StyleRefinement, Subscription, Window, div, prelude::*, px, rgb, rgba,
 };
 use mezon_store::{ChannelId, MessageId, MessagesStore, Settings, TopicsEvent, TopicsStore};
 
@@ -252,23 +254,54 @@ impl Render for TopicPanel {
             .child(self.input_bar.clone())
             .child(self.typing.clone());
 
-        v_flex()
-            .w(px(PANEL_WIDTH))
-            .min_w(px(PANEL_WIDTH))
-            .flex_shrink_0()
-            .h_full()
+        let drop_title: SharedString =
+            mezon_i18n::t(&locale, "common.dropFilesToUploadToTopic").into();
+        let mention_input = self.mention_input.clone();
+        let drop_overlay = div()
+            .absolute()
+            .inset_0()
+            .invisible()
+            .group_drag_over::<ExternalPaths>("topic-drop-zone", |style| style.visible())
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x3b82f633))
+            .border_2()
+            .border_dashed()
+            .border_color(rgb(0x3b82f6))
+            .rounded(px(8.))
+            .child(
+                div()
+                    .px(px(24.))
+                    .py(px(12.))
+                    .rounded(px(8.))
+                    .bg(rgb(0x3b82f6))
+                    .shadow_lg()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0xffffff))
+                            .child(drop_title),
+                    ),
+            );
+
+        let drop_body = v_flex()
+            .relative()
+            .group("topic-drop-zone")
+            .flex_1()
             .min_h_0()
+            .w_full()
             .overflow_hidden()
-            .border_l_1()
-            .border_color(tokens.border_primary)
-            .bg(theme.bg_primary)
-            .text_color(tokens.text_theme_message)
-            .on_key_down(cx.listener(|_this, event: &KeyDownEvent, _window, cx| {
-                if event.keystroke.key == "escape" {
-                    TopicsStore::global(cx).update(cx, |store, cx| store.close_panel(cx));
-                }
-            }))
-            .child(header)
+            .on_drop(
+                move |paths: &ExternalPaths, window: &mut Window, cx: &mut App| {
+                    let dropped: Vec<PathBuf> = paths.paths().to_vec();
+                    mention_input.update(cx, |input, cx| {
+                        input.focus_input(window, cx);
+                        input.add_dropped_paths(dropped, window, cx);
+                    });
+                },
+            )
             .child(
                 div()
                     .id("topic-timeline-host")
@@ -292,5 +325,25 @@ impl Render for TopicPanel {
                     .children(self.topic_timeline.read(cx).skeleton_overlay(cx.theme())),
             )
             .child(composer)
+            .child(drop_overlay);
+
+        v_flex()
+            .w(px(PANEL_WIDTH))
+            .min_w(px(PANEL_WIDTH))
+            .flex_shrink_0()
+            .h_full()
+            .min_h_0()
+            .overflow_hidden()
+            .border_l_1()
+            .border_color(tokens.border_primary)
+            .bg(theme.bg_primary)
+            .text_color(tokens.text_theme_message)
+            .on_key_down(cx.listener(|_this, event: &KeyDownEvent, _window, cx| {
+                if event.keystroke.key == "escape" {
+                    TopicsStore::global(cx).update(cx, |store, cx| store.close_panel(cx));
+                }
+            }))
+            .child(header)
+            .child(drop_body)
     }
 }

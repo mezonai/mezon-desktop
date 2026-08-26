@@ -3,36 +3,164 @@ use core_graphics::display::CGDirectDisplayID;
 use dispatch2::{
     _dispatch_source_type_data_add, DispatchObject, DispatchQueue, DispatchRetained, DispatchSource,
 };
-use std::ffi::c_void;
+use std::{
+    collections::{BTreeMap, btree_map},
+    ffi::c_void,
+    sync::{Mutex, MutexGuard, PoisonError},
+};
 use util::ResultExt;
 
-pub struct DisplayLink {
-    display_link: Option<sys::DisplayLink>,
-    frame_requests: DispatchRetained<DispatchSource>,
+static REGISTRY: Mutex<Registry> = Mutex::new(Registry::new());
+
+struct Registry {
+    displays: BTreeMap<CGDirectDisplayID, DisplayEntry>,
+    next_subscriber_id: u64,
 }
 
-impl DisplayLink {
-    pub fn new(
-        display_id: CGDirectDisplayID,
-        data: *mut c_void,
-        callback: extern "C" fn(*mut c_void),
-    ) -> Result<DisplayLink> {
-        unsafe extern "C" fn display_link_callback(
-            _display_link_out: *mut sys::CVDisplayLink,
-            _current_time: *const sys::CVTimeStamp,
-            _output_time: *const sys::CVTimeStamp,
-            _flags_in: i64,
-            _flags_out: *mut i64,
-            frame_requests: *mut c_void,
-        ) -> i32 {
-            unsafe {
-                let frame_requests = &*(frame_requests as *const DispatchSource);
-                frame_requests.merge_data(1);
-                0
-            }
+impl Registry {
+    const fn new() -> Self {
+        Self {
+            displays: BTreeMap::new(),
+            next_subscriber_id: 0,
         }
+    }
+}
 
-        unsafe {
+struct DisplayEntry {
+    link: sys::DisplayLink,
+    running: bool,
+    subscribers: Vec<(SubscriberId, DispatchRetained<DispatchSource>)>,
+}
+
+unsafe impl Send for DisplayEntry {}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+struct SubscriberId(u64);
+
+fn lock_registry() -> MutexGuard<'static, Registry> {
+    REGISTRY.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn debug_assert_main_thread() {
+    #[cfg(debug_assertions)]
+    {
+        use objc::{class, msg_send, sel, sel_impl};
+        let is_main_thread: objc::runtime::BOOL =
+            unsafe { msg_send![class!(NSThread), isMainThread] };
+        debug_assert!(
+            is_main_thread == objc::runtime::YES,
+            "display link registry mutations must happen on the main thread"
+        );
+    }
+}
+
+unsafe extern "C" fn display_link_output_callback(
+    _display_link_out: *mut sys::CVDisplayLink,
+    _current_time: *const sys::CVTimeStamp,
+    _output_time: *const sys::CVTimeStamp,
+    _flags_in: i64,
+    _flags_out: *mut i64,
+    display_id: *mut c_void,
+) -> i32 {
+    let display_id = display_id as usize as CGDirectDisplayID;
+    let registry = lock_registry();
+    if let Some(entry) = registry.displays.get(&display_id) {
+        for (_, frame_requests) in &entry.subscribers {
+            frame_requests.merge_data(1);
+        }
+    }
+    0
+}
+
+fn subscribe(
+    display_id: CGDirectDisplayID,
+    frame_requests: DispatchRetained<DispatchSource>,
+) -> Result<SubscriberId> {
+    debug_assert_main_thread();
+
+    let needs_link = !lock_registry().displays.contains_key(&display_id);
+    let new_link = if needs_link {
+        Some(unsafe {
+            sys::DisplayLink::new(
+                display_id,
+                display_link_output_callback,
+                display_id as usize as *mut c_void,
+            )?
+        })
+    } else {
+        None
+    };
+
+    let (subscriber_id, link_to_start) = {
+        let mut registry = lock_registry();
+        let registry = &mut *registry;
+        let subscriber_id = SubscriberId(registry.next_subscriber_id);
+        registry.next_subscriber_id += 1;
+        let entry = match (registry.displays.entry(display_id), new_link) {
+            (btree_map::Entry::Occupied(entry), _) => entry.into_mut(),
+            (btree_map::Entry::Vacant(vacant), Some(link)) => vacant.insert(DisplayEntry {
+                link,
+                running: false,
+                subscribers: Vec::new(),
+            }),
+            (btree_map::Entry::Vacant(_), None) => {
+                anyhow::bail!("display link registry entry vanished for display {display_id}");
+            }
+        };
+        entry.subscribers.push((subscriber_id, frame_requests));
+        let link_to_start = if entry.running {
+            None
+        } else {
+            entry.running = true;
+            Some(entry.link.clone())
+        };
+        (subscriber_id, link_to_start)
+    };
+
+    if let Some(mut link) = link_to_start {
+        if let Err(error) = unsafe { link.start() } {
+            let mut registry = lock_registry();
+            if let Some(entry) = registry.displays.get_mut(&display_id) {
+                entry.running = false;
+                entry.subscribers.retain(|(id, _)| *id != subscriber_id);
+            }
+            return Err(error);
+        }
+    }
+
+    Ok(subscriber_id)
+}
+
+fn unsubscribe(display_id: CGDirectDisplayID, subscriber_id: SubscriberId) {
+    debug_assert_main_thread();
+
+    let link_to_stop = {
+        let mut registry = lock_registry();
+        let Some(entry) = registry.displays.get_mut(&display_id) else {
+            return;
+        };
+        entry.subscribers.retain(|(id, _)| *id != subscriber_id);
+        if entry.subscribers.is_empty() && entry.running {
+            entry.running = false;
+            Some(entry.link.clone())
+        } else {
+            None
+        }
+    };
+
+    if let Some(mut link) = link_to_stop {
+        unsafe { link.stop().log_err() };
+    }
+}
+
+pub struct WindowFrameSource {
+    frame_requests: DispatchRetained<DispatchSource>,
+    registration: Option<(CGDirectDisplayID, SubscriberId)>,
+}
+
+impl WindowFrameSource {
+    pub fn new(data: *mut c_void, callback: extern "C" fn(*mut c_void)) -> Self {
+        let frame_requests = unsafe {
             let frame_requests = DispatchSource::new(
                 &raw const _dispatch_source_type_data_add as *mut _,
                 0,
@@ -42,46 +170,31 @@ impl DisplayLink {
             frame_requests.set_context(data);
             frame_requests.set_event_handler_f(callback);
             frame_requests.resume();
-
-            let display_link = sys::DisplayLink::new(
-                display_id,
-                display_link_callback,
-                &*frame_requests as *const DispatchSource as *mut c_void,
-            )?;
-
-            Ok(Self {
-                display_link: Some(display_link),
-                frame_requests,
-            })
+            frame_requests
+        };
+        Self {
+            frame_requests,
+            registration: None,
         }
     }
 
-    pub fn start(&mut self) -> Result<()> {
-        unsafe {
-            self.display_link.as_mut().unwrap().start()?;
-        }
+    pub fn start(&mut self, display_id: CGDirectDisplayID) -> Result<()> {
+        self.stop();
+        let subscriber_id = subscribe(display_id, self.frame_requests.clone())?;
+        self.registration = Some((display_id, subscriber_id));
         Ok(())
     }
 
-    pub fn stop(&mut self) -> Result<()> {
-        unsafe {
-            self.display_link.as_mut().unwrap().stop()?;
+    pub fn stop(&mut self) {
+        if let Some((display_id, subscriber_id)) = self.registration.take() {
+            unsubscribe(display_id, subscriber_id);
         }
-        Ok(())
     }
 }
 
-impl Drop for DisplayLink {
+impl Drop for WindowFrameSource {
     fn drop(&mut self) {
-        self.stop().log_err();
-        // We see occasional segfaults on the CVDisplayLink thread.
-        //
-        // It seems possible that this happens because CVDisplayLinkRelease releases the CVDisplayLink
-        // on the main thread immediately, but the background thread that CVDisplayLink uses for timers
-        // is still accessing it.
-        //
-        // We might also want to upgrade to CADisplayLink, but that requires dropping old macOS support.
-        std::mem::forget(self.display_link.take());
+        self.stop();
         self.frame_requests.cancel();
     }
 }

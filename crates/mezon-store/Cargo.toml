@@ -18,6 +18,7 @@ mezon-voice.workspace = true
 mezon-call.workspace = true
 mezon-stream.workspace = true
 mezon-audio.workspace = true
+mezon-active-windows.workspace = true
 gpui.workspace = true
 image = { workspace = true, features = ["webp"] }
 smallvec.workspace = true

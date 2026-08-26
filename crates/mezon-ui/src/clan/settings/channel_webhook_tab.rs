@@ -4,8 +4,8 @@ use gpui::{
 };
 
 use mezon_store::{
-    AppConfig, ChannelId, ChannelList, ChannelType, ChannelWebhook, ClanId, ClanMembersStore,
-    Settings, WEBHOOK_NAME_MAX_LENGTH, WebhookStore,
+    AppConfig, ChannelId, ChannelList, ChannelWebhook, ClanId, ClanMembersStore, Settings,
+    WEBHOOK_NAME_MAX_LENGTH, WebhookStore,
 };
 
 use super::integration_setting_page::{
@@ -33,7 +33,7 @@ pub struct ChannelWebhookTab {
     channel_list: Entity<ChannelList>,
     settings: Entity<Settings>,
     channel_options: Vec<ChannelOption>,
-    selected_channel_index: Option<usize>,
+    selected_channel_id: Option<ChannelId>,
     channel_menu_open: bool,
     expanded_id: Option<String>,
     edit_names: std::collections::HashMap<String, Entity<InputState>>,
@@ -53,7 +53,10 @@ impl ChannelWebhookTab {
         settings: Entity<Settings>,
         cx: &mut Context<Self>,
     ) -> Self {
-        channel_list.update(cx, |store, cx| store.load_for_clan(clan_id, cx));
+        channel_list.update(cx, |store, cx| {
+            store.load_for_clan(clan_id, cx);
+            store.ensure_user_channels_loaded(cx);
+        });
         WebhookStore::global(cx).update(cx, |store, cx| {
             store.ensure_channel_webhooks_loaded(clan_id, cx);
         });
@@ -62,7 +65,7 @@ impl ChannelWebhookTab {
         });
 
         let channel_options = Self::build_channel_options(&channel_list, clan_id, cx);
-        let selected_channel_index = channel_options.first().map(|_| 0);
+        let selected_channel_id = channel_options.first().map(|option| option.id);
 
         let channel_list_for_sub = channel_list.clone();
         Self {
@@ -70,7 +73,7 @@ impl ChannelWebhookTab {
             channel_list,
             settings,
             channel_options,
-            selected_channel_index,
+            selected_channel_id,
             channel_menu_open: false,
             expanded_id: None,
             edit_names: std::collections::HashMap::new(),
@@ -81,9 +84,7 @@ impl ChannelWebhookTab {
             _channel_sub: cx.subscribe(&channel_list_for_sub, |this, _, _, cx| {
                 this.channel_options =
                     Self::build_channel_options(&this.channel_list, this.clan_id, cx);
-                if this.selected_channel_index.is_none() && !this.channel_options.is_empty() {
-                    this.selected_channel_index = Some(0);
-                }
+                this.sync_selected_channel();
                 cx.notify();
             }),
             _webhook_sub: cx.subscribe(&WebhookStore::global(cx), |this, _, event, cx| {
@@ -108,21 +109,28 @@ impl ChannelWebhookTab {
     ) -> Vec<ChannelOption> {
         channel_list
             .read(cx)
-            .categories_for_clan(clan_id)
-            .iter()
-            .flat_map(|category| {
-                category.channels.iter().filter_map(|channel| {
-                    if channel.channel_type != ChannelType::Text || channel.private {
-                        return None;
-                    }
-                    Some(ChannelOption {
-                        id: channel.id,
-                        label: channel.name.clone().into(),
-                        category_name: category.name.to_uppercase().into(),
-                    })
-                })
+            .webhook_target_channels_for_clan(clan_id)
+            .into_iter()
+            .map(|channel| ChannelOption {
+                id: channel.id,
+                label: channel.name.into(),
+                category_name: channel.category_name.to_uppercase().into(),
             })
             .collect()
+    }
+
+    fn sync_selected_channel(&mut self) {
+        if self.channel_options.is_empty() {
+            self.selected_channel_id = None;
+            return;
+        }
+        if self
+            .selected_channel_id
+            .is_some_and(|id| self.channel_options.iter().any(|option| option.id == id))
+        {
+            return;
+        }
+        self.selected_channel_id = Some(self.channel_options[0].id);
     }
 
     fn locale(&self, cx: &App) -> String {
@@ -130,8 +138,8 @@ impl ChannelWebhookTab {
     }
 
     fn selected_channel(&self) -> Option<&ChannelOption> {
-        self.selected_channel_index
-            .and_then(|index| self.channel_options.get(index))
+        self.selected_channel_id
+            .and_then(|id| self.channel_options.iter().find(|option| option.id == id))
     }
 
     fn create_webhook(&mut self, cx: &mut Context<Self>) {
@@ -392,14 +400,21 @@ impl ChannelWebhookTab {
         theme: &crate::theme::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let selected = self
-            .selected_channel_index
-            .and_then(|index| self.channel_options.get(index));
+        let selected = self.selected_channel().cloned();
         let open = self.channel_menu_open;
-        let options = self.channel_options.clone();
+        let selected_channel_id = self.selected_channel_id;
+        let mut menu_options = self.channel_options.clone();
+        if let Some(selected_channel_id) = selected_channel_id {
+            menu_options.sort_by_key(|option| {
+                if option.id == selected_channel_id {
+                    0
+                } else {
+                    1
+                }
+            });
+        }
         let entity = cx.entity();
         let locale = self.locale(cx);
-        let selected_channel_index = self.selected_channel_index;
 
         let mut trigger = h_flex()
             .id("channel-webhook-filter-trigger")
@@ -418,7 +433,7 @@ impl ChannelWebhookTab {
                     .flex_1()
                     .min_w(px(0.0))
                     .overflow_hidden()
-                    .when_some(selected.cloned(), |el, option| {
+                    .when_some(selected.clone(), |el, option| {
                         el.child(render_channel_label(&option, theme))
                     })
                     .when(selected.is_none(), |el| {
@@ -475,33 +490,35 @@ impl ChannelWebhookTab {
                                 .id("channel-webhook-filter-menu")
                                 .overflow_y_scroll()
                                 .max_h(px(192.0))
-                                .child(v_flex().children(options.into_iter().enumerate().map(
-                                    |(index, option)| {
-                                        let is_selected = selected_channel_index == Some(index);
-                                        h_flex()
-                                            .id(("channel-webhook-filter-item", index))
-                                            .w_full()
-                                            .items_center()
-                                            .px(px(16.0))
-                                            .py(px(8.0))
-                                            .rounded(px(4.0))
-                                            .text_sm()
-                                            .cursor_pointer()
-                                            .hover(|s| s.bg(theme.bg_hover))
-                                            .when(is_selected, |row| row.bg(theme.bg_hover))
-                                            .child(render_channel_label(&option, theme))
-                                            .on_click({
-                                                let entity = entity.clone();
-                                                move |_, _, cx| {
-                                                    entity.update(cx, |this, cx| {
-                                                        this.selected_channel_index = Some(index);
-                                                        this.channel_menu_open = false;
-                                                        cx.notify();
-                                                    });
-                                                }
-                                            })
-                                    },
-                                ))),
+                                .child(v_flex().children(menu_options.into_iter().map(|option| {
+                                    let is_selected = selected_channel_id == Some(option.id);
+                                    let option_id = option.id;
+                                    h_flex()
+                                        .id(SharedString::from(format!(
+                                            "channel-webhook-filter-item-{}",
+                                            option_id.get()
+                                        )))
+                                        .w_full()
+                                        .items_center()
+                                        .px(px(16.0))
+                                        .py(px(8.0))
+                                        .rounded(px(4.0))
+                                        .text_sm()
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(theme.bg_hover))
+                                        .when(is_selected, |row| row.bg(theme.bg_hover))
+                                        .child(render_channel_label(&option, theme))
+                                        .on_click({
+                                            let entity = entity.clone();
+                                            move |_, _, cx| {
+                                                entity.update(cx, |this, cx| {
+                                                    this.selected_channel_id = Some(option_id);
+                                                    this.channel_menu_open = false;
+                                                    cx.notify();
+                                                });
+                                            }
+                                        })
+                                }))),
                         ),
                 ))
             })
@@ -531,13 +548,15 @@ fn render_channel_label(option: &ChannelOption, theme: &crate::theme::Theme) -> 
                 .text_color(theme.text_primary)
                 .child(option.label.clone()),
         )
-        .child(
-            div()
-                .flex_shrink_0()
-                .text_xs()
-                .text_color(theme.text_muted)
-                .child(option.category_name.clone()),
-        )
+        .when(!option.category_name.is_empty(), |el| {
+            el.child(
+                div()
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(theme.text_muted)
+                    .child(option.category_name.clone()),
+            )
+        })
 }
 
 fn render_channel_webhook_edit(

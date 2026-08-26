@@ -2,15 +2,15 @@ use crate::{
     AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, DefiniteLength, Element, ElementId,
     Entity, GlobalElementId, Hitbox, Image, ImageCache, ImageId, InspectorElementId,
     InteractiveElement, Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels,
-    RenderImage, Resource,
-    SharedString, SharedUri, StyleRefinement, Styled, Task, Window, px,
+    RenderImage, Resource, SharedString, SharedUri, StyleRefinement, Styled, Task, Window,
+    decode_static_image, decode_static_image_from_decoder, px,
 };
 use anyhow::Result;
 
 use futures::Future;
 use gpui_util::ResultExt;
 use image::{
-    AnimationDecoder, DynamicImage, Frame, ImageError, ImageFormat, Rgba,
+    AnimationDecoder, ImageError, ImageFormat, Rgba,
     codecs::{gif::GifDecoder, webp::WebPDecoder},
 };
 use scheduler::Instant;
@@ -270,6 +270,24 @@ pub struct ImgLayoutState {
 
 const MIN_ANIMATION_FRAME_DELAY: Duration = Duration::from_millis(11);
 const CLAMPED_ANIMATION_FRAME_DELAY: Duration = Duration::from_millis(100);
+const ANIMATION_WAKEUP_QUANTUM: Duration = Duration::from_millis(33);
+
+// mezon vendor edit: every animating img scheduled its own wakeup, and a wakeup
+// notifies the owning view, which rebuilds every cached ancestor. A handful of
+// animated emoji therefore redrew the whole window at the union of their frame
+// rates. Wakeups now land on one process-wide grid, so the cost stops scaling
+// with the number of animations on screen; the frame index catches up from the
+// clock, so quantising the wakeup never slows an animation down.
+fn coalesced_wakeup(due_at: Instant) -> Instant {
+    static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let origin = *ORIGIN.get_or_init(Instant::now);
+    let Some(offset) = due_at.checked_duration_since(origin) else {
+        return due_at;
+    };
+    let quantum = ANIMATION_WAKEUP_QUANTUM.as_nanos();
+    let steps = offset.as_nanos().div_ceil(quantum);
+    origin + Duration::from_nanos((steps * quantum) as u64)
+}
 
 fn animation_frame_delay(data: &RenderImage, frame_index: usize) -> Duration {
     let delay = Duration::from(data.delay(frame_index));
@@ -357,10 +375,19 @@ impl Element for Img {
                                                 animation_frame_delay(&data, state.frame_index);
 
                                             if elapsed >= frame_duration {
-                                                state.frame_index =
-                                                    (state.frame_index + 1) % frame_count;
+                                                let mut remaining = elapsed;
+                                                let mut index = state.frame_index;
+                                                for _ in 0..frame_count {
+                                                    let step = animation_frame_delay(&data, index);
+                                                    if remaining < step {
+                                                        break;
+                                                    }
+                                                    remaining -= step;
+                                                    index = (index + 1) % frame_count;
+                                                }
+                                                state.frame_index = index;
                                                 state.last_frame_time =
-                                                    Some(current_time - (elapsed - frame_duration));
+                                                    Some(current_time - remaining);
                                             }
                                         } else {
                                             state.last_frame_time = Some(current_time);
@@ -376,7 +403,9 @@ impl Element for Img {
                             }
 
                             let image_size = data.render_size(frame_index);
-                            style.aspect_ratio = Some(image_size.width / image_size.height);
+                            if style.aspect_ratio.is_none() {
+                                style.aspect_ratio = Some(image_size.width / image_size.height);
+                            }
 
                             if let Length::Auto = style.size.width {
                                 style.size.width = match style.size.height {
@@ -432,10 +461,11 @@ impl Element for Img {
                                             && state.next_frame_due != Some(due_at)
                                         {
                                             state.next_frame_due = Some(due_at);
+                                            let wake_at = coalesced_wakeup(due_at);
                                             let current_view = window.current_view();
                                             state.next_frame_wakeup =
                                                 Some(window.spawn(cx, async move |cx| {
-                                                    let remaining = due_at
+                                                    let remaining = wake_at
                                                         .saturating_duration_since(Instant::now());
                                                     cx.background_executor()
                                                         .timer(remaining)
@@ -569,12 +599,10 @@ impl Element for Img {
                         .style
                         .object_fit
                         .get_bounds(bounds, data.size(frame_index));
-                    let corner_radii = style
-                        .corner_radii
-                        .to_pixels(window.rem_size())
-                        .clamp_radii_for_quad_size(new_bounds.size);
+                    let corner_radii = style.corner_radii.to_pixels(window.rem_size());
                     window
                         .paint_image(
+                            bounds,
                             new_bounds,
                             corner_radii,
                             data,
@@ -798,27 +826,10 @@ impl Asset for ImageAssetLoader {
 
                             frames
                         } else {
-                            let mut data = DynamicImage::from_decoder(decoder)?.into_rgba8();
-
-                            // Convert from RGBA to BGRA.
-                            for pixel in data.chunks_exact_mut(4) {
-                                pixel.swap(0, 2);
-                            }
-
-                            SmallVec::from_elem(Frame::new(data), 1)
+                            decode_static_image_from_decoder(decoder)?
                         }
                     }
-                    _ => {
-                        let mut data =
-                            image::load_from_memory_with_format(&bytes, format)?.into_rgba8();
-
-                        // Convert from RGBA to BGRA.
-                        for pixel in data.chunks_exact_mut(4) {
-                            pixel.swap(0, 2);
-                        }
-
-                        SmallVec::from_elem(Frame::new(data), 1)
-                    }
+                    _ => decode_static_image(&bytes, format)?,
                 };
 
                 Ok(Arc::new(RenderImage::new(data)))

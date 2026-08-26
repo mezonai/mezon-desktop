@@ -318,6 +318,10 @@ pub enum IconName {
     EndPollNowIcon,
     MarkUnreadIcon,
     AddToInboxIcon,
+    QuickActionEdit,
+    QuickActionEmpty,
+    QuickActionInfo,
+    QuickActionTrash,
     QuickMenusIcon,
 }
 
@@ -640,6 +644,10 @@ impl IconName {
             Self::EndPollNowIcon => "icons/end-poll-now.svg",
             Self::MarkUnreadIcon => "icons/mark-unread.svg",
             Self::AddToInboxIcon => "icons/add-to-inbox.svg",
+            Self::QuickActionEdit => "icons/quick-action-edit.svg",
+            Self::QuickActionEmpty => "icons/quick-action-empty.svg",
+            Self::QuickActionInfo => "icons/quick-action-info.svg",
+            Self::QuickActionTrash => "icons/quick-action-trash.svg",
             Self::QuickMenusIcon => "icons/quick-menus.svg",
         }
     }

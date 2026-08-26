@@ -52,7 +52,7 @@ use crate::linux::{
     DEFAULT_CURSOR_ICON_NAME, LinuxClient, capslock_from_xkb, cursor_style_to_icon_names,
     get_xkb_compose_state, is_within_click_distance, key_char_from_keysym, key_name_from_keysym,
     keystroke_from_xkb, keystroke_underlying_dead_key, log_cursor_icon_warning, modifiers_from_xkb,
-    open_uri_internal,
+    new_xkb_context, open_uri_internal,
     platform::{DOUBLE_CLICK_INTERVAL, SCROLL_LINES},
     reveal_path_internal,
     xdg_desktop_portal::{Event as XDPEvent, XDPEventSource},
@@ -105,7 +105,6 @@ fn xim_preedit_geometry(bounds: Bounds<gpui::ScaledPixels>) -> (xim::Point, xim:
 pub(crate) struct WindowRef {
     window: X11WindowStatePtr,
     refresh_state: Option<RefreshState>,
-    expose_event_received: bool,
     last_visibility: Visibility,
     is_mapped: bool,
 }
@@ -169,33 +168,6 @@ fn ime_mode_modifier(keyval: u32) -> bool {
     )
 }
 
-fn rewrite_escape_cancel(events: &mut [ImEvent]) -> bool {
-    if events.iter().any(im_event_has_text) {
-        return false;
-    }
-    let mut converted = false;
-    for event in events {
-        if matches!(event, ImEvent::HidePreedit) {
-            *event = ImEvent::Preedit {
-                text: String::new(),
-                caret_chars: 0,
-            };
-            converted = true;
-        }
-    }
-    converted
-}
-
-fn consume_escape_cancel_pending(events: &mut [ImEvent], pending: bool) -> bool {
-    if !pending {
-        return false;
-    }
-    if events.iter().any(im_event_has_text) {
-        return true;
-    }
-    rewrite_escape_cancel(events)
-}
-
 fn navigation_skips_ime(keyval: u32) -> bool {
     const TAB: u32 = 0xff09;
     const ISO_LEFT_TAB: u32 = 0xfe20;
@@ -248,7 +220,7 @@ fn maybe_append_fcitx_space(keyval: u32, events: &mut Vec<ImEvent>) {
     if !events.iter().any(|event| {
         matches!(
             event,
-            ImEvent::HidePreedit | ImEvent::Commit(_) | ImEvent::Preedit { .. }
+            ImEvent::ClearPreedit | ImEvent::Commit(_) | ImEvent::Preedit { .. }
         )
     }) {
         return;
@@ -261,7 +233,7 @@ fn fold_im_events(events: Vec<ImEvent>) -> Vec<ImEvent> {
     events
         .into_iter()
         .filter(|event| match event {
-            ImEvent::HidePreedit => !has_text,
+            ImEvent::ClearPreedit => !has_text,
             ImEvent::Preedit { text, .. } if text.is_empty() => !has_text,
             _ => true,
         })
@@ -360,7 +332,6 @@ pub struct X11ClientState {
     im_watch_token: Option<RegistrationToken>,
     dbus_unavailable: bool,
     dbus_im_focused: bool,
-    escape_cancel_pending: bool,
     pub modifiers: Modifiers,
     pub capslock: Capslock,
     // TODO: Can the other updates to `modifiers` be removed so that this is unnecessary?
@@ -484,12 +455,15 @@ impl X11Client {
                         // Insert the runnables as idle callbacks, so we make sure that user-input and X11
                         // events have higher priority and runnables are only worked off after the event
                         // callbacks.
-                        handle.insert_idle(|_| {
+                        handle.insert_idle(|client| {
                             let location = runnable.metadata().location;
                             let spawned = runnable.metadata().spawned;
                             profiler::update_running_task(spawned, location);
                             runnable.run();
                             profiler::save_task_timing();
+
+                            let xcb_connection = client.0.borrow().xcb_connection.clone();
+                            client.process_x11_events(&xcb_connection).log_err();
                         });
                     }
                 }
@@ -574,7 +548,7 @@ impl X11Client {
             ),
         )?;
 
-        let xkb_context = xkbc::Context::new(xkbc::CONTEXT_NO_FLAGS);
+        let xkb_context = new_xkb_context()?;
         let xkb_device_id = xkbc::x11::get_core_keyboard_device_id(&xcb_connection);
         let xkb_state = {
             let xkb_keymap = xkbc::x11::keymap_new_from_device(
@@ -702,7 +676,6 @@ impl X11Client {
             im_watch_token: None,
             dbus_unavailable: false,
             dbus_im_focused: false,
-            escape_cancel_pending: false,
 
             compose_state,
             pre_edit_text: None,
@@ -864,13 +837,6 @@ impl X11Client {
                 break;
             }
 
-            for window in windows_to_refresh.into_iter() {
-                let mut state = self.0.borrow_mut();
-                if let Some(window) = state.windows.get_mut(&window) {
-                    window.expose_event_received = true;
-                }
-            }
-
             for event in events.into_iter() {
                 if self.try_dbus_im_event(&event) {
                     continue;
@@ -934,6 +900,21 @@ impl X11Client {
                         drop(state);
                         self.handle_event(event);
                     }
+                }
+            }
+
+            for x_window in windows_to_refresh {
+                let window = self
+                    .0
+                    .borrow()
+                    .windows
+                    .get(&x_window)
+                    .and_then(|window| window.is_mapped.then(|| window.window.clone()));
+                if let Some(window) = window {
+                    window.refresh(RequestFrameOptions {
+                        require_presentation: true,
+                        force_render: false,
+                    });
                 }
             }
         }
@@ -1074,7 +1055,6 @@ impl X11Client {
     pub fn reset_ime(&self) {
         let mut state = self.0.borrow_mut();
         state.composing = false;
-        state.escape_cancel_pending = false;
         if let Some(im) = state.im.as_mut() {
             im.reset();
             return;
@@ -1136,9 +1116,6 @@ impl X11Client {
         if !self.0.borrow().dbus_im_focused && self.sync_dbus_im(None, true, true) {
             self.0.borrow_mut().dbus_im_focused = true;
             self.drain_dbus_im();
-        }
-        if !is_release {
-            self.0.borrow_mut().escape_cancel_pending = keyval == 0xff1b;
         }
         if shortcut_skips_ime(state, keyval) && !is_modifier {
             if !is_release {
@@ -1368,36 +1345,27 @@ impl X11Client {
         true
     }
 
-    fn apply_im_events(&self, window: &X11WindowStatePtr, mut events: Vec<ImEvent>) {
-        let pending = self.0.borrow().escape_cancel_pending;
-        if consume_escape_cancel_pending(&mut events, pending) {
-            self.0.borrow_mut().escape_cancel_pending = false;
+    fn clear_preedit(&self, window: &X11WindowStatePtr) {
+        let composing = self.0.borrow().composing;
+        self.0.borrow_mut().composing = false;
+        if composing {
+            window.handle_ime_delete();
         }
+    }
+
+    fn apply_im_events(&self, window: &X11WindowStatePtr, events: Vec<ImEvent>) {
         for event in fold_im_events(events) {
             match event {
                 ImEvent::Commit(text) => {
                     self.0.borrow_mut().composing = false;
                     window.handle_ime_commit(text);
                 }
-                ImEvent::HidePreedit => {
-                    let composing = self.0.borrow().composing;
-                    self.0.borrow_mut().composing = false;
-                    if composing {
-                        window.handle_ime_unmark();
-                    }
-                }
+                ImEvent::ClearPreedit => self.clear_preedit(window),
+                ImEvent::Preedit { ref text, .. } if text.is_empty() => self.clear_preedit(window),
                 ImEvent::Preedit { text, caret_chars } => {
-                    if text.is_empty() {
-                        let composing = self.0.borrow().composing;
-                        self.0.borrow_mut().composing = false;
-                        if composing {
-                            window.handle_ime_delete();
-                        }
-                    } else {
-                        self.0.borrow_mut().composing = true;
-                        let caret = super::caret_utf16_range(&text, caret_chars);
-                        window.handle_ime_preedit(text, caret);
-                    }
+                    self.0.borrow_mut().composing = true;
+                    let caret = super::caret_utf16_range(&text, caret_chars);
+                    window.handle_ime_preedit(text, caret);
                 }
                 ImEvent::DeleteSurrounding { offset, nchars } => {
                     if let Some(surrounding) = window.get_ime_surrounding() {
@@ -1483,15 +1451,19 @@ impl X11Client {
             Event::ClientMessage(event) => {
                 let window = self.get_window(event.window)?;
                 let [atom, arg1, arg2, arg3, arg4] = event.data.as_data32();
-                let mut state = self.0.borrow_mut();
+                let delete_window_atom = self.0.borrow().atoms.WM_DELETE_WINDOW;
 
-                if atom == state.atoms.WM_DELETE_WINDOW && window.should_close() {
-                    // window "x" button clicked by user
-                    // Rest of the close logic is handled in drop_window()
-                    drop(state);
-                    window.close();
-                    state = self.0.borrow_mut();
-                } else if atom == state.atoms._NET_WM_SYNC_REQUEST {
+                if atom == delete_window_atom {
+                    if window.should_close() {
+                        // window "x" button clicked by user
+                        // Rest of the close logic is handled in drop_window()
+                        window.close();
+                    }
+                    return Some(());
+                }
+
+                let mut state = self.0.borrow_mut();
+                if atom == state.atoms._NET_WM_SYNC_REQUEST {
                     window.state.borrow_mut().last_sync_counter =
                         Some(x11rb::protocol::sync::Int64 {
                             lo: arg2,
@@ -1680,9 +1652,13 @@ impl X11Client {
                     state.restore_xim(ximc, xim_handler);
                 }
                 drop(state);
-                self.drain_dbus_im();
-                self.0.borrow_mut().keyboard_focused_window = None;
                 self.reset_ime();
+                self.drain_dbus_im();
+                {
+                    let mut state = self.0.borrow_mut();
+                    state.composing = false;
+                    state.keyboard_focused_window = None;
+                }
                 window.handle_ime_unmark();
             }
             Event::XkbNewKeyboardNotify(_) | Event::XkbMapNotify(_) => {
@@ -2362,7 +2338,6 @@ impl LinuxClient for X11Client {
         let window_ref = WindowRef {
             window: window.0.clone(),
             refresh_state: None,
-            expose_event_received: false,
             last_visibility: Visibility::UNOBSCURED,
             is_mapped: false,
         };
@@ -2698,15 +2673,13 @@ impl X11ClientState {
                         let mut state = client.0.borrow_mut();
                         let xcb_connection = state.xcb_connection.clone();
                         if let Some(window) = state.windows.get_mut(&x_window) {
-                            let expose_event_received = window.expose_event_received;
-                            window.expose_event_received = false;
                             let force_render = std::mem::take(
                                 &mut window.window.state.borrow_mut().force_render_after_recovery,
                             );
                             let window = window.window.clone();
                             drop(state);
                             window.refresh(RequestFrameOptions {
-                                require_presentation: expose_event_received,
+                                require_presentation: false,
                                 force_render,
                             });
                         }
@@ -3594,7 +3567,7 @@ mod tests {
     }
 
     fn test_keymap_with_variant(layouts: &str, variant: &str) -> xkbc::Keymap {
-        let context = xkbc::Context::new(xkbc::CONTEXT_NO_FLAGS);
+        let context = new_xkb_context().expect("test XKB context should initialize");
         xkbc::Keymap::new_from_names(
             &context,
             "",
@@ -3903,37 +3876,23 @@ mod tests {
     }
 
     #[test]
-    fn escape_cancel_keeps_latch_when_first_drain_has_no_hide() {
-        let mut first = vec![ImEvent::ForwardKey {
-            keyval: 0xff1b,
-            state: 0,
-            is_release: false,
-        }];
-        assert!(!consume_escape_cancel_pending(&mut first, true));
-        assert!(matches!(first[0], ImEvent::ForwardKey { .. }));
+    fn fold_keeps_lone_preedit_clear_events() {
+        let cleared = fold_im_events(vec![ImEvent::ClearPreedit]);
+        assert!(matches!(cleared.as_slice(), [ImEvent::ClearPreedit]));
 
-        let mut second = vec![ImEvent::HidePreedit];
-        assert!(consume_escape_cancel_pending(&mut second, true));
+        let emptied = fold_im_events(vec![ImEvent::Preedit {
+            text: String::new(),
+            caret_chars: 0,
+        }]);
         assert!(matches!(
-            second[0],
-            ImEvent::Preedit {
-                text: ref t,
-                caret_chars: 0
-            } if t.is_empty()
+            emptied.as_slice(),
+            [ImEvent::Preedit { text, .. }] if text.is_empty()
         ));
     }
 
     #[test]
-    fn escape_cancel_clears_latch_on_text_commit() {
-        let mut events = vec![ImEvent::Commit("hoa".into())];
-        assert!(consume_escape_cancel_pending(&mut events, true));
-        assert!(matches!(events[0], ImEvent::Commit(_)));
-    }
-
-    #[test]
-    fn escape_cancel_is_noop_when_latch_is_off() {
-        let mut events = vec![ImEvent::HidePreedit];
-        assert!(!consume_escape_cancel_pending(&mut events, false));
-        assert!(matches!(events[0], ImEvent::HidePreedit));
+    fn fold_drops_preedit_clear_next_to_commit() {
+        let committed = fold_im_events(vec![ImEvent::Commit("được".into()), ImEvent::ClearPreedit]);
+        assert!(matches!(committed.as_slice(), [ImEvent::Commit(_)]));
     }
 }

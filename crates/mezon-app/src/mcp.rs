@@ -78,6 +78,73 @@ impl McpRuntime {
                         let result = cx.update(|cx| navigate_path(cx, &path));
                         let _ = reply.send(result);
                     }
+                    #[cfg(debug_assertions)]
+                    McpCommand::SetChannelAgeRestricted {
+                        clan_id,
+                        channel_id,
+                        on,
+                        reply,
+                    } => {
+                        let clan_id = mezon_store::ClanId(clan_id);
+                        let channel_id = mezon_store::ChannelId(channel_id);
+                        let prepared = cx.update(|cx| {
+                            let store = mezon_store::ChannelList::global(cx);
+                            let channel = store.read(cx).channel(clan_id, channel_id).cloned();
+                            channel.map(|channel| {
+                                store.update(cx, |store, cx| {
+                                    store.update_channel_overview(
+                                        clan_id,
+                                        channel_id,
+                                        channel.name.to_string(),
+                                        channel.topic.clone(),
+                                        i32::from(on),
+                                        cx,
+                                    )
+                                })
+                            })
+                        });
+                        let result = match prepared {
+                            Some(task) => match task.await {
+                                Ok(()) => {
+                                    Ok(serde_json::json!({ "ok": true, "age_restricted": on }))
+                                }
+                                Err(e) => Err(anyhow::anyhow!("update failed: {e:?}")),
+                            },
+                            None => Err(anyhow::anyhow!("channel not loaded")),
+                        };
+                        let _ = reply.send(result);
+                    }
+                    #[cfg(debug_assertions)]
+                    McpCommand::SetLocalDob { seconds, reply } => {
+                        let result = cx.update(|cx| {
+                            mezon_store::AccountStore::global(cx).update(cx, |store, cx| {
+                                match store.account.as_mut() {
+                                    Some(account) => {
+                                        account.dob_seconds = seconds;
+                                        cx.notify();
+                                        Ok(serde_json::json!({ "ok": true, "dob_seconds": seconds }))
+                                    }
+                                    None => Err(anyhow::anyhow!("account not loaded")),
+                                }
+                            })
+                        });
+                        let _ = reply.send(result);
+                    }
+                    #[cfg(debug_assertions)]
+                    McpCommand::InjectPreviewMessage {
+                        content,
+                        sender_name,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_store::MessagesStore::global(cx).update(cx, |store, cx| {
+                                store.inject_preview_message(content, sender_name, cx).map(
+                                    |message_id| serde_json::json!({ "message_id": message_id }),
+                                )
+                            })
+                        });
+                        let _ = reply.send(result);
+                    }
                     McpCommand::Logout { reply } => {
                         let result = cx.update(|cx| {
                             LoginStore::global(cx).update(cx, |store, cx| store.logout(cx));

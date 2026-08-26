@@ -360,10 +360,14 @@ mod tests {
     use super::*;
     use crate::mixer::AudioSource;
 
+    fn recording_path(dir: &Path) -> PathBuf {
+        dir.join(format!("call.{}", crate::file_extension()))
+    }
+
     #[test]
     fn an_audio_only_recording_lands_at_the_final_path_with_no_part_file_left() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("call.mp4");
+        let path = recording_path(dir.path());
         let recorder = match Recorder::start(RecorderConfig {
             path: path.clone(),
             video: None,
@@ -496,7 +500,7 @@ mod tests {
     #[test]
     fn a_dropped_recorder_leaves_the_part_file_and_never_claims_the_final_path() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("call.mp4");
+        let path = recording_path(dir.path());
         let recorder = match Recorder::start(RecorderConfig {
             path: path.clone(),
             video: None,

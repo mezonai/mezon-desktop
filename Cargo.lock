@@ -4014,6 +4014,7 @@ dependencies = [
  "raw-window-handle",
  "smallvec",
  "swash",
+ "unicode-bidi",
  "unicode-segmentation",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -4232,9 +4233,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.4.15"
+version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
+checksum = "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -5768,8 +5769,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mezon-active-windows"
+version = "2.0.18"
+dependencies = [
+ "anyhow",
+ "core-foundation 0.10.0",
+ "libc",
+ "serde",
+ "tracing",
+ "windows 0.61.3",
+ "x11rb",
+]
+
+[[package]]
 name = "mezon-app"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -5800,7 +5814,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-audio"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "anyhow",
  "flume",
@@ -5815,7 +5829,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-call"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5833,7 +5847,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-canvas"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5855,7 +5869,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-cli"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "anyhow",
  "clap",
@@ -5871,7 +5885,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-client"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5908,14 +5922,14 @@ dependencies = [
 
 [[package]]
 name = "mezon-i18n"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "mezon-mcp"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "anyhow",
  "axum",
@@ -5936,7 +5950,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-native"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "anyhow",
  "auto-launch",
@@ -5963,7 +5977,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-pdf"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "anyhow",
  "core-graphics 0.24.0",
@@ -5976,7 +5990,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-proto"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "prost 0.13.5",
  "prost-build 0.13.5",
@@ -5987,7 +6001,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-record"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -6010,7 +6024,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-store"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6020,6 +6034,7 @@ dependencies = [
  "gpui",
  "image",
  "keyring",
+ "mezon-active-windows",
  "mezon-audio",
  "mezon-call",
  "mezon-client",
@@ -6042,7 +6057,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-stream"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "anyhow",
  "flume",
@@ -6060,7 +6075,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-theme"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "gpui",
  "theme",
@@ -6068,7 +6083,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-ui"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6107,12 +6122,13 @@ dependencies = [
  "unicode-normalization",
  "unicode-segmentation",
  "windows 0.61.3",
+ "x11rb",
  "zed-scap",
 ]
 
 [[package]]
 name = "mezon-updater"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6133,7 +6149,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-video"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -6155,7 +6171,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-voice"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "anyhow",
  "block",
@@ -6175,6 +6191,7 @@ dependencies = [
  "nokhwa",
  "objc",
  "parking_lot",
+ "pipewire",
  "screencapturekit",
  "screencapturekit-sys",
  "tiny-skia",
@@ -6189,7 +6206,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-widgets"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "gpui",
  "mezon-store",
@@ -6253,7 +6270,7 @@ dependencies = [
 
 [[package]]
 name = "mmn-client"
-version = "2.0.17"
+version = "2.0.18"
 dependencies = [
  "base64 0.22.1",
  "bs58",

@@ -51,6 +51,7 @@ pub mod presign;
 pub mod quick_menu;
 pub mod realtime;
 pub mod roles;
+pub mod sprite_atlas;
 pub mod sticker;
 pub mod stream;
 pub mod threads;
@@ -205,12 +206,17 @@ pub use platform::{
     download_url_with_dialog,
 };
 pub use presence::*;
-pub use quick_menu::{QuickMenuItem, QuickMenuStore};
+pub use quick_menu::{
+    QUICK_MENU_ACTION_MSG_MAX_BYTES, QUICK_MENU_NAME_MAX_RUNES, QUICK_MENU_TYPE_FLASH,
+    QUICK_MENU_TYPE_QUICK, QuickMenuItem, QuickMenuStore, is_valid_action_msg, is_valid_menu_name,
+    name_exists,
+};
 pub use realtime::{RealtimeDispatch, RealtimeKind};
 pub use roles::{
     ClanRoleDetail, DEFAULT_ROLE_COLOR, MAX_ROLE_ICON_BYTES, Role, RoleDraft, RolePermission,
     RoleStyle, RoleUser, RolesEvent, RolesStore, everyone_slug, parse_role_color,
 };
+pub use sprite_atlas::{SpriteAtlas, SpriteFrame, fetch_sprite_atlas, parse_sprite_atlas};
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
 pub use stream::{StreamMember, StreamPhase, StreamStore};
 pub use threads::{

@@ -1,10 +1,14 @@
 use std::{
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
     thread::{ThreadId, current},
     time::Duration,
 };
 
 use anyhow::Context;
+use parking_lot::Mutex;
 use util::ResultExt;
 use windows::{
     System::Threading::{
@@ -87,7 +91,12 @@ impl WindowsDispatcher {
             })
         };
 
-        ThreadPool::RunWithPriorityAsync(&handler, priority).log_err();
+        if let Err(error) = ThreadPool::RunWithPriorityAsync(&handler, priority) {
+            log::error!("failed to dispatch work to the Windows thread pool: {error}");
+            // Zed #60693 adapted to this older WinRT dispatcher: leaking the handler keeps
+            // the captured runnable pending instead of cancelling a task during shutdown.
+            std::mem::forget(handler);
+        }
     }
 
     fn dispatch_on_threadpool_after(&self, runnable: RunnableVariant, duration: Duration) {
@@ -95,22 +104,29 @@ impl WindowsDispatcher {
         // pending, else 30Hz media pumps quantize to the ~15.6ms tick (fire at 31-47ms).
         // Scoped to short timers so long TTL timers don't pin 1ms resolution forever.
         // `HighResTimerGuard` refcounts it process-wide, so N pending timers cost one
-        // `timeBeginPeriod`, not N. The guard restores resolution on every path: handler
-        // completion, handler panic (unwind drop), and CreateTimer failure (handler never
-        // runs, closure dropped with the moved guard).
+        // `timeBeginPeriod`, not N. The guard restores resolution on handler completion and is
+        // explicitly released if CreateTimer fails before its handler is intentionally leaked.
         const HIGH_RES_THRESHOLD: Duration = Duration::from_millis(100);
-        let resolution_guard = (duration < HIGH_RES_THRESHOLD).then(HighResTimerGuard::acquire);
+        let resolution_guard = Arc::new(Mutex::new(
+            (duration < HIGH_RES_THRESHOLD).then(HighResTimerGuard::acquire),
+        ));
         let handler = {
             let mut task_wrapper = Some(runnable);
-            let mut resolution_guard = resolution_guard;
+            let resolution_guard = resolution_guard.clone();
             TimerElapsedHandler::new(move |_| {
                 let runnable = task_wrapper.take().unwrap();
                 Self::execute_runnable(runnable);
-                resolution_guard.take();
+                resolution_guard.lock().take();
                 Ok(())
             })
         };
-        ThreadPoolTimer::CreateTimer(&handler, duration.into()).log_err();
+        if let Err(error) = ThreadPoolTimer::CreateTimer(&handler, duration.into()) {
+            log::error!("failed to create a Windows thread-pool timer: {error}");
+            // Preserve Zed's shutdown behavior by leaking the pending runnable, but release
+            // Mezon's process-wide timer-resolution holder before leaking its handler.
+            resolution_guard.lock().take();
+            std::mem::forget(handler);
+        }
     }
 
     #[inline(always)]

@@ -52,6 +52,7 @@ pub use forward_modal::{ShareContactModal, share_contact_subject};
 pub use gif_video::VideoThumbView;
 pub(crate) use message_buzz_modal::MessageBuzzModal;
 pub(crate) use ogp_embed::render_ogp_preview;
+pub(crate) use poll_card::render_poll_card_readonly;
 pub(crate) use reaction_picker::{ReactionPicker, ReactionPickerEvent};
 pub(crate) use send_token_modal::SendTokenModal;
 pub(crate) use share_location_modal::ShareLocationModal;

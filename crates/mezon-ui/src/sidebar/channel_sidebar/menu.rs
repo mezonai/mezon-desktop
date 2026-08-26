@@ -331,6 +331,7 @@ pub(crate) fn submenu_options(
             value: *value,
             label: mezon_i18n::t(locale, key).into(),
             selected: *value == selected,
+            disabled: false,
         })
         .collect()
 }

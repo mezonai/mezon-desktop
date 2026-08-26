@@ -43,3 +43,6 @@ core-foundation = "0.9"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows.workspace = true
+
+[features]
+dev-session = []

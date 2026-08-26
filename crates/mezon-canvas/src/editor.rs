@@ -41,8 +41,8 @@ use mezon_widgets::text_actions::{
 };
 use mezon_widgets::text_edit::{
     SelectGranularity, extend_range_for_granularity, granularity_for_click, ime_replace_range,
-    marked_caret_range, next_word_boundary, previous_word_boundary, range_for_granularity,
-    surrounding_delete_range, swallow_discarded_ime_commit,
+    marked_caret_range, marked_range_after_delete, next_word_boundary, previous_word_boundary,
+    range_for_granularity, surrounding_delete_range, swallow_discarded_ime_commit,
 };
 use mezon_widgets::{
     Button, ButtonVariants, Icon, IconName, Input, InputState, Sizable, Size, h_flex, v_flex,
@@ -668,7 +668,11 @@ impl CanvasEditorState {
         let new_cursor = start + inserted_len;
         self.selected_range = new_cursor..new_cursor;
         self.selection_reversed = false;
-        self.marked_range = None;
+        self.marked_range = if new_text.is_empty() {
+            marked_range_after_delete(self.marked_range.as_ref(), &(start..end))
+        } else {
+            None
+        };
         self.caret_blink.pause_blinking(cx);
         cx.notify();
     }

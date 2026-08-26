@@ -1,16 +1,20 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
+use mezon_active_windows::{get_active_window, tracked_activity_from_window};
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 use mezon_proto::{api, realtime};
 
 use crate::Freshness;
+use crate::Settings;
 use crate::ids::UserId;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
+const ACTIVITY_POLL_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
 /// A user's current rich-presence activity, mirroring proto `UserActivity` and React `IActivity`.
-/// `activity_type` groups the activity (React `ActivitiesType`): `1` = coding/work (Visual Studio
-/// Code), `2` = music/live (Spotify), `3` = gaming/play (League of Legends).
+/// `activity_type` groups the activity (React `ActivitiesType`): `1` = coding (editors/dev tools),
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserActivity {
     pub user_id: UserId,
@@ -20,13 +24,17 @@ pub struct UserActivity {
 }
 
 /// Activity kinds used by the Friends activity sidebar, matching React's `activity_type` literals.
-pub const ACTIVITY_TYPE_WORK: i32 = 1;
-pub const ACTIVITY_TYPE_LIVE: i32 = 2;
-pub const ACTIVITY_TYPE_PLAY: i32 = 3;
+pub use mezon_active_windows::{ACTIVITY_TYPE_LIVE, ACTIVITY_TYPE_PLAY, ACTIVITY_TYPE_WORK};
 
 #[derive(Debug, Clone)]
 pub enum ActivityEvent {
     Changed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PublishedActivity {
+    app_name: String,
+    activity_type: i32,
 }
 
 fn activity_from_api(a: api::UserActivity) -> UserActivity {
@@ -35,6 +43,43 @@ fn activity_from_api(a: api::UserActivity) -> UserActivity {
         activity_type: a.activity_type,
         activity_name: a.activity_name,
         activity_description: a.activity_description,
+    }
+}
+
+fn detect_tracked_activity(
+    info: &mezon_active_windows::ActiveWindowInfo,
+) -> Option<(String, String, i32)> {
+    tracked_activity_from_window(info).map(|tracked| {
+        (
+            tracked.app_name,
+            tracked.description,
+            tracked.kind.as_type(),
+        )
+    })
+}
+
+fn clear_activity_request() -> api::CreateActivityRequest {
+    api::CreateActivityRequest {
+        activity_name: String::new(),
+        activity_type: 0,
+        status: 0,
+        ..Default::default()
+    }
+}
+
+fn publish_activity_request(
+    app_name: &str,
+    window_title: &str,
+    activity_type: i32,
+    start_time_seconds: u32,
+) -> api::CreateActivityRequest {
+    api::CreateActivityRequest {
+        activity_name: app_name.to_string(),
+        activity_type,
+        activity_description: window_title.to_string(),
+        start_time_seconds,
+        application_id: 0,
+        status: 1,
     }
 }
 
@@ -49,15 +94,19 @@ pub struct ActivityStore {
     loading: bool,
     freshness: Freshness,
     reset_generation: u64,
+    publish_generation: u64,
+    last_published: Option<PublishedActivity>,
     api: Arc<AppApi>,
+    settings: Entity<Settings>,
     _conn_watch: Task<()>,
+    _tracking_task: Task<()>,
 }
 
 impl EventEmitter<ActivityEvent> for ActivityStore {}
 
 impl ActivityStore {
-    pub fn init(api: Arc<AppApi>, cx: &mut App) -> Entity<Self> {
-        let entity = cx.new(|cx| Self::new(api, cx));
+    pub fn init(api: Arc<AppApi>, settings: Entity<Settings>, cx: &mut App) -> Entity<Self> {
+        let entity = cx.new(|cx| Self::new(api, settings, cx));
         cx.set_global(GlobalActivityStore(entity.clone()));
         entity
     }
@@ -70,31 +119,54 @@ impl ActivityStore {
         cx.try_global::<GlobalActivityStore>().map(|g| g.0.clone())
     }
 
-    fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
+    fn new(api: Arc<AppApi>, settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
+        let tracking_task = Self::spawn_tracking_task(cx);
         let entity = cx.entity();
         RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
             dispatch.on(RealtimeKind::ListActivity, &entity, |this, event, cx| {
                 this.handle_list_activity(event, cx);
             });
         });
+        cx.observe(&settings, |this, settings, cx| {
+            if settings.read(cx).activity_tracking {
+                this.poll_active_window(cx);
+            } else {
+                this.clear_published_activity(cx);
+            }
+        })
+        .detach();
         Self {
             activities: Vec::new(),
             loading: false,
             freshness: Freshness::new(),
             reset_generation: 0,
+            publish_generation: 0,
+            last_published: None,
             api,
+            settings,
             _conn_watch: conn_watch,
+            _tracking_task: tracking_task,
         }
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.reset_generation = self.reset_generation.wrapping_add(1);
+        self.publish_generation = self.publish_generation.wrapping_add(1);
+        self.clear_published_activity(cx);
         self.activities.clear();
         self.loading = false;
         self.freshness.mark_stale();
         cx.emit(ActivityEvent::Changed);
         cx.notify();
+    }
+
+    fn tracking_enabled(&self, cx: &App) -> bool {
+        self.settings.read(cx).activity_tracking
+    }
+
+    fn is_connected(&self) -> bool {
+        *self.api.status().borrow() == ConnectionStatus::Connected
     }
 
     fn spawn_connection_watch(api: Arc<AppApi>, cx: &mut Context<Self>) -> Task<()> {
@@ -112,6 +184,7 @@ impl ActivityStore {
                         .update(cx, |this, cx| {
                             this.freshness.mark_stale();
                             this.fetch(cx);
+                            this.poll_active_window(cx);
                         })
                         .is_err()
                     {
@@ -122,6 +195,96 @@ impl ActivityStore {
                 }
             }
         })
+    }
+
+    fn spawn_tracking_task(cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            loop {
+                let should_poll = this
+                    .update(cx, |this, cx| {
+                        this.tracking_enabled(cx) && this.is_connected()
+                    })
+                    .unwrap_or(false);
+                if should_poll {
+                    let _ = this.update(cx, |this, cx| this.poll_active_window(cx));
+                }
+                cx.background_executor().timer(ACTIVITY_POLL_INTERVAL).await;
+            }
+        })
+    }
+
+    fn poll_active_window(&mut self, cx: &mut Context<Self>) {
+        if !self.tracking_enabled(cx) || !self.is_connected() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { get_active_window() })
+                .await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(info) => this.apply_active_window(info, cx),
+                Err(error) => tracing::debug!("active window query failed: {error}"),
+            });
+        })
+        .detach();
+    }
+
+    fn apply_active_window(
+        &mut self,
+        info: mezon_active_windows::ActiveWindowInfo,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((app_name, description, activity_type)) = detect_tracked_activity(&info) else {
+            if self.last_published.is_some() {
+                self.clear_published_activity(cx);
+            }
+            return;
+        };
+        let unchanged = self.last_published.as_ref().is_some_and(|published| {
+            published.app_name == app_name && published.activity_type == activity_type
+        });
+        if unchanged {
+            return;
+        }
+        let start_time_seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs() as u32)
+            .unwrap_or(0);
+        self.last_published = Some(PublishedActivity {
+            app_name: app_name.clone(),
+            activity_type,
+        });
+        self.publish_activity(
+            publish_activity_request(&app_name, &description, activity_type, start_time_seconds),
+            cx,
+        );
+    }
+
+    fn clear_published_activity(&mut self, cx: &mut Context<Self>) {
+        if self.last_published.is_none() {
+            return;
+        }
+        self.last_published = None;
+        self.publish_activity(clear_activity_request(), cx);
+    }
+
+    fn publish_activity(&mut self, request: api::CreateActivityRequest, cx: &mut Context<Self>) {
+        self.publish_generation = self.publish_generation.wrapping_add(1);
+        let generation = self.publish_generation;
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let result = api.create_activity(request).await;
+            let _ = this.update(cx, |this, _cx| {
+                if this.publish_generation != generation {
+                    return;
+                }
+                if let Err(error) = result {
+                    tracing::warn!("create_activity failed: {error}");
+                }
+            });
+        })
+        .detach();
     }
 
     pub fn activities(&self) -> &[UserActivity] {
@@ -205,8 +368,9 @@ mod tests {
             Arc::new(mezon_client::TransportClient::new(String::new())),
             String::new(),
         ));
+        let settings = cx.new(|_| Settings::default());
         RealtimeDispatch::init(api.clone(), cx);
-        cx.new(|cx| ActivityStore::new(api, cx))
+        cx.new(|cx| ActivityStore::new(api, settings, cx))
     }
 
     fn work(user_id: i64, name: &str) -> UserActivity {
@@ -216,6 +380,49 @@ mod tests {
             activity_name: name.into(),
             activity_description: String::new(),
         }
+    }
+
+    #[test]
+    fn detect_tracked_activity_matches_code_and_game() {
+        let code = mezon_active_windows::ActiveWindowInfo {
+            os: "linux".into(),
+            window_class: "Code".into(),
+            window_name: "main.rs".into(),
+            window_desktop: "0".into(),
+            window_type: "0".into(),
+            window_pid: "1".into(),
+            idle_time: "0".into(),
+        };
+        let (app, title, activity_type) = detect_tracked_activity(&code).expect("code activity");
+        assert_eq!(app, "Code");
+        assert!(title.is_empty());
+        assert_eq!(activity_type, ACTIVITY_TYPE_WORK);
+
+        let lol = mezon_active_windows::ActiveWindowInfo {
+            os: "windows".into(),
+            window_class: "LeagueClientUx.exe".into(),
+            window_name: String::new(),
+            window_desktop: "0".into(),
+            window_type: "0".into(),
+            window_pid: "2".into(),
+            idle_time: "0".into(),
+        };
+        let (_, _, activity_type) = detect_tracked_activity(&lol).expect("lol activity");
+        assert_eq!(activity_type, ACTIVITY_TYPE_PLAY);
+    }
+
+    #[test]
+    fn detect_tracked_activity_rejects_unlisted_apps() {
+        let chrome = mezon_active_windows::ActiveWindowInfo {
+            os: "linux".into(),
+            window_class: "Google Chrome".into(),
+            window_name: String::new(),
+            window_desktop: "0".into(),
+            window_type: "0".into(),
+            window_pid: "1".into(),
+            idle_time: "0".into(),
+        };
+        assert!(detect_tracked_activity(&chrome).is_none());
     }
 
     #[gpui::test]
@@ -303,6 +510,24 @@ mod tests {
                 );
             });
         });
+    }
+
+    #[test]
+    fn clear_activity_request_matches_react_contract() {
+        let request = clear_activity_request();
+        assert_eq!(request.activity_name, "");
+        assert_eq!(request.activity_type, 0);
+        assert_eq!(request.status, 0);
+    }
+
+    #[test]
+    fn publish_activity_request_is_process_only() {
+        let request = publish_activity_request("Cursor", "", ACTIVITY_TYPE_WORK, 100);
+        assert_eq!(request.activity_name, "Cursor");
+        assert_eq!(request.activity_description, "");
+        assert_eq!(request.activity_type, ACTIVITY_TYPE_WORK);
+        assert_eq!(request.start_time_seconds, 100);
+        assert_eq!(request.status, 1);
     }
 
     #[test]

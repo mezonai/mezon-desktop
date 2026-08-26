@@ -11,9 +11,10 @@ use gpui::{
 };
 use mezon_audio::{AudioPlayer, decode_audio};
 use mezon_client::transport::{
-    ApiActionRow, ApiComponentPayload, ApiEmbed, ApiEmbedInputWrapper, ApiMessage,
-    ApiMessageComponent, ApiMessageContent, ApiMessageInput, ApiSelectComponent, LOCATION_CODE,
-    MESSAGE_BUZZ_CODE, OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag,
+    ApiActionRow, ApiAnimationComponent, ApiComponentPayload, ApiEmbed, ApiEmbedInputWrapper,
+    ApiEmbedShapeWrapper, ApiMessage, ApiMessageComponent, ApiMessageContent, ApiMessageInput,
+    ApiRadioOption, ApiSelectComponent, LOCATION_CODE, MESSAGE_BUZZ_CODE,
+    OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag,
     OutgoingMention as TransportMention, OutgoingMessageFlags, OutgoingOgp, OutgoingReply,
     SHARE_CONTACT_CODE, build_send_content, build_share_contact_content_json, detect_markdown,
     emoji_content_tokens, hashtag_content_tokens, is_here_user_id, markdown_content_tokens,
@@ -28,16 +29,18 @@ use mezon_client::{
 use crate::AppConfig;
 use crate::KeyedCache;
 use crate::Settings;
-use crate::account::AccountStore;
+use crate::account::{AccountStore, UserAccount};
 use crate::album_layout::{AlbumLayout, calculate_album_layout};
 use crate::badge::BadgeService;
 use crate::channel::{ChannelEvent, ChannelList, ChannelType, STREAM_MODE_THREAD};
 use crate::channel_members::ChannelMembersStore;
 use crate::clan_members::ClanMembersStore;
-use crate::direct::{DirectKind, DirectMessageStore};
+use crate::direct::{DirectChannel, DirectKind, DirectMessageStore};
+use crate::group_members::GroupMembersStore;
 use crate::inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxStore};
 use crate::message::{
-    CallLog, CallLogType, Embed, EmbedAuthor, EmbedField, EmbedFooter, EmbedImage, EmbedInput,
+    CallLog, CallLogType, Embed, EmbedAnimation, EmbedAuthor, EmbedDatePicker, EmbedField,
+    EmbedFooter, EmbedGrid, EmbedGridItem, EmbedImage, EmbedInput, EmbedRadio, EmbedRadioOption,
     EmbedTextInput, InvitePreview, MentionTarget, Message, MessageAttachment, MessageButton,
     MessageCode, MessageComponent, MessageComponentRow, MessageReference, MessageSelect,
     MessageSelectOption, MessageSpan, OgpPreview, PollAnswerView, PollData, PollDetail,
@@ -4189,6 +4192,14 @@ impl MessagesStore {
         let Some(message) = self.cached_message(message_id) else {
             return HashSet::new();
         };
+        let embed_radios = message
+            .embeds
+            .iter()
+            .flat_map(|embed| embed.fields.iter())
+            .filter_map(|field| match field.input.as_ref() {
+                Some(EmbedInput::Radio(radio)) if radio.allows_multiple() => Some(radio.id.clone()),
+                _ => None,
+            });
         let embed_selects = message
             .embeds
             .iter()
@@ -4209,7 +4220,39 @@ impl MessagesStore {
             .chain(row_selects)
             .filter(|select| select.allows_multiple())
             .filter_map(|select| select.id.clone())
+            .chain(embed_radios)
             .collect()
+    }
+
+    pub fn choose_embed_radio(
+        &mut self,
+        message_id: MessageId,
+        radio_id: SharedString,
+        multiple: bool,
+        max_options: Option<i32>,
+        value: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .message_select_selection(message_id, &radio_id)
+            .to_vec();
+        let values = if multiple {
+            if current.contains(&value) {
+                current.into_iter().filter(|item| *item != value).collect()
+            } else {
+                let max = max_options.filter(|max| *max > 0);
+                if max.is_some_and(|max| current.len() >= max as usize) {
+                    return;
+                }
+                let mut values = current;
+                values.push(value);
+                values
+            }
+        } else {
+            vec![value]
+        };
+        self.set_message_select_selection(message_id, radio_id, values, cx);
+        self.notify_message_row(message_id, cx);
     }
 
     fn embed_form_payload(
@@ -4221,6 +4264,47 @@ impl MessagesStore {
             self.select_ui.get(&message_id),
             self.embed_form.get(&message_id),
         )
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn inject_preview_message(
+        &mut self,
+        content: serde_json::Value,
+        sender_name: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<i64> {
+        let Some(channel_id) = self.active_channel_id else {
+            anyhow::bail!("no active channel");
+        };
+        let content_tokens: mezon_client::transport::ApiMessageContent =
+            serde_json::from_value(content.clone())?;
+        let attachments: Vec<mezon_client::transport::ApiAttachment> = content
+            .get("attachments")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default();
+        let message_id = synthesize_ws_message_id(self, channel_id, channel_id, 0);
+        let api = ApiMessage {
+            message_id,
+            content: content_tokens.t.clone(),
+            content_tokens,
+            content_raw: content.to_string(),
+            code: 0,
+            sender_id: 0,
+            sender_name: sender_name.unwrap_or_else(|| "Embed Preview".to_string()),
+            avatar: String::new(),
+            create_time: unix_now_seconds(),
+            update_time: 0,
+            hide_editted: true,
+            attachments,
+            references: Vec::new(),
+            reactions: Vec::new(),
+            entity_mentions: Vec::new(),
+        };
+        let cfg = AppConfig::try_global(cx);
+        let viewer_id = viewer_user_id(cx);
+        let message = message_from_api(api, cfg, viewer_id);
+        self.apply_incoming_message(channel_id, message, cx);
+        Ok(message_id)
     }
 
     pub fn click_message_button(
@@ -5902,16 +5986,16 @@ impl MessagesStore {
         } else {
             state.selected = vec![index];
         }
-        self.notify_poll_row(message_id, cx);
+        self.notify_message_row(message_id, cx);
     }
 
     pub fn toggle_poll_results(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
         let state = self.poll_ui.entry(message_id).or_default();
         state.show_results = !state.show_results;
-        self.notify_poll_row(message_id, cx);
+        self.notify_message_row(message_id, cx);
     }
 
-    fn notify_poll_row(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+    fn notify_message_row(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
         cx.emit(MessagesEvent::Updated {
             message_id: Some(message_id),
         });
@@ -5955,7 +6039,7 @@ impl MessagesStore {
             return;
         };
         self.poll_ui.entry(message_id).or_default().voting = true;
-        self.notify_poll_row(message_id, cx);
+        self.notify_message_row(message_id, cx);
         let api = self.api.clone();
         let cid = channel_id.get();
         let mid = message_id.get();
@@ -5977,7 +6061,7 @@ impl MessagesStore {
                     }
                     Err(e) => tracing::error!("vote_poll failed: {e}"),
                 }
-                store.notify_poll_row(message_id, cx);
+                store.notify_message_row(message_id, cx);
             });
         })
         .detach();
@@ -6031,11 +6115,15 @@ impl MessagesStore {
     ) -> Task<anyhow::Result<PollDetail>> {
         let api = self.api.clone();
         let cid = self.active_channel_id.map_or(0, |c| c.get());
-        let clan_id = self.active_clan_id.unwrap_or(ClanId(0));
+        let is_dm = self.is_dm;
+        let clan_id = (!is_dm).then_some(self.active_clan_id).flatten();
+        let dm_channel_id = is_dm.then_some(self.active_channel_id).flatten();
         let mid = message_id.get();
         cx.spawn(async move |this, cx| {
             let resp = api.get_poll(poll_id, mid, cid).await?;
-            let detail = this.update(cx, |_store, cx| map_poll_detail(&resp, clan_id, cx))?;
+            let detail = this.update(cx, |_store, cx| {
+                map_poll_detail(&resp, clan_id, dm_channel_id, cx)
+            })?;
             Ok(detail)
         })
     }
@@ -7684,12 +7772,17 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
 
 fn map_poll_detail(
     resp: &mezon_proto::api::GetPollResponse,
-    clan_id: ClanId,
+    clan_id: Option<ClanId>,
+    dm_channel_id: Option<ChannelId>,
     cx: &App,
 ) -> PollDetail {
-    let members_entity = ClanMembersStore::global(cx);
-    let members = members_entity.read(cx);
     let cfg = AppConfig::try_global(cx);
+    let clan = clan_id.map(|clan_id| (clan_id, ClanMembersStore::global(cx).read(cx)));
+    let group =
+        dm_channel_id.map(|channel_id| (channel_id, GroupMembersStore::global(cx).read(cx)));
+    let dm_channel = dm_channel_id
+        .and_then(|channel_id| DirectMessageStore::global(cx).read(cx).find(channel_id));
+    let account = AccountStore::try_global(cx).and_then(|store| store.read(cx).account.as_ref());
     let answer_count = resp.answers.len().max(resp.answer_counts.len());
     let mut voters_by_answer: Vec<Vec<PollVoter>> = vec![Vec::new(); answer_count];
     for detail in &resp.voter_details {
@@ -7698,34 +7791,85 @@ fn map_poll_detail(
             continue;
         };
         for &uid in &detail.user_ids {
-            let user_id = UserId(uid);
-            let voter = match members.member(clan_id, user_id) {
-                Some(member) => {
-                    let avatar = member.avatar();
-                    let avatar_proxied = cfg
-                        .map(|c| c.avatar_proxy(avatar))
-                        .unwrap_or_else(|| avatar.to_string());
-                    PollVoter {
-                        user_id,
-                        display_name: member.name().to_string().into(),
-                        username: member.user.username.clone().into(),
-                        avatar_proxied: avatar_proxied.into(),
-                    }
-                }
-                None => PollVoter {
-                    user_id,
-                    display_name: uid.to_string().into(),
-                    username: SharedString::default(),
-                    avatar_proxied: SharedString::default(),
-                },
-            };
-            slot.push(voter);
+            slot.push(resolve_poll_voter(
+                UserId(uid),
+                clan,
+                group,
+                dm_channel,
+                account,
+                cfg,
+            ));
         }
     }
     PollDetail {
         total_votes: resp.total_votes,
         answer_counts: resp.answer_counts.clone(),
         voters_by_answer,
+    }
+}
+
+fn resolve_poll_voter(
+    user_id: UserId,
+    clan: Option<(ClanId, &ClanMembersStore)>,
+    group: Option<(ChannelId, &GroupMembersStore)>,
+    dm_channel: Option<&DirectChannel>,
+    account: Option<&UserAccount>,
+    cfg: Option<&AppConfig>,
+) -> PollVoter {
+    let proxy = |avatar: &str| {
+        cfg.map(|c| c.avatar_proxy(avatar))
+            .unwrap_or_else(|| avatar.to_string())
+    };
+    if let Some((clan_id, members)) = clan
+        && let Some(member) = members.member(clan_id, user_id)
+    {
+        return PollVoter {
+            user_id,
+            display_name: member.name().to_string().into(),
+            username: member.user.username.clone().into(),
+            avatar_proxied: proxy(member.avatar()).into(),
+        };
+    }
+    if let Some((channel_id, members)) = group
+        && let Some(member) = members.member(channel_id, user_id)
+    {
+        return PollVoter {
+            user_id,
+            display_name: member.name().to_string().into(),
+            username: member.user.username.clone().into(),
+            avatar_proxied: proxy(member.avatar()).into(),
+        };
+    }
+    if let Some(dm) = dm_channel
+        && dm.peer_user_id == Some(user_id)
+    {
+        return PollVoter {
+            user_id,
+            display_name: dm.label.clone().into(),
+            username: dm.peer_username.clone().into(),
+            avatar_proxied: proxy(&dm.avatar).into(),
+        };
+    }
+    if let Some(account) = account
+        && account.user_id == user_id.get()
+    {
+        let display_name = if account.display_name.is_empty() {
+            &account.username
+        } else {
+            &account.display_name
+        };
+        return PollVoter {
+            user_id,
+            display_name: display_name.clone().into(),
+            username: account.username.clone().into(),
+            avatar_proxied: proxy(account.avatar_url.as_deref().unwrap_or_default()).into(),
+        };
+    }
+    PollVoter {
+        user_id,
+        display_name: user_id.get().to_string().into(),
+        username: SharedString::default(),
+        avatar_proxied: SharedString::default(),
     }
 }
 
@@ -8002,17 +8146,22 @@ fn build_embed(embed: &ApiEmbed, cfg: Option<&AppConfig>) -> Embed {
                 .into(),
             url: a.url.clone().map(Into::into),
         });
-    let thumbnail_proxied = embed
+    let thumbnail = embed
         .thumbnail
         .as_ref()
         .filter(|t| !t.url.is_empty())
-        .map(|t| proxy_image(&t.url, 64, 64, cfg))
-        .unwrap_or_default()
-        .into();
+        .map(|t| t.url.clone())
+        .unwrap_or_default();
+    let thumbnail_proxied = if thumbnail.is_empty() {
+        SharedString::default()
+    } else {
+        proxy_image(&thumbnail, 64, 64, cfg).into()
+    };
     let image = embed.image.as_ref().filter(|i| !i.url.is_empty()).map(|i| {
         let width = i.width.map(|v| v.max(0) as u32);
         let height = i.height.map(|v| v.max(0) as u32);
         EmbedImage {
+            url: i.url.clone().into(),
             url_proxied: proxy_image(&i.url, width.unwrap_or(400), height.unwrap_or(300), cfg)
                 .into(),
             width,
@@ -8040,6 +8189,8 @@ fn build_embed(embed: &ApiEmbed, cfg: Option<&AppConfig>) -> Embed {
             value: field.value.clone().into(),
             inline: field.inline,
             input: parse_embed_input(field.inputs.as_ref()),
+            shape: parse_embed_shape(field.shape.as_ref()),
+            buttons: parse_embed_field_buttons(field.button.as_ref()),
         })
         .collect::<Vec<_>>()
         .into();
@@ -8051,6 +8202,7 @@ fn build_embed(embed: &ApiEmbed, cfg: Option<&AppConfig>) -> Embed {
         url: embed.url.clone().map(Into::into),
         author,
         description_spans: text_to_spans(embed.description.as_deref().unwrap_or_default()),
+        thumbnail_url: thumbnail.into(),
         thumbnail_proxied,
         image,
         footer,
@@ -8114,8 +8266,66 @@ fn describe_form(form: &serde_json::Map<String, serde_json::Value>) -> String {
         .join(", ")
 }
 
+const EMBED_COMPONENT_TYPE_BUTTON: i32 = 1;
 const EMBED_COMPONENT_TYPE_SELECT: i32 = 2;
 const EMBED_COMPONENT_TYPE_INPUT: i32 = 3;
+const EMBED_COMPONENT_TYPE_DATEPICKER: i32 = 4;
+const EMBED_COMPONENT_TYPE_RADIO: i32 = 5;
+const EMBED_COMPONENT_TYPE_ANIMATION: i32 = 6;
+const EMBED_COMPONENT_TYPE_GRID: i32 = 7;
+const EMBED_ANIMATION_DEFAULT_DURATION: f32 = 2.0;
+const EMBED_GRID_MAX_ITEMS: u32 = 2048;
+
+fn parse_embed_field_buttons(value: Option<&serde_json::Value>) -> Vec<MessageButton> {
+    let Some(serde_json::Value::Array(items)) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let component: ApiMessageComponent = serde_json::from_value(item.clone()).ok()?;
+            if component.component_type != EMBED_COMPONENT_TYPE_BUTTON {
+                return None;
+            }
+            match build_component(&component) {
+                MessageComponent::Button(button) => Some(button),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn parse_embed_shape(value: Option<&serde_json::Value>) -> Option<EmbedGrid> {
+    let wrapper: ApiEmbedShapeWrapper = serde_json::from_value(value?.clone()).ok()?;
+    if wrapper
+        .component_type
+        .is_some_and(|kind| kind != EMBED_COMPONENT_TYPE_GRID)
+    {
+        return None;
+    }
+    let columns = wrapper.columns.unwrap_or(0).max(0) as u32;
+    let rows = wrapper.rows.unwrap_or(0).max(0) as u32;
+    if columns == 0 || rows == 0 {
+        return None;
+    }
+    let cells = columns.saturating_mul(rows).min(EMBED_GRID_MAX_ITEMS) as usize;
+    Some(EmbedGrid {
+        columns,
+        rows,
+        items: wrapper
+            .component
+            .items
+            .iter()
+            .take(cells)
+            .map(|item| EmbedGridItem {
+                start_col: item.start_col.unwrap_or(1).max(1) as u32,
+                start_row: item.start_row.unwrap_or(1).max(1) as u32,
+                width: item.width.unwrap_or(1).max(1) as u32,
+                height: item.height.unwrap_or(1).max(1) as u32,
+            })
+            .collect(),
+    })
+}
 
 fn parse_embed_input(value: Option<&serde_json::Value>) -> Option<EmbedInput> {
     let value = value?;
@@ -8132,6 +8342,73 @@ fn parse_embed_input(value: Option<&serde_json::Value>) -> Option<EmbedInput> {
                 multiline: component.textarea,
                 required: component.required,
                 disabled: component.disabled,
+                numeric: component
+                    .input_type
+                    .as_deref()
+                    .is_some_and(|kind| kind.eq_ignore_ascii_case("number")),
+            }))
+        }
+        Some(EMBED_COMPONENT_TYPE_DATEPICKER) => {
+            let value = wrapper
+                .component
+                .get("value")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string();
+            Some(EmbedInput::DatePicker(EmbedDatePicker {
+                id: id.into(),
+                value: value.into(),
+            }))
+        }
+        Some(EMBED_COMPONENT_TYPE_RADIO) => {
+            let options: Vec<ApiRadioOption> =
+                serde_json::from_value(wrapper.component).unwrap_or_default();
+            if options.is_empty() {
+                return None;
+            }
+            Some(EmbedInput::Radio(EmbedRadio {
+                id: id.into(),
+                options: options
+                    .into_iter()
+                    .map(|option| EmbedRadioOption {
+                        label: option.label.into(),
+                        value: option.value.into(),
+                        description: option.description.unwrap_or_default().into(),
+                        name: option.name.unwrap_or_default().into(),
+                        style: option.style,
+                        disabled: option.disabled,
+                    })
+                    .collect(),
+                max_options: Some(wrapper.max_options.filter(|max| *max > 0).unwrap_or(1)),
+            }))
+        }
+        Some(EMBED_COMPONENT_TYPE_ANIMATION) => {
+            let component: ApiAnimationComponent =
+                serde_json::from_value(wrapper.component).unwrap_or_default();
+            let pool: Vec<Vec<SharedString>> = component
+                .pool
+                .into_iter()
+                .map(|frames| frames.into_iter().map(SharedString::from).collect())
+                .filter(|frames: &Vec<SharedString>| !frames.is_empty())
+                .collect();
+            if pool.is_empty() {
+                return None;
+            }
+            Some(EmbedInput::Animation(EmbedAnimation {
+                id: id.into(),
+                url_image: component.url_image.unwrap_or_default().into(),
+                url_position: component.url_position.unwrap_or_default().into(),
+                pool,
+                duration_seconds: component
+                    .duration
+                    .filter(|value| *value > 0.)
+                    .unwrap_or(EMBED_ANIMATION_DEFAULT_DURATION),
+                repeat: component
+                    .repeat
+                    .filter(|value| *value > 0)
+                    .map(|v| v as u32),
+                vertical: component.vertical,
+                is_result: component.is_result.is_some_and(|value| value != 0),
             }))
         }
         Some(EMBED_COMPONENT_TYPE_SELECT) => {
@@ -8271,7 +8548,7 @@ fn poll_label_segments(label: &str, cfg: Option<&AppConfig>) -> Vec<PollLabelSeg
     segments
 }
 
-fn build_poll_data(
+pub(crate) fn build_poll_data(
     content: &ApiMessageContent,
     text: &str,
     cfg: Option<&AppConfig>,
@@ -9487,6 +9764,206 @@ mod tests {
         assert_eq!(form["today"], serde_json::json!("shipped"));
     }
 
+    #[gpui::test]
+    fn a_single_choice_radio_replaces_and_a_multi_choice_one_toggles(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let message_id = MessageId(7);
+            let single = EmbedRadio {
+                id: "vote".into(),
+                options: vec![radio_option("y", "vote"), radio_option("n", "vote")],
+                max_options: None,
+            };
+            let multi = EmbedRadio {
+                id: "picks".into(),
+                options: vec![radio_option("a", "a"), radio_option("b", "b")],
+                max_options: Some(1),
+            };
+
+            store.update(cx, |store, cx| {
+                pick(store, &single, "y", cx);
+                pick(store, &single, "n", cx);
+                assert_eq!(store.message_select_selection(message_id, "vote"), ["n"]);
+
+                pick(store, &multi, "a", cx);
+                pick(store, &multi, "b", cx);
+                assert_eq!(
+                    store.message_select_selection(message_id, "picks"),
+                    ["a"],
+                    "max_options caps a multi-choice radio"
+                );
+
+                pick(store, &multi, "a", cx);
+                assert!(
+                    store
+                        .message_select_selection(message_id, "picks")
+                        .is_empty(),
+                    "picking the same option again clears it"
+                );
+            });
+        });
+    }
+
+    fn pick(
+        store: &mut MessagesStore,
+        radio: &EmbedRadio,
+        value: &str,
+        cx: &mut Context<MessagesStore>,
+    ) {
+        store.choose_embed_radio(
+            MessageId(7),
+            radio.id.clone(),
+            radio.allows_multiple(),
+            radio.max_options,
+            value.into(),
+            cx,
+        );
+    }
+
+    fn radio_option(value: &str, name: &str) -> EmbedRadioOption {
+        EmbedRadioOption {
+            label: value.to_string().into(),
+            value: value.to_string().into(),
+            description: SharedString::default(),
+            name: name.to_string().into(),
+            style: None,
+            disabled: false,
+        }
+    }
+
+    #[gpui::test]
+    fn a_submitted_embed_form_carries_every_input_kind_in_react_shape(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let clan = ClanId(1);
+            let channel = ChannelId(10);
+            let message_id = MessageId(42);
+            let content = serde_json::json!({
+                "t": "",
+                "embed": [{
+                    "title": "Daily",
+                    "fields": [
+                        { "name": "Project", "value": "", "inputs": {
+                            "type": 3, "id": "project",
+                            "component": { "defaultValue": "Alpha" } } },
+                        { "name": "Task", "value": "", "inputs": {
+                            "type": 2, "id": "task",
+                            "component": { "options": [{ "label": "Coding", "value": "coding" }] } } },
+                        { "name": "Tags", "value": "", "inputs": {
+                            "type": 2, "id": "tags", "max_options": 3,
+                            "component": { "min_options": 1, "max_options": 3, "options": [
+                                { "label": "A", "value": "a" }, { "label": "B", "value": "b" }] } } },
+                        { "name": "Ship", "value": "", "inputs": {
+                            "type": 5, "id": "vote", "component": [
+                                { "label": "Yes", "value": "y", "name": "vote" },
+                                { "label": "No", "value": "n", "name": "vote" }] } },
+                        { "name": "Stack", "value": "", "inputs": {
+                            "type": 5, "id": "picks", "max_options": 2, "component": [
+                                { "label": "Rust", "value": "rust", "name": "rust" },
+                                { "label": "GPUI", "value": "gpui", "name": "gpui" }] } }
+                    ]
+                }]
+            });
+            let api_content: mezon_client::transport::ApiMessageContent =
+                serde_json::from_value(content).expect("content parses");
+            let embeds = build_embeds(&api_content, None);
+            let mut message = Message::new(message_id, "", "7", "KOMU", 100);
+            message.embeds = embeds;
+
+            store.update(cx, |store, cx| {
+                store.activate(clan, channel, true, false, 1, 2, cx);
+                store.set_channel(channel, vec![message]);
+
+                store.set_embed_form_value(message_id, "project".into(), "Alpha".into());
+                store.set_message_select_selection(
+                    message_id,
+                    "task".into(),
+                    vec!["coding".into()],
+                    cx,
+                );
+                store.set_message_select_selection(
+                    message_id,
+                    "tags".into(),
+                    vec!["a".into(), "b".into()],
+                    cx,
+                );
+                store.choose_embed_radio(message_id, "vote".into(), false, Some(1), "y".into(), cx);
+                store.choose_embed_radio(
+                    message_id,
+                    "picks".into(),
+                    true,
+                    Some(2),
+                    "rust".into(),
+                    cx,
+                );
+                store.choose_embed_radio(
+                    message_id,
+                    "picks".into(),
+                    true,
+                    Some(2),
+                    "gpui".into(),
+                    cx,
+                );
+
+                let form = serde_json::Value::Object(store.embed_form_payload(message_id));
+                assert_eq!(
+                    form,
+                    serde_json::json!({
+                        "project": "Alpha",
+                        "task": "coding",
+                        "tags": ["a", "b"],
+                        "vote": "y",
+                        "picks": ["rust", "gpui"]
+                    }),
+                    "single-choice select/radio submit as strings, multi-choice as arrays"
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn a_grid_never_renders_more_cells_than_the_board_has() {
+        let shape = serde_json::json!({
+            "type": 7,
+            "id": "board",
+            "columns": 2,
+            "rows": 2,
+            "component": {
+                "items": (0..50)
+                    .map(|index| serde_json::json!({ "start_col": 1, "start_row": 1, "width": index % 3 + 1 }))
+                    .collect::<Vec<_>>()
+            }
+        });
+        let grid = parse_embed_shape(Some(&shape)).expect("grid");
+        assert_eq!(grid.columns, 2);
+        assert_eq!(grid.rows, 2);
+        assert_eq!(
+            grid.items.len(),
+            4,
+            "a 2x2 board keeps four cells however many the payload lists"
+        );
+    }
+
     #[test]
     fn embed_form_of_an_untouched_message_is_an_empty_object() {
         let form = build_embed_form_payload(&HashSet::new(), None, None);
@@ -9575,11 +10052,183 @@ mod tests {
 
     #[test]
     fn parse_embed_input_ignores_unsupported_and_incomplete() {
-        let datepicker = serde_json::json!({ "type": 4, "id": "date", "component": {} });
-        assert!(parse_embed_input(Some(&datepicker)).is_none());
+        let unknown = serde_json::json!({ "type": 9, "id": "what", "component": {} });
+        assert!(parse_embed_input(Some(&unknown)).is_none());
         let missing_id = serde_json::json!({ "type": 3, "component": {} });
         assert!(parse_embed_input(Some(&missing_id)).is_none());
         assert!(parse_embed_input(None).is_none());
+    }
+
+    #[test]
+    fn a_numeric_default_value_still_fills_the_input() {
+        let value = serde_json::json!({
+            "type": 3,
+            "id": "working-time",
+            "component": {
+                "placeholder": "Working time",
+                "defaultValue": 8,
+                "type": "number",
+                "required": 1
+            }
+        });
+        let EmbedInput::Text(input) = parse_embed_input(Some(&value)).expect("input should parse")
+        else {
+            panic!("expected a text input");
+        };
+        assert_eq!(input.default_value.as_ref(), "8");
+        assert_eq!(input.placeholder.as_ref(), "Working time");
+        assert!(input.numeric);
+        assert!(
+            input.required,
+            "a JSON-typed field must not take the rest of the component with it"
+        );
+    }
+
+    #[test]
+    fn one_malformed_field_does_not_drop_the_rest_of_the_embed() {
+        let api: ApiEmbed = serde_json::from_value(serde_json::json!({
+            "title": 2026,
+            "description": 7,
+            "fields": [
+                { "name": "Good", "value": "one" },
+                { "name": "Numeric", "value": 42 },
+                { "name": "Broken", "value": { "nested": true } },
+                { "name": "Also good", "value": "two" }
+            ]
+        }))
+        .expect("embed should parse");
+        let embed = build_embed(&api, None);
+        assert_eq!(embed.title.as_ref(), "2026");
+        let names: Vec<&str> = embed.fields.iter().map(|f| f.name.as_ref()).collect();
+        assert_eq!(names, ["Good", "Numeric", "Broken", "Also good"]);
+        assert_eq!(embed.fields[1].value.as_ref(), "42");
+        assert_eq!(embed.fields[2].value.as_ref(), "");
+    }
+
+    #[test]
+    fn parse_embed_input_extracts_date_picker() {
+        let value = serde_json::json!({
+            "type": 4,
+            "id": "day",
+            "component": { "value": "2026-08-24" }
+        });
+        let EmbedInput::DatePicker(picker) =
+            parse_embed_input(Some(&value)).expect("datepicker should parse")
+        else {
+            panic!("expected a datepicker");
+        };
+        assert_eq!(picker.id.as_ref(), "day");
+        assert_eq!(picker.value.as_ref(), "2026-08-24");
+    }
+
+    #[test]
+    fn parse_embed_input_extracts_radio_and_derives_multiplicity() {
+        let single = serde_json::json!({
+            "type": 5,
+            "id": "vote",
+            "max_options": 2,
+            "component": [
+                { "label": "Yes", "value": "y", "name": "vote" },
+                { "label": "No", "value": "n", "name": "vote", "style": 4 }
+            ]
+        });
+        let EmbedInput::Radio(radio) =
+            parse_embed_input(Some(&single)).expect("radio should parse")
+        else {
+            panic!("expected a radio");
+        };
+        assert_eq!(radio.options.len(), 2);
+        assert_eq!(radio.max_options, Some(2));
+        assert_eq!(radio.options[1].style, Some(4));
+        assert!(!radio.allows_multiple());
+
+        let multi = serde_json::json!({
+            "type": 5,
+            "id": "picks",
+            "component": [
+                { "label": "A", "value": "a", "name": "a" },
+                { "label": "B", "value": "b", "name": "b" }
+            ]
+        });
+        let EmbedInput::Radio(radio) = parse_embed_input(Some(&multi)).expect("radio should parse")
+        else {
+            panic!("expected a radio");
+        };
+        assert!(radio.allows_multiple());
+        assert_eq!(
+            radio.max_options,
+            Some(1),
+            "React defaults a missing max_options to 1"
+        );
+    }
+
+    #[test]
+    fn parse_embed_input_extracts_animation() {
+        let value = serde_json::json!({
+            "type": 6,
+            "id": "dice",
+            "component": {
+                "url_image": "https://cdn/sheet.png",
+                "url_position": "https://cdn/sheet.json",
+                "pool": [["a", "b"], ["c"]],
+                "duration": "3",
+                "repeat": 2,
+                "isResult": 1
+            }
+        });
+        let EmbedInput::Animation(animation) =
+            parse_embed_input(Some(&value)).expect("animation should parse")
+        else {
+            panic!("expected an animation");
+        };
+        assert_eq!(animation.pool.len(), 2);
+        assert_eq!(animation.duration_seconds, 3.0);
+        assert_eq!(animation.repeat, Some(2));
+        assert!(animation.is_result);
+    }
+
+    #[test]
+    fn parse_embed_input_drops_animation_without_frames() {
+        let value = serde_json::json!({
+            "type": 6,
+            "id": "dice",
+            "component": { "url_image": "https://cdn/sheet.png", "pool": [] }
+        });
+        assert!(parse_embed_input(Some(&value)).is_none());
+    }
+
+    #[test]
+    fn build_embed_maps_field_buttons_and_shape() {
+        let field = mezon_client::transport::ApiEmbedField {
+            name: "Board".into(),
+            button: Some(serde_json::json!([
+                { "type": 1, "id": "play", "component": { "label": "Play", "icon": "PLAY" } },
+                { "type": 2, "id": "not-a-button", "component": {} }
+            ])),
+            shape: Some(serde_json::json!({
+                "type": 7,
+                "id": "board",
+                "columns": 4,
+                "rows": 2,
+                "component": { "items": [{ "start_col": 2, "start_row": 1, "width": 2 }] }
+            })),
+            ..Default::default()
+        };
+        let api = ApiEmbed {
+            fields: vec![field],
+            ..Default::default()
+        };
+        let embed = build_embed(&api, None);
+        let field = &embed.fields[0];
+        assert_eq!(field.buttons.len(), 1);
+        assert_eq!(field.buttons[0].label.as_ref(), "Play");
+        assert_eq!(field.buttons[0].id.as_deref(), Some("play"));
+        let shape = field.shape.as_ref().expect("shape should parse");
+        assert_eq!((shape.columns, shape.rows), (4, 2));
+        assert_eq!(shape.items.len(), 1);
+        assert_eq!(shape.items[0].start_col, 2);
+        assert_eq!(shape.items[0].width, 2);
+        assert_eq!(shape.items[0].height, 1);
     }
 
     #[test]

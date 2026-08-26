@@ -75,6 +75,7 @@ pub struct Arena {
     valid: Rc<Cell<bool>>,
     current_chunk_index: usize,
     chunk_size: NonZeroUsize,
+    scope_depth: usize,
     low_use_clears: u32,
     elements_window_peak: usize,
     elements_window_clears: u32,
@@ -84,7 +85,7 @@ const ARENA_SHRINK_AFTER_CLEARS: u32 = 600;
 
 impl Drop for Arena {
     fn drop(&mut self) {
-        self.clear();
+        self.force_clear();
     }
 }
 
@@ -97,6 +98,7 @@ impl Arena {
             valid: Rc::new(Cell::new(true)),
             current_chunk_index: 0,
             chunk_size,
+            scope_depth: 0,
             low_use_clears: 0,
             elements_window_peak: 0,
             elements_window_clears: 0,
@@ -107,7 +109,22 @@ impl Arena {
         self.chunks.len() * self.chunk_size.get()
     }
 
+    pub fn begin_scope(&mut self) {
+        self.scope_depth += 1;
+    }
+
+    pub fn end_scope(&mut self) {
+        debug_assert!(self.scope_depth > 0, "end_scope called without begin_scope");
+        self.scope_depth = self.scope_depth.saturating_sub(1);
+    }
+
     pub fn clear(&mut self) {
+        if self.scope_depth == 0 {
+            self.force_clear();
+        }
+    }
+
+    fn force_clear(&mut self) {
         self.valid.set(false);
         self.valid = Rc::new(Cell::new(true));
         self.elements_window_peak = self.elements_window_peak.max(self.elements.len());

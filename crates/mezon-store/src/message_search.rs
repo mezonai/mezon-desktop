@@ -17,10 +17,11 @@ use crate::AppConfig;
 use crate::cache::KeyedCache;
 use crate::ids::{ChannelId, ClanId, MessageId, UserId};
 use crate::message::{
-    Embed, MessageAttachment, MessageSpan, OgpPreview, RichLayout, build_rich_layout, parse_spans,
+    Embed, MessageAttachment, MessageSpan, OgpPreview, PollData, RichLayout, build_rich_layout,
+    parse_spans,
 };
 use crate::message_time::{format_local_time_hhmm, local_datetime};
-use crate::messages::{MessagesStore, build_embeds, build_ogp_preview};
+use crate::messages::{MessagesStore, build_embeds, build_ogp_preview, build_poll_data};
 
 #[derive(Debug, Clone, Default)]
 pub struct ChannelSearchState {
@@ -59,6 +60,7 @@ pub struct SearchHit {
     pub rich_layout: Option<Arc<RichLayout>>,
     pub ogp: Option<Box<OgpPreview>>,
     pub embeds: Arc<[Embed]>,
+    pub poll: Option<Box<PollData>>,
     pub channel_label: SharedString,
     pub create_time_seconds: i64,
     pub time_hhmm: SharedString,
@@ -567,6 +569,7 @@ pub fn search_hit_from_document(
         rich_layout: parsed.rich_layout,
         ogp: parsed.ogp,
         embeds: parsed.embeds,
+        poll: parsed.poll,
         channel_label: SharedString::from(doc.channel_label.clone()),
         create_time_seconds,
         time_hhmm,
@@ -617,6 +620,7 @@ struct ParsedSearchContent {
     rich_layout: Option<Arc<RichLayout>>,
     ogp: Option<Box<OgpPreview>>,
     embeds: Arc<[Embed]>,
+    poll: Option<Box<PollData>>,
 }
 
 fn parse_search_hit_content(
@@ -640,7 +644,10 @@ fn parse_search_hit_content(
     let rich_layout = build_rich_layout(&spans);
     let ogp = build_ogp_preview(&tokens, cfg);
     let embeds = build_embeds(&tokens, cfg);
-    let preview = if tokens.t.is_empty() {
+    let poll = build_poll_data(&tokens, &tokens.t, cfg);
+    let preview = if poll.is_some() {
+        String::new()
+    } else if tokens.t.is_empty() {
         content_preview_from_raw(content_raw)
     } else {
         crate::message::reply_preview_line(tokens.t.trim())
@@ -651,6 +658,7 @@ fn parse_search_hit_content(
         rich_layout,
         ogp,
         embeds,
+        poll,
     }
 }
 
@@ -837,6 +845,19 @@ mod tests {
             content_preview_from_raw(r#"{"t":"hello world"}"#),
             "hello world"
         );
+    }
+
+    #[test]
+    fn search_hit_content_parses_poll_and_leaves_no_preview() {
+        let raw = r#"{"poll_id":7,"question":"gg","answers":["1","2"],"answer_counts":[1,1],"total_votes":2}"#;
+
+        let parsed = parse_search_hit_content(raw, "", None);
+
+        assert!(parsed.preview.is_empty());
+        let poll = parsed.poll.expect("poll parsed from search hit");
+        assert_eq!(poll.question.as_ref(), "gg");
+        assert_eq!(poll.answers.len(), 2);
+        assert_eq!(poll.total_votes, 2);
     }
 
     #[test]

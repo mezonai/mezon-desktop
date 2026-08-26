@@ -222,6 +222,33 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["clan_id", "channel_id", "message_id", "pin_id"],
         )),
+        #[cfg(debug_assertions)]
+        "set_channel_age_restricted" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id."),
+                "channel_id": id("Channel snowflake id."),
+                "on": { "type": "boolean", "description": "Enable the gate. Default true." },
+            }),
+            &["clan_id", "channel_id"],
+        )),
+        #[cfg(debug_assertions)]
+        "set_local_dob" => Arc::new(object(
+            json!({
+                "seconds": { "type": "integer", "description": "Unix seconds of the birthday. 0 = never entered." },
+            }),
+            &["seconds"],
+        )),
+        #[cfg(debug_assertions)]
+        "inject_preview_message" => Arc::new(object(
+            json!({
+                "content": {
+                    "type": "object",
+                    "description": "Raw mezon message content payload, e.g. {\"t\": \"hi\", \"embed\": [...], \"components\": [...]}."
+                },
+                "sender_name": string("Display name for the injected sender. Default \"Embed Preview\"."),
+            }),
+            &["content"],
+        )),
         "create_poll" => Arc::new(object(
             json!({
                 "clan_id": id("Clan snowflake id. Use 0 for direct messages."),

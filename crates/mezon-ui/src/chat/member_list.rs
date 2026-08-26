@@ -1459,6 +1459,7 @@ fn ban_duration_options(locale: &str) -> Vec<SubmenuOption> {
             value: *value,
             label: mezon_i18n::t(locale, key).into(),
             selected: false,
+            disabled: false,
         })
         .collect()
 }

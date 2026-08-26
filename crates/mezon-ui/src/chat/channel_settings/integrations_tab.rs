@@ -3,9 +3,9 @@ use gpui::{
     Window, deferred, div, img, prelude::*, px,
 };
 use mezon_store::{
-    AppConfig, ChannelId, ChannelList, ChannelType, ChannelWebhook, ClanId, ClanMembersEvent,
-    ClanMembersStore, PlatformStore, Settings, UserId, WEBHOOK_NAME_MAX_LENGTH, WebhookEvent,
-    WebhookStore, webhook_name_is_valid,
+    AppConfig, ChannelId, ChannelList, ChannelWebhook, ClanId, ClanMembersEvent, ClanMembersStore,
+    PlatformStore, Settings, UserId, WEBHOOK_NAME_MAX_LENGTH, WebhookEvent, WebhookStore,
+    webhook_name_is_valid,
 };
 
 use crate::app::shell::Shell;
@@ -88,7 +88,10 @@ impl IntegrationsTab {
         ClanMembersStore::global(cx).update(cx, |store, cx| {
             store.ensure_loaded(clan_id, cx);
         });
-        ChannelList::global(cx).update(cx, |store, cx| store.load_for_clan(clan_id, cx));
+        ChannelList::global(cx).update(cx, |store, cx| {
+            store.load_for_clan(clan_id, cx);
+            store.ensure_user_channels_loaded(cx);
+        });
 
         let webhook_store = WebhookStore::global(cx);
         let members = ClanMembersStore::global(cx);
@@ -193,15 +196,11 @@ impl IntegrationsTab {
     fn rebuild_channel_options(&mut self, cx: &App) {
         self.channel_options = ChannelList::global(cx)
             .read(cx)
-            .categories_for_clan(self.clan_id)
-            .iter()
-            .flat_map(|category| category.channels.iter())
-            .filter(|channel| {
-                channel.channel_type == ChannelType::Text && channel.parent_id.is_none()
-            })
+            .webhook_target_channels_for_clan(self.clan_id)
+            .into_iter()
             .map(|channel| ChannelOption {
                 id: channel.id,
-                label: channel.name.clone().into(),
+                label: channel.name.into(),
             })
             .collect();
     }

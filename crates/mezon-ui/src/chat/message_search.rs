@@ -25,7 +25,7 @@ use crate::chat::layout::ChatLayout;
 use crate::chat::member_list::{MentionMemberRaw, mention_member_pool};
 use crate::chat::message::{
     RichRunPalette, code_block_copy_overlay, format_message_time, open_message_link,
-    render_ogp_preview, rich_run_highlight_with_link_underline,
+    render_ogp_preview, render_poll_card_readonly, rich_run_highlight_with_link_underline,
 };
 use crate::chat::role_style::message_sender_color;
 use crate::components::primitives::{Icon, IconName, Input, InputState, Sizable, Size, Spinner};
@@ -827,6 +827,24 @@ fn render_search_row(
         )
     });
     let ogp = resolve_search_hit_ogp(hit, cx);
+    let poll_card = hit.poll.as_deref().map(|poll| {
+        let voted = MessagesStore::try_global(cx)
+            .and_then(|store| {
+                store
+                    .read(cx)
+                    .poll_my_vote(hit.message_id)
+                    .map(<[i32]>::to_vec)
+            })
+            .unwrap_or_default();
+        render_poll_card_readonly(
+            poll,
+            &voted,
+            theme,
+            locale,
+            now.timestamp(),
+            &attachment_image_cache,
+        )
+    });
 
     let group_header =
         (show_channel_label && show_group_header && resolved_channel_label.is_some()).then(|| {
@@ -896,6 +914,7 @@ fn render_search_row(
                                             )),
                                     )
                                 })
+                                .children(poll_card)
                                 .children(ogp.as_ref().and_then(|ogp| {
                                     let preview = render_ogp_preview(
                                         ogp,

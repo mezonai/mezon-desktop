@@ -6,8 +6,8 @@ use gpui::{
     Subscription, Window, deferred, div, img, prelude::*, px, relative, rgb, uniform_list,
 };
 use mezon_store::{
-    AccountEvent, AccountStore, Channel, ChannelId, ChannelType, ClanId, Settings, is_adult_dob,
-    schedule_settings_save,
+    AccountEvent, AccountStore, Channel, ChannelId, ChannelType, ClanId, Settings, dob_needs_entry,
+    is_adult_dob, schedule_settings_save,
 };
 
 use crate::app::shell::Shell;
@@ -95,7 +95,7 @@ fn viewer_needs_birthday(cx: &App) -> bool {
             && store
                 .account
                 .as_ref()
-                .is_some_and(|user| user.dob_seconds == 0)
+                .is_some_and(|user| dob_needs_entry(user.dob_seconds))
     })
 }
 
@@ -104,6 +104,8 @@ pub struct AgeRestrictedGate {
     channel_id: ChannelId,
     settings: Entity<Settings>,
     birthday_modal: Option<EntityId>,
+    birthday_prompt_dismissed: bool,
+    birthday_prompt_pending: bool,
 }
 
 impl AgeRestrictedGate {
@@ -113,6 +115,8 @@ impl AgeRestrictedGate {
             channel_id,
             settings,
             birthday_modal: None,
+            birthday_prompt_dismissed: false,
+            birthday_prompt_pending: false,
         }
     }
 
@@ -125,18 +129,46 @@ impl AgeRestrictedGate {
             self.dismiss_birthday_prompt(cx);
             return;
         }
-        if self.birthday_modal.is_some() {
+        if let Some(shown) = self.birthday_modal {
+            if Shell::global(cx).read(cx).modal_view_id() == Some(shown) {
+                return;
+            }
+            self.birthday_modal = None;
+            self.birthday_prompt_dismissed = true;
             return;
         }
-        let settings = self.settings.clone();
-        let modal = cx.new(|cx| ConfirmBirthdayModal::new(settings, cx));
-        let focus_handle = modal.read(cx).focus_handle.clone();
-        window.focus(&focus_handle, cx);
-        self.birthday_modal = Some(modal.entity_id());
-        Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
+        if self.birthday_prompt_dismissed || self.birthday_prompt_pending {
+            return;
+        }
+        self.birthday_prompt_pending = true;
+        cx.defer_in(window, |gate, window, cx| {
+            gate.birthday_prompt_pending = false;
+            if gate.birthday_modal.is_some()
+                || gate.birthday_prompt_dismissed
+                || !viewer_needs_birthday(cx)
+            {
+                return;
+            }
+            let settings = gate.settings.clone();
+            let modal = cx.new(|cx| ConfirmBirthdayModal::new(settings, cx));
+            let focus_handle = modal.read(cx).focus_handle.clone();
+            window.focus(&focus_handle, cx);
+            gate.birthday_modal = Some(modal.entity_id());
+            Shell::global(cx).update(cx, |shell, cx| {
+                shell.show_modal_keyboard_dismiss_only(modal.into(), cx)
+            });
+        });
+    }
+
+    pub fn reopen_birthday_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.birthday_prompt_dismissed = false;
+        self.birthday_modal = None;
+        self.sync_birthday_prompt(window, cx);
     }
 
     pub fn dismiss_birthday_prompt(&mut self, cx: &mut App) {
+        self.birthday_prompt_dismissed = false;
+        self.birthday_prompt_pending = false;
         let Some(modal) = self.birthday_modal.take() else {
             return;
         };
@@ -178,6 +210,7 @@ impl Render for AgeRestrictedGate {
             .text_color(text_color)
             .child(
                 v_flex()
+                    .max_w_full()
                     .items_center()
                     .child(
                         img(AGE_RESTRICTED_WARNING)
@@ -187,11 +220,13 @@ impl Render for AgeRestrictedGate {
                     )
                     .child(
                         v_flex()
+                            .max_w_full()
                             .mt(px(16.))
                             .items_center()
                             .text_center()
                             .child(
                                 div()
+                                    .max_w_full()
                                     .text_size(px(30.))
                                     .line_height(px(36.))
                                     .font_weight(FontWeight::BOLD)
@@ -201,6 +236,7 @@ impl Render for AgeRestrictedGate {
                             )
                             .child(
                                 div()
+                                    .max_w_full()
                                     .mb(px(16.))
                                     .child(mezon_i18n::t(&locale, "ageRestricted.description")),
                             ),
@@ -221,6 +257,26 @@ impl Render for AgeRestrictedGate {
                                     .child(mezon_i18n::t(&locale, "ageRestricted.nope"))
                                     .on_click(cx.listener(|this, _, _window, cx| this.leave(cx))),
                             )
+                            .when(viewer_needs_birthday(cx), |row| {
+                                row.child(
+                                    div()
+                                        .id("age-restricted-enter-birthday")
+                                        .px(px(24.))
+                                        .py(px(8.))
+                                        .rounded(px(8.))
+                                        .border_2()
+                                        .border_color(border_color)
+                                        .text_color(active_color)
+                                        .cursor_pointer()
+                                        .child(mezon_i18n::t(
+                                            &locale,
+                                            "ageRestricted.enterBirthday",
+                                        ))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.reopen_birthday_prompt(window, cx)
+                                        })),
+                                )
+                            })
                             .child(
                                 div()
                                     .id("age-restricted-continue")
@@ -735,5 +791,30 @@ mod tests {
             assert_eq!(modal.open_field, None);
             assert_eq!(modal.selected_month, Some(3));
         });
+    }
+
+    #[test]
+    fn age_gate_strings_are_translated_in_every_locale() {
+        const LOCALES: [&str; 16] = [
+            "en", "vi", "ru", "ukr", "es", "tt", "de", "it", "pt", "jpn", "pl", "kr", "swe", "blr",
+            "fr", "nl",
+        ];
+        const KEYS: [&str; 8] = [
+            "ageRestricted.title",
+            "ageRestricted.description",
+            "ageRestricted.nope",
+            "ageRestricted.continue",
+            "ageRestricted.enterBirthday",
+            "ageRestricted.confirmBirthdayTitle",
+            "ageRestricted.dateOfBirth",
+            "ageRestricted.submit",
+        ];
+        for locale in LOCALES {
+            for key in KEYS {
+                let label = mezon_i18n::t(locale, key);
+                assert_ne!(label, key, "{locale} is missing {key}");
+                assert!(!label.is_empty(), "{locale} has an empty {key}");
+            }
+        }
     }
 }
