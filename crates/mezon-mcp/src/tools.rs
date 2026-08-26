@@ -390,6 +390,49 @@ impl McpBackend {
                 self.send_ui_ok(|reply| McpCommand::ShowWindow { reply })
                     .await
             }
+            #[cfg(debug_assertions)]
+            "set_channel_age_restricted" => {
+                self.require_write_mode("set_channel_age_restricted")?;
+                let clan_id = parse_i64_field(&arguments, "clan_id")?;
+                let channel_id = parse_i64_field(&arguments, "channel_id")?;
+                let on = arguments
+                    .get("on")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                self.send_ui_result(|reply| McpCommand::SetChannelAgeRestricted {
+                    clan_id,
+                    channel_id,
+                    on,
+                    reply,
+                })
+                .await
+            }
+            #[cfg(debug_assertions)]
+            "set_local_dob" => {
+                self.require_write_mode("set_local_dob")?;
+                let seconds = u32::try_from(parse_i64_field(&arguments, "seconds")?)
+                    .map_err(|_| anyhow::anyhow!("seconds must fit in u32"))?;
+                self.send_ui_result(|reply| McpCommand::SetLocalDob { seconds, reply })
+                    .await
+            }
+            #[cfg(debug_assertions)]
+            "inject_preview_message" => {
+                self.require_write_mode("inject_preview_message")?;
+                let content = arguments
+                    .get("content")
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("inject_preview_message requires content"))?;
+                let sender_name = arguments
+                    .get("sender_name")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                self.send_ui_result(|reply| McpCommand::InjectPreviewMessage {
+                    content,
+                    sender_name,
+                    reply,
+                })
+                .await
+            }
             "send_message" => {
                 self.require_write_mode("send_message")?;
                 let clan_id = parse_i64_field(&arguments, "clan_id")?;

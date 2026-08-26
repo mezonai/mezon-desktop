@@ -10,7 +10,9 @@ use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, SharedString,
     Subscription, Task, Window, div, prelude::*, px,
 };
-use mezon_store::{ChannelList, ChannelType, ClanId, CreateChannelError, validate_channel_name};
+use mezon_store::{
+    ChannelList, ChannelType, ClanId, CreateChannelError, Settings, validate_channel_name,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Validation {
@@ -178,6 +180,20 @@ impl CreateChannelModal {
                     this.validation_visible = true;
                     this.creating = false;
                     cx.notify();
+                });
+            }
+            Err(CreateChannelError::Api(code)) => {
+                tracing::error!("create channel failed: API code {code}");
+                let _ = this.update(cx, |this, cx| {
+                    this.creating = false;
+                    cx.notify();
+                });
+                cx.update(|cx| {
+                    let locale = Settings::try_global(cx)
+                        .map(|settings| settings.read(cx).language.clone())
+                        .unwrap_or_else(|| "en".to_string());
+                    let message = mezon_i18n::api_error(&locale, code).to_string();
+                    Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
                 });
             }
             Err(CreateChannelError::Other(msg)) => {

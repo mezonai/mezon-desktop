@@ -661,6 +661,7 @@ mod tests {
             logo: None,
             status: String::new(),
             user_status: String::new(),
+            dob_seconds: 0,
         }
     }
 

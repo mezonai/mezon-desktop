@@ -16,6 +16,24 @@ pub enum McpCommand {
         path: String,
         reply: oneshot::Sender<anyhow::Result<()>>,
     },
+    #[cfg(debug_assertions)]
+    SetChannelAgeRestricted {
+        clan_id: i64,
+        channel_id: i64,
+        on: bool,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    #[cfg(debug_assertions)]
+    SetLocalDob {
+        seconds: u32,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    #[cfg(debug_assertions)]
+    InjectPreviewMessage {
+        content: Value,
+        sender_name: Option<String>,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
     Logout {
         reply: oneshot::Sender<anyhow::Result<()>>,
     },

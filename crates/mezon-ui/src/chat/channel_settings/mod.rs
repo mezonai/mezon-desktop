@@ -5,6 +5,7 @@ pub mod integrations_tab;
 pub mod overview_tab;
 pub mod permission_overrides;
 pub mod permissions_tab;
+pub mod quick_actions_tab;
 
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, FontWeight, ScrollHandle, SharedString,
@@ -22,6 +23,7 @@ use category_tab::CategoryTab;
 use integrations_tab::{IntegrationsTab, render_channel_integrations_save_bar};
 use overview_tab::{OverviewTab, render_channel_overview_save_bar};
 use permissions_tab::PermissionsTab;
+use quick_actions_tab::QuickActionsTab;
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 const SIDEBAR_WIDTH: f32 = 224.0;
@@ -154,6 +156,8 @@ pub struct ChannelSettingScreen {
     category_sub: Option<Subscription>,
     integrations_tab: Option<Entity<IntegrationsTab>>,
     integrations_sub: Option<Subscription>,
+    quick_actions_tab: Option<Entity<QuickActionsTab>>,
+    quick_actions_sub: Option<Subscription>,
     content_scroll: ScrollHandle,
     nav_scroll: ScrollHandle,
     focus_handle: FocusHandle,
@@ -183,6 +187,8 @@ impl ChannelSettingScreen {
             category_sub: None,
             integrations_tab: None,
             integrations_sub: None,
+            quick_actions_tab: None,
+            quick_actions_sub: None,
             content_scroll: ScrollHandle::new(),
             nav_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
@@ -195,18 +201,22 @@ impl ChannelSettingScreen {
         let had_overview_tab = self.overview_tab.take().is_some();
         let had_category_tab = self.category_tab.take().is_some();
         let had_integrations_tab = self.integrations_tab.take().is_some();
+        let had_quick_actions_tab = self.quick_actions_tab.take().is_some();
         let had_permissions_sub = self.permissions_sub.take().is_some();
         let had_overview_sub = self.overview_sub.take().is_some();
         let had_category_sub = self.category_sub.take().is_some();
         let had_integrations_sub = self.integrations_sub.take().is_some();
+        let had_quick_actions_sub = self.quick_actions_sub.take().is_some();
         if had_permissions_tab
             || had_overview_tab
             || had_category_tab
             || had_integrations_tab
+            || had_quick_actions_tab
             || had_permissions_sub
             || had_overview_sub
             || had_category_sub
             || had_integrations_sub
+            || had_quick_actions_sub
             || !self.clan_id.is_zero()
         {
             cx.notify();
@@ -215,6 +225,7 @@ impl ChannelSettingScreen {
         self.overview_sub = None;
         self.category_sub = None;
         self.integrations_sub = None;
+        self.quick_actions_sub = None;
         self.clan_id = ClanId(0);
         self.channel_id = ChannelId(0);
         self.current_tab = ChannelSettingsTab::Overview;
@@ -260,6 +271,8 @@ impl ChannelSettingScreen {
             self.category_sub = None;
             self.integrations_tab = None;
             self.integrations_sub = None;
+            self.quick_actions_tab = None;
+            self.quick_actions_sub = None;
             self.content_scroll.set_offset(point(px(0.0), px(0.0)));
         }
         self.current_tab = resolved;
@@ -351,6 +364,17 @@ impl ChannelSettingScreen {
                 let tab = cx.new(|cx| IntegrationsTab::new(clan_id, channel_id, settings, cx));
                 self.integrations_sub = Some(cx.observe(&tab, |_, _, cx| cx.notify()));
                 self.integrations_tab = Some(tab);
+            }
+            ChannelSettingsTab::QuickMenu => {
+                if self.quick_actions_tab.is_some() {
+                    return;
+                }
+                let clan_id = self.clan_id;
+                let channel_id = self.channel_id;
+                let settings = self.settings.clone();
+                let tab = cx.new(|cx| QuickActionsTab::new(clan_id, channel_id, settings, cx));
+                self.quick_actions_sub = Some(cx.observe(&tab, |_, _, cx| cx.notify()));
+                self.quick_actions_tab = Some(tab);
             }
             _ => {}
         }
@@ -631,6 +655,10 @@ impl Render for ChannelSettingScreen {
                 .integrations_tab
                 .as_ref()
                 .map(|tab| tab.clone().into_any_element()),
+            ChannelSettingsTab::QuickMenu => self
+                .quick_actions_tab
+                .as_ref()
+                .map(|tab| tab.clone().into_any_element()),
             _ => None,
         }
         .unwrap_or_else(|| {
@@ -827,6 +855,30 @@ mod tests {
             false,
             true
         )));
+    }
+
+    #[test]
+    fn quick_actions_tab_requires_manage_and_hides_voice_stream_app() {
+        assert!(ChannelSettingsTab::QuickMenu.visible_in_sidebar(ctx(
+            ChannelType::Text,
+            false,
+            false,
+            true
+        )));
+        assert!(!ChannelSettingsTab::QuickMenu.visible_in_sidebar(ctx(
+            ChannelType::Text,
+            false,
+            false,
+            false
+        )));
+        for channel_type in [ChannelType::Voice, ChannelType::Stream, ChannelType::App] {
+            assert!(!ChannelSettingsTab::QuickMenu.visible_in_sidebar(ctx(
+                channel_type,
+                false,
+                false,
+                true
+            )));
+        }
     }
 
     #[test]

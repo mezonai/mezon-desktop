@@ -50,6 +50,7 @@ pub struct ChannelPermissionsStore {
     loading: HashSet<ChannelPermissionKey>,
     failed_at: HashMap<ChannelPermissionKey, Instant>,
     reset_generation: u64,
+    patch_generation: u64,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
     _refetch: Task<()>,
@@ -83,12 +84,20 @@ impl ChannelPermissionsStore {
             dispatch.on(RealtimeKind::RoleEvent, &entity, |this, event, cx| {
                 this.handle_role_event(event, cx);
             });
+            dispatch.on(
+                RealtimeKind::PermissionChanged,
+                &entity,
+                |this, event, cx| {
+                    this.handle_permission_changed(event, cx);
+                },
+            );
         });
         Self {
             cache: KeyedCache::new(Some(MAX_CACHED_CHANNEL_PERMISSIONS)),
             loading: HashSet::new(),
             failed_at: HashMap::new(),
             reset_generation: 0,
+            patch_generation: 0,
             api,
             _conn_watch: conn_watch,
             _refetch: Task::ready(()),
@@ -132,6 +141,64 @@ impl ChannelPermissionsStore {
         }
         self.invalidate();
         self.refetch_cached(cx);
+        cx.notify();
+    }
+
+    fn handle_permission_changed(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::Unhandled(realtime::envelope::Message::PermissionChangedEvent(changed)) =
+            event
+        else {
+            return;
+        };
+        let Some(me) = BadgeService::try_global(cx).and_then(|b| b.read(cx).current_user_id(cx))
+        else {
+            return;
+        };
+        if changed.user_id != me.get() {
+            return;
+        }
+        let channel_id = ChannelId(changed.channel_id);
+        let keys = self
+            .cache
+            .iter()
+            .map(|(key, _)| *key)
+            .filter(|key| key.channel_id == channel_id)
+            .collect::<Vec<_>>();
+        let mut touched = Vec::new();
+        for key in keys {
+            let Some(perms) = self.cache.get_mut(&key) else {
+                continue;
+            };
+            let mut changed_any = false;
+            for (updates, active) in [
+                (&changed.add_permissions, Some(true)),
+                (&changed.remove_permissions, Some(false)),
+                (&changed.default_permissions, None),
+            ] {
+                for update in updates {
+                    if update.slug.is_empty() {
+                        continue;
+                    }
+                    let value = active.unwrap_or(update.slug == PERMISSION_SEND_MESSAGE);
+                    if perms.insert(update.slug.clone(), value) != Some(value) {
+                        changed_any = true;
+                    }
+                }
+            }
+            if changed_any {
+                touched.push(key);
+            }
+        }
+        if touched.is_empty() {
+            return;
+        }
+        self.patch_generation = self.patch_generation.wrapping_add(1);
+        for key in touched {
+            cx.emit(ChannelPermissionsEvent::Changed {
+                clan_id: key.clan_id,
+                channel_id: key.channel_id,
+            });
+        }
         cx.notify();
     }
 
@@ -256,6 +323,7 @@ impl ChannelPermissionsStore {
         self.loading.insert(key);
         let api = self.api.clone();
         let generation = self.reset_generation;
+        let patched_at_start = self.patch_generation;
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_user_permission_in_channel(clan_id.get(), channel_id.get())
@@ -268,6 +336,9 @@ impl ChannelPermissionsStore {
                 match result {
                     Ok(resp) => {
                         this.failed_at.remove(&key);
+                        if this.patch_generation != patched_at_start {
+                            return;
+                        }
                         let perms = permissions_from_response(&resp);
                         this.cache.insert(key, perms, None);
                         cx.emit(ChannelPermissionsEvent::Changed {
@@ -316,6 +387,7 @@ mod tests {
             loading: HashSet::new(),
             failed_at: HashMap::new(),
             reset_generation: 0,
+            patch_generation: 0,
             api: Arc::new(AppApi::new(
                 Arc::new(mezon_client::TransportClient::new(String::new())),
                 String::new(),
@@ -323,6 +395,147 @@ mod tests {
             _conn_watch: Task::ready(()),
             _refetch: Task::ready(()),
         }
+    }
+
+    const TEST_ME: i64 = 55;
+
+    fn init_permissions_store(cx: &mut App) -> Entity<ChannelPermissionsStore> {
+        let api = Arc::new(AppApi::new(
+            Arc::new(mezon_client::TransportClient::new(String::new())),
+            String::new(),
+        ));
+        crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+        let auth_state = cx.new(|_| {
+            crate::AuthState::Authenticated(mezon_client::Session {
+                user_id: TEST_ME.to_string(),
+                ..Default::default()
+            })
+        });
+        BadgeService::init(auth_state, cx);
+        crate::clan::ClanList::init(api.clone(), cx);
+        crate::channel::ChannelList::init(api.clone(), cx);
+        crate::clan_members::ClanMembersStore::init(api.clone(), cx);
+        cx.new(|cx| ChannelPermissionsStore::new(api, cx))
+    }
+
+    fn permission_update(slug: &str) -> api::PermissionUpdate {
+        api::PermissionUpdate {
+            permission_id: 0,
+            slug: slug.into(),
+            r#type: 0,
+        }
+    }
+
+    fn permission_changed(user_id: i64) -> RealtimeEvent {
+        RealtimeEvent::Unhandled(realtime::envelope::Message::PermissionChangedEvent(
+            realtime::PermissionChangedEvent {
+                user_id,
+                channel_id: TEST_CHANNEL.get(),
+                add_permissions: vec![permission_update(PERMISSION_MANAGE_THREAD)],
+                remove_permissions: vec![permission_update(PERMISSION_DELETE_MESSAGE)],
+                default_permissions: vec![
+                    permission_update(PERMISSION_SEND_MESSAGE),
+                    permission_update("kick-member"),
+                ],
+            },
+        ))
+    }
+
+    #[gpui::test]
+    fn a_permission_change_for_me_rewrites_the_cached_channel(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_permissions_store(cx);
+            store.update(cx, |store, cx| {
+                seed_granted(store);
+                store.handle_permission_changed(&permission_changed(TEST_ME), cx);
+                assert_eq!(
+                    store.permission_value(PERMISSION_MANAGE_THREAD, TEST_CLAN, TEST_CHANNEL),
+                    Some(true),
+                    "add_permissions grants"
+                );
+                assert_eq!(
+                    store.permission_value(PERMISSION_DELETE_MESSAGE, TEST_CLAN, TEST_CHANNEL),
+                    Some(false),
+                    "remove_permissions revokes"
+                );
+                assert_eq!(
+                    store.permission_value(PERMISSION_SEND_MESSAGE, TEST_CLAN, TEST_CHANNEL),
+                    Some(true),
+                    "send-message is the one default that stays on, as in React"
+                );
+                assert_eq!(
+                    store.permission_value("kick-member", TEST_CLAN, TEST_CHANNEL),
+                    Some(false),
+                    "every other default is denied"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_fetch_that_started_before_the_change_cannot_overwrite_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_permissions_store(cx);
+            store.update(cx, |store, cx| {
+                seed_granted(store);
+                let key = ChannelPermissionKey {
+                    clan_id: TEST_CLAN,
+                    channel_id: TEST_CHANNEL,
+                };
+
+                let patched_at_start = store.patch_generation;
+                store.handle_permission_changed(&permission_changed(TEST_ME), cx);
+                assert_eq!(
+                    store.permission_value(PERMISSION_DELETE_MESSAGE, TEST_CLAN, TEST_CHANNEL),
+                    Some(false),
+                    "precondition: the event revoked delete-message"
+                );
+
+                assert_ne!(
+                    store.patch_generation, patched_at_start,
+                    "the patch must be visible to a fetch that is already in flight"
+                );
+
+                if store.patch_generation == patched_at_start {
+                    store.cache.insert(
+                        key,
+                        HashMap::from([(PERMISSION_DELETE_MESSAGE.to_string(), true)]),
+                        None,
+                    );
+                }
+
+                assert_eq!(
+                    store.permission_value(PERMISSION_DELETE_MESSAGE, TEST_CLAN, TEST_CHANNEL),
+                    Some(false),
+                    "a response that predates the revocation must not hand the permission back"
+                );
+                assert_eq!(
+                    store.permission_value(PERMISSION_MANAGE_THREAD, TEST_CLAN, TEST_CHANNEL),
+                    Some(true),
+                    "discarding the response must not blank the whole channel — a stale entry \
+                     reads as None, which denies every permission at once"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_permission_change_for_someone_else_is_ignored(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_permissions_store(cx);
+            store.update(cx, |store, cx| {
+                seed_granted(store);
+                store.handle_permission_changed(&permission_changed(TEST_ME + 1), cx);
+                assert_eq!(
+                    store.permission_value(PERMISSION_DELETE_MESSAGE, TEST_CLAN, TEST_CHANNEL),
+                    Some(true)
+                );
+                assert_eq!(
+                    store.permission_value(PERMISSION_MANAGE_THREAD, TEST_CLAN, TEST_CHANNEL),
+                    None
+                );
+            });
+        });
     }
 
     fn seed_granted(store: &mut ChannelPermissionsStore) {

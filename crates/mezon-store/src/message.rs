@@ -443,6 +443,7 @@ pub struct EmbedAuthor {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbedImage {
+    pub url: SharedString,
     pub url_proxied: SharedString,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -462,12 +463,75 @@ pub struct EmbedTextInput {
     pub multiline: bool,
     pub required: bool,
     pub disabled: bool,
+    pub numeric: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbedDatePicker {
+    pub id: SharedString,
+    pub value: SharedString,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbedRadioOption {
+    pub label: SharedString,
+    pub value: SharedString,
+    pub description: SharedString,
+    pub name: SharedString,
+    pub style: Option<i32>,
+    pub disabled: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbedRadio {
+    pub id: SharedString,
+    pub options: Vec<EmbedRadioOption>,
+    pub max_options: Option<i32>,
+}
+
+impl EmbedRadio {
+    pub fn allows_multiple(&self) -> bool {
+        match (self.options.first(), self.options.get(1)) {
+            (Some(first), Some(second)) => !first.name.is_empty() && first.name != second.name,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbedAnimation {
+    pub id: SharedString,
+    pub url_image: SharedString,
+    pub url_position: SharedString,
+    pub pool: Vec<Vec<SharedString>>,
+    pub duration_seconds: f32,
+    pub repeat: Option<u32>,
+    pub vertical: bool,
+    pub is_result: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum EmbedInput {
     Text(EmbedTextInput),
     Select(MessageSelect),
+    DatePicker(EmbedDatePicker),
+    Radio(EmbedRadio),
+    Animation(EmbedAnimation),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EmbedGridItem {
+    pub start_col: u32,
+    pub start_row: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbedGrid {
+    pub columns: u32,
+    pub rows: u32,
+    pub items: Vec<EmbedGridItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -476,6 +540,8 @@ pub struct EmbedField {
     pub value: SharedString,
     pub inline: bool,
     pub input: Option<EmbedInput>,
+    pub shape: Option<EmbedGrid>,
+    pub buttons: Vec<MessageButton>,
 }
 
 #[derive(Debug, Clone)]
@@ -485,6 +551,7 @@ pub struct Embed {
     pub url: Option<SharedString>,
     pub author: Option<EmbedAuthor>,
     pub description_spans: Vec<MessageSpan>,
+    pub thumbnail_url: SharedString,
     pub thumbnail_proxied: SharedString,
     pub image: Option<EmbedImage>,
     pub footer: Option<EmbedFooter>,

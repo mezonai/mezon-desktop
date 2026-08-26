@@ -7,17 +7,18 @@ use gpui::{
     linear_gradient, prelude::*, px, relative,
 };
 use mezon_store::{
-    AuthState, AutoUpdateStatus, AutoUpdateStore, CHANNEL_ACTIVE_ARCHIVED, CHANNEL_ACTIVE_JOINED,
-    CallStore, Channel, ChannelEvent, ChannelId, ChannelList, ChannelType, ClanId, ClanList,
-    ClanMembersStore, DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
-    MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
-    Settings, StreamStore, THREAD_STATUS_ARCHIVED, ThreadsEvent, ThreadsStore, TopicsEvent,
-    TopicsStore, UiState, VoiceConnection, VoiceMember, VoiceModerationError, VoiceStore,
-    expand_mention_name_tokens,
+    AccountEvent, AccountStore, AuthState, AutoUpdateStatus, AutoUpdateStore,
+    CHANNEL_ACTIVE_ARCHIVED, CHANNEL_ACTIVE_JOINED, CallStore, Channel, ChannelEvent, ChannelId,
+    ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore, DirectChannel, DirectKind,
+    DirectMessageStore, GroupMembersStore, InboxStore, MessageSearchEvent, MessageSearchStore,
+    MessagesStore, PinnedEvent, PinnedMessagesStore, Settings, StreamStore, THREAD_STATUS_ARCHIVED,
+    ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, UiState, VoiceConnection, VoiceMember,
+    VoiceModerationError, VoiceStore, expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
 
 use crate::app::shell::Shell;
+use crate::chat::age_restricted::{AgeRestrictedGate, age_gate_blocks};
 use crate::chat::area::ChatArea;
 use crate::chat::call_window::{CallPanelView, render_call_mini_bar};
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
@@ -101,6 +102,7 @@ pub struct ChatLayout {
     pin_popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
     canvas_popover_handle: PopoverMenuHandle<CanvasPopoverPanel>,
     canvas_view: Option<Entity<CanvasView>>,
+    age_gate: Option<Entity<AgeRestrictedGate>>,
     displayed_active_channel: Option<ActiveChannelSlice>,
     focused_channel_id: Option<ChannelId>,
     displayed_voice_mini: Option<VoiceMiniSlice>,
@@ -190,6 +192,18 @@ impl ChatLayout {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(
+            &AccountStore::global(cx),
+            |_, _, event: &AccountEvent, cx| {
+                if matches!(
+                    event,
+                    AccountEvent::AccountLoaded | AccountEvent::DateOfBirthSaved
+                ) {
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
 
         let channel_list = ChannelList::global(cx);
 
@@ -542,6 +556,7 @@ impl ChatLayout {
             pin_popover_handle: PopoverMenuHandle::default(),
             canvas_popover_handle: PopoverMenuHandle::default(),
             canvas_view: None,
+            age_gate: None,
             displayed_active_channel: None,
             focused_channel_id: None,
             displayed_voice_mini: None,
@@ -2715,7 +2730,43 @@ impl ChatLayout {
         })
     }
 
+    fn gated_channel(&self, cx: &App) -> Option<(ClanId, ChannelId)> {
+        let channel = self.channel_list.read(cx).active_channel()?;
+        if !age_gate_blocks(channel, cx) {
+            return None;
+        }
+        let ids = (channel.clan_id, channel.id);
+        matches!(
+            Router::global(cx).read(cx).route(),
+            Route::Chat | Route::Channel { .. } | Route::Thread { .. } | Route::Canvas { .. }
+        )
+        .then_some(ids)
+    }
+
+    fn sync_age_gate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((clan_id, channel_id)) = self.gated_channel(cx) else {
+            if let Some(gate) = self.age_gate.take() {
+                gate.update(cx, |gate, cx| gate.dismiss_birthday_prompt(cx));
+            }
+            return;
+        };
+        let gate = match self.age_gate.clone() {
+            Some(gate) if gate.read(cx).is_for(clan_id, channel_id) => gate,
+            previous => {
+                if let Some(previous) = previous {
+                    previous.update(cx, |gate, cx| gate.dismiss_birthday_prompt(cx));
+                }
+                let settings = self.settings.clone();
+                let gate = cx.new(|_| AgeRestrictedGate::new(clan_id, channel_id, settings));
+                self.age_gate = Some(gate.clone());
+                gate
+            }
+        };
+        gate.update(cx, |gate, cx| gate.sync_birthday_prompt(window, cx));
+    }
+
     fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        self.sync_age_gate(window, cx);
         let window_width = window.viewport_size().width;
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
@@ -2857,6 +2908,34 @@ impl ChatLayout {
         }
 
         if let Some(ch) = self.channel_list.read(cx).active_channel() {
+            if let Some(gate) = self.age_gate.clone() {
+                let channel_name = ch.name.clone();
+                let active_channel_id = ch.id;
+                let header_icon = channel_icon(ch.channel_type, ch.private);
+                return self
+                    .chat_area
+                    .render_panel_body(
+                        &locale,
+                        Some(channel_name.as_str()),
+                        Some(header_icon),
+                        Some(active_channel_id),
+                        true,
+                        self.show_member_list && !show_results_panel && !side_panel_open,
+                        true,
+                        Some(inbox_handle.clone()),
+                        active_clan_id.clone(),
+                        Some(pin_handle.clone()),
+                        Some(canvas_handle.clone()),
+                        show_search_bar,
+                        search_expanded,
+                        show_search_options,
+                        search_input.clone(),
+                        gate.into_any_element(),
+                        cx,
+                    )
+                    .into_any_element();
+            }
+
             if let Route::Canvas {
                 clan_id,
                 channel_id,

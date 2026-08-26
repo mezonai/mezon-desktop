@@ -3,8 +3,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, Bounds, FontWeight, ObjectFit, Pixels, SharedString,
-    div, img, prelude::*, px, relative, rgb, rgba,
+    Animation, AnimationExt as _, AnyElement, Bounds, Entity, FontWeight, ObjectFit, Pixels,
+    SharedString, div, img, prelude::*, px, relative, rgb, rgba,
 };
 use mezon_store::{Message, MessageId, MessagesStore, PollAnswerView, PollData, PollLabelSegment};
 
@@ -15,6 +15,8 @@ use super::context::RowCtx;
 use super::poll_detail_modal::PollDetailModal;
 use super::selection::{SelectableRegion, TextSegment};
 use crate::components::primitives::{Icon, IconName};
+use crate::image_cache::LruImageCache;
+use crate::theme::Theme;
 
 const BLUE_600: u32 = 0x2563eb;
 const BLUE_500: u32 = 0x3b82f6;
@@ -622,11 +624,213 @@ fn render_footer(
 }
 
 fn vote_word(ctx: &RowCtx, count: i32) -> &'static str {
+    vote_word_for(ctx.locale, count)
+}
+
+fn vote_word_for(locale: &str, count: i32) -> &'static str {
     if count < 2 {
-        mezon_i18n::t(ctx.locale, "message.poll.vote")
+        mezon_i18n::t(locale, "message.poll.vote")
     } else {
-        mezon_i18n::t(ctx.locale, "message.poll.votes")
+        mezon_i18n::t(locale, "message.poll.votes")
     }
+}
+
+pub(crate) fn render_poll_card_readonly(
+    poll: &PollData,
+    voted: &[i32],
+    theme: &Theme,
+    locale: &str,
+    now_secs: i64,
+    image_cache: &Entity<LruImageCache>,
+) -> AnyElement {
+    let is_expired = poll.is_expired(now_secs);
+    let is_closed = poll.is_closed;
+    let tokens = &theme.tokens;
+
+    let mut header = div().flex().flex_row().items_center().gap_2().mb_1().child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .text_size(px(15.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(tokens.text_secondary)
+            .child(poll.question.clone()),
+    );
+    if is_closed || is_expired {
+        header = header.child(
+            div()
+                .flex_shrink_0()
+                .px_2()
+                .py_0p5()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .rounded(px(4.))
+                .bg(rgba(RED_500_10))
+                .text_color(rgb(RED_500))
+                .child(mezon_i18n::t(locale, "message.poll.ended")),
+        );
+    }
+
+    let mut answers = div().flex().flex_col().gap_2().mb_3();
+    for (position, answer) in poll.answers.iter().enumerate() {
+        let count = poll.answer_counts.get(position).copied().unwrap_or(0);
+        let percentage = poll.percentages.get(position).copied().unwrap_or(0);
+        let is_voted = voted.contains(&(position as i32));
+
+        let mut right = div()
+            .relative()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .flex_shrink_0()
+            .pl_2()
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(tokens.text_secondary)
+                    .child(format!(
+                        "{percentage}% {count} {}",
+                        vote_word_for(locale, count)
+                    )),
+            );
+        if is_voted {
+            right = right.child(
+                div()
+                    .size_5()
+                    .rounded_full()
+                    .bg(tokens.text_theme_primary)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .flex_shrink_0()
+                    .child(
+                        Icon::new(IconName::Check)
+                            .size(px(12.))
+                            .text_color(tokens.text_secondary),
+                    ),
+            );
+        }
+
+        answers = answers.child(
+            div()
+                .relative()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .flex_shrink_0()
+                .px_3()
+                .py(px(10.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(tokens.border_primary)
+                .overflow_hidden()
+                .bg(tokens.bg_item_hover)
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(relative(percentage as f32 / 100.0))
+                        .bg(rgb(BLUE_600)),
+                )
+                .child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(tokens.text_secondary)
+                        .child(render_poll_label_plain(
+                            answer,
+                            poll.poll_id,
+                            position,
+                            image_cache,
+                        )),
+                )
+                .child(right),
+        );
+    }
+
+    let mut footer = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .w_full()
+        .min_w_0()
+        .pt_1()
+        .text_xs()
+        .text_color(tokens.text_theme_primary)
+        .child(div().child(format!(
+            "{} {}",
+            poll.total_votes,
+            vote_word_for(locale, poll.total_votes)
+        )));
+    if !is_closed
+        && !is_expired
+        && let Some(time_label) = time_remaining_label(poll.expire_at, now_secs, locale)
+    {
+        footer = footer.child(div().child(format!(
+            "• {time_label} {}",
+            mezon_i18n::t(locale, "message.poll.left")
+        )));
+    }
+
+    div()
+        .w_full()
+        .min_w_0()
+        .child(
+            div()
+                .w_full()
+                .max_w(px(420.))
+                .rounded(px(4.))
+                .p_3()
+                .border_1()
+                .border_color(tokens.border_primary)
+                .bg(tokens.bg_active_member_channel)
+                .child(header)
+                .child(answers)
+                .child(footer),
+        )
+        .into_any_element()
+}
+
+fn render_poll_label_plain(
+    answer: &PollAnswerView,
+    poll_id: i64,
+    position: usize,
+    image_cache: &Entity<LruImageCache>,
+) -> AnyElement {
+    let mut row = div().flex().flex_row().items_center().overflow_hidden();
+    for (segment_index, segment) in answer.segments.iter().enumerate() {
+        match segment {
+            PollLabelSegment::Text(text) => {
+                row = row.child(div().overflow_hidden().child(text.clone()));
+            }
+            PollLabelSegment::Emoji(src) => {
+                if src.is_empty() {
+                    continue;
+                }
+                row = row.child(
+                    img(src.clone())
+                        .w(px(20.))
+                        .h(px(20.))
+                        .object_fit(ObjectFit::Contain)
+                        .image_cache(image_cache)
+                        .id(format!(
+                            "pin-poll-emoji-{poll_id}-{position}-{segment_index}"
+                        )),
+                );
+            }
+        }
+    }
+    row.into_any_element()
 }
 
 fn time_remaining_label(expire_at: Option<i64>, now_secs: i64, locale: &str) -> Option<String> {

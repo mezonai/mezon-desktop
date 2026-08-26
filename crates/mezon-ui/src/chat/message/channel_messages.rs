@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -16,11 +17,11 @@ use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelPermissionsEvent, ChannelPermissionsStore, ClanId,
-    ClanList, ClanMembersStore, DirectMessageStore, EmbedInput, EmbedTextInput, Emoji, EmojiStore,
-    GroupMembersStore, MessageCode, MessageId, MessagesEvent, MessagesStore,
+    ClanList, ClanMembersStore, DirectMessageStore, EmbedDatePicker, EmbedInput, EmbedTextInput,
+    Emoji, EmojiStore, GroupMembersStore, MessageCode, MessageId, MessagesEvent, MessagesStore,
     PERMISSION_DELETE_MESSAGE, PERMISSION_MANAGE_THREAD, PERMISSION_SEND_MESSAGE, PermissionStore,
-    ProfileContext, RolesEvent, RolesStore, Settings, TopicsEvent, TopicsStore, UserId,
-    UsersByUserStore,
+    ProfileContext, QUICK_MENU_TYPE_QUICK, QuickMenuStore, RolesEvent, RolesStore, Settings,
+    SpriteAtlas, TopicsEvent, TopicsStore, UserId, UsersByUserStore,
     message::{Message, markdown_edit_source},
 };
 
@@ -42,7 +43,9 @@ use crate::app::shell::Shell;
 use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::user_profile_popover::UserProfilePopover;
 use crate::components::primitives::text_actions::Copy;
-use crate::components::primitives::{Icon, IconName, TextArea, TextAreaEvent, context_menu_at};
+use crate::components::primitives::{
+    DatePicker, DatePickerEvent, Icon, IconName, TextArea, TextAreaEvent, context_menu_at,
+};
 use crate::image_cache::{
     LruImageCache, MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
 };
@@ -323,6 +326,8 @@ fn message_offset_at(
         })
 }
 
+const EMBED_DATE_PICKER_HEIGHT: f32 = 36.0;
+const ANIMATION_TICK_FALLBACK: Duration = Duration::from_millis(120);
 const SELECTION_DRAG_THRESHOLD_PX: f32 = 2.;
 
 fn press_drag_started(origin: Point<Pixels>, position: Point<Pixels>) -> bool {
@@ -1273,8 +1278,16 @@ pub struct ChannelMessages {
     gif_videos: Rc<HashMap<(MessageId, usize), Entity<GifVideoView>>>,
     embed_inputs: Rc<HashMap<(MessageId, SharedString), Entity<TextArea>>>,
     embed_input_subs: HashMap<(MessageId, SharedString), Subscription>,
-    embed_input_fingerprint: Option<(Option<ChannelId>, usize)>,
+    embed_date_pickers: Rc<HashMap<(MessageId, SharedString), Entity<DatePicker>>>,
+    embed_date_picker_subs: HashMap<(MessageId, SharedString), Subscription>,
+    embed_input_fingerprint: Option<(Option<ChannelId>, usize, Option<MessageId>)>,
     embed_select_seeded: HashSet<(MessageId, SharedString)>,
+    sprite_atlases: Rc<HashMap<SharedString, Arc<SpriteAtlas>>>,
+    sprite_atlas_pending: HashSet<SharedString>,
+    sprite_atlas_failed: HashSet<SharedString>,
+    animation_starts: Rc<HashMap<(MessageId, SharedString), Instant>>,
+    animation_tick: Option<Task<()>>,
+    window_active: bool,
     cached_for_channel: Option<ChannelId>,
     skeleton_phase: SkeletonPhase,
     skeleton_key: SkeletonKey,
@@ -1337,8 +1350,10 @@ pub struct ChannelMessages {
     context_menu_target: Option<(MessageId, Point<Pixels>)>,
     context_menu_forward_all: bool,
     reaction_submenu_open: bool,
+    quick_menu_submenu_open: bool,
     emoji_recent: Rc<Vec<RecentEmojiCell>>,
     _emoji_observe: Subscription,
+    _quick_menu_observe: Option<Subscription>,
     channel_permissions_fp: Option<(bool, bool, bool)>,
     _channel_permissions_observe: Subscription,
     _roles_observe: Subscription,
@@ -1663,6 +1678,10 @@ impl ChannelMessages {
                     Rc::make_mut(&mut this.gif_videos).retain(|(id, _), _| id != message_id);
                     Rc::make_mut(&mut this.embed_inputs).retain(|(id, _), _| id != message_id);
                     this.embed_input_subs.retain(|(id, _), _| id != message_id);
+                    Rc::make_mut(&mut this.embed_date_pickers)
+                        .retain(|(id, _), _| id != message_id);
+                    this.embed_date_picker_subs
+                        .retain(|(id, _), _| id != message_id);
                     this.embed_select_seeded.retain(|(id, _)| id != message_id);
                     this.embed_input_fingerprint = None;
                     let at = usize::from(this.header_shown) + *index;
@@ -1893,6 +1912,13 @@ impl ChannelMessages {
                 cx.notify();
             },
         );
+        let quick_menu_observe = QuickMenuStore::try_global(cx).map(|store| {
+            cx.observe(&store, |this, _, cx| {
+                if this.context_menu_target.is_some() {
+                    cx.notify();
+                }
+            })
+        });
         Self {
             list_state,
             focus_handle: cx.focus_handle(),
@@ -1913,8 +1939,16 @@ impl ChannelMessages {
             gif_videos: Rc::new(HashMap::new()),
             embed_inputs: Rc::new(HashMap::new()),
             embed_input_subs: HashMap::new(),
+            embed_date_pickers: Rc::new(HashMap::new()),
+            embed_date_picker_subs: HashMap::new(),
             embed_input_fingerprint: None,
             embed_select_seeded: HashSet::new(),
+            sprite_atlases: Rc::new(HashMap::new()),
+            sprite_atlas_pending: HashSet::new(),
+            sprite_atlas_failed: HashSet::new(),
+            animation_starts: Rc::new(HashMap::new()),
+            animation_tick: None,
+            window_active: true,
             cached_for_channel: None,
             skeleton_phase: SkeletonPhase::Hidden,
             skeleton_key: SkeletonKey::None,
@@ -1974,8 +2008,10 @@ impl ChannelMessages {
             context_menu_target: None,
             context_menu_forward_all: false,
             reaction_submenu_open: false,
+            quick_menu_submenu_open: false,
             emoji_recent,
             _emoji_observe: emoji_observe,
+            _quick_menu_observe: quick_menu_observe,
             channel_permissions_fp: None,
             _channel_permissions_observe: channel_permissions_observe,
             _roles_observe: roles_observe,
@@ -2508,6 +2544,12 @@ impl ChannelMessages {
         self.clear_hover_tasks();
         self.hovered_row = None;
         self.reaction_submenu_open = false;
+        self.quick_menu_submenu_open = false;
+        if let Some(channel_id) = MessagesStore::global(cx).read(cx).active_channel_id() {
+            QuickMenuStore::global(cx).update(cx, |store, cx| {
+                store.ensure_loaded(channel_id, QUICK_MENU_TYPE_QUICK, cx);
+            });
+        }
         self.context_menu_target = Some((message_id, position));
         cx.notify();
     }
@@ -2515,6 +2557,7 @@ impl ChannelMessages {
     pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
         if self.context_menu_target.take().is_some() {
             self.reaction_submenu_open = false;
+            self.quick_menu_submenu_open = false;
             if self.hover_target().is_none() {
                 self.hovered_row = None;
             }
@@ -2526,6 +2569,13 @@ impl ChannelMessages {
     pub(crate) fn set_reaction_submenu_open(&mut self, open: bool, cx: &mut Context<Self>) {
         if self.reaction_submenu_open != open {
             self.reaction_submenu_open = open;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn set_quick_menu_submenu_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.quick_menu_submenu_open != open {
+            self.quick_menu_submenu_open = open;
             cx.notify();
         }
     }
@@ -2857,21 +2907,31 @@ impl ChannelMessages {
         }
     }
 
+    fn topic_embed_source(&self) -> Option<Rc<Vec<Message>>> {
+        self.is_topic_box.then(|| self.topic_messages.clone())
+    }
+
     fn apply_embed_input_reconcile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_topic_box {
-            return;
-        }
-        let fingerprint = (self.cached_for_channel, self.list_state.item_count());
+        let tail = if self.is_topic_box {
+            self.topic_messages.last().map(|message| message.id)
+        } else {
+            MessagesStore::global(cx)
+                .read(cx)
+                .viewport_messages()
+                .last()
+                .map(|message| message.id)
+        };
+        let fingerprint = (self.cached_for_channel, self.list_state.item_count(), tail);
         if self.embed_input_fingerprint == Some(fingerprint) {
             return;
         }
         self.embed_input_fingerprint = Some(fingerprint);
 
+        let source = self.topic_embed_source();
         let desired: Vec<(MessageId, EmbedTextInput)> = {
             let store = MessagesStore::global(cx);
             let store = store.read(cx);
-            store
-                .viewport_messages()
+            embed_source(source.as_deref(), store)
                 .iter()
                 .flat_map(|message| {
                     let message_id = message.id;
@@ -2913,7 +2973,7 @@ impl ChannelMessages {
                 .embed_form_value(message_id, &input.id)
                 .cloned();
             let initial = restored.unwrap_or_else(|| input.default_value.clone());
-            let placeholder = if input.required && !input.placeholder.is_empty() {
+            let placeholder = if input.required {
                 SharedString::from(format!("{}*", input.placeholder))
             } else {
                 input.placeholder.clone()
@@ -2930,6 +2990,7 @@ impl ChannelMessages {
                     .text_size(px(14.))
                     .bg(bg)
                     .text_color(text_color)
+                    .numeric(input.numeric)
             });
             if !initial.is_empty() {
                 input_state.update(cx, |state, cx| {
@@ -2957,8 +3018,7 @@ impl ChannelMessages {
         let select_defaults: Vec<(MessageId, SharedString, Vec<SharedString>)> = {
             let store = MessagesStore::global(cx);
             let store = store.read(cx);
-            store
-                .viewport_messages()
+            embed_source(source.as_deref(), store)
                 .iter()
                 .flat_map(|message| {
                     let message_id = message.id;
@@ -3004,9 +3064,210 @@ impl ChannelMessages {
             });
         }
 
+        let desired_pickers: Vec<(MessageId, EmbedDatePicker)> = {
+            let store = MessagesStore::global(cx);
+            let store = store.read(cx);
+            embed_source(source.as_deref(), store)
+                .iter()
+                .flat_map(|message| {
+                    let message_id = message.id;
+                    message.embeds.iter().flat_map(move |embed| {
+                        embed
+                            .fields
+                            .iter()
+                            .filter_map(move |field| match field.input.as_ref() {
+                                Some(EmbedInput::DatePicker(picker)) => {
+                                    Some((message_id, picker.clone()))
+                                }
+                                _ => None,
+                            })
+                    })
+                })
+                .collect()
+        };
+        let wanted_pickers: HashSet<(MessageId, SharedString)> = desired_pickers
+            .iter()
+            .map(|(id, picker)| (*id, picker.id.clone()))
+            .collect();
+        if self
+            .embed_date_pickers
+            .keys()
+            .any(|key| !wanted_pickers.contains(key))
+        {
+            Rc::make_mut(&mut self.embed_date_pickers)
+                .retain(|key, _| wanted_pickers.contains(key));
+            self.embed_date_picker_subs
+                .retain(|key, _| wanted_pickers.contains(key));
+            changed = true;
+        }
+        for (message_id, picker) in desired_pickers {
+            let key = (message_id, picker.id.clone());
+            if self.embed_date_pickers.contains_key(&key) {
+                continue;
+            }
+            let restored = MessagesStore::global(cx)
+                .read(cx)
+                .embed_form_value(message_id, &picker.id)
+                .cloned()
+                .unwrap_or_default();
+            let selected = chrono::NaiveDate::parse_from_str(&restored, "%Y-%m-%d").ok();
+            let locale = self.cached_locale.clone();
+            let entity = cx.new(|cx| {
+                let mut date_picker = DatePicker::new(cx);
+                date_picker.set_locale(locale);
+                date_picker.set_min(None, cx);
+                date_picker.set_field_height(EMBED_DATE_PICKER_HEIGHT, cx);
+                date_picker.set_empty_label("dd/mm/yyyy", cx);
+                date_picker.set_selected_silent(selected, cx);
+                date_picker
+            });
+            let sub_key = key.clone();
+            let sub = cx.subscribe(&entity, move |_this, _entity, event, cx| {
+                let DatePickerEvent::Change(date) = event else {
+                    return;
+                };
+                let value: SharedString = date
+                    .map(|date| date.format("%Y-%m-%d").to_string())
+                    .unwrap_or_default()
+                    .into();
+                let (message_id, input_id) = &sub_key;
+                MessagesStore::global(cx).update(cx, |store, _cx| {
+                    store.set_embed_form_value(*message_id, input_id.clone(), value);
+                });
+            });
+            Rc::make_mut(&mut self.embed_date_pickers).insert(key.clone(), entity);
+            self.embed_date_picker_subs.insert(key, sub);
+            changed = true;
+        }
+
+        self.fetch_embed_sprite_atlases(cx);
+
         if changed {
             cx.notify();
         }
+    }
+
+    fn fetch_embed_sprite_atlases(&mut self, cx: &mut Context<Self>) {
+        let topic_source = self.topic_embed_source();
+        let animations: Vec<(MessageId, SharedString, SharedString, f32, usize)> = {
+            let store = MessagesStore::global(cx);
+            let store = store.read(cx);
+            embed_source(topic_source.as_deref(), store)
+                .iter()
+                .flat_map(|message| {
+                    let message_id = message.id;
+                    message.embeds.iter().flat_map(move |embed| {
+                        embed
+                            .fields
+                            .iter()
+                            .filter_map(move |field| match field.input.as_ref() {
+                                Some(EmbedInput::Animation(animation))
+                                    if !animation.url_position.is_empty()
+                                        && !animation.url_image.is_empty() =>
+                                {
+                                    Some((
+                                        message_id,
+                                        animation.id.clone(),
+                                        animation.url_position.clone(),
+                                        animation.duration_seconds,
+                                        animation.pool.iter().map(Vec::len).max().unwrap_or(1),
+                                    ))
+                                }
+                                _ => None,
+                            })
+                    })
+                })
+                .collect()
+        };
+        self.sync_animation_tick(&animations, cx);
+        let wanted: Vec<SharedString> = animations
+            .iter()
+            .map(|(_, _, url, _, _)| url.clone())
+            .collect();
+        for url in wanted {
+            if self.sprite_atlases.contains_key(&url)
+                || self.sprite_atlas_failed.contains(&url)
+                || !self.sprite_atlas_pending.insert(url.clone())
+            {
+                continue;
+            }
+            cx.spawn(async move |this, cx| {
+                let atlas = cx
+                    .background_spawn(mezon_store::fetch_sprite_atlas(url.to_string()))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.sprite_atlas_pending.remove(&url);
+                    match atlas {
+                        Ok(atlas) => {
+                            Rc::make_mut(&mut this.sprite_atlases).insert(url, atlas);
+                            cx.notify();
+                        }
+                        Err(error) => {
+                            this.sprite_atlas_failed.insert(url);
+                            tracing::warn!("embed animation atlas fetch failed: {error}");
+                        }
+                    }
+                });
+            })
+            .detach();
+        }
+    }
+
+    fn sync_animation_tick(
+        &mut self,
+        animations: &[(MessageId, SharedString, SharedString, f32, usize)],
+        cx: &mut Context<Self>,
+    ) {
+        let wanted: HashSet<(MessageId, SharedString)> = animations
+            .iter()
+            .map(|(message_id, id, _, _, _)| (*message_id, id.clone()))
+            .collect();
+        if self
+            .animation_starts
+            .keys()
+            .any(|key| !wanted.contains(key))
+        {
+            Rc::make_mut(&mut self.animation_starts).retain(|key, _| wanted.contains(key));
+        }
+        let now = Instant::now();
+        for key in wanted {
+            if !self.animation_starts.contains_key(&key) {
+                Rc::make_mut(&mut self.animation_starts).insert(key, now);
+            }
+        }
+        if animations.is_empty() {
+            self.animation_tick = None;
+            return;
+        }
+        if self.animation_tick.is_some() {
+            return;
+        }
+        let interval = animations
+            .iter()
+            .map(|(_, _, _, duration, frames)| {
+                Duration::from_secs_f32((duration / frames.max(&1).to_owned() as f32).max(0.08))
+            })
+            .min()
+            .unwrap_or(ANIMATION_TICK_FALLBACK);
+        self.animation_tick = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(interval).await;
+                let keep = this
+                    .update(cx, |this, cx| {
+                        if this.animation_starts.is_empty() {
+                            return false;
+                        }
+                        if this.window_active {
+                            cx.notify();
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        }));
     }
 
     fn reconcile_cold(&mut self, cx: &mut Context<Self>) {
@@ -3100,6 +3361,10 @@ impl ChannelMessages {
         Rc::make_mut(&mut self.gif_videos).clear();
         Rc::make_mut(&mut self.embed_inputs).clear();
         self.embed_input_subs.clear();
+        Rc::make_mut(&mut self.embed_date_pickers).clear();
+        self.embed_date_picker_subs.clear();
+        Rc::make_mut(&mut self.animation_starts).clear();
+        self.animation_tick = None;
         self.embed_input_fingerprint = None;
         self.embed_select_seeded.clear();
     }
@@ -4291,6 +4556,7 @@ impl ChannelMessages {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        self.window_active = window.is_window_active();
         self.sync_render_identity(cx);
         self.drive_scroll_anim(window);
         self.schedule_selection_autoscroll(window, cx);
@@ -4363,6 +4629,9 @@ impl ChannelMessages {
         let active_audios = self.active_audios.clone();
         let gif_videos = self.gif_videos.clone();
         let embed_inputs = self.embed_inputs.clone();
+        let embed_date_pickers = self.embed_date_pickers.clone();
+        let sprite_atlases = self.sprite_atlases.clone();
+        let animation_starts = self.animation_starts.clone();
         let video_host = cx.entity().downgrade();
         let current_user_id = self.cached_current_user_id.clone();
         let role_ids = self.cached_role_ids.clone();
@@ -4387,7 +4656,7 @@ impl ChannelMessages {
             .on_key_down(key_listener)
             .on_mouse_down(MouseButton::Left, focus_on_click)
             .child(
-                list(list_state, move |ix, _window, cx| {
+                list(list_state, move |ix, window, cx| {
                     if header_shown && ix == 0 {
                         return div()
                             .id("topic-loading-top")
@@ -4422,6 +4691,10 @@ impl ChannelMessages {
                         active_audios: &active_audios,
                         gif_videos: &gif_videos,
                         embed_inputs: &embed_inputs,
+                        embed_date_pickers: &embed_date_pickers,
+                        sprite_atlases: &sprite_atlases,
+                        animation_starts: &animation_starts,
+                        window_active: window.is_window_active(),
                         video_host: video_host.clone(),
                         now: frame_now,
                         clan_id: active_clan,
@@ -4497,6 +4770,7 @@ impl ChannelMessages {
                     self.context_menu_forward_all,
                     true,
                     self.reaction_submenu_open,
+                    self.quick_menu_submenu_open,
                     selected_text,
                     cx.entity().downgrade(),
                     cx,
@@ -4514,10 +4788,18 @@ impl ChannelMessages {
     }
 }
 
+fn embed_source<'a>(topic: Option<&'a Vec<Message>>, store: &'a MessagesStore) -> &'a [Message] {
+    match topic {
+        Some(messages) => messages.as_slice(),
+        None => store.viewport_messages(),
+    }
+}
+
 impl EventEmitter<ChannelMessagesEvent> for ChannelMessages {}
 
 impl Render for ChannelMessages {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.window_active = window.is_window_active();
         self.ogp_image_cache
             .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         {
@@ -4615,6 +4897,9 @@ impl Render for ChannelMessages {
         let active_audios = self.active_audios.clone();
         let gif_videos = self.gif_videos.clone();
         let embed_inputs = self.embed_inputs.clone();
+        let embed_date_pickers = self.embed_date_pickers.clone();
+        let sprite_atlases = self.sprite_atlases.clone();
+        let animation_starts = self.animation_starts.clone();
         let video_host = cx.entity().downgrade();
         let current_user_id = self.cached_current_user_id.clone();
         let role_ids = self.cached_role_ids.clone();
@@ -4648,7 +4933,7 @@ impl Render for ChannelMessages {
             .on_key_down(key_listener)
             .on_mouse_down(MouseButton::Left, focus_on_click)
             .child(
-                list(list_state, move |ix, _window, cx| {
+                list(list_state, move |ix, window, cx| {
                     if header_shown && ix == 0 {
                         return div()
                             .id("msg-loading-top")
@@ -4683,6 +4968,10 @@ impl Render for ChannelMessages {
                         active_audios: &active_audios,
                         gif_videos: &gif_videos,
                         embed_inputs: &embed_inputs,
+                        embed_date_pickers: &embed_date_pickers,
+                        sprite_atlases: &sprite_atlases,
+                        animation_starts: &animation_starts,
+                        window_active: window.is_window_active(),
                         video_host: video_host.clone(),
                         now: frame_now,
                         clan_id: active_clan,
@@ -4762,6 +5051,7 @@ impl Render for ChannelMessages {
                     self.context_menu_forward_all,
                     false,
                     self.reaction_submenu_open,
+                    self.quick_menu_submenu_open,
                     selected_text,
                     cx.entity().downgrade(),
                     cx,

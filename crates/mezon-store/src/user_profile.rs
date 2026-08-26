@@ -307,6 +307,7 @@ mod tests {
             logo: None,
             status: String::new(),
             user_status: String::new(),
+            dob_seconds: 0,
         };
         let view = UserProfileView::from_account(UserId(1), &account, true);
         assert_eq!(view.display_name, "Hello Me");

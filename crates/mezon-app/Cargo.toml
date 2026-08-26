@@ -40,6 +40,7 @@ raw-window-handle = "0.6"
 
 [features]
 tracy = ["dep:tracing-tracy", "dep:tracy-client"]
+dev-session = ["mezon-client/dev-session"]
 
 [build-dependencies]
 woff2-patched = "0.4.0"

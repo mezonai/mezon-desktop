@@ -498,6 +498,11 @@ impl AudioIo {
                 let mut current_in_fmt: Option<AudioFormat> = None;
                 let mut output_stall_recovery = StallRecovery::new(&output_heartbeat);
                 let mut input_stall_recovery = StallRecovery::new(&input_heartbeat);
+                let mut active_default_output_id = if current_output_id.is_none() {
+                    default_output_id(&host)
+                } else {
+                    None
+                };
                 loop {
                     let cmd = match ctrl_rx.recv_timeout(AUDIO_HEALTH_CHECK_INTERVAL) {
                         Ok(cmd) => cmd,
@@ -537,6 +542,25 @@ impl AudioIo {
                                 }
                             } else {
                                 input_stall_recovery.reset(&input_heartbeat);
+                            }
+                            if output_healthy
+                                && current_output_id.is_none()
+                                && !rebuild_pending.load(Ordering::Relaxed)
+                            {
+                                let now_default = default_output_id(&host);
+                                if now_default.is_some()
+                                    && now_default != active_default_output_id
+                                {
+                                    tracing::info!(
+                                        from = ?active_default_output_id,
+                                        to = ?now_default,
+                                        "system default output device changed; following"
+                                    );
+                                    active_default_output_id = now_default;
+                                    if !rebuild_pending.swap(true, Ordering::Relaxed) {
+                                        let _ = rebuild_tx.send(AudioCmd::RebuildOutput);
+                                    }
+                                }
                             }
                             continue;
                         }
@@ -677,6 +701,11 @@ impl AudioIo {
                                     ));
                                     output_healthy = true;
                                     rebuild_pending.store(false, Ordering::Relaxed);
+                                    active_default_output_id = if current_output_id.is_none() {
+                                        default_output_id(&host)
+                                    } else {
+                                        None
+                                    };
                                     let changed = new_fmt.sample_rate != out_fmt.sample_rate
                                         || new_fmt.channels != out_fmt.channels;
                                     out_fmt = new_fmt;
@@ -815,6 +844,11 @@ impl AudioIo {
                                         stream,
                                     ));
                                     output_healthy = true;
+                                    active_default_output_id = if current_output_id.is_none() {
+                                        default_output_id(&host)
+                                    } else {
+                                        None
+                                    };
                                     tracing::info!(
                                         "voice output stream recovered: {}Hz/{}ch",
                                         fmt.sample_rate,
@@ -1209,6 +1243,14 @@ fn open_output(
     err_hook: OutputErrorHook,
 ) -> Result<(cpal::Stream, AudioFormat)> {
     let supported = device.default_output_config()?;
+    let device_id = device
+        .id()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let device_name = device
+        .description()
+        .map(|description| description.to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
     let out_fmt = AudioFormat {
         sample_rate: supported.sample_rate(),
         channels: supported.channels() as u32,
@@ -1223,6 +1265,13 @@ fn open_output(
         err_hook,
     )?;
     stream.play()?;
+    tracing::info!(
+        device_id,
+        device_name,
+        sample_rate = out_fmt.sample_rate,
+        channels = out_fmt.channels,
+        "voice output stream opened",
+    );
     Ok((stream, out_fmt))
 }
 
@@ -1246,6 +1295,12 @@ fn select_input(host: &cpal::Host, id: Option<&str>) -> Result<cpal::Device> {
         .ok_or_else(|| anyhow!("no audio input device available"))
 }
 
+fn default_output_id(host: &cpal::Host) -> Option<String> {
+    host.default_output_device()
+        .and_then(|device| device.id().ok())
+        .map(|id| id.to_string())
+}
+
 fn select_output(host: &cpal::Host, id: Option<&str>) -> Result<cpal::Device> {
     if let Some(id) = id {
         if let Ok(mut devices) = host.output_devices()
@@ -1260,10 +1315,10 @@ fn select_output(host: &cpal::Host, id: Option<&str>) -> Result<cpal::Device> {
         .ok_or_else(|| anyhow!("no audio output device available"))
 }
 
-fn low_latency_buffer(supported: &cpal::SupportedStreamConfig) -> cpal::BufferSize {
+fn capture_buffer(supported: &cpal::SupportedStreamConfig) -> cpal::BufferSize {
     match supported.buffer_size() {
         cpal::SupportedBufferSize::Range { min, max } => {
-            cpal::BufferSize::Fixed((supported.sample_rate() / 100).clamp(*min, *max))
+            cpal::BufferSize::Fixed((supported.sample_rate() / 25).clamp(*min, *max))
         }
         cpal::SupportedBufferSize::Unknown => cpal::BufferSize::Default,
     }
@@ -1390,7 +1445,7 @@ fn open_input(
         channels: supported.channels() as u32,
     };
     let mut config: cpal::StreamConfig = supported.config();
-    config.buffer_size = low_latency_buffer(&supported);
+    config.buffer_size = capture_buffer(&supported);
     let rate = in_fmt.sample_rate as i32;
     let channels = in_fmt.channels.max(1) as i32;
     let frame = (in_fmt.sample_rate as usize / 100) * in_fmt.channels.max(1) as usize;

@@ -12,6 +12,7 @@ pub const CHANNEL_SETTING_LOGO_LIGHT: &str = "images/channel_setting_logo_light.
 pub const CHANNEL_SETTING_LOGO_DARK: &str = "images/channel_setting_logo_dark.svg";
 pub const ONBOARDING: &str = "images/onboarding.png";
 pub const EMPTY_WEBHOOK: &str = "images/empty-webhook.svg";
+pub const AGE_RESTRICTED_WARNING: &str = "images/warning.svg";
 
 #[derive(RustEmbed)]
 #[folder = "assets"]
@@ -53,6 +54,7 @@ mod tests {
             CHANNEL_SETTING_LOGO_DARK,
             ONBOARDING,
             EMPTY_WEBHOOK,
+            AGE_RESTRICTED_WARNING,
             "icons/flower.svg",
         ] {
             let loaded = Assets
@@ -63,5 +65,18 @@ mod tests {
                 "{path} embedded but empty"
             );
         }
+    }
+
+    #[test]
+    fn age_restricted_warning_renders_as_an_image() {
+        let bytes = Assets
+            .load(AGE_RESTRICTED_WARNING)
+            .expect("warning illustration is embedded")
+            .expect("warning illustration has bytes");
+        let renderer = gpui::SvgRenderer::new(std::sync::Arc::new(Assets));
+        let frame = renderer
+            .render_single_frame(&bytes, 1.0)
+            .expect("warning illustration parses as svg");
+        assert!(frame.size(0).width.0 > 0);
     }
 }

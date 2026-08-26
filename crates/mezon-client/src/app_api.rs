@@ -1197,6 +1197,38 @@ impl AppApi {
         Ok(list.list_menus)
     }
 
+    pub async fn add_quick_menu_access(
+        &self,
+        id: i64,
+        clan_id: i64,
+        channel_id: i64,
+        menu_name: &str,
+        action_msg: &str,
+        menu_type: i32,
+    ) -> Result<()> {
+        self.transport
+            .add_quick_menu_access(id, 0, clan_id, channel_id, menu_name, action_msg, menu_type)
+            .await
+    }
+
+    pub async fn update_quick_menu_access(
+        &self,
+        id: i64,
+        clan_id: i64,
+        channel_id: i64,
+        menu_name: &str,
+        action_msg: &str,
+        menu_type: i32,
+    ) -> Result<()> {
+        self.transport
+            .update_quick_menu_access(id, 0, clan_id, channel_id, menu_name, action_msg, menu_type)
+            .await
+    }
+
+    pub async fn delete_quick_menu_access(&self, id: i64, clan_id: i64) -> Result<()> {
+        self.transport.delete_quick_menu_access(id, clan_id).await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn send_channel_message_with_flags(
         &self,
@@ -1742,6 +1774,14 @@ impl AppApi {
     /// List rich-presence activities for users (React `listActivity` / `ListActivity`).
     pub async fn list_activity(&self) -> Result<mezon_proto::api::ListUserActivity> {
         self.transport.list_activity().await
+    }
+
+    /// Publish or clear the local user's rich-presence activity (React `createActivity`).
+    pub async fn create_activity(
+        &self,
+        request: mezon_proto::api::CreateActivityRequest,
+    ) -> Result<mezon_proto::api::UserActivity> {
+        self.transport.create_activity(request).await
     }
 
     /// Create a category in a clan; returns its id.
@@ -2444,9 +2484,10 @@ impl AppApi {
         avatar_url: Option<&str>,
         about_me: Option<&str>,
         logo: Option<&str>,
+        dob_seconds: Option<u32>,
     ) -> Result<()> {
         self.transport
-            .update_account(display_name, avatar_url, about_me, logo)
+            .update_account(display_name, avatar_url, about_me, logo, dob_seconds)
             .await
     }
 

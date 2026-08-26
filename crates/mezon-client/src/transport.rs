@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, watch};
 
 const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
+const CHANNEL_DESC_FETCH_LIMIT: i32 = 1000;
 const DEFAULT_CONNECT_GATE_MS: u64 = 5000;
 const DEFAULT_PING_TIMEOUT_MS: u64 = 5000;
 const MULTIPART_OP_TIMEOUT_MS: u64 = 120000;
@@ -796,6 +797,8 @@ pub struct ApiAccount {
     pub status: String,
     #[serde(default)]
     pub user_status: String,
+    #[serde(default)]
+    pub dob_seconds: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1610,9 +1613,42 @@ fn parse_message_references(bytes: &[u8]) -> Vec<ApiMessageRef> {
     if let Some(value) = message_field_json(bytes) {
         return parse_references_json_value(&value);
     }
-    match api::MessageRefList::decode(bytes) {
-        Ok(list) => list
-            .refs
+    if let Some(refs) = decode_message_ref_list(bytes) {
+        return refs;
+    }
+    if let Some(inner) = base64_blob(bytes) {
+        if let Some(value) = message_field_json(&inner) {
+            return parse_references_json_value(&value);
+        }
+        if let Some(refs) = decode_message_ref_list(&inner) {
+            return refs;
+        }
+    }
+    let salvaged = salvage_message_refs(bytes);
+    if !salvaged.is_empty() {
+        tracing::warn!(
+            "salvaged {} message reference(s) from a malformed blob ({} bytes)",
+            salvaged.len(),
+            bytes.len()
+        );
+        return salvaged;
+    }
+    tracing::warn!(
+        "failed to decode message references ({} bytes, leading bytes {}, utf8 {}, json {:?})",
+        bytes.len(),
+        blob_prefix(bytes),
+        std::str::from_utf8(bytes).is_ok(),
+        serde_json::from_slice::<serde_json::Value>(bytes)
+            .err()
+            .map(|e| e.to_string())
+    );
+    Vec::new()
+}
+
+fn decode_message_ref_list(bytes: &[u8]) -> Option<Vec<ApiMessageRef>> {
+    let list = api::MessageRefList::decode(bytes).ok()?;
+    Some(
+        list.refs
             .into_iter()
             .map(|r| ApiMessageRef {
                 message_ref_id: r.message_ref_id,
@@ -1625,14 +1661,86 @@ fn parse_message_references(bytes: &[u8]) -> Vec<ApiMessageRef> {
                 message_sender_display_name: r.message_sender_display_name,
             })
             .collect(),
-        Err(e) => {
-            tracing::warn!(
-                "failed to decode message references ({} bytes): {e}",
-                bytes.len()
-            );
-            Vec::new()
+    )
+}
+
+fn base64_blob(bytes: &[u8]) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let text = std::str::from_utf8(bytes).ok()?.trim();
+    if text.is_empty()
+        || !text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'-' | b'_'))
+    {
+        return None;
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(text))
+        .ok()
+}
+
+fn salvage_scalar(text: &str, key: &str) -> Option<String> {
+    let start = text.find(key)? + key.len();
+    let rest = text[start..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    if let Some(quoted) = rest.strip_prefix('"') {
+        let end = quoted.find('"')?;
+        Some(quoted[..end].to_string())
+    } else {
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit() && c != '-')
+            .unwrap_or(rest.len());
+        if end == 0 {
+            None
+        } else {
+            Some(rest[..end].to_string())
         }
     }
+}
+
+fn salvage_message_refs(bytes: &[u8]) -> Vec<ApiMessageRef> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut refs = Vec::new();
+    for chunk in text.split("\"message_ref_id\"").skip(1) {
+        let chunk = format!("\"message_ref_id\"{chunk}");
+        let Some(id) = salvage_scalar(&chunk, "\"message_ref_id\"") else {
+            continue;
+        };
+        let Ok(message_ref_id) = id.parse::<i64>() else {
+            continue;
+        };
+        if message_ref_id == 0 {
+            continue;
+        }
+        refs.push(ApiMessageRef {
+            message_ref_id,
+            content: String::new(),
+            has_attachment: false,
+            message_sender_id: salvage_scalar(&chunk, "\"message_sender_id\"")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or_default(),
+            message_sender_username: salvage_scalar(&chunk, "\"message_sender_username\"")
+                .unwrap_or_default(),
+            message_sender_avatar: salvage_scalar(&chunk, "\"message_sender_avatar\"")
+                .or_else(|| salvage_scalar(&chunk, "\"mesages_sender_avatar\""))
+                .unwrap_or_default(),
+            message_sender_clan_nick: salvage_scalar(&chunk, "\"message_sender_clan_nick\"")
+                .unwrap_or_default(),
+            message_sender_display_name: salvage_scalar(&chunk, "\"message_sender_display_name\"")
+                .unwrap_or_default(),
+        });
+    }
+    refs
+}
+
+fn blob_prefix(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .take(12)
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn json_field_i64(value: &serde_json::Value, key: &str) -> i64 {
@@ -1829,6 +1937,53 @@ mod opt_i32_flex {
     }
 }
 
+mod opt_f32_flex {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            Some(serde_json::Value::Number(n)) => Ok(n.as_f64().map(|v| v as f32)),
+            Some(serde_json::Value::String(s)) if !s.is_empty() => Ok(s.parse::<f32>().ok()),
+            _ => Ok(None),
+        }
+    }
+}
+
+mod sprite_pool {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<Vec<String>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Some(serde_json::Value::Array(items)) =
+            Option::<serde_json::Value>::deserialize(deserializer)?
+        else {
+            return Ok(Vec::new());
+        };
+        let mut flat = Vec::new();
+        let mut pools = Vec::new();
+        for item in items {
+            match item {
+                serde_json::Value::Array(frames) => pools.push(
+                    frames
+                        .iter()
+                        .filter_map(super::flex_string)
+                        .collect::<Vec<_>>(),
+                ),
+                other => flat.extend(super::flex_string(&other)),
+            }
+        }
+        if !flat.is_empty() {
+            pools.push(flat);
+        }
+        Ok(pools)
+    }
+}
+
 mod i32_flex {
     use serde::{Deserialize, Deserializer};
 
@@ -1958,23 +2113,23 @@ mod poll_answers {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiEmbedAuthor {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub icon_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiEmbedThumbnail {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub url: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiEmbedImage {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub url: String,
     #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
     pub width: Option<i32>,
@@ -1984,17 +2139,17 @@ pub struct ApiEmbedImage {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiEmbedFooter {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub text: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub icon_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiEmbedField {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub value: String,
     #[serde(default, deserialize_with = "bool_flex::deserialize")]
     pub inline: bool,
@@ -2008,16 +2163,104 @@ pub struct ApiEmbedField {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ApiMessageInput {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub placeholder: Option<String>,
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "opt_string_flex::deserialize"
+    )]
+    pub input_type: Option<String>,
     #[serde(default, deserialize_with = "bool_flex::deserialize")]
     pub required: bool,
     #[serde(default, deserialize_with = "bool_flex::deserialize")]
     pub textarea: bool,
-    #[serde(default, rename = "defaultValue")]
+    #[serde(
+        default,
+        rename = "defaultValue",
+        deserialize_with = "opt_string_flex::deserialize"
+    )]
     pub default_value: Option<String>,
     #[serde(default, deserialize_with = "bool_flex::deserialize")]
     pub disabled: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ApiRadioOption {
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
+    pub label: String,
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
+    pub value: String,
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub description: Option<String>,
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub style: Option<i32>,
+    #[serde(default, deserialize_with = "bool_flex::deserialize")]
+    pub disabled: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ApiAnimationComponent {
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub url_image: Option<String>,
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub url_position: Option<String>,
+    #[serde(default, deserialize_with = "sprite_pool::deserialize")]
+    pub pool: Vec<Vec<String>>,
+    #[serde(default, deserialize_with = "opt_f32_flex::deserialize")]
+    pub duration: Option<f32>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub repeat: Option<i32>,
+    #[serde(default, deserialize_with = "bool_flex::deserialize")]
+    pub vertical: bool,
+    #[serde(
+        default,
+        rename = "isResult",
+        deserialize_with = "opt_i32_flex::deserialize"
+    )]
+    pub is_result: Option<i32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ApiGridItem {
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub width: Option<i32>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub height: Option<i32>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub start_col: Option<i32>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub start_row: Option<i32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ApiGridComponent {
+    #[serde(default, deserialize_with = "vec_null_as_empty::deserialize")]
+    pub items: Vec<ApiGridItem>,
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub url_image: Option<String>,
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub url_position: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ApiEmbedShapeWrapper {
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "opt_i32_flex::deserialize"
+    )]
+    pub component_type: Option<i32>,
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub component: ApiGridComponent,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub columns: Option<i32>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub rows: Option<i32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -2028,7 +2271,7 @@ pub struct ApiEmbedInputWrapper {
         deserialize_with = "opt_i32_flex::deserialize"
     )]
     pub component_type: Option<i32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub id: Option<String>,
     #[serde(default)]
     pub component: serde_json::Value,
@@ -2040,21 +2283,21 @@ pub struct ApiEmbedInputWrapper {
 pub struct ApiEmbed {
     #[serde(default, deserialize_with = "embed_color::deserialize")]
     pub color: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub title: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub url: Option<String>,
     #[serde(default)]
     pub author: Option<ApiEmbedAuthor>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub description: Option<String>,
     #[serde(default)]
     pub thumbnail: Option<ApiEmbedThumbnail>,
-    #[serde(default, deserialize_with = "vec_null_as_empty::deserialize")]
+    #[serde(default, deserialize_with = "embed_fields_lenient::deserialize")]
     pub fields: Vec<ApiEmbedField>,
     #[serde(default)]
     pub image: Option<ApiEmbedImage>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub timestamp: Option<String>,
     #[serde(default)]
     pub footer: Option<ApiEmbedFooter>,
@@ -2074,15 +2317,15 @@ pub struct ApiSelectOption {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiButtonComponent {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_flex::deserialize")]
     pub label: String,
     #[serde(default, deserialize_with = "bool_flex::deserialize")]
     pub disable: bool,
     #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
     pub style: Option<i32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub url: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_string_flex::deserialize")]
     pub icon: Option<String>,
 }
 
@@ -2159,6 +2402,26 @@ mod opt_string_flex {
             .as_ref()
             .and_then(super::flex_string)
             .filter(|text| !text.is_empty()))
+    }
+}
+
+mod embed_fields_lenient {
+    use super::ApiEmbedField;
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<ApiEmbedField>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Some(serde_json::Value::Array(items)) =
+            Option::<serde_json::Value>::deserialize(deserializer)?
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(items
+            .into_iter()
+            .filter_map(|item| serde_json::from_value(item).ok())
+            .collect())
     }
 }
 
@@ -3717,6 +3980,7 @@ impl MezonTransport {
             logo,
             status: user.status,
             user_status: user.user_status,
+            dob_seconds: user.dob_seconds,
         }
     }
 
@@ -4239,7 +4503,7 @@ impl MezonTransport {
         let api_name = "ListChannelDescs";
         let body = api::ListChannelDescsRequest {
             clan_id,
-            limit: 500,
+            limit: CHANNEL_DESC_FETCH_LIMIT,
             state: 1,
             channel_type: 1,
             ..Default::default()
@@ -8035,16 +8299,10 @@ impl MezonTransport {
     /// Create activity.
     pub async fn create_activiy(
         &self,
-        activity_name: &str,
-        activity_type: i32,
+        request: api::CreateActivityRequest,
     ) -> Result<api::UserActivity> {
         let cid = self.generate_cid();
-        let body = api::CreateActivityRequest {
-            activity_name: activity_name.to_string(),
-            activity_type,
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, response) = self.send_api_request(cid, "CreateActiviy", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -8981,18 +9239,26 @@ impl MezonTransport {
         Ok(api::MezonOauthClient::decode(response.as_slice())?)
     }
 
-    /// Add quick menu access.
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_quick_menu_access(
         &self,
+        id: i64,
         bot_id: i64,
         clan_id: i64,
+        channel_id: i64,
         menu_name: &str,
+        action_msg: &str,
+        menu_type: i32,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::QuickMenuAccess {
+            id,
             bot_id,
             clan_id,
+            channel_id,
             menu_name: menu_name.to_string(),
+            action_msg: action_msg.to_string(),
+            menu_type,
             ..Default::default()
         }
         .encode_to_vec();
@@ -9005,18 +9271,26 @@ impl MezonTransport {
         Ok(())
     }
 
-    /// Update quick menu access.
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_quick_menu_access(
         &self,
+        id: i64,
         bot_id: i64,
         clan_id: i64,
+        channel_id: i64,
         menu_name: &str,
+        action_msg: &str,
+        menu_type: i32,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::QuickMenuAccess {
+            id,
             bot_id,
             clan_id,
+            channel_id,
             menu_name: menu_name.to_string(),
+            action_msg: action_msg.to_string(),
+            menu_type,
             ..Default::default()
         }
         .encode_to_vec();
@@ -9367,6 +9641,7 @@ impl MezonTransport {
         avatar_url: Option<&str>,
         about_me: Option<&str>,
         logo: Option<&str>,
+        dob_seconds: Option<u32>,
     ) -> Result<()> {
         let cid = self.generate_cid();
 
@@ -9377,6 +9652,7 @@ impl MezonTransport {
             avatar_url: avatar_url.map(str::to_string),
             about_me: about_me.map(str::to_string),
             logo: logo.map(str::to_string),
+            dob_seconds: dob_seconds.unwrap_or_default(),
             ..Default::default()
         }
         .encode_to_vec();

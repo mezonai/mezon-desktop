@@ -76,7 +76,7 @@ pub(crate) enum ImEvent {
         state: u32,
         is_release: bool,
     },
-    HidePreedit,
+    ClearPreedit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,7 +158,7 @@ impl X11ImContext {
             .map(|events| {
                 !events.is_empty()
                     && events.iter().all(|event| match event {
-                        ImEvent::HidePreedit => true,
+                        ImEvent::ClearPreedit => true,
                         ImEvent::Preedit { text, .. } => text.is_empty(),
                         _ => false,
                     })
@@ -926,7 +926,7 @@ fn parse_fcitx5_preedit(message: &Message) -> Option<ImEvent> {
     let (chunks, caret): (Vec<(String, i32)>, i32) = message.read2().ok()?;
     let text: String = chunks.into_iter().map(|(piece, _)| piece).collect();
     if text.is_empty() {
-        return Some(ImEvent::HidePreedit);
+        return Some(ImEvent::ClearPreedit);
     }
     let caret_chars = fcitx_byte_caret_to_chars(&text, caret);
     Some(ImEvent::Preedit { text, caret_chars })
@@ -948,7 +948,7 @@ fn parse_fcitx5_batch_preedit(arg: &dyn RefArg) -> Option<ImEvent> {
     let caret = iter.next().and_then(|value| value.as_i64()).unwrap_or(0) as i32;
     let text = formatted_preedit_text(chunks);
     if text.is_empty() {
-        return Some(ImEvent::HidePreedit);
+        return Some(ImEvent::ClearPreedit);
     }
     let caret_chars = fcitx_byte_caret_to_chars(&text, caret);
     Some(ImEvent::Preedit { text, caret_chars })
@@ -1032,13 +1032,13 @@ fn parse_ibus_preedit(message: &Message) -> Option<ImEvent> {
     let _ = iter.next();
     let visible = iter.get::<bool>().unwrap_or(true);
     if !visible {
-        return Some(ImEvent::HidePreedit);
+        return Some(ImEvent::ClearPreedit);
     }
     Some(ImEvent::Preedit { text, caret_chars })
 }
 
 fn parse_ibus_hide_preedit(_message: &Message) -> Option<ImEvent> {
-    Some(ImEvent::HidePreedit)
+    Some(ImEvent::ClearPreedit)
 }
 
 fn parse_ibus_forward(message: &Message) -> Option<ImEvent> {

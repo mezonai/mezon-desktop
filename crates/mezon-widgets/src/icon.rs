@@ -49,6 +49,7 @@ pub enum IconName {
     Chevron,
     ChevronDown,
     ChevronDownIcon,
+    ChevronDownThin,
     ChevronRight,
     CirclePlusFill,
     ClanGuideHouse,
@@ -317,6 +318,10 @@ pub enum IconName {
     EndPollNowIcon,
     MarkUnreadIcon,
     AddToInboxIcon,
+    QuickActionEdit,
+    QuickActionEmpty,
+    QuickActionInfo,
+    QuickActionTrash,
     QuickMenusIcon,
 }
 
@@ -370,6 +375,7 @@ impl IconName {
             Self::Chevron => "icons/chevron.svg",
             Self::ChevronDown => "icons/chevron_down.svg",
             Self::ChevronDownIcon => "icons/chevron-down-icon.svg",
+            Self::ChevronDownThin => "icons/chevron-down-thin.svg",
             Self::ChevronRight => "icons/chevron_right.svg",
             Self::CirclePlusFill => "icons/circle-plus-fill.svg",
             Self::ClanGuideHouse => "icons/clan-guide-house.svg",
@@ -638,6 +644,10 @@ impl IconName {
             Self::EndPollNowIcon => "icons/end-poll-now.svg",
             Self::MarkUnreadIcon => "icons/mark-unread.svg",
             Self::AddToInboxIcon => "icons/add-to-inbox.svg",
+            Self::QuickActionEdit => "icons/quick-action-edit.svg",
+            Self::QuickActionEmpty => "icons/quick-action-empty.svg",
+            Self::QuickActionInfo => "icons/quick-action-info.svg",
+            Self::QuickActionTrash => "icons/quick-action-trash.svg",
             Self::QuickMenusIcon => "icons/quick-menus.svg",
         }
     }

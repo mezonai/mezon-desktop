@@ -1783,6 +1783,7 @@ fn decode_static_image(
     if let Some(scaled) = decode_scaled_dynamic(bytes, max_px) {
         return Ok(scaled);
     }
+    reject_oversized_full_decode(bytes, format)?;
     Ok(image::load_from_memory_with_format(bytes, format)?)
 }
 
@@ -1797,18 +1798,33 @@ fn decoder_limits() -> image::Limits {
     limits
 }
 
+fn canvas_dimensions(
+    bytes: &[u8],
+    format: image::ImageFormat,
+) -> Result<(u32, u32), ImageCacheError> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes));
+    reader.set_format(format);
+    Ok(reader.into_dimensions()?)
+}
+
 fn reject_oversized_canvas(
     bytes: &[u8],
     format: image::ImageFormat,
 ) -> Result<(), ImageCacheError> {
-    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes));
-    reader.set_format(format);
-    let (width, height) = reader.into_dimensions()?;
+    let (width, height) = canvas_dimensions(bytes, format)?;
     if width > 16_384 || height > 16_384 {
         return Err(ImageCacheError::Asset(
             format!("image dimension too large to decode: {width}x{height}").into(),
         ));
     }
+    Ok(())
+}
+
+fn reject_oversized_full_decode(
+    bytes: &[u8],
+    format: image::ImageFormat,
+) -> Result<(), ImageCacheError> {
+    let (width, height) = canvas_dimensions(bytes, format)?;
     if width as u64 * height as u64 > MAX_DECODE_PIXELS {
         return Err(ImageCacheError::Asset(
             format!("image dimensions too large to decode: {width}x{height}").into(),
@@ -1842,6 +1858,7 @@ fn decode_avatar_image(
     reject_oversized_canvas(bytes, format)?;
     let frames = match format {
         image::ImageFormat::Gif => {
+            reject_oversized_full_decode(bytes, format)?;
             let mut decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))?;
             image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
             match downscaled_avatar_animation_frames(
@@ -1861,6 +1878,7 @@ fn decode_avatar_image(
         image::ImageFormat::WebP => {
             let decoder = animated_webp_decoder(bytes)?;
             if decoder.has_animation() {
+                reject_oversized_full_decode(bytes, format)?;
                 match downscaled_avatar_animation_frames(
                     decoder.into_frames(),
                     animation.max_px,
@@ -1900,6 +1918,7 @@ fn decode_message_image(
     reject_oversized_canvas(bytes, format)?;
     let frames = match format {
         image::ImageFormat::Gif => {
+            reject_oversized_full_decode(bytes, format)?;
             let mut decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))?;
             image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
             match downscaled_animation_frames(
@@ -1920,6 +1939,7 @@ fn decode_message_image(
         image::ImageFormat::WebP => {
             let decoder = animated_webp_decoder(bytes)?;
             if decoder.has_animation() {
+                reject_oversized_full_decode(bytes, format)?;
                 match downscaled_animation_frames(
                     decoder.into_frames(),
                     animation_max_px,

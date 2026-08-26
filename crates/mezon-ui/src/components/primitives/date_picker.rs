@@ -1,7 +1,7 @@
 use chrono::{Datelike, Local, NaiveDate, Weekday};
 use gpui::{
     App, Context, Entity, EventEmitter, FontWeight, Hsla, MouseButton, MouseDownEvent, Render,
-    SharedString, Window, deferred, div, prelude::*, px, svg,
+    SharedString, Window, anchored, deferred, div, point, prelude::*, px, svg,
 };
 
 use super::icon::{Icon, IconName};
@@ -10,6 +10,12 @@ use crate::theme::{ActiveTheme, Theme};
 const DEFAULT_FIELD_HEIGHT: f32 = 32.0;
 const CALENDAR_WIDTH: f32 = 280.0;
 const MIN_GALLERY_DATE: (i32, u32, u32) = (2020, 1, 1);
+const YEAR_PAGE: i32 = 12;
+const WEEKDAY_ROW_HEIGHT: f32 = 28.0;
+const DAY_CELL_HEIGHT: f32 = 32.0;
+const CALENDAR_BODY_HEIGHT: f32 = WEEKDAY_ROW_HEIGHT + DAY_CELL_HEIGHT * 6.0;
+const OPTION_GRID_GAP: f32 = 4.0;
+const OPTION_CELL_HEIGHT: f32 = (CALENDAR_BODY_HEIGHT - OPTION_GRID_GAP * 3.0) / 4.0;
 
 fn surface_bg(theme: &Theme) -> gpui::Rgba {
     theme.tokens.bg_surface
@@ -20,6 +26,14 @@ pub enum DatePickerPopupMode {
     #[default]
     DeferredOverlay,
     InlineExpand,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum CalendarView {
+    #[default]
+    Days,
+    Months,
+    Years,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,9 +47,11 @@ pub struct DatePicker {
     open: bool,
     view_year: i32,
     view_month: u32,
+    view_mode: CalendarView,
     min_date: Option<NaiveDate>,
     max_date: Option<NaiveDate>,
     locale: SharedString,
+    empty_label: Option<SharedString>,
     field_height: f32,
     popup_mode: DatePickerPopupMode,
 }
@@ -50,12 +66,14 @@ impl DatePicker {
             open: false,
             view_year: today.year(),
             view_month: today.month(),
+            view_mode: CalendarView::Days,
             min_date: Some(
                 NaiveDate::from_ymd_opt(MIN_GALLERY_DATE.0, MIN_GALLERY_DATE.1, MIN_GALLERY_DATE.2)
                     .unwrap_or(today),
             ),
             max_date: None,
             locale: SharedString::default(),
+            empty_label: None,
             field_height: DEFAULT_FIELD_HEIGHT,
             popup_mode: DatePickerPopupMode::default(),
         }
@@ -70,6 +88,11 @@ impl DatePicker {
 
     pub fn popup_mode(&self) -> DatePickerPopupMode {
         self.popup_mode
+    }
+
+    pub fn set_empty_label(&mut self, label: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.empty_label = Some(label.into());
+        cx.notify();
     }
 
     pub fn set_field_height(&mut self, height: f32, cx: &mut Context<Self>) {
@@ -121,6 +144,7 @@ impl DatePicker {
     pub fn close(&mut self, cx: &mut Context<Self>) {
         if self.open {
             self.open = false;
+            self.view_mode = CalendarView::Days;
             cx.notify();
         }
     }
@@ -131,6 +155,7 @@ impl DatePicker {
 
     fn toggle_open(&mut self, cx: &mut Context<Self>) {
         self.open = !self.open;
+        self.view_mode = CalendarView::Days;
         if self.open {
             let display = self.display_date();
             self.view_year = display.year();
@@ -157,6 +182,46 @@ impl DatePicker {
         } else {
             self.view_month += 1;
         }
+        cx.notify();
+    }
+
+    fn step_view(&mut self, forward: bool, cx: &mut Context<Self>) {
+        match self.view_mode {
+            CalendarView::Days => {
+                if forward {
+                    self.next_month(cx);
+                } else {
+                    self.prev_month(cx);
+                }
+            }
+            CalendarView::Months => {
+                self.view_year += if forward { 1 } else { -1 };
+                cx.notify();
+            }
+            CalendarView::Years => {
+                self.view_year += if forward { YEAR_PAGE } else { -YEAR_PAGE };
+                cx.notify();
+            }
+        }
+    }
+
+    fn zoom_out_view(&mut self, cx: &mut Context<Self>) {
+        self.view_mode = match self.view_mode {
+            CalendarView::Days => CalendarView::Months,
+            CalendarView::Months | CalendarView::Years => CalendarView::Years,
+        };
+        cx.notify();
+    }
+
+    fn pick_month(&mut self, month: u32, cx: &mut Context<Self>) {
+        self.view_month = month;
+        self.view_mode = CalendarView::Days;
+        cx.notify();
+    }
+
+    fn pick_year(&mut self, year: i32, cx: &mut Context<Self>) {
+        self.view_year = year;
+        self.view_mode = CalendarView::Months;
         cx.notify();
     }
 
@@ -207,7 +272,10 @@ impl Render for DatePicker {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let locale = self.locale.clone();
-        let display = format_date(self.display_date());
+        let display = match (self.selected, self.empty_label.clone()) {
+            (None, Some(label)) => label,
+            _ => SharedString::from(format_date(self.display_date())),
+        };
         let entity = cx.entity();
         let field_height = self.field_height;
 
@@ -254,30 +322,32 @@ impl Render for DatePicker {
                     ),
             )
             .when(self.open, |el| match self.popup_mode {
-                DatePickerPopupMode::DeferredOverlay => el.child(
-                    deferred(render_calendar(
-                        &theme,
-                        &locale,
-                        self.view_year,
-                        self.view_month,
-                        self.selected,
-                        self.min_date,
-                        self.max_date,
-                        field_height,
-                        entity,
-                        false,
-                    ))
-                    .with_priority(1),
-                ),
+                DatePickerPopupMode::DeferredOverlay => el.child(deferred(
+                    anchored()
+                        .snap_to_window_with_margin(px(8.))
+                        .offset(point(px(0.), px(field_height + 4.)))
+                        .child(render_calendar(
+                            &theme,
+                            &locale,
+                            self.view_year,
+                            self.view_month,
+                            self.view_mode,
+                            self.selected,
+                            self.min_date,
+                            self.max_date,
+                            entity,
+                            false,
+                        )),
+                )),
                 DatePickerPopupMode::InlineExpand => el.child(render_calendar(
                     &theme,
                     &locale,
                     self.view_year,
                     self.view_month,
+                    self.view_mode,
                     self.selected,
                     self.min_date,
                     self.max_date,
-                    field_height,
                     entity,
                     true,
                 )),
@@ -285,19 +355,27 @@ impl Render for DatePicker {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_calendar(
     theme: &Theme,
     locale: &str,
     year: i32,
     month: u32,
+    view_mode: CalendarView,
     selected: Option<NaiveDate>,
     min_date: Option<NaiveDate>,
     max_date: Option<NaiveDate>,
-    field_height: f32,
     entity: Entity<DatePicker>,
     inline: bool,
 ) -> impl IntoElement {
-    let month_label = month_title(year, month);
+    let header_label = match view_mode {
+        CalendarView::Days => month_title(year, month),
+        CalendarView::Months => year.to_string(),
+        CalendarView::Years => {
+            let start = year_page_start(year);
+            format!("{start} – {}", start + YEAR_PAGE - 1)
+        }
+    };
     let today = Local::now().date_naive();
     let clear_label = mezon_i18n::t(locale, "channelTopbar.gallery.buttons.clearAll");
     let today_label = mezon_i18n::t(locale, "common.today");
@@ -316,10 +394,7 @@ fn render_calendar(
     root = if inline {
         root.w_full().mt(px(4.))
     } else {
-        root.absolute()
-            .top(px(field_height + 4.))
-            .left_0()
-            .w(px(CALENDAR_WIDTH))
+        root.w(px(CALENDAR_WIDTH))
     };
     root.on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
         cx.stop_propagation();
@@ -338,10 +413,31 @@ fn render_calendar(
             .justify_between()
             .child(
                 div()
+                    .id("date-picker-header")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .px_1()
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(theme.bg_hover))
                     .text_size(px(14.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text_primary)
-                    .child(month_label),
+                    .child(header_label)
+                    .child(
+                        Icon::new(IconName::ArrowDown)
+                            .size(px(10.))
+                            .text_color(theme.text_secondary),
+                    )
+                    .on_mouse_down(MouseButton::Left, {
+                        let entity = entity.clone();
+                        move |_: &MouseDownEvent, _window, cx: &mut App| {
+                            cx.stop_propagation();
+                            entity.update(cx, |this, cx| this.zoom_out_view(cx));
+                        }
+                    }),
             )
             .child(
                 div()
@@ -349,33 +445,68 @@ fn render_calendar(
                     .flex_row()
                     .items_center()
                     .gap_1()
-                    .child(calendar_nav_button(IconName::ArrowDown, theme, true, {
-                        let entity = entity.clone();
-                        move |_: &MouseDownEvent, _window, cx: &mut App| {
-                            cx.stop_propagation();
-                            entity.update(cx, |this, cx| this.prev_month(cx));
-                        }
-                    }))
-                    .child(calendar_nav_button(IconName::ArrowDown, theme, false, {
-                        let entity = entity.clone();
-                        move |_: &MouseDownEvent, _window, cx: &mut App| {
-                            cx.stop_propagation();
-                            entity.update(cx, |this, cx| this.next_month(cx));
-                        }
-                    })),
+                    .child(calendar_nav_button(
+                        "date-picker-prev",
+                        IconName::ArrowDown,
+                        theme,
+                        true,
+                        {
+                            let entity = entity.clone();
+                            move |_: &MouseDownEvent, _window, cx: &mut App| {
+                                cx.stop_propagation();
+                                entity.update(cx, |this, cx| this.step_view(false, cx));
+                            }
+                        },
+                    ))
+                    .child(calendar_nav_button(
+                        "date-picker-next",
+                        IconName::ArrowDown,
+                        theme,
+                        false,
+                        {
+                            let entity = entity.clone();
+                            move |_: &MouseDownEvent, _window, cx: &mut App| {
+                                cx.stop_propagation();
+                                entity.update(cx, |this, cx| this.step_view(true, cx));
+                            }
+                        },
+                    )),
             ),
     )
-    .child(render_weekday_header(theme))
-    .children(render_day_rows(
-        theme,
-        year,
-        month,
-        selected,
-        today,
-        min_date,
-        max_date,
-        entity.clone(),
-    ))
+    .child(
+        div()
+            .h(px(CALENDAR_BODY_HEIGHT))
+            .flex()
+            .flex_col()
+            .children(match view_mode {
+                CalendarView::Days => {
+                    let mut rows = vec![render_weekday_header(theme).into_any_element()];
+                    rows.extend(
+                        render_day_rows(
+                            theme,
+                            year,
+                            month,
+                            selected,
+                            today,
+                            min_date,
+                            max_date,
+                            entity.clone(),
+                        )
+                        .into_iter()
+                        .map(IntoElement::into_any_element),
+                    );
+                    rows
+                }
+                CalendarView::Months => vec![
+                    render_month_grid(theme, year, selected, min_date, max_date, entity.clone())
+                        .into_any_element(),
+                ],
+                CalendarView::Years => vec![
+                    render_year_grid(theme, year, selected, min_date, max_date, entity.clone())
+                        .into_any_element(),
+                ],
+            }),
+    )
     .child(
         div()
             .flex()
@@ -385,6 +516,7 @@ fn render_calendar(
             .pt_1()
             .child(
                 div()
+                    .id("date-picker-clear")
                     .text_size(px(12.))
                     .text_color(theme.text_secondary)
                     .cursor_pointer()
@@ -400,6 +532,7 @@ fn render_calendar(
             )
             .child(
                 div()
+                    .id("date-picker-today")
                     .text_size(px(12.))
                     .text_color(theme.brand)
                     .cursor_pointer()
@@ -417,6 +550,7 @@ fn render_calendar(
 }
 
 fn calendar_nav_button(
+    id: &'static str,
     icon: IconName,
     theme: &Theme,
     rotate_up: bool,
@@ -431,6 +565,7 @@ fn calendar_nav_button(
         )));
     }
     div()
+        .id(id)
         .size(px(24.))
         .flex()
         .items_center()
@@ -513,9 +648,6 @@ fn render_day_rows(
                 .children(cells)
                 .into_any_element(),
         );
-        if day > days_in_month {
-            break;
-        }
     }
     rows
 }
@@ -539,7 +671,150 @@ fn is_day_in_range(
 }
 
 fn empty_day_cell() -> gpui::AnyElement {
-    div().h(px(32.)).into_any_element()
+    div().h(px(DAY_CELL_HEIGHT)).into_any_element()
+}
+
+fn render_month_grid(
+    theme: &Theme,
+    year: i32,
+    selected: Option<NaiveDate>,
+    min_date: Option<NaiveDate>,
+    max_date: Option<NaiveDate>,
+    entity: Entity<DatePicker>,
+) -> impl IntoElement {
+    let picker = entity.clone();
+    div()
+        .grid()
+        .grid_cols(3)
+        .gap(px(OPTION_GRID_GAP))
+        .children((1..=12u32).map(move |month| {
+            let enabled = month_in_range(year, month, min_date, max_date);
+            let is_selected =
+                selected.is_some_and(|date| date.year() == year && date.month() == month);
+            let entity = picker.clone();
+            option_cell(
+                ("date-picker-month", month as u64).into(),
+                theme,
+                short_month_label(month),
+                enabled,
+                is_selected,
+                move |_: &MouseDownEvent, _window, cx: &mut App| {
+                    cx.stop_propagation();
+                    entity.update(cx, |this, cx| this.pick_month(month, cx));
+                },
+            )
+        }))
+}
+
+fn render_year_grid(
+    theme: &Theme,
+    year: i32,
+    selected: Option<NaiveDate>,
+    min_date: Option<NaiveDate>,
+    max_date: Option<NaiveDate>,
+    entity: Entity<DatePicker>,
+) -> impl IntoElement {
+    let start = year_page_start(year);
+    let picker = entity.clone();
+    div()
+        .grid()
+        .grid_cols(3)
+        .gap(px(OPTION_GRID_GAP))
+        .children((start..start + YEAR_PAGE).map(move |candidate| {
+            let enabled = year_in_range(candidate, min_date, max_date);
+            let is_selected = selected.is_some_and(|date| date.year() == candidate);
+            let entity = picker.clone();
+            option_cell(
+                ("date-picker-year", i64::from(candidate).unsigned_abs()).into(),
+                theme,
+                candidate.to_string(),
+                enabled,
+                is_selected,
+                move |_: &MouseDownEvent, _window, cx: &mut App| {
+                    cx.stop_propagation();
+                    entity.update(cx, |this, cx| this.pick_year(candidate, cx));
+                },
+            )
+        }))
+}
+
+fn option_cell(
+    id: gpui::ElementId,
+    theme: &Theme,
+    label: String,
+    enabled: bool,
+    selected: bool,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> gpui::AnyElement {
+    let mut cell = div()
+        .id(id)
+        .h(px(OPTION_CELL_HEIGHT))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .text_size(px(13.))
+        .text_color(Hsla::from(theme.text_primary))
+        .child(label);
+    if selected {
+        cell = cell.bg(theme.brand).text_color(gpui::white());
+    } else if !enabled {
+        cell = cell.text_color(Hsla::from(theme.text_muted)).opacity(0.35);
+    } else {
+        cell = cell
+            .cursor_pointer()
+            .hover(|el| el.bg(theme.bg_hover))
+            .on_mouse_down(MouseButton::Left, on_click);
+    }
+    cell.into_any_element()
+}
+
+fn year_page_start(year: i32) -> i32 {
+    year - year.rem_euclid(YEAR_PAGE)
+}
+
+fn short_month_label(month: u32) -> String {
+    NaiveDate::from_ymd_opt(2000, month, 1)
+        .map(|date| date.format("%b").to_string())
+        .unwrap_or_default()
+}
+
+fn month_in_range(
+    year: i32,
+    month: u32,
+    min_date: Option<NaiveDate>,
+    max_date: Option<NaiveDate>,
+) -> bool {
+    let Some(first) = NaiveDate::from_ymd_opt(year, month, 1) else {
+        return false;
+    };
+    let last = first + chrono::Duration::days(days_in_month(year, month) as i64 - 1);
+    range_overlaps(first, last, min_date, max_date)
+}
+
+fn year_in_range(year: i32, min_date: Option<NaiveDate>, max_date: Option<NaiveDate>) -> bool {
+    let (Some(first), Some(last)) = (
+        NaiveDate::from_ymd_opt(year, 1, 1),
+        NaiveDate::from_ymd_opt(year, 12, 31),
+    ) else {
+        return false;
+    };
+    range_overlaps(first, last, min_date, max_date)
+}
+
+fn range_overlaps(
+    first: NaiveDate,
+    last: NaiveDate,
+    min_date: Option<NaiveDate>,
+    max_date: Option<NaiveDate>,
+) -> bool {
+    if min_date.is_some_and(|min| last < min) {
+        return false;
+    }
+    if max_date.is_some_and(|max| first > max) {
+        return false;
+    }
+    true
 }
 
 fn day_cell(
@@ -561,7 +836,8 @@ fn day_cell(
     };
 
     let mut cell = div()
-        .h(px(32.))
+        .id(("date-picker-day", day as u64))
+        .h(px(DAY_CELL_HEIGHT))
         .flex()
         .items_center()
         .justify_center()
@@ -617,4 +893,131 @@ fn month_title(year: i32, month: u32) -> String {
 
 fn format_date(date: NaiveDate) -> String {
     date.format("%d/%m/%Y").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[gpui::test]
+    fn walking_the_three_views_lands_on_the_picked_month_and_year(cx: &mut gpui::TestAppContext) {
+        let picker = cx.new(DatePicker::new);
+        picker.update(cx, |picker, cx| {
+            picker.set_selected_silent(NaiveDate::from_ymd_opt(2026, 8, 24), cx);
+            picker.set_min(None, cx);
+            picker.toggle_open(cx);
+
+            assert_eq!(picker.view_mode, CalendarView::Days);
+            assert_eq!((picker.view_year, picker.view_month), (2026, 8));
+
+            picker.step_view(true, cx);
+            assert_eq!((picker.view_year, picker.view_month), (2026, 9));
+            picker.step_view(false, cx);
+            assert_eq!((picker.view_year, picker.view_month), (2026, 8));
+
+            picker.zoom_out_view(cx);
+            assert_eq!(picker.view_mode, CalendarView::Months);
+            picker.step_view(false, cx);
+            assert_eq!(picker.view_year, 2025);
+
+            picker.zoom_out_view(cx);
+            assert_eq!(picker.view_mode, CalendarView::Years);
+            picker.step_view(false, cx);
+            assert_eq!(year_page_start(picker.view_year), 2004);
+
+            picker.pick_year(2019, cx);
+            assert_eq!(picker.view_mode, CalendarView::Months);
+            assert_eq!(picker.view_year, 2019);
+
+            picker.pick_month(3, cx);
+            assert_eq!(picker.view_mode, CalendarView::Days);
+            assert_eq!((picker.view_year, picker.view_month), (2019, 3));
+
+            picker.pick_day(15, cx);
+            assert_eq!(
+                picker.selected,
+                NaiveDate::from_ymd_opt(2019, 3, 15),
+                "picking a day commits the month and year walked to"
+            );
+            assert!(!picker.open, "picking a day closes the popup");
+        });
+    }
+
+    #[gpui::test]
+    fn reopening_resets_to_the_day_view(cx: &mut gpui::TestAppContext) {
+        let picker = cx.new(DatePicker::new);
+        picker.update(cx, |picker, cx| {
+            picker.toggle_open(cx);
+            picker.zoom_out_view(cx);
+            picker.zoom_out_view(cx);
+            assert_eq!(picker.view_mode, CalendarView::Years);
+            picker.close(cx);
+            picker.toggle_open(cx);
+            assert_eq!(picker.view_mode, CalendarView::Days);
+        });
+    }
+
+    #[gpui::test]
+    fn a_day_outside_the_allowed_range_is_not_picked(cx: &mut gpui::TestAppContext) {
+        let picker = cx.new(DatePicker::new);
+        picker.update(cx, |picker, cx| {
+            picker.set_min(NaiveDate::from_ymd_opt(2026, 8, 10), cx);
+            picker.set_max(NaiveDate::from_ymd_opt(2026, 8, 20), cx);
+            picker.toggle_open(cx);
+            picker.pick_month(8, cx);
+            picker.view_year = 2026;
+            picker.pick_day(5, cx);
+            assert_eq!(picker.selected, None);
+            picker.pick_day(15, cx);
+            assert_eq!(picker.selected, NaiveDate::from_ymd_opt(2026, 8, 15));
+        });
+    }
+
+    #[test]
+    fn year_pages_are_aligned_blocks_of_twelve() {
+        assert_eq!(year_page_start(2026), 2016);
+        assert_eq!(year_page_start(2016), 2016);
+        assert_eq!(year_page_start(2015), 2004);
+    }
+
+    #[test]
+    fn month_and_year_cells_respect_the_allowed_range() {
+        let min = NaiveDate::from_ymd_opt(2026, 3, 10);
+        let max = NaiveDate::from_ymd_opt(2026, 5, 20);
+
+        assert!(!month_in_range(2026, 2, min, max));
+        assert!(month_in_range(2026, 3, min, max));
+        assert!(month_in_range(2026, 5, min, max));
+        assert!(!month_in_range(2026, 6, min, max));
+
+        assert!(!year_in_range(2025, min, max));
+        assert!(year_in_range(2026, min, max));
+        assert!(!year_in_range(2027, min, max));
+
+        assert!(month_in_range(1970, 1, None, None));
+        assert!(year_in_range(3000, None, None));
+    }
+
+    #[test]
+    fn every_month_renders_six_week_rows() {
+        for (year, month) in [(2026, 2), (2026, 8), (2021, 5), (2024, 2)] {
+            let first = NaiveDate::from_ymd_opt(year, month, 1).expect("valid month");
+            let cells = weekday_offset(first.weekday()) + days_in_month(year, month) as usize;
+            assert!(cells <= 42, "{year}-{month} needs more than six rows");
+        }
+    }
+
+    #[test]
+    fn month_and_day_bodies_are_the_same_height() {
+        assert_eq!(
+            WEEKDAY_ROW_HEIGHT + DAY_CELL_HEIGHT * 6.0,
+            OPTION_CELL_HEIGHT * 4.0 + OPTION_GRID_GAP * 3.0
+        );
+    }
+
+    #[test]
+    fn short_month_labels_cover_every_month() {
+        assert_eq!(short_month_label(1), "Jan");
+        assert_eq!(short_month_label(12), "Dec");
+    }
 }

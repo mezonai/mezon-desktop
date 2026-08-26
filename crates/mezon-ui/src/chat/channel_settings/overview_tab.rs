@@ -172,23 +172,18 @@ impl OverviewTab {
                 this.detail_loading = false;
                 if let Ok(detail) = result {
                     let topic_dirty = this.is_topic_dirty(cx);
-                    let age_dirty = this.is_age_restricted_dirty(cx);
                     if !topic_dirty {
                         this.saved_topic = detail.topic.clone();
                         this.topic_input.update(cx, |state, cx| {
                             state.set_value(detail.topic.clone(), cx);
                         });
                     }
-                    if !age_dirty {
-                        this.saved_age_restricted = detail.age_restricted;
-                        this.draft_age_restricted = detail.age_restricted;
-                    }
                     ChannelList::global(cx).update(cx, |store, cx| {
                         store.patch_channel_overview_detail(
                             clan_id,
                             channel_id,
                             detail.topic,
-                            detail.age_restricted,
+                            None,
                             detail.e2ee,
                             detail.app_id,
                             cx,

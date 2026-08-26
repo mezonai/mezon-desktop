@@ -2,6 +2,7 @@ use crate::ids::ClanId;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::transport::ApiAccount;
 use mezon_client::transport::LinkPhoneError;
@@ -24,6 +25,7 @@ pub struct UserAccount {
     pub logo: Option<String>,
     pub status: String,
     pub user_status: String,
+    pub dob_seconds: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +55,8 @@ pub enum AccountEvent {
     DevicesLoadFailed,
     AccountSaved,
     AccountSaveFailed(String),
+    DateOfBirthSaved,
+    DateOfBirthSaveFailed(String),
     PasswordSaved,
     PasswordSaveFailed(PasswordSaveError),
     UserAvatarUploaded(String),
@@ -272,6 +276,10 @@ impl AccountStore {
             .detach();
     }
 
+    pub fn account_fetched(&self) -> bool {
+        self.account_freshness.was_fetched()
+    }
+
     pub fn ensure_account(&mut self, cx: &mut Context<Self>) {
         if !self.account_loading && !self.account_freshness.is_fresh(crate::CACHE_TTL) {
             self.fetch_account(cx);
@@ -377,6 +385,7 @@ impl AccountStore {
                     Some(avatar_url.as_deref().unwrap_or_default()),
                     Some(&about_me),
                     logo_url.as_deref(),
+                    None,
                 )
                 .await
             {
@@ -402,6 +411,32 @@ impl AccountStore {
                     });
                 }
             }
+        })
+        .detach();
+    }
+
+    pub fn save_date_of_birth(&mut self, dob_seconds: u32, cx: &mut Context<Self>) {
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .update_account(None, None, None, None, Some(dob_seconds))
+                .await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(()) => {
+                    if let Some(account) = &mut this.account {
+                        account.dob_seconds = dob_seconds;
+                    }
+                    if let Some(account) = &this.account {
+                        Self::spawn_persist_cache(account, cx);
+                    }
+                    cx.emit(AccountEvent::DateOfBirthSaved);
+                    cx.notify();
+                }
+                Err(error) => {
+                    tracing::error!("Failed to save date of birth: {error}");
+                    cx.emit(AccountEvent::DateOfBirthSaveFailed(error.to_string()));
+                }
+            });
         })
         .detach();
     }
@@ -916,6 +951,8 @@ struct PersistedAccount {
     status: String,
     #[serde(default)]
     user_status: String,
+    #[serde(default)]
+    dob_seconds: u32,
 }
 
 impl PersistedAccount {
@@ -928,6 +965,7 @@ impl PersistedAccount {
             logo: account.logo.clone(),
             status: account.status.clone(),
             user_status: account.user_status.clone(),
+            dob_seconds: account.dob_seconds,
         }
     }
 
@@ -944,6 +982,7 @@ impl PersistedAccount {
             logo: self.logo,
             status: self.status,
             user_status: self.user_status,
+            dob_seconds: self.dob_seconds,
         }
     }
 }
@@ -1005,7 +1044,44 @@ fn user_account_from_api(acct: ApiAccount) -> UserAccount {
         logo: acct.logo,
         status: acct.status,
         user_status: acct.user_status,
+        dob_seconds: acct.dob_seconds,
     }
+}
+
+pub const ADULT_AGE_YEARS: i32 = 18;
+
+pub fn is_adult_dob(dob_seconds: u32) -> bool {
+    is_adult_dob_on(dob_seconds, Utc::now().date_naive())
+}
+
+pub fn is_adult_dob_on(dob_seconds: u32, today: NaiveDate) -> bool {
+    if dob_seconds == 0 {
+        return false;
+    }
+    let Some(born) = DateTime::from_timestamp(i64::from(dob_seconds), 0) else {
+        return false;
+    };
+    adult_date(born.date_naive()).is_some_and(|adult_on| adult_on <= today)
+}
+
+pub fn dob_needs_entry(dob_seconds: u32) -> bool {
+    dob_needs_entry_on(dob_seconds, Utc::now().date_naive())
+}
+
+pub fn dob_needs_entry_on(dob_seconds: u32, today: NaiveDate) -> bool {
+    if dob_seconds == 0 {
+        return true;
+    }
+    let Some(born) = DateTime::from_timestamp(i64::from(dob_seconds), 0) else {
+        return true;
+    };
+    born.date_naive() > today
+}
+
+fn adult_date(born: NaiveDate) -> Option<NaiveDate> {
+    let year = born.year() + ADULT_AGE_YEARS;
+    born.with_year(year)
+        .or_else(|| NaiveDate::from_ymd_opt(year, 3, 1))
 }
 
 fn logged_device_from_proto(d: mezon_proto::api::LogedDevice) -> LoggedDevice {
@@ -1043,6 +1119,43 @@ fn format_device_last_active(seconds: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_missing_or_impossible_birthday_asks_for_entry() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 24).expect("valid date");
+        let secs = |y, m, d| {
+            NaiveDate::from_ymd_opt(y, m, d)
+                .expect("valid date")
+                .and_hms_opt(0, 0, 0)
+                .expect("valid time")
+                .and_utc()
+                .timestamp() as u32
+        };
+
+        assert!(dob_needs_entry_on(0, today), "never set");
+        assert!(
+            dob_needs_entry_on(secs(2042, 7, 14), today),
+            "a birthday in the future is a server placeholder, not a birthday"
+        );
+        assert!(!dob_needs_entry_on(secs(2026, 8, 24), today), "born today");
+        assert!(!dob_needs_entry_on(secs(1997, 4, 4), today), "adult");
+        assert!(
+            !dob_needs_entry_on(secs(2015, 1, 1), today),
+            "a real minor already told us their birthday"
+        );
+    }
+
+    #[test]
+    fn a_future_birthday_is_never_adult() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 24).expect("valid date");
+        let future = NaiveDate::from_ymd_opt(2042, 7, 14)
+            .expect("valid date")
+            .and_hms_opt(0, 0, 0)
+            .expect("valid time")
+            .and_utc()
+            .timestamp() as u32;
+        assert!(!is_adult_dob_on(future, today));
+    }
+
     use super::*;
 
     #[test]
@@ -1059,6 +1172,7 @@ mod tests {
             logo: Some("https://cdn/logo.webp".into()),
             status: String::new(),
             user_status: String::new(),
+            dob_seconds: 0,
         };
         let json = serde_json::to_string(&PersistedAccount::from_account(&account)).unwrap();
         let restored = serde_json::from_str::<PersistedAccount>(&json)
@@ -1077,6 +1191,68 @@ mod tests {
     }
 
     #[test]
+    fn is_adult_dob_needs_eighteen_full_years() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 23).unwrap();
+        let seconds = |year, month, day| {
+            u32::try_from(
+                NaiveDate::from_ymd_opt(year, month, day)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    .and_utc()
+                    .timestamp(),
+            )
+            .unwrap()
+        };
+
+        assert!(is_adult_dob_on(seconds(2008, 8, 23), today));
+        assert!(is_adult_dob_on(seconds(2008, 8, 22), today));
+        assert!(!is_adult_dob_on(seconds(2008, 8, 24), today));
+        assert!(!is_adult_dob_on(seconds(2015, 1, 1), today));
+        assert!(!is_adult_dob_on(0, today));
+    }
+
+    #[test]
+    fn is_adult_dob_handles_leap_day_births() {
+        let born = 68169600;
+        assert_eq!(
+            DateTime::from_timestamp(i64::from(born), 0)
+                .unwrap()
+                .date_naive(),
+            NaiveDate::from_ymd_opt(1972, 2, 29).unwrap()
+        );
+        assert!(!is_adult_dob_on(
+            born,
+            NaiveDate::from_ymd_opt(1990, 2, 28).unwrap()
+        ));
+        assert!(is_adult_dob_on(
+            born,
+            NaiveDate::from_ymd_opt(1990, 3, 1).unwrap()
+        ));
+    }
+
+    #[test]
+    fn user_account_from_api_keeps_dob_seconds() {
+        let acct = user_account_from_api(ApiAccount {
+            user_id: 1,
+            username: "alice".into(),
+            email: None,
+            display_name: Some("Alice".into()),
+            avatar_url: None,
+            about_me: None,
+            phone_number: None,
+            password_setted: true,
+            logo: None,
+            status: String::new(),
+            user_status: String::new(),
+            dob_seconds: 946_684_800,
+        });
+        assert_eq!(acct.dob_seconds, 946_684_800);
+        let restored = PersistedAccount::from_account(&acct).into_account();
+        assert_eq!(restored.dob_seconds, 946_684_800);
+    }
+
+    #[test]
     fn user_account_from_api_uses_username_when_display_empty() {
         let acct = user_account_from_api(ApiAccount {
             user_id: 1,
@@ -1090,6 +1266,7 @@ mod tests {
             logo: None,
             status: String::new(),
             user_status: String::new(),
+            dob_seconds: 0,
         });
         assert_eq!(acct.user_id, 1);
         assert_eq!(acct.display_name, "alice");

@@ -974,6 +974,49 @@ Useful before capture_chat/capture_window so the window is visible.
 Parameters: none.",
         write: true,
     },
+    #[cfg(debug_assertions)]
+    ToolSpec {
+        name: "set_channel_age_restricted",
+        description: "\
+Turn a channel's age-restricted flag on or off (debug builds only).
+
+Goes through the same save path as Channel Settings, so it reaches the server.
+Use it to put a channel behind the age gate for testing.
+
+Parameters:
+- clan_id (required)
+- channel_id (required)
+- on (optional, default true)",
+        write: true,
+    },
+    #[cfg(debug_assertions)]
+    ToolSpec {
+        name: "set_local_dob",
+        description: "\
+Overwrite the signed-in account's date of birth in the local store (debug builds only).
+
+Nothing is sent to the server \u{2014} it only changes what this client believes, so the
+age gate and the birthday prompt can be exercised without a fresh account.
+
+Parameters:
+- seconds (required): unix seconds of the birthday; 0 means \"never entered\"",
+        write: true,
+    },
+    #[cfg(debug_assertions)]
+    ToolSpec {
+        name: "inject_preview_message",
+        description: "\
+Render a message locally in the open channel WITHOUT sending anything to the server.
+
+Debug builds only. The content object is a raw mezon message-content payload, so it can
+carry `embed`, `components`, attachments — anything the renderer understands. Use it to
+preview bot/embed layouts that no bot in reach produces.
+
+Parameters:
+- content (required): message content object, e.g. {\"t\": \"hi\", \"embed\": [ ... ]}
+- sender_name (optional): display name for the fake sender",
+        write: true,
+    },
     ToolSpec {
         name: "send_message",
         description: "\
