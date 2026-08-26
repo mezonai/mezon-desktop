@@ -428,7 +428,9 @@ impl Platform for WindowsPlatform {
         }
 
         self.inner
-            .with_callback(|callbacks| &callbacks.quit, |callback| callback());
+            .with_callback(|callbacks| &callbacks.quit, |callback| {
+                callback();
+            });
 
         // Bypass the CRT exit logic, which runs atexit handlers before calling ExitProcess.
         // aws-lc registers an atexit handler that intentionally acquires a lock without releasing it.
