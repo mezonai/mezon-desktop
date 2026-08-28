@@ -3285,6 +3285,7 @@
   "message.newMessage.to": "Naar",
   "message.newMessages": "NIEUWE BERICHTEN",
   "message.noAccess": "Geen toegang",
+  "message.privateChannel": "private-channel",
   "message.noContactsFound": "Geen contacten gevonden",
   "message.noSendMessagePermission": "Je hebt geen toestemming om berichten te sturen",
   "message.numberReplies": "{{number}} berichten",

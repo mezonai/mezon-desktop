@@ -262,7 +262,7 @@ impl ChannelSettingScreen {
             );
             return;
         }
-        if target_changed || resolved != self.current_tab {
+        if target_changed {
             self.permissions_tab = None;
             self.permissions_sub = None;
             self.overview_tab = None;
@@ -273,6 +273,8 @@ impl ChannelSettingScreen {
             self.integrations_sub = None;
             self.quick_actions_tab = None;
             self.quick_actions_sub = None;
+            self.content_scroll.set_offset(point(px(0.0), px(0.0)));
+        } else if resolved != self.current_tab {
             self.content_scroll.set_offset(point(px(0.0), px(0.0)));
         }
         self.current_tab = resolved;

@@ -71,6 +71,8 @@ pub struct RowCtx<'a> {
     pub large_avatar_cache: Entity<LruImageCache>,
     pub icon_cache: Entity<LruImageCache>,
     pub ogp_cache: Entity<LruImageCache>,
+    pub social_cache: Entity<LruImageCache>,
+    pub sprite_cache: Entity<LruImageCache>,
     pub unread_boundary_id: Option<MessageId>,
     pub highlight_id: Option<MessageId>,
     pub reply_highlight_id: Option<MessageId>,

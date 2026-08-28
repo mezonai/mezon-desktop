@@ -4655,7 +4655,9 @@ impl MezonTransport {
         }
         .encode_to_vec();
 
-        let (code, response) = self.send_api_request(cid, api_name, body).await?;
+        let (code, response) = self
+            .send_api_request_with_http_fallback(cid, api_name, body)
+            .await?;
 
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -4710,7 +4712,9 @@ impl MezonTransport {
         }
         .encode_to_vec();
 
-        let (code, response) = self.send_api_request(cid, api_name, body).await?;
+        let (code, response) = self
+            .send_api_request_with_http_fallback(cid, api_name, body)
+            .await?;
 
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -11112,6 +11116,35 @@ mod tests {
             Some(&1),
             "an expired token must be renewed before the send"
         );
+    }
+
+    #[tokio::test]
+    async fn message_fetches_fall_back_to_http_while_the_socket_is_down() {
+        let (port, hits) = fake_api().await;
+        let t = MezonTransport::new(Box::new(ClosedAdapter), String::new());
+        t.set_http_fallback(Some(expired_fallback(port)));
+
+        let channel_page = t.list_channel_messages(1, 2, 0, 3, 50).await.unwrap();
+        let topic_page = t.list_topic_messages(1, 2, 3, 0, 3, 50).await.unwrap();
+
+        assert!(channel_page.messages.is_empty());
+        assert!(topic_page.messages.is_empty());
+        let hits = hits.lock().clone();
+        assert_eq!(hits.get("/mezon.api.Mezon/ListChannelMessages"), Some(&2));
+        assert_eq!(hits.get("/mezon.api.Mezon/SessionRefresh"), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn message_fetch_keeps_using_an_open_socket() {
+        let (port, hits) = fake_api().await;
+        let t = transport(false);
+        t.connected_tx.send(true).unwrap();
+        t.set_http_fallback(Some(expired_fallback(port)));
+
+        let error = t.list_channel_messages(1, 2, 0, 3, 50).await.unwrap_err();
+
+        assert!(error.to_string().contains("mock send failed"));
+        assert!(hits.lock().is_empty());
     }
 
     /// A burst of sends must share one refresh, not spend the refresh token once per message.

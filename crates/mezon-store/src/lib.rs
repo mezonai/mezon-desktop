@@ -221,7 +221,7 @@ pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
 pub use stream::{StreamMember, StreamPhase, StreamStore};
 pub use threads::{
     GroupedThreadIndexes, THREAD_STATUS_ARCHIVED, THREAD_STATUS_JOINED, ThreadCreateFailReason,
-    ThreadSummary, ThreadsEvent, ThreadsStore, group_threads,
+    ThreadSummary, ThreadsEvent, ThreadsStore, group_threads, thread_preview_display,
 };
 pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
 pub use topics::{TopicsEvent, TopicsStore};

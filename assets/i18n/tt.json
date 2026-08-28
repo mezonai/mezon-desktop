@@ -3294,6 +3294,7 @@
   "message.newMessage.to": "Кемгә",
   "message.newMessages": "ЯҢА ХӘБӘРЛӘР",
   "message.noAccess": "Керү юк",
+  "message.privateChannel": "private-channel",
   "message.noContactsFound": "Контактлар табылмады",
   "message.noSendMessagePermission": "Сезнең хәбәр җибәрү рөхсәтегез юк.",
   "message.numberReplies": "{{number}} җаваплар",

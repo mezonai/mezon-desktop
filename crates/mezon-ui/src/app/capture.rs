@@ -518,7 +518,39 @@ pub fn topic_type(cx: &mut App, text: &str) -> anyhow::Result<Value> {
     cx.update_window(main_handle, |_, window, cx| {
         composer.update(cx, |composer, cx| composer.probe_set_text(text, window, cx));
     })?;
-    Ok(json!({ "ok": true, "text": text }))
+    topic_composer_snapshot(cx)
+}
+
+/// Accept one entry of the topic composer's suggestion popup — the `@`/`#`/`:` flow.
+///
+/// Typing `@name` alone only produces literal text: a real mention needs the picked
+/// entry, which is what writes the id into the message's `mentions` field. Detection on
+/// the receiving side reads that field, never the text, so a topic mention can only be
+/// exercised end-to-end through here.
+pub fn topic_pick(cx: &mut App, index: usize) -> anyhow::Result<Value> {
+    let (composer, _) = topic_panel(cx)?;
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    let accepted = cx.update_window(main_handle, |_, window, cx| {
+        composer.update(cx, |composer, cx| composer.probe_accept(index, window, cx))
+    })?;
+    if !accepted {
+        anyhow::bail!("no suggestion at index {index}; call topic_type first");
+    }
+    topic_composer_snapshot(cx)
+}
+
+fn topic_composer_snapshot(cx: &mut App) -> anyhow::Result<Value> {
+    let (composer, _) = topic_panel(cx)?;
+    let composer = composer.read(cx);
+    let (popup_open, selected, suggestions) = composer.probe_suggestions();
+    Ok(json!({
+        "ok": true,
+        "text": composer.probe_text(cx).to_string(),
+        "attachments": composer.probe_attachments(),
+        "popup_open": popup_open,
+        "selected": selected,
+        "suggestions": suggestions,
+    }))
 }
 
 pub fn topic_submit(cx: &mut App) -> anyhow::Result<Value> {

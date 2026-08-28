@@ -3285,6 +3285,7 @@
   "message.newMessage.to": "Do",
   "message.newMessages": "NOWE WIADOMOŚCI",
   "message.noAccess": "Brak uprawnień",
+  "message.privateChannel": "private-channel",
   "message.noContactsFound": "Nie znaleziono kontaktów",
   "message.noSendMessagePermission": "Nie masz uprawnień do wysyłania wiadomości",
   "message.numberReplies": "{{number}} wiadomości",

@@ -3287,6 +3287,7 @@
   "message.newMessage.to": "宛先",
   "message.newMessages": "新しいメッセージ",
   "message.noAccess": "アクセス権限なし",
+  "message.privateChannel": "private-channel",
   "message.noContactsFound": "連絡先が見つかりません",
   "message.noSendMessagePermission": "メッセージを送信する権限がありません",
   "message.numberReplies": "{{number}} メッセージ",

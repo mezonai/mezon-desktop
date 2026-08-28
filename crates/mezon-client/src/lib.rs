@@ -17,6 +17,7 @@ pub mod ogp;
 pub mod search_message;
 pub mod server_clock;
 pub mod session;
+pub mod social;
 pub mod tls_crypto;
 pub mod transport;
 pub mod transport_adapter;

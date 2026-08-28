@@ -3286,6 +3286,7 @@
   "message.newMessage.to": "A",
   "message.newMessages": "NUOVI MESSAGGI",
   "message.noAccess": "Nessun accesso",
+  "message.privateChannel": "private-channel",
   "message.noContactsFound": "Nessun contatto trovato",
   "message.noSendMessagePermission": "Non hai il permesso di inviare messaggi",
   "message.numberReplies": "{{number}} messaggi",

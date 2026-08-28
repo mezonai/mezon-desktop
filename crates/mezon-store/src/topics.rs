@@ -1123,7 +1123,14 @@ impl TopicsStore {
         let creator_id = viewer_user_id(cx);
         let append = MessagesStore::global(cx).update(cx, |store, cx| {
             store.set_active_topic(Some(topic_id), cx);
-            let append = store.append_topic_message(topic_id, ack, anonymous, local_sources, cx);
+            let append = store.append_topic_message(
+                topic_id,
+                ack,
+                anonymous,
+                local_sources,
+                is_new_topic,
+                cx,
+            );
             if is_new_topic {
                 store.mark_message_as_topic(
                     ChannelId(parent_channel_id),

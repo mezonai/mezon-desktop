@@ -268,6 +268,10 @@ impl FriendStore {
             .any(|f| f.state == FriendState::Blocked && f.source_id == me && f.username == username)
     }
 
+    pub fn is_user_blocked_by_me(&self, user_id: UserId, cx: &App) -> bool {
+        is_blocked_by(&self.friends, user_id, self.current_user_id(cx))
+    }
+
     /// Count of incoming friend requests awaiting the current user's response
     /// (React `quantityPendingRequest` = friends with state `MY_PENDING`).
     pub fn pending_incoming_count(&self) -> usize {

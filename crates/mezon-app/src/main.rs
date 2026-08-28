@@ -342,10 +342,13 @@ fn log_dir() -> std::path::PathBuf {
 /// Initialise tracing to stdout **and** a daily-rotated log file. Uses a blocking file writer
 /// (not `non_blocking`) so a panic is flushed to disk before the process aborts.
 fn init_logging() {
+    // `noti` is an explicit target rather than a module path, so it needs its own
+    // directive — the whole notification chain logs there and has to stay readable in
+    // release, where `mezon=info` alone would drop it to the global `warn` floor.
     let default_filter = if cfg!(debug_assertions) {
-        "mezon=debug,info"
+        "mezon=debug,noti=debug,info"
     } else {
-        "mezon=info,warn"
+        "mezon=info,noti=info,warn"
     };
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));

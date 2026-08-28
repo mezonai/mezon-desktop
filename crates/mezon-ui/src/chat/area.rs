@@ -7,8 +7,9 @@ use gpui::{
     Subscription, Task, Window, div, prelude::*, px, rgb, rgba,
 };
 use mezon_store::{
-    ChannelId, ChannelPermissionsStore, ClanId, InVoiceInfo, MessagesEvent, MessagesStore,
-    PERMISSION_SEND_MESSAGE, Settings,
+    ChannelId, ChannelPermissionsStore, ClanId, DirectEvent, DirectKind, DirectMessageStore,
+    FriendEvent, FriendStore, InVoiceInfo, MessagesEvent, MessagesStore, PERMISSION_SEND_MESSAGE,
+    Settings,
 };
 use ui::PopoverMenuHandle;
 
@@ -46,12 +47,15 @@ pub struct ChatArea {
     send_permission_key: Option<(ClanId, ChannelId)>,
     send_permission_live: Option<bool>,
     can_send_message: Option<bool>,
-    no_permission_label: Option<(SharedString, SharedString)>,
+    dm_blocked: bool,
+    no_permission_label: Option<(SharedString, bool, SharedString)>,
     _submit_sub: Option<Subscription>,
     _reply_sub: Option<Subscription>,
     _edit_closed_sub: Option<Subscription>,
     _send_permission_sub: Subscription,
     _send_permission_channel_sub: Subscription,
+    _send_permission_direct_sub: Subscription,
+    _send_permission_friend_sub: Subscription,
     _send_permission_debounce: Option<Task<()>>,
     drop_title_cache: Option<(SharedString, SharedString, SharedString)>,
     drop_body_cache: Option<(SharedString, SharedString)>,
@@ -84,6 +88,24 @@ impl ChatArea {
                 }
             },
         );
+        let send_permission_direct_sub = cx.subscribe(
+            &DirectMessageStore::global(cx),
+            |this: &mut crate::ChatLayout, _, event: &DirectEvent, cx| {
+                let DirectEvent::Changed { channel_id } = event;
+                let active_channel = MessagesStore::global(cx).read(cx).active_channel_id();
+                if channel_id.is_none() || *channel_id == active_channel {
+                    this.chat_area.sync_send_permission(cx);
+                }
+            },
+        );
+        let send_permission_friend_sub = cx.subscribe(
+            &FriendStore::global(cx),
+            |this: &mut crate::ChatLayout, _, event: &FriendEvent, cx| {
+                if matches!(event, FriendEvent::Changed) {
+                    this.chat_area.sync_send_permission(cx);
+                }
+            },
+        );
         Self {
             timeline,
             mention_input: None,
@@ -100,12 +122,15 @@ impl ChatArea {
             send_permission_key: None,
             send_permission_live: None,
             can_send_message: None,
+            dm_blocked: false,
             no_permission_label: None,
             _submit_sub: None,
             _reply_sub: None,
             _edit_closed_sub: None,
             _send_permission_sub: send_permission_sub,
             _send_permission_channel_sub: send_permission_channel_sub,
+            _send_permission_direct_sub: send_permission_direct_sub,
+            _send_permission_friend_sub: send_permission_friend_sub,
             _send_permission_debounce: None,
             drop_title_cache: None,
             drop_body_cache: None,
@@ -113,17 +138,32 @@ impl ChatArea {
     }
 
     pub fn sync_send_permission(&mut self, cx: &mut Context<crate::ChatLayout>) {
-        let key = {
+        let (key, dm_peer) = {
             let messages = MessagesStore::global(cx).read(cx);
             if messages.is_dm() {
-                None
+                let peer = messages.active_channel_id().and_then(|channel_id| {
+                    let direct_store = DirectMessageStore::try_global(cx)?;
+                    let direct_store = direct_store.read(cx);
+                    let direct = direct_store.find(channel_id)?;
+                    (direct.kind == DirectKind::Dm).then_some(direct.peer_user_id)?
+                });
+                (None, peer)
             } else {
-                messages
-                    .active_clan_id()
-                    .filter(|clan_id| !clan_id.is_zero())
-                    .zip(messages.active_channel_id())
+                (
+                    messages
+                        .active_clan_id()
+                        .filter(|clan_id| !clan_id.is_zero())
+                        .zip(messages.active_channel_id()),
+                    None,
+                )
             }
         };
+        let dm_blocked = dm_peer.is_some_and(|peer| {
+            FriendStore::try_global(cx)
+                .is_some_and(|store| store.read(cx).is_user_blocked_by_me(peer, cx))
+        });
+        let mut notify = self.dm_blocked != dm_blocked;
+        self.dm_blocked = dm_blocked;
         let live = key.and_then(|(clan_id, channel_id)| {
             ChannelPermissionsStore::try_global(cx).and_then(|store| {
                 store
@@ -132,6 +172,9 @@ impl ChatArea {
             })
         });
         if key == self.send_permission_key && live == self.send_permission_live {
+            if notify {
+                cx.notify();
+            }
             return;
         }
         let switched = key != self.send_permission_key;
@@ -141,9 +184,15 @@ impl ChatArea {
             self._send_permission_debounce = None;
             if self.can_send_message != live {
                 self.can_send_message = live;
+                notify = true;
+            }
+            if notify {
                 cx.notify();
             }
             return;
+        }
+        if notify {
+            cx.notify();
         }
         self._send_permission_debounce = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -157,6 +206,10 @@ impl ChatArea {
                 }
             });
         }));
+    }
+
+    pub(crate) fn send_denied(&self) -> bool {
+        self.dm_blocked || self.can_send_message == Some(false)
     }
 
     pub fn bind_channel_members(&mut self, cx: &mut Context<crate::ChatLayout>) {
@@ -281,7 +334,7 @@ impl ChatArea {
                 window,
                 |this: &mut crate::ChatLayout, _, event: &ChannelMessagesEvent, window, cx| {
                     let ChannelMessagesEvent::EditClosed = event;
-                    if this.chat_area.can_send_message == Some(false) {
+                    if this.chat_area.send_denied() {
                         return;
                     }
                     if let Some(input) = this.chat_area.mention_input.clone() {
@@ -628,15 +681,27 @@ impl ChatArea {
             )
         };
 
-        let send_denied = !media_channel_view && self.can_send_message == Some(false);
+        let send_denied = !media_channel_view && self.send_denied();
         let no_permission_notice = if send_denied {
             let label = match &self.no_permission_label {
-                Some((cached_locale, label)) if cached_locale.as_ref() == locale => label.clone(),
+                Some((cached_locale, cached_dm_blocked, label))
+                    if cached_locale.as_ref() == locale
+                        && *cached_dm_blocked == self.dm_blocked =>
+                {
+                    label.clone()
+                }
                 _ => {
-                    let label: SharedString =
-                        mezon_i18n::t(locale, "common.noPermissionToSendMessage").into();
-                    self.no_permission_label =
-                        Some((SharedString::from(locale.to_string()), label.clone()));
+                    let key = if self.dm_blocked {
+                        "message.blockedUserMessage"
+                    } else {
+                        "common.noPermissionToSendMessage"
+                    };
+                    let label: SharedString = mezon_i18n::t(locale, key).into();
+                    self.no_permission_label = Some((
+                        SharedString::from(locale.to_string()),
+                        self.dm_blocked,
+                        label.clone(),
+                    ));
                     label
                 }
             };
@@ -680,12 +745,12 @@ impl ChatArea {
                 let input_visible = !send_denied;
                 col.on_drop(
                     move |paths: &ExternalPaths, window: &mut Window, cx: &mut App| {
-                        if let Some(drop_input) = drop_input.clone() {
+                        if let Some(drop_input) = drop_input.clone()
+                            && input_visible
+                        {
                             let dropped: Vec<PathBuf> = paths.paths().to_vec();
                             drop_input.update(cx, |input, cx| {
-                                if input_visible {
-                                    input.focus_input(window, cx);
-                                }
+                                input.focus_input(window, cx);
                                 input.add_dropped_paths(dropped, window, cx)
                             });
                         }

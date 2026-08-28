@@ -3285,6 +3285,7 @@
   "message.newMessage.to": "Кому",
   "message.newMessages": "НОВІ ПОВІДОМЛЕННЯ",
   "message.noAccess": "Немає доступу",
+  "message.privateChannel": "private-channel",
   "message.noContactsFound": "Контактів не знайдено",
   "message.noSendMessagePermission": "У вас немає права надсилати повідомлення",
   "message.numberReplies": "{{number}} повідомлень",

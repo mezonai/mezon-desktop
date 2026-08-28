@@ -4,7 +4,7 @@ use std::sync::Arc;
 pub enum DownloadEvent {
     Started,
     Progress { written: u64, total: Option<u64> },
-    Finished,
+    Finished { path: std::path::PathBuf },
     Failed,
 }
 
@@ -25,6 +25,7 @@ pub fn download_url_with_dialog(
             Ok(Ok(Some(path))) => path,
             _ => return,
         };
+        let finished_path = path.clone();
         cx.update(|cx| on_event(DownloadEvent::Started, cx));
         let (tx, rx) = flume::unbounded::<(u64, Option<u64>)>();
         let download = cx.background_executor().spawn(async move {
@@ -37,7 +38,9 @@ pub fn download_url_with_dialog(
             cx.update(|cx| on_event(DownloadEvent::Progress { written, total }, cx));
         }
         let event = match download.await {
-            Ok(()) => DownloadEvent::Finished,
+            Ok(()) => DownloadEvent::Finished {
+                path: finished_path,
+            },
             Err(error) => {
                 tracing::error!("attachment download failed: {error}");
                 DownloadEvent::Failed

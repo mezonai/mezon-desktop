@@ -2,7 +2,8 @@ use crate::info::ActiveWindowInfo;
 use core_foundation::array::CFArrayGetValueAtIndex;
 use core_foundation::base::TCFType;
 use core_foundation::dictionary::CFDictionary;
-use core_foundation::number::CFNumber;
+use core_foundation::number::{CFNumber, CFNumberRef};
+use core_foundation::string::CFStringRef;
 use std::ffi::c_void;
 use std::os::raw::c_void as RawCVoid;
 
@@ -80,7 +81,7 @@ fn dictionary_string(dict: &CFDictionary, key: &str) -> String {
         return String::new();
     };
     let cf_str = unsafe {
-        core_foundation::string::CFString::wrap_under_get_rule(*value_ref as *const c_void)
+        core_foundation::string::CFString::wrap_under_get_rule(*value_ref as CFStringRef)
     };
     cf_str.to_string()
 }
@@ -88,7 +89,7 @@ fn dictionary_string(dict: &CFDictionary, key: &str) -> String {
 fn dictionary_i64(dict: &CFDictionary, key: &str) -> Option<i64> {
     let key = core_foundation::string::CFString::new(key);
     let value_ref = dict.find(key.as_concrete_TypeRef() as *const RawCVoid)?;
-    let number = unsafe { CFNumber::wrap_under_get_rule(*value_ref as *const c_void) };
+    let number = unsafe { CFNumber::wrap_under_get_rule(*value_ref as CFNumberRef) };
     number.to_i64()
 }
 

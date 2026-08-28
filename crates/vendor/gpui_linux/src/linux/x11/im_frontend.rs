@@ -11,7 +11,7 @@ use dbus::message::MatchRule;
 use dbus::{Message, Path as DbusPath};
 use gpui::ImeSurroundingText;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_millis(200);
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_millis(200);
 const KEY_TIMEOUT: Duration = Duration::from_millis(80);
 const MODIFIER_TIMEOUT: Duration = Duration::from_millis(16);
 const SIGNAL_WAIT: Duration = Duration::from_millis(16);
@@ -77,6 +77,7 @@ pub(crate) enum ImEvent {
         is_release: bool,
     },
     ClearPreedit,
+    HidePreedit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +99,7 @@ pub(crate) struct X11ImContext {
     fcitx_key_mode: Cell<FcitxKeyMode>,
     quarantine_until: Cell<Option<Instant>>,
     slow_daemon: Cell<bool>,
+    ibus_fcitx_shim: bool,
     watch: RawFd,
 }
 
@@ -137,6 +139,10 @@ impl X11ImContext {
         self.kind
     }
 
+    pub(crate) fn ibus_fcitx_shim(&self) -> bool {
+        self.ibus_fcitx_shim
+    }
+
     pub(crate) fn watch_fd(&self) -> DbusWatchFd {
         DbusWatchFd(self.watch)
     }
@@ -155,14 +161,7 @@ impl X11ImContext {
     fn only_clears_preedit(&self) -> bool {
         self.events
             .lock()
-            .map(|events| {
-                !events.is_empty()
-                    && events.iter().all(|event| match event {
-                        ImEvent::ClearPreedit => true,
-                        ImEvent::Preedit { text, .. } => text.is_empty(),
-                        _ => false,
-                    })
-            })
+            .map(|events| events_only_clear_preedit(&events))
             .unwrap_or(false)
     }
 
@@ -248,6 +247,7 @@ impl X11ImContext {
         state: u32,
         is_release: bool,
         time: u32,
+        warm: bool,
     ) -> Result<bool, String> {
         if self.quarantine_until.get().is_some() {
             self.process_io();
@@ -256,6 +256,8 @@ impl X11ImContext {
         let modifier = is_modifier_keyval(keyval);
         let timeout = if modifier {
             MODIFIER_TIMEOUT
+        } else if warm {
+            CONNECT_TIMEOUT
         } else {
             KEY_TIMEOUT
         };
@@ -495,11 +497,11 @@ impl X11ImContext {
     }
 
     pub(crate) fn focus_in(&self) {
-        self.note_result(self.call_void("FocusIn"));
+        self.note_result(self.call_void_with("FocusIn", CONNECT_TIMEOUT));
     }
 
     pub(crate) fn focus_out(&self) {
-        self.note_result(self.call_void("FocusOut"));
+        self.note_result(self.call_void_with("FocusOut", CONNECT_TIMEOUT));
     }
 
     pub(crate) fn reset(&self) {
@@ -514,7 +516,11 @@ impl X11ImContext {
     }
 
     fn call_void(&self, method: &str) -> Result<(), String> {
-        self.proxy()
+        self.call_void_with(method, KEY_TIMEOUT)
+    }
+
+    fn call_void_with(&self, method: &str, timeout: Duration) -> Result<(), String> {
+        self.proxy_with(timeout)
             .method_call::<(), _, _, _>(self.ic_iface(), method, ())
             .map_err(|error| error.to_string())
     }
@@ -574,6 +580,12 @@ fn preferred_backends() -> Vec<ImKind> {
     )
 }
 
+fn push_backend(backends: &mut Vec<ImKind>, kind: ImKind) {
+    if !backends.contains(&kind) {
+        backends.push(kind);
+    }
+}
+
 fn backends_from_env_values(modifiers: &str, gtk: &str, qt: &str) -> Vec<ImKind> {
     let mut backends = Vec::new();
     let mentions_fcitx = [modifiers, gtk, qt]
@@ -583,14 +595,15 @@ fn backends_from_env_values(modifiers: &str, gtk: &str, qt: &str) -> Vec<ImKind>
         .iter()
         .any(|value| value.contains("ibus"));
     if mentions_fcitx {
-        backends.push(ImKind::Fcitx5);
+        push_backend(&mut backends, ImKind::IBus);
+        push_backend(&mut backends, ImKind::Fcitx5);
     }
     if mentions_ibus {
-        backends.push(ImKind::IBus);
+        push_backend(&mut backends, ImKind::IBus);
     }
     if backends.is_empty() {
-        backends.push(ImKind::Fcitx5);
-        backends.push(ImKind::IBus);
+        push_backend(&mut backends, ImKind::Fcitx5);
+        push_backend(&mut backends, ImKind::IBus);
     }
     backends
 }
@@ -640,11 +653,19 @@ fn connect_fcitx5() -> Result<X11ImContext, String> {
         ic.method_call::<(), _, _, _>(FCITX5_IC_IFACE, "SetSupportedCapability", (FCITX5_CAPS,));
     ic.method_call::<(), _, _, _>(FCITX5_IC_IFACE, "SetCapability", (FCITX5_CAPS,))
         .map_err(|error| error.to_string())?;
-    finish_context(conn, FCITX5_DEST.to_string(), path, ImKind::Fcitx5, watch)
+    finish_context(
+        conn,
+        FCITX5_DEST.to_string(),
+        path,
+        ImKind::Fcitx5,
+        watch,
+        false,
+    )
 }
 
 fn connect_ibus() -> Result<X11ImContext, String> {
     let (conn, dest, watch) = ibus_connection()?;
+    let fcitx_shim = name_has_owner(&conn, FCITX5_DEST);
     let proxy = conn.with_proxy(&dest, IBUS_PATH, CONNECT_TIMEOUT);
     let (path,): (DbusPath<'static>,) = proxy
         .method_call(IBUS_IFACE, "CreateInputContext", ("mezon",))
@@ -652,7 +673,7 @@ fn connect_ibus() -> Result<X11ImContext, String> {
     let ic = conn.with_proxy(&dest, path.clone(), CONNECT_TIMEOUT);
     ic.method_call::<(), _, _, _>(IBUS_IC_IFACE, "SetCapabilities", (IBUS_CAPS,))
         .map_err(|error| error.to_string())?;
-    finish_context(conn, dest, path, ImKind::IBus, watch)
+    finish_context(conn, dest, path, ImKind::IBus, watch, fcitx_shim)
 }
 
 fn ibus_connection() -> Result<(Connection, String, RawFd), String> {
@@ -795,6 +816,7 @@ fn finish_context(
     path: DbusPath<'static>,
     kind: ImKind,
     watch: RawFd,
+    ibus_fcitx_shim: bool,
 ) -> Result<X11ImContext, String> {
     let events = Arc::new(Mutex::new(Vec::new()));
     let mut tokens = Vec::new();
@@ -888,6 +910,7 @@ fn finish_context(
         fcitx_key_mode: Cell::new(FcitxKeyMode::Unknown),
         quarantine_until: Cell::new(None),
         slow_daemon: Cell::new(false),
+        ibus_fcitx_shim,
         watch,
     })
 }
@@ -1031,14 +1054,27 @@ fn parse_ibus_preedit(message: &Message) -> Option<ImEvent> {
     let caret_chars = iter.get::<u32>().unwrap_or(0) as i32;
     let _ = iter.next();
     let visible = iter.get::<bool>().unwrap_or(true);
-    if !visible {
+    ibus_preedit_event(text, caret_chars, visible)
+}
+
+fn ibus_preedit_event(text: String, caret_chars: i32, _visible: bool) -> Option<ImEvent> {
+    if text.is_empty() {
         return Some(ImEvent::ClearPreedit);
     }
     Some(ImEvent::Preedit { text, caret_chars })
 }
 
 fn parse_ibus_hide_preedit(_message: &Message) -> Option<ImEvent> {
-    Some(ImEvent::ClearPreedit)
+    Some(ImEvent::HidePreedit)
+}
+
+fn events_only_clear_preedit(events: &[ImEvent]) -> bool {
+    !events.is_empty()
+        && events.iter().all(|event| match event {
+            ImEvent::ClearPreedit | ImEvent::HidePreedit => true,
+            ImEvent::Preedit { text, .. } => text.is_empty(),
+            _ => false,
+        })
 }
 
 fn parse_ibus_forward(message: &Message) -> Option<ImEvent> {
@@ -1287,14 +1323,14 @@ mod tests {
     }
 
     #[test]
-    fn env_fcitx_is_tried_first_then_ibus() {
+    fn env_fcitx_prefers_ibus_compat_then_native() {
         assert_eq!(
             backends_from_env_values("@im=fcitx", "", ""),
-            vec![ImKind::Fcitx5]
+            vec![ImKind::IBus, ImKind::Fcitx5]
         );
         assert_eq!(
-            connect_order(&[ImKind::Fcitx5]),
-            vec![ImKind::Fcitx5, ImKind::IBus]
+            connect_order(&[ImKind::IBus, ImKind::Fcitx5]),
+            vec![ImKind::IBus, ImKind::Fcitx5]
         );
     }
 
@@ -1313,6 +1349,55 @@ mod tests {
             backends_from_env_values("", "", ""),
             vec![ImKind::Fcitx5, ImKind::IBus]
         );
+    }
+
+    #[test]
+    fn ibus_hidden_preedit_keeps_text() {
+        assert!(matches!(
+            ibus_preedit_event("đứt".into(), 1, false),
+            Some(ImEvent::Preedit { text, caret_chars })
+                if text == "đứt" && caret_chars == 1
+        ));
+        assert!(matches!(
+            ibus_preedit_event("đứt".into(), 3, true),
+            Some(ImEvent::Preedit { text, .. }) if text == "đứt"
+        ));
+        assert!(matches!(
+            ibus_preedit_event(String::new(), 0, false),
+            Some(ImEvent::ClearPreedit)
+        ));
+        assert!(matches!(
+            ibus_preedit_event(String::new(), 0, true),
+            Some(ImEvent::ClearPreedit)
+        ));
+        let hide = Message::new_signal(
+            "/",
+            "org.freedesktop.IBus.InputContext",
+            "HidePreeditText",
+        )
+        .unwrap();
+        assert!(matches!(
+            parse_ibus_hide_preedit(&hide),
+            Some(ImEvent::HidePreedit)
+        ));
+    }
+
+    #[test]
+    fn hide_only_waits_for_following_preedit() {
+        assert!(events_only_clear_preedit(&[ImEvent::HidePreedit]));
+        assert!(events_only_clear_preedit(&[
+            ImEvent::HidePreedit,
+            ImEvent::ClearPreedit,
+        ]));
+        assert!(!events_only_clear_preedit(&[
+            ImEvent::HidePreedit,
+            ImEvent::Preedit {
+                text: "t".into(),
+                caret_chars: 1,
+            },
+        ]));
+        assert!(!events_only_clear_preedit(&[ImEvent::Commit("được ".into())]));
+        assert!(!events_only_clear_preedit(&[]));
     }
 
     #[test]

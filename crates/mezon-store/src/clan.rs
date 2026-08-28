@@ -365,8 +365,14 @@ impl ClanOverviewDraft {
     }
 }
 
-fn carry_live_badges(previous: &[Clan], next: &mut [Clan]) {
-    if previous.is_empty() {
+/// Keep the live rail counts across a clan-list refetch.
+///
+/// `ListClanDescs` carries no badge, so a plain reload would paint every clan
+/// read. `authoritative` says the incoming rows came from `ListClanBadgeCount`
+/// instead — server truth, which also knows about reads made on other devices —
+/// and then it must win, or a reconnect could never correct a stale count.
+fn carry_live_badges(previous: &[Clan], next: &mut [Clan], authoritative: bool) {
+    if previous.is_empty() || authoritative {
         return;
     }
     let live: std::collections::HashMap<ClanId, (u32, bool)> = previous
@@ -552,7 +558,7 @@ impl ClanList {
             }
             dispatch.on_lagged(&entity, |this, cx| {
                 tracing::warn!("ClanList realtime lagged — reloading clans");
-                this.reload(cx);
+                this.reload_badges(cx);
             });
         });
     }
@@ -570,7 +576,7 @@ impl ClanList {
                     was_connected = true;
                     // Reconnected — realtime pushes were missed while offline, so the cached list
                     // is stale: always refetch (not just when empty).
-                    if this.update(cx, |this, cx| this.reload(cx)).is_err() {
+                    if this.update(cx, |this, cx| this.reload_badges(cx)).is_err() {
                         break;
                     }
                 } else if !connected {
@@ -578,6 +584,20 @@ impl ClanList {
                 }
             }
         })
+    }
+
+    /// `reload` plus a fresh `ListClanBadgeCount`, for the paths where the rail's
+    /// own counts are suspect and not just the clan list.
+    ///
+    /// The per-clan `ListChannelBadgeCount` re-seed is lazy — entering a clan
+    /// after a reconnect refetches it — but the rail is user-scoped and nothing
+    /// re-seeds it lazily, so an unvisited clan would keep a count from before
+    /// the drop for the rest of the session. Live traffic can't fill the gap
+    /// either: the rail's unread dot rides `ChannelMessage`, which needs the
+    /// clan to be joined.
+    pub fn reload_badges(&mut self, cx: &mut Context<Self>) {
+        self.badges_loaded = false;
+        self.reload(cx);
     }
 
     pub fn reload(&mut self, cx: &mut Context<Self>) {
@@ -651,12 +671,12 @@ impl ClanList {
                 }
                 this.loading = false;
                 this.badges_loaded = this.badges_loaded || badges_fetched;
-                this.update_clans(mapped, cx);
-                if let Some(clan_id) = this.active_clan_id {
-                    this.fire_join_clan_chat(clan_id, cx);
-                } else if let Some(clan_id) = this.clans.first().map(|clan| clan.id) {
-                    this.fire_join_clan_chat(clan_id, cx);
-                }
+                this.update_clans_inner(mapped, badges_fetched, cx);
+                // No `clan_join` from here. The clan listing has not been fetched
+                // yet at this point, and a join that lands before it leaves the
+                // clan's private channels and threads unsubscribed for the whole
+                // gateway session — `ChannelList::ensure_clan_joined` owns the
+                // join and waits for the structure first.
                 if this.reload_pending {
                     this.reload_pending = false;
                     this.reload(cx);
@@ -899,19 +919,16 @@ impl ClanList {
             .and_then(|c| c.welcome_channel_id)
     }
 
-    fn fire_join_clan_chat(&self, clan_id: ClanId, cx: &mut Context<Self>) {
-        let api = self.api.clone();
-        let id = clan_id.get();
-        cx.spawn(async move |_, _| {
-            if let Err(e) = api.join_clan_chat(id).await {
-                tracing::error!("join_clan_chat failed for clan {id}: {e}");
-            }
-        })
-        .detach();
-    }
-
+    /// `clan_join` has exactly one owner — [`ChannelList::ensure_clan_joined`] —
+    /// because the gateway only fans the join out to the clan's private channels
+    /// and threads when it already holds that user's channel listing, and it
+    /// answers every later join for the clan from the tracker instead of
+    /// re-running the fan-out. A join sent from here, before the listing, would
+    /// be the one that counts.
     pub fn subscribe_clan_realtime(&self, clan_id: ClanId, cx: &mut Context<Self>) {
-        self.fire_join_clan_chat(clan_id, cx);
+        crate::channel::ChannelList::global(cx).update(cx, |channels, cx| {
+            drop(channels.ensure_clan_joined(clan_id, cx));
+        });
     }
 
     pub fn is_joining_invite(&self, invite_url: &str) -> bool {
@@ -963,8 +980,9 @@ impl ClanList {
                 match &result {
                     Ok(accept) => {
                         this.invite_join_failed_urls.remove(&invite_url_for_task);
+                        // `select_clan` runs the clan load, which joins the chat
+                        // once the channel listing has landed.
                         this.select_clan(accept.clan_id, cx);
-                        this.fire_join_clan_chat(accept.clan_id, cx);
                         this.reload(cx);
                     }
                     Err(AcceptInviteError::AlreadyJoining) => {}
@@ -994,14 +1012,23 @@ impl ClanList {
         }
     }
 
-    pub fn update_clans(&mut self, mut clans: Vec<Clan>, cx: &mut Context<Self>) {
+    pub fn update_clans(&mut self, clans: Vec<Clan>, cx: &mut Context<Self>) {
+        self.update_clans_inner(clans, false, cx);
+    }
+
+    fn update_clans_inner(
+        &mut self,
+        mut clans: Vec<Clan>,
+        authoritative_badges: bool,
+        cx: &mut Context<Self>,
+    ) {
         let prev_active = self.active_clan_id;
         let previous: HashMap<ClanId, UserId> = self
             .clans
             .iter()
             .map(|clan| (clan.id, clan.creator_id))
             .collect();
-        carry_live_badges(&self.clans, &mut clans);
+        carry_live_badges(&self.clans, &mut clans, authoritative_badges);
         self.clans = clans;
         self.apply_saved_order_internal();
         let active_missing = self
@@ -1878,7 +1905,7 @@ mod tests {
         previous[0].badge_count = 4;
         previous[0].has_unread = true;
         let mut refetched = clans();
-        carry_live_badges(&previous, &mut refetched);
+        carry_live_badges(&previous, &mut refetched, false);
         assert_eq!(refetched[0].badge_count, 4);
         assert!(refetched[0].has_unread);
         assert_eq!(refetched[1].badge_count, 0);
@@ -1889,9 +1916,23 @@ mod tests {
         let mut fresh = clans();
         fresh[0].badge_count = 7;
         fresh[0].has_unread = true;
-        carry_live_badges(&[], &mut fresh);
+        carry_live_badges(&[], &mut fresh, false);
         assert_eq!(fresh[0].badge_count, 7);
         assert!(fresh[0].has_unread);
+    }
+
+    #[test]
+    fn a_badge_count_refetch_outranks_the_live_carry() {
+        let mut previous = clans();
+        previous[0].badge_count = 4;
+        previous[0].has_unread = true;
+        let mut refetched = clans();
+        refetched[0].badge_count = 1;
+        refetched[0].has_unread = true;
+        // Reconnect: ListClanBadgeCount ran, so the rows are server truth and must
+        // land — otherwise a count read on another device could never clear here.
+        carry_live_badges(&previous, &mut refetched, true);
+        assert_eq!(refetched[0].badge_count, 1);
     }
 
     #[test]
@@ -1899,7 +1940,7 @@ mod tests {
         let previous = vec![make_clan(1, "One", None)];
         let mut refetched = clans();
         refetched[1].badge_count = 9;
-        carry_live_badges(&previous, &mut refetched);
+        carry_live_badges(&previous, &mut refetched, false);
         assert_eq!(refetched[0].badge_count, 0);
         assert_eq!(refetched[1].badge_count, 9);
     }

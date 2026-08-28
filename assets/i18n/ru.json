@@ -3524,6 +3524,7 @@
   "message.newMessage.to": "Кому",
   "message.newMessages": "НОВЫЕ СООБЩЕНИЯ",
   "message.noAccess": "Нет доступа",
+  "message.privateChannel": "private-channel",
   "message.noContactsFound": "Контакты не найдены",
   "message.noSendMessagePermission": "У Вас нет разрешения на отправку сообщения.",
   "message.numberReplies": "{{number}} ответы",

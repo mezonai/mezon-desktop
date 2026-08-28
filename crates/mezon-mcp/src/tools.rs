@@ -168,8 +168,14 @@ impl McpBackend {
                 self.send_ui_result(|reply| McpCommand::OpenTopic { message_id, reply })
                     .await
             }
-            "close_topic" => self.send_ui_result(|reply| McpCommand::CloseTopic { reply }).await,
-            "topic_state" => self.send_ui_result(|reply| McpCommand::TopicState { reply }).await,
+            "close_topic" => {
+                self.send_ui_result(|reply| McpCommand::CloseTopic { reply })
+                    .await
+            }
+            "topic_state" => {
+                self.send_ui_result(|reply| McpCommand::TopicState { reply })
+                    .await
+            }
             "topic_type" => {
                 let text = arguments
                     .get("text")
@@ -177,6 +183,12 @@ impl McpBackend {
                     .ok_or_else(|| anyhow::anyhow!("topic_type requires string field text"))?
                     .to_string();
                 self.send_ui_result(|reply| McpCommand::TopicType { text, reply })
+                    .await
+            }
+            "topic_pick" => {
+                self.require_write_mode("topic_pick")?;
+                let index = arguments.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                self.send_ui_result(|reply| McpCommand::TopicPick { index, reply })
                     .await
             }
             "topic_submit" => {
@@ -277,6 +289,10 @@ impl McpBackend {
             "clan_menu_state" => self.clan_menu_state().await,
             "list_categories" => self.list_categories(&arguments).await,
             "create_category" => self.create_category(&arguments).await,
+            "mute_channel" => {
+                self.require_write_mode("mute_channel")?;
+                self.mute_channel(&arguments).await
+            }
             "channel_menu_state" => self.channel_menu_state().await,
             "channel_menu_open" => self.channel_menu_open(&arguments).await,
             "channel_menu_close" => self.channel_menu_close().await,
@@ -1393,6 +1409,26 @@ impl McpBackend {
         .await
     }
 
+    async fn mute_channel(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = optional_i64_field(arguments, "clan_id")
+            .ok_or_else(|| anyhow::anyhow!("mute_channel requires field clan_id"))?;
+        let channel_id = optional_i64_field(arguments, "channel_id")
+            .ok_or_else(|| anyhow::anyhow!("mute_channel requires field channel_id"))?;
+        let mute_minutes = arguments
+            .get("mute_minutes")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let mute_seconds = mute_seconds_from_minutes(mute_minutes)?;
+        self.api
+            .set_mute_channel(channel_id, mute_seconds, clan_id)
+            .await?;
+        to_json(&serde_json::json!({
+            "ok": true,
+            "channel_id": channel_id,
+            "mute_minutes": mute_minutes,
+        }))
+    }
+
     async fn channel_menu_state(&self) -> anyhow::Result<Value> {
         self.send_ui_result(|reply| McpCommand::ChannelMenuState { reply })
             .await
@@ -2353,6 +2389,18 @@ fn optional_i64_field(arguments: &Value, field: &str) -> Option<i64> {
     })
 }
 
+fn mute_seconds_from_minutes(minutes: i64) -> anyhow::Result<i32> {
+    match minutes {
+        -1 => Ok(-1),
+        0 => Ok(0),
+        1.. => minutes
+            .checked_mul(60)
+            .and_then(|seconds| i32::try_from(seconds).ok())
+            .ok_or_else(|| anyhow::anyhow!("mute_minutes is too large")),
+        _ => anyhow::bail!("mute_minutes must be -1, 0, or positive"),
+    }
+}
+
 fn validate_navigate_path(path: &str) -> anyhow::Result<()> {
     let path = path.trim();
     if path.is_empty() {
@@ -2534,5 +2582,14 @@ mod tests {
                 .expect("spans")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn mute_minutes_are_converted_to_wire_seconds() {
+        assert_eq!(mute_seconds_from_minutes(-1).unwrap(), -1);
+        assert_eq!(mute_seconds_from_minutes(0).unwrap(), 0);
+        assert_eq!(mute_seconds_from_minutes(15).unwrap(), 900);
+        assert!(mute_seconds_from_minutes(-2).is_err());
+        assert!(mute_seconds_from_minutes(i64::MAX).is_err());
     }
 }

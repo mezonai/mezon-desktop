@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use livekit::track::LocalVideoTrack;
@@ -22,6 +22,7 @@ const TARGET_HEIGHT: u32 = 480;
 const TARGET_FPS: u32 = 30;
 const MAX_CAMERA_WIDTH: u32 = 1280;
 const MAX_CAMERA_HEIGHT: u32 = 720;
+const CAMERA_ENUM_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct CameraDeviceInfo {
@@ -29,7 +30,33 @@ pub struct CameraDeviceInfo {
     pub name: String,
 }
 
-pub fn enumerate_cameras() -> Vec<CameraDeviceInfo> {
+type CameraEnumReply = flume::Sender<Vec<CameraDeviceInfo>>;
+
+fn camera_enum_worker() -> Option<&'static flume::Sender<CameraEnumReply>> {
+    static WORKER: OnceLock<Option<flume::Sender<CameraEnumReply>>> = OnceLock::new();
+    WORKER
+        .get_or_init(|| {
+            let (tx, rx) = flume::unbounded::<CameraEnumReply>();
+            let spawned = std::thread::Builder::new()
+                .name("mezon-camera-enum".into())
+                .spawn(move || {
+                    init_camera_com();
+                    while let Ok(reply) = rx.recv() {
+                        let _ = reply.send(query_cameras());
+                    }
+                });
+            match spawned {
+                Ok(_) => Some(tx),
+                Err(e) => {
+                    tracing::warn!("camera enumeration thread unavailable: {e}");
+                    None
+                }
+            }
+        })
+        .as_ref()
+}
+
+fn query_cameras() -> Vec<CameraDeviceInfo> {
     let backend = native_api_backend().unwrap_or(ApiBackend::AVFoundation);
     match query(backend) {
         Ok(devices) => devices
@@ -45,6 +72,39 @@ pub fn enumerate_cameras() -> Vec<CameraDeviceInfo> {
         }
     }
 }
+
+pub fn enumerate_cameras() -> Vec<CameraDeviceInfo> {
+    let Some(worker) = camera_enum_worker() else {
+        return Vec::new();
+    };
+    let (reply_tx, reply_rx) = flume::bounded::<Vec<CameraDeviceInfo>>(1);
+    if worker.send(reply_tx).is_err() {
+        tracing::warn!("camera enumeration worker stopped");
+        return Vec::new();
+    }
+    match reply_rx.recv_timeout(CAMERA_ENUM_TIMEOUT) {
+        Ok(devices) => devices,
+        Err(e) => {
+            tracing::warn!("camera enumeration did not answer: {e}");
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn init_camera_com() {
+    use windows::Win32::System::Com::{
+        COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx,
+    };
+
+    let result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
+    if result.is_err() {
+        tracing::warn!("camera thread COM initialization failed: {result}");
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn init_camera_com() {}
 
 pub struct CameraController {
     stop: Arc<AtomicBool>,
@@ -84,6 +144,7 @@ pub fn start_camera(
         .name("mezon-camera".into())
         .spawn(move || {
             let _guard = crate::runtime::handle().enter();
+            init_camera_com();
 
             if !request_macos_permission() {
                 let _ = track_tx.send(Err("camera permission denied".into()));
@@ -149,6 +210,7 @@ pub fn start_camera_into(
         .name("mezon-camera".into())
         .spawn(move || {
             let _guard = crate::runtime::handle().enter();
+            init_camera_com();
 
             if !request_macos_permission() {
                 tracing::warn!("camera permission denied");
