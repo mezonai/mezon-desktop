@@ -97,6 +97,61 @@ impl Session {
             self.id_token = id_token.to_string();
         }
     }
+
+    pub fn apply_healthy_endpoint(
+        &mut self,
+        session_id: &str,
+        api_url: Option<&str>,
+        ws_url: Option<&str>,
+        tcp_url: Option<&str>,
+    ) {
+        if !session_id.is_empty() {
+            self.session_id = session_id.to_string();
+        }
+        if let Some(url) = api_url.filter(|u| !u.is_empty()) {
+            let (host, port, secure) = parse_endpoint_url(url);
+            self.api_url = Some(url.to_string());
+            self.api_host = host;
+            self.api_port = port;
+            self.api_secure = secure;
+        }
+        if let Some(url) = ws_url.filter(|u| !u.is_empty()) {
+            let (host, port, secure) = parse_endpoint_url(url);
+            self.ws_url = Some(url.to_string());
+            self.ws_host = host;
+            self.ws_port = port;
+            self.ws_secure = secure;
+        }
+        if let Some(url) = tcp_url.filter(|u| !u.is_empty()) {
+            let (host, port, _) = parse_endpoint_url(url);
+            self.tcp_url = Some(url.to_string());
+            self.tcp_host = host;
+            self.tcp_port = port;
+        }
+    }
+}
+
+fn parse_endpoint_url(endpoint: &str) -> (Option<String>, Option<u16>, Option<bool>) {
+    let endpoint = if endpoint.contains("://") {
+        endpoint.to_owned()
+    } else if endpoint.contains(':') {
+        format!("tcp://{endpoint}")
+    } else {
+        return (Some(endpoint.to_owned()), None, Some(true));
+    };
+    let Ok(parsed) = url::Url::parse(&endpoint) else {
+        return (None, None, None);
+    };
+    let secure = match parsed.scheme() {
+        "https" | "wss" => Some(true),
+        "http" | "ws" | "tcp" => Some(false),
+        _ => None,
+    };
+    (
+        parsed.host_str().map(str::to_owned),
+        parsed.port_or_known_default(),
+        secure,
+    )
 }
 
 pub fn jwt_expires_at(token: &str) -> Option<u64> {
@@ -224,5 +279,24 @@ mod tests {
         assert_eq!(session.refresh_token, "old-refresh");
         assert_eq!(session.session_id, "new-sid");
         assert_eq!(session.expires_at, 1000);
+    }
+
+    #[test]
+    fn apply_healthy_endpoint_adopts_sid_and_urls() {
+        let mut session = Session {
+            session_id: "old".into(),
+            ..Default::default()
+        };
+        session.apply_healthy_endpoint(
+            "new-sid",
+            Some("https://api.mezon.ai:443"),
+            Some("wss://ws.mezon.ai:443"),
+            Some("tcp://tcp.mezon.ai:7349"),
+        );
+        assert_eq!(session.session_id, "new-sid");
+        assert_eq!(session.api_url.as_deref(), Some("https://api.mezon.ai:443"));
+        assert_eq!(session.api_host.as_deref(), Some("api.mezon.ai"));
+        assert_eq!(session.tcp_host.as_deref(), Some("tcp.mezon.ai"));
+        assert_eq!(session.tcp_port, Some(7349));
     }
 }

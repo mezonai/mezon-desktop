@@ -79,6 +79,26 @@ struct ApiSession {
     tcp_url: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct HealthyEndpoint {
+    pub session_id: String,
+    pub api_url: Option<String>,
+    pub ws_url: Option<String>,
+    pub tcp_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HealthyEndpointResponse {
+    #[serde(default, alias = "sessionId")]
+    session_id: String,
+    #[serde(default, alias = "apiUrl")]
+    api_url: Option<String>,
+    #[serde(default, alias = "wsUrl")]
+    ws_url: Option<String>,
+    #[serde(default, alias = "tcpUrl")]
+    tcp_url: Option<String>,
+}
+
 /// Response from the OTP request endpoint.
 #[derive(Debug, Deserialize)]
 struct OtpRequestResponse {
@@ -372,6 +392,64 @@ impl MezonClient {
         } else {
             SessionProbe::Inconclusive
         }
+    }
+
+    pub async fn get_healthy_endpoint(
+        &self,
+        gw_base: &str,
+        token: &str,
+    ) -> Result<HealthyEndpoint> {
+        let url = format!("{}/v2/healthy/endpoint", gw_base.trim_end_matches('/'));
+        let request = http::Request::builder()
+            .method(http::Method::GET)
+            .uri(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Accept", "application/json")
+            .body(AsyncBody::empty())
+            .context("Failed to build GetHealthyEndpoint request")?;
+
+        let mut response = self
+            .http
+            .send(request)
+            .await
+            .with_context(|| format!("Network error on GET {url}"))?;
+        observe_date_header(response.headers());
+        let status = response.status();
+
+        const MAX_BYTES: u64 = 256 * 1024;
+        let mut resp_bytes: Vec<u8> = Vec::new();
+        response
+            .body_mut()
+            .take(MAX_BYTES + 1)
+            .read_to_end(&mut resp_bytes)
+            .await
+            .with_context(|| format!("Failed to read GetHealthyEndpoint body from {url}"))?;
+        if resp_bytes.len() as u64 > MAX_BYTES {
+            bail!("GetHealthyEndpoint response from {url} exceeds {MAX_BYTES} bytes");
+        }
+        if !status.is_success() {
+            let preview: String = String::from_utf8_lossy(&resp_bytes)
+                .trim()
+                .chars()
+                .take(300)
+                .collect();
+            bail!(
+                "HTTP {} on GetHealthyEndpoint {url}: {preview}",
+                status.as_u16()
+            );
+        }
+
+        let parsed: HealthyEndpointResponse = serde_json::from_slice(&resp_bytes)
+            .with_context(|| format!("Failed to parse GetHealthyEndpoint JSON from {url}"))?;
+        if parsed.session_id.is_empty() {
+            bail!("GetHealthyEndpoint returned an empty session_id");
+        }
+        Ok(HealthyEndpoint {
+            session_id: parsed.session_id,
+            api_url: parsed.api_url.filter(|u| !u.is_empty()),
+            ws_url: parsed.ws_url.filter(|u| !u.is_empty()),
+            tcp_url: parsed.tcp_url.filter(|u| !u.is_empty()),
+        })
     }
 
     /// Convert an `ApiSession` wire response into our internal `Session`.

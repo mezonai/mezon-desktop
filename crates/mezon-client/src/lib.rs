@@ -32,6 +32,7 @@ pub use attachment_download::{
     clean_download_url, download_url_to_downloads, resolve_download_filename, sanitize_filename,
     write_bytes_to_downloads,
 };
+pub use auth::HealthyEndpoint;
 pub use auth::MezonClient;
 pub use auth::QrLoginId;
 pub use auth::SessionProbe;
