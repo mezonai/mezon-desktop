@@ -26,16 +26,24 @@ const RECONNECT_BACKOFF_CAP_SECS: u64 = 60;
 const NETWORK_PROBE_RETRY_MIN_SECS: u64 = 1;
 const NETWORK_PROBE_RETRY_CAP_SECS: u64 = 15;
 const DEFAULT_TLS_PORT: u16 = 443;
+/// After this many *explicit* SID rejects (HTTP 401/403 on the abridged handshake) we re-handshake
+/// with the JWT. Silent closes must not count — they also cover session-limit and gateway incidents.
+const SSID_REFUSALS_BEFORE_JWT: u32 = 1;
+/// How many explicit JWT rejects before asking the API host whether the account still exists.
+/// Only an authenticated HTTP probe separates a dead session from a gateway that is turning
+/// connections away.
+const JWT_REFUSALS_BEFORE_PROBE: u32 = 1;
 const JWT_SKEW: std::time::Duration = std::time::Duration::from_secs(60);
-/// Result of a single reconnect attempt. Only a rejected credential (the server accepted the TCP
-/// connection but refused the handshake) is treated as a dead session; an unreachable server must
-/// never discard the persisted session.
+/// Result of a single reconnect attempt. Only an explicit credential reject may advance the
+/// JWT / logout ladder; silent drops and unreachable hosts must keep the session.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ConnectOutcome {
     Confirmed,
-    /// The gateway took the connection and then dropped it. It is up and choosing not to serve us,
-    /// so the credentials are worth questioning.
-    Refused,
+    /// Gateway returned HTTP 401/403 for the handshake credential.
+    ExplicitReject,
+    /// TCP opened then closed without an explicit 401/403. Session-limit, TLS close, and many
+    /// gateway incidents look like this — retry with backoff, never logout from this alone.
+    SilentDrop,
     /// The host never answered — DNS, routing, a dead port. This says nothing about credentials
     /// and must never advance the checks that can end in a logout.
     Unreachable,
@@ -162,6 +170,7 @@ impl ConnectionStore {
             .unwrap_or_else(|| favicon_probe_url(""));
         let tcp_default_port = AppConfig::try_global(cx).and_then(|cfg| cfg.tcp_port);
         let configured_api_base = AppConfig::try_global(cx).map(configured_api_base_url);
+        let auth_client = crate::login::LoginStore::global(cx).read(cx).client();
         let api_server_key = AppConfig::try_global(cx)
             .map(|cfg| cfg.api_key.clone())
             .unwrap_or_default();
@@ -174,6 +183,9 @@ impl ConnectionStore {
             let mut connect_ack_rx = connect_ack_rx;
             let mut network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
             let mut refreshed_this_run = false;
+            let mut gateway_refusals = 0u32;
+            let mut jwt_refusals = 0u32;
+            let mut probed_this_outage = false;
 
             loop {
                 let (session, is_connecting) = cx.update(|cx| match auth_state.read(cx).clone() {
@@ -190,7 +202,7 @@ impl ConnectionStore {
                     }
                 });
 
-                let Some(session) = session else {
+                let Some(mut session) = session else {
                     api.set_http_fallback(None);
                     if connected_user_id.take().is_some() {
                         if let Err(e) = transport.close().await {
@@ -204,17 +216,6 @@ impl ConnectionStore {
                     wake.notified().await;
                     continue;
                 };
-
-                if !session_has_socket_id(&session) {
-                    tracing::warn!(
-                        "Session has no session_id — logging out (matches web BootstrapGate)"
-                    );
-                    force_logout(&api, &auth_state, &exec, cx).await;
-                    connected_user_id = None;
-                    consecutive_failures = 0;
-                    retry_backoff_secs = 1;
-                    continue;
-                }
 
                 api.set_http_fallback(http_fallback_session(
                     &session,
@@ -231,7 +232,10 @@ impl ConnectionStore {
                     continue;
                 }
 
+                let mut network_confirmed = false;
                 if requires_network_probe(consecutive_failures) {
+                    // Probe the deployment this session actually belongs to; the baked config can
+                    // point somewhere else entirely.
                     let target = session
                         .api_url
                         .as_deref()
@@ -257,9 +261,75 @@ impl ConnectionStore {
                         network_retry_secs = next_network_retry_secs(network_retry_secs);
                         continue;
                     }
+                    network_confirmed = true;
                     if network_retry_secs != NETWORK_PROBE_RETRY_MIN_SECS {
                         tracing::info!("Network reachable again — resuming reconnect");
                         network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
+                    }
+
+                }
+
+                // Two credentials authenticate the same session; the JWT is the escape hatch when
+                // the stored `session_id` keeps being refused.
+                let use_jwt = should_lead_with_jwt(&session, gateway_refusals);
+                if use_jwt && !jwt_is_fresh(&session) {
+                    let (renewed, verdict) =
+                        refresh_jwt_for_fallback(&api, &auth_state, session.clone(), cx).await;
+                    session = renewed;
+                    if verdict == RefreshVerdict::Renewed {
+                        // This rotation counts as the once-per-run keep-alive.
+                        refreshed_this_run = true;
+                    }
+                }
+
+                // Probe only with a token the server would still accept. A JWT we failed to renew
+                // (a 503 from SessionRefresh is enough) answers 403 because it is expired, not
+                // because the account is gone — concluding "session dead" from that would log the
+                // user out over a transient backend hiccup.
+                if use_jwt
+                    && jwt_is_fresh(&session)
+                    && jwt_refusals >= JWT_REFUSALS_BEFORE_PROBE
+                    && !probed_this_outage
+                {
+                    probed_this_outage = true;
+                    let api_base = session
+                        .api_url
+                        .clone()
+                        .filter(|url| !url.is_empty())
+                        .or_else(|| configured_api_base.clone());
+                    if let Some(api_base) = api_base {
+                        match auth_client.probe_session(&api_base, &session.token).await {
+                            mezon_client::SessionProbe::Rejected(status) => {
+                                tracing::warn!(
+                                    "Both socket credentials refused and the API host rejected the token (HTTP {status}) — the session is gone, logging out"
+                                );
+                                let credentials =
+                                    cx.update(|cx| session_credentials(auth_state.read(cx)));
+                                spawn_session_logout(api.clone(), credentials, &exec);
+                                cx.update(|cx| {
+                                    auth_state.update(cx, |state, cx| {
+                                        *state = AuthState::NotAuthenticated;
+                                        cx.notify();
+                                    });
+                                    crate::login::LoginStore::reset_all_user_stores(cx);
+                                });
+                                connected_user_id = None;
+                                consecutive_failures = 0;
+                                gateway_refusals = 0;
+                                jwt_refusals = 0;
+                                retry_backoff_secs = 1;
+                                continue;
+                            }
+                            mezon_client::SessionProbe::Alive => {
+                                tracing::warn!(
+                                    "The API host still accepts this session — the gateway is refusing the connection, keeping the session"
+                                );
+                            }
+                            mezon_client::SessionProbe::Inconclusive => {
+                                tracing::warn!("Session probe was inconclusive — keeping the session");
+                                probed_this_outage = false;
+                            }
+                        }
                     }
                 }
 
@@ -279,7 +349,14 @@ impl ConnectionStore {
 
                 tracing::info!("Connecting shared abridged TCP transport to {endpoint_label}");
                 api.set_status(ConnectionStatus::Connecting);
-                let token = session.ws_credential().to_string();
+                let token = if use_jwt {
+                    tracing::info!(
+                        "Handshaking with the JWT after {gateway_refusals} explicit rejects by the gateway"
+                    );
+                    session.token.clone()
+                } else {
+                    session.ws_credential().to_string()
+                };
                 let api_for_publish = api.clone();
                 let api_for_close = api.clone();
                 let wake_for_close = wake.clone();
@@ -316,12 +393,19 @@ impl ConnectionStore {
                             ConnectOutcome::Confirmed
                         } else {
                             let rejected = transport.credential_rejected();
+                            let frames = transport.frames_received();
                             let _ = transport.close().await;
-                            tracing::warn!(
-                                "Gateway dropped the connection (explicit rejection: {rejected}, server frames: {})",
-                                transport.frames_received()
-                            );
-                            ConnectOutcome::Refused
+                            if rejected {
+                                tracing::warn!(
+                                    "Gateway explicitly rejected the credential (server frames: {frames})"
+                                );
+                                ConnectOutcome::ExplicitReject
+                            } else {
+                                tracing::warn!(
+                                    "Gateway dropped the connection without an explicit reject (server frames: {frames}) — treating as transient"
+                                );
+                                ConnectOutcome::SilentDrop
+                            }
                         }
                     }
                     Err(e) => {
@@ -336,6 +420,9 @@ impl ConnectionStore {
                     connected_user_id = Some(session.user_id.clone());
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
+                    gateway_refusals = 0;
+                    jwt_refusals = 0;
+                    probed_this_outage = false;
                     network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
                     api.set_status(ConnectionStatus::Connected);
                     tracing::info!("Connection confirmed — handshake accepted");
@@ -370,19 +457,30 @@ impl ConnectionStore {
                 connected_user_id = None;
                 api.set_status(ConnectionStatus::Disconnected);
                 consecutive_failures += 1;
-
-                if outcome == ConnectOutcome::Refused {
-                    tracing::warn!(
-                        "Gateway refused the session_id — logging out (matches web: SID is required)"
-                    );
-                    force_logout(&api, &auth_state, &exec, cx).await;
-                    consecutive_failures = 0;
-                    retry_backoff_secs = 1;
-                    continue;
+                let explicit_reject = outcome == ConnectOutcome::ExplicitReject;
+                if explicit_reject {
+                    gateway_refusals += 1;
+                    if use_jwt && network_confirmed {
+                        jwt_refusals += 1;
+                    } else if use_jwt {
+                        tracing::info!(
+                            "JWT explicit reject seen without a confirmed network — not counting it against the session"
+                        );
+                    }
                 }
+
+                let switched_to_jwt = if explicit_reject && !use_jwt {
+                    discard_session_id(&auth_state, cx).await
+                } else {
+                    false
+                };
 
                 if reached_failure_limit(consecutive_failures) {
                     promote_connecting_to_authenticated(&auth_state, cx);
+                }
+
+                if switched_to_jwt {
+                    continue;
                 }
 
                 retry_backoff_secs = next_backoff_secs(retry_backoff_secs);
@@ -635,25 +733,47 @@ async fn refresh_jwt_for_fallback(
     (session, RefreshVerdict::Renewed)
 }
 
-fn session_has_socket_id(session: &Session) -> bool {
-    !session.session_id.is_empty()
+fn should_lead_with_jwt(session: &Session, gateway_refusals: u32) -> bool {
+    session.session_id.is_empty() || gateway_refusals >= SSID_REFUSALS_BEFORE_JWT
 }
 
-async fn force_logout(
-    api: &Arc<AppApi>,
-    auth_state: &Entity<AuthState>,
-    exec: &BackgroundExecutor,
-    cx: &mut AsyncApp,
-) {
-    let credentials = cx.update(|cx| session_credentials(auth_state.read(cx)));
-    spawn_session_logout(api.clone(), credentials, exec);
-    cx.update(|cx| {
+fn clear_socket_credential(session: &mut Session) -> bool {
+    if session.session_id.is_empty() {
+        return false;
+    }
+    session.session_id.clear();
+    true
+}
+
+async fn discard_session_id(auth_state: &Entity<AuthState>, cx: &mut AsyncApp) -> bool {
+    let cleared = cx.update(|cx| {
         auth_state.update(cx, |state, cx| {
-            *state = AuthState::NotAuthenticated;
+            let session = match state {
+                AuthState::Authenticated(s) | AuthState::Connecting(s) => s,
+                _ => return None,
+            };
+            if !clear_socket_credential(session) {
+                return None;
+            }
             cx.notify();
-        });
-        crate::login::LoginStore::reset_all_user_stores(cx);
+            Some(session.clone())
+        })
     });
+    let Some(session) = cleared else {
+        return false;
+    };
+
+    tracing::info!(
+        "The gateway explicitly rejected the stored session_id — dropping it so the JWT leads until the server pushes a new one"
+    );
+    cx.background_executor()
+        .spawn(async move {
+            if let Err(e) = keychain::save_session(&session) {
+                tracing::warn!("Failed to persist the session without its refused session_id: {e}");
+            }
+        })
+        .await;
+    true
 }
 
 /// Whether the JWT can still authenticate a handshake or an HTTP call.
@@ -764,24 +884,13 @@ pub(crate) fn resolve_tcp_port(session: &Session, default_port: Option<u16>) -> 
 
 /// Restore a stored session from the OS keychain.
 ///
-/// - Stored session with `session_id` → `Connecting` (SID is the durable socket cred; JWT may be
-///   expired and is refreshed for HTTP fallback after handshake).
-/// - Stored session without `session_id` → clear + `NotAuthenticated` (matches web BootstrapGate).
+/// - Stored session → `Connecting` (the socket validates it; the server pushes a fresh token via
+///   `refresh_session_event`, so an expired JWT is fine — `session_id` is the durable cred).
 /// - Nothing stored → `NotAuthenticated`.
 pub fn resolve_initial_auth_state() -> AuthState {
     match keychain::load_session() {
         None => {
             tracing::info!("No stored session — showing login");
-            AuthState::NotAuthenticated
-        }
-        Some(session) if !session_has_socket_id(&session) => {
-            tracing::warn!(
-                "Stored session for user_id={} has no session_id — clearing (matches web BootstrapGate)",
-                session.user_id
-            );
-            if let Err(e) = keychain::clear_session() {
-                tracing::warn!("Failed to clear keychain session without session_id: {e}");
-            }
             AuthState::NotAuthenticated
         }
         Some(session) => {
@@ -948,31 +1057,48 @@ mod tests {
     }
 
     #[test]
-    fn a_session_without_an_id_is_not_a_valid_socket_login() {
+    fn a_session_without_an_id_authenticates_with_the_jwt() {
         let jwt_only = Session {
             token: "jwt".into(),
             expires_at: now_secs() + 600,
             ..Default::default()
         };
-        assert!(!session_has_socket_id(&jwt_only));
+        assert!(jwt_only.session_id.is_empty());
         assert_eq!(jwt_only.ws_credential(), "jwt");
         assert!(jwt_is_fresh(&jwt_only));
     }
 
     #[test]
-    fn a_session_with_session_id_is_a_valid_socket_login() {
-        let session = Session {
+    fn a_refused_socket_credential_is_dropped_and_the_jwt_takes_over() {
+        let mut session = Session {
             token: "jwt".into(),
-            session_id: "sid".into(),
+            session_id: "dead-sid".into(),
             expires_at: now_secs() + 600,
             ..Default::default()
         };
-        assert!(session_has_socket_id(&session));
-        assert_eq!(session.ws_credential(), "sid");
+        assert!(!should_lead_with_jwt(&session, 0));
+
+        assert!(clear_socket_credential(&mut session));
+        assert!(should_lead_with_jwt(&session, 0));
+        assert_eq!(session.ws_credential(), "jwt");
+        assert!(jwt_is_fresh(&session));
+
+        assert!(!clear_socket_credential(&mut session));
     }
 
     #[test]
-    fn a_stale_jwt_is_not_fresh_for_http_fallback() {
+    fn a_single_explicit_sid_reject_moves_the_ladder_to_the_jwt() {
+        let session = Session {
+            token: "jwt".into(),
+            session_id: "sid".into(),
+            ..Default::default()
+        };
+        assert!(!should_lead_with_jwt(&session, 0));
+        assert!(should_lead_with_jwt(&session, SSID_REFUSALS_BEFORE_JWT));
+    }
+
+    #[test]
+    fn a_stale_jwt_is_renewed_before_it_is_used_as_a_credential() {
         let stale = Session {
             token: "jwt".into(),
             expires_at: now_secs().saturating_sub(1),
@@ -1008,10 +1134,12 @@ mod tests {
         LoggedOut,
     }
 
-    /// Models the SID-required reconnect loop: gateway refusal of the session_id logs out;
-    /// unreachable hosts never do.
+    /// Models the loop's decision state: what a connect outcome advances, and what may end in a
+    /// logout. Only an explicit credential reject followed by a refused API probe may.
     struct ReconnectSim {
         consecutive_failures: u32,
+        gateway_refusals: u32,
+        jwt_refusals: u32,
         logout_count: u32,
         surface: Surface,
         displayed_attempt: u32,
@@ -1021,6 +1149,8 @@ mod tests {
         fn new() -> Self {
             Self {
                 consecutive_failures: 0,
+                gateway_refusals: 0,
+                jwt_refusals: 0,
                 logout_count: 0,
                 surface: Surface::Connecting,
                 displayed_attempt: 0,
@@ -1039,6 +1169,10 @@ mod tests {
             requires_network_probe(self.consecutive_failures)
         }
 
+        fn uses_jwt(&self) -> bool {
+            self.gateway_refusals >= SSID_REFUSALS_BEFORE_JWT
+        }
+
         fn record_unreachable(&mut self) {
             self.consecutive_failures += 1;
             if reached_failure_limit(self.consecutive_failures) {
@@ -1046,14 +1180,36 @@ mod tests {
             }
         }
 
-        fn record_sid_refusal(&mut self) {
+        fn record_silent_drop(&mut self) {
+            self.record_unreachable();
+        }
+
+        fn record_explicit_reject(&mut self) {
             self.consecutive_failures += 1;
-            self.logout_count += 1;
-            self.surface = Surface::LoggedOut;
+            let was_jwt = self.uses_jwt();
+            self.gateway_refusals += 1;
+            if was_jwt {
+                self.jwt_refusals += 1;
+            }
+            if reached_failure_limit(self.consecutive_failures) {
+                self.surface = Surface::AppShell;
+            }
+        }
+
+        fn record_api_probe(&mut self, session_alive: bool) {
+            if self.jwt_refusals < JWT_REFUSALS_BEFORE_PROBE {
+                return;
+            }
+            if !session_alive {
+                self.logout_count += 1;
+                self.surface = Surface::LoggedOut;
+            }
         }
 
         fn record_connect_success(&mut self) {
             self.consecutive_failures = 0;
+            self.gateway_refusals = 0;
+            self.jwt_refusals = 0;
             self.surface = Surface::AppShell;
         }
     }
@@ -1063,28 +1219,66 @@ mod tests {
         let mut sim = ReconnectSim::new();
         for _ in 0..200 {
             sim.record_unreachable();
+            sim.record_api_probe(false);
+        }
+        assert_eq!(sim.logout_count, 0);
+        assert_eq!(
+            sim.gateway_refusals, 0,
+            "reachability failures are not refusals"
+        );
+        assert!(!sim.uses_jwt(), "the JWT escape hatch must stay disarmed");
+        assert_eq!(sim.surface, Surface::AppShell);
+    }
+
+    #[test]
+    fn a_silent_drop_never_logs_out_or_advances_the_jwt_ladder() {
+        let mut sim = ReconnectSim::new();
+        for _ in 0..200 {
+            sim.record_silent_drop();
+            sim.record_api_probe(false);
+        }
+        assert_eq!(sim.logout_count, 0);
+        assert_eq!(sim.gateway_refusals, 0);
+        assert!(!sim.uses_jwt());
+        assert_eq!(sim.surface, Surface::AppShell);
+    }
+
+    #[test]
+    fn a_dead_session_logs_out_after_one_explicit_reject_of_each_credential() {
+        let mut sim = ReconnectSim::new();
+        sim.record_explicit_reject();
+        assert!(
+            sim.uses_jwt(),
+            "the JWT is tried straight after the first explicit SID reject"
+        );
+        sim.record_explicit_reject();
+        assert_eq!(sim.jwt_refusals, JWT_REFUSALS_BEFORE_PROBE);
+
+        sim.record_api_probe(false);
+        assert_eq!(sim.logout_count, 1);
+        assert_eq!(sim.surface, Surface::LoggedOut);
+    }
+
+    #[test]
+    fn explicit_rejects_with_a_live_account_keep_the_session() {
+        let mut sim = ReconnectSim::new();
+        for _ in 0..20 {
+            sim.record_explicit_reject();
+            sim.record_api_probe(true);
         }
         assert_eq!(sim.logout_count, 0);
         assert_eq!(sim.surface, Surface::AppShell);
     }
 
     #[test]
-    fn a_refused_session_id_logs_out_immediately() {
+    fn a_successful_connect_disarms_everything() {
         let mut sim = ReconnectSim::new();
-        sim.record_sid_refusal();
-        assert_eq!(sim.logout_count, 1);
-        assert_eq!(sim.surface, Surface::LoggedOut);
-    }
-
-    #[test]
-    fn a_successful_connect_clears_failure_state() {
-        let mut sim = ReconnectSim::new();
-        sim.record_unreachable();
-        sim.record_unreachable();
+        sim.record_explicit_reject();
+        sim.record_explicit_reject();
         sim.record_connect_success();
-        assert_eq!(sim.consecutive_failures, 0);
-        assert_eq!(sim.logout_count, 0);
-        assert_eq!(sim.surface, Surface::AppShell);
+        assert_eq!(sim.gateway_refusals, 0);
+        assert_eq!(sim.jwt_refusals, 0);
+        assert!(!sim.uses_jwt());
     }
 
     #[test]
@@ -1106,8 +1300,8 @@ mod tests {
         sim.begin_iteration();
         assert_eq!(sim.displayed_attempt, 0);
 
-        sim.record_unreachable();
-        sim.record_unreachable();
+        sim.record_explicit_reject();
+        sim.record_explicit_reject();
         sim.begin_iteration();
         assert_eq!(sim.displayed_attempt, 2);
 
@@ -1118,11 +1312,11 @@ mod tests {
     }
 
     #[test]
-    fn mid_session_unreachable_does_not_display_attempt_on_app_shell() {
+    fn mid_session_failures_do_not_display_attempt() {
         let mut sim = ReconnectSim::new();
         sim.record_connect_success();
         for _ in 0..4 {
-            sim.record_unreachable();
+            sim.record_silent_drop();
             sim.begin_iteration();
             assert_eq!(sim.surface, Surface::AppShell);
             assert_eq!(sim.displayed_attempt, 0);
