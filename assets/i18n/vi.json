@@ -3285,6 +3285,7 @@
   "message.newMessage.to": "Đến",
   "message.newMessages": "TIN NHẮN MỚI",
   "message.noAccess": "Không có quyền",
+  "message.privateChannel": "private-channel",
   "message.noContactsFound": "Không tìm thấy liên hệ",
   "message.noSendMessagePermission": "Bạn không có quyền gửi tin nhắn",
   "message.numberReplies": "{{number}} tin nhắn",

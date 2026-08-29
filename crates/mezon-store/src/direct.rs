@@ -84,6 +84,8 @@ pub enum DirectEvent {
 }
 
 const DM_PAGE_SIZE: i32 = 500;
+const DM_FETCH_MAX_ATTEMPTS: u32 = 3;
+const DM_FETCH_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(400);
 const MESSAGE_CODE_SEND_TOKEN: i32 = 11;
 /// Incoming DM traffic bumps last-message/unread state per message; the
 /// sidebar and unread rail only need to converge, not animate every packet,
@@ -254,6 +256,12 @@ pub struct DirectMessageStore {
     current: Option<(ChannelId, i32)>,
     pending_changed: Vec<ChannelId>,
     changed_notify_task: Option<Task<()>>,
+    dm_space_joined: bool,
+    /// Bumped when the socket comes back. A listing issued on the socket that
+    /// died carries the old value and drops its result, so the reconnect can
+    /// clear `loading` and re-issue without the dead fetch clearing the flag —
+    /// or applying its stale page — behind the replacement.
+    socket_generation: u64,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
 }
@@ -282,6 +290,9 @@ impl DirectMessageStore {
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.channels = DirectChannelList::default();
+        // Same fence as a reconnect: a listing still in flight must not repopulate
+        // the store, or re-join the DM space, for the account that just left.
+        self.socket_generation = self.socket_generation.wrapping_add(1);
         self.loading = false;
         self.freshness.mark_stale();
         self.has_more = true;
@@ -291,6 +302,7 @@ impl DirectMessageStore {
         self.persist_pinned(cx);
         self.pending_changed.clear();
         self.changed_notify_task = None;
+        self.dm_space_joined = false;
         cx.emit(DirectEvent::Changed { channel_id: None });
         cx.notify();
     }
@@ -308,6 +320,8 @@ impl DirectMessageStore {
             current: None,
             pending_changed: Vec::new(),
             changed_notify_task: None,
+            dm_space_joined: false,
+            socket_generation: 0,
             api,
             _conn_watch: conn_watch,
         }
@@ -342,6 +356,9 @@ impl DirectMessageStore {
                     was_connected = true;
                     if this
                         .update(cx, |this, cx| {
+                            this.socket_generation = this.socket_generation.wrapping_add(1);
+                            this.dm_space_joined = false;
+                            this.loading = false;
                             this.freshness.mark_stale();
                             this.fetch(cx);
                         })
@@ -351,6 +368,7 @@ impl DirectMessageStore {
                     }
                 } else if !connected {
                     was_connected = false;
+                    let _ = this.update(cx, |this, _| this.dm_space_joined = false);
                 }
             }
         })
@@ -687,6 +705,7 @@ impl DirectMessageStore {
         let next_page = self.current_page + 1;
         self.loading = true;
         let api = self.api.clone();
+        let socket_generation = self.socket_generation;
         cx.spawn(async move |this, cx| {
             let (result, badges) = tokio::join!(
                 api.list_dm_channels(next_page as i32),
@@ -699,6 +718,9 @@ impl DirectMessageStore {
             }
             let badge_map = badge_map_from_descs(badges.unwrap_or_default());
             let _ = this.update(cx, |this, cx| {
+                if this.socket_generation != socket_generation {
+                    return;
+                }
                 this.loading = false;
                 match result {
                     Ok(list) => {
@@ -725,25 +747,81 @@ impl DirectMessageStore {
         .detach();
     }
 
+    /// Subscribe the socket to the DM space, once per gateway session.
+    ///
+    /// `clan_join{clan_id: 0}` fans out to the DM and group streams from the
+    /// gateway's cached channel listing for this user, and the listing is only
+    /// cached once `ListChannelDescs` has been served — a join that runs first
+    /// subscribes to nothing, so unopened conversations stop pushing
+    /// `ChannelMessage` for the rest of the session. Hence: only ever called
+    /// after the DM listing round-trip has completed.
+    fn join_dm_space(&mut self, cx: &mut Context<Self>) {
+        if self.dm_space_joined {
+            return;
+        }
+        self.dm_space_joined = true;
+        let api = self.api.clone();
+        let socket_generation = self.socket_generation;
+        cx.spawn(async move |this, cx| match api.join_clan_chat(0).await {
+            Ok(()) => tracing::info!("DM-space subscribed (clan_join clan_id=0)"),
+            Err(e) => {
+                tracing::warn!("DM-space join (clan_join clan_id=0) failed: {e}");
+                let _ = this.update(cx, |this, _| {
+                    if this.socket_generation == socket_generation {
+                        this.dm_space_joined = false;
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
     fn fetch(&mut self, cx: &mut Context<Self>) {
         if self.loading {
             return;
         }
         self.loading = true;
         let api = self.api.clone();
+        let socket_generation = self.socket_generation;
+        let timer = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
-            let (result, badges) =
-                tokio::join!(api.list_dm_channels(1), api.list_channel_badge_counts(0),);
+            // Retried, because a failure here does more than leave the list stale:
+            // the DM-space `clan_join` hangs off this call landing, and nothing
+            // else re-triggers it while the socket stays up.
+            let mut attempt = 1u32;
+            let (result, badges) = loop {
+                let pair = tokio::join!(api.list_dm_channels(1), api.list_channel_badge_counts(0));
+                if pair.0.is_ok() || attempt >= DM_FETCH_MAX_ATTEMPTS {
+                    break pair;
+                }
+                if let Err(e) = &pair.0 {
+                    tracing::warn!("list_dm_channels failed (attempt {attempt}): {e}, retrying");
+                }
+                timer.timer(DM_FETCH_RETRY_BACKOFF * attempt).await;
+                let current = this
+                    .update(cx, |this, _| this.socket_generation == socket_generation)
+                    .unwrap_or(false);
+                if !current {
+                    return;
+                }
+                attempt += 1;
+            };
             let badges_complete = badges.is_ok();
             if let Err(e) = &badges {
                 tracing::warn!("list_channel_badge_counts failed alongside the DM list: {e}");
             }
             let badge_map = badge_map_from_descs(badges.unwrap_or_default());
             let _ = this.update(cx, |this, cx| {
+                if this.socket_generation != socket_generation {
+                    return;
+                }
                 this.loading = false;
                 match result {
                     Ok(list) => {
                         tracing::info!("DirectMessageStore: fetched {} DM channels", list.len());
+                        // The gateway has just served this user's clan-0 channel
+                        // listing, so its cache is warm and the join can fan out.
+                        this.join_dm_space(cx);
                         let has_more = list.len() >= DM_PAGE_SIZE as usize;
                         let channels: Vec<DirectChannel> =
                             list.into_iter().map(direct_from_api).collect();

@@ -3283,6 +3283,7 @@
   "message.newMessage.to": "To",
   "message.newMessages": "NEW MESSAGES",
   "message.noAccess": "No Access",
+  "message.privateChannel": "private-channel",
   "message.noContactsFound": "No contacts found",
   "message.noSendMessagePermission": "You don't have permission to send message",
   "message.numberReplies": "{{number}} replies",

@@ -6,8 +6,8 @@ use gpui::{
     Window, div, point, prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, DirectKind, DirectMessageStore, DmAvatarPresence, InVoiceInfo, PinnedMessagesStore,
-    Settings, StreamStore, ThreadsStore,
+    ChannelId, DirectKind, DirectMessageStore, DmAvatarPresence, FriendEvent, FriendStore,
+    InVoiceInfo, PinnedMessagesStore, Settings, StreamStore, ThreadsStore,
 };
 use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable, Tooltip};
 
@@ -41,6 +41,7 @@ fn canvas_popover_y_offset() -> Pixels {
 pub struct DmHeaderInfo {
     pub channel_id: ChannelId,
     pub is_group: bool,
+    pub blocked_by_me: bool,
     /// Peer presence for a 1:1 DM; always `None` for a group.
     pub presence: DmAvatarPresence,
     pub label: SharedString,
@@ -261,13 +262,19 @@ impl ChannelHeader {
             ("hdr-files", IconName::FileIcon),
         ];
         let dm_one_to_one = self.dm_header.as_ref().is_some_and(|info| !info.is_group);
+        let dm_one_to_one_blocked = self
+            .dm_header
+            .as_ref()
+            .is_some_and(|info| !info.is_group && info.blocked_by_me);
         let actions: Vec<(&str, IconName)> = if self.dm {
             let mut items: Vec<(&str, IconName)> = Vec::with_capacity(4);
-            if dm_one_to_one {
+            if dm_one_to_one && !dm_one_to_one_blocked {
                 items.push(("hdr-call", IconName::IconPhoneDM));
                 items.push(("hdr-video-call", IconName::IconMeetDM));
             }
-            items.push(("hdr-members", IconName::MemberList));
+            if !dm_one_to_one_blocked {
+                items.push(("hdr-members", IconName::MemberList));
+            }
             items.push(("hdr-pin", IconName::PinRight));
             items
         } else {
@@ -951,6 +958,7 @@ pub struct ChatHeader {
     _notification_observe: Subscription,
     _pinned_observe: Subscription,
     _direct_observe: Subscription,
+    _friend_subscribe: Subscription,
     _group_members_observe: Subscription,
     _presence_subscribe: Subscription,
 }
@@ -973,6 +981,14 @@ impl ChatHeader {
         let _direct_observe = cx.observe(&DirectMessageStore::global(cx), |this, _, cx| {
             this.refresh_dm_header(cx)
         });
+        let _friend_subscribe = cx.subscribe(
+            &FriendStore::global(cx),
+            |this, _, event: &FriendEvent, cx| {
+                if matches!(event, FriendEvent::Changed) {
+                    this.refresh_dm_header(cx);
+                }
+            },
+        );
         let _group_members_observe = cx.observe(
             &mezon_store::GroupMembersStore::global(cx),
             |this, _, cx| this.refresh_dm_header(cx),
@@ -1014,6 +1030,7 @@ impl ChatHeader {
             _notification_observe,
             _pinned_observe,
             _direct_observe,
+            _friend_subscribe,
             _group_members_observe,
             _presence_subscribe,
         }
@@ -1033,6 +1050,11 @@ impl ChatHeader {
         let store = DirectMessageStore::try_global(cx)?;
         let dm = store.read(cx).find(direct_id)?;
         let is_group = dm.kind == DirectKind::Group;
+        let blocked_by_me = dm.peer_user_id.is_some_and(|peer| {
+            !is_group
+                && FriendStore::try_global(cx)
+                    .is_some_and(|store| store.read(cx).is_user_blocked_by_me(peer, cx))
+        });
         let presence = dm_peer_presence(dm, cx);
         let avatar_src = if dm.avatar.is_empty() {
             String::new()
@@ -1057,6 +1079,7 @@ impl ChatHeader {
         Some(DmHeaderInfo {
             channel_id: dm.id,
             is_group,
+            blocked_by_me,
             presence,
             label: SharedString::from(dm.label.clone()),
             avatar_src: SharedString::from(avatar_src),

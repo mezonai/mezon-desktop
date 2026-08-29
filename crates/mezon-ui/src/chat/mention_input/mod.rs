@@ -815,6 +815,7 @@ impl MentionInput {
         Vec<OutgoingAttachment>,
         Option<OutgoingOgp>,
     )> {
+        let swallow = self.input.read(cx).pending_send_ime_token();
         let raw = self.input.read(cx).value().to_string();
         if raw.trim().is_empty() && self.pending_attachments.is_empty() {
             return None;
@@ -835,7 +836,7 @@ impl MentionInput {
             self.clear_ogp_preview(cx);
             self.input.update(cx, |input, cx| {
                 input.set_mention_spans(Vec::new(), cx);
-                input.set_value("", window, cx);
+                input.clear_after_send(swallow.clone(), window, cx);
             });
             return None;
         }
@@ -847,7 +848,7 @@ impl MentionInput {
         self.close_popup();
         self.input.update(cx, |input, cx| {
             input.set_mention_spans(Vec::new(), cx);
-            input.set_value("", window, cx);
+            input.clear_after_send(swallow, window, cx);
         });
         Some((text, content, attachments, ogp))
     }

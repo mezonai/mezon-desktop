@@ -3286,6 +3286,7 @@
   "message.newMessage.to": "받는 사람",
   "message.newMessages": "새 메시지",
   "message.noAccess": "권한 없음",
+  "message.privateChannel": "private-channel",
   "message.noContactsFound": "연락처를 찾지 못함",
   "message.noSendMessagePermission": "메시지 보내기 권한 없음",
   "message.numberReplies": "{{number}}개 메시지",

@@ -2322,6 +2322,29 @@ impl AppApi {
         attachments: Vec<UrlAttachment>,
         flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
+        self.send_message_with_attachment_urls_reply(
+            clan_id,
+            channel_id,
+            is_public,
+            mode,
+            attachments,
+            None,
+            flags,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_message_with_attachment_urls_reply(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        is_public: bool,
+        mode: i32,
+        attachments: Vec<UrlAttachment>,
+        reply: Option<crate::transport::OutgoingReply>,
+        flags: crate::transport::OutgoingMessageFlags,
+    ) -> Result<ApiMessage> {
         let proto: Vec<mezon_proto::api::MessageAttachment> = attachments
             .iter()
             .map(|a| mezon_proto::api::MessageAttachment {
@@ -2357,7 +2380,7 @@ impl AppApi {
                 is_public,
                 mode,
                 proto,
-                None,
+                reply,
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),

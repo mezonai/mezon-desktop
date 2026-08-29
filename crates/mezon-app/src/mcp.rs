@@ -309,6 +309,10 @@ impl McpRuntime {
                         let result = cx.update(|cx| mezon_ui::app::capture::topic_type(cx, &text));
                         let _ = reply.send(result);
                     }
+                    McpCommand::TopicPick { index, reply } => {
+                        let result = cx.update(|cx| mezon_ui::app::capture::topic_pick(cx, index));
+                        let _ = reply.send(result);
+                    }
                     McpCommand::TopicDropPaths { paths, reply } => {
                         let result =
                             cx.update(|cx| mezon_ui::app::capture::topic_drop_paths(cx, paths));

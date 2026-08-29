@@ -424,6 +424,17 @@ Parameters:
         write: true,
     },
     ToolSpec {
+        name: "mute_channel",
+        description: "\
+Mute or unmute a channel for the signed-in user (backend SetMuteChannel).
+
+Parameters:
+- clan_id (required): clan snowflake id. Use 0 for direct messages.
+- channel_id (required): channel snowflake id.
+- mute_minutes (optional): minutes to mute (-1 = forever, 0 = unmute, default 0).",
+        write: true,
+    },
+    ToolSpec {
         name: "channel_menu_state",
         description: "\
 Return the channel context menu that is currently open in the channel sidebar, if any.
@@ -609,9 +620,27 @@ Parameters: none.",
         description: "\
 Replace the topic composer's text, the way typing into the panel does.
 
+Drives the real MentionInput, so trigger characters open their popup: @ (member/role),
+# (channel), : (emoji). Returns the composer state including the suggestion list; follow
+with topic_pick to accept one, then topic_submit to send.
+
 Parameters:
 - text (required)",
         write: false,
+    },
+    ToolSpec {
+        name: "topic_pick",
+        description: "\
+Accept one entry of the topic composer's suggestion popup.
+
+Typing `@name` on its own only produces literal text. A real mention needs the picked
+entry, because that is what writes the id into the message's `mentions` field — and the
+receiving client detects mentions from that field, never from the text. So a topic
+mention can only be exercised end to end through topic_type + topic_pick + topic_submit.
+
+Parameters:
+- index (optional, default 0): suggestion index from topic_type/topic_state.",
+        write: true,
     },
     ToolSpec {
         name: "topic_submit",

@@ -178,7 +178,7 @@ pub enum MessagesEvent {
 
 /// The message currently being replied to (composer state), mirroring React's
 /// reply reference draft in `references.slice`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplyDraft {
     pub message_ref_id: MessageId,
     pub sender_id: UserId,
@@ -593,8 +593,7 @@ pub struct MessagesStore {
     fetch_generation: u64,
     latest_fetch: HashMap<ChannelId, u64>,
     reset_generation: u64,
-    /// Active reply target for the composer, if any.
-    reply_target: Option<ReplyDraft>,
+    reply_targets: KeyedCache<ChannelId, ReplyDraft>,
     /// Message currently being edited inline in its row (self-only; one at a time).
     editing: Option<MessageId>,
     joined_channels: HashSet<ChannelId>,
@@ -977,7 +976,7 @@ impl MessagesStore {
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
         self.latest_fetch.clear();
         self.reset_generation = self.reset_generation.wrapping_add(1);
-        self.reply_target = None;
+        self.reply_targets.clear();
         self.editing = None;
         self.joined_channels.clear();
         self.pending_self_adds.clear();
@@ -1048,7 +1047,7 @@ impl MessagesStore {
             fetch_generation: 0,
             latest_fetch: HashMap::new(),
             reset_generation: 0,
-            reply_target: None,
+            reply_targets: KeyedCache::new(Some(crate::compose::MAX_DRAFT_CHANNELS)),
             editing: None,
             joined_channels: HashSet::new(),
             pending_self_adds: HashMap::new(),
@@ -2147,12 +2146,17 @@ impl MessagesStore {
 
     /// Current composer reply target (React reply reference draft).
     pub fn reply_target(&self) -> Option<&ReplyDraft> {
-        self.reply_target.as_ref()
+        self.active_channel_id
+            .and_then(|channel_id| self.reply_targets.get(&channel_id))
     }
 
     /// Set the composer reply target (from a "Reply" action on a message).
     pub fn set_reply(&mut self, draft: ReplyDraft, cx: &mut Context<Self>) {
-        self.reply_target = Some(draft);
+        let Some(channel_id) = self.active_channel_id else {
+            return;
+        };
+        self.reply_targets
+            .insert(channel_id, draft, Some(&channel_id));
         cx.emit(MessagesEvent::ReplyTargetChanged);
         cx.notify();
     }
@@ -2183,10 +2187,15 @@ impl MessagesStore {
 
     /// Clear the composer reply target.
     pub fn clear_reply(&mut self, cx: &mut Context<Self>) {
-        if self.reply_target.take().is_some() {
+        if self.take_reply_target().is_some() {
             cx.emit(MessagesEvent::ReplyTargetChanged);
             cx.notify();
         }
+    }
+
+    fn take_reply_target(&mut self) -> Option<ReplyDraft> {
+        self.active_channel_id
+            .and_then(|channel_id| self.reply_targets.remove(&channel_id))
     }
 
     /// Message currently being edited inline in its row, if any.
@@ -2583,6 +2592,7 @@ impl MessagesStore {
                     uid,
                     uname,
                     payload.anonymous,
+                    payload.reply,
                     cx,
                 );
                 return;
@@ -3600,6 +3610,7 @@ impl MessagesStore {
         api_msg: mezon_client::transport::ApiMessage,
         anonymous: bool,
         local_sources: Vec<(String, Option<std::path::PathBuf>)>,
+        is_new_topic: bool,
         cx: &mut Context<Self>,
     ) -> TopicAppend {
         let topic_key = ChannelId(topic_id);
@@ -3645,6 +3656,9 @@ impl MessagesStore {
             }
         } else {
             self.set_channel(topic_key, vec![msg]);
+        }
+        if is_new_topic && let Some(channel) = self.cache.get_mut(&topic_key) {
+            channel.has_more = false;
         }
         self.set_last_message(topic_key, message_id);
         let should_count_reply = topic_id != 0
@@ -4383,7 +4397,7 @@ impl MessagesStore {
         };
         let is_public = self.is_public;
         let mode = self.mode;
-        let reply = self.reply_target.take();
+        let reply = self.take_reply_target();
         if reply.is_some() {
             cx.emit(MessagesEvent::ReplyTargetChanged);
         }
@@ -4516,7 +4530,7 @@ impl MessagesStore {
         let has_attachments = !attachments.is_empty();
         let reply = match reply_override {
             Some(draft) => Some(draft),
-            None => self.reply_target.take(),
+            None => self.take_reply_target(),
         };
         if reply.is_some() {
             cx.emit(MessagesEvent::ReplyTargetChanged);
@@ -4905,6 +4919,7 @@ impl MessagesStore {
             sender_id,
             sender_name,
             self.is_anonymous_mode(),
+            None,
             cx,
         );
     }
@@ -4927,6 +4942,7 @@ impl MessagesStore {
             sender_id,
             sender_name,
             self.is_anonymous_mode(),
+            None,
             cx,
         );
     }
@@ -4948,6 +4964,7 @@ impl MessagesStore {
             sender_id,
             sender_name,
             self.is_anonymous_mode(),
+            None,
             cx,
         );
     }
@@ -4962,6 +4979,7 @@ impl MessagesStore {
         sender_id: String,
         sender_name: String,
         anonymous: bool,
+        reply_override: Option<ReplyDraft>,
         cx: &mut Context<Self>,
     ) {
         if url.is_empty() {
@@ -4975,6 +4993,17 @@ impl MessagesStore {
         };
         let is_public = self.is_public;
         let mode = self.mode;
+        let reply = match reply_override {
+            Some(draft) => Some(draft),
+            None => self.take_reply_target(),
+        };
+        if reply.is_some() {
+            cx.emit(MessagesEvent::ReplyTargetChanged);
+        }
+        let reply_clan_id = (!self.is_dm)
+            .then_some(self.active_clan_id)
+            .flatten()
+            .filter(|clan_id| !clan_id.is_zero());
         self.clear_last_read_message(channel_id);
         let grouping_sender_id = if anonymous {
             AppConfig::try_global(cx)
@@ -4999,7 +5028,7 @@ impl MessagesStore {
                 content_tokens: OutgoingContent::default(),
                 attachments: Vec::new(),
                 ogp: None,
-                reply: None,
+                reply: reply.clone(),
                 anonymous,
                 message_code: 0,
                 url_attachment: Some(UrlAttachment {
@@ -5028,12 +5057,58 @@ impl MessagesStore {
 
         let (display_name, avatar_url, avatar_proxied) =
             outgoing_sender_profile(&sender_id, &sender_name, clan_id, cx);
+        let (reply_reference, reply_ref) = match &reply {
+            Some(draft) => {
+                let (clan_nick, display_name, username, avatar) = reference_sender_fields(
+                    draft.sender_id,
+                    (
+                        "",
+                        &draft.sender_name,
+                        &draft.sender_name,
+                        &draft.sender_avatar,
+                    ),
+                    reply_clan_id,
+                    cx,
+                );
+                (
+                    Some(MessageReference {
+                        message_ref_id: draft.message_ref_id,
+                        sender_id: draft.sender_id,
+                        sender_name: name_for_prioritize(&clan_nick, &display_name, &username),
+                        sender_clan_nick: clan_nick.clone(),
+                        sender_display_name: display_name.clone(),
+                        sender_username: username.clone(),
+                        sender_avatar: avatar.clone(),
+                        content_preview: crate::message::reply_preview_line(&draft.content_preview)
+                            .into(),
+                        content: draft.content_preview.clone(),
+                        has_attachment: draft.has_attachment,
+                        has_embed: draft.has_embed,
+                        is_poll: draft.is_poll,
+                    }),
+                    Some(OutgoingReply {
+                        message_ref_id: draft.message_ref_id.get(),
+                        content: draft.content_preview.clone(),
+                        has_attachment: draft.has_attachment,
+                        message_sender_id: draft.sender_id.get(),
+                        message_sender_username: username,
+                        message_sender_avatar: avatar,
+                        message_sender_clan_nick: clan_nick,
+                        message_sender_display_name: display_name,
+                    }),
+                )
+            }
+            None => (None, None),
+        };
         let mut optimistic =
             Message::new(temp_id, String::new(), sender_id, display_name, create_time)
                 .with_sort_id(sort_id)
                 .with_avatar(avatar_url)
                 .with_avatar_proxied(avatar_proxied)
                 .with_attachments(vec![optimistic_attachment]);
+        if let Some(reference) = reply_reference {
+            optimistic = optimistic.with_references(vec![reference]);
+        }
         if anonymous {
             let _ = anonymize_sender(&mut optimistic, AppConfig::try_global(cx));
         }
@@ -5041,12 +5116,11 @@ impl MessagesStore {
         if let Some(old_len) = appended {
             self.emit_appended(old_len, cx);
         }
-
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             ensure_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx).await;
             let result = api
-                .send_message_with_attachment_urls(
+                .send_message_with_attachment_urls_reply(
                     clan_id.get(),
                     channel_id.get(),
                     is_public,
@@ -5058,6 +5132,7 @@ impl MessagesStore {
                         width,
                         height,
                     }],
+                    reply_ref,
                     OutgoingMessageFlags {
                         anonymous_message: anonymous,
                         message_code: 0,
@@ -5124,13 +5199,14 @@ impl MessagesStore {
         self.pending_self_adds.clear();
         self.prune_message_ui_state();
         let Some(channel_id) = channel_id else {
+            let had_reply_target = self.reply_target().is_some();
             self.flush_pending_last_seen(cx);
             self.active_channel_id = None;
             self.active_clan_id = None;
             self.is_dm = false;
             self.loading = false;
             self.loading_more = false;
-            if self.reply_target.take().is_some() {
+            if had_reply_target {
                 cx.emit(MessagesEvent::ReplyTargetChanged);
             }
             self.sync_anonymous_mode(cx);
@@ -5249,6 +5325,7 @@ impl MessagesStore {
         mode: i32,
         cx: &mut Context<Self>,
     ) {
+        let previous_reply_target = self.reply_target().cloned();
         self.flush_pending_last_seen(cx);
         if self.pending_jump.is_some_and(|(pc, _)| pc != channel_id) {
             self.pending_jump = None;
@@ -5262,7 +5339,8 @@ impl MessagesStore {
         self.pending_below_by_channel.clear();
         self.loading_more = false;
         self.sync_anonymous_mode(cx);
-        if self.reply_target.take().is_some() {
+        self.reply_targets.touch(&channel_id);
+        if self.reply_target() != previous_reply_target.as_ref() {
             cx.emit(MessagesEvent::ReplyTargetChanged);
         }
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
@@ -5298,6 +5376,16 @@ impl MessagesStore {
         self.spawn_initial_fetch(clan_id, channel_id, generation, cx);
     }
 
+    /// Subscribe the socket to one channel — but never before the clan itself is joined.
+    ///
+    /// A `channel_join` for a **public** channel resolves to the clan-wide stream, not a
+    /// per-channel one, so the gateway ends up with the clan stream already tracked. Its
+    /// `clan_join` handler answers an already-tracked clan from the tracker and skips the
+    /// fan-out entirely, which silently leaves every **private** channel and thread in that
+    /// clan unsubscribed for the rest of the session — public rows keep updating, so it
+    /// reads as "some channels stopped going unread". Awaiting the clan join first is what
+    /// keeps the fan-out reachable. React gets this ordering for free: its clan route loader
+    /// dispatches `joinClan` before the channel loader dispatches `joinChannel`.
     fn spawn_join(
         &self,
         clan_id: ClanId,
@@ -5307,7 +5395,14 @@ impl MessagesStore {
         cx: &mut Context<Self>,
     ) {
         let api = self.api.clone();
+        let clan_joined = (!clan_id.is_zero()).then(|| {
+            ChannelList::global(cx)
+                .update(cx, |channels, cx| channels.ensure_clan_joined(clan_id, cx))
+        });
         cx.spawn(async move |_this, _cx| {
+            if let Some(clan_joined) = clan_joined {
+                clan_joined.await;
+            }
             if let Err(e) = api
                 .join_chat(clan_id.get(), channel_id.get(), join_type, is_public)
                 .await
@@ -5666,12 +5761,14 @@ impl MessagesStore {
         cx: &mut Context<Self>,
     ) {
         if self
-            .reply_target
-            .as_ref()
+            .reply_targets
+            .get(&storage_id)
             .is_some_and(|draft| draft.message_ref_id == message_id)
         {
-            self.reply_target = None;
-            cx.emit(MessagesEvent::ReplyTargetChanged);
+            self.reply_targets.remove(&storage_id);
+            if self.active_channel_id == Some(storage_id) {
+                cx.emit(MessagesEvent::ReplyTargetChanged);
+            }
         }
         self.retreat_last_message(storage_id, message_id);
 
@@ -6253,6 +6350,7 @@ pub(crate) fn plan_thread_membership(
     self_id: Option<UserId>,
     thread_members: &[UserId],
     parent_members: &[UserId],
+    parent_is_public: bool,
     mentioned: &[UserId],
 ) -> Vec<UserId> {
     let mut plan = Vec::new();
@@ -6264,7 +6362,7 @@ pub(crate) fn plan_thread_membership(
     for user_id in mentioned {
         if Some(*user_id) == self_id
             || thread_members.contains(user_id)
-            || !parent_members.contains(user_id)
+            || (!parent_is_public && !parent_members.contains(user_id))
             || plan.contains(user_id)
         {
             continue;
@@ -6312,6 +6410,7 @@ struct ThreadSendContext {
     parent_id: ChannelId,
     channel_type: Option<i32>,
     parent_channel_type: Option<i32>,
+    parent_is_public: bool,
     self_id: Option<UserId>,
     /// `None` when the store holds no roster for the channel. Distinguishing that
     /// from an empty roster matters: an unloaded thread would otherwise read as
@@ -6335,12 +6434,16 @@ fn thread_send_context(
     let parent_channel_type = channels
         .channel(clan_id, parent_id)
         .map(|channel| channel.channel_type.as_raw() as i32);
+    let parent_is_public = channels
+        .channel(clan_id, parent_id)
+        .is_some_and(|channel| !channel.private);
     let members = ChannelMembersStore::try_global(cx)?;
     let members = members.read(cx);
     Some(ThreadSendContext {
         parent_id,
         channel_type,
         parent_channel_type,
+        parent_is_public,
         self_id: viewer_user_id(cx),
         thread_members: members
             .has_channel(channel_id)
@@ -6430,25 +6533,27 @@ async fn resolve_thread_membership_plan(
     let mut candidates = ctx.mentioned;
     candidates.extend_from_slice(extra_candidates);
     // Parent membership only gates the candidates; a self-join never consults it.
-    let parent_members = if needs_parent_lookup(&thread_members, &candidates) {
-        resolve_channel_members(
-            api,
-            this,
-            clan_id,
-            ctx.parent_id,
-            ctx.parent_channel_type,
-            ctx.parent_members,
-            cx,
-        )
-        .await
-        .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let parent_members =
+        if !ctx.parent_is_public && needs_parent_lookup(&thread_members, &candidates) {
+            resolve_channel_members(
+                api,
+                this,
+                clan_id,
+                ctx.parent_id,
+                ctx.parent_channel_type,
+                ctx.parent_members,
+                cx,
+            )
+            .await
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
     plan_thread_membership(
         if join_self { ctx.self_id } else { None },
         &thread_members,
         &parent_members,
+        ctx.parent_is_public,
         &candidates,
     )
 }
@@ -8366,7 +8471,7 @@ fn parse_embed_input(value: Option<&serde_json::Value>) -> Option<EmbedInput> {
             if options.is_empty() {
                 return None;
             }
-            Some(EmbedInput::Radio(EmbedRadio {
+            let mut radio = EmbedRadio {
                 id: id.into(),
                 options: options
                     .into_iter()
@@ -8379,8 +8484,12 @@ fn parse_embed_input(value: Option<&serde_json::Value>) -> Option<EmbedInput> {
                         disabled: option.disabled,
                     })
                     .collect(),
-                max_options: Some(wrapper.max_options.filter(|max| *max > 0).unwrap_or(1)),
-            }))
+                max_options: wrapper.max_options.filter(|max| *max > 0),
+            };
+            if radio.max_options.is_none() && radio.allows_multiple() {
+                radio.max_options = Some(i32::try_from(radio.options.len()).unwrap_or(i32::MAX));
+            }
+            Some(EmbedInput::Radio(radio))
         }
         Some(EMBED_COMPONENT_TYPE_ANIMATION) => {
             let component: ApiAnimationComponent =
@@ -8946,8 +9055,13 @@ mod tests {
 
     #[test]
     fn thread_send_joins_sender_when_not_a_member() {
-        let plan =
-            plan_thread_membership(Some(UserId(1)), &[UserId(2)], &[UserId(1), UserId(2)], &[]);
+        let plan = plan_thread_membership(
+            Some(UserId(1)),
+            &[UserId(2)],
+            &[UserId(1), UserId(2)],
+            false,
+            &[],
+        );
 
         assert_eq!(plan, vec![UserId(1)]);
     }
@@ -8958,6 +9072,7 @@ mod tests {
             Some(UserId(1)),
             &[UserId(1), UserId(2)],
             &[UserId(1), UserId(2)],
+            false,
             &[],
         );
 
@@ -8970,6 +9085,7 @@ mod tests {
             Some(UserId(1)),
             &[UserId(1)],
             &[UserId(1), UserId(2), UserId(3)],
+            false,
             &[UserId(2), UserId(3)],
         );
 
@@ -8982,6 +9098,7 @@ mod tests {
             Some(UserId(1)),
             &[UserId(1)],
             &[UserId(1), UserId(2)],
+            false,
             &[UserId(2), UserId(9)],
         );
 
@@ -8994,6 +9111,7 @@ mod tests {
             Some(UserId(1)),
             &[UserId(1), UserId(2)],
             &[UserId(1), UserId(2)],
+            false,
             &[UserId(2)],
         );
 
@@ -9006,6 +9124,7 @@ mod tests {
             Some(UserId(1)),
             &[],
             &[UserId(1), UserId(2)],
+            false,
             &[UserId(1), UserId(2), UserId(2)],
         );
 
@@ -9014,7 +9133,7 @@ mod tests {
 
     #[test]
     fn thread_send_without_a_known_viewer_only_adds_mentions() {
-        let plan = plan_thread_membership(None, &[], &[UserId(2)], &[UserId(2)]);
+        let plan = plan_thread_membership(None, &[], &[UserId(2)], false, &[UserId(2)]);
 
         assert_eq!(plan, vec![UserId(2)]);
     }
@@ -9030,16 +9149,28 @@ mod tests {
     }
 
     #[test]
+    fn public_parent_does_not_require_an_explicit_channel_roster() {
+        let plan = plan_thread_membership(Some(UserId(1)), &[UserId(1)], &[], true, &[UserId(2)]);
+
+        assert_eq!(plan, vec![UserId(2)]);
+    }
+
+    #[test]
     fn thread_reaction_joins_a_parent_member() {
-        let plan =
-            plan_thread_membership(None, &[UserId(2)], &[UserId(1), UserId(2)], &[UserId(1)]);
+        let plan = plan_thread_membership(
+            None,
+            &[UserId(2)],
+            &[UserId(1), UserId(2)],
+            false,
+            &[UserId(1)],
+        );
 
         assert_eq!(plan, vec![UserId(1)]);
     }
 
     #[test]
     fn thread_reaction_does_not_join_a_non_parent_member() {
-        let plan = plan_thread_membership(None, &[UserId(2)], &[UserId(2)], &[UserId(1)]);
+        let plan = plan_thread_membership(None, &[UserId(2)], &[UserId(2)], false, &[UserId(1)]);
 
         assert!(plan.is_empty());
     }
@@ -9212,6 +9343,65 @@ mod tests {
             &[("reset", 1), ("reset", 0), ("reset", 2), ("reset", 1)],
             "returning to the dm must re-emit its real row count, not zero"
         );
+    }
+
+    #[gpui::test]
+    fn reply_targets_are_restored_per_conversation(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let dm = ChannelId(11);
+            let clan_channel = ChannelId(22);
+            let dm_message = MessageId(1);
+            let clan_message = MessageId(2);
+
+            store.update(cx, |store, cx| {
+                store.set_channel(dm, vec![Message::new(dm_message, "dm", "5", "Bob", 100)]);
+                store.set_channel(
+                    clan_channel,
+                    vec![Message::new(clan_message, "clan", "6", "Eve", 200)],
+                );
+
+                store.activate(ClanId(0), dm, false, true, 3, 4, cx);
+                store.set_reply_to(dm_message, cx);
+                assert_eq!(
+                    store.reply_target().map(|draft| draft.message_ref_id),
+                    Some(dm_message)
+                );
+
+                store.close(cx);
+                store.activate(ClanId(1), clan_channel, true, false, 1, 2, cx);
+                assert!(store.reply_target().is_none());
+                store.set_reply_to(clan_message, cx);
+
+                store.close(cx);
+                store.activate(ClanId(0), dm, false, true, 3, 4, cx);
+                assert_eq!(
+                    store.reply_target().map(|draft| draft.message_ref_id),
+                    Some(dm_message)
+                );
+
+                store.activate(ClanId(1), clan_channel, true, false, 1, 2, cx);
+                assert_eq!(
+                    store.reply_target().map(|draft| draft.message_ref_id),
+                    Some(clan_message)
+                );
+                store.clear_reply(cx);
+
+                store.activate(ClanId(0), dm, false, true, 3, 4, cx);
+                assert_eq!(
+                    store.reply_target().map(|draft| draft.message_ref_id),
+                    Some(dm_message)
+                );
+            });
+        });
     }
 
     fn api_page(ids: &[i64]) -> mezon_client::transport::ListChannelMessagesResult {
@@ -9789,6 +9979,11 @@ mod tests {
                 options: vec![radio_option("a", "a"), radio_option("b", "b")],
                 max_options: Some(1),
             };
+            let bounded_multi = EmbedRadio {
+                id: "implicit-picks".into(),
+                options: vec![radio_option("a", "a"), radio_option("b", "b")],
+                max_options: Some(2),
+            };
 
             store.update(cx, |store, cx| {
                 pick(store, &single, "y", cx);
@@ -9809,6 +10004,14 @@ mod tests {
                         .message_select_selection(message_id, "picks")
                         .is_empty(),
                     "picking the same option again clears it"
+                );
+
+                pick(store, &bounded_multi, "a", cx);
+                pick(store, &bounded_multi, "b", cx);
+                assert_eq!(
+                    store.message_select_selection(message_id, "implicit-picks"),
+                    ["a", "b"],
+                    "an inferred multi-choice radio accepts each available option"
                 );
             });
         });
@@ -10155,11 +10358,7 @@ mod tests {
             panic!("expected a radio");
         };
         assert!(radio.allows_multiple());
-        assert_eq!(
-            radio.max_options,
-            Some(1),
-            "React defaults a missing max_options to 1"
-        );
+        assert_eq!(radio.max_options, Some(2));
     }
 
     #[test]
@@ -12629,6 +12828,42 @@ mod tests {
     }
 
     #[gpui::test]
+    fn new_topic_reply_marks_top_without_disabling_existing_topic_history(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            let new_topic_id = 77;
+            let existing_topic_id = 88;
+            store.update(cx, |store, cx| {
+                store.set_active_topic(Some(new_topic_id), cx);
+                store.append_topic_message(
+                    new_topic_id,
+                    plain_api_message(0, Vec::new()),
+                    false,
+                    Vec::new(),
+                    true,
+                    cx,
+                );
+
+                assert!(!store.topic_has_more_top());
+
+                store.set_active_topic(Some(existing_topic_id), cx);
+                store.append_topic_message(
+                    existing_topic_id,
+                    plain_api_message(0, Vec::new()),
+                    false,
+                    Vec::new(),
+                    false,
+                    cx,
+                );
+
+                assert!(store.topic_has_more_top());
+            });
+        });
+    }
+
+    #[gpui::test]
     fn resend_keeps_a_failed_row_it_cannot_replay(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let store = test_store(cx);
@@ -12677,6 +12912,52 @@ mod tests {
                 assert_eq!(
                     payload.url_attachment.as_ref().map(|a| a.url.as_str()),
                     Some("https://cdn.example/sticker.webp")
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_url_attachment_reply_keeps_its_reference(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let channel = ChannelId(7);
+                let target = MessageId(42);
+                store.set_channel(
+                    channel,
+                    vec![Message::new(target, "hello", "6", "Eve", 100)],
+                );
+                store.active_channel_id = Some(channel);
+                store.active_clan_id = Some(ClanId(1));
+                store.set_reply_to(target, cx);
+
+                store.send_sticker(
+                    "https://cdn.example/sticker.webp".to_string(),
+                    "sticker.webp".to_string(),
+                    "5".to_string(),
+                    "Bob".to_string(),
+                    cx,
+                );
+
+                assert!(store.reply_target().is_none());
+                let payload = store
+                    .pending_send_payloads
+                    .values()
+                    .next()
+                    .expect("sticker reply records a payload to retry with");
+                assert_eq!(
+                    payload.reply.as_ref().map(|reply| reply.message_ref_id),
+                    Some(target)
+                );
+                assert_eq!(
+                    store
+                        .cache
+                        .get(&channel)
+                        .and_then(|messages| messages.messages.last())
+                        .and_then(|message| message.references.first())
+                        .map(|reference| reference.message_ref_id),
+                    Some(target)
                 );
             });
         });

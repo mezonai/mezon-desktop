@@ -83,6 +83,7 @@ const MIC_PUBLISH_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 const MIC_EGRESS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const MIC_EGRESS_PUBLISH_GRACE: Duration = Duration::from_secs(3);
 const MIC_EGRESS_STALL_LIMIT: u32 = 3;
+const MIC_CAPTURE_SILENT_LIMIT: u32 = 3;
 const PLAYBACK_RESTART_DELAY: Duration = Duration::from_millis(500);
 const MAX_PLAYBACK_RESTARTS: u32 = 3;
 
@@ -412,6 +413,7 @@ async fn session_main(
                 let mut frames_since_poll: u64 = 0;
                 let mut egress_recovering = false;
                 let mut egress_grace_until: Option<Instant> = None;
+                let mut silent_capture_polls: u32 = 0;
                 loop {
                     tokio::select! {
                         biased;
@@ -507,6 +509,7 @@ async fn session_main(
                             let fed = std::mem::take(&mut frames_since_poll);
                             if !mic_enabled.load(Ordering::Relaxed) || source.is_none() {
                                 egress_stall_polls = 0;
+                                silent_capture_polls = 0;
                                 continue;
                             }
                             if egress_grace_until.is_some_and(|until| Instant::now() < until) {
@@ -514,8 +517,15 @@ async fn session_main(
                             }
                             if fed == 0 {
                                 egress_stall_polls = 0;
+                                silent_capture_polls += 1;
+                                if silent_capture_polls == MIC_CAPTURE_SILENT_LIMIT {
+                                    tracing::warn!(
+                                        "voice mic is unmuted but no captured audio is reaching the encoder"
+                                    );
+                                }
                                 continue;
                             }
+                            silent_capture_polls = 0;
                             let track = mic_publication_task
                                 .lock()
                                 .as_ref()

@@ -214,6 +214,9 @@ impl MentionInputState {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         let window_activation_sub = cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.discard_ime_commit = None;
+            }
             this.caret_blink
                 .sync_window_active(window.is_window_active(), cx);
         });
@@ -329,6 +332,24 @@ impl MentionInputState {
         if let Some(marked) = self.marked_range.take() {
             self.discard_ime_commit = self.content.get(marked).map(str::to_string);
         }
+    }
+
+    pub(crate) fn pending_send_ime_token(&self) -> Option<String> {
+        if let Some(marked) = self.marked_range.clone() {
+            let marked = self.clamp_range(marked);
+            return self.content.get(marked).map(str::to_string);
+        }
+        self.discard_ime_commit.clone()
+    }
+
+    pub(crate) fn clear_after_send(
+        &mut self,
+        swallow_commit: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.discard_ime_commit = swallow_commit;
+        self.set_value("", window, cx);
     }
 
     pub fn set_value(
@@ -1063,6 +1084,9 @@ impl EntityInputHandler for MentionInputState {
             self.marked_range.is_some(),
             new_text,
         ) {
+            return;
+        }
+        if new_text.is_empty() && range_utf16.is_none() && self.marked_range.is_none() {
             return;
         }
         let range = if let Some(range_utf16) = range_utf16.as_ref() {

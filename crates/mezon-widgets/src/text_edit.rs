@@ -245,24 +245,60 @@ pub fn marked_range_after_delete(
 
 pub fn swallow_discarded_ime_commit(
     discard: &mut Option<String>,
-    range_utf16: Option<&Range<usize>>,
-    has_marked: bool,
+    _range_utf16: Option<&Range<usize>>,
+    _has_marked: bool,
     new_text: &str,
 ) -> bool {
-    if range_utf16.is_some() || has_marked {
-        return false;
-    }
     let Some(expected) = discard.as_deref() else {
         return false;
     };
-    if new_text == expected {
-        *discard = None;
+    if new_text.is_empty() {
+        return false;
+    }
+    if new_text.chars().count() < expected.chars().count() {
+        return false;
+    }
+    if ime_token_eq(expected, new_text) {
         return true;
     }
-    if !new_text.is_empty() {
-        *discard = None;
-    }
+    *discard = None;
     false
+}
+
+fn ime_token_eq(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let folded_a = fold_ime_token(a);
+    let folded_b = fold_ime_token(b);
+    folded_a == folded_b && folded_a.chars().count() > 1
+}
+
+fn fold_ime_token(s: &str) -> String {
+    s.chars()
+        .filter(|c| !is_combining_mark(*c))
+        .map(fold_latin_letter)
+        .collect()
+}
+
+fn is_combining_mark(c: char) -> bool {
+    matches!(c, '\u{0300}'..='\u{036F}')
+}
+
+fn fold_latin_letter(c: char) -> char {
+    let c = c.to_lowercase().next().unwrap_or(c);
+    match c {
+        'à' | 'á' | 'ả' | 'ã' | 'ạ' | 'ă' | 'ằ' | 'ắ' | 'ẳ' | 'ẵ' | 'ặ' | 'â' | 'ầ' | 'ấ' | 'ẩ'
+        | 'ẫ' | 'ậ' => 'a',
+        'è' | 'é' | 'ẻ' | 'ẽ' | 'ẹ' | 'ê' | 'ề' | 'ế' | 'ể' | 'ễ' | 'ệ' => 'e',
+        'ì' | 'í' | 'ỉ' | 'ĩ' | 'ị' => 'i',
+        'ò' | 'ó' | 'ỏ' | 'õ' | 'ọ' | 'ô' | 'ồ' | 'ố' | 'ổ' | 'ỗ' | 'ộ' | 'ơ' | 'ờ' | 'ớ' | 'ở'
+        | 'ỡ' | 'ợ' => 'o',
+        'ù' | 'ú' | 'ủ' | 'ũ' | 'ụ' | 'ư' | 'ừ' | 'ứ' | 'ử' | 'ữ' | 'ự' => 'u',
+        'ỳ' | 'ý' | 'ỷ' | 'ỹ' | 'ỵ' => 'y',
+        'đ' => 'd',
+        _ => c,
+    }
 }
 
 pub fn surrounding_delete_range(
@@ -553,17 +589,91 @@ mod tests {
             false,
             "hoa"
         ));
-        assert!(discard.is_none());
+        assert_eq!(discard.as_deref(), Some("hoa"));
     }
 
     #[test]
-    fn discarded_ime_commit_clears_on_a_different_insert() {
-        let mut discard = Some("hoa".to_string());
+    fn discarded_ime_commit_swallows_composed_vietnamese() {
+        let mut discard = Some("ban".to_string());
+        assert!(swallow_discarded_ime_commit(
+            &mut discard,
+            None,
+            false,
+            "bạn"
+        ));
+        assert_eq!(discard.as_deref(), Some("ban"));
+    }
+
+    #[test]
+    fn discarded_ime_commit_does_not_swallow_the_next_sentence_first_char() {
+        let mut discard = Some("ban".to_string());
         assert!(!swallow_discarded_ime_commit(
             &mut discard,
             None,
             false,
-            "h"
+            "t"
+        ));
+        assert_eq!(discard.as_deref(), Some("ban"));
+        assert!(!swallow_discarded_ime_commit(
+            &mut discard,
+            None,
+            true,
+            "to"
+        ));
+        assert_eq!(discard.as_deref(), Some("ban"));
+    }
+
+    #[test]
+    fn discarded_ime_commit_keeps_the_token_until_the_echo_arrives() {
+        let mut discard = Some("ban".to_string());
+        assert!(!swallow_discarded_ime_commit(
+            &mut discard,
+            None,
+            false,
+            "t"
+        ));
+        assert_eq!(discard.as_deref(), Some("ban"));
+        assert!(swallow_discarded_ime_commit(
+            &mut discard,
+            None,
+            true,
+            "bạn"
+        ));
+        assert_eq!(discard.as_deref(), Some("ban"));
+    }
+
+    #[test]
+    fn discarded_ime_commit_clears_on_a_new_word_of_equal_length() {
+        let mut discard = Some("ban".to_string());
+        assert!(!swallow_discarded_ime_commit(
+            &mut discard,
+            None,
+            false,
+            "xin"
+        ));
+        assert!(discard.is_none());
+    }
+
+    #[test]
+    fn discarded_ime_commit_does_not_swallow_a_shorter_preedit_update() {
+        let mut discard = Some("được".to_string());
+        assert!(!swallow_discarded_ime_commit(
+            &mut discard,
+            None,
+            true,
+            "đượ"
+        ));
+        assert_eq!(discard.as_deref(), Some("được"));
+    }
+
+    #[test]
+    fn discarded_ime_commit_does_not_swallow_telex_d_as_echo_of_d() {
+        let mut discard = Some("đ".to_string());
+        assert!(!swallow_discarded_ime_commit(
+            &mut discard,
+            None,
+            false,
+            "d"
         ));
         assert!(discard.is_none());
     }

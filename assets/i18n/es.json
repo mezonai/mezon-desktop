@@ -3319,6 +3319,7 @@
   "message.newMessage.to": "Para",
   "message.newMessages": "NUEVOS MENSAJES",
   "message.noAccess": "Sin acceso",
+  "message.privateChannel": "private-channel",
   "message.noContactsFound": "No se encontraron contactos",
   "message.noSendMessagePermission": "No tienes permiso para enviar mensajes",
   "message.numberReplies": "{{number}} respuestas",

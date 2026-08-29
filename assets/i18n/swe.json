@@ -3286,6 +3286,7 @@
   "message.newMessage.to": "Till",
   "message.newMessages": "NYA MEDELANDEN",
   "message.noAccess": "Ingen tillgång",
+  "message.privateChannel": "private-channel",
   "message.noContactsFound": "Inga kontakter hittades",
   "message.noSendMessagePermission": "Du har inte rätt att skicka meddelande",
   "message.numberReplies": "{{number}} meddelanden",

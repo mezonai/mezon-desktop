@@ -2005,6 +2005,9 @@ impl Render for ChatLayout {
 
 impl ChatLayout {
     pub(crate) fn send_current_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chat_area.send_denied() {
+            return;
+        }
         let Some(mention_input) = self.chat_area.mention_input.clone() else {
             return;
         };
@@ -2342,6 +2345,9 @@ impl ChatLayout {
     }
 
     pub(crate) fn send_sticker(&mut self, url: String, filename: String, cx: &mut Context<Self>) {
+        if self.chat_area.send_denied() {
+            return;
+        }
         crate::chat::ChatSending::send_sticker(url, filename, &self.auth_state, cx);
     }
 
@@ -2352,10 +2358,16 @@ impl ChatLayout {
         height: u32,
         cx: &mut Context<Self>,
     ) {
+        if self.chat_area.send_denied() {
+            return;
+        }
         crate::chat::ChatSending::send_gif(url, width, height, &self.auth_state, cx);
     }
 
     pub(crate) fn send_sound(&mut self, url: String, filename: String, cx: &mut Context<Self>) {
+        if self.chat_area.send_denied() {
+            return;
+        }
         crate::chat::ChatSending::send_sound(url, filename, &self.auth_state, cx);
     }
 

@@ -3286,6 +3286,7 @@
   "message.newMessage.to": "Para",
   "message.newMessages": "NOVAS MENSAGENS",
   "message.noAccess": "Sem permissão",
+  "message.privateChannel": "private-channel",
   "message.noContactsFound": "Nenhum contato encontrado",
   "message.noSendMessagePermission": "Você não tem permissão para enviar mensagens",
   "message.numberReplies": "{{number}} mensagens",

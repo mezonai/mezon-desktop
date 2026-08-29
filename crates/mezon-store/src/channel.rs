@@ -20,6 +20,7 @@ use mezon_client::{
 
 use crate::KeyedCache;
 use crate::badge::BadgeService;
+use crate::channel_settings::ChannelSettingsStore;
 use crate::clan::{ClanEvent, ClanList};
 use crate::compose::ComposeStore;
 use crate::event_targets_user;
@@ -254,17 +255,30 @@ fn archive_permission_for(
     channel_id: ChannelId,
     cx: &App,
 ) -> bool {
-    let Some(channel) = channel_list.channel(clan_id, channel_id) else {
-        return false;
-    };
-    let is_welcome = ClanList::global(cx).read(cx).welcome_channel_id(clan_id) == Some(channel_id);
-    if archive_menu_hidden(channel.channel_type, is_welcome) {
+    let fallback = ChannelSettingsStore::try_global(cx)
+        .and_then(|store| store.read(cx).row_by_id(clan_id, channel_id).cloned());
+    let channel = channel_list.channel(clan_id, channel_id);
+    if channel.is_none() && fallback.is_none() {
         return false;
     }
-    let is_thread = channel.parent_id.is_some();
+    let is_welcome = ClanList::global(cx).read(cx).welcome_channel_id(clan_id) == Some(channel_id);
+    let channel_type = channel
+        .map(|channel| channel.channel_type)
+        .unwrap_or_else(|| {
+            ChannelType::from_raw(fallback.as_ref().unwrap().channel_type.max(0) as u32)
+        });
+    if archive_menu_hidden(channel_type, is_welcome) {
+        return false;
+    }
+    let is_thread = channel
+        .map(|channel| channel.parent_id.is_some())
+        .unwrap_or_else(|| !fallback.as_ref().unwrap().parent_id.is_zero());
+    let creator_id = channel
+        .map(|channel| channel.creator_id)
+        .unwrap_or_else(|| fallback.as_ref().unwrap().creator_id);
     let is_creator = BadgeService::try_global(cx)
         .and_then(|badges| badges.read(cx).current_user_id(cx))
-        .is_some_and(|me| me == channel.creator_id);
+        .is_some_and(|me| me == creator_id);
     let Some(permissions) = PermissionStore::try_global(cx) else {
         return is_creator;
     };
@@ -288,12 +302,23 @@ fn delete_permission_for(
     if ClanList::global(cx).read(cx).welcome_channel_id(clan_id) == Some(channel_id) {
         return false;
     }
-    let Some(channel) = channel_list.channel(clan_id, channel_id) else {
+    let creator_id = channel_list
+        .channel(clan_id, channel_id)
+        .map(|channel| channel.creator_id)
+        .or_else(|| {
+            ChannelSettingsStore::try_global(cx).and_then(|store| {
+                store
+                    .read(cx)
+                    .row_by_id(clan_id, channel_id)
+                    .map(|row| row.creator_id)
+            })
+        });
+    let Some(creator_id) = creator_id else {
         return false;
     };
     let is_creator = BadgeService::try_global(cx)
         .and_then(|badges| badges.read(cx).current_user_id(cx))
-        .is_some_and(|me| me == channel.creator_id);
+        .is_some_and(|me| me == creator_id);
     let Some(permissions) = PermissionStore::try_global(cx) else {
         return is_creator;
     };
@@ -468,6 +493,13 @@ pub struct ChannelList {
     extras_loading: HashSet<ClanId>,
     badge_seeding: HashSet<ClanId>,
     badge_seeded: HashSet<ClanId>,
+    joined_clans: HashSet<ClanId>,
+    joining_clans: HashMap<ClanId, Shared<Task<()>>>,
+    /// Bumped by `resync` only. Every fetch that owns an in-flight guard captures
+    /// it and abandons its bookkeeping when it no longer matches, so a reconnect
+    /// can drop those guards and re-issue without a task from the dead socket
+    /// clearing the replacement's guard behind it.
+    socket_generation: u64,
     forgotten_clans: HashSet<ClanId>,
     user_channels: HashMap<ChannelId, Channel>,
     user_channels_order: Vec<ChannelId>,
@@ -476,6 +508,7 @@ pub struct ChannelList {
     in_voice: HashMap<UserId, InVoiceInfo>,
     user_channels_loaded: bool,
     loading: HashMap<ClanId, Shared<Task<()>>>,
+    pending_clan_refresh: HashSet<ClanId>,
     active_clan_id: Option<ClanId>,
     pub active_channel_id: Option<ChannelId>,
     remembered_channels: HashMap<ClanId, ChannelId>,
@@ -639,6 +672,8 @@ impl ChannelList {
         self.extras_loading.clear();
         self.badge_seeding.clear();
         self.badge_seeded.clear();
+        self.joined_clans.clear();
+        self.joining_clans.clear();
         self.forgotten_clans.clear();
         self.user_channels.clear();
         self.user_channels_order.clear();
@@ -647,6 +682,7 @@ impl ChannelList {
         self.in_voice.clear();
         self.user_channels_loaded = false;
         self.loading.clear();
+        self.pending_clan_refresh.clear();
         self.show_empty_categories.clear();
         self.remembered_channels.clear();
         self.previous_channels.clear();
@@ -731,6 +767,9 @@ impl ChannelList {
             extras_loading: HashSet::new(),
             badge_seeding: HashSet::new(),
             badge_seeded: HashSet::new(),
+            joined_clans: HashSet::new(),
+            joining_clans: HashMap::new(),
+            socket_generation: 0,
             forgotten_clans: HashSet::new(),
             user_channels: HashMap::new(),
             user_channels_order: Vec::new(),
@@ -739,6 +778,7 @@ impl ChannelList {
             in_voice: HashMap::new(),
             user_channels_loaded: false,
             loading: HashMap::new(),
+            pending_clan_refresh: HashSet::new(),
             active_clan_id: None,
             active_channel_id: None,
             remembered_channels: HashMap::new(),
@@ -784,6 +824,7 @@ impl ChannelList {
             .or_else(|| ClanList::global(cx).read(cx).active_clan_id);
         if active == Some(clan_id) {
             self.load_for_clan(clan_id, cx);
+            drop(self.ensure_clan_joined(clan_id, cx));
             self.seed_badges(clan_id, cx).detach();
         }
     }
@@ -812,7 +853,10 @@ impl ChannelList {
         self.extras_loading.remove(&clan_id);
         self.badge_seeding.remove(&clan_id);
         self.badge_seeded.remove(&clan_id);
+        self.joined_clans.remove(&clan_id);
+        self.joining_clans.remove(&clan_id);
         self.loading.remove(&clan_id);
+        self.pending_clan_refresh.remove(&clan_id);
         self.show_empty_categories.remove(&clan_id);
         self.remembered_channels.remove(&clan_id);
         if self.previous_channels.remove(&clan_id).is_some() {
@@ -895,6 +939,81 @@ impl ChannelList {
         self.badge_seeding.remove(&clan_id);
     }
 
+    /// Subscribe the socket to a clan's channel streams — and never before the
+    /// clan's `ListChannelDescs` has been served.
+    ///
+    /// The gateway builds the per-channel subscriptions of a `clan_join` from the
+    /// server-side listing cache for this `(clan, user)`; on a cache miss it
+    /// tracks the clan stream alone, and every later `clan_join` for that clan is
+    /// answered from the tracker without re-running the fan-out. Public channels
+    /// ride the clan stream and keep working, so a join that lands too early goes
+    /// unnoticed except that **private channels and threads stop pushing** — no
+    /// `ChannelMessage`, so their sidebar rows never turn unread until the channel
+    /// is opened (opening one subscribes it on its own). Fetching the listing
+    /// first is what populates that cache.
+    pub fn ensure_clan_joined(
+        &mut self,
+        clan_id: ClanId,
+        cx: &mut Context<Self>,
+    ) -> Shared<Task<()>> {
+        if clan_id.is_zero() || self.forgotten_clans.contains(&clan_id) {
+            return Task::ready(()).shared();
+        }
+        if let Some(in_flight) = self.joining_clans.get(&clan_id) {
+            return in_flight.clone();
+        }
+        if self.joined_clans.contains(&clan_id) {
+            return Task::ready(()).shared();
+        }
+        // Callers reach this from two directions — the clan load, which has already
+        // started the listing, and a channel being opened, which may not have. Kick the
+        // listing here so the join is never skipped merely because nobody fetched yet.
+        self.load_structure_for_clan(clan_id, cx);
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        let socket_generation = self.socket_generation;
+        let structure_ready = self.clan_structure_ready(clan_id);
+        let task = cx
+            .spawn(async move |this, cx| {
+                structure_ready.await;
+                let ready = this
+                    .update(cx, |this, _| {
+                        this.reset_generation == generation
+                            && this.socket_generation == socket_generation
+                            && !this.forgotten_clans.contains(&clan_id)
+                            && this.cache.contains(&clan_id)
+                    })
+                    .unwrap_or(false);
+                // No listing means the gateway's cache may still be cold, and the
+                // one join it acts on would be wasted; leave the clan unjoined so
+                // the next entry retries.
+                if ready {
+                    match api.join_clan_chat(clan_id.get()).await {
+                        Ok(()) => {
+                            tracing::debug!(target: "clan_load", "clan {clan_id} subscribed (clan_join)");
+                            let _ = this.update(cx, |this, _| {
+                                if this.socket_generation == socket_generation {
+                                    this.joined_clans.insert(clan_id);
+                                }
+                            });
+                        }
+                        Err(e) => tracing::error!(
+                            target: "clan_load",
+                            "join_clan_chat failed for clan {clan_id}: {e}"
+                        ),
+                    }
+                }
+                let _ = this.update(cx, |this, _| {
+                    if this.socket_generation == socket_generation {
+                        this.joining_clans.remove(&clan_id);
+                    }
+                });
+            })
+            .shared();
+        self.joining_clans.insert(clan_id, task.clone());
+        task
+    }
+
     pub fn seed_badges(&mut self, clan_id: ClanId, cx: &mut Context<Self>) -> Task<()> {
         if self.forgotten_clans.contains(&clan_id)
             || self.badge_seeded.contains(&clan_id)
@@ -904,19 +1023,19 @@ impl ChannelList {
         }
         let api = self.api.clone();
         let generation = self.reset_generation;
+        let socket_generation = self.socket_generation;
         let structure_ready = self.clan_structure_ready(clan_id);
         cx.spawn(async move |this, cx| {
             structure_ready.await;
             let still_current = this
                 .update(cx, |this, _| {
-                    this.reset_generation == generation && !this.forgotten_clans.contains(&clan_id)
+                    this.reset_generation == generation
+                        && this.socket_generation == socket_generation
+                        && !this.forgotten_clans.contains(&clan_id)
                 })
                 .unwrap_or(false);
             if !still_current {
                 return;
-            }
-            if let Err(e) = api.join_clan_chat(clan_id.get()).await {
-                tracing::error!(target: "clan_load", "join_clan_chat failed for clan {clan_id}: {e}");
             }
             let mut attempt = 0u32;
             let descs = loop {
@@ -940,10 +1059,12 @@ impl ChannelList {
                 }
             };
             let _ = this.update(cx, |this, cx| {
-                this.badge_seeding.remove(&clan_id);
-                if this.reset_generation != generation {
+                if this.reset_generation != generation
+                    || this.socket_generation != socket_generation
+                {
                     return;
                 }
+                this.badge_seeding.remove(&clan_id);
                 let Some(descs) = descs else {
                     return;
                 };
@@ -1079,13 +1200,16 @@ impl ChannelList {
         }
         let api = self.api.clone();
         let generation = self.reset_generation;
+        let socket_generation = self.socket_generation;
         cx.spawn(async move |this, cx| {
             let extras = Self::fetch_clan_extras(&api, clan_id).await;
             let _ = this.update(cx, |this, cx| {
-                this.extras_loading.remove(&clan_id);
-                if this.reset_generation != generation {
+                if this.reset_generation != generation
+                    || this.socket_generation != socket_generation
+                {
                     return;
                 }
+                this.extras_loading.remove(&clan_id);
                 this.finish_extras(clan_id, extras, cx);
             });
         })
@@ -1107,6 +1231,10 @@ impl ChannelList {
         }
         self.want_extras.insert(clan_id);
         self.extras_loaded.remove(&clan_id);
+        if self.loading.contains_key(&clan_id) {
+            self.pending_clan_refresh.insert(clan_id);
+            return;
+        }
         self.fetch_clan(clan_id, cx);
     }
 
@@ -1145,10 +1273,32 @@ impl ChannelList {
     ) -> Task<Result<(), String>> {
         let api = self.api.clone();
         let clan_id_raw = clan_id.get();
-        cx.spawn(async move |_, _| {
-            api.restore_archived_channel(clan_id_raw, channel_id)
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .restore_archived_channel(clan_id_raw, channel_id)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string());
+            if result.is_ok() {
+                let channel_id = ChannelId(channel_id);
+                let _ = this.update(cx, |this, cx| {
+                    this.archived_channel_ids.remove(&channel_id);
+                    this.archived_channel_parents.remove(&channel_id);
+                    if let Some(children) = this.archived_cascade_children.remove(&channel_id) {
+                        for child_id in children {
+                            this.archived_channel_ids.remove(&child_id);
+                        }
+                    }
+                    this.channel_detail_failed.remove(&channel_id);
+                    this.refresh_clan(clan_id, cx);
+                    this.ensure_channel_in_clan(clan_id, channel_id, cx);
+                    if let Some(settings) = ChannelSettingsStore::try_global(cx) {
+                        settings.update(cx, |settings, cx| {
+                            settings.refresh_rows(clan_id, ChannelId(0), cx)
+                        });
+                    }
+                });
+            }
+            result
         })
     }
 
@@ -1170,6 +1320,14 @@ impl ChannelList {
                     let parent_id = this
                         .channel(clan_id, channel_id)
                         .and_then(|ch| ch.parent_id)
+                        .or_else(|| {
+                            ChannelSettingsStore::try_global(cx).and_then(|store| {
+                                store
+                                    .read(cx)
+                                    .row_by_id(clan_id, channel_id)
+                                    .map(|row| row.parent_id)
+                            })
+                        })
                         .unwrap_or(ChannelId(0));
                     Ok((parent_id, this.api.clone()))
                 })
@@ -1220,6 +1378,14 @@ impl ChannelList {
                     let parent_id = this
                         .channel(clan_id, channel_id)
                         .and_then(|ch| ch.parent_id)
+                        .or_else(|| {
+                            ChannelSettingsStore::try_global(cx).and_then(|store| {
+                                store
+                                    .read(cx)
+                                    .row_by_id(clan_id, channel_id)
+                                    .map(|row| row.parent_id)
+                            })
+                        })
                         .unwrap_or(ChannelId(0));
                     Ok((parent_id, this.api.clone()))
                 })
@@ -1325,6 +1491,7 @@ impl ChannelList {
         }
         let api = self.api.clone();
         let generation = self.reset_generation;
+        let socket_generation = self.socket_generation;
         let executor = cx.background_executor().clone();
         let task = cx
             .spawn(async move |this, cx| {
@@ -1332,20 +1499,30 @@ impl ChannelList {
                 match result {
                     Ok((categories, favorite_ids)) => {
                         let _ = this.update(cx, |this, cx| {
-                            if this.reset_generation != generation {
+                            if this.reset_generation != generation
+                                || this.socket_generation != socket_generation
+                            {
                                 return;
                             }
                             this.apply_clan_structure(clan_id, categories, favorite_ids, cx);
                             this.loading.remove(&clan_id);
+                            if this.pending_clan_refresh.remove(&clan_id) {
+                                this.refresh_clan(clan_id, cx);
+                            }
                         });
                     }
                     Err(e) => {
                         tracing::error!("Failed to load channels for clan {clan_id}: {e}");
                         let _ = this.update(cx, |this, cx| {
-                            if this.reset_generation != generation {
+                            if this.reset_generation != generation
+                                || this.socket_generation != socket_generation
+                            {
                                 return;
                             }
                             this.loading.remove(&clan_id);
+                            if this.pending_clan_refresh.remove(&clan_id) {
+                                this.refresh_clan(clan_id, cx);
+                            }
                             cx.notify();
                         });
                     }
@@ -1422,6 +1599,35 @@ impl ChannelList {
 
     pub fn is_locally_deleted(&self, channel_id: ChannelId) -> bool {
         self.deleted_channel_ids.contains(&channel_id)
+    }
+
+    pub fn reconcile_active_channels(
+        &mut self,
+        clan_id: ClanId,
+        channel_ids: &[ChannelId],
+        cx: &mut Context<Self>,
+    ) {
+        let restored = channel_ids
+            .iter()
+            .copied()
+            .filter(|channel_id| self.archived_channel_ids.remove(channel_id))
+            .collect::<Vec<_>>();
+        if restored.is_empty() {
+            return;
+        }
+        for channel_id in &restored {
+            self.archived_channel_parents.remove(channel_id);
+            if let Some(children) = self.archived_cascade_children.remove(channel_id) {
+                for child_id in children {
+                    self.archived_channel_ids.remove(&child_id);
+                }
+            }
+            self.channel_detail_failed.remove(channel_id);
+        }
+        self.refresh_clan(clan_id, cx);
+        for channel_id in restored {
+            self.ensure_channel_in_clan(clan_id, channel_id, cx);
+        }
     }
 
     pub fn deleted_channel_parent(&self, channel_id: ChannelId) -> Option<ChannelId> {
@@ -2685,45 +2891,6 @@ impl ChannelList {
         })
     }
 
-    pub fn patch_channel_overview_detail(
-        &mut self,
-        clan_id: ClanId,
-        channel_id: ChannelId,
-        topic: String,
-        age_restricted: Option<i32>,
-        e2ee: i32,
-        app_id: i64,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(channel) = self.channel(clan_id, channel_id).cloned() else {
-            return;
-        };
-        let mut changed = false;
-        if let Some(categories) = self.cache.get_mut(&clan_id) {
-            changed = update_channel(
-                categories,
-                channel_id,
-                None,
-                Some(topic),
-                age_restricted,
-                channel.private,
-            );
-            if changed {
-                for cat in categories.iter_mut() {
-                    for ch in cat.channels.iter_mut() {
-                        if ch.id == channel_id {
-                            ch.e2ee = e2ee;
-                            ch.app_id = app_id;
-                        }
-                    }
-                }
-            }
-        }
-        if changed {
-            cx.notify();
-        }
-    }
-
     pub fn update_channel_overview(
         &mut self,
         clan_id: ClanId,
@@ -2886,6 +3053,30 @@ impl ChannelList {
                 .iter_mut()
                 .flat_map(|c| c.channels.iter_mut())
                 .filter(|ch| ch.id == channel_id)
+            {
+                if ch.muted != muted {
+                    ch.muted = muted;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    pub fn set_channels_muted_any_clan(
+        &mut self,
+        channel_ids: &HashSet<ChannelId>,
+        muted: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = false;
+        for categories in self.cache.values_mut() {
+            for ch in categories
+                .iter_mut()
+                .flat_map(|c| c.channels.iter_mut())
+                .filter(|ch| channel_ids.contains(&ch.id))
             {
                 if ch.muted != muted {
                     ch.muted = muted;
@@ -3334,13 +3525,29 @@ impl ChannelList {
 
     fn resync(&mut self, cx: &mut Context<Self>) {
         tracing::info!("ChannelList resync — invalidating channel cache");
+        // Everything issued on the socket that just died is abandoned: the
+        // adapter drops its pending waiters, so those tasks resolve as failures
+        // whose only remaining effect would be to clear the guard belonging to
+        // their replacement. Bumping the generation makes them no-ops, which is
+        // what lets the guards below be cleared safely.
+        self.socket_generation = self.socket_generation.wrapping_add(1);
         self.cache.mark_all_stale();
         self.invalidate_channel_index_all();
         self.badge_seeded.clear();
+        self.badge_seeding.clear();
         self.extras_loaded.clear();
+        self.extras_loading.clear();
+        self.loading.clear();
+        // A reconnect is a new gateway session: every `clan_join` we sent is gone
+        // with the old one, so the clans have to be re-subscribed from scratch.
+        self.joined_clans.clear();
+        self.joining_clans.clear();
+        self.user_channels_generation = self.user_channels_generation.wrapping_add(1);
+        self.user_channels_loading = false;
         self.fetch_user_channels(cx);
         if let Some(clan_id) = self.active_clan_id {
             self.load_for_clan(clan_id, cx);
+            drop(self.ensure_clan_joined(clan_id, cx));
             self.seed_badges(clan_id, cx).detach();
         }
     }
@@ -3755,6 +3962,11 @@ impl ChannelList {
         parent_id: ChannelId,
         cx: &mut Context<Self>,
     ) {
+        if let Some(store) = ChannelSettingsStore::try_global(cx) {
+            store.update(cx, |store, cx| {
+                store.remove_channel_locally(clan_id, channel_id, cx)
+            });
+        }
         self.deleted_channel_ids.insert(channel_id);
         if !parent_id.is_zero() {
             self.deleted_channel_parents.insert(channel_id, parent_id);
@@ -3828,6 +4040,11 @@ impl ChannelList {
         parent_id: ChannelId,
         cx: &mut Context<Self>,
     ) {
+        if let Some(store) = ChannelSettingsStore::try_global(cx) {
+            store.update(cx, |store, cx| {
+                store.remove_channel_locally(clan_id, channel_id, cx)
+            });
+        }
         let leaving_badge = self
             .channel(clan_id, channel_id)
             .map(|ch| ch.badge_count)
@@ -4925,6 +5142,7 @@ fn merge_previous_voice_members(
 
 struct LiveUnreadState {
     badge_count: u32,
+    muted: bool,
     last_seen_timestamp: i64,
     last_seen_message_id: MessageId,
     last_sent_timestamp: i64,
@@ -4946,6 +5164,7 @@ fn collect_channel_badges(
                         ch.id,
                         LiveUnreadState {
                             badge_count: ch.badge_count,
+                            muted: ch.muted,
                             last_seen_timestamp: ch.last_seen_timestamp,
                             last_seen_message_id: ch.last_seen_message_id,
                             last_sent_timestamp: ch.last_sent_timestamp,
@@ -4975,6 +5194,7 @@ fn carry_live_channel_badges(
         let Some(live) = previous.get(&ch.id) else {
             continue;
         };
+        ch.muted = live.muted;
         ch.badge_count = ch.badge_count.max(live.badge_count);
         if live.last_seen_timestamp > ch.last_seen_timestamp
             || (live.last_seen_timestamp == ch.last_seen_timestamp
@@ -7886,6 +8106,7 @@ mod tests {
                                 active: crate::threads::THREAD_STATUS_JOINED,
                                 creator_id: "1".into(),
                                 last_message_content: String::new(),
+                                last_message_preview: String::new(),
                                 last_message_sender_id: String::new(),
                                 last_message_sender_name: String::new(),
                                 last_message_sender_avatar: String::new(),
@@ -7901,6 +8122,7 @@ mod tests {
                                 active: crate::threads::THREAD_STATUS_JOINED,
                                 creator_id: "1".into(),
                                 last_message_content: String::new(),
+                                last_message_preview: String::new(),
                                 last_message_sender_id: String::new(),
                                 last_message_sender_name: String::new(),
                                 last_message_sender_avatar: String::new(),
@@ -7916,6 +8138,7 @@ mod tests {
                                 active: crate::threads::THREAD_STATUS_JOINED,
                                 creator_id: "1".into(),
                                 last_message_content: String::new(),
+                                last_message_preview: String::new(),
                                 last_message_sender_id: String::new(),
                                 last_message_sender_name: String::new(),
                                 last_message_sender_avatar: String::new(),
@@ -8396,6 +8619,105 @@ mod tests {
     }
 
     #[gpui::test]
+    fn clan_join_waits_for_the_channel_listing(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.load_for_clan(ClanId(1), cx);
+
+                let join = channels.ensure_clan_joined(ClanId(1), cx);
+                assert!(
+                    join.now_or_never().is_none(),
+                    "clan_join must not be sent while the channel listing is still in flight — \
+                     the gateway would fan out over a cold cache and silently subscribe to \
+                     none of the clan's private channels or threads"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn opening_a_channel_waits_for_the_clan_join(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                // Nobody has loaded the clan yet — the path a deep link or a restored
+                // route takes. The join must still be reachable, because a public
+                // channel_join landing first would resolve to the clan stream and make
+                // the gateway skip the fan-out for the whole session.
+                let join = channels.ensure_clan_joined(ClanId(1), cx);
+                assert!(
+                    channels.is_loading_clan(ClanId(1)),
+                    "ensure_clan_joined must start the listing itself, not give up"
+                );
+                assert!(
+                    join.now_or_never().is_none(),
+                    "and it must not resolve until that listing lands"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn clan_join_is_sent_once_per_gateway_session(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_two_channels(),
+                    favor_ids(&[]),
+                    cx,
+                );
+
+                let first = channels.ensure_clan_joined(ClanId(1), cx);
+                assert!(
+                    Shared::ptr_eq(&first, &channels.ensure_clan_joined(ClanId(1), cx)),
+                    "a second entry must reuse the in-flight join, not send another"
+                );
+
+                channels.resync(cx);
+                assert!(
+                    channels.joined_clans.is_empty() && channels.joining_clans.is_empty(),
+                    "a reconnect starts a new gateway session, so every clan has to be \
+                     re-subscribed"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn resync_re_issues_the_fetches_a_dead_socket_left_in_flight(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.active_clan_id = Some(ClanId(1));
+                channels.load_for_clan(ClanId(1), cx);
+                channels.seed_badges(ClanId(1), cx).detach();
+                assert!(channels.is_loading_clan(ClanId(1)));
+                assert!(channels.badge_seeding.contains(&ClanId(1)));
+
+                let before = channels.socket_generation;
+                channels.resync(cx);
+
+                assert_ne!(
+                    channels.socket_generation, before,
+                    "the tasks of the dead socket must be fenced off"
+                );
+                assert!(
+                    channels.is_loading_clan(ClanId(1)),
+                    "resync must re-issue ListChannelDescs, not sit behind the guard the \
+                     dead socket's fetch still holds"
+                );
+                assert!(
+                    channels.badge_seeding.contains(&ClanId(1)),
+                    "resync must re-issue ListChannelBadgeCount for the active clan"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
     fn seed_badges_waits_on_the_in_flight_structure_fetch(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let channels = init_channel_list(cx);
@@ -8409,7 +8731,7 @@ mod tests {
                 let listing = channels.clan_structure_ready(ClanId(1));
                 assert!(
                     listing.clone().now_or_never().is_none(),
-                    "seed_badges must not reach join_clan_chat while the listing is in flight"
+                    "seed_badges must not reach ListChannelBadgeCount while the listing is in flight"
                 );
 
                 channels.refresh_clan(ClanId(1), cx);
@@ -8548,6 +8870,42 @@ mod tests {
                      badge forward instead of resetting it, exactly like ClanList::carry_live_badges \
                      does for the clan-icon aggregate"
                 );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn live_channel_mute_survives_a_structure_refetch(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.set_channel_muted(ClanId(1), ChannelId(1), true, cx);
+                assert!(channels.channel(ClanId(1), ChannelId(1)).unwrap().muted);
+
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                assert!(
+                    channels.channel(ClanId(1), ChannelId(1)).unwrap().muted,
+                    "a stale structure response must not erase a newer realtime mute"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn bulk_channel_mute_updates_matching_rows(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.set_channels_muted_any_clan(
+                    &HashSet::from([ChannelId(1), ChannelId(2)]),
+                    true,
+                    cx,
+                );
+
+                assert!(channels.channel(ClanId(1), ChannelId(1)).unwrap().muted);
+                assert!(channels.channel(ClanId(1), ChannelId(2)).unwrap().muted);
             });
         });
     }

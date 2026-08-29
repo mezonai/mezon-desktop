@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
@@ -261,7 +261,7 @@ impl NotificationSettingStore {
             let _ = this.update(cx, |store, cx| {
                 store.clan_prefetch.remove(&clan_id);
                 match muted {
-                    Ok(ids) => store.seed_muted_channels(&ids),
+                    Ok(ids) => store.seed_muted_channels(&ids, cx),
                     Err(e) => tracing::warn!(
                         clan_id = clan_id.get(),
                         "failed to list muted channels: {e}"
@@ -283,7 +283,8 @@ impl NotificationSettingStore {
     /// `list_muted_channels` returns ids only, so it can establish that a channel is
     /// muted but not when the mute expires; the exact expiry arrives with
     /// [`Self::ensure_loaded`] for the channel actually being opened.
-    fn seed_muted_channels(&mut self, muted_ids: &[String]) {
+    fn seed_muted_channels(&mut self, muted_ids: &[String], cx: &mut Context<Self>) {
+        let mut seeded = HashSet::with_capacity(muted_ids.len());
         for id in muted_ids {
             let Ok(raw) = id.parse::<i64>() else {
                 continue;
@@ -297,6 +298,12 @@ impl NotificationSettingStore {
             if entry.mute_until_ms == 0 {
                 entry.mute_until_ms = i64::from(MUTE_INFINITY);
             }
+            seeded.insert(channel_id);
+        }
+        if !seeded.is_empty() {
+            crate::channel::ChannelList::global(cx).update(cx, |channels, cx| {
+                channels.set_channels_muted_any_clan(&seeded, true, cx);
+            });
         }
     }
 
@@ -316,6 +323,10 @@ impl NotificationSettingStore {
                 match fetched {
                     Ok(setting) => {
                         store.settings.insert(channel_id, setting);
+                        let muted = setting.is_time_muted(now_ms());
+                        crate::channel::ChannelList::global(cx).update(cx, |channels, cx| {
+                            channels.set_channel_muted_any_clan(channel_id, muted, cx);
+                        });
                         cx.emit(NotificationSettingEvent::Changed(channel_id));
                         cx.notify();
                     }

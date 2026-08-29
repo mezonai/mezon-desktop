@@ -31,6 +31,7 @@ const CODING_ALIASES: &[&str] = &[
     "Code",
     "Visual Studio Code",
     "Cursor",
+    "Zed",
     "Xcode",
     "Sublime Text",
     "Atom",
@@ -69,6 +70,7 @@ const CATALOG: &[CatalogEntry] = &[
 
 const LINUX_COMM_ALIASES: &[(&str, &str)] = &[
     ("sublime_text", "Sublime Text"),
+    ("zed", "Zed"),
     ("codium", "Code"),
     ("vscodium", "Code"),
     ("webstorm", "WebStorm"),
@@ -90,6 +92,10 @@ const LINUX_COMM_ALIASES: &[(&str, &str)] = &[
 const LINUX_PATH_HINTS: &[(&str, &str)] = &[
     ("/cursor/cursor", "Cursor"),
     ("/cursor.appimage", "Cursor"),
+    ("/zed.appimage", "Zed"),
+    ("/zed.app/", "Zed"),
+    ("/lib/zed/", "Zed"),
+    ("/share/zed/", "Zed"),
     ("/spotify/", "Spotify"),
     ("/code/code", "Code"),
     ("/visual studio code/", "Visual Studio Code"),
@@ -143,10 +149,10 @@ pub fn match_linux_process(
         return Some(matched);
     }
     let comm_normalized = comm.replace('_', " ");
-    if comm_normalized != comm {
-        if let Some(matched) = match_process_name(&comm_normalized) {
-            return Some(matched);
-        }
+    if comm_normalized != comm
+        && let Some(matched) = match_process_name(&comm_normalized)
+    {
+        return Some(matched);
     }
     for (comm_alias, catalog_alias) in LINUX_COMM_ALIASES {
         if comm.eq_ignore_ascii_case(comm_alias) {
@@ -194,6 +200,7 @@ pub fn pick_highest_priority_match(
     best.map(|(name, kind, _)| (name, kind))
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn running_process_kind_priority(kind: ActivityKind) -> u8 {
     match kind {
         ActivityKind::Coding => 3,
@@ -215,11 +222,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn coding_aliases_match_old_electron_enum() {
+    fn coding_aliases_include_electron_editors_and_zed() {
         let expected = [
             "Code",
             "Visual Studio Code",
             "Cursor",
+            "Zed",
             "Xcode",
             "Sublime Text",
             "Atom",
@@ -255,6 +263,8 @@ mod tests {
         );
         assert_eq!(classify_process_name("Cursor"), Some(ActivityKind::Coding));
         assert_eq!(classify_process_name("cursor"), Some(ActivityKind::Coding));
+        assert_eq!(classify_process_name("Zed"), Some(ActivityKind::Coding));
+        assert_eq!(classify_process_name("zed"), Some(ActivityKind::Coding));
     }
 
     #[test]
@@ -294,6 +304,14 @@ mod tests {
             match_linux_process("webstorm", "", None),
             Some(("WebStorm".to_string(), ActivityKind::Coding))
         );
+        assert_eq!(
+            match_linux_process("zed", "", None),
+            Some(("Zed".to_string(), ActivityKind::Coding))
+        );
+        assert_eq!(
+            match_linux_process("electron", "/usr/lib/zed/zed-editor", None),
+            Some(("Zed".to_string(), ActivityKind::Coding))
+        );
     }
 
     #[test]
@@ -312,6 +330,7 @@ mod tests {
     #[test]
     fn is_coding_app_recognizes_catalog_editors() {
         assert!(is_coding_app("Cursor"));
+        assert!(is_coding_app("Zed"));
         assert!(is_coding_app("WebStorm"));
         assert!(!is_coding_app("Spotify"));
     }

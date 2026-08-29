@@ -433,16 +433,11 @@ impl ConnectionStore {
                         ));
                     }
 
-                    let api_for_join = api.clone();
-                    exec.spawn(async move {
-                        match api_for_join.join_clan_chat(0).await {
-                            Ok(()) => tracing::info!("DM-space subscribed (clan_join clan_id=0)"),
-                            Err(e) => {
-                                tracing::warn!("DM-space join (clan_join clan_id=0) failed: {e}")
-                            }
-                        }
-                    })
-                    .detach();
+                    // The DM-space join (`clan_join{clan_id: 0}`) is owned by
+                    // `DirectMessageStore`: the gateway derives the DM and group
+                    // stream subscriptions from its cached channel listing for
+                    // this user, so the join has to follow the DM listing fetch
+                    // instead of racing it from here.
                     cx.update(|cx| {
                         auth_state.update(cx, |state, cx| {
                             if let AuthState::Connecting(s) = state {

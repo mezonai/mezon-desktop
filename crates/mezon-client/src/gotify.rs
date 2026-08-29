@@ -82,6 +82,7 @@ pub async fn run_once(
     tx: &mpsc::UnboundedSender<GotifyNotification>,
 ) -> StreamEnd {
     let url = format!("{}/stream?token={token}", ws_base.trim_end_matches('/'));
+    tracing::info!(target: "noti", host = %ws_base, "gotify: connecting to the notification stream");
     let stream = match tokio_tungstenite::connect_async(&url).await {
         Ok((stream, _)) => stream,
         Err(e) => {
@@ -92,6 +93,8 @@ pub async fn run_once(
             );
             // The error may embed the URL, which carries the auth token — redact it.
             tracing::warn!(
+                target: "noti",
+                rejected,
                 "gotify: connect failed: {}",
                 e.to_string().replace(token, "***")
             );
@@ -102,7 +105,7 @@ pub async fn run_once(
             };
         }
     };
-    tracing::debug!("gotify: stream connected");
+    tracing::info!(target: "noti", "gotify: stream connected — listening for notifications");
     let (mut write, mut read) = stream.split();
 
     // The 60s watchdog advances only on a received `ping`, mirroring React's
@@ -112,13 +115,13 @@ pub async fn run_once(
     loop {
         let frame = tokio::select! {
             () = tokio::time::sleep_until(deadline) => {
-                tracing::debug!("gotify: ping timeout, reconnecting");
+                tracing::warn!(target: "noti", secs = PING_TIMEOUT.as_secs(), "gotify: no ping within the watchdog window, reconnecting");
                 return StreamEnd::Dropped;
             }
             frame = read.next() => match frame {
                 None => return StreamEnd::ClosedByServer,
                 Some(Err(e)) => {
-                    tracing::warn!("gotify: read error: {e}");
+                    tracing::warn!(target: "noti", "gotify: read error: {e}");
                     return StreamEnd::Dropped;
                 }
                 Some(Ok(frame)) => frame,
@@ -148,11 +151,25 @@ pub async fn run_once(
 
         match serde_json::from_str::<GotifyNotification>(trimmed) {
             Ok(notification) => {
+                tracing::info!(
+                    target: "noti",
+                    title = %notification.title,
+                    channel_id = %notification.channel_id,
+                    sender_id = %notification.sender_id,
+                    date = %notification.date,
+                    bytes = trimmed.len(),
+                    "gotify: frame received from the server"
+                );
                 if tx.send(notification).is_err() {
+                    tracing::warn!(target: "noti", "gotify: nobody is consuming notifications any more");
                     return StreamEnd::ReceiverGone;
                 }
             }
-            Err(e) => tracing::debug!("gotify: unparseable frame: {e}"),
+            Err(e) => tracing::warn!(
+                target: "noti",
+                bytes = trimmed.len(),
+                "gotify: could not parse a frame the server sent: {e}"
+            ),
         }
     }
 }

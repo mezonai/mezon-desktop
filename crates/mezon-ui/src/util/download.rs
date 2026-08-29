@@ -35,7 +35,8 @@ pub fn save_with_progress_toast(url: SharedString, filename: SharedString, cx: &
                         mezon_i18n::t(&locale, "download.downloading").replace("{{name}}", &name);
                     shell.progress_toast(key, message, progress, cx);
                 }
-                DownloadEvent::Finished => {
+                DownloadEvent::Finished { path } => {
+                    cx.reveal_path(&path);
                     let message =
                         mezon_i18n::t(&locale, "download.saved").replace("{{name}}", &name);
                     shell.finish_toast(key, ToastKind::Success, message, cx);

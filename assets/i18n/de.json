@@ -3286,6 +3286,7 @@
   "message.newMessage.to": "An",
   "message.newMessages": "NEUE NACHRICHTEN",
   "message.noAccess": "Kein Zugriff",
+  "message.privateChannel": "private-channel",
   "message.noContactsFound": "Keine Kontakte gefunden",
   "message.noSendMessagePermission": "Du hast keine Berechtigung, Nachrichten zu senden",
   "message.numberReplies": "{{number}} Nachrichten",
