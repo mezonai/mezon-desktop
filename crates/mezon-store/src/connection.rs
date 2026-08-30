@@ -219,6 +219,10 @@ impl ConnectionStore {
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
                     network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
+                    gateway_refusals = 0;
+                    jwt_refusals = 0;
+                    probed_this_outage = false;
+                    reminted_this_outage = false;
                     wake.notified().await;
                     continue;
                 };
@@ -229,9 +233,9 @@ impl ConnectionStore {
                     &api_server_key,
                 ));
 
-                if connected_user_id.as_deref() == Some(session.user_id.as_str())
-                    && transport.is_open().await
-                {
+                let already_connected = connected_user_id.as_deref() == Some(session.user_id.as_str())
+                    && transport.is_open().await;
+                if already_connected && !session.session_id.is_empty() {
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
                     wake.notified().await;
@@ -280,9 +284,17 @@ impl ConnectionStore {
                 // try GetHealthyEndpoint to mint a fresh SID. JWT socket is only the fallback when
                 // remint fails. Logout only follows an explicit JWT reject plus a rejected
                 // authenticated HTTP probe.
-                let needs_sid_recovery = session.session_id.is_empty()
-                    || gateway_refusals >= SSID_FAILURES_BEFORE_JWT;
-                if needs_sid_recovery && !reminted_this_outage && !gw_base.is_empty() {
+                //
+                // `reminted_this_outage` latches only on *success* so a dead reminted SID is not
+                // re-minted in a tight loop; remint *errors* must not latch — otherwise one gw 503
+                // leaves the session SID-empty for the whole outage.
+                let needs_sid_recovery = should_attempt_sid_remint(
+                    &session,
+                    gateway_refusals,
+                    reminted_this_outage,
+                    !gw_base.is_empty(),
+                );
+                if needs_sid_recovery {
                     if !jwt_is_fresh(&session) {
                         let (renewed, verdict) =
                             refresh_jwt_for_fallback(&api, &auth_state, session.clone(), cx).await;
@@ -312,15 +324,35 @@ impl ConnectionStore {
                                 tracing::info!(
                                     "Reminted session_id via GetHealthyEndpoint — retrying SID handshake"
                                 );
+                                if transport.is_open().await {
+                                    let _ = transport.close().await;
+                                    connected_user_id = None;
+                                    api.set_status(ConnectionStatus::Disconnected);
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!(
                                     "GetHealthyEndpoint could not remint session_id ({e}) — falling back to JWT handshake"
                                 );
-                                reminted_this_outage = true;
+                                if already_connected {
+                                    retry_backoff_secs = 1;
+                                    consecutive_failures = 0;
+                                    wake.notified().await;
+                                    continue;
+                                }
                             }
                         }
+                    } else if already_connected {
+                        retry_backoff_secs = 1;
+                        consecutive_failures = 0;
+                        wake.notified().await;
+                        continue;
                     }
+                } else if already_connected {
+                    retry_backoff_secs = 1;
+                    consecutive_failures = 0;
+                    wake.notified().await;
+                    continue;
                 }
 
                 let use_jwt = should_lead_with_jwt(&session, gateway_refusals);
@@ -855,14 +887,25 @@ async fn remint_session_via_healthy_endpoint(
     Ok(renewed)
 }
 
+fn should_attempt_sid_remint(
+    session: &Session,
+    sid_failures: u32,
+    reminted_successfully_this_outage: bool,
+    gw_configured: bool,
+) -> bool {
+    gw_configured
+        && !reminted_successfully_this_outage
+        && (session.session_id.is_empty() || sid_failures >= SSID_FAILURES_BEFORE_JWT)
+}
+
 fn should_lead_with_jwt(session: &Session, sid_failures: u32) -> bool {
     session.session_id.is_empty() || sid_failures >= SSID_FAILURES_BEFORE_JWT
 }
 
-/// Whether the JWT can still authenticate a handshake or an HTTP call.
 fn jwt_is_fresh(session: &Session) -> bool {
     !session.token.is_empty()
-        && (session.expires_at == 0 || now_secs() + JWT_SKEW.as_secs() < session.expires_at)
+        && session.expires_at != 0
+        && now_secs() + JWT_SKEW.as_secs() < session.expires_at
 }
 
 fn configured_api_base_url(config: &AppConfig) -> String {
@@ -1154,6 +1197,37 @@ mod tests {
     }
 
     #[test]
+    fn remint_is_retried_after_errors_but_not_after_a_successful_mint() {
+        let empty_sid = Session {
+            token: "jwt".into(),
+            expires_at: now_secs() + 600,
+            ..Default::default()
+        };
+        assert!(should_attempt_sid_remint(&empty_sid, 0, false, true));
+        assert!(
+            should_attempt_sid_remint(&empty_sid, 0, false, true),
+            "a failed remint must not latch — the next loop may retry"
+        );
+        assert!(
+            !should_attempt_sid_remint(&empty_sid, 0, true, true),
+            "a successful remint latches until the outage clears so a dead mint is not tight-looped"
+        );
+        assert!(!should_attempt_sid_remint(&empty_sid, 0, false, false));
+
+        let with_sid = Session {
+            session_id: "sid".into(),
+            ..empty_sid
+        };
+        assert!(!should_attempt_sid_remint(&with_sid, 0, false, true));
+        assert!(should_attempt_sid_remint(
+            &with_sid,
+            SSID_FAILURES_BEFORE_JWT,
+            false,
+            true
+        ));
+    }
+
+    #[test]
     fn a_session_without_an_id_authenticates_with_the_jwt() {
         let jwt_only = Session {
             token: "jwt".into(),
@@ -1188,6 +1262,16 @@ mod tests {
             ..Default::default()
         };
         assert!(!jwt_is_fresh(&stale));
+
+        let missing_exp = Session {
+            token: "jwt".into(),
+            expires_at: 0,
+            ..Default::default()
+        };
+        assert!(
+            !jwt_is_fresh(&missing_exp),
+            "expires_at=0 matches Session::is_expired — do not treat as fresh"
+        );
 
         let inside_skew = Session {
             expires_at: now_secs() + JWT_SKEW.as_secs() / 2,
