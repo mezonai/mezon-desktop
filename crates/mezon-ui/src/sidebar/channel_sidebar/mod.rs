@@ -655,19 +655,49 @@ impl ChannelSidebar {
         }
 
         let skeleton_changed = self.advance_skeleton(cold_loading, new_clan_id, cx);
-        items_changed || name_changed || clan_changed || skeleton_changed
+        let changed = items_changed || name_changed || clan_changed || skeleton_changed;
+        self.try_scroll_ctrlk_focus(cx);
+        changed
     }
 
-    fn reveal_original_channel(&mut self, channel_id: &str, cx: &mut Context<Self>) {
+    fn scroll_to_channel_row(
+        &mut self,
+        channel_id: ChannelId,
+        exclude_favorites: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let id_str = channel_id.to_string();
         let target = self.items.iter().position(|item| {
             matches!(
                 item,
-                SidebarItem::Channel { id, is_favorite: false, .. } if id.as_str() == channel_id
+                SidebarItem::Channel { id, is_favorite, .. }
+                    if id.as_str() == id_str && (!exclude_favorites || !is_favorite)
             )
         });
         if let Some(ix) = target {
             self.list_state.scroll_to_center_item(ix);
             cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn try_scroll_ctrlk_focus(&mut self, cx: &mut Context<Self>) {
+        let focus = self.channel_list.read(cx).ctrlk_focus_channel().copied();
+        let Some(focus) = focus else {
+            return;
+        };
+        if self.scroll_to_channel_row(focus.channel_id, true, cx) {
+            self.channel_list.update(cx, |store, _| {
+                store.clear_ctrlk_focus_channel();
+            });
+        }
+    }
+
+    fn reveal_original_channel(&mut self, channel_id: &str, cx: &mut Context<Self>) {
+        if let Ok(id) = channel_id.parse::<i64>() {
+            let _ = self.scroll_to_channel_row(ChannelId(id), true, cx);
         }
     }
 

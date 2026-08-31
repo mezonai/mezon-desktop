@@ -1076,20 +1076,20 @@ impl TransportClient {
         &self,
         channel_id: &str,
         clan_id: &str,
-        room_name: &str,
-        username: &str,
+        user_id: &str,
     ) -> Result<()> {
         let transport = self.inner.clone();
         let channel_id = channel_id
             .parse::<i64>()
             .map_err(|e| anyhow::anyhow!("invalid channel_id: {e}"))?;
         let clan_id = parse_optional_id(clan_id, "clan_id")?;
-        let room_name = room_name.to_string();
-        let username = username.to_string();
+        let user_id = user_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid user_id: {e}"))?;
         runtime()
             .spawn(async move {
                 transport
-                    .remove_participant_mezon_meet(channel_id, clan_id, &room_name, &username)
+                    .remove_participant_mezon_meet(channel_id, clan_id, user_id)
                     .await
             })
             .await
@@ -1100,20 +1100,20 @@ impl TransportClient {
         &self,
         channel_id: &str,
         clan_id: &str,
-        room_name: &str,
-        username: &str,
+        user_id: &str,
     ) -> Result<()> {
         let transport = self.inner.clone();
         let channel_id = channel_id
             .parse::<i64>()
             .map_err(|e| anyhow::anyhow!("invalid channel_id: {e}"))?;
         let clan_id = parse_optional_id(clan_id, "clan_id")?;
-        let room_name = room_name.to_string();
-        let username = username.to_string();
+        let user_id = user_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid user_id: {e}"))?;
         runtime()
             .spawn(async move {
                 transport
-                    .mute_participant_mezon_meet(channel_id, clan_id, &room_name, &username)
+                    .mute_participant_mezon_meet(channel_id, clan_id, user_id)
                     .await
             })
             .await
@@ -1757,6 +1757,20 @@ impl TransportClient {
 
         runtime()
             .spawn(async move { transport.search_message(filters, from, size, sorts).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn search_ctrl_k(
+        &self,
+        text: &str,
+        search_type: i32,
+    ) -> Result<mezon_proto::api::SearchCtrlKResponse> {
+        let transport = self.inner.clone();
+        let text = text.to_string();
+
+        runtime()
+            .spawn(async move { transport.search_ctrl_k(&text, search_type).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

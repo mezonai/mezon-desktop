@@ -2119,16 +2119,15 @@ impl VoiceStore {
         }
         let channel_id = channel_id.to_string();
         let clan_id = clan_id.to_string();
-        let room_name = self.room_name.clone();
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let result = match action {
                 ModerationAction::Mute => {
-                    api.mute_participant_mezon_meet(&channel_id, &clan_id, &room_name, &identity)
+                    api.mute_participant_mezon_meet(&channel_id, &clan_id, &identity)
                         .await
                 }
                 ModerationAction::Kick => {
-                    api.remove_participant_mezon_meet(&channel_id, &clan_id, &room_name, &identity)
+                    api.remove_participant_mezon_meet(&channel_id, &clan_id, &identity)
                         .await
                 }
             };

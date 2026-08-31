@@ -11,8 +11,8 @@ use gpui::{
     prelude::*, px, uniform_list,
 };
 use mezon_store::{
-    AuthState, ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, DirectKind,
-    DirectMessageStore, LoginStore, Settings, UserId, UsersByUserStore,
+    AuthState, ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, CtrlKSearchStore,
+    DirectKind, DirectMessageStore, LoginStore, Settings, UserId, UsersByUserStore,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -24,17 +24,17 @@ use crate::image_cache::{
 use crate::router::{Route, Router, navigate};
 use crate::theme::ActiveTheme;
 
-use filter::filter_and_sort_indices;
+use filter::{filter_and_sort_indices, parse_ctrlk_query, sort_palette_indices};
 use groups::{
     PaletteBrowseContext, PaletteDisplayRow, PaletteSectionLabels, build_display_rows,
     render_section_header,
 };
 use items::{
     PaletteItem, PaletteItemKind, PaletteRowActions, ROW_PX, build_palette_items,
-    ensure_palette_sources_loaded, render_palette_row,
+    build_palette_items_from_ctrlk, ensure_palette_sources_loaded, render_palette_row,
 };
 
-const FILTER_DEBOUNCE_MS: u64 = 200;
+const FILTER_DEBOUNCE_MS: u64 = 300;
 const KEY_CONTEXT: &str = "CommandPalette";
 
 actions!(mezon_command_palette, [PaletteMoveUp, PaletteMoveDown]);
@@ -68,6 +68,7 @@ pub struct CommandPaletteModal {
     _users_observe: Subscription,
     _members_observe: Subscription,
     _router_observe: Subscription,
+    _ctrlk_observe: Subscription,
 }
 
 impl Focusable for CommandPaletteModal {
@@ -152,6 +153,7 @@ impl CommandPaletteModal {
                 _users_observe: Subscription::new(|| ()),
                 _members_observe: Subscription::new(|| ()),
                 _router_observe: Subscription::new(|| ()),
+                _ctrlk_observe: Subscription::new(|| ()),
             }
         });
 
@@ -179,6 +181,14 @@ impl CommandPaletteModal {
                     });
                 }
                 this._router_observe = cx.observe(&Router::global(cx), |this, _, cx| {
+                    this.recompute_filtered(cx);
+                    cx.notify();
+                });
+                this._ctrlk_observe = cx.observe(&CtrlKSearchStore::global(cx), |this, _, cx| {
+                    let (api_text, _) = parse_ctrlk_query(&this.debounced_query);
+                    if api_text.is_empty() {
+                        return;
+                    }
                     this.recompute_filtered(cx);
                     cx.notify();
                 });
@@ -242,6 +252,26 @@ impl CommandPaletteModal {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.debounced_query = this.search_input.read(cx).value().to_string();
+                if this.debounced_query.trim().is_empty() {
+                    CtrlKSearchStore::global(cx).update(cx, |store, cx| store.clear(cx));
+                    this.recompute_filtered(cx);
+                    this.scroll
+                        .scroll_to_item(this.selected_visible, ScrollStrategy::Top);
+                    cx.notify();
+                    return;
+                }
+                let (text, search_type) = parse_ctrlk_query(&this.debounced_query);
+                if text.is_empty() {
+                    CtrlKSearchStore::global(cx).update(cx, |store, cx| store.clear(cx));
+                    this.recompute_filtered(cx);
+                    this.scroll
+                        .scroll_to_item(this.selected_visible, ScrollStrategy::Top);
+                    cx.notify();
+                    return;
+                }
+                CtrlKSearchStore::global(cx).update(cx, |store, cx| {
+                    store.search(text, search_type, cx);
+                });
                 this.recompute_filtered(cx);
                 this.scroll
                     .scroll_to_item(this.selected_visible, ScrollStrategy::Top);
@@ -252,6 +282,33 @@ impl CommandPaletteModal {
 
     fn recompute_filtered(&mut self, cx: &App) {
         let previous_selection = self.selected_item_id();
+        let (api_text, _) = parse_ctrlk_query(&self.debounced_query);
+        if self.debounced_query.trim().is_empty() || api_text.is_empty() {
+            self.recompute_local_filtered(cx, previous_selection);
+            return;
+        }
+
+        let ctrlk = CtrlKSearchStore::global(cx).read(cx);
+        let state = ctrlk.state();
+        self.items = Rc::new(build_palette_items_from_ctrlk(state, cx));
+        self.filtered = Rc::new(sort_palette_indices(
+            self.items.as_ref(),
+            &self.debounced_query,
+        ));
+        self.display_rows = Rc::new(
+            self.filtered
+                .iter()
+                .map(|&item_index| PaletteDisplayRow::Item { item_index })
+                .collect(),
+        );
+        self.selected_visible = previous_selection
+            .and_then(|id| {
+                find_visible_row_by_item_id(self.display_rows.as_ref(), self.items.as_ref(), id)
+            })
+            .unwrap_or_else(|| first_selectable_row(self.display_rows.as_ref()));
+    }
+
+    fn recompute_local_filtered(&mut self, cx: &App, previous_selection: Option<PaletteItemId>) {
         self.filtered = Rc::new(filter_and_sort_indices(
             self.items.as_ref(),
             &self.debounced_query,
@@ -281,6 +338,14 @@ impl CommandPaletteModal {
             .unwrap_or_else(|| first_selectable_row(self.display_rows.as_ref()));
     }
 
+    fn ctrlk_searching(&self, cx: &App) -> bool {
+        let (api_text, _) = parse_ctrlk_query(&self.debounced_query);
+        if self.debounced_query.trim().is_empty() || api_text.is_empty() {
+            return false;
+        }
+        CtrlKSearchStore::global(cx).read(cx).state().is_searching
+    }
+
     fn selected_item_id(&self) -> Option<PaletteItemId> {
         let PaletteDisplayRow::Item { item_index } =
             self.display_rows.get(self.selected_visible)?
@@ -297,7 +362,10 @@ impl CommandPaletteModal {
         ChannelList::global(cx).update(cx, |store, cx| {
             items::ensure_palette_clans_loaded(store, cx);
         });
-        self.items = Rc::new(build_palette_items(cx));
+        let (api_text, _) = parse_ctrlk_query(&self.debounced_query);
+        if self.debounced_query.trim().is_empty() || api_text.is_empty() {
+            self.items = Rc::new(build_palette_items(cx));
+        }
         self.items_dirty = false;
         self.recompute_filtered(cx);
         cx.notify();
@@ -347,8 +415,13 @@ impl CommandPaletteModal {
                 let Some(channel_id) = item.channel_id else {
                     return;
                 };
+                let parent_id = ChannelList::global(cx)
+                    .read(cx)
+                    .channel(clan_id, channel_id)
+                    .and_then(|ch| ch.parent_id);
                 ClanList::global(cx).update(cx, |list, cx| list.select_clan(clan_id, cx));
                 ChannelList::global(cx).update(cx, |store, cx| {
+                    store.set_ctrlk_focus_channel(channel_id, parent_id, cx);
                     store.record_previous_channel(clan_id, channel_id, cx);
                     store.reset_user_channel_unread(channel_id, cx);
                 });
@@ -454,7 +527,14 @@ impl Render for CommandPaletteModal {
 
         let count = self.display_rows.len();
         let search_query = self.debounced_query.clone();
-        let list = if count == 0 {
+        let ctrlk_searching = self.ctrlk_searching(cx);
+        let list = if count == 0 && ctrlk_searching {
+            div()
+                .id("command-palette-list")
+                .flex_shrink_0()
+                .max_h(px(250.))
+                .min_h(px(120.))
+        } else if count == 0 {
             div()
                 .id("command-palette-list")
                 .flex_shrink_0()
