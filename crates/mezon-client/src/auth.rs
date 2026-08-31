@@ -10,6 +10,7 @@
 //! should be directed to that host (call `set_api_url` after auth).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
@@ -18,7 +19,7 @@ use http_client::{AsyncBody, HttpClient, http};
 use reqwest_client::ReqwestClient;
 use serde::{Deserialize, Serialize};
 
-use crate::session::{Session, decode_jwt_claims};
+use crate::session::{Session, decode_jwt_claims, parse_endpoint};
 
 fn observe_date_header(headers: &http::HeaderMap) {
     if let Some(date) = headers
@@ -43,6 +44,7 @@ pub const DEFAULT_API_SECURE: bool = true;
 pub const DEFAULT_SERVER_KEY: &str = "defaultkey";
 
 const PROTO_CONTENT_TYPE: &str = "application/proto";
+const HEALTHY_ENDPOINT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Whether the server still recognises a session. `SessionRefresh` answers every failure with a
 /// 500 (`codes.Internal`), so it cannot tell a dead credential from a backend incident; a plain
@@ -408,48 +410,68 @@ impl MezonClient {
             .body(AsyncBody::empty())
             .context("Failed to build GetHealthyEndpoint request")?;
 
-        let mut response = self
-            .http
-            .send(request)
-            .await
-            .with_context(|| format!("Network error on GET {url}"))?;
-        observe_date_header(response.headers());
-        let status = response.status();
+        let http = self.http.clone();
+        let outcome = crate::transport_runtime::handle()
+            .spawn(async move {
+                tokio::time::timeout(HEALTHY_ENDPOINT_TIMEOUT, async move {
+                    let mut response = http
+                        .send(request)
+                        .await
+                        .with_context(|| format!("Network error on GET {url}"))?;
+                    observe_date_header(response.headers());
+                    let status = response.status();
 
-        const MAX_BYTES: u64 = 256 * 1024;
-        let mut resp_bytes: Vec<u8> = Vec::new();
-        response
-            .body_mut()
-            .take(MAX_BYTES + 1)
-            .read_to_end(&mut resp_bytes)
-            .await
-            .with_context(|| format!("Failed to read GetHealthyEndpoint body from {url}"))?;
-        if resp_bytes.len() as u64 > MAX_BYTES {
-            bail!("GetHealthyEndpoint response from {url} exceeds {MAX_BYTES} bytes");
-        }
-        if !status.is_success() {
-            let preview: String = String::from_utf8_lossy(&resp_bytes)
-                .trim()
-                .chars()
-                .take(300)
-                .collect();
-            bail!(
-                "HTTP {} on GetHealthyEndpoint {url}: {preview}",
-                status.as_u16()
-            );
-        }
+                    const MAX_BYTES: u64 = 256 * 1024;
+                    let mut resp_bytes: Vec<u8> = Vec::new();
+                    response
+                        .body_mut()
+                        .take(MAX_BYTES + 1)
+                        .read_to_end(&mut resp_bytes)
+                        .await
+                        .with_context(|| {
+                            format!("Failed to read GetHealthyEndpoint body from {url}")
+                        })?;
+                    if resp_bytes.len() as u64 > MAX_BYTES {
+                        bail!("GetHealthyEndpoint response from {url} exceeds {MAX_BYTES} bytes");
+                    }
+                    if !status.is_success() {
+                        let preview: String = String::from_utf8_lossy(&resp_bytes)
+                            .trim()
+                            .chars()
+                            .take(300)
+                            .collect();
+                        bail!(
+                            "HTTP {} on GetHealthyEndpoint {url}: {preview}",
+                            status.as_u16()
+                        );
+                    }
 
-        let parsed: HealthyEndpointResponse = serde_json::from_slice(&resp_bytes)
-            .with_context(|| format!("Failed to parse GetHealthyEndpoint JSON from {url}"))?;
-        if parsed.session_id.is_empty() {
-            bail!("GetHealthyEndpoint returned an empty session_id");
+                    let parsed: HealthyEndpointResponse = serde_json::from_slice(&resp_bytes)
+                        .with_context(|| {
+                            format!("Failed to parse GetHealthyEndpoint JSON from {url}")
+                        })?;
+                    if parsed.session_id.is_empty() {
+                        bail!("GetHealthyEndpoint returned an empty session_id");
+                    }
+                    Ok(HealthyEndpoint {
+                        session_id: parsed.session_id,
+                        api_url: parsed.api_url.filter(|u| !u.is_empty()),
+                        ws_url: parsed.ws_url.filter(|u| !u.is_empty()),
+                        tcp_url: parsed.tcp_url.filter(|u| !u.is_empty()),
+                    })
+                })
+                .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("GetHealthyEndpoint task failed: {e}"))?;
+
+        match outcome {
+            Ok(result) => result,
+            Err(_) => bail!(
+                "GetHealthyEndpoint timed out after {}s",
+                HEALTHY_ENDPOINT_TIMEOUT.as_secs()
+            ),
         }
-        Ok(HealthyEndpoint {
-            session_id: parsed.session_id,
-            api_url: parsed.api_url.filter(|u| !u.is_empty()),
-            ws_url: parsed.ws_url.filter(|u| !u.is_empty()),
-            tcp_url: parsed.tcp_url.filter(|u| !u.is_empty()),
-        })
     }
 
     /// Convert an `ApiSession` wire response into our internal `Session`.
@@ -573,39 +595,6 @@ impl MezonClient {
             .await?;
         Ok(self.parse_session(api))
     }
-}
-
-fn parse_endpoint(endpoint: Option<&str>) -> (Option<String>, Option<u16>, Option<bool>) {
-    let Some(endpoint) = endpoint else {
-        return (None, None, None);
-    };
-
-    let endpoint = if endpoint.contains("://") {
-        endpoint.to_owned()
-    } else if endpoint.contains(':') {
-        format!("tcp://{endpoint}")
-    } else {
-        // Bare hostname (e.g. `sock.mezon.ai`) — host-only endpoint; port comes from
-        // session/config or TLS implicit default at connect time, not URL parsing.
-        return (Some(endpoint.to_owned()), None, Some(true));
-    };
-
-    let parsed = url::Url::parse(&endpoint);
-    let Ok(parsed) = parsed else {
-        return (None, None, None);
-    };
-
-    let secure = match parsed.scheme() {
-        "https" | "wss" => Some(true),
-        "http" | "ws" | "tcp" => Some(false),
-        _ => None,
-    };
-
-    (
-        parsed.host_str().map(str::to_owned),
-        parsed.port_or_known_default(),
-        secure,
-    )
 }
 
 #[cfg(test)]

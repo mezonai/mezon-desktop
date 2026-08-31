@@ -109,29 +109,41 @@ impl Session {
             self.session_id = session_id.to_string();
         }
         if let Some(url) = api_url.filter(|u| !u.is_empty()) {
-            let (host, port, secure) = parse_endpoint_url(url);
-            self.api_url = Some(url.to_string());
-            self.api_host = host;
-            self.api_port = port;
-            self.api_secure = secure;
+            let (host, port, secure) = parse_endpoint(Some(url));
+            if let Some(host) = host.filter(|h| !h.is_empty()) {
+                self.api_url = Some(url.to_string());
+                self.api_host = Some(host);
+                self.api_port = port;
+                self.api_secure = secure;
+            }
         }
         if let Some(url) = ws_url.filter(|u| !u.is_empty()) {
-            let (host, port, secure) = parse_endpoint_url(url);
-            self.ws_url = Some(url.to_string());
-            self.ws_host = host;
-            self.ws_port = port;
-            self.ws_secure = secure;
+            let (host, port, secure) = parse_endpoint(Some(url));
+            if let Some(host) = host.filter(|h| !h.is_empty()) {
+                self.ws_url = Some(url.to_string());
+                self.ws_host = Some(host);
+                self.ws_port = port;
+                self.ws_secure = secure;
+            }
         }
         if let Some(url) = tcp_url.filter(|u| !u.is_empty()) {
-            let (host, port, _) = parse_endpoint_url(url);
-            self.tcp_url = Some(url.to_string());
-            self.tcp_host = host;
-            self.tcp_port = port;
+            let (host, port, _) = parse_endpoint(Some(url));
+            if let Some(host) = host.filter(|h| !h.is_empty()) {
+                self.tcp_url = Some(url.to_string());
+                self.tcp_host = Some(host);
+                self.tcp_port = port;
+            }
         }
     }
 }
 
-fn parse_endpoint_url(endpoint: &str) -> (Option<String>, Option<u16>, Option<bool>) {
+pub(crate) fn parse_endpoint(
+    endpoint: Option<&str>,
+) -> (Option<String>, Option<u16>, Option<bool>) {
+    let Some(endpoint) = endpoint else {
+        return (None, None, None);
+    };
+
     let endpoint = if endpoint.contains("://") {
         endpoint.to_owned()
     } else if endpoint.contains(':') {
@@ -139,14 +151,17 @@ fn parse_endpoint_url(endpoint: &str) -> (Option<String>, Option<u16>, Option<bo
     } else {
         return (Some(endpoint.to_owned()), None, Some(true));
     };
+
     let Ok(parsed) = url::Url::parse(&endpoint) else {
         return (None, None, None);
     };
+
     let secure = match parsed.scheme() {
         "https" | "wss" => Some(true),
         "http" | "ws" | "tcp" => Some(false),
         _ => None,
     };
+
     (
         parsed.host_str().map(str::to_owned),
         parsed.port_or_known_default(),
@@ -297,6 +312,37 @@ mod tests {
         assert_eq!(session.api_url.as_deref(), Some("https://api.mezon.ai:443"));
         assert_eq!(session.api_host.as_deref(), Some("api.mezon.ai"));
         assert_eq!(session.tcp_host.as_deref(), Some("tcp.mezon.ai"));
+        assert_eq!(session.tcp_port, Some(7349));
+    }
+
+    #[test]
+    fn apply_healthy_endpoint_keeps_hosts_when_url_does_not_parse() {
+        let mut session = Session {
+            session_id: "old".into(),
+            api_url: Some("https://api.mezon.ai:443".into()),
+            api_host: Some("api.mezon.ai".into()),
+            api_port: Some(443),
+            ws_url: Some("wss://ws.mezon.ai:443".into()),
+            ws_host: Some("ws.mezon.ai".into()),
+            ws_port: Some(443),
+            tcp_url: Some("tcp://tcp.mezon.ai:7349".into()),
+            tcp_host: Some("tcp.mezon.ai".into()),
+            tcp_port: Some(7349),
+            ..Default::default()
+        };
+        session.apply_healthy_endpoint(
+            "new-sid",
+            Some("https://["),
+            Some("://bad"),
+            Some("tcp://["),
+        );
+        assert_eq!(session.session_id, "new-sid");
+        assert_eq!(session.api_host.as_deref(), Some("api.mezon.ai"));
+        assert_eq!(session.api_url.as_deref(), Some("https://api.mezon.ai:443"));
+        assert_eq!(session.ws_host.as_deref(), Some("ws.mezon.ai"));
+        assert_eq!(session.ws_url.as_deref(), Some("wss://ws.mezon.ai:443"));
+        assert_eq!(session.tcp_host.as_deref(), Some("tcp.mezon.ai"));
+        assert_eq!(session.tcp_url.as_deref(), Some("tcp://tcp.mezon.ai:7349"));
         assert_eq!(session.tcp_port, Some(7349));
     }
 }
