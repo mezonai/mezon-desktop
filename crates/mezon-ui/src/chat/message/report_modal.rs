@@ -2,7 +2,7 @@ use gpui::{
     App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, SharedString,
     Subscription, Window, div, prelude::*, px,
 };
-use mezon_store::{MessageId, MessagesStore};
+use mezon_store::{FriendState, FriendStore, MessageId, MessagesStore, UserId};
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{
@@ -32,13 +32,23 @@ const REASON_KEYS: [&str; 7] = [
 
 const CUSTOM_REASON_MAX: usize = 64;
 
+/// The report is a two-step flow, the way the web client runs it: pick a reason, then decide
+/// whether to also ignore or block the person you just reported.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Reason,
+    Actions,
+}
+
 pub struct ReportMessageModal {
     focus_handle: FocusHandle,
     locale: SharedString,
     message_id: MessageId,
+    sender_id: Option<UserId>,
+    sender_name: SharedString,
+    step: Step,
     selected: Option<usize>,
     custom_input: Entity<InputState>,
-    submitting: bool,
     _custom_sub: Subscription,
 }
 
@@ -49,7 +59,14 @@ impl Focusable for ReportMessageModal {
 }
 
 impl ReportMessageModal {
-    pub fn open(message_id: MessageId, locale: SharedString, window: &mut Window, cx: &mut App) {
+    pub fn open(
+        message_id: MessageId,
+        sender_id: Option<UserId>,
+        sender_name: SharedString,
+        locale: SharedString,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let placeholder = mezon_i18n::t(
             &locale,
             "contextMenu.reportMessageModal.customReasonPlaceholder",
@@ -71,12 +88,18 @@ impl ReportMessageModal {
                 focus_handle: cx.focus_handle(),
                 locale,
                 message_id,
+                sender_id,
+                sender_name,
+                step: Step::Reason,
                 selected: None,
                 custom_input,
-                submitting: false,
                 _custom_sub: custom_sub,
             }
         });
+        // The block action needs the friend list, which is otherwise only fetched by the pages
+        // that show friends — a session that went straight to a clan channel has none, and
+        // blocking a real friend would be refused.
+        FriendStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
         Shell::global(cx).update(cx, |shell, cx| shell.show_modal(view.into(), cx));
@@ -97,7 +120,7 @@ impl ReportMessageModal {
     }
 
     fn submit(&mut self, cx: &mut Context<Self>) {
-        if self.submitting || !self.is_submittable(cx) {
+        if !self.is_submittable(cx) {
             return;
         }
         let Some(idx) = self.selected else {
@@ -108,12 +131,176 @@ impl ReportMessageModal {
         } else {
             REASONS[idx].to_string()
         };
-        self.submitting = true;
         let message_id = self.message_id;
         MessagesStore::global(cx).update(cx, |store, cx| {
             store.report_message(message_id, abuse_type, cx);
         });
+        // The report is fire-and-forget, so the second step opens straight away rather than
+        // waiting on a round trip the store never reports back on.
+        self.step = Step::Actions;
+        cx.notify();
+    }
+
+    fn toast_success(&self, key: &'static str, cx: &mut App) {
+        let message = mezon_i18n::t(&self.locale, key).to_string();
+        Shell::global(cx).update(cx, |shell, cx| shell.success(message, cx));
+    }
+
+    /// Ignoring is a local acknowledgement in the web client too — there is no API behind it,
+    /// so this stays a confirmation rather than pretending to filter anything.
+    fn ignore_user(&mut self, cx: &mut Context<Self>) {
+        self.toast_success("contextMenu.reportMessageModal.userMessagesIgnored", cx);
         Self::close(cx);
+    }
+
+    fn block_user(&mut self, cx: &mut Context<Self>) {
+        let Some(user_id) = self.sender_id else {
+            let message = mezon_i18n::t(
+                &self.locale,
+                "contextMenu.reportMessageModal.userBlockedFailed",
+            )
+            .to_string();
+            Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+            return;
+        };
+        let friends = FriendStore::global(cx);
+        let is_friend = friends
+            .read(cx)
+            .friend(user_id)
+            .is_some_and(|friend| friend.state == FriendState::Friend);
+        if !is_friend {
+            let message = mezon_i18n::t(
+                &self.locale,
+                "contextMenu.reportMessageModal.canOnlyBlockFriends",
+            )
+            .to_string();
+            Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+            return;
+        }
+        friends.update(cx, |store, cx| store.block_friend(user_id, cx));
+        self.toast_success("contextMenu.reportMessageModal.userBlockedSuccess", cx);
+        Self::close(cx);
+    }
+}
+
+impl ReportMessageModal {
+    /// Step two: the web client offers to ignore or block the reported person before closing.
+    fn render_actions(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = cx.theme();
+        let locale = self.locale.clone();
+        let t = |key: &'static str| mezon_i18n::t(&locale, key).to_string();
+        let name = self.sender_name.clone();
+
+        let action_card = |id: &'static str,
+                           title: String,
+                           description: String,
+                           title_color: gpui::Rgba,
+                           name: SharedString| {
+            div()
+                .id(id)
+                .flex()
+                .flex_col()
+                .items_start()
+                .w_full()
+                .gap_1()
+                .p_4()
+                .rounded_lg()
+                .cursor_pointer()
+                .bg(theme.tokens.theme_setting_nav)
+                .hover(|s| s.bg(theme.tokens.bg_item_hover))
+                .child(
+                    div()
+                        .text_base()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(title_color)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_1()
+                        .text_xs()
+                        .text_color(theme.tokens.text_theme_primary)
+                        .child(description)
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.tokens.text_secondary)
+                                .child(name),
+                        ),
+                )
+        };
+
+        let ignore_entity = cx.entity();
+        let block_entity = cx.entity();
+
+        div()
+            .track_focus(&self.focus_handle)
+            .occlude()
+            .w(px(480.))
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_6()
+            .overflow_hidden()
+            .rounded(px(12.))
+            .bg(theme.tokens.theme_setting_primary)
+            .shadow_lg()
+            .child(
+                div()
+                    .text_size(px(20.))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(theme.tokens.text_secondary)
+                    .child(t("contextMenu.reportMessageModal.actionModal.title")),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(theme.tokens.text_theme_primary)
+                    .child(t("contextMenu.reportMessageModal.actionModal.description")),
+            )
+            .child(
+                action_card(
+                    "report-ignore-user",
+                    t("contextMenu.reportMessageModal.actionModal.ignoreMessages"),
+                    t("contextMenu.reportMessageModal.actionModal.ignoreDescription"),
+                    theme.tokens.text_secondary,
+                    name.clone(),
+                )
+                .on_click(move |_: &ClickEvent, _window, cx| {
+                    ignore_entity.update(cx, |this, cx| this.ignore_user(cx));
+                }),
+            )
+            .child(
+                action_card(
+                    "report-block-user",
+                    t("contextMenu.reportMessageModal.actionModal.blockUser"),
+                    t("contextMenu.reportMessageModal.actionModal.blockDescription"),
+                    theme.danger_text,
+                    name,
+                )
+                .on_click(move |_: &ClickEvent, _window, cx| {
+                    block_entity.update(cx, |this, cx| this.block_user(cx));
+                }),
+            )
+            .child(
+                div().flex().flex_row().justify_end().child(
+                    div()
+                        .id("report-skip-actions")
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.tokens.text_theme_primary)
+                        .hover(|s| s.bg(theme.tokens.bg_item_hover))
+                        .child(t("contextMenu.reportMessageModal.actionModal.skip"))
+                        .on_click(|_: &ClickEvent, _window, cx| Self::close(cx)),
+                ),
+            )
+            .into_any_element()
     }
 }
 
@@ -123,6 +310,10 @@ impl Render for ReportMessageModal {
         let locale = self.locale.clone();
         let t = |key: &'static str| mezon_i18n::t(&locale, key).to_string();
         let entity = cx.entity();
+
+        if self.step == Step::Actions {
+            return self.render_actions(cx);
+        }
 
         let header = div()
             .flex()
@@ -244,12 +435,8 @@ impl Render for ReportMessageModal {
             .children(custom_section);
 
         let submit_entity = entity.clone();
-        let submit_label = if self.submitting {
-            t("contextMenu.reportMessageModal.submitting")
-        } else {
-            t("contextMenu.reportMessageModal.submit")
-        };
-        let submit_disabled = self.submitting || !self.is_submittable(cx);
+        let submit_label = t("contextMenu.reportMessageModal.submit");
+        let submit_disabled = !self.is_submittable(cx);
 
         let footer = div()
             .flex()
@@ -276,7 +463,6 @@ impl Render for ReportMessageModal {
                 Button::new("report-submit")
                     .primary()
                     .label(submit_label)
-                    .loading(self.submitting)
                     .disabled(submit_disabled)
                     .on_click(move |_: &ClickEvent, _window, cx| {
                         submit_entity.update(cx, |this, cx| this.submit(cx));
@@ -297,5 +483,6 @@ impl Render for ReportMessageModal {
             .child(header)
             .child(div().flex_1().min_h_0().overflow_hidden().child(body))
             .child(footer)
+            .into_any_element()
     }
 }

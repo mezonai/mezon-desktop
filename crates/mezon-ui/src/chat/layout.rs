@@ -430,6 +430,13 @@ impl ChatLayout {
         .detach();
         cx.observe(&MessageSearchStore::global(cx), |_, _, cx| cx.notify())
             .detach();
+        // The banned notice replaces the composer, and its answer arrives from `IsBanned` well
+        // after the channel opened — without this the strip would not paint until something
+        // else happened to redraw the chat.
+        cx.observe(&mezon_store::BannedUsersStore::global(cx), |_, _, cx| {
+            cx.notify()
+        })
+        .detach();
         cx.subscribe(&TopicsStore::global(cx), |this, _, event, cx| match event {
             TopicsEvent::Opened => {
                 ThreadsStore::global(cx).update(cx, |threads, cx| threads.cancel_create(cx));

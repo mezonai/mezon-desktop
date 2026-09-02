@@ -45,6 +45,7 @@ pub struct RootView {
     tour_autostart_last: Option<&'static str>,
     tour_autostart_attempts: u8,
     tour_autostart_armed: bool,
+    first_join_prompted: bool,
 }
 
 fn surface_recording_toast(
@@ -105,6 +106,14 @@ fn spawn_splash_delay(cx: &mut Context<RootView>) -> Task<()> {
 }
 
 impl RootView {
+    /// Repaint only when the first-join prompt has actually become showable — the root view is
+    /// expensive to redraw, and these stores notify on every badge and profile change.
+    fn notify_if_first_join_due(&self, cx: &mut Context<Self>) {
+        if !self.first_join_prompted && crate::clan::first_join_modal::should_prompt(cx) {
+            cx.notify();
+        }
+    }
+
     pub fn new(
         title_bar: Entity<TitleBar>,
         auth_state: Entity<AuthState>,
@@ -154,7 +163,19 @@ impl RootView {
             if crate::tour::eligibility_undecided(cx) {
                 this.schedule_tour_autostart(cx);
             }
+            this.notify_if_first_join_due(cx);
         })
+        .detach();
+
+        // The clan list and the account both land after the render that follows sign-in, and
+        // neither observer above repaints the root — without this the first-join prompt would
+        // become due while nothing was left to notice it.
+        cx.observe(
+            &mezon_store::AccountStore::global(cx),
+            |this, _account, cx| {
+                this.notify_if_first_join_due(cx);
+            },
+        )
         .detach();
 
         cx.observe(&auth_state, |this, auth_state, cx| {
@@ -173,6 +194,7 @@ impl RootView {
             }
             if matches!(*auth_state.read(cx), AuthState::NotAuthenticated) {
                 this.tour_autostart_armed = false;
+                this.first_join_prompted = false;
                 this.tour_autostart = None;
                 this.tour_autostart_for = None;
                 this.tour_autostart_last = None;
@@ -325,6 +347,7 @@ impl RootView {
             tour_autostart_last: None,
             tour_autostart_attempts: 0,
             tour_autostart_armed: false,
+            first_join_prompted: false,
         }
     }
 
@@ -429,6 +452,20 @@ impl Render for RootView {
         crate::trace_render!("RootView");
         crate::image_cache::flush_atlas_drops(window, cx);
         crate::image_cache::flush_atlas_replaces(window, cx);
+
+        // Someone who just signed up and has landed with no clans gets the same nudge the web
+        // client gives them. Deferred because a modal cannot be opened from inside a render.
+        let authenticated = matches!(*self.auth_state.read(cx), AuthState::Authenticated(_));
+        if authenticated
+            && !self.first_join_prompted
+            && crate::clan::first_join_modal::should_prompt(cx)
+        {
+            self.first_join_prompted = true;
+            cx.defer_in(window, |_, window, cx| {
+                crate::clan::first_join_modal::FirstJoinModal::open(window, cx);
+            });
+        }
+
         let locale = self.cached_locale.as_str();
         let base_font_family = ::theme::theme_settings(cx).ui_font(cx).family.clone();
         let theme = cx.theme();
