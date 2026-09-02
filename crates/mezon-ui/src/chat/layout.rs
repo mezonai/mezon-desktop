@@ -430,6 +430,10 @@ impl ChatLayout {
         .detach();
         cx.observe(&MessageSearchStore::global(cx), |_, _, cx| cx.notify())
             .detach();
+        cx.observe(&mezon_store::OnboardingStore::global(cx), |_, _, cx| {
+            cx.notify()
+        })
+        .detach();
         cx.subscribe(&TopicsStore::global(cx), |this, _, event, cx| match event {
             TopicsEvent::Opened => {
                 ThreadsStore::global(cx).update(cx, |threads, cx| threads.cancel_create(cx));
