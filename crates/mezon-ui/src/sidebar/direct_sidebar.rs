@@ -16,6 +16,7 @@ use super::create_message_group_modal::CreateMessageGroupModal;
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::app::shell::{FriendRemovalKind, Shell};
+use crate::chat::add_members_to_group_modal::AddMembersToGroupModal;
 use crate::chat::edit_group_modal::EditGroupModal;
 use crate::chat::user_profile_modal::UserProfileModal;
 use crate::command_palette::CommandPaletteModal;
@@ -175,6 +176,30 @@ fn dm_items_fingerprint(store: &DirectMessageStore, cx: &App) -> u64 {
     })
 }
 
+fn request_dm_close(channel_id: ChannelId, window: &mut Window, cx: &mut App) {
+    let Some(store) = DirectMessageStore::try_global(cx) else {
+        return;
+    };
+    let Some((is_group, group_name)) = store.read(cx).find(channel_id).map(|dm| {
+        (
+            dm.kind == DirectKind::Group,
+            SharedString::from(dm.label.clone()),
+        )
+    }) else {
+        return;
+    };
+    let locale = Settings::try_global(cx)
+        .map(|settings| settings.read(cx).language.clone())
+        .unwrap_or_default();
+    Shell::global(cx).update(cx, |shell, cx| {
+        if is_group {
+            shell.confirm_leave_dm_group(channel_id, &group_name, &locale, window, cx);
+        } else {
+            shell.confirm_close_dm(channel_id, &locale, window, cx);
+        }
+    });
+}
+
 fn render_dm_row(
     item: &DmItem,
     theme: &Theme,
@@ -198,7 +223,8 @@ fn render_dm_row(
     .avatar_src(item.avatar_src.clone())
     .avatar_raw(item.avatar_raw.clone())
     .suppress_hover(suppress_hover)
-    .image_cache(image_cache.clone());
+    .image_cache(image_cache.clone())
+    .on_close(item.channel_id, request_dm_close);
     if item.in_voice {
         row = row.in_voice_label(in_voice_label.clone());
     }
@@ -511,10 +537,18 @@ fn build_dm_menu(
     }
 
     if is_group && let Some(target) = target.as_ref() {
+        let add_locale = locale.to_string();
+        menu = menu.separator().item(
+            t("common.addMembers"),
+            move |window: &mut Window, cx: &mut App| {
+                AddMembersToGroupModal::open(channel_id, add_locale.clone(), window, cx);
+            },
+        );
+
         let group_label = target.label.clone();
         let group_avatar = target.avatar.clone();
         let group_locale = locale.to_string();
-        menu = menu.separator().item(
+        menu = menu.item(
             t("directMessage.contextMenu.editGroup"),
             move |window: &mut Window, cx: &mut App| {
                 let modal = cx.new(|cx| {
@@ -670,6 +704,7 @@ impl DirectSidebar {
         div()
             .id("dm-friends")
             .relative()
+            .children(crate::tour::probe(crate::tour::TourAnchor::FriendsButton))
             .w_full()
             .flex()
             .flex_row()
@@ -867,6 +902,7 @@ impl Render for DirectSidebar {
         });
 
         div()
+            .children(crate::tour::probe(crate::tour::TourAnchor::DirectList))
             .flex()
             .flex_col()
             .size_full()

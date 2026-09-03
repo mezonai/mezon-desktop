@@ -718,16 +718,18 @@ impl TextArea {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-            return;
-        };
-        let normalized = normalize_pasted(&text);
-        let sanitized = if self.single_line {
-            normalized.replace('\n', " ")
-        } else {
-            normalized
-        };
-        self.replace_text_in_range(None, &sanitized, window, cx);
+        mezon_widgets::clipboard::read_then(self, window, cx, |this, item, window, cx| {
+            let Some(text) = item.text() else {
+                return;
+            };
+            let normalized = normalize_pasted(&text);
+            let sanitized = if this.single_line {
+                normalized.replace('\n', " ")
+            } else {
+                normalized
+            };
+            this.replace_text_in_range(None, &sanitized, window, cx);
+        });
     }
 
     fn on_key_down(&mut self, _: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {

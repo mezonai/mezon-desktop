@@ -12,6 +12,8 @@ mod linux;
 mod macos;
 #[cfg(not(target_os = "macos"))]
 mod poster;
+#[cfg(target_os = "linux")]
+mod poster_fallback;
 #[cfg(not(target_os = "macos"))]
 mod render_frame;
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]

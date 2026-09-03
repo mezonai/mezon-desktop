@@ -4924,6 +4924,30 @@ impl MessagesStore {
         );
     }
 
+    pub fn send_sticker_reply(
+        &mut self,
+        url: String,
+        filename: String,
+        sender_id: String,
+        sender_name: String,
+        reply_to: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        let reply = self.reply_draft_for(reply_to);
+        self.send_url_attachment(
+            url,
+            filename,
+            STICKER_FILETYPE.to_string(),
+            0,
+            0,
+            sender_id,
+            sender_name,
+            self.is_anonymous_mode(),
+            reply,
+            cx,
+        );
+    }
+
     pub fn send_gif(
         &mut self,
         url: String,

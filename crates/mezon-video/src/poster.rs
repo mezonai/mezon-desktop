@@ -13,6 +13,13 @@ pub(crate) fn encode_poster_jpeg(
     max_edge: u32,
 ) -> Option<Vec<u8>> {
     let rgb = bgra_to_rgb(bgra, width, height, stride, bottom_up)?;
+    encode_rgb_jpeg(rgb, max_edge)
+}
+
+pub(crate) fn encode_rgb_jpeg(rgb: RgbImage, max_edge: u32) -> Option<Vec<u8>> {
+    if rgb.width() == 0 || rgb.height() == 0 {
+        return None;
+    }
     let rgb = downscale(rgb, max_edge);
     let mut jpeg = Vec::new();
     JpegEncoder::new_with_quality(&mut jpeg, POSTER_JPEG_QUALITY)
@@ -116,6 +123,12 @@ mod tests {
     fn downscale_leaves_a_small_frame_alone() {
         let scaled = downscale(RgbImage::new(64, 32), 480);
         assert_eq!((scaled.width(), scaled.height()), (64, 32));
+    }
+
+    #[test]
+    fn encode_rgb_jpeg_rejects_a_zero_sized_frame() {
+        assert!(encode_rgb_jpeg(RgbImage::new(0, 0), 480).is_none());
+        assert!(encode_rgb_jpeg(RgbImage::new(4, 0), 480).is_none());
     }
 
     #[test]

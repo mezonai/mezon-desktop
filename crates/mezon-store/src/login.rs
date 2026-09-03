@@ -224,6 +224,7 @@ impl LoginStore {
         if let Some(e) = crate::ctrlk_search::CtrlKSearchStore::try_global(cx) {
             e.update(cx, |s, cx| s.clear(cx));
         }
+        crate::clear_tour_progress(cx);
     }
 }
 

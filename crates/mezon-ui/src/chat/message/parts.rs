@@ -31,6 +31,7 @@ use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, Spinn
 use crate::theme::Theme;
 
 const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
+const SYSTEM_AVATAR_PATH: &str = "images/mezon_logo.png";
 pub(crate) const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 
 pub fn effective_clan_id(clan_id: Option<ClanId>, cx: &App) -> Option<ClanId> {
@@ -292,6 +293,16 @@ fn reference_avatar(
     resolved.map(|(_, proxied)| proxied)
 }
 
+fn system_sender_avatar(cx: &App) -> SharedString {
+    static AVATAR: std::sync::OnceLock<SharedString> = std::sync::OnceLock::new();
+    AVATAR
+        .get_or_init(|| {
+            let logo = crate::util::imgproxy::cdn_asset_url(cx, SYSTEM_AVATAR_PATH);
+            SharedString::from(crate::util::imgproxy::avatar_url(cx, &logo))
+        })
+        .clone()
+}
+
 fn resolve_reference_identity(
     reference: &MessageReference,
     is_anonymous: bool,
@@ -305,6 +316,9 @@ fn resolve_reference_identity(
             SharedString::from(mezon_store::ANONYMOUS_SENDER_NAME),
             SharedString::default(),
         );
+    }
+    if reference.sender_id.is_zero() && reference.sender_avatar.is_empty() {
+        return (baked_name(), system_sender_avatar(cx));
     }
     let clan_id = role_scope(ctx.profile_context).filter(|_| !reference.sender_id.is_zero());
     let Some(clan_id) = clan_id else {

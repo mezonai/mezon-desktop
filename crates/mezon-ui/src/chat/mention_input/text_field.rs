@@ -36,6 +36,7 @@ use crate::util::text_edit::{
 };
 
 const MASK: char = '\u{2022}';
+const MEASURE_CACHE_ENTRIES: usize = 4;
 const MAX_VISIBLE_LINES: usize = 10;
 
 struct DocLine {
@@ -192,6 +193,7 @@ pub(crate) struct MentionInputState {
     line_height: Pixels,
     scroll_offset: Point<Pixels>,
     measured_rows: usize,
+    measure_cache: Vec<(SharedString, Pixels, usize)>,
     content_height: Pixels,
     pending_caret_reveal: bool,
     is_selecting: bool,
@@ -206,6 +208,12 @@ pub(crate) struct MentionInputState {
     last_edit_kind: Option<EditKind>,
     history_payload: Option<Rc<dyn Any>>,
     _window_activation_sub: Subscription,
+}
+
+impl MentionInputState {
+    pub(crate) fn is_composing(&self) -> bool {
+        self.marked_range.is_some()
+    }
 }
 
 impl EventEmitter<MentionFieldEvent> for MentionInputState {}
@@ -234,6 +242,7 @@ impl MentionInputState {
             line_height: px(20.),
             scroll_offset: Point::default(),
             measured_rows: 1,
+            measure_cache: Vec::new(),
             content_height: px(0.),
             pending_caret_reveal: true,
             is_selecting: false,
@@ -771,10 +780,13 @@ impl MentionInputState {
         window.show_character_palette();
     }
 
-    fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = cx.read_from_clipboard() else {
-            return;
-        };
+    fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        mezon_widgets::clipboard::read_then(self, window, cx, |this, item, _window, cx| {
+            this.apply_paste(item, cx)
+        });
+    }
+
+    fn apply_paste(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
         let images: Vec<Image> = item
             .entries()
             .iter()
@@ -1406,6 +1418,78 @@ impl IntoElement for MentionTextElement {
     }
 }
 
+impl MentionTextElement {
+    fn measured_rows(
+        state: &Entity<MentionInputState>,
+        width: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> usize {
+        let input = state.read(cx);
+        if input.is_masked() || input.content.is_empty() {
+            return 1;
+        }
+        if width <= Pixels::ZERO {
+            return input.visible_line_count();
+        }
+        let display_text = input.display_text();
+        if let Some((_, _, rows)) = input
+            .measure_cache
+            .iter()
+            .find(|(text, cached_width, _)| *cached_width == width && *text == display_text)
+        {
+            return (*rows).max(input.line_count);
+        }
+        let hard_lines = input.line_count;
+        let marked_range = input.marked_range.clone();
+        let brand_color: Hsla = cx.theme().brand.into();
+        let emoji_color: Hsla = rgb(EMOJI_SPAN_COLOR).into();
+        let resolved_spans: Vec<ResolvedSpan> = input
+            .mention_spans
+            .iter()
+            .map(|span| {
+                let (color, bold) = match span.kind {
+                    MentionSpanKind::Mention | MentionSpanKind::Hashtag => (brand_color, false),
+                    MentionSpanKind::Emoji => (emoji_color, true),
+                };
+                ResolvedSpan {
+                    range: span.range.clone(),
+                    color,
+                    bold,
+                }
+            })
+            .collect();
+        let style = window.text_style();
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let line_height = window.line_height();
+        let base = TextRun {
+            len: display_text.len(),
+            font: style.font(),
+            color: style.color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let runs = build_text_runs(display_text.len(), &base, marked_range, &resolved_spans);
+        let wrapped = window
+            .text_system()
+            .shape_text(display_text.clone(), font_size, &runs, Some(width), None)
+            .unwrap_or_default();
+        let total_h = wrapped
+            .iter()
+            .fold(Pixels::ZERO, |acc, line| {
+                acc + wrapped_line_height(line, line_height)
+            })
+            .max(line_height);
+        let rows = (total_h / line_height).round().max(1.) as usize;
+        state.update(cx, |input, _| {
+            input.measure_cache.insert(0, (display_text, width, rows));
+            input.measure_cache.truncate(MEASURE_CACHE_ENTRIES);
+        });
+        rows.max(hard_lines)
+    }
+}
+
 impl Element for MentionTextElement {
     type RequestLayoutState = ();
     type PrepaintState = PrepaintState;
@@ -1423,14 +1507,30 @@ impl Element for MentionTextElement {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         window: &mut Window,
-        cx: &mut App,
+        _cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let line_count = self.input.read(cx).visible_line_count();
-        let visible = line_count.clamp(1, MAX_VISIBLE_LINES);
         let mut style = Style::default();
         style.size.width = gpui::relative(1.).into();
-        style.size.height = (window.line_height() * visible as f32).into();
-        (window.request_layout(style, [], cx), ())
+        let state = self.input.clone();
+        let layout_id = window.request_measured_layout(
+            style,
+            move |known_dimensions, available_space, window, cx| {
+                let width = known_dimensions.width.or(match available_space.width {
+                    gpui::AvailableSpace::Definite(width) => Some(width),
+                    _ => None,
+                });
+                let line_count = match width {
+                    Some(width) => Self::measured_rows(&state, width, window, cx),
+                    None => state.read(cx).visible_line_count(),
+                };
+                let visible = line_count.clamp(1, MAX_VISIBLE_LINES);
+                let height = known_dimensions
+                    .height
+                    .unwrap_or(window.line_height() * visible as f32);
+                gpui::size(width.unwrap_or(Pixels::ZERO), height)
+            },
+        );
+        (layout_id, ())
     }
 
     fn prepaint(

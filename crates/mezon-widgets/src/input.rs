@@ -740,14 +740,16 @@ impl InputState {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            let sanitized = if self.multi_line {
-                text
-            } else {
-                text.replace('\n', " ")
-            };
-            self.replace_text_in_range(None, &sanitized, window, cx);
-        }
+        crate::clipboard::read_then(self, window, cx, |this, item, window, cx| {
+            if let Some(text) = item.text() {
+                let sanitized = if this.multi_line {
+                    text
+                } else {
+                    text.replace('\n', " ")
+                };
+                this.replace_text_in_range(None, &sanitized, window, cx);
+            }
+        });
     }
 
     fn on_key_down(&mut self, _: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {

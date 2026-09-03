@@ -647,6 +647,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
         }
 
         init_ui(cx);
+        mezon_ui::clipboard::enable_off_main_thread_reads();
 
         AppConfig::init_global(app_config_handle, cx);
 

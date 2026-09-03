@@ -13,6 +13,7 @@ use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable, Tooltip};
 
 use crate::app::shell::Shell;
 use crate::app::window_controls;
+use crate::chat::add_members_to_group_modal::AddMembersToGroupModal;
 use crate::chat::call_actions::call_current_dm;
 use crate::chat::edit_group_modal::EditGroupModal;
 use crate::chat::files_popover::{FilesPopoverPanel, files_popover_on_open};
@@ -49,6 +50,7 @@ pub struct DmHeaderInfo {
     pub avatar_raw: SharedString,
     pub members_text: Option<SharedString>,
     pub edit_tooltip: SharedString,
+    pub add_members_tooltip: SharedString,
     pub locale: SharedString,
 }
 
@@ -320,7 +322,11 @@ impl ChannelHeader {
         } else {
             None
         };
-        let buttons = Self::build_action_buttons(
+        let add_members_button = dm_header
+            .as_ref()
+            .filter(|info| info.is_group)
+            .map(|info| Self::render_add_members_button(info, icon_color, bg_hover));
+        let mut buttons = Self::build_action_buttons(
             actions,
             theme,
             icon_color,
@@ -345,6 +351,9 @@ impl ChannelHeader {
             notification_trigger,
             cx,
         );
+        if let Some(button) = add_members_button {
+            buttons.insert(0, button);
+        }
 
         div()
             .flex()
@@ -492,6 +501,10 @@ impl ChannelHeader {
             .child(div().flex_1())
             .child(
                 div()
+                    .relative()
+                    .children(crate::tour::probe(
+                        crate::tour::TourAnchor::ChannelHeaderTools,
+                    ))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -548,6 +561,37 @@ impl ChannelHeader {
             on_toggle_timeline: None,
         };
         header.render_inbox_button(theme, cx)
+    }
+
+    fn render_add_members_button(
+        info: &DmHeaderInfo,
+        icon_color: gpui::Rgba,
+        bg_hover: gpui::Rgba,
+    ) -> AnyElement {
+        let tooltip = info.add_members_tooltip.clone();
+        let channel_id = info.channel_id;
+        let locale = info.locale.clone();
+        div()
+            .id("hdr-add-members")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(32.))
+            .h(px(32.))
+            .rounded_md()
+            .cursor_pointer()
+            .hover(move |s| s.bg(bg_hover))
+            .tooltip(Tooltip::text(tooltip))
+            .occlude()
+            .child(
+                Icon::new(IconName::IconAddFriendDM)
+                    .size(px(20.))
+                    .text_color(icon_color),
+            )
+            .on_click(move |_, window, cx| {
+                AddMembersToGroupModal::open(channel_id, locale.to_string(), window, cx);
+            })
+            .into_any_element()
     }
 
     fn build_action_buttons(
@@ -1087,6 +1131,9 @@ impl ChatHeader {
             members_text,
             edit_tooltip: SharedString::from(
                 mezon_i18n::t(locale, "channelTopbar.tooltips.clickToEdit").to_string(),
+            ),
+            add_members_tooltip: SharedString::from(
+                mezon_i18n::t(locale, "channelTopbar.tooltips.addFriendsToDM").to_string(),
             ),
             locale: SharedString::from(locale.to_string()),
         })

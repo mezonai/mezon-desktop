@@ -29,6 +29,7 @@ use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::components::compositions::channel_row::ChannelIcon;
 use crate::components::primitives::{Icon, IconName, InputState};
 use crate::image_cache::LruImageCache;
+use crate::router::{Route, Router, navigate};
 use crate::theme::ActiveTheme;
 
 pub struct ChatArea {
@@ -63,6 +64,20 @@ pub struct ChatArea {
 
 const SEND_PERMISSION_DEBOUNCE: Duration = Duration::from_millis(500);
 
+fn leave_removed_conversation(channel_id: ChannelId, cx: &mut App) {
+    let viewing = route_targets_conversation(&Router::global(cx).read(cx).route(), channel_id);
+    if viewing {
+        navigate(cx, Route::Friends);
+    }
+    // After the navigate, so the entry `navigate` just pushed goes too: a conversation the
+    // store dropped must not be reachable through Back or Forward either.
+    Router::global(cx).update(cx, |router, _| router.forget_conversation(channel_id));
+}
+
+fn route_targets_conversation(route: &Route, channel_id: ChannelId) -> bool {
+    matches!(route, Route::DirectMessage { direct_id, .. } if *direct_id == channel_id)
+}
+
 impl ChatArea {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<crate::ChatLayout>) -> Self {
         let timeline = cx.new({
@@ -91,9 +106,15 @@ impl ChatArea {
         let send_permission_direct_sub = cx.subscribe(
             &DirectMessageStore::global(cx),
             |this: &mut crate::ChatLayout, _, event: &DirectEvent, cx| {
-                let DirectEvent::Changed { channel_id } = event;
+                let channel_id = match event {
+                    DirectEvent::Changed { channel_id } => *channel_id,
+                    DirectEvent::Removed { channel_id } => {
+                        leave_removed_conversation(*channel_id, cx);
+                        Some(*channel_id)
+                    }
+                };
                 let active_channel = MessagesStore::global(cx).read(cx).active_channel_id();
-                if channel_id.is_none() || *channel_id == active_channel {
+                if channel_id.is_none() || channel_id == active_channel {
                     this.chat_area.sync_send_permission(cx);
                 }
             },
@@ -855,5 +876,32 @@ impl ChatArea {
             .when(!hide_header, |this| this.child(header))
             .child(body)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod removed_conversation_tests {
+    use super::{ChannelId, Route, route_targets_conversation};
+
+    fn direct(id: i64) -> Route {
+        Route::DirectMessage {
+            direct_id: ChannelId(id),
+            message_type: "2".to_string(),
+        }
+    }
+
+    #[test]
+    fn the_open_conversation_has_to_be_left() {
+        assert!(route_targets_conversation(&direct(7), ChannelId(7)));
+    }
+
+    #[test]
+    fn another_conversation_stays_put() {
+        assert!(!route_targets_conversation(&direct(7), ChannelId(8)));
+    }
+
+    #[test]
+    fn a_route_outside_direct_messages_stays_put() {
+        assert!(!route_targets_conversation(&Route::Friends, ChannelId(7)));
     }
 }

@@ -2491,7 +2491,7 @@ impl OnboardingSettingPage {
             prompt: None,
         });
         self._upload_task = Some(cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else {
+            let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
                 return;
             };
             let Some(path) = paths.into_iter().next() else {

@@ -1,8 +1,8 @@
 use gpui::{App, ClipboardItem, SharedString, WeakEntity, Window};
 use mezon_client::transport::QUICK_MENU_TYPE_QUICK;
 use mezon_store::{
-    AppConfig, BadgeService, ChannelPermissionsStore, DirectKind, DirectMessageStore, EmojiStore,
-    Message, MessageCode, MessageId, MessagesStore, PERMISSION_DELETE_MESSAGE, PinnedMessagesStore,
+    AppConfig, ChannelPermissionsStore, DirectKind, DirectMessageStore, EmojiStore, Message,
+    MessageCode, MessageId, MessagesStore, PERMISSION_DELETE_MESSAGE, PinnedMessagesStore,
     QuickMenuStore, ThreadsStore, TopicsStore,
 };
 
@@ -163,14 +163,14 @@ fn active_group_dm_owner(cx: &App) -> (bool, bool) {
     let Some(store) = DirectMessageStore::try_global(cx) else {
         return (false, false);
     };
-    let Some(direct) = store.read(cx).find(channel_id) else {
+    let store = store.read(cx);
+    let Some(direct) = store.find(channel_id) else {
         return (false, false);
     };
     if direct.kind != DirectKind::Group {
         return (false, false);
     }
-    let me = BadgeService::global(cx).read(cx).current_user_id(cx);
-    (true, me.is_some() && direct.creator_id == me)
+    (true, store.group_owned_by_me(channel_id, cx))
 }
 
 pub(crate) fn edit_message_allowed(

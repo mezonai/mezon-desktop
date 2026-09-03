@@ -5,6 +5,7 @@
 //! gpui-coupled lifecycle lives here as a store instead of in the app binary.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::{
     App, AppContext, AsyncApp, BackgroundExecutor, Context, Entity, Global, Subscription, Task,
@@ -67,6 +68,10 @@ pub struct ConnectionStore {
     connecting_attempt: u32,
     transport: Arc<TransportClient>,
     wake: Arc<tokio::sync::Notify>,
+    /// Bumped whenever the live connection is replaced. Callbacks captured by an
+    /// older attempt compare against it and stay quiet, so a socket that dies
+    /// while its successor is already up cannot mark the new one disconnected.
+    connection_generation: Arc<AtomicU64>,
     _manager: Task<()>,
     _auth_observe: Subscription,
     _heartbeat: Task<()>,
@@ -112,8 +117,12 @@ impl ConnectionStore {
     pub fn reconnect(&self, cx: &mut Context<Self>) {
         let transport = self.transport.clone();
         let wake = self.wake.clone();
+        let connection_generation = self.connection_generation.clone();
         cx.background_executor()
             .spawn(async move {
+                // Retire the live connection first: its close callback must not
+                // land on the attempt this reconnect is about to start.
+                connection_generation.fetch_add(1, Ordering::AcqRel);
                 if let Err(e) = transport.close().await {
                     tracing::warn!("Failed to close the transport before reconnect: {e}");
                 }
@@ -167,6 +176,8 @@ impl ConnectionStore {
         let heartbeat = Self::spawn_heartbeat(transport.clone(), api.clone(), wake.clone(), cx);
         let transport_handle = transport.clone();
         let wake_handle = wake.clone();
+        let connection_generation = Arc::new(AtomicU64::new(0));
+        let connection_generation_handle = connection_generation.clone();
 
         let probe_url = AppConfig::try_global(cx)
             .map(|cfg| favicon_probe_url(&cfg.redirect_uri))
@@ -208,6 +219,7 @@ impl ConnectionStore {
                 let Some(mut session) = session else {
                     api.set_http_fallback(None);
                     if connected_user_id.take().is_some() {
+                        connection_generation.fetch_add(1, Ordering::AcqRel);
                         if let Err(e) = transport.close().await {
                             tracing::warn!("Failed to close TCP transport after logout: {e}");
                         }
@@ -350,6 +362,7 @@ impl ConnectionStore {
                     tracing::warn!("Failed to close stale transport: {e}");
                 }
 
+                let generation = connection_generation.fetch_add(1, Ordering::AcqRel) + 1;
                 tracing::info!("Connecting shared abridged TCP transport to {endpoint_label}");
                 api.set_status(ConnectionStatus::Connecting);
                 let token = if use_jwt {
@@ -363,6 +376,8 @@ impl ConnectionStore {
                 let api_for_publish = api.clone();
                 let api_for_close = api.clone();
                 let wake_for_close = wake.clone();
+                let connection_generation_for_publish = connection_generation.clone();
+                let connection_generation_for_close = connection_generation.clone();
                 connect_ack_rx.borrow_and_update();
                 let connect_result = transport
                     .connect(
@@ -370,9 +385,17 @@ impl ConnectionStore {
                         explicit_port,
                         &token,
                         move |event| {
-                            api_for_publish.publish_event(event);
+                            if connection_generation_for_publish.load(Ordering::Acquire)
+                                == generation
+                            {
+                                api_for_publish.publish_event(event);
+                            }
                         },
                         move |was_clean| {
+                            if connection_generation_for_close.load(Ordering::Acquire) != generation
+                            {
+                                return;
+                            }
                             if was_clean {
                                 tracing::info!("TCP transport closed cleanly");
                             } else {
@@ -389,9 +412,18 @@ impl ConnectionStore {
                         tracing::info!("Shared abridged TCP transport connected");
                         let signaled = tokio::select! {
                             res = connect_ack_rx.changed() => res.is_ok(),
-                            _ = exec.timer(CONNECT_CONFIRM_GRACE) => true,
+                            _ = exec.timer(CONNECT_CONFIRM_GRACE) => false,
                         };
-                        let handshake_ok = signaled && transport.is_open().await;
+                        // Running out the grace period is not evidence the gateway
+                        // accepted us — it only means nothing arrived yet. Ask the
+                        // socket directly instead of assuming.
+                        let handshake_ok = if !transport.is_open().await {
+                            false
+                        } else if signaled {
+                            true
+                        } else {
+                            transport.ping_roundtrip().await.is_ok()
+                        };
                         if handshake_ok {
                             ConnectOutcome::Confirmed
                         } else {
@@ -491,6 +523,7 @@ impl ConnectionStore {
             connecting_attempt: 0,
             transport: transport_handle,
             wake: wake_handle,
+            connection_generation: connection_generation_handle,
             _manager: manager,
             _auth_observe: auth_observe,
             _heartbeat: heartbeat,

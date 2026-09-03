@@ -1,6 +1,7 @@
 pub mod assets;
 pub mod avatar_color;
 pub mod download;
+pub mod file_dialog;
 pub mod imgproxy;
 pub mod qr_image;
 pub mod reactive;

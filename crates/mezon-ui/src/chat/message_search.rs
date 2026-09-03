@@ -1507,6 +1507,9 @@ pub fn render_header_search_bar(
 
     div()
         .relative()
+        .children(crate::tour::probe(
+            crate::tour::TourAnchor::ChannelHeaderSearch,
+        ))
         .flex_shrink_0()
         .when(expanded, |el| {
             el.on_mouse_down_out(move |_: &MouseDownEvent, window, cx| {

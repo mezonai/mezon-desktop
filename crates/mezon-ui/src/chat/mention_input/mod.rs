@@ -1005,7 +1005,7 @@ impl MentionInput {
             prompt: None,
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else {
+            let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
                 return;
             };
             let pending = cx
@@ -1684,7 +1684,9 @@ impl MentionInput {
             cx.subscribe(
                 &DirectMessageStore::global(cx),
                 |this, _, event: &DirectEvent, cx| {
-                    let DirectEvent::Changed { channel_id } = event;
+                    let DirectEvent::Changed { channel_id } = event else {
+                        return;
+                    };
                     if channel_id.is_none() || *channel_id == mention_direct_id(cx) {
                         this.invalidate_pool(Sigil::At, cx);
                     }
@@ -2130,6 +2132,10 @@ impl MentionInput {
 
     pub fn register_as_active_composer(entity: &Entity<Self>, cx: &mut App) {
         cx.set_global(ActiveComposer(entity.downgrade()));
+    }
+
+    pub fn is_composing(&self, cx: &App) -> bool {
+        self.input.read(cx).is_composing()
     }
 
     pub fn active_composer(cx: &App) -> Option<Entity<Self>> {
@@ -2963,6 +2969,7 @@ impl Render for MentionInput {
             .child(
                 div()
                     .absolute()
+                    .children(crate::tour::probe(crate::tour::TourAnchor::ComposerTools))
                     .right(px(12.))
                     .top(px(12.))
                     .flex()
@@ -3031,6 +3038,8 @@ impl Render for MentionInput {
             });
 
         div()
+            .relative()
+            .children(crate::tour::probe(crate::tour::TourAnchor::Composer))
             .flex()
             .flex_col()
             .w_full()
