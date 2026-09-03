@@ -64,9 +64,6 @@ const DIRECTION_AFTER: i32 = 1;
 /// (used by jump-to-message when the target is not loaded).
 const DIRECTION_AROUND: i32 = 2;
 
-fn topic_jump_needs_around_fetch(found_in_cache: bool) -> bool {
-    !found_in_cache
-}
 const CHANNEL_TYPE_CHANNEL: i32 = 1;
 const CHANNEL_TYPE_THREAD: i32 = 7;
 use crate::message::STICKER_FILETYPE;
@@ -1994,7 +1991,7 @@ impl MessagesStore {
         true
     }
 
-    pub fn topic_id_for_message(&self, message_id: MessageId) -> Option<i64> {
+    pub fn topic_id_for_message(&self, message_id: MessageId, cx: &App) -> Option<i64> {
         if let Some(topic) = self.active_topic_id
             && self.bucket_contains(topic, message_id)
         {
@@ -2009,7 +2006,15 @@ impl MessagesStore {
             {
                 return Some(topic.get());
             }
-            if self.active_channel_id != Some(*bucket_id) {
+            if self.active_topic_id == Some(*bucket_id) {
+                return Some(bucket_id.get());
+            }
+            if TopicsStore::try_global(cx).is_some_and(|store| {
+                store
+                    .read(cx)
+                    .topic_by_id(&bucket_id.get().to_string())
+                    .is_some()
+            }) {
                 return Some(bucket_id.get());
             }
         }
@@ -3109,7 +3114,9 @@ impl MessagesStore {
         };
         match api.create_message_2_inbox(retry).await {
             Ok(()) => {
-                tracing::warn!("add_to_inbox: the server refused the avatar url, saved without it");
+                tracing::warn!(
+                    "add_to_inbox: CreateMessage2Inbox returned InvalidArgument (server ValidateImageURLSecure on avatar); saved without avatar"
+                );
                 true
             }
             Err(retry_error) => {
@@ -3478,11 +3485,14 @@ impl MessagesStore {
             return;
         }
         let topic_key = ChannelId(topic_id);
-        if !topic_jump_needs_around_fetch(
-            self.cache
-                .get(&topic_key)
-                .is_some_and(|channel| channel.messages.contains_id(message_id)),
-        ) {
+        if self
+            .cache
+            .get(&topic_key)
+            .is_some_and(|channel| channel.messages.contains_id(message_id))
+        {
+            if let Some(parent) = self.active_topic_parent.or(self.active_channel_id) {
+                self.active_topic_parent = Some(parent);
+            }
             self.emit_topic_jump(message_id, cx);
             return;
         }
@@ -3546,9 +3556,6 @@ impl MessagesStore {
                         message_id = anchor,
                         "request_topic_jump: target not in AROUND window"
                     );
-                    let has_more = window.len() >= TOPIC_FULL_PAGE_LEN;
-                    this.replace_channel(topic_key, window, has_more);
-                    cx.emit(MessagesEvent::TopicUpdated { topic_id });
                     cx.notify();
                     return;
                 }
@@ -8635,9 +8642,7 @@ mod tests {
     }
 
     #[test]
-    fn topic_jump_fetches_around_when_reply_is_not_cached() {
-        assert!(!topic_jump_needs_around_fetch(true));
-        assert!(topic_jump_needs_around_fetch(false));
+    fn topic_jump_skips_around_fetch_when_reply_is_cached() {
         assert_eq!(DIRECTION_AROUND, 2);
     }
 

@@ -1674,6 +1674,9 @@ impl ChannelMessages {
                     }
                 }
                 MessagesEvent::JumpTo { message_id } => {
+                    if this.is_topic_jump_target(*message_id, cx) {
+                        return;
+                    }
                     this.begin_highlight(*message_id, cx);
                 }
                 MessagesEvent::UnreadBelowChanged => {
@@ -4623,16 +4626,19 @@ impl Render for ChannelMessages {
         let skeleton_overlay = self.skeleton_overlay(cx.theme());
         let header_shown = self.header_shown;
 
-        if let Some(target) = self.pending_jump
-            && let Some(pos) = store
+        if let Some(target) = self.pending_jump {
+            if let Some(pos) = store
                 .read(cx)
                 .viewport_messages()
                 .iter()
                 .position(|m| m.id == target)
-        {
-            self.pending_jump = None;
-            self.list_state
-                .scroll_to_reveal_item(usize::from(header_shown) + pos);
+            {
+                self.pending_jump = None;
+                self.list_state
+                    .scroll_to_reveal_item(usize::from(header_shown) + pos);
+            } else if self.is_topic_jump_target(target, cx) {
+                self.pending_jump = None;
+            }
         }
 
         let locale = self.cached_locale.clone();

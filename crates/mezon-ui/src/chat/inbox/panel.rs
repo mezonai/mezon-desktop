@@ -236,14 +236,8 @@ impl InboxPopoverPanel {
     }
 
     fn sync_from_store(&mut self, cx: &App) {
-        let old_first = self
-            .cached_items
-            .first()
-            .map(ListRow::id)
-            .map(str::to_string);
         self.cached_items = Self::build_items(self.tab, &self.clan_id, &self.locale, cx);
-        let new_first = self.cached_items.first().map(ListRow::id);
-        self.sync_list_state(old_first.as_deref() != new_first);
+        self.sync_list_state(false);
     }
 
     fn build_items(
@@ -794,7 +788,7 @@ fn schedule_notification_jump(
             effective_topic_id = Some(topic_id.to_string());
         } else if let Some(topic_id) = MessagesStore::global(cx)
             .read(cx)
-            .topic_id_for_message(message_id)
+            .topic_id_for_message(message_id, cx)
             .filter(|id| *id > 0)
         {
             effective_topic_id = Some(topic_id.to_string());
