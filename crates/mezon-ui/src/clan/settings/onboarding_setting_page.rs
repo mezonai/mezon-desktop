@@ -855,6 +855,7 @@ impl OnboardingSettingPage {
         let setup = cx.entity().downgrade();
         let guide = cx.entity().downgrade();
         let preview_clan = self.clan_id;
+        let preview_blocked = self.dirty;
         v_flex()
             .gap_5()
             .child(
@@ -877,21 +878,27 @@ impl OnboardingSettingPage {
                             .child(
                                 div()
                                     .id("onboarding-open-preview")
-                                    .cursor_pointer()
-                                    .text_color(rgb(0x5865f2))
-                                    .hover(|style| style.text_color(rgb(0x818cf8)))
-                                    .child(mezon_i18n::t(locale, "onBoardingClan.buttons.preview"))
-                                    .on_click(move |_, _, cx| {
-                                        OnboardingStore::global(cx).update(cx, |store, cx| {
-                                            store.open_preview(preview_clan, cx)
-                                        });
-                                        crate::router::navigate(
-                                            cx,
-                                            crate::router::Route::ClanGuide {
-                                                clan_id: preview_clan,
-                                            },
-                                        );
-                                    }),
+                                    .when(!preview_blocked, |link| {
+                                        link.cursor_pointer()
+                                            .text_color(rgb(0x5865f2))
+                                            .hover(|style| style.text_color(rgb(0x818cf8)))
+                                            .on_click(move |_, _, cx| {
+                                                OnboardingStore::global(cx).update(
+                                                    cx,
+                                                    |store, cx| {
+                                                        store.open_preview(preview_clan, cx)
+                                                    },
+                                                );
+                                                crate::router::navigate(
+                                                    cx,
+                                                    crate::router::Route::ClanGuide {
+                                                        clan_id: preview_clan,
+                                                    },
+                                                );
+                                            })
+                                    })
+                                    .when(preview_blocked, |link| link.text_color(theme.text_muted))
+                                    .child(mezon_i18n::t(locale, "onBoardingClan.buttons.preview")),
                             ),
                     ),
             )

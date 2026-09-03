@@ -438,6 +438,7 @@ impl Render for RootView {
         let base_font_family = ::theme::theme_settings(cx).ui_font(cx).family.clone();
         let theme = cx.theme();
 
+        let mut preview_bar = None;
         let content: gpui::AnyElement = match self.auth_state.read(cx) {
             AuthState::NotAuthenticated | AuthState::OtpRequested { .. } => {
                 cached_fill(self.login_view.clone())
@@ -460,6 +461,17 @@ impl Render for RootView {
             }
             AuthState::Authenticated(_) => {
                 let route = Router::global(cx).read(cx).route();
+                if matches!(
+                    route,
+                    Route::Chat | Route::Channel { .. } | Route::ClanGuide { .. }
+                ) {
+                    preview_bar = OnboardingStore::try_global(cx)
+                        .and_then(|store| store.read(cx).preview_clan())
+                        .filter(|clan_id| {
+                            ClanList::global(cx).read(cx).active_clan_id == Some(*clan_id)
+                        })
+                        .map(|clan_id| render_onboarding_preview_bar(clan_id, theme, locale));
+                }
                 match route {
                     Route::SettingsAccount
                     | Route::SettingsProfile
@@ -482,13 +494,6 @@ impl Render for RootView {
                 }
             }
         };
-
-        // React gates the strip on `previewMode.clanId === currentClanId`, so switching clans
-        // parks the preview rather than following the owner around.
-        let preview_bar = OnboardingStore::try_global(cx)
-            .and_then(|store| store.read(cx).preview_clan())
-            .filter(|clan_id| ClanList::global(cx).read(cx).active_clan_id == Some(*clan_id))
-            .map(|clan_id| render_onboarding_preview_bar(clan_id, theme, locale));
 
         div()
             .relative()
@@ -528,31 +533,29 @@ impl Render for RootView {
 /// The strip React drops across the top while an owner is previewing their clan the way a new
 /// member sees it. Closing it hands them back to the onboarding settings they opened it from.
 fn render_onboarding_preview_bar(clan_id: ClanId, theme: &Theme, locale: &str) -> gpui::AnyElement {
-    // The bar spans the whole window, so on macOS the close button has to start clear of the
-    // native traffic lights it would otherwise sit on top of.
-    let close_left = if cfg!(target_os = "macos") {
-        px(88.)
+    let leading_inset = if cfg!(target_os = "macos") {
+        px(80.)
     } else {
-        px(24.)
+        px(16.)
     };
     div()
-        .relative()
+        .occlude()
         .flex()
         .flex_row()
         .flex_none()
         .items_center()
-        .justify_center()
+        .gap_4()
         .w_full()
         .h(px(48.))
-        .px_4()
+        .pl(leading_inset)
+        .pr_4()
         .bg(theme.bg_secondary)
         .border_b_1()
         .border_color(theme.border)
         .child(
             div()
                 .id("onboarding-close-preview")
-                .absolute()
-                .left(close_left)
+                .flex_none()
                 .flex()
                 .flex_row()
                 .items_center()
@@ -589,6 +592,10 @@ fn render_onboarding_preview_bar(clan_id: ClanId, theme: &Theme, locale: &str) -
         )
         .child(
             div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_center()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text_primary)
                 .child(mezon_i18n::t(locale, "common.previewModeDescription")),

@@ -400,7 +400,7 @@ impl ChannelSidebar {
             let onboarding = OnboardingStore::global(cx);
             let unloaded = {
                 let store = onboarding.read(cx);
-                !store.has_onboarding(clan_id) || !store.steps_loaded(clan_id)
+                !store.load_attempted(clan_id) || !store.steps_loaded(clan_id)
             };
             if unloaded
                 && self
@@ -1620,6 +1620,7 @@ fn clan_inputs_fingerprint(clans: &ClanList) -> (Option<ClanId>, u64) {
     let mut hash = FNV_OFFSET;
     if let Some(clan) = clans.active_clan() {
         hash = fold(hash, clan.name.as_bytes());
+        hash = fold(hash, &[u8::from(clan.is_onboarding)]);
     }
     if let Some(banner) = clans.active_clan_banner() {
         hash = fold(hash, banner.as_bytes());

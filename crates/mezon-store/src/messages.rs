@@ -4528,6 +4528,11 @@ impl MessagesStore {
         let is_public = self.is_public;
         let mode = self.mode;
         let has_attachments = !attachments.is_empty();
+        if let Some(onboarding) = crate::onboarding::OnboardingStore::try_global(cx) {
+            onboarding.update(cx, |store, cx| {
+                store.note_message_sent(clan_id, channel_id, cx);
+            });
+        }
         let reply = match reply_override {
             Some(draft) => Some(draft),
             None => self.take_reply_target(),
