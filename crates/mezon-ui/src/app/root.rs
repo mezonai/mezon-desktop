@@ -18,7 +18,9 @@ use gpui::{
     Animation, AnimationExt as _, AnyView, App, ClickEvent, Context, Entity, FontWeight,
     MouseButton, NavigationDirection, StyleRefinement, Task, Window, div, img, prelude::*, px,
 };
-use mezon_store::{AuthState, ChannelList, ClanId, ClanList, ConnectionStore, Settings};
+use mezon_store::{
+    AuthState, ChannelList, ClanId, ClanList, ConnectionStore, OnboardingStore, Settings,
+};
 use std::time::{Duration, Instant};
 
 pub struct RootView {
@@ -156,6 +158,9 @@ impl RootView {
             }
         })
         .detach();
+
+        cx.observe(&OnboardingStore::global(cx), |_, _, cx| cx.notify())
+            .detach();
 
         cx.observe(&auth_state, |this, auth_state, cx| {
             if matches!(*auth_state.read(cx), AuthState::Connecting(_)) {
@@ -478,6 +483,13 @@ impl Render for RootView {
             }
         };
 
+        // React gates the strip on `previewMode.clanId === currentClanId`, so switching clans
+        // parks the preview rather than following the owner around.
+        let preview_bar = OnboardingStore::try_global(cx)
+            .and_then(|store| store.read(cx).preview_clan())
+            .filter(|clan_id| ClanList::global(cx).read(cx).active_clan_id == Some(*clan_id))
+            .map(|clan_id| render_onboarding_preview_bar(clan_id, theme, locale));
+
         div()
             .relative()
             .flex()
@@ -503,6 +515,7 @@ impl Render for RootView {
             .when(window_controls::HAS_CUSTOM_TITLE_BAR, |this| {
                 this.child(render_title_bar(self.title_bar.clone()))
             })
+            .children(preview_bar)
             .child(content)
             .when(window_controls::is_edge_resizable(), |this| {
                 this.child(window_controls::render_resize_edges(window))
@@ -510,6 +523,77 @@ impl Render for RootView {
             .child(self.shell.clone())
             .child(self.call_overlay.clone())
     }
+}
+
+/// The strip React drops across the top while an owner is previewing their clan the way a new
+/// member sees it. Closing it hands them back to the onboarding settings they opened it from.
+fn render_onboarding_preview_bar(clan_id: ClanId, theme: &Theme, locale: &str) -> gpui::AnyElement {
+    // The bar spans the whole window, so on macOS the close button has to start clear of the
+    // native traffic lights it would otherwise sit on top of.
+    let close_left = if cfg!(target_os = "macos") {
+        px(88.)
+    } else {
+        px(24.)
+    };
+    div()
+        .relative()
+        .flex()
+        .flex_row()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .w_full()
+        .h(px(48.))
+        .px_4()
+        .bg(theme.bg_secondary)
+        .border_b_1()
+        .border_color(theme.border)
+        .child(
+            div()
+                .id("onboarding-close-preview")
+                .absolute()
+                .left(close_left)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py(px(4.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(theme.border)
+                .cursor_pointer()
+                .text_color(theme.text_primary)
+                .hover(|style| style.bg(theme.bg_hover))
+                .child(
+                    Icon::new(IconName::ArrowLeft)
+                        .size(px(14.))
+                        .text_color(theme.text_primary),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(mezon_i18n::t(locale, "common.closePreviewMode")),
+                )
+                .on_click(move |_, _, cx| {
+                    OnboardingStore::global(cx).update(cx, |store, cx| store.close_preview(cx));
+                    crate::router::navigate(
+                        cx,
+                        Route::ClanSettings {
+                            clan_id,
+                            page: ClanSettingsPage::Onboarding,
+                        },
+                    );
+                }),
+        )
+        .child(
+            div()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text_primary)
+                .child(mezon_i18n::t(locale, "common.previewModeDescription")),
+        )
+        .into_any_element()
 }
 
 fn render_title_bar(title_bar: Entity<TitleBar>) -> AnyView {
