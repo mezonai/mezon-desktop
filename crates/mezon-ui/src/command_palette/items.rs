@@ -352,9 +352,7 @@ pub fn build_palette_items_from_ctrlk(state: &CtrlKSearchState, cx: &App) -> Vec
             }
             continue;
         }
-        if let Some(item) =
-            ctrlk_channel_as_clan_channel(channel, channels, clans, members_store.as_ref(), cx)
-        {
+        if let Some(item) = ctrlk_channel_as_clan_channel(channel, channels, clans) {
             items.push(item);
         }
     }
@@ -365,7 +363,6 @@ pub fn build_palette_items_from_ctrlk(state: &CtrlKSearchState, cx: &App) -> Vec
         }
     }
 
-    items.sort_by(cmp_items);
     items
 }
 
@@ -382,6 +379,9 @@ fn ctrlk_channel_as_direct(
         _ => return None,
     };
     let existing = dms.iter().find(|dm| dm.id == channel.channel_id);
+    if kind == DirectKind::Dm && existing.is_none() {
+        return None;
+    }
     let (unread_count, last_sent_timestamp, last_seen_timestamp) = channel_list
         .user_channel(channel.channel_id)
         .map(|ch| channel_list.palette_channel_unread(ch))
@@ -434,9 +434,7 @@ fn ctrlk_channel_as_clan_channel(
     channel: &CtrlKChannel,
     channel_list: &ChannelList,
     clans: &ClanList,
-    _members_store: Option<&Entity<ClanMembersStore>>,
-    _cx: &App,
-) -> Option<PaletteItem> {
+) -> PaletteItem {
     let channel_type = ChannelType::from_raw(channel.channel_type as u32);
     let stored = channel_list.channel(channel.clan_id, channel.channel_id);
     let name = stored
@@ -461,7 +459,7 @@ fn ctrlk_channel_as_clan_channel(
         channel.channel_id,
         channel_type,
     );
-    Some(PaletteItem {
+    PaletteItem {
         kind: PaletteItemKind::Channel,
         label: SharedString::from(name.clone()),
         subtext: SharedString::from(subtext),
@@ -482,7 +480,7 @@ fn ctrlk_channel_as_clan_channel(
         filter_display: String::new(),
         filter_blob: normalize_search_string(&name),
         voice_busy,
-    })
+    }
 }
 
 fn ctrlk_user_as_member(

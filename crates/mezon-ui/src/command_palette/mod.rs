@@ -282,8 +282,9 @@ impl CommandPaletteModal {
 
     fn recompute_filtered(&mut self, cx: &App) {
         let previous_selection = self.selected_item_id();
-        let (api_text, _) = parse_ctrlk_query(&self.debounced_query);
-        if self.debounced_query.trim().is_empty() || api_text.is_empty() {
+        let query = self.debounced_query.trim();
+        let (api_text, _) = parse_ctrlk_query(query);
+        if query.is_empty() || api_text.is_empty() {
             self.items = Rc::new(build_palette_items(cx));
             self.recompute_local_filtered(cx, previous_selection);
             return;
@@ -292,16 +293,15 @@ impl CommandPaletteModal {
         let ctrlk = CtrlKSearchStore::global(cx).read(cx);
         let state = ctrlk.state();
         self.items = Rc::new(build_palette_items_from_ctrlk(state, cx));
-        self.filtered = Rc::new(sort_palette_indices(
+        self.filtered = Rc::new(sort_palette_indices(self.items.as_ref(), query));
+        self.display_rows = Rc::new(build_display_rows(
             self.items.as_ref(),
-            &self.debounced_query,
+            self.filtered.as_ref(),
+            query,
+            &[],
+            None,
+            &section_labels(&self.locale),
         ));
-        self.display_rows = Rc::new(
-            self.filtered
-                .iter()
-                .map(|&item_index| PaletteDisplayRow::Item { item_index })
-                .collect(),
-        );
         self.selected_visible = previous_selection
             .and_then(|id| {
                 find_visible_row_by_item_id(self.display_rows.as_ref(), self.items.as_ref(), id)
@@ -310,16 +310,14 @@ impl CommandPaletteModal {
     }
 
     fn recompute_local_filtered(&mut self, cx: &App, previous_selection: Option<PaletteItemId>) {
-        self.filtered = Rc::new(filter_and_sort_indices(
-            self.items.as_ref(),
-            &self.debounced_query,
-        ));
-        let previous = if self.debounced_query.is_empty() {
+        let query = self.debounced_query.trim();
+        self.filtered = Rc::new(filter_and_sort_indices(self.items.as_ref(), query));
+        let previous = if query.is_empty() {
             previous_channel_ids(cx)
         } else {
             Vec::new()
         };
-        let browse_context = if self.debounced_query.is_empty() {
+        let browse_context = if query.is_empty() {
             palette_browse_context(cx)
         } else {
             None
@@ -327,7 +325,7 @@ impl CommandPaletteModal {
         self.display_rows = Rc::new(build_display_rows(
             self.items.as_ref(),
             self.filtered.as_ref(),
-            &self.debounced_query,
+            query,
             &previous,
             browse_context,
             &section_labels(&self.locale),
@@ -363,10 +361,6 @@ impl CommandPaletteModal {
         ChannelList::global(cx).update(cx, |store, cx| {
             items::ensure_palette_clans_loaded(store, cx);
         });
-        let (api_text, _) = parse_ctrlk_query(&self.debounced_query);
-        if self.debounced_query.trim().is_empty() || api_text.is_empty() {
-            self.items = Rc::new(build_palette_items(cx));
-        }
         self.items_dirty = false;
         self.recompute_filtered(cx);
         cx.notify();
@@ -527,7 +521,7 @@ impl Render for CommandPaletteModal {
             );
 
         let count = self.display_rows.len();
-        let search_query = self.debounced_query.clone();
+        let search_query = self.debounced_query.trim().to_string();
         let ctrlk_searching = self.ctrlk_searching(cx);
         let list = if count == 0 && ctrlk_searching {
             div()

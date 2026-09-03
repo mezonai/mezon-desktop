@@ -67,7 +67,6 @@ pub struct CtrlKSearchStore {
     state: CtrlKSearchState,
     api: Arc<AppApi>,
     search_generation: u64,
-    result_generation: u64,
     _search_task: Task<()>,
 }
 
@@ -82,7 +81,6 @@ impl CtrlKSearchStore {
             state: CtrlKSearchState::default(),
             api,
             search_generation: 0,
-            result_generation: 0,
             _search_task: Task::ready(()),
         });
         cx.set_global(GlobalCtrlKSearchStore(entity.clone()));
@@ -120,8 +118,6 @@ impl CtrlKSearchStore {
         self.state.users.clear();
         self.state.channels.clear();
         self.state.is_searching = true;
-        self.result_generation = self.result_generation.wrapping_add(1);
-        let generation = self.result_generation;
         cx.emit(CtrlKSearchEvent::Changed);
         cx.notify();
 
@@ -131,9 +127,6 @@ impl CtrlKSearchStore {
             let result = api.search_ctrl_k(&trimmed, search_type.as_raw()).await;
             let _ = this.update(cx, |this, cx| {
                 if this.search_generation != store_generation {
-                    return;
-                }
-                if this.result_generation != generation {
                     return;
                 }
                 this.state.is_searching = false;
