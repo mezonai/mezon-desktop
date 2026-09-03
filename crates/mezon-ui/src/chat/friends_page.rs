@@ -596,7 +596,7 @@ fn build_activity_rows(
             group.len()
         ))));
         for (a, f) in group {
-            let description = activity_row_subtitle(a, locale);
+            let description = activity_row_subtitle(a);
             rows.push(ActivityRow::Item {
                 label: SharedString::from(f.label().to_string()),
                 description: SharedString::from(description),
@@ -608,21 +608,11 @@ fn build_activity_rows(
     rows
 }
 
-fn activity_row_subtitle(activity: &UserActivity, locale: &str) -> String {
+fn activity_row_subtitle(activity: &UserActivity) -> String {
     if !activity.activity_description.is_empty() {
-        return activity.activity_description.clone();
-    }
-    let kind_key = match activity.activity_type {
-        ACTIVITY_TYPE_WORK => "friendsPage.activity.codingStatus",
-        ACTIVITY_TYPE_LIVE => "friendsPage.activity.musicStatus",
-        ACTIVITY_TYPE_PLAY => "friendsPage.activity.gamingStatus",
-        _ => return activity.activity_name.clone(),
-    };
-    let kind_label = mezon_i18n::t(locale, kind_key);
-    if activity.activity_name.is_empty() {
-        kind_label.to_string()
+        activity.activity_description.clone()
     } else {
-        format!("{kind_label} · {}", activity.activity_name)
+        activity.activity_name.clone()
     }
 }
 
@@ -893,9 +883,13 @@ impl FriendsPage {
                     div()
                         .id("friend-search-clear")
                         .absolute()
-                        .top(px(10.))
+                        .top_0()
                         .right(px(48.))
+                        .h(px(44.))
                         .px_2()
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .text_size(px(25.))
                         .text_color(theme.tokens.text_theme_primary)
                         .cursor_pointer()

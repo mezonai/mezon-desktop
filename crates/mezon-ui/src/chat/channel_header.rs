@@ -512,11 +512,20 @@ impl ChannelHeader {
                     .children(buttons)
                     .children(inbox_el.map(|inbox| {
                         div()
+                            .relative()
                             .flex()
                             .items_center()
-                            .pl_4()
-                            .border_l_1()
-                            .border_color(theme.tokens.border_primary)
+                            .ml(px(4.))
+                            .pl(px(8.))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .top(px(6.))
+                                    .w(px(1.))
+                                    .h(px(20.))
+                                    .bg(theme.tokens.border_primary),
+                            )
                             .child(inbox)
                             .into_any_element()
                     }))
