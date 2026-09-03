@@ -656,7 +656,13 @@ impl ChannelSidebar {
 
         let skeleton_changed = self.advance_skeleton(cold_loading, new_clan_id, cx);
         let changed = items_changed || name_changed || clan_changed || skeleton_changed;
-        self.try_scroll_ctrlk_focus(cx);
+        if self.channel_list.read(cx).ctrlk_focus_channel().is_some() {
+            cx.defer(|cx| {
+                if let Ok(sidebar) = active_channel_sidebar(cx) {
+                    sidebar.update(cx, |this, cx| this.try_scroll_ctrlk_focus(cx));
+                }
+            });
+        }
         changed
     }
 

@@ -221,6 +221,9 @@ impl LoginStore {
         if let Some(e) = crate::audit_log::AuditLogStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }
+        if let Some(e) = crate::ctrlk_search::CtrlKSearchStore::try_global(cx) {
+            e.update(cx, |s, cx| s.clear(cx));
+        }
     }
 }
 

@@ -69,6 +69,9 @@ pub fn filter_and_sort_indices(items: &[PaletteItem], raw_query: &str) -> Vec<us
 
 pub fn sort_palette_indices(items: &[PaletteItem], raw_query: &str) -> Vec<usize> {
     let mut indices: Vec<usize> = (0..items.len()).collect();
+    if raw_query.starts_with('#') {
+        indices.retain(|&index| items[index].kind == PaletteItemKind::Channel);
+    }
     sort_indices(items, &mut indices, raw_query);
     indices
 }

@@ -284,6 +284,7 @@ impl CommandPaletteModal {
         let previous_selection = self.selected_item_id();
         let (api_text, _) = parse_ctrlk_query(&self.debounced_query);
         if self.debounced_query.trim().is_empty() || api_text.is_empty() {
+            self.items = Rc::new(build_palette_items(cx));
             self.recompute_local_filtered(cx, previous_selection);
             return;
         }
@@ -534,6 +535,13 @@ impl Render for CommandPaletteModal {
                 .flex_shrink_0()
                 .max_h(px(250.))
                 .min_h(px(120.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .px_4()
+                .text_size(px(14.))
+                .text_color(theme.tokens.text_theme_primary)
+                .child(mezon_i18n::t(&locale, "channelTopbar.loading"))
         } else if count == 0 {
             div()
                 .id("command-palette-list")

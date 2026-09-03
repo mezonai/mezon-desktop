@@ -386,7 +386,10 @@ fn ctrlk_channel_as_direct(
         .user_channel(channel.channel_id)
         .map(|ch| channel_list.palette_channel_unread(ch))
         .unwrap_or((0, 0, 0));
-    let label = channel.label.clone();
+    let label = existing
+        .map(|dm| dm.label.clone())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| channel.label.clone());
     let avatar_raw = existing
         .filter(|dm| !dm.avatar.is_empty())
         .map(|dm| dm.avatar.clone())
