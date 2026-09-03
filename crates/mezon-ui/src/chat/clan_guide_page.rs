@@ -467,7 +467,7 @@ impl ClanGuidePage {
                 .into_any_element();
         }
         let clan_id = self.clan_id;
-        let done = store.mission_done(clan_id);
+        let done = store.mission_progress(clan_id);
         let channels = ChannelList::global(cx);
         let channels = channels.read(cx);
         for (index, mission) in missions.iter().enumerate() {

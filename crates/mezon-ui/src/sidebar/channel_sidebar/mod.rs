@@ -390,25 +390,22 @@ impl ChannelSidebar {
         let locale = self.settings.read(cx).language.clone();
         self.last_locale = locale.clone();
         self.last_clan_inputs = clan_inputs_fingerprint(self.clan_list.read(cx));
-        if let Some(clan_id) = self.clan_list.read(cx).active_clan_id {
+        let active_clan = {
+            let clans = self.clan_list.read(cx);
+            clans
+                .active_clan()
+                .map(|clan| (clan.id, clan.is_onboarding))
+        };
+        if let Some((clan_id, _)) = active_clan {
             EventsStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
-            // `ClanLoadScheduler` already fetches this when the clan is entered; this covers the
-            // other way in — an owner who just switched onboarding on and expects the progress
-            // card without leaving and re-entering the clan. `rebuild_items` is hot (every
-            // `ChannelList` notify lands here), so the two hash lookups gate the clan-list scan:
-            // once both halves are in, this costs nothing.
+        }
+        if let Some((clan_id, true)) = active_clan {
             let onboarding = OnboardingStore::global(cx);
             let unloaded = {
                 let store = onboarding.read(cx);
-                !store.has_onboarding(clan_id) || !store.steps_loaded(clan_id)
+                !store.load_attempted(clan_id) || !store.steps_loaded(clan_id)
             };
-            if unloaded
-                && self
-                    .clan_list
-                    .read(cx)
-                    .clan(clan_id)
-                    .is_some_and(|clan| clan.is_onboarding)
-            {
+            if unloaded {
                 onboarding.update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
             }
         }
@@ -1620,6 +1617,7 @@ fn clan_inputs_fingerprint(clans: &ClanList) -> (Option<ClanId>, u64) {
     let mut hash = FNV_OFFSET;
     if let Some(clan) = clans.active_clan() {
         hash = fold(hash, clan.name.as_bytes());
+        hash = fold(hash, &[u8::from(clan.is_onboarding)]);
     }
     if let Some(banner) = clans.active_clan_banner() {
         hash = fold(hash, banner.as_bytes());
