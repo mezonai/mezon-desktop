@@ -148,6 +148,7 @@ impl RootView {
             this.sync_clan_settings_page(cx);
             this.sync_channel_settings_tab(cx);
             this.schedule_tour_autostart(cx);
+            end_preview_off_its_own_screens(cx);
             cx.notify();
         })
         .detach();
@@ -461,10 +462,7 @@ impl Render for RootView {
             }
             AuthState::Authenticated(_) => {
                 let route = Router::global(cx).read(cx).route();
-                if matches!(
-                    route,
-                    Route::Chat | Route::Channel { .. } | Route::ClanGuide { .. }
-                ) {
+                if previewable_route(&route) {
                     preview_bar = OnboardingStore::try_global(cx)
                         .and_then(|store| store.read(cx).preview_clan())
                         .filter(|clan_id| {
@@ -532,6 +530,26 @@ impl Render for RootView {
 
 /// The strip React drops across the top while an owner is previewing their clan the way a new
 /// member sees it. Closing it hands them back to the onboarding settings they opened it from.
+fn previewable_route(route: &Route) -> bool {
+    matches!(
+        route,
+        Route::Chat | Route::Channel { .. } | Route::ClanGuide { .. }
+    )
+}
+
+fn end_preview_off_its_own_screens(cx: &mut App) {
+    let Some(store) = OnboardingStore::try_global(cx) else {
+        return;
+    };
+    if store.read(cx).preview_clan().is_none() {
+        return;
+    }
+    let route = Router::global(cx).read(cx).route();
+    if !previewable_route(&route) {
+        store.update(cx, |store, cx| store.close_preview(cx));
+    }
+}
+
 fn render_onboarding_preview_bar(clan_id: ClanId, theme: &Theme, locale: &str) -> gpui::AnyElement {
     let leading_inset = if cfg!(target_os = "macos") {
         px(80.)
