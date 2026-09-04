@@ -21,7 +21,8 @@ use crate::chat::clan_management_page::management_page;
 use crate::chat::message::format_channel_setting_relative_time_from_seconds;
 use crate::components::compositions::channel_row::channel_type_icon;
 use crate::components::primitives::{
-    Avatar, ContextMenu, Icon, IconName, Input, InputEvent, InputState, context_menu_at,
+    Avatar, ContextMenu, Icon, IconName, Input, InputEvent, InputState, PaginationButton,
+    context_menu_at, pagination_button, pagination_items,
 };
 use crate::theme::ActiveTheme;
 use crate::util::text_utils::normalize_diacritics;
@@ -708,7 +709,14 @@ impl ClanChannelsPage {
         }
         let mut bar = div().flex().items_center().gap_2();
         bar = bar.child(
-            page_button("‹", self.page == 0, false, cx).on_click(cx.listener(|this, _, _, cx| {
+            pagination_button(
+                "clan-channels",
+                PaginationButton::Previous,
+                self.page == 0,
+                false,
+                cx.theme(),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
                 if this.page > 0 {
                     this.page -= 1;
                     this.scroll_to_top();
@@ -719,28 +727,38 @@ impl ClanChannelsPage {
         for page in pagination_items(self.page, pages) {
             if let Some(page) = page {
                 bar = bar.child(
-                    page_button(&(page + 1).to_string(), false, page == self.page, cx).on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.page = page;
-                            this.scroll_to_top();
-                            cx.notify();
-                        }),
-                    ),
+                    pagination_button(
+                        "clan-channels",
+                        PaginationButton::Page(page + 1),
+                        false,
+                        page == self.page,
+                        cx.theme(),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.page = page;
+                        this.scroll_to_top();
+                        cx.notify();
+                    })),
                 );
             } else {
                 bar = bar.child(div().px_2().child("…"));
             }
         }
         bar.child(
-            page_button("›", self.page + 1 >= pages, false, cx).on_click(cx.listener(
-                move |this, _, _, cx| {
-                    if this.page + 1 < pages {
-                        this.page += 1;
-                        this.scroll_to_top();
-                        cx.notify();
-                    }
-                },
-            )),
+            pagination_button(
+                "clan-channels",
+                PaginationButton::Next,
+                self.page + 1 >= pages,
+                false,
+                cx.theme(),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.page + 1 < pages {
+                    this.page += 1;
+                    this.scroll_to_top();
+                    cx.notify();
+                }
+            })),
         )
         .into_any_element()
     }
@@ -1085,83 +1103,6 @@ fn changed_range<T: PartialEq>(old: &[T], new: &[T]) -> (Range<usize>, usize) {
         .count();
 
     (prefix..old.len() - suffix, new.len() - prefix - suffix)
-}
-
-fn pagination_items(current: usize, pages: usize) -> Vec<Option<usize>> {
-    if pages <= 6 {
-        return (0..pages).map(Some).collect();
-    }
-    if current <= 2 {
-        let mut items = (0..5).map(Some).collect::<Vec<_>>();
-        items.push(None);
-        items.push(Some(pages - 1));
-        return items;
-    }
-    if current >= pages - 3 {
-        let mut items = vec![Some(0), None];
-        items.extend(((pages - 6)..pages).map(Some));
-        return items;
-    }
-    vec![
-        Some(0),
-        None,
-        Some(current - 1),
-        Some(current),
-        Some(current + 1),
-        None,
-        Some(pages - 1),
-    ]
-}
-
-fn page_button(
-    label: &str,
-    disabled: bool,
-    selected: bool,
-    cx: &Context<ClanChannelsPage>,
-) -> gpui::Stateful<gpui::Div> {
-    let is_arrow = label.parse::<usize>().is_err();
-    let is_left = label == "‹" || label == "previous";
-    div()
-        .id(format!("channel-page-{label}-{selected}-{disabled}"))
-        .w(px(40.))
-        .h(px(32.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(5.))
-        .border_1()
-        .border_color(if selected {
-            cx.theme().text_primary
-        } else {
-            cx.theme().border
-        })
-        .bg(if disabled {
-            cx.theme().brand
-        } else if selected {
-            cx.theme().tokens.bg_active_button
-        } else {
-            cx.theme().brand
-        })
-        .text_color(if is_arrow {
-            gpui::white()
-        } else {
-            gpui::Hsla::from(cx.theme().text_primary)
-        })
-        .when(disabled, |element| element.opacity(0.5))
-        .when(!disabled, |element| element.cursor_pointer())
-        .when(is_arrow, |element| {
-            element.child(
-                Icon::new(IconName::ArrowRight)
-                    .size(px(20.))
-                    .text_color(gpui::white())
-                    .when(is_left, |icon| {
-                        icon.with_transformation(gpui::Transformation::rotate(gpui::radians(
-                            std::f32::consts::PI,
-                        )))
-                    }),
-            )
-        })
-        .when(!is_arrow, |element| element.child(label.to_string()))
 }
 
 #[cfg(test)]

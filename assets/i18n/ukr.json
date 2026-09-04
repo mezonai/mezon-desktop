@@ -1535,6 +1535,8 @@
   "clanSettings.appDirectory.categories.serverMiniGames": "Міні-ігри серверу",
   "clanSettings.appDirectory.inServers": "в {{count}} серверах",
   "clanSettings.archivedChannels.archived": "АКТИВНИЙ",
+  "clanSettings.archivedChannels.searchPlaceholder": "Пошук архівних каналів за назвою",
+  "clanSettings.archivedChannels.noSearchResults": "Немає архівних каналів, що відповідають пошуку",
   "clanSettings.archivedChannels.description": "Відновіть канали на бічній панелі, щоб зробити їх знову активними. Архівовані канали зберігають усю історію повідомлень, але приховані з основної навігації.",
   "clanSettings.archivedChannels.emptyState": "Немає архівованих каналів",
   "clanSettings.archivedChannels.fetchFailed": "Не вдалося завантажити архівні канали",

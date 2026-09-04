@@ -1536,6 +1536,8 @@
   "clanSettings.appDirectory.categories.serverMiniGames": "Server-Minispiele",
   "clanSettings.appDirectory.inServers": "in {{count}} Servern",
   "clanSettings.archivedChannels.archived": "AKTIV",
+  "clanSettings.archivedChannels.searchPlaceholder": "Archivierte Kanäle nach Name suchen",
+  "clanSettings.archivedChannels.noSearchResults": "Keine archivierten Kanäle entsprechen deiner Suche",
   "clanSettings.archivedChannels.description": "Stelle Kanäle in der Seitenleiste wieder her, um sie erneut zu aktivieren. Archivierte Kanäle behalten den gesamten Nachrichtenverlauf, sind jedoch in der Hauptnavigation ausgeblendet.",
   "clanSettings.archivedChannels.emptyState": "Keine archivierten Kanäle",
   "clanSettings.archivedChannels.fetchFailed": "Archivierte Kanäle konnten nicht geladen werden",

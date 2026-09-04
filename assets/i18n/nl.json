@@ -1535,6 +1535,8 @@
   "clanSettings.appDirectory.categories.serverMiniGames": "Server mini-games",
   "clanSettings.appDirectory.inServers": "in {{count}} servers",
   "clanSettings.archivedChannels.archived": "ACTIEF",
+  "clanSettings.archivedChannels.searchPlaceholder": "Zoek gearchiveerde kanalen op naam",
+  "clanSettings.archivedChannels.noSearchResults": "Geen gearchiveerde kanalen komen overeen met je zoekopdracht",
   "clanSettings.archivedChannels.description": "Herstel kanalen naar de zijbalk om ze weer actief te maken. Gearchiveerde kanalen bewaren de volledige berichtgeschiedenis, maar worden verborgen in de primaire navigatie.",
   "clanSettings.archivedChannels.emptyState": "Geen gearchiveerde kanalen",
   "clanSettings.archivedChannels.fetchFailed": "Gearchiveerde kanalen konden niet worden geladen",

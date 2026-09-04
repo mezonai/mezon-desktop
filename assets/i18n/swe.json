@@ -1536,6 +1536,8 @@
   "clanSettings.appDirectory.categories.serverMiniGames": "Server Mini-Games",
   "clanSettings.appDirectory.inServers": "i {{count}} servrar",
   "clanSettings.archivedChannels.archived": "AKTIV",
+  "clanSettings.archivedChannels.searchPlaceholder": "Sök arkiverade kanaler efter namn",
+  "clanSettings.archivedChannels.noSearchResults": "Inga arkiverade kanaler matchar din sökning",
   "clanSettings.archivedChannels.description": "Återställ kanaler till sidofältet för att göra dem aktiva igen. Arkiverade kanaler bevarar hela meddelandehistoriken men är dolda från den primära navigeringen.",
   "clanSettings.archivedChannels.emptyState": "Inga arkiverade kanaler",
   "clanSettings.archivedChannels.fetchFailed": "Det gick inte att läsa in arkiverade kanaler",

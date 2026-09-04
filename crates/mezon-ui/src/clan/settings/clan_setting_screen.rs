@@ -565,7 +565,10 @@ impl Render for ClanSettingScreen {
         let perms = PermissionStore::global(cx)
             .read(cx)
             .clan_settings_permissions(clan_id, cx);
-        let audit_log_layout = page == ClanSettingsPage::AuditLog;
+        let fixed_content_layout = matches!(
+            page,
+            ClanSettingsPage::AuditLog | ClanSettingsPage::ArchivedChannels
+        );
         let content = self
             .current_page_view(&locale, &theme, cx)
             .unwrap_or_else(|| {
@@ -892,7 +895,7 @@ impl Render for ClanSettingScreen {
                                                         .child(content),
                                                 )
                                                 .into_any_element()
-                                        } else if audit_log_layout {
+                                        } else if fixed_content_layout {
                                             div()
                                                 .id("clan-settings-scroll")
                                                 .flex_1()
