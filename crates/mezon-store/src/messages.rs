@@ -293,17 +293,36 @@ struct MessageList {
     items: Vec<Message>,
     index: HashMap<MessageId, usize>,
     temp_ids: Vec<MessageId>,
+    /// The bucket these rows belong to (see `Message::channel_id`). Every row that
+    /// enters the list is stamped with it, so a row carries the other half of its
+    /// identity wherever it is cloned to — the topic panel builds one list out of
+    /// two buckets and a bare `MessageId` cannot tell them apart.
+    channel_id: ChannelId,
 }
 
 impl MessageList {
-    fn from_messages(items: Vec<Message>) -> Self {
+    fn from_messages(channel_id: ChannelId, mut items: Vec<Message>) -> Self {
+        for msg in &mut items {
+            msg.channel_id = channel_id;
+        }
         let mut list = Self {
             items,
             index: HashMap::new(),
             temp_ids: Vec::new(),
+            channel_id,
         };
         list.reindex();
         list
+    }
+
+    fn stamp(&self, msg: &mut Message) {
+        msg.channel_id = self.channel_id;
+    }
+
+    fn stamp_all(&self, msgs: &mut [Message]) {
+        for msg in msgs {
+            msg.channel_id = self.channel_id;
+        }
     }
 
     fn reindex(&mut self) {
@@ -372,12 +391,14 @@ impl MessageList {
         })
     }
 
-    fn replace(&mut self, items: Vec<Message>) {
+    fn replace(&mut self, mut items: Vec<Message>) {
+        self.stamp_all(&mut items);
         self.items = items;
         self.reindex();
     }
 
-    fn push_sorted(&mut self, msg: Message) {
+    fn push_sorted(&mut self, mut msg: Message) {
+        self.stamp(&mut msg);
         self.items.push(msg);
         sort_messages(&mut self.items);
         trim_messages(&mut self.items);
@@ -385,7 +406,8 @@ impl MessageList {
         self.reindex();
     }
 
-    fn push_grouped(&mut self, msg: Message) {
+    fn push_grouped(&mut self, mut msg: Message) {
+        self.stamp(&mut msg);
         let in_order = self
             .items
             .last()
@@ -441,7 +463,8 @@ impl MessageList {
         self.items[idx].show_forwarded_label = show_forwarded_label;
     }
 
-    fn replace_at(&mut self, idx: usize, msg: Message) {
+    fn replace_at(&mut self, idx: usize, mut msg: Message) {
+        self.stamp(&mut msg);
         let old_id = self.items[idx].id;
         let new_id = msg.id;
         self.items[idx] = msg;
@@ -501,7 +524,8 @@ impl MessageList {
                  two rows are sharing one id"
             );
         }
-        let merged = merge_sparse_sender(&existing, incoming);
+        let mut merged = merge_sparse_sender(&existing, incoming);
+        self.stamp(&mut merged);
         if let Some(slot) = self.get_mut_by_id(id) {
             *slot = merged;
         }
@@ -509,7 +533,8 @@ impl MessageList {
         true
     }
 
-    fn replace_resort(&mut self, idx: usize, msg: Message) {
+    fn replace_resort(&mut self, idx: usize, mut msg: Message) {
+        self.stamp(&mut msg);
         self.items[idx] = msg;
         sort_messages(&mut self.items);
         trim_messages(&mut self.items);
@@ -518,6 +543,7 @@ impl MessageList {
     }
 
     fn prepend_older(&mut self, mut older: Vec<Message>) -> usize {
+        self.stamp_all(&mut older);
         older.append(&mut self.items);
         sort_messages(&mut older);
         let dropped_bottom = trim_messages_back(&mut older);
@@ -528,6 +554,7 @@ impl MessageList {
     }
 
     fn append_newer(&mut self, mut newer: Vec<Message>) -> usize {
+        self.stamp_all(&mut newer);
         self.items.append(&mut newer);
         sort_messages(&mut self.items);
         let dropped = trim_messages(&mut self.items);
@@ -6867,7 +6894,7 @@ impl MessagesStore {
         self.cache.insert(
             channel_id,
             ChannelMessages {
-                messages: MessageList::from_messages(messages),
+                messages: MessageList::from_messages(channel_id, messages),
                 has_more,
             },
             active.as_ref(),
@@ -11418,8 +11445,10 @@ mod tests {
     #[test]
     fn optimistic_create_time_increments_within_same_sender_burst() {
         let now = 1_700_000_000i64;
-        let mut list =
-            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "42", "Me", now - 5)]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(MessageId(1), "a", "42", "Me", now - 5)],
+        );
         assert_eq!(optimistic_create_time_at(&list, "42", now), now + 1);
         list.push_grouped(Message::new(
             MessageId::next_optimistic(),
@@ -11434,13 +11463,10 @@ mod tests {
     #[test]
     fn optimistic_create_time_resets_after_combine_window() {
         let now = 1_700_000_000i64;
-        let list = MessageList::from_messages(vec![Message::new(
-            MessageId(1),
-            "a",
-            "42",
-            "Me",
-            now - 700,
-        )]);
+        let list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(MessageId(1), "a", "42", "Me", now - 700)],
+        );
         assert_eq!(optimistic_create_time_at(&list, "42", now), now);
     }
 
@@ -11463,10 +11489,13 @@ mod tests {
 
     #[test]
     fn push_message_grouped_appends_in_order() {
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(1), "a", "u1", "U1", 100),
-            Message::new(MessageId(2), "b", "u1", "U1", 110),
-        ]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(1), "a", "u1", "U1", 100),
+                Message::new(MessageId(2), "b", "u1", "U1", 110),
+            ],
+        );
         list.push_grouped(Message::new(MessageId(3), "c", "u1", "U1", 120));
         assert_eq!(list.len(), 3);
         assert_eq!(list.as_slice()[2].id, MessageId(3));
@@ -11476,10 +11505,13 @@ mod tests {
 
     #[test]
     fn push_message_grouped_resorts_when_out_of_order() {
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(1), "a", "u1", "U1", 100),
-            Message::new(MessageId(3), "c", "u1", "U1", 120),
-        ]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(1), "a", "u1", "U1", 100),
+                Message::new(MessageId(3), "c", "u1", "U1", 120),
+            ],
+        );
         list.push_grouped(Message::new(MessageId(2), "b", "u1", "U1", 110));
         let ids: Vec<MessageId> = list.as_slice().iter().map(|m| m.id).collect();
         assert_eq!(ids, [MessageId(1), MessageId(2), MessageId(3)]);
@@ -11488,8 +11520,10 @@ mod tests {
 
     #[test]
     fn push_message_grouped_breaks_group_for_different_sender() {
-        let mut list =
-            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U1", 100)]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(MessageId(1), "a", "u1", "U1", 100)],
+        );
         list.push_grouped(Message::new(MessageId(2), "b", "u2", "U2", 105));
         assert!(!list.as_slice()[1].combined_with_prev);
         assert_list_consistent(&list);
@@ -11497,8 +11531,10 @@ mod tests {
 
     #[test]
     fn push_message_grouped_sets_forwarded_label_on_first_realtime_forward() {
-        let mut list =
-            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U1", 100)]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(MessageId(1), "a", "u1", "U1", 100)],
+        );
         list.push_grouped(Message::new(MessageId(2), "fwd", "u1", "U1", 110).with_forwarded(true));
         assert!(list.as_slice()[1].is_forwarded);
         assert!(list.as_slice()[1].show_forwarded_label);
@@ -11507,8 +11543,10 @@ mod tests {
 
     #[test]
     fn push_message_grouped_hides_forwarded_label_for_same_sender_burst() {
-        let mut list =
-            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U1", 100)]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(MessageId(1), "a", "u1", "U1", 100)],
+        );
         list.push_grouped(
             Message::new(MessageId(2), "fwd-a", "u1", "U1", 110).with_forwarded(true),
         );
@@ -11528,7 +11566,7 @@ mod tests {
 
     #[test]
     fn optimistic_sort_id_lands_in_the_server_snowflake_space() {
-        let list = MessageList::from_messages(Vec::new());
+        let list = MessageList::from_messages(ChannelId(1), Vec::new());
         let sort_id = optimistic_sort_id_at(&list, SEND_NOW_MS, 7);
         assert_eq!(sort_id >> SNOWFLAKE_TIME_SHIFT, SEND_NOW_MS);
         assert_eq!(sort_id & SNOWFLAKE_SEQUENCE_MASK, 7);
@@ -11538,7 +11576,10 @@ mod tests {
     #[test]
     fn optimistic_sort_id_stays_above_a_tail_minted_ahead_of_the_local_clock() {
         let ahead = server_id_at(SEND_NOW_MS + 5_000);
-        let list = MessageList::from_messages(vec![Message::new(ahead, "a", "u1", "U1", 100)]);
+        let list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(ahead, "a", "u1", "U1", 100)],
+        );
         assert_eq!(
             optimistic_sort_id_at(&list, SEND_NOW_MS, 0),
             ahead.get() + 1
@@ -11547,13 +11588,16 @@ mod tests {
 
     #[test]
     fn failed_optimistic_row_keeps_its_slot_when_a_later_message_arrives() {
-        let mut list = MessageList::from_messages(vec![Message::new(
-            server_id_at(SEND_NOW_MS - 1_000),
-            "a",
-            "u1",
-            "U1",
-            100,
-        )]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(
+                server_id_at(SEND_NOW_MS - 1_000),
+                "a",
+                "u1",
+                "U1",
+                100,
+            )],
+        );
         let sort_id = optimistic_sort_id_at(&list, SEND_NOW_MS, 0);
         let mut failed =
             Message::new(MessageId::next_optimistic(), "b", "u2", "U2", 110).with_sort_id(sort_id);
@@ -11573,13 +11617,16 @@ mod tests {
 
     #[test]
     fn acking_a_temp_that_is_no_longer_the_tail_restores_id_order() {
-        let mut list = MessageList::from_messages(vec![Message::new(
-            server_id_at(SEND_NOW_MS - 1_000),
-            "old",
-            "u1",
-            "U1",
-            100,
-        )]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(
+                server_id_at(SEND_NOW_MS - 1_000),
+                "old",
+                "u1",
+                "U1",
+                100,
+            )],
+        );
         let temp_id = MessageId::next_optimistic();
         list.push_grouped(
             Message::new(temp_id, "mine", "me", "Me", 110).with_sort_id(optimistic_sort_id_at(
@@ -11612,13 +11659,16 @@ mod tests {
 
     #[test]
     fn acking_a_temp_at_the_tail_does_not_resort() {
-        let mut list = MessageList::from_messages(vec![Message::new(
-            server_id_at(SEND_NOW_MS - 1_000),
-            "old",
-            "u1",
-            "U1",
-            100,
-        )]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(
+                server_id_at(SEND_NOW_MS - 1_000),
+                "old",
+                "u1",
+                "U1",
+                100,
+            )],
+        );
         let temp_id = MessageId::next_optimistic();
         list.push_grouped(
             Message::new(temp_id, "mine", "me", "Me", 110).with_sort_id(optimistic_sort_id_at(
@@ -11653,9 +11703,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_row_is_stamped_with_the_bucket_it_is_put_into() {
+        // A message id is only unique inside one bucket, so the bucket is the
+        // other half of a row's identity and has to survive being cloned out.
+        let topic = ChannelId(77);
+        let mut list =
+            MessageList::from_messages(topic, vec![Message::new(MessageId(1), "a", "u", "U", 1)]);
+        assert_eq!(list.as_slice()[0].channel_id, topic);
+
+        list.push_grouped(Message::new(MessageId(2), "b", "u", "U", 2));
+        list.prepend_older(vec![Message::new(MessageId(0), "z", "u", "U", 0)]);
+        list.append_newer(vec![Message::new(MessageId(3), "c", "u", "U", 3)]);
+
+        assert!(
+            list.as_slice().iter().all(|m| m.channel_id == topic),
+            "every path that puts a row into the list must stamp it"
+        );
+    }
+
     fn channel_msgs(msgs: Vec<Message>) -> ChannelMessages {
         ChannelMessages {
-            messages: MessageList::from_messages(msgs),
+            messages: MessageList::from_messages(ChannelId(1), msgs),
             has_more: false,
         }
     }
@@ -11757,10 +11826,13 @@ mod tests {
     #[test]
     fn temp_match_reconciles_optimistic_row_in_place() {
         let temp1 = MessageId::next_optimistic();
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(100), "earlier", "u1", "U", 100),
-            Message::new(temp1, "hello world", "u9", "Me", 200),
-        ]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(100), "earlier", "u1", "U", 100),
+                Message::new(temp1, "hello world", "u9", "Me", 200),
+            ],
+        );
         assert_eq!(list.temp_match_position("u9", "hello world"), Some(1));
         assert_eq!(list.temp_match_position("u9", "other"), None);
         let idx = list.temp_match_position("u9", "hello world").unwrap();
@@ -11782,8 +11854,10 @@ mod tests {
             "optimistic text must be stripped like the server-stored text"
         );
         let temp = MessageId::next_optimistic();
-        let list =
-            MessageList::from_messages(vec![Message::new(temp, optimistic_text, "u9", "Me", 200)]);
+        let list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(temp, optimistic_text, "u9", "Me", 200)],
+        );
         assert_eq!(
             list.temp_match_position("u9", "bold"),
             Some(0),
@@ -11793,10 +11867,13 @@ mod tests {
 
     #[test]
     fn server_echo_merge_preserves_message_grouping() {
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(100), "first", "u9", "Me", 200),
-            Message::new(MessageId(101), "second", "u9", "Me", 201),
-        ]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(100), "first", "u9", "Me", 200),
+                Message::new(MessageId(101), "second", "u9", "Me", 201),
+            ],
+        );
         let echo = Message::new(MessageId(101), "second", "0", "", 201);
         assert!(list.merge_existing(MessageId(101), echo));
         assert!(
@@ -11808,10 +11885,13 @@ mod tests {
 
     #[test]
     fn append_update_remove_keep_index_and_order() {
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(10), "a", "u1", "U", 100),
-            Message::new(MessageId(20), "b", "u1", "U", 110),
-        ]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(10), "a", "u1", "U", 100),
+                Message::new(MessageId(20), "b", "u1", "U", 110),
+            ],
+        );
         list.push_grouped(Message::new(MessageId(30), "c", "u1", "U", 120));
         assert_eq!(list.position(MessageId(30)), Some(2));
         list.get_mut_by_id(MessageId(20)).unwrap().content = "edited".into();
@@ -11825,10 +11905,13 @@ mod tests {
 
     #[test]
     fn prepend_older_and_append_newer_preserve_order_and_index() {
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(50), "e", "u1", "U", 150),
-            Message::new(MessageId(60), "f", "u1", "U", 160),
-        ]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(50), "e", "u1", "U", 150),
+                Message::new(MessageId(60), "f", "u1", "U", 160),
+            ],
+        );
         let dropped = list.prepend_older(vec![
             Message::new(MessageId(30), "c", "u1", "U", 130),
             Message::new(MessageId(40), "d", "u1", "U", 140),
@@ -11858,8 +11941,10 @@ mod tests {
 
     #[test]
     fn window_replace_rebuilds_index() {
-        let mut list =
-            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U", 100)]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(MessageId(1), "a", "u1", "U", 100)],
+        );
         list.replace(vec![
             Message::new(MessageId(8), "h", "u1", "U", 180),
             Message::new(MessageId(9), "i", "u1", "U", 190),
@@ -11873,6 +11958,7 @@ mod tests {
     #[test]
     fn append_at_cap_evicts_front_and_reindexes() {
         let mut list = MessageList::from_messages(
+            ChannelId(1),
             (0..MAX_MESSAGES_PER_CHANNEL)
                 .map(|i| Message::new(MessageId(i as i64), "m", "u", "U", i as i64))
                 .collect(),
@@ -11902,7 +11988,7 @@ mod tests {
             (1..MAX_MESSAGES_PER_CHANNEL)
                 .map(|i| Message::new(MessageId(i as i64), "m", "u", "U", i as i64)),
         );
-        let mut list = MessageList::from_messages(items);
+        let mut list = MessageList::from_messages(ChannelId(1), items);
         assert_eq!(list.len(), MAX_MESSAGES_PER_CHANNEL);
         assert_eq!(list.temp_ids, vec![temp_old]);
 
@@ -11925,26 +12011,34 @@ mod tests {
 
     #[test]
     fn has_more_bottom_false_when_tail_in_buffer() {
-        let list = MessageList::from_messages(vec![
-            Message::new(MessageId(1), "a", "u1", "U", 100),
-            Message::new(MessageId(99), "z", "u1", "U", 200),
-        ]);
+        let list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(1), "a", "u1", "U", 100),
+                Message::new(MessageId(99), "z", "u1", "U", 200),
+            ],
+        );
         assert!(!has_more_bottom_for(Some(MessageId(99)), &list));
     }
 
     #[test]
     fn has_more_bottom_true_when_tail_not_in_buffer() {
-        let list = MessageList::from_messages(vec![
-            Message::new(MessageId(1), "a", "u1", "U", 100),
-            Message::new(MessageId(50), "m", "u1", "U", 150),
-        ]);
+        let list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(1), "a", "u1", "U", 100),
+                Message::new(MessageId(50), "m", "u1", "U", 150),
+            ],
+        );
         assert!(has_more_bottom_for(Some(MessageId(99)), &list));
     }
 
     #[test]
     fn has_more_bottom_false_without_tail_or_empty_buffer() {
-        let list =
-            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U", 100)]);
+        let list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(MessageId(1), "a", "u1", "U", 100)],
+        );
         assert!(!has_more_bottom_for(None, &list));
         assert!(!has_more_bottom_for(
             Some(MessageId(1)),
@@ -11954,10 +12048,13 @@ mod tests {
 
     #[test]
     fn an_empty_newer_page_pins_the_tail_to_the_loaded_newest() {
-        let list = MessageList::from_messages(vec![
-            Message::new(MessageId(1), "a", "u1", "U", 100),
-            Message::new(MessageId(50), "m", "u1", "U", 150),
-        ]);
+        let list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(1), "a", "u1", "U", 100),
+                Message::new(MessageId(50), "m", "u1", "U", 150),
+            ],
+        );
         assert!(has_more_bottom_for(Some(MessageId(99)), &list));
 
         let reconciled = reconciled_tail_after_empty_page(
@@ -11997,10 +12094,13 @@ mod tests {
 
     #[test]
     fn tail_keyed_by_storage_bucket_avoids_parent_poison() {
-        let parent_buffer = MessageList::from_messages(vec![
-            Message::new(MessageId(100), "a", "u1", "U", 1),
-            Message::new(MessageId(200), "b", "u1", "U", 2),
-        ]);
+        let parent_buffer = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(100), "a", "u1", "U", 1),
+                Message::new(MessageId(200), "b", "u1", "U", 2),
+            ],
+        );
 
         let topic_msg = mezon_proto::api::ChannelMessage {
             channel_id: 10,
@@ -12259,7 +12359,7 @@ mod tests {
         let failed_id = failed.id;
         let pending_id = pending.id;
 
-        let list = MessageList::from_messages(vec![failed, pending]);
+        let list = MessageList::from_messages(ChannelId(1), vec![failed, pending]);
         let idx = list
             .temp_match_position("42", "hello")
             .expect("a non-failed temp should match");
@@ -12269,18 +12369,21 @@ mod tests {
 
     #[test]
     fn patch_reply_previews_after_delete_marks_reference() {
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(1), "reply", "u1", "U", 100).with_references(vec![
-                MessageReference {
-                    message_ref_id: MessageId(42),
-                    sender_id: UserId(1),
-                    sender_name: "x".into(),
-                    content: "orig".into(),
-                    content_preview: "orig".into(),
-                    ..Default::default()
-                },
-            ]),
-        ]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(1), "reply", "u1", "U", 100).with_references(vec![
+                    MessageReference {
+                        message_ref_id: MessageId(42),
+                        sender_id: UserId(1),
+                        sender_name: "x".into(),
+                        content: "orig".into(),
+                        content_preview: "orig".into(),
+                        ..Default::default()
+                    },
+                ]),
+            ],
+        );
         patch_reply_previews_after_delete(&mut list, MessageId(42));
         assert_eq!(
             list.as_slice()[0].references[0].content,
@@ -13050,8 +13153,10 @@ mod tests {
 
     #[test]
     fn has_more_bottom_ignores_an_optimistic_tail_id() {
-        let list =
-            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U", 100)]);
+        let list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(MessageId(1), "a", "u1", "U", 100)],
+        );
         assert!(
             !has_more_bottom_for(Some(MessageId::next_optimistic()), &list),
             "an un-acked optimistic row is not evidence of unloaded server history"
@@ -13060,11 +13165,14 @@ mod tests {
 
     #[test]
     fn removing_a_reply_in_the_middle_keeps_the_index_and_order() {
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(1), "first", "u1", "U1", 100),
-            Message::new(MessageId(2), "second", "u2", "U2", 200),
-            Message::new(MessageId(3), "third", "u3", "U3", 300),
-        ]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(1), "first", "u1", "U1", 100),
+                Message::new(MessageId(2), "second", "u2", "U2", 200),
+                Message::new(MessageId(3), "third", "u3", "U3", 300),
+            ],
+        );
 
         assert_eq!(list.remove_id(MessageId(2)), Some(1));
         assert_list_consistent(&list);

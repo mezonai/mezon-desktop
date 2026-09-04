@@ -2078,17 +2078,7 @@ impl ChannelMessages {
             .active_topic_id()
             .map(|topic_id| store.messages_in_channel(ChannelId(topic_id)))
             .unwrap_or_default();
-        let mut messages = Vec::with_capacity(replies.len() + usize::from(origin.is_some()));
-        if let Some(mut origin) = origin {
-            origin.combined_with_prev = false;
-            messages.push(origin);
-        }
-        for msg in replies {
-            if origin_id != Some(msg.id) {
-                messages.push(msg.clone());
-            }
-        }
-        messages
+        merge_topic_rows(origin, replies)
     }
 
     fn refresh_topic_messages(&mut self, cx: &App) -> bool {
@@ -2300,15 +2290,14 @@ impl ChannelMessages {
         cx: &App,
     ) -> Vec<MessageId> {
         let messages = Self::collect_topic_messages(cx);
-        message_context_menu::resolve_forward_group_in(&messages, message_id, sender_id)
+        let start = topic_row_index(&messages, message_id, active_topic_bucket(cx)).unwrap_or(0);
+        message_context_menu::resolve_forward_group_in(&messages[start..], message_id, sender_id)
     }
 
     fn find_local_message(&self, message_id: MessageId, cx: &App) -> Option<Message> {
         if self.is_topic_box {
-            self.topic_messages
-                .iter()
-                .find(|m| m.id == message_id)
-                .cloned()
+            topic_row_index(&self.topic_messages, message_id, active_topic_bucket(cx))
+                .map(|idx| self.topic_messages[idx].clone())
         } else {
             MessagesStore::global(cx)
                 .read(cx)
@@ -2531,8 +2520,11 @@ impl ChannelMessages {
         self.context_menu_forward_all = match sender_and_poll {
             Some((sender_id, false)) => {
                 if self.is_topic_box {
+                    let start =
+                        topic_row_index(&self.topic_messages, message_id, active_topic_bucket(cx))
+                            .unwrap_or(0);
                     message_context_menu::resolve_forward_group_in(
-                        &self.topic_messages,
+                        &self.topic_messages[start..],
                         message_id,
                         sender_id.as_str(),
                     )
@@ -5497,6 +5489,159 @@ mod skeleton_tests {
 
         let many: Vec<MessageId> = (1..=150).rev().map(MessageId).collect();
         assert!(fab_unread_count(Some(MessageId(0)), many.iter().copied()) > 99);
+    }
+}
+
+/// The rows the topic panel shows: the origin message it hangs off, then that
+/// topic's replies.
+///
+/// The two come from different id spaces. The server mints a message id as
+/// `(sequence << shift) | node | year` with a **per-channel** sequence and no
+/// channel component, so the Nth message of the parent channel and the Nth reply
+/// of the topic carry byte-identical ids. The origin is a parent-channel row and
+/// the replies live in the topic's own bucket, so a collision is not a duplicate
+/// — dropping a reply that matches `origin.id` hid one real reply from every
+/// topic (the one whose sequence position equals the origin's) while the topic
+/// reply count kept counting it. There is nothing to de-duplicate either: the
+/// bucket never holds the origin, since replies are stored under
+/// `channel_id = topic_id` and the origin has `topic_id == 0`.
+///
+/// `Message::channel_id` carries which bucket a row came from, so the two are
+/// still told apart after they are merged into one list. Element ids are keyed on
+/// a single integer (`row_anchor_id`) and cannot hold the pair, so the origin's is
+/// moved out of the replies' (positive) id space rather than a row being thrown
+/// away. Mirrors mezon-react, which renders `firstMsgOfThisTopic` outside the
+/// id-keyed message list and never filters the replies (`ChannelMessages.tsx`).
+fn active_topic_bucket(cx: &App) -> Option<ChannelId> {
+    TopicsStore::global(cx)
+        .read(cx)
+        .active_topic_id()
+        .map(ChannelId)
+}
+
+/// Which row an id-keyed row action in the topic panel refers to.
+///
+/// The panel is one list over two buckets (see `merge_topic_rows`) and a message
+/// id is only unique inside one of them, so an id can match both the origin row
+/// and one reply. It resolves to the reply: the origin is context, every other row
+/// is the topic's, and an action that lands on the wrong one is far cheaper on a
+/// reply than on the message the whole topic hangs off — deleting that one takes
+/// the topic with it.
+fn topic_row_index(
+    messages: &[Message],
+    message_id: MessageId,
+    topic: Option<ChannelId>,
+) -> Option<usize> {
+    messages
+        .iter()
+        .position(|m| m.id == message_id && Some(m.channel_id) == topic)
+        .or_else(|| messages.iter().position(|m| m.id == message_id))
+}
+
+fn merge_topic_rows(origin: Option<Message>, replies: &[Message]) -> Vec<Message> {
+    let mut messages = Vec::with_capacity(replies.len() + usize::from(origin.is_some()));
+    if let Some(mut origin) = origin {
+        origin.combined_with_prev = false;
+        origin.row_anchor_id = MessageId(origin.id.get().wrapping_neg());
+        messages.push(origin);
+    }
+    messages.extend_from_slice(replies);
+    messages
+}
+
+#[cfg(test)]
+mod topic_row_tests {
+    use super::{merge_topic_rows, topic_row_index};
+    use mezon_store::{ChannelId, Message, MessageId};
+
+    fn reply(id: i64, text: &str) -> Message {
+        Message::new(MessageId(id), text, "1", "u", 0)
+    }
+
+    #[test]
+    fn a_reply_sharing_the_origins_id_is_still_shown() {
+        // Message ids are per-channel sequences: the topic's 4th reply carries the
+        // same id as the 4th message of the parent channel, which is the origin.
+        let origin = reply(104, "hhh");
+        let replies = [
+            reply(101, "test"),
+            reply(102, "hi"),
+            reply(103, "he"),
+            reply(104, "hi"),
+            reply(105, "ok"),
+        ];
+
+        let rows = merge_topic_rows(Some(origin), &replies);
+
+        let shown: Vec<&str> = rows.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(shown, ["hhh", "test", "hi", "he", "hi", "ok"]);
+    }
+
+    #[test]
+    fn the_origin_row_cannot_collide_with_a_reply_element_id() {
+        let rows = merge_topic_rows(Some(reply(104, "hhh")), &[reply(104, "hi")]);
+
+        assert_eq!(rows[0].row_anchor_id, MessageId(-104));
+        assert_eq!(rows[1].row_anchor_id, MessageId(104));
+        assert!(!rows[0].combined_with_prev);
+    }
+
+    #[test]
+    fn each_row_keeps_the_bucket_it_came_from() {
+        let mut origin = reply(104, "hhh");
+        origin.channel_id = ChannelId(10);
+        let mut in_topic = reply(104, "hi");
+        in_topic.channel_id = ChannelId(77);
+
+        let rows = merge_topic_rows(Some(origin), &[in_topic]);
+
+        // Same id, different bucket — which is what tells the two rows apart.
+        assert_eq!(rows[0].id, rows[1].id);
+        assert_eq!(rows[0].channel_id, ChannelId(10));
+        assert_eq!(rows[1].channel_id, ChannelId(77));
+    }
+
+    #[test]
+    fn a_row_action_on_a_colliding_id_resolves_to_the_reply() {
+        let mut origin = reply(104, "hhh");
+        origin.channel_id = ChannelId(10);
+        let mut collides = reply(104, "hi");
+        collides.channel_id = ChannelId(77);
+        let rows = merge_topic_rows(Some(origin), &[collides]);
+
+        // Row 0 is the origin, row 1 the reply that happens to share its id.
+        assert_eq!(
+            topic_row_index(&rows, MessageId(104), Some(ChannelId(77))),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn the_origin_is_still_reachable_when_nothing_collides() {
+        let mut origin = reply(104, "hhh");
+        origin.channel_id = ChannelId(10);
+        let mut other = reply(101, "test");
+        other.channel_id = ChannelId(77);
+        let rows = merge_topic_rows(Some(origin), &[other]);
+
+        assert_eq!(
+            topic_row_index(&rows, MessageId(104), Some(ChannelId(77))),
+            Some(0)
+        );
+        assert_eq!(
+            topic_row_index(&rows, MessageId(101), Some(ChannelId(77))),
+            Some(1)
+        );
+        assert_eq!(
+            topic_row_index(&rows, MessageId(999), Some(ChannelId(77))),
+            None
+        );
+    }
+
+    #[test]
+    fn without_an_origin_only_the_replies_are_shown() {
+        let rows = merge_topic_rows(None, &[reply(101, "test"), reply(102, "hi")]);
+        assert_eq!(rows.len(), 2);
     }
 }
 
