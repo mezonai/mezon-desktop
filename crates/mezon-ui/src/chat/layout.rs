@@ -440,6 +440,12 @@ impl ChatLayout {
             }
         })
         .detach();
+        cx.observe(&InboxStore::global(cx), |this, _, cx| {
+            if this.inbox_display_changed(cx) {
+                cx.notify();
+            }
+        })
+        .detach();
         let ns_level = voice_store.read(cx).noise_suppression_level();
         let ns_slider = cx.new(|_| {
             SliderState::new()

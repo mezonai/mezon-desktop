@@ -870,11 +870,8 @@ impl ChannelHeader {
                 .into_any_element();
         };
 
-        let show_badge = self
-            .clan_id
-            .as_deref()
-            .is_some_and(|id| clan_has_inbox_badge(id, cx));
         let clan_id = self.clan_id.clone().unwrap_or_default();
+        let show_badge = clan_has_inbox_badge(&clan_id, cx);
         let locale = self.locale.clone().unwrap_or_else(|| "en".to_string());
         let badge_color = theme.mention_badge;
         let is_open = handle.is_deployed();
@@ -936,6 +933,7 @@ pub struct ChatHeader {
     show_search_options: bool,
     search_input: Option<Entity<InputState>>,
     show_inbox: bool,
+    inbox_badge: bool,
     inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
     clan_id: Option<String>,
     locale: Option<SharedString>,
@@ -949,6 +947,8 @@ pub struct ChatHeader {
     settings: Entity<Settings>,
     _settings_observe: Subscription,
     _notification_observe: Subscription,
+    _clan_observe: Subscription,
+    _inbox_observe: Subscription,
     _pinned_observe: Subscription,
     _direct_observe: Subscription,
     _group_members_observe: Subscription,
@@ -966,6 +966,9 @@ impl ChatHeader {
             &mezon_store::NotificationSettingStore::global(cx),
             |_, _, cx| cx.notify(),
         );
+        let _clan_observe = cx.observe(&mezon_store::ClanList::global(cx), |_, _, cx| cx.notify());
+        let _inbox_observe =
+            cx.observe(&mezon_store::InboxStore::global(cx), |_, _, cx| cx.notify());
         let _pinned_observe = cx.observe(&PinnedMessagesStore::global(cx), |_, _, cx| cx.notify());
         // The DM store carries the group's label and avatar; the layout's own
         // change gate only tracks the label, so an avatar-only edit reaches the
@@ -999,6 +1002,7 @@ impl ChatHeader {
             show_search_options: false,
             search_input: None,
             show_inbox: true,
+            inbox_badge: false,
             inbox_handle: None,
             clan_id: None,
             locale: None,
@@ -1012,6 +1016,8 @@ impl ChatHeader {
             settings: settings.clone(),
             _settings_observe,
             _notification_observe,
+            _clan_observe,
+            _inbox_observe,
             _pinned_observe,
             _direct_observe,
             _group_members_observe,
@@ -1172,6 +1178,9 @@ impl ChatHeader {
         } else {
             Self::compute_dm_header(dm, locale.unwrap_or("en"), cx)
         };
+        let inbox_badge = clan_id
+            .as_deref()
+            .is_some_and(|id| clan_has_inbox_badge(id, cx));
         if self.name == name
             && self.dm_header == dm_header
             && self.icon == icon
@@ -1183,6 +1192,7 @@ impl ChatHeader {
             && self.search_expanded == search_expanded
             && self.show_search_options == show_search_options
             && self.show_inbox == show_inbox
+            && self.inbox_badge == inbox_badge
             && self.clan_id == clan_id
             && self.locale.as_deref() == locale
             && self.show_threads == show_threads
@@ -1203,6 +1213,7 @@ impl ChatHeader {
         self.search_expanded = search_expanded;
         self.show_search_options = show_search_options;
         self.show_inbox = show_inbox;
+        self.inbox_badge = inbox_badge;
         self.clan_id = clan_id;
         self.locale = locale.map(|locale| SharedString::from(locale.to_string()));
         self.show_threads = show_threads;

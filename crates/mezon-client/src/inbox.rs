@@ -6,6 +6,8 @@ pub const INBOX_PAGE_LIMIT: i32 = 50;
 pub const DIRECTION_BEFORE_TIMESTAMP: i32 = 3;
 pub const DIRECTION_AROUND_TIMESTAMP: i32 = 2;
 pub const INBOX_MESSAGE_MARK_CODE: i32 = -12;
+pub const INBOX_USER_MENTIONED_CODE: i32 = -9;
+pub const INBOX_USER_REPLIED_CODE: i32 = -11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(i32)]
@@ -834,6 +836,24 @@ pub fn inbox_notification_from_marked_message(
     }
 }
 
+pub fn inbox_notification_from_channel_mention(message: &api::ChannelMessage) -> InboxNotification {
+    let preview = preview_from_channel_message(message.clone());
+    InboxNotification {
+        id: pending_inbox_notification_id(message.message_id),
+        category: InboxCategory::Mentions,
+        subject: String::new(),
+        sender_id: id_str(message.sender_id),
+        clan_id: id_str(message.clan_id),
+        channel_id: id_str(message.channel_id),
+        topic_id: optional_id_str(message.topic_id),
+        channel_type: message.mode,
+        avatar_url: preview.avatar.clone(),
+        create_time_seconds: message.create_time_seconds,
+        code: INBOX_USER_MENTIONED_CODE,
+        message: Some(preview),
+    }
+}
+
 impl TopicDiscussion {
     pub fn reply_preview(&self) -> TopicReplyPreview {
         topic_reply_preview(&self.content)
@@ -851,8 +871,15 @@ impl TopicDiscussion {
     }
 }
 
+fn inbox_category_from_notification(n: &api::Notification) -> Option<InboxCategory> {
+    InboxCategory::from_i32(n.category).or_else(|| {
+        matches!(n.code, INBOX_USER_MENTIONED_CODE | INBOX_USER_REPLIED_CODE)
+            .then_some(InboxCategory::Mentions)
+    })
+}
+
 pub fn inbox_notification_from_api(n: api::Notification) -> Result<InboxNotification> {
-    let category = InboxCategory::from_i32(n.category)
+    let category = inbox_category_from_notification(&n)
         .with_context(|| format!("unknown notification category {}", n.category))?;
     let mut message = parse_notification_content(&n.content);
     if message.is_none() && !n.content.is_empty() {
@@ -979,6 +1006,19 @@ mod tests {
         assert_eq!(InboxCategory::from_i32(2), Some(InboxCategory::Messages));
         assert_eq!(InboxCategory::from_i32(3), Some(InboxCategory::ForYou));
         assert_eq!(InboxCategory::from_i32(99), None);
+    }
+
+    #[test]
+    fn mention_code_maps_zero_category_to_mentions() {
+        let n = api::Notification {
+            category: 0,
+            code: INBOX_USER_MENTIONED_CODE,
+            ..Default::default()
+        };
+        assert_eq!(
+            inbox_category_from_notification(&n),
+            Some(InboxCategory::Mentions)
+        );
     }
 
     #[test]
@@ -1344,5 +1384,34 @@ mod tests {
             TopicReplyPreview::Contact
         );
         assert_eq!(topic_reply_preview(""), TopicReplyPreview::Attachment);
+    }
+
+    #[test]
+    fn channel_mention_keeps_distinct_message_and_topic_ids() {
+        let first = api::ChannelMessage {
+            message_id: 11,
+            channel_id: 7,
+            clan_id: 1,
+            sender_id: 9,
+            topic_id: 99,
+            content: r#"{"t":"one"}"#.into(),
+            ..Default::default()
+        };
+        let second = api::ChannelMessage {
+            message_id: 12,
+            channel_id: 7,
+            clan_id: 1,
+            sender_id: 9,
+            topic_id: 99,
+            content: r#"{"t":"two"}"#.into(),
+            ..Default::default()
+        };
+        let first_n = inbox_notification_from_channel_mention(&first);
+        let second_n = inbox_notification_from_channel_mention(&second);
+        assert_ne!(first_n.id, second_n.id);
+        assert_eq!(first_n.effective_message_id().as_deref(), Some("11"));
+        assert_eq!(second_n.effective_message_id().as_deref(), Some("12"));
+        assert_eq!(first_n.effective_topic_id().as_deref(), Some("99"));
+        assert_eq!(first_n.category, InboxCategory::Mentions);
     }
 }

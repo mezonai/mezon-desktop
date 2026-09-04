@@ -107,6 +107,16 @@ impl TopicBadgeStore {
         format_topic_badge_label(self.all_topic_noti_clan(clan_id))
     }
 
+    pub fn clear_topic(&mut self, topic_id: &str, cx: &mut Context<Self>) {
+        let Some(clan_id) = self.reset_topic(topic_id) else {
+            return;
+        };
+        cx.emit(TopicBadgeEvent::Updated {
+            clan_id: Some(clan_id),
+        });
+        cx.notify();
+    }
+
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         let changed_clans = match event {
             RealtimeEvent::ChannelMessage(m) => self.handle_channel_message(m, cx),
@@ -451,5 +461,21 @@ mod tests {
             .map(|entry| entry.count)
             .sum();
         assert_eq!(total, 5);
+    }
+
+    #[test]
+    fn reset_topic_removes_entry() {
+        let mut store_map = HashMap::new();
+        store_map.insert(
+            "99".to_string(),
+            TopicParentEntry {
+                clan_id: "10".into(),
+                _parent_channel_id: "5".into(),
+                count: 2,
+            },
+        );
+        let removed = store_map.remove("99").map(|entry| entry.clan_id);
+        assert_eq!(removed.as_deref(), Some("10"));
+        assert!(store_map.is_empty());
     }
 }

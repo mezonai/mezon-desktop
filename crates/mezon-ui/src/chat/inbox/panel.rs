@@ -40,9 +40,11 @@ pub struct InboxPopoverPanel {
     list_state: ListState,
     focus_handle: FocusHandle,
     cached_items: Rc<Vec<ListRow>>,
+    list_first_id: Option<String>,
     avatar_image_cache: Entity<LruImageCache>,
     message_image_cache: Entity<LruImageCache>,
     _inbox_sub: Subscription,
+    _inbox_obs: Subscription,
     _topics_sub: Subscription,
     _members_sub: Subscription,
     _channel_obs: Subscription,
@@ -100,6 +102,21 @@ impl InboxPopoverPanel {
             });
         }
 
+        let _inbox_sub = cx.subscribe(&inbox_store, |this, _, event, cx| {
+            let InboxEvent::Updated { .. } = event;
+            if this.tab == InboxTab::Topics {
+                return;
+            }
+            this.sync_from_store(cx);
+            cx.notify();
+        });
+        let _inbox_obs = cx.observe(&inbox_store, |this, _, cx| {
+            if this.tab == InboxTab::Topics {
+                return;
+            }
+            this.sync_from_store(cx);
+            cx.notify();
+        });
         if let Some(category) = InboxTab::Mentions.category() {
             inbox_store.update(cx, |store, cx| {
                 store.fetch_if_empty(&clan_id, category, cx);
@@ -110,15 +127,6 @@ impl InboxPopoverPanel {
                 store.fetch_if_empty(&clan_id, category, cx);
             });
         }
-
-        let _inbox_sub = cx.subscribe(&inbox_store, |this, _, event, cx| {
-            let InboxEvent::Updated { .. } = event;
-            if this.tab == InboxTab::Topics {
-                return;
-            }
-            this.sync_from_store(cx);
-            cx.notify();
-        });
         let _topics_sub = cx.subscribe(&topics_store, |this, _, event, cx| {
             if matches!(event, TopicsEvent::Updated) {
                 this.sync_from_store(cx);
@@ -156,9 +164,11 @@ impl InboxPopoverPanel {
             list_state,
             focus_handle,
             cached_items: Rc::new(Vec::new()),
+            list_first_id: None,
             avatar_image_cache,
             message_image_cache,
             _inbox_sub,
+            _inbox_obs,
             _topics_sub,
             _members_sub,
             _channel_obs,
@@ -191,25 +201,23 @@ impl InboxPopoverPanel {
     fn sync_list_state(&mut self, pin_top: bool) {
         let count = self.cached_items.len();
         let old_count = self.list_state.item_count();
-        if pin_top {
+        let first_id = self.cached_items.first().map(|row| row.id().to_string());
+        if pin_top || old_count == 0 || self.list_first_id != first_id {
             self.list_state.reset(count);
             self.scroll_list_to_top();
-            return;
-        }
-        if old_count == count {
-            return;
-        }
-        if old_count == 0 {
-            self.list_state.reset(count);
-            self.scroll_list_to_top();
+            self.list_first_id = first_id;
             return;
         }
         if count > old_count {
             self.list_state
                 .splice(old_count..old_count, count - old_count);
+            self.list_first_id = first_id;
             return;
         }
-        self.list_state.reset(count);
+        if count != old_count {
+            self.list_state.reset(count);
+        }
+        self.list_first_id = first_id;
     }
 
     fn prefetch_context_for_tab(&self, cx: &mut Context<Self>) {
@@ -752,6 +760,12 @@ fn schedule_inbox_jump(
     channel_id: ChannelId,
     message_id: MessageId,
 ) {
+    if let Route::Channel { clan_id, .. } = &route {
+        let clan_id = *clan_id;
+        ChannelList::global(cx).update(cx, |store, cx| {
+            store.apply_read(clan_id, channel_id, cx);
+        });
+    }
     navigate(cx, route);
     MessagesStore::global(cx).update(cx, |store, cx| {
         store.request_jump(channel_id, message_id, cx);
@@ -781,19 +795,7 @@ fn schedule_notification_jump(
         } => *channel_id,
         _ => return,
     };
-    let mut effective_topic_id = notification.effective_topic_id();
-    if effective_topic_id.is_none() {
-        let key = message_id.get().to_string();
-        if let Some(topic_id) = InboxStore::global(cx).read(cx).remembered_topic_id(&key) {
-            effective_topic_id = Some(topic_id.to_string());
-        } else if let Some(topic_id) = MessagesStore::global(cx)
-            .read(cx)
-            .topic_id_for_message(message_id, cx)
-            .filter(|id| *id > 0)
-        {
-            effective_topic_id = Some(topic_id.to_string());
-        }
-    }
+    let effective_topic_id = notification.effective_topic_id();
     tracing::debug!(
         notification_id = %notification.id,
         message_id = message_id.get(),
@@ -814,6 +816,12 @@ fn schedule_notification_jump(
         tracing::debug!(topic_id, reply_id = message_id.get(), "inbox topic jump");
         navigate(cx, route);
         inbox_handle.hide(cx);
+        TopicBadgeStore::global(cx).update(cx, |store, cx| {
+            store.clear_topic(&topic_id.to_string(), cx);
+        });
+        ChannelList::global(cx).update(cx, |store, cx| {
+            store.apply_topic_read(ChannelId(topic_id), cx);
+        });
         TopicsStore::global(cx).update(cx, |store, cx| {
             store.begin_inbox_topic_jump(channel_id, topic_id, message_id, cx);
         });
@@ -848,6 +856,12 @@ fn schedule_topic_jump(
         },
     );
     inbox_handle.hide(cx);
+    TopicBadgeStore::global(cx).update(cx, |store, cx| {
+        store.clear_topic(&topic.id, cx);
+    });
+    ChannelList::global(cx).update(cx, |store, cx| {
+        store.apply_topic_read(ChannelId(topic_id), cx);
+    });
     TopicsStore::global(cx).update(cx, |store, cx| {
         store.begin_inbox_topic_jump_to_origin(
             channel,
@@ -1104,13 +1118,10 @@ fn render_topic_item(
 }
 
 pub fn clan_has_inbox_badge(clan_id: &str, cx: &App) -> bool {
-    let Ok(clan_id) = clan_id.parse::<ClanId>() else {
+    let Ok(id) = clan_id.parse::<ClanId>() else {
         return false;
     };
-    ClanList::global(cx)
-        .read(cx)
-        .clans
-        .iter()
-        .find(|c| c.id == clan_id)
-        .is_some_and(|c| c.badge_count > 0)
+    ClanList::try_global(cx)
+        .and_then(|list| list.read(cx).clan(id).map(|clan| clan.badge_count > 0))
+        .unwrap_or(false)
 }

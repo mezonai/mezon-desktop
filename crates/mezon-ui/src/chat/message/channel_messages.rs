@@ -1761,6 +1761,12 @@ impl ChannelMessages {
                 this.mark_scroll_activity(cx);
 
                 if this.is_topic_box {
+                    if at_bottom {
+                        this.sync_topic_seen(cx);
+                    }
+                    if visible_range_changed {
+                        this.schedule_pagination_check(window, cx);
+                    }
                     return;
                 }
 
@@ -1995,6 +2001,9 @@ impl ChannelMessages {
             cx.subscribe(&TopicsStore::global(cx), |this, _, event, cx| match event {
                 TopicsEvent::Opened => {
                     this.refresh_topic_messages(cx);
+                    if this.at_bottom {
+                        this.sync_topic_seen(cx);
+                    }
                     cx.notify();
                 }
                 TopicsEvent::ReplyTargetChanged => cx.notify(),
@@ -2260,6 +2269,9 @@ impl ChannelMessages {
                 Some(ix) => self.remeasure_topic_rows(ix..ix + 1),
                 None => self.remeasure_topic_rows(0..self.topic_row_ids.len()),
             }
+        }
+        if self.at_bottom {
+            self.sync_topic_seen(cx);
         }
         cx.notify();
     }
@@ -2681,6 +2693,13 @@ impl ChannelMessages {
                 view.update(cx, |gif, cx| gif.set_playing(true, cx));
             }
             if self.is_topic_box {
+                if self
+                    .list_state
+                    .is_scrolled_to_end()
+                    .unwrap_or(self.at_bottom)
+                {
+                    self.sync_topic_seen(cx);
+                }
                 return;
             }
             if self
@@ -3537,6 +3556,34 @@ impl ChannelMessages {
     fn sync_channel_seen(&mut self, cx: &mut Context<Self>) {
         let app_focused = cx.active_window().is_some();
         self.sync_channel_seen_when_focused(app_focused, cx);
+    }
+
+    fn sync_topic_seen(&mut self, cx: &mut Context<Self>) {
+        if !self.is_topic_box {
+            return;
+        }
+        let app_focused = cx.active_window().is_some();
+        let Some(last) = self
+            .topic_messages
+            .last()
+            .filter(|message| !message.id.is_optimistic())
+        else {
+            return;
+        };
+        let Some(topic_id) = TopicsStore::global(cx).read(cx).active_topic_id() else {
+            return;
+        };
+        let last_id = last.id;
+        let last_create_time = last.create_time;
+        MessagesStore::global(cx).update(cx, |store, cx| {
+            store.note_topic_viewport_seen(
+                ChannelId(topic_id),
+                last_id,
+                last_create_time,
+                app_focused,
+                cx,
+            );
+        });
     }
 
     fn sync_channel_seen_when_focused(&mut self, app_focused: bool, cx: &mut Context<Self>) {

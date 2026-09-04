@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Context, Entity, Global};
-use mezon_client::RealtimeEvent;
+use mezon_client::{RealtimeEvent, inbox_notification_from_api};
 use mezon_proto::api::{ChannelMessage, Notification};
 
 use crate::AuthState;
@@ -545,33 +545,44 @@ impl BadgeService {
                 cl.ensure_thread_with_parent(channel_id, parent_id, clan_id, label, cx);
             });
         }
-        let (message_id_raw, content_time) =
-            mezon_client::transport::parse_notification_content(&notif.content);
-        tracing::debug!(
-            message_id = message_id_raw,
-            content_time,
-            content_len = notif.content.len(),
-            content_first_byte = notif.content.first().copied(),
-            "badge: parsed notification content"
-        );
-        let message_id = MessageId(message_id_raw);
-        if message_id.is_zero() {
+        let Ok(notification) = inbox_notification_from_api(notif.clone()) else {
+            tracing::debug!(
+                content_len = notif.content.len(),
+                "badge: skip notification, inbox parse failed"
+            );
+            return;
+        };
+        let Some(message_id_raw) = notification
+            .effective_message_id()
+            .and_then(|id| id.parse::<i64>().ok())
+            .filter(|id| *id != 0)
+        else {
             tracing::debug!(
                 content_len = notif.content.len(),
                 "badge: skip notification, no message_id in content"
             );
             return;
-        }
-        let msg_time = if content_time > 0 {
-            content_time
-        } else {
-            i64::from(notif.create_time_seconds)
         };
-        let badge_channel = if notif.topic_id != 0 {
-            ChannelId(notif.topic_id)
-        } else {
-            channel_id
-        };
+        let message_id = MessageId(message_id_raw);
+        let msg_time = notification
+            .message
+            .as_ref()
+            .map(|preview| preview.create_time_seconds)
+            .filter(|ts| *ts > 0)
+            .map(i64::from)
+            .unwrap_or_else(|| i64::from(notification.create_time_seconds));
+        tracing::debug!(
+            message_id = message_id.get(),
+            msg_time,
+            content_len = notif.content.len(),
+            "badge: parsed notification content"
+        );
+        let badge_channel = notification
+            .effective_topic_id()
+            .and_then(|id| id.parse::<i64>().ok())
+            .filter(|id| *id != 0)
+            .map(ChannelId)
+            .unwrap_or(channel_id);
         if is_message_already_seen(cx, clan_id, badge_channel, msg_time) {
             tracing::debug!(
                 channel_id = badge_channel.get(),

@@ -52,6 +52,7 @@ use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::roles::RolesStore;
 use crate::threads::ThreadsStore;
+use crate::topic_badges::TopicBadgeStore;
 use crate::topics::TopicsStore;
 use crate::wallet::{SendTokenRequest, WalletEvent, WalletStore};
 
@@ -1394,6 +1395,48 @@ impl MessagesStore {
         } else {
             self.set_last_read_message(channel_id, message_id);
         }
+        self.pending_last_seen = Some(pending);
+        self.arm_last_seen_debounce(cx);
+    }
+
+    pub fn note_topic_viewport_seen(
+        &mut self,
+        topic_id: ChannelId,
+        message_id: MessageId,
+        create_time: i64,
+        app_focused: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !app_focused || message_id.is_optimistic() || topic_id.is_zero() {
+            return;
+        }
+        let Some(clan_id) = self.active_clan_id else {
+            return;
+        };
+        if let Some(store) = TopicBadgeStore::try_global(cx) {
+            store.update(cx, |store, cx| {
+                store.clear_topic(&topic_id.get().to_string(), cx);
+            });
+        }
+        ChannelList::global(cx).update(cx, |cl, cx| {
+            cl.apply_topic_read(topic_id, cx);
+        });
+        if !should_write_last_seen(
+            self.known_last_seen_id(topic_id, cx),
+            self.last_message_by_channel.get(&topic_id).copied(),
+            message_id,
+        ) {
+            return;
+        }
+        let pending = PendingLastSeen {
+            clan_id,
+            channel_id: topic_id,
+            message_id,
+            create_time,
+            mode: STREAM_MODE_THREAD,
+            badge_count: 0,
+        };
+        self.set_last_read_message(topic_id, message_id);
         self.pending_last_seen = Some(pending);
         self.arm_last_seen_debounce(cx);
     }
