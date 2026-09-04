@@ -35,14 +35,9 @@ impl Focusable for FirstJoinModal {
 /// Whether this account is new enough, and empty enough, to be shown the prompt — and whether
 /// now is a moment to raise a modal at all.
 pub fn should_prompt(cx: &App) -> bool {
-    if !route_allows_prompt(&Router::global(cx).read(cx).route()) {
-        return false;
-    }
-    // A brand-new account with no clans is also exactly who the tour autostarts for; whichever
-    // wins the race, the other must not paint on top of it.
-    if crate::tour::is_running(cx) {
-        return false;
-    }
+    // Who the prompt is for comes first: this runs from `RootView`'s render for the whole
+    // session, and anybody who has ever joined a clan — which is very nearly everybody — is out
+    // on a `bool` before the moment-to-raise-it checks below cost anything.
     let clans = ClanList::global(cx);
     let clans = clans.read(cx);
     if !clans.has_listed() || !clans.clans.is_empty() {
@@ -59,7 +54,22 @@ pub fn should_prompt(cx: &App) -> bool {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_secs())
         .unwrap_or_default();
-    now.saturating_sub(u64::from(created)) <= NEW_ACCOUNT_WINDOW_SECS
+    if now.saturating_sub(u64::from(created)) > NEW_ACCOUNT_WINDOW_SECS {
+        return false;
+    }
+    let router = Router::global(cx);
+    if !route_allows_prompt(router.read(cx).route_ref()) {
+        return false;
+    }
+    // `show_modal` replaces whatever is up, and this prompt is raised from a render rather than
+    // by anyone asking for it: a create-clan dialog opened while the account was still in flight
+    // would vanish under it. Wait instead — closing that one brings the prompt back.
+    if Shell::global(cx).read(cx).has_modal() {
+        return false;
+    }
+    // A brand-new account with no clans is also exactly who the tour autostarts for; whichever
+    // wins the race, the other must not paint on top of it.
+    !crate::tour::is_running(cx)
 }
 
 /// Only over the surfaces someone with no clans lands on, the way the web only mounts the popup

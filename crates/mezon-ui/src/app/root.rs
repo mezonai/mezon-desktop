@@ -189,6 +189,7 @@ impl RootView {
         cx.observe(&shell, |this, shell, cx| {
             if !shell.read(cx).has_modal() {
                 this.schedule_tour_autostart(cx);
+                this.notify_if_first_join_due(cx);
             }
         })
         .detach();
