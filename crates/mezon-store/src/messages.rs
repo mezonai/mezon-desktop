@@ -3239,20 +3239,21 @@ impl MessagesStore {
         .detach();
     }
 
+    /// Report a message for abuse. The caller gets the round trip back: a report that the server
+    /// refused must not read as one it took.
     pub fn report_message(
         &self,
         message_id: MessageId,
         abuse_type: String,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Task<anyhow::Result<()>> {
         let api = self.api.clone();
         let message_num = message_id.get();
-        cx.spawn(async move |_this, _cx| {
-            if let Err(e) = api.report_message_abuse(message_num, &abuse_type).await {
-                tracing::error!("report_message report_message_abuse failed: {e}");
-            }
+        cx.background_spawn(async move {
+            api.report_message_abuse(message_num, &abuse_type)
+                .await
+                .inspect_err(|e| tracing::error!("report_message report_message_abuse failed: {e}"))
         })
-        .detach();
     }
 
     /// Messages held in an arbitrary bucket (used by the discussion topic panel,

@@ -525,6 +525,12 @@ pub fn shutdown(cx: &mut App) {
     }
 }
 
+/// Whether a tour is on screen right now. Anything that would paint over it — a modal, an
+/// autostart of its own — has to stand down while it is.
+pub fn is_running(cx: &App) -> bool {
+    TourState::try_global(cx).is_some_and(|entity| entity.read(cx).is_active())
+}
+
 pub fn layer(cx: &App) -> Option<AnyView> {
     let entity = TourState::try_global(cx)?;
     entity.read(cx).is_active().then(|| AnyView::from(entity))

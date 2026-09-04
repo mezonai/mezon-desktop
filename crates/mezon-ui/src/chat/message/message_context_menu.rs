@@ -528,12 +528,21 @@ fn build_topic_menu(
 
     if !is_own_message {
         let message_id = msg.id;
+        let sender_user_id = msg.sender_user_id;
+        let sender_name = msg.sender_name.clone();
         let locale_owned = locale.to_string();
         menu = menu.danger_item_trailing_icon(
             t("contextMenu.reportMessage"),
             IconName::ReportMessageRightClick,
             move |window, cx| {
-                ReportMessageModal::open(message_id, locale_owned.clone().into(), window, cx);
+                ReportMessageModal::open(
+                    message_id,
+                    sender_user_id,
+                    sender_name.clone(),
+                    locale_owned.clone().into(),
+                    window,
+                    cx,
+                );
             },
         );
     }
@@ -818,12 +827,21 @@ fn build_channel_menu(
     }
     if !is_own_message {
         let message_id = msg.id;
+        let sender_user_id = msg.sender_user_id;
+        let sender_name = msg.sender_name.clone();
         let locale_owned = locale.to_string();
         menu = menu.danger_item_trailing_icon(
             t("contextMenu.reportMessage"),
             IconName::ReportMessageRightClick,
             move |window, cx| {
-                ReportMessageModal::open(message_id, locale_owned.clone().into(), window, cx);
+                ReportMessageModal::open(
+                    message_id,
+                    sender_user_id,
+                    sender_name.clone(),
+                    locale_owned.clone().into(),
+                    window,
+                    cx,
+                );
             },
         );
     }
