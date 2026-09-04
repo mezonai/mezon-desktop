@@ -1544,6 +1544,8 @@
   "clanSettings.appDirectory.categories.serverMiniGames": "Клан мини-уеннары",
   "clanSettings.appDirectory.inServers": "{{count}} кланда",
   "clanSettings.archivedChannels.archived": "АКТИВ",
+  "clanSettings.archivedChannels.searchPlaceholder": "Архив каналларын исем буенча эзләү",
+  "clanSettings.archivedChannels.noSearchResults": "Эзләүгә туры килгән архив каналлары юк",
   "clanSettings.archivedChannels.description": "Каналларны яңадан актив итү өчен аларны ян-як панеленә кайтарыгыз. Архивланган каналлар барлык хәбәрләр тарихын саклый, ләкин төп навигациядә күрсәтелми.",
   "clanSettings.archivedChannels.emptyState": "Архивланган каналлар юк",
   "clanSettings.archivedChannels.fetchFailed": "Архивланган каналларны йөкләп булмады",

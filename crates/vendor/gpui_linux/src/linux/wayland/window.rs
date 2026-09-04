@@ -112,6 +112,8 @@ pub struct WaylandWindowState {
     bounds: Bounds<Pixels>,
     scale: f32,
     input_handler: Option<PlatformInputHandler>,
+    /// mezon vendor edit: one-shot surrounding for IME position sync only.
+    ime_surrounding_hint: Option<ImeSurroundingText>,
     decorations: WindowDecorations,
     background_appearance: WindowBackgroundAppearance,
     fullscreen: bool,
@@ -390,6 +392,7 @@ impl WaylandWindowState {
             bounds: options.bounds,
             scale: 1.0,
             input_handler: None,
+            ime_surrounding_hint: None,
             decorations: WindowDecorations::Client,
             background_appearance: WindowBackgroundAppearance::Opaque,
             fullscreen: false,
@@ -1141,6 +1144,19 @@ impl WaylandWindowStatePtr {
     }
 
     pub fn get_ime_surrounding(&self) -> Option<ImeSurroundingText> {
+        self.ime_surrounding_from_handler()
+    }
+
+    pub fn take_ime_surrounding_for_position_sync(&self) -> Option<ImeSurroundingText> {
+        let mut state = self.state.borrow_mut();
+        if let Some(hint) = state.ime_surrounding_hint.take() {
+            return Some(hint);
+        }
+        drop(state);
+        self.ime_surrounding_from_handler()
+    }
+
+    fn ime_surrounding_from_handler(&self) -> Option<ImeSurroundingText> {
         let mut state = self.state.borrow_mut();
         if let Some(mut input_handler) = state.input_handler.take() {
             drop(state);
@@ -1450,7 +1466,13 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
-        self.borrow_mut().input_handler.take()
+        let mut state = self.borrow_mut();
+        state.ime_surrounding_hint = None;
+        state.input_handler.take()
+    }
+
+    fn set_ime_surrounding_hint(&self, surrounding: Option<ImeSurroundingText>) {
+        self.borrow_mut().ime_surrounding_hint = surrounding;
     }
 
     fn prompt(
@@ -1790,6 +1812,11 @@ impl PlatformWindow for WaylandWindow {
         let client = state.client.clone();
         drop(state);
         client.update_ime_position(bounds);
+    }
+
+    fn reset_ime(&self) {
+        let client = self.borrow().client.clone();
+        client.reset_ime();
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {

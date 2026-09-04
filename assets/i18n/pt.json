@@ -1536,6 +1536,8 @@
   "clanSettings.appDirectory.categories.serverMiniGames": "Minijogos do servidor",
   "clanSettings.appDirectory.inServers": "em {{count}} servidores",
   "clanSettings.archivedChannels.archived": "ATIVO",
+  "clanSettings.archivedChannels.searchPlaceholder": "Pesquisar canais arquivados por nome",
+  "clanSettings.archivedChannels.noSearchResults": "Nenhum canal arquivado corresponde à sua pesquisa",
   "clanSettings.archivedChannels.description": "Restaure os canais para a barra lateral para torná-los ativos novamente. Os canais arquivados preservam todo o histórico de mensagens, mas ficam ocultos na navegação principal.",
   "clanSettings.archivedChannels.emptyState": "Nenhum canal arquivado",
   "clanSettings.archivedChannels.fetchFailed": "Não foi possível carregar os canais arquivados",

@@ -854,6 +854,8 @@ impl OnboardingSettingPage {
     fn render_main(&self, theme: &Theme, locale: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
         let setup = cx.entity().downgrade();
         let guide = cx.entity().downgrade();
+        let preview_clan = self.clan_id;
+        let preview_blocked = self.dirty;
         v_flex()
             .gap_5()
             .child(
@@ -875,8 +877,28 @@ impl OnboardingSettingPage {
                             )))
                             .child(
                                 div()
-                                    .text_color(rgb(0x5865f2))
-                                    .child(mezon_i18n::t(locale, "common.preview")),
+                                    .id("onboarding-open-preview")
+                                    .when(!preview_blocked, |link| {
+                                        link.cursor_pointer()
+                                            .text_color(rgb(0x5865f2))
+                                            .hover(|style| style.text_color(rgb(0x818cf8)))
+                                            .on_click(move |_, _, cx| {
+                                                OnboardingStore::global(cx).update(
+                                                    cx,
+                                                    |store, cx| {
+                                                        store.open_preview(preview_clan, cx)
+                                                    },
+                                                );
+                                                crate::router::navigate(
+                                                    cx,
+                                                    crate::router::Route::ClanGuide {
+                                                        clan_id: preview_clan,
+                                                    },
+                                                );
+                                            })
+                                    })
+                                    .when(preview_blocked, |link| link.text_color(theme.text_muted))
+                                    .child(mezon_i18n::t(locale, "onBoardingClan.buttons.preview")),
                             ),
                     ),
             )
@@ -1231,12 +1253,9 @@ impl OnboardingSettingPage {
                     .justify_between()
                     .child(
                         div().text_size(px(12.)).child(
-                            format!(
-                                "{} {}",
-                                mezon_i18n::t(locale, "onBoardingClan.questionsPage.title"),
-                                index + 1
-                            )
-                            .to_uppercase(),
+                            mezon_i18n::t(locale, "onBoardingClan.questionsPage.questionNumber")
+                                .replace("{{number}}", &(index + 1).to_string())
+                                .to_uppercase(),
                         ),
                     )
                     .child(
@@ -1304,12 +1323,12 @@ impl OnboardingSettingPage {
             if let Some(input) = &question.title_input {
                 card = card.child(Input::new(input).w_full());
             }
-            card = card.child(div().text_color(theme.text_secondary).child(format!(
-                "{} - {} / {}",
-                mezon_i18n::t(locale, "onBoardingClan.questionsPage.addAnswer"),
-                question.answers.len(),
-                MAX_ANSWERS
-            )));
+            card = card.child(
+                div().text_color(theme.text_secondary).child(
+                    mezon_i18n::t(locale, "onBoardingClan.questionsPage.availableAnswers")
+                        .replace("{{count}}", &question.answers.len().to_string()),
+                ),
+            );
             let mut answers = h_flex().gap_2().flex_wrap();
             for (answer_index, answer) in question.answers.iter().enumerate() {
                 let edit = cx.entity().downgrade();

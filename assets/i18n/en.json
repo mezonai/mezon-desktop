@@ -1534,6 +1534,8 @@
   "clanSettings.appDirectory.categories.serverMiniGames": "clan Mini-Games",
   "clanSettings.appDirectory.inServers": "in {{count}} clans",
   "clanSettings.archivedChannels.archived": "ACTIVE",
+  "clanSettings.archivedChannels.searchPlaceholder": "Search archived channels by name",
+  "clanSettings.archivedChannels.noSearchResults": "No archived channels match your search",
   "clanSettings.archivedChannels.description": "Restore channels to the sidebar to make them active again. Archived channels preserve all message history but are hidden from the primary navigation.",
   "clanSettings.archivedChannels.emptyState": "No archived channels",
   "clanSettings.archivedChannels.fetchFailed": "Failed to load archived channels",

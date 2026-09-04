@@ -32,7 +32,8 @@ use crate::util::text_edit::{
     EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
     granularity_for_click, home_target, ime_replace_range, line_end, line_start,
     marked_caret_range, marked_range_after_delete, next_word_boundary, previous_word_boundary,
-    range_for_granularity, should_coalesce, surrounding_delete_range, swallow_discarded_ime_commit,
+    range_for_granularity, should_coalesce, splice_out_byte_range, surrounding_delete_range,
+    swallow_discarded_ime_commit,
 };
 
 const MASK: char = '\u{2022}';
@@ -341,6 +342,21 @@ impl MentionInputState {
         if let Some(marked) = self.marked_range.take() {
             self.discard_ime_commit = self.content.get(marked).map(str::to_string);
         }
+    }
+
+    pub(crate) fn drop_uncommitted_preedit(&mut self, cx: &mut Context<Self>) {
+        let Some(marked) = self.marked_range.take() else {
+            return;
+        };
+        let Some((next, discarded, caret)) = splice_out_byte_range(&self.content, marked) else {
+            return;
+        };
+        self.discard_ime_commit = Some(discarded);
+        self.set_content(next);
+        self.selected_range = caret..caret;
+        self.selection_reversed = false;
+        cx.notify();
+        cx.emit(MentionFieldEvent::Change);
     }
 
     pub(crate) fn pending_send_ime_token(&self) -> Option<String> {
@@ -821,7 +837,10 @@ impl MentionInputState {
         self.replace_text_in_range(None, text, window, cx);
     }
 
-    fn on_key_down(&mut self, _: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {
+        if event.keystroke.key == "enter" && !event.keystroke.modifiers.modified() {
+            return;
+        }
         self.discard_ime_commit = None;
     }
 
