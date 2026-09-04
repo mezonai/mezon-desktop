@@ -125,6 +125,7 @@ pub struct ChannelSidebar {
     _permissions_observe: Subscription,
     _channel_permissions_observe: Subscription,
     _notification_setting_observe: Subscription,
+    pending_ctrlk_scroll: bool,
 }
 
 struct ActiveChannelSidebar(gpui::WeakEntity<ChannelSidebar>);
@@ -377,6 +378,7 @@ impl ChannelSidebar {
             _permissions_observe: permissions_observe,
             _channel_permissions_observe: channel_permissions_observe,
             _notification_setting_observe: notification_setting_observe,
+            pending_ctrlk_scroll: false,
         };
         cx.set_global(ActiveChannelSidebar(cx.entity().downgrade()));
         this.rebuild_items(cx);
@@ -657,13 +659,20 @@ impl ChannelSidebar {
         let skeleton_changed = self.advance_skeleton(cold_loading, new_clan_id, cx);
         let changed = items_changed || name_changed || clan_changed || skeleton_changed;
         if self.channel_list.read(cx).ctrlk_focus_channel().is_some() {
-            cx.defer(|cx| {
-                if let Ok(sidebar) = active_channel_sidebar(cx) {
-                    sidebar.update(cx, |this, cx| this.try_scroll_ctrlk_focus(cx));
-                }
-            });
+            self.pending_ctrlk_scroll = true;
         }
         changed
+    }
+
+    fn channel_row_index(&self, channel_id: ChannelId, exclude_favorites: bool) -> Option<usize> {
+        let id_str = channel_id.to_string();
+        self.items.iter().position(|item| {
+            matches!(
+                item,
+                SidebarItem::Channel { id, is_favorite, .. }
+                    if id.as_str() == id_str && (!exclude_favorites || !is_favorite)
+            )
+        })
     }
 
     fn scroll_to_channel_row(
@@ -672,32 +681,34 @@ impl ChannelSidebar {
         exclude_favorites: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        let id_str = channel_id.to_string();
-        let target = self.items.iter().position(|item| {
-            matches!(
-                item,
-                SidebarItem::Channel { id, is_favorite, .. }
-                    if id.as_str() == id_str && (!exclude_favorites || !is_favorite)
-            )
-        });
-        if let Some(ix) = target {
-            self.list_state.scroll_to_center_item(ix);
-            cx.notify();
-            true
-        } else {
-            false
-        }
+        let Some(ix) = self.channel_row_index(channel_id, exclude_favorites) else {
+            return false;
+        };
+        self.list_state.scroll_to_center_item(ix);
+        cx.notify();
+        true
     }
 
     fn try_scroll_ctrlk_focus(&mut self, cx: &mut Context<Self>) {
         let focus = self.channel_list.read(cx).ctrlk_focus_channel().copied();
         let Some(focus) = focus else {
+            self.pending_ctrlk_scroll = false;
             return;
         };
-        if self.scroll_to_channel_row(focus.channel_id, true, cx) {
+        let Some(ix) = self.channel_row_index(focus.channel_id, true) else {
+            self.pending_ctrlk_scroll = true;
+            return;
+        };
+        self.list_state.scroll_to_center_item(ix);
+        if self.list_state.bounds_for_item(ix).is_some() {
             self.channel_list.update(cx, |store, _| {
                 store.clear_ctrlk_focus_channel();
             });
+            self.pending_ctrlk_scroll = false;
+            cx.notify();
+        } else {
+            self.pending_ctrlk_scroll = true;
+            cx.notify();
         }
     }
 
@@ -872,6 +883,9 @@ impl ChannelSidebar {
 impl Render for ChannelSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("ChannelSidebar");
+        if self.pending_ctrlk_scroll {
+            self.try_scroll_ctrlk_focus(cx);
+        }
         let theme = cx.theme();
         let items = self.items.clone();
         let channel_list_handle = self.channel_list_handle.clone();

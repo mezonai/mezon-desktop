@@ -3186,6 +3186,7 @@ impl MessagesStore {
             content: content_json,
             mentions,
             attachments,
+            topic_id: msg.topic_id.map(|topic| topic.get()).unwrap_or(0),
             ..Default::default()
         };
         let api = self.api.clone();

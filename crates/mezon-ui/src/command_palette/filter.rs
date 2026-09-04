@@ -69,7 +69,9 @@ pub fn filter_and_sort_indices(items: &[PaletteItem], raw_query: &str) -> Vec<us
 
 pub fn sort_palette_indices(items: &[PaletteItem], raw_query: &str) -> Vec<usize> {
     let mut indices: Vec<usize> = (0..items.len()).collect();
-    if raw_query.starts_with('#') {
+    if raw_query.starts_with('@') {
+        indices.retain(|&index| items[index].kind == PaletteItemKind::Member);
+    } else if raw_query.starts_with('#') {
         indices.retain(|&index| items[index].kind == PaletteItemKind::Channel);
     }
     sort_indices(items, &mut indices, raw_query);
@@ -311,6 +313,23 @@ mod tests {
         ];
         let indices = filter_and_sort_indices(&items, "dev");
         assert_eq!(indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn sort_palette_indices_at_prefix_keeps_members_only() {
+        let items = vec![
+            item(PaletteItemKind::Channel, "alice-ch", "alice-ch", "", "", 0),
+            item(
+                PaletteItemKind::Member,
+                "Alice",
+                "alice",
+                "Alice Display",
+                "alice",
+                0,
+            ),
+        ];
+        let indices = sort_palette_indices(&items, "@ali");
+        assert_eq!(indices, vec![1]);
     }
 
     #[test]
