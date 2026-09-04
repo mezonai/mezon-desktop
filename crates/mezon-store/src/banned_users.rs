@@ -26,6 +26,13 @@ const BAN_ACTION_BANNED: i32 = 1;
 /// render loop would re-arm the request every frame for as long as the call keeps failing.
 const SELF_BAN_RETRY_BACKOFF: Duration = Duration::from_secs(30);
 
+/// Longest gap between repaints while a ban is counting down. The label is bucketed to whole
+/// minutes, so this only has to be fine enough that it never looks stuck.
+const SELF_BAN_TICK: Duration = Duration::from_secs(30);
+
+/// Floor on a scheduled wake, so a deadline that is already up cannot spin the timer.
+const SELF_BAN_MIN_WAKE: Duration = Duration::from_millis(250);
+
 #[derive(Debug, Clone)]
 pub struct BannedEntry {
     pub channel_id: i64,
@@ -50,6 +57,8 @@ pub struct BannedUsersStore {
     self_ban: HashMap<ChannelId, Option<Instant>>,
     self_ban_asked: HashSet<ChannelId>,
     self_ban_failed_at: HashMap<ChannelId, Instant>,
+    self_ban_waking: bool,
+    _self_ban_wake: Option<Task<()>>,
     mutation_epoch: u64,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
@@ -76,6 +85,8 @@ impl BannedUsersStore {
             self_ban: HashMap::new(),
             self_ban_asked: HashSet::new(),
             self_ban_failed_at: HashMap::new(),
+            self_ban_waking: false,
+            _self_ban_wake: None,
             mutation_epoch: 0,
             api,
             _conn_watch: conn_watch,
@@ -92,9 +103,7 @@ impl BannedUsersStore {
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
-        self.self_ban.clear();
-        self.self_ban_asked.clear();
-        self.self_ban_failed_at.clear();
+        self.forget_self_bans();
         self.cache.clear();
         self.loading.clear();
         cx.notify();
@@ -172,13 +181,8 @@ impl BannedUsersStore {
         }
         // A deadline that has passed is no longer an answer: drop it so the ask below runs and
         // the server confirms the ban really is over.
-        if self
-            .self_ban
-            .get(&channel_id)
-            .is_some_and(|expires| expires.is_some_and(|at| at <= Instant::now()))
-        {
-            self.self_ban.remove(&channel_id);
-            self.self_ban_asked.remove(&channel_id);
+        if self.drop_lapsed_self_bans(Instant::now()) {
+            self.schedule_self_ban_wake(cx);
         }
         if !self.self_ban_asked.insert(channel_id) {
             return;
@@ -188,24 +192,32 @@ impl BannedUsersStore {
             let Ok(response) = api.is_banned(channel_id.get()).await else {
                 // Stay unanswered rather than guess at a banned notice, but behind a backoff:
                 // the caller is a render, so an unguarded retry would fire once per frame.
-                let _ = this.update(cx, |this, _| {
+                let _ = this.update(cx, |this, cx| {
                     this.self_ban_asked.remove(&channel_id);
                     this.self_ban_failed_at.insert(channel_id, Instant::now());
+                    // The render that would re-arm the retry only happens if something repaints,
+                    // so the wake is what actually brings us back after the backoff.
+                    this.schedule_self_ban_wake(cx);
                 });
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                if response.is_banned {
-                    let expires = (response.expired_ban_time > 0).then(|| {
-                        Instant::now()
-                            + std::time::Duration::from_secs(response.expired_ban_time as u64)
-                    });
-                    this.self_ban.insert(channel_id, expires);
-                } else {
-                    this.self_ban.remove(&channel_id);
-                }
+                let answer = response
+                    .is_banned
+                    .then(|| self_ban_deadline(response.expired_ban_time, Instant::now()));
+                let changed = this.self_ban.get(&channel_id).copied() != answer;
+                match answer {
+                    Some(expires) => this.self_ban.insert(channel_id, expires),
+                    None => this.self_ban.remove(&channel_id),
+                };
                 this.self_ban_failed_at.remove(&channel_id);
-                cx.notify();
+                this.schedule_self_ban_wake(cx);
+                // "Still not banned" is the answer for almost every channel anybody opens, and
+                // `ChatLayout` observes this store — notifying anyway would cost a full chat
+                // repaint per channel switch for nothing.
+                if changed {
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -214,15 +226,70 @@ impl BannedUsersStore {
     /// `Some(None)` = banned with no expiry, `Some(Some(secs))` = seconds left, `None` = not
     /// banned (or not answered yet).
     pub fn self_ban_remaining(&self, channel_id: ChannelId) -> Option<Option<i64>> {
-        let expires = self.self_ban.get(&channel_id)?;
-        let Some(expires) = expires else {
-            return Some(None);
-        };
-        // A timed ban lapses in the server's cache without any event, so an elapsed deadline
-        // means the ban is over — reporting zero here would leave the composer replaced by an
-        // "Expired" notice for the rest of the session.
-        let left = expires.saturating_duration_since(Instant::now()).as_secs();
-        (left > 0).then_some(Some(left as i64))
+        self_ban_remaining_at(self.self_ban.get(&channel_id), Instant::now())
+    }
+
+    /// Drop every ban whose deadline has passed, so the next render asks the server to confirm.
+    /// Returns whether anything went.
+    fn drop_lapsed_self_bans(&mut self, now: Instant) -> bool {
+        let lapsed: Vec<ChannelId> = self
+            .self_ban
+            .iter()
+            .filter(|(_, expires)| expires.is_some_and(|at| at <= now))
+            .map(|(channel_id, _)| *channel_id)
+            .collect();
+        for channel_id in &lapsed {
+            self.self_ban.remove(channel_id);
+            self.self_ban_asked.remove(channel_id);
+        }
+        !lapsed.is_empty()
+    }
+
+    /// The soonest moment a wake would have anything to do: a ban running out, or a retry coming
+    /// due. `None` when nothing is outstanding.
+    fn next_self_ban_wake(&self) -> Option<Instant> {
+        let deadlines = self.self_ban.values().filter_map(|expires| *expires);
+        let retries = self
+            .self_ban_failed_at
+            .values()
+            .map(|at| *at + SELF_BAN_RETRY_BACKOFF);
+        deadlines.chain(retries).min()
+    }
+
+    /// Keep a wake running while a ban is counting down or a retry is owed. The notice is only
+    /// ever recomputed from a render, and a channel nobody is typing in does not repaint on its
+    /// own — without this the countdown would freeze and a lapsed ban would keep the composer
+    /// hidden for the rest of the session.
+    fn schedule_self_ban_wake(&mut self, cx: &mut Context<Self>) {
+        if self.self_ban_waking || self.next_self_ban_wake().is_none() {
+            return;
+        }
+        self.self_ban_waking = true;
+        self._self_ban_wake = Some(cx.spawn(async move |this, cx| {
+            while let Ok(Some(next)) = this.update(cx, |this, _| this.next_self_ban_wake()) {
+                // The label buckets to whole minutes, so a tick that coarse keeps it honest
+                // without repainting the chat any more often than it has to. The floor stops a
+                // moment that is already up from spinning the timer.
+                let delay = next
+                    .saturating_duration_since(Instant::now())
+                    .clamp(SELF_BAN_MIN_WAKE, SELF_BAN_TICK);
+                cx.background_executor().timer(delay).await;
+                let woke = this.update(cx, |this, cx| {
+                    let now = Instant::now();
+                    this.drop_lapsed_self_bans(now);
+                    // A backoff that is up has done its job: dropping it lets the next render ask
+                    // again, and keeps it out of the schedule so the loop does not spin on it.
+                    this.self_ban_failed_at.retain(|_, at| {
+                        now.saturating_duration_since(*at) < SELF_BAN_RETRY_BACKOFF
+                    });
+                    cx.notify();
+                });
+                if woke.is_err() {
+                    return;
+                }
+            }
+            let _ = this.update(cx, |this, _| this.self_ban_waking = false);
+        }));
     }
 
     /// Forget every `IsBanned` answer, so the next render asks again. Used when the socket has
@@ -231,6 +298,8 @@ impl BannedUsersStore {
         self.self_ban.clear();
         self.self_ban_asked.clear();
         self.self_ban_failed_at.clear();
+        self.self_ban_waking = false;
+        self._self_ban_wake = None;
     }
 
     pub fn is_banned(&self, channel_id: ChannelId, user_id: UserId) -> bool {
@@ -396,6 +465,26 @@ impl BannedUsersStore {
     }
 }
 
+/// When a ban reported by `IsBanned` runs out. `expired_ban_time` is the server handing back a
+/// valkey TTL on the ban key (`mezon-api/server/api_clan_desc.go`): negative means the key has no
+/// expiry, i.e. the ban does not lift by itself, and zero means it lapses this very instant — so
+/// zero reads as an already-spent deadline and gets asked again rather than pinned as forever.
+fn self_ban_deadline(expired_ban_time: i32, now: Instant) -> Option<Instant> {
+    (expired_ban_time >= 0).then(|| now + Duration::from_secs(expired_ban_time as u64))
+}
+
+/// `Some(None)` = banned with no expiry, `Some(Some(secs))` = seconds left, `None` = not banned.
+///
+/// A timed ban lapses in the server's cache without any event, so an elapsed deadline means the
+/// ban is over — reporting zero here would leave the composer replaced by an "Expired" notice.
+fn self_ban_remaining_at(expires: Option<&Option<Instant>>, now: Instant) -> Option<Option<i64>> {
+    let Some(expires) = expires? else {
+        return Some(None);
+    };
+    let left = expires.saturating_duration_since(now).as_secs();
+    (left > 0).then_some(Some(left as i64))
+}
+
 fn banned_ids_for_channel(
     banned_users: &[mezon_proto::api::BannedUser],
     channel_id: ChannelId,
@@ -427,30 +516,41 @@ mod tests {
         }
     }
 
-    /// The map is what `self_ban_remaining` reads; building the whole store would need a live
-    /// `AppApi`, and the expiry rule is the part worth pinning down.
-    fn remaining_for(entry: Option<Instant>) -> Option<Option<i64>> {
-        let mut map: HashMap<ChannelId, Option<Instant>> = HashMap::new();
-        map.insert(ChannelId(1), entry);
-        let expires = map.get(&ChannelId(1))?;
-        let Some(expires) = expires else {
-            return Some(None);
-        };
-        let left = expires.saturating_duration_since(Instant::now()).as_secs();
-        (left > 0).then_some(Some(left as i64))
+    #[test]
+    fn a_lapsed_ban_reads_as_no_ban_rather_than_zero_seconds() {
+        let now = Instant::now();
+        // Never asked.
+        assert_eq!(self_ban_remaining_at(None, now), None);
+        // No expiry: banned until someone lifts it.
+        assert_eq!(self_ban_remaining_at(Some(&None), now), Some(None));
+        // Still running.
+        let later = Some(now + Duration::from_secs(600));
+        assert_eq!(self_ban_remaining_at(Some(&later), now), Some(Some(600)));
+        // Already lapsed — must not report a banned-with-zero-left state, which would leave the
+        // composer replaced by an "Expired" notice for the rest of the session.
+        let past = Some(now - Duration::from_secs(1));
+        assert_eq!(self_ban_remaining_at(Some(&past), now), None);
     }
 
     #[test]
-    fn a_lapsed_ban_reads_as_no_ban_rather_than_zero_seconds() {
-        // No expiry: banned until someone lifts it.
-        assert_eq!(remaining_for(None), Some(None));
-        // Still running.
-        let later = Instant::now() + Duration::from_secs(600);
-        assert!(matches!(remaining_for(Some(later)), Some(Some(secs)) if secs > 0));
-        // Already lapsed — must not report a banned-with-zero-left state, which would leave the
-        // composer replaced by an "Expired" notice for the rest of the session.
-        let past = Instant::now() - Duration::from_secs(1);
-        assert_eq!(remaining_for(Some(past)), None);
+    fn a_ban_deadline_follows_the_servers_ttl_sign() {
+        let now = Instant::now();
+        // A live TTL counts down from now.
+        assert_eq!(
+            self_ban_deadline(900, now),
+            Some(now + Duration::from_secs(900))
+        );
+        // Valkey hands back -1 for a key with no expiry and -2 for a key that is gone: either
+        // way the ban does not lift by itself.
+        assert_eq!(self_ban_deadline(-1, now), None);
+        assert_eq!(self_ban_deadline(-2, now), None);
+        // Zero is "lapses now", not "forever" — it has to read as already spent so the answer
+        // gets asked again instead of pinning the composer shut for the session.
+        assert_eq!(self_ban_deadline(0, now), Some(now));
+        assert_eq!(
+            self_ban_remaining_at(Some(&self_ban_deadline(0, now)), now),
+            None
+        );
     }
 
     #[test]

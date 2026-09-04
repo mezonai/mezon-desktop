@@ -85,6 +85,12 @@ fn banned_notice(locale: &str, remaining: Option<i64>, cx: &App) -> gpui::AnyEle
         .text_color(theme.tokens.text_theme_primary)
         .overflow_hidden()
         .child(
+            Icon::new(IconName::TriangleAlert)
+                .size(px(24.))
+                .flex_none()
+                .text_color(theme.danger_text),
+        )
+        .child(
             div()
                 .flex()
                 .flex_col()

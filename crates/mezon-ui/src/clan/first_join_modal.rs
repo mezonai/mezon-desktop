@@ -8,7 +8,7 @@ use crate::app::shell::Shell;
 use crate::components::primitives::{
     Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState,
 };
-use crate::router::{Route, navigate};
+use crate::router::{Route, Router, navigate};
 use crate::theme::ActiveTheme;
 
 /// How long after signing up the prompt still counts as helpful rather than nagging. The web
@@ -32,8 +32,23 @@ impl Focusable for FirstJoinModal {
     }
 }
 
-/// Whether this account is new enough, and empty enough, to be shown the prompt.
+/// Whether this account is new enough, and empty enough, to be shown the prompt — and whether
+/// now is a moment to raise a modal at all.
 pub fn should_prompt(cx: &App) -> bool {
+    // Only over the surfaces someone lands on with no clans, the way the web only mounts the
+    // popup inside the chat page. Raising it over the invite page would cover the very button
+    // it is telling people to press, and a deep link lands there before the account arrives.
+    if !matches!(
+        Router::global(cx).read(cx).route(),
+        Route::Chat | Route::Direct | Route::DirectMessage { .. } | Route::Friends
+    ) {
+        return false;
+    }
+    // A brand-new account with no clans is also exactly who the tour autostarts for; whichever
+    // wins the race, the other must not paint on top of it.
+    if crate::tour::is_running(cx) {
+        return false;
+    }
     let clans = ClanList::global(cx);
     let clans = clans.read(cx);
     if !clans.has_listed() || !clans.clans.is_empty() {
@@ -54,7 +69,8 @@ pub fn should_prompt(cx: &App) -> bool {
 }
 
 /// The invite id inside a full `…/invite/<id>` link, or the input itself when it already looks
-/// like a bare code — the web client accepts both.
+/// like a bare code. The web only accepts the full link, but its own placeholder offers a bare
+/// code as an example, so both are taken here.
 fn invite_code(raw: &str) -> Option<String> {
     let raw = raw.trim();
     if let Some(id) = invite_id_from_url(raw) {

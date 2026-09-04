@@ -184,6 +184,15 @@ impl RootView {
         cx.observe(&OnboardingStore::global(cx), |_, _, cx| cx.notify())
             .detach();
 
+        // Nothing else re-arms the tour once a modal has waved it off, and dismissing a modal is
+        // not a route change — without this the first-join prompt would swallow the tour for good.
+        cx.observe(&shell, |this, shell, cx| {
+            if !shell.read(cx).has_modal() {
+                this.schedule_tour_autostart(cx);
+            }
+        })
+        .detach();
+
         cx.observe(&auth_state, |this, auth_state, cx| {
             if matches!(*auth_state.read(cx), AuthState::Connecting(_)) {
                 if this.connecting_since.is_none() {
@@ -381,9 +390,17 @@ impl RootView {
             cx.background_executor().timer(TOUR_AUTOSTART_DELAY).await;
             let started = cx.update(|cx| crate::tour::auto_start_if_context_holds(id, cx));
             if !started {
+                // A modal on screen is a "not yet", not a "this context will never hold": the
+                // first-join prompt goes up for exactly the account the tour autostarts for, and
+                // counting that would spend the whole budget before anybody dismissed it.
+                let blocked_by_modal = cx.update(|cx| Shell::global(cx).read(cx).has_modal());
                 this.update(cx, |this, _| {
                     if this.tour_autostart_for == Some(id) {
                         this.tour_autostart_for = None;
+                    }
+                    if blocked_by_modal {
+                        this.tour_autostart_attempts =
+                            this.tour_autostart_attempts.saturating_sub(1);
                     }
                 })
                 .ok();

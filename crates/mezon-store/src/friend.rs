@@ -290,6 +290,12 @@ impl FriendStore {
         self.fetch(cx);
     }
 
+    /// Whether `ListFriends` has landed at least once. Callers that refuse an action for a
+    /// non-friend have to tell "not a friend" apart from "the list is not here yet".
+    pub fn has_loaded(&self) -> bool {
+        self.freshness.was_fetched()
+    }
+
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
         if !self.loading && !self.freshness.is_fresh(crate::CACHE_TTL) {
             self.fetch(cx);

@@ -1,4 +1,7 @@
-//! Coarse relative-time labels, matching the web client's `convertTimestampToTimeRemaining`.
+//! Coarse relative-time labels for a countdown, over the web client's `timeFormat.timeAgo`
+//! strings. The buckets are not the web's own: `BanCountDown` rounds to the nearest unit (and so
+//! can claim two hours with an hour and forty minutes left) and drops sub-minute values into a
+//! per-second ticker. Time *remaining* has to round down, so these floor instead.
 
 const MINUTE: i64 = 60;
 const HOUR: i64 = 60 * MINUTE;
@@ -8,8 +11,8 @@ fn count(locale: &str, key: &'static str, value: i64) -> String {
     mezon_i18n::t(locale, key).replace("{{count}}", &value.to_string())
 }
 
-/// How long is left, in the same buckets the web client uses: whole days, then hours, then
-/// minutes, then a catch-all for the final minute. A non-positive value reads as expired.
+/// How long is left: whole days, then hours, then minutes, then a catch-all for the final
+/// minute, each rounded down. A non-positive value reads as expired.
 pub fn remaining(locale: &str, seconds: i64) -> String {
     if seconds <= 0 {
         return mezon_i18n::t(locale, "common.timeFormat.timeAgo.expired").to_string();
@@ -35,7 +38,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn buckets_match_the_web_clients_thresholds() {
+    fn buckets_round_down_to_the_unit_on_show() {
         assert_eq!(remaining("en", 0), "Expired");
         assert_eq!(remaining("en", -5), "Expired");
         assert_eq!(remaining("en", 30), "Less than a minute");
