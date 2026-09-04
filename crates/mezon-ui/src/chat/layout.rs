@@ -11,9 +11,9 @@ use mezon_store::{
     CallStore, Channel, ChannelEvent, ChannelId, ChannelList, ChannelType, ClanId, ClanList,
     ClanMembersStore, DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
     MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
-    Settings, StreamStore, THREAD_STATUS_ARCHIVED, ThreadsEvent, ThreadsStore, TopicsEvent,
-    TopicsStore, UiState, VoiceConnection, VoiceMember, VoiceModerationError, VoiceStore,
-    expand_mention_name_tokens,
+    Settings, StreamStore, THREAD_STATUS_ARCHIVED, ThreadsEvent, ThreadsStore, TopicBadgeStore,
+    TopicsEvent, TopicsStore, UiState, VoiceConnection, VoiceMember, VoiceModerationError,
+    VoiceStore, expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
 
@@ -441,6 +441,12 @@ impl ChatLayout {
         })
         .detach();
         cx.observe(&InboxStore::global(cx), |this, _, cx| {
+            if this.inbox_display_changed(cx) {
+                cx.notify();
+            }
+        })
+        .detach();
+        cx.observe(&TopicBadgeStore::global(cx), |this, _, cx| {
             if this.inbox_display_changed(cx) {
                 cx.notify();
             }

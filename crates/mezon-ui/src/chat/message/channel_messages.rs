@@ -19,8 +19,8 @@ use mezon_store::{
     ClanList, ClanMembersStore, DirectMessageStore, EmbedInput, EmbedTextInput, Emoji, EmojiStore,
     GroupMembersStore, MessageCode, MessageId, MessagesEvent, MessagesStore,
     PERMISSION_DELETE_MESSAGE, PERMISSION_MANAGE_THREAD, PERMISSION_SEND_MESSAGE, PermissionStore,
-    ProfileContext, RolesEvent, RolesStore, Settings, TopicsEvent, TopicsStore, UserId,
-    UsersByUserStore,
+    ProfileContext, RolesEvent, RolesStore, Settings, TopicBadgeEvent, TopicBadgeStore,
+    TopicsEvent, TopicsStore, UserId, UsersByUserStore,
     message::{Message, markdown_edit_source},
 };
 
@@ -1510,6 +1510,22 @@ impl ChannelMessages {
             this.topics_viewport_fp = Some(fp);
             cx.notify();
         });
+
+        let topic_badge_sub = cx.subscribe(&TopicBadgeStore::global(cx), |this, _, event, cx| {
+            if this.is_topic_box {
+                return;
+            }
+            let TopicBadgeEvent::Updated { .. } = event;
+            let messages = MessagesStore::global(cx).read(cx);
+            if messages
+                .viewport_messages()
+                .iter()
+                .any(|msg| msg.topic_id.is_some())
+            {
+                cx.notify();
+            }
+        });
+        subs.push(topic_badge_sub);
 
         let store = MessagesStore::global(cx);
         subs.push(cx.subscribe(&store, |this, _store, event, cx| {

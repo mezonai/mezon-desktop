@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Context, Entity, Global};
-use mezon_client::{RealtimeEvent, inbox_notification_from_api};
+use mezon_client::{
+    RealtimeEvent, inbox_notification_from_api, inbox_notification_from_channel_mention,
+};
 use mezon_proto::api::{ChannelMessage, Notification};
 
 use crate::AuthState;
@@ -11,6 +13,7 @@ use crate::clan::ClanList;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::DirectMessageStore;
 use crate::ids::{ChannelId, ClanId, MessageId, UserId};
+use crate::inbox::{InboxStore, skip_inbox_mention_code};
 use crate::message::MessageCode;
 use crate::messages::MessagesStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
@@ -420,6 +423,16 @@ impl BadgeService {
                             });
                         }
                     }
+                    if !from_me
+                        && is_new_message
+                        && mentions_me
+                        && !skip_unread_activity
+                        && !skip_inbox_mention_code(m.code)
+                    {
+                        InboxStore::global(cx).update(cx, |inbox, cx| {
+                            inbox.note_mention(inbox_notification_from_channel_mention(m), cx);
+                        });
+                    }
                     if removed_by_other && mentions_me {
                         let message_ts = deleted_message_timestamp(m);
                         let deleted_channel = ChannelId(m.channel_id);
@@ -552,6 +565,9 @@ impl BadgeService {
             );
             return;
         };
+        InboxStore::global(cx).update(cx, |inbox, cx| {
+            inbox.note_mention(notification.clone(), cx);
+        });
         let Some(message_id_raw) = notification
             .effective_message_id()
             .and_then(|id| id.parse::<i64>().ok())

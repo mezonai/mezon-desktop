@@ -203,13 +203,25 @@ impl InboxStore {
         if bucket.loading {
             return false;
         }
+        if !bucket.server_loaded
+            && (!bucket.items.is_empty()
+                || bucket
+                    .items
+                    .iter()
+                    .any(|item| is_pending_inbox_notification_id(&item.id)))
+        {
+            return false;
+        }
         if !bucket.server_loaded {
+            return true;
+        }
+        if bucket.items.is_empty() {
             return true;
         }
         if bucket.fetched_at.is_some_and(|t| t.elapsed() < CACHE_TTL) {
             return false;
         }
-        bucket.items.is_empty()
+        false
     }
 
     pub fn fetch_if_empty(
@@ -616,12 +628,14 @@ impl InboxStore {
             .map(|key| key.category)
             .collect();
         for category in categories {
-            self.fetch_page(GLOBAL_INBOX_BUCKET_CLAN_ID, category, None, cx);
+            if Self::should_fetch_initial(self.bucket(category)) {
+                self.fetch_page(GLOBAL_INBOX_BUCKET_CLAN_ID, category, None, cx);
+            }
         }
     }
 }
 
-fn skip_inbox_mention_code(code: i32) -> bool {
+pub(crate) fn skip_inbox_mention_code(code: i32) -> bool {
     matches!(
         MessageCode::from_raw(code),
         MessageCode::ChatUpdate
@@ -648,17 +662,18 @@ fn channel_message_is_mention_for_inbox(message: &ChannelMessage, cx: &App) -> b
         return false;
     }
     let clan_id = ClanId(message.clan_id);
-    let Some(members) = ClanMembersStore::try_global(cx) else {
-        return false;
-    };
-    let members = members.read(cx);
-    let role_ids: Vec<i64> = members
-        .self_role_ids(clan_id)
-        .map(<[i64]>::to_vec)
-        .or_else(|| {
+    let role_ids: Vec<i64> = ClanMembersStore::try_global(cx)
+        .map(|members| {
+            let members = members.read(cx);
             members
-                .member(clan_id, user_id)
-                .map(|member| member.role_ids.iter().map(|role| role.get()).collect())
+                .self_role_ids(clan_id)
+                .map(<[i64]>::to_vec)
+                .or_else(|| {
+                    members
+                        .member(clan_id, user_id)
+                        .map(|member| member.role_ids.iter().map(|role| role.get()).collect())
+                })
+                .unwrap_or_default()
         })
         .unwrap_or_default();
     mezon_client::transport::is_mention_or_reply(
@@ -740,13 +755,34 @@ mod tests {
     }
 
     #[test]
-    fn fetch_initial_after_local_prepend_without_server_page() {
+    fn skip_initial_fetch_when_realtime_items_are_pending() {
         let local_only = CategoryBucket {
-            items: vec![sample_notification("7")],
+            items: vec![InboxNotification {
+                id: "pending-42".into(),
+                ..sample_notification("7")
+            }],
             ..CategoryBucket::default()
         };
-        assert!(InboxStore::should_fetch_initial(Some(&local_only)));
+        assert!(!InboxStore::should_fetch_initial(Some(&local_only)));
         assert!(InboxStore::should_fetch_initial(None));
+    }
+
+    #[test]
+    fn skip_initial_fetch_when_socket_items_exist_before_server_page() {
+        let local_only = CategoryBucket {
+            items: vec![InboxNotification {
+                id: "99".into(),
+                ..sample_notification("7")
+            }],
+            ..CategoryBucket::default()
+        };
+        assert!(!InboxStore::should_fetch_initial(Some(&local_only)));
+    }
+
+    #[test]
+    fn fetch_initial_when_bucket_is_empty_and_not_server_loaded() {
+        let empty = CategoryBucket::default();
+        assert!(InboxStore::should_fetch_initial(Some(&empty)));
     }
 
     #[test]
@@ -779,6 +815,8 @@ mod tests {
         };
         assert!(!InboxStore::should_fetch_initial(Some(&loaded)));
         InboxStore::invalidate(&mut loaded);
+        assert!(!InboxStore::should_fetch_initial(Some(&loaded)));
+        loaded.items.clear();
         assert!(InboxStore::should_fetch_initial(Some(&loaded)));
     }
 
@@ -803,7 +841,17 @@ mod tests {
     }
 
     #[test]
-    fn skip_initial_fetch_when_server_page_is_fresh() {
+    fn refetch_when_server_loaded_but_bucket_empty() {
+        let empty_loaded = CategoryBucket {
+            fetched_at: Some(Instant::now()),
+            server_loaded: true,
+            ..CategoryBucket::default()
+        };
+        assert!(InboxStore::should_fetch_initial(Some(&empty_loaded)));
+    }
+
+    #[test]
+    fn skip_refetch_when_server_page_fresh_and_nonempty() {
         let loaded = CategoryBucket {
             items: vec![sample_notification("7")],
             last_id: Some("1".into()),

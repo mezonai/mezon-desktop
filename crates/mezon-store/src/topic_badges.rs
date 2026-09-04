@@ -2,7 +2,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global};
-use mezon_client::{AppApi, RealtimeEvent};
+use mezon_client::{
+    AppApi, InboxNotification, RealtimeEvent, inbox_notification_from_api,
+    inbox_notification_from_channel_mention,
+};
 use mezon_proto::api;
 use prost::Message;
 
@@ -10,6 +13,7 @@ use crate::AuthState;
 use crate::channel::{ChannelList, ChannelType};
 use crate::clan_members::ClanMembersStore;
 use crate::ids::{ChannelId, ClanId, RoleId, UserId};
+use crate::inbox::InboxStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const USER_MENTIONED: i32 = -9;
@@ -103,6 +107,13 @@ impl TopicBadgeStore {
             .sum()
     }
 
+    pub fn topic_badge_count(&self, topic_id: &str) -> u32 {
+        self.topic_parent_map
+            .get(topic_id)
+            .map(|entry| entry.count)
+            .unwrap_or(0)
+    }
+
     pub fn badge_label_for_clan(&self, clan_id: &str) -> Option<String> {
         format_topic_badge_label(self.all_topic_noti_clan(clan_id))
     }
@@ -118,12 +129,19 @@ impl TopicBadgeStore {
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
-        let changed_clans = match event {
+        let (changed_clans, inbox_mentions) = match event {
             RealtimeEvent::ChannelMessage(m) => self.handle_channel_message(m, cx),
             RealtimeEvent::Notifications(batch) => self.handle_notifications(batch, cx),
-            RealtimeEvent::MarkAsRead(e) => self.handle_mark_as_read(e.channel_id, cx),
-            _ => Vec::new(),
+            RealtimeEvent::MarkAsRead(e) => {
+                (self.handle_mark_as_read(e.channel_id, cx), Vec::new())
+            }
+            _ => (Vec::new(), Vec::new()),
         };
+        for notification in inbox_mentions {
+            InboxStore::global(cx).update(cx, |inbox, cx| {
+                inbox.note_mention(notification, cx);
+            });
+        }
         if !changed_clans.is_empty() {
             for clan_id in changed_clans {
                 cx.emit(TopicBadgeEvent::Updated {
@@ -134,21 +152,25 @@ impl TopicBadgeStore {
         }
     }
 
-    fn handle_channel_message(&mut self, m: &api::ChannelMessage, cx: &App) -> Vec<String> {
+    fn handle_channel_message(
+        &mut self,
+        m: &api::ChannelMessage,
+        cx: &App,
+    ) -> (Vec<String>, Vec<InboxNotification>) {
         if m.code == CHAT_UPDATE || m.code == CHAT_REMOVE {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         if m.topic_id == 0 {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         let Some(user_id) = self.current_user_id(cx) else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
         let topic_id = m.topic_id.to_string();
         let parent_channel_id = m.channel_id.to_string();
         let clan_id = m.clan_id.to_string();
         if is_viewing_channel(&topic_id, cx) {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         if is_already_seen(
             ClanId(m.clan_id),
@@ -156,14 +178,14 @@ impl TopicBadgeStore {
             m.create_time_seconds,
             cx,
         ) {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         let topic_message = api::ChannelMessage {
             channel_id: m.topic_id,
             ..m.clone()
         };
         if !is_message_mention_or_reply(&topic_message, user_id, cx) {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         let message_id = m.message_id.to_string();
         let dedupe_key = format!("{parent_channel_id}_{message_id}");
@@ -174,9 +196,12 @@ impl TopicBadgeStore {
             Some(&message_id),
             &dedupe_key,
         ) {
-            vec![clan_id]
+            (
+                vec![clan_id],
+                vec![inbox_notification_from_channel_mention(m)],
+            )
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         }
     }
 
@@ -184,8 +209,9 @@ impl TopicBadgeStore {
         &mut self,
         batch: &mezon_proto::realtime::Notifications,
         cx: &App,
-    ) -> Vec<String> {
+    ) -> (Vec<String>, Vec<InboxNotification>) {
         let mut changed_clans: Vec<String> = Vec::new();
+        let mut inbox_mentions: Vec<InboxNotification> = Vec::new();
         for n in &batch.notifications {
             if n.channel_type == ChannelType::App.as_raw() as i32
                 || n.channel_type == ChannelType::Voice.as_raw() as i32
@@ -221,12 +247,16 @@ impl TopicBadgeStore {
                 &topic_id,
                 Some(&message_id),
                 &dedupe_key,
-            ) && !changed_clans.contains(&clan_id)
-            {
-                changed_clans.push(clan_id);
+            ) {
+                if let Ok(notification) = inbox_notification_from_api(n.clone()) {
+                    inbox_mentions.push(notification);
+                }
+                if !changed_clans.contains(&clan_id) {
+                    changed_clans.push(clan_id);
+                }
             }
         }
-        changed_clans
+        (changed_clans, inbox_mentions)
     }
 
     fn handle_mark_as_read(&mut self, channel_id: i64, _cx: &App) -> Vec<String> {

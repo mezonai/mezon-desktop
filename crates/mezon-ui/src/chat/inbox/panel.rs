@@ -107,14 +107,14 @@ impl InboxPopoverPanel {
             if this.tab == InboxTab::Topics {
                 return;
             }
-            this.sync_from_store(cx);
+            this.sync_from_store(cx, true);
             cx.notify();
         });
         let _inbox_obs = cx.observe(&inbox_store, |this, _, cx| {
             if this.tab == InboxTab::Topics {
                 return;
             }
-            this.sync_from_store(cx);
+            this.sync_from_store(cx, false);
             cx.notify();
         });
         if let Some(category) = InboxTab::Mentions.category() {
@@ -129,7 +129,7 @@ impl InboxPopoverPanel {
         }
         let _topics_sub = cx.subscribe(&topics_store, |this, _, event, cx| {
             if matches!(event, TopicsEvent::Updated) {
-                this.sync_from_store(cx);
+                this.sync_from_store(cx, false);
                 cx.notify();
             }
         });
@@ -175,7 +175,7 @@ impl InboxPopoverPanel {
             _topic_badge_sub,
             _users_sub,
         };
-        this.sync_from_store(cx);
+        this.sync_from_store(cx, false);
         this
     }
 
@@ -243,9 +243,9 @@ impl InboxPopoverPanel {
         }
     }
 
-    fn sync_from_store(&mut self, cx: &App) {
+    fn sync_from_store(&mut self, cx: &App, pin_top: bool) {
         self.cached_items = Self::build_items(self.tab, &self.clan_id, &self.locale, cx);
-        self.sync_list_state(false);
+        self.sync_list_state(pin_top);
     }
 
     fn build_items(
@@ -1118,10 +1118,23 @@ fn render_topic_item(
 }
 
 pub fn clan_has_inbox_badge(clan_id: &str, cx: &App) -> bool {
-    let Ok(id) = clan_id.parse::<ClanId>() else {
+    let Ok(clan) = clan_id.parse::<ClanId>() else {
         return false;
     };
-    ClanList::try_global(cx)
-        .and_then(|list| list.read(cx).clan(id).map(|clan| clan.badge_count > 0))
-        .unwrap_or(false)
+    let has_clan_badge = ClanList::try_global(cx)
+        .and_then(|list| list.read(cx).clan(clan).map(|c| c.badge_count > 0))
+        .unwrap_or(false);
+    let has_mentions = InboxStore::try_global(cx)
+        .map(|store| {
+            store
+                .read(cx)
+                .items(clan_id, InboxCategory::Mentions)
+                .iter()
+                .any(|item| item.clan_id == clan_id)
+        })
+        .unwrap_or(false);
+    let has_topic_mentions = TopicBadgeStore::try_global(cx)
+        .map(|store| store.read(cx).all_topic_noti_clan(clan_id) > 0)
+        .unwrap_or(false);
+    has_clan_badge || has_mentions || has_topic_mentions
 }

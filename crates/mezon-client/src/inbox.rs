@@ -872,10 +872,10 @@ impl TopicDiscussion {
 }
 
 fn inbox_category_from_notification(n: &api::Notification) -> Option<InboxCategory> {
-    InboxCategory::from_i32(n.category).or_else(|| {
-        matches!(n.code, INBOX_USER_MENTIONED_CODE | INBOX_USER_REPLIED_CODE)
-            .then_some(InboxCategory::Mentions)
-    })
+    if matches!(n.code, INBOX_USER_MENTIONED_CODE | INBOX_USER_REPLIED_CODE) {
+        return Some(InboxCategory::Mentions);
+    }
+    InboxCategory::from_i32(n.category)
 }
 
 pub fn inbox_notification_from_api(n: api::Notification) -> Result<InboxNotification> {
@@ -1012,6 +1012,19 @@ mod tests {
     fn mention_code_maps_zero_category_to_mentions() {
         let n = api::Notification {
             category: 0,
+            code: INBOX_USER_MENTIONED_CODE,
+            ..Default::default()
+        };
+        assert_eq!(
+            inbox_category_from_notification(&n),
+            Some(InboxCategory::Mentions)
+        );
+    }
+
+    #[test]
+    fn mention_code_overrides_non_mention_category() {
+        let n = api::Notification {
+            category: InboxCategory::Messages as i32,
             code: INBOX_USER_MENTIONED_CODE,
             ..Default::default()
         };
