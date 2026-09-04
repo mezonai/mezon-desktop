@@ -1039,20 +1039,20 @@ impl TransportClient {
         &self,
         channel_id: &str,
         clan_id: &str,
-        user_id: &str,
+        username: &str,
+        room_name: &str,
     ) -> Result<()> {
         let transport = self.inner.clone();
         let channel_id = channel_id
             .parse::<i64>()
             .map_err(|e| anyhow::anyhow!("invalid channel_id: {e}"))?;
         let clan_id = parse_optional_id(clan_id, "clan_id")?;
-        let user_id = user_id
-            .parse::<i64>()
-            .map_err(|e| anyhow::anyhow!("invalid user_id: {e}"))?;
+        let username = username.to_string();
+        let room_name = room_name.to_string();
         runtime()
             .spawn(async move {
                 transport
-                    .remove_participant_mezon_meet(channel_id, clan_id, user_id)
+                    .remove_participant_mezon_meet(channel_id, clan_id, &username, &room_name)
                     .await
             })
             .await
@@ -1063,20 +1063,20 @@ impl TransportClient {
         &self,
         channel_id: &str,
         clan_id: &str,
-        user_id: &str,
+        username: &str,
+        room_name: &str,
     ) -> Result<()> {
         let transport = self.inner.clone();
         let channel_id = channel_id
             .parse::<i64>()
             .map_err(|e| anyhow::anyhow!("invalid channel_id: {e}"))?;
         let clan_id = parse_optional_id(clan_id, "clan_id")?;
-        let user_id = user_id
-            .parse::<i64>()
-            .map_err(|e| anyhow::anyhow!("invalid user_id: {e}"))?;
+        let username = username.to_string();
+        let room_name = room_name.to_string();
         runtime()
             .spawn(async move {
                 transport
-                    .mute_participant_mezon_meet(channel_id, clan_id, user_id)
+                    .mute_participant_mezon_meet(channel_id, clan_id, &username, &room_name)
                     .await
             })
             .await
