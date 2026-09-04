@@ -1931,13 +1931,13 @@ impl Render for ChatLayout {
                             .inset_0()
                             .flex()
                             .flex_row()
+                            .child(div().w(px(72.0)).h_full().bg(theme.surfaces.primary.ramp()))
                             .child(
                                 div()
-                                    .w(px(72.0))
+                                    .flex_1()
                                     .h_full()
-                                    .bg(theme.surface_for(theme.bg_tertiary)),
-                            )
-                            .child(div().flex_1().h_full().bg(theme.bg_secondary)),
+                                    .bg(theme.surfaces.direct_message.ramp()),
+                            ),
                     )
                     .child(
                         div()

@@ -906,7 +906,7 @@ impl Render for DirectSidebar {
             .flex()
             .flex_col()
             .size_full()
-            .bg(theme.bg_secondary)
+            .bg(theme.surfaces.direct_message.ramp())
             .child(self.render_search(theme, &locale))
             .child(div().px_2().pt_2().child(self.render_friends_button(
                 theme,
