@@ -83,9 +83,8 @@ const CM_TIME_FLAG_INDEFINITE: u32 = 1 << 4;
 const SEEK_TIMESCALE: i32 = 600;
 const AV_PLAYER_ITEM_STATUS_READY_TO_PLAY: isize = 1;
 const AV_PLAYER_ITEM_STATUS_FAILED: isize = 2;
-/// How many already-rendered frames may be skipped while the video composition
-/// takes hold — bounded so a composition that never applies still plays.
 const STALE_FRAME_BUDGET: u8 = 10;
+const TRANSFORM_WAIT_POLLS: u8 = 30;
 
 fn cm_time_to_seconds(time: CmTime) -> f64 {
     if time.flags & CM_TIME_FLAG_VALID == 0
@@ -120,15 +119,9 @@ pub struct PlayerImpl {
     player: StrongPtr,
     asset: StrongPtr,
     output: StrongPtr,
-    /// The video output hands back the *encoded* frame, so a clip carrying a
-    /// rotation in its preferred transform (any phone portrait recording) plays
-    /// sideways unless the item renders through a video composition. Reading the
-    /// asset's tracks before the item is ready would block on a remote URL, so
-    /// the composition is installed on the first frame poll after that instead.
+    max_size: Option<(u32, u32)>,
     transform_checked: Cell<bool>,
-    /// Set while frames rendered before the composition went in may still be
-    /// queued: the orientation the composed frames will have, and how many
-    /// sideways ones may be dropped while waiting for the first of them.
+    transform_polls_left: Cell<u8>,
     upright_is_portrait: Cell<Option<bool>>,
     stale_frames_left: Cell<u8>,
 }
@@ -190,7 +183,9 @@ impl PlayerImpl {
                 player,
                 asset,
                 output,
+                max_size,
                 transform_checked: Cell::new(false),
+                transform_polls_left: Cell::new(TRANSFORM_WAIT_POLLS),
                 upright_is_portrait: Cell::new(None),
                 stale_frames_left: Cell::new(0),
             })
@@ -199,6 +194,9 @@ impl PlayerImpl {
 
     pub fn copy_frame(&self) -> Option<VideoFrame> {
         self.apply_preferred_transform();
+        if self.waiting_for_transform() {
+            return None;
+        }
         unsafe {
             let time: CmTime = msg_send![*self.player, currentTime];
             let has_new: BOOL = msg_send![*self.output, hasNewPixelBufferForItemTime: time];
@@ -224,9 +222,6 @@ impl PlayerImpl {
         }
     }
 
-    /// Route playback through a video composition when the track carries a
-    /// rotation, so the frames match the (transform-corrected) poster and the
-    /// layout box the attachment was sized with.
     fn apply_preferred_transform(&self) {
         if self.transform_checked.get() {
             return;
@@ -240,11 +235,11 @@ impl PlayerImpl {
             if status != AV_PLAYER_ITEM_STATUS_READY_TO_PLAY {
                 return;
             }
-            self.transform_checked.set(true);
             let Some(track) = first_video_track(*self.asset) else {
                 return;
             };
             let transform = track_preferred_transform(track);
+            self.transform_checked.set(true);
             if transform_is_identity(transform) {
                 return;
             }
@@ -254,13 +249,15 @@ impl PlayerImpl {
             if composition.is_null() {
                 return;
             }
-            if transform_swaps_axes(transform) {
+            let encoded_size: CgSize = msg_send![track, naturalSize];
+            let render_size: CgSize = msg_send![composition, renderSize];
+            if render_size.width != encoded_size.width || render_size.height != encoded_size.height
+            {
                 let _: () = msg_send![item, setVideoComposition: composition];
             } else {
                 self.restart_with_composition(composition);
             }
-            let render_size: CgSize = msg_send![composition, renderSize];
-            if render_size.width != render_size.height {
+            if self.max_size.is_none() && render_size.width != render_size.height {
                 self.upright_is_portrait
                     .set(Some(render_size.height > render_size.width));
                 self.stale_frames_left.set(STALE_FRAME_BUDGET);
@@ -268,9 +265,6 @@ impl PlayerImpl {
         });
     }
 
-    /// An item that has already begun rendering only picks up a composition that
-    /// changes the frame size, so a rotation that leaves it alone (180°, or a
-    /// mirror) needs a fresh item to render through.
     fn restart_with_composition(&self, composition: *mut Object) {
         unsafe {
             let resume_at = self.current_time();
@@ -292,13 +286,19 @@ impl PlayerImpl {
         }
     }
 
+    fn waiting_for_transform(&self) -> bool {
+        if self.transform_checked.get() {
+            return false;
+        }
+        let left = self.transform_polls_left.get();
+        self.transform_polls_left.set(left.saturating_sub(1));
+        left > 0
+    }
+
     fn current_item(&self) -> *mut Object {
         unsafe { msg_send![*self.player, currentItem] }
     }
 
-    /// The output can still hand back a frame it rendered before the composition
-    /// was installed, which would flash the video sideways for a beat. Drop those
-    /// until the first composed frame arrives, within a fixed budget.
     fn is_stale_pre_composition_frame(&self, frame: &VideoFrame) -> bool {
         let Some(portrait) = self.upright_is_portrait.get() else {
             return false;
@@ -530,12 +530,6 @@ fn transform_is_identity(transform: CgAffineTransform) -> bool {
         && (transform.d - 1.0).abs() < EPSILON
 }
 
-/// True for the quarter turns that swap width and height.
-fn transform_swaps_axes(transform: CgAffineTransform) -> bool {
-    const EPSILON: f64 = 1e-6;
-    transform.a.abs() < EPSILON && transform.d.abs() < EPSILON
-}
-
 fn track_preferred_transform(track: *mut Object) -> CgAffineTransform {
     unsafe { msg_send![track, preferredTransform] }
 }
@@ -671,19 +665,10 @@ mod tests {
         for quarters in 1..4 {
             assert!(!transform_is_identity(quarter_turns(quarters)));
         }
-        // A mirrored front-camera clip needs the composition too.
         assert!(!transform_is_identity(CgAffineTransform {
             a: -1.0,
             ..IDENTITY
         }));
-    }
-
-    #[test]
-    fn only_the_quarter_turns_swap_width_and_height() {
-        assert!(transform_swaps_axes(quarter_turns(1)));
-        assert!(transform_swaps_axes(quarter_turns(3)));
-        assert!(!transform_swaps_axes(IDENTITY));
-        assert!(!transform_swaps_axes(quarter_turns(2)));
     }
 
     #[test]

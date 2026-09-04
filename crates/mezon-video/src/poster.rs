@@ -4,24 +4,56 @@ use image::{ExtendedColorType, ImageEncoder, RgbImage};
 
 const POSTER_JPEG_QUALITY: u8 = 80;
 
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(crate) struct Turn {
+    pub(crate) quarter_turns: u8,
+    pub(crate) mirrored: bool,
+}
+
+impl Turn {
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn clockwise(quarter_turns: u8) -> Self {
+        Self {
+            quarter_turns,
+            mirrored: false,
+        }
+    }
+
+    pub(crate) fn is_none(self) -> bool {
+        self == Self::default()
+    }
+
+    pub(crate) fn swaps_axes(self) -> bool {
+        self.quarter_turns % 2 == 1
+    }
+
+    pub(crate) fn applied_to(self, size: (u32, u32)) -> (u32, u32) {
+        if self.swaps_axes() {
+            (size.1, size.0)
+        } else {
+            size
+        }
+    }
+}
+
 pub(crate) fn encode_poster_jpeg(
     bgra: &[u8],
     width: u32,
     height: u32,
     stride: usize,
     bottom_up: bool,
-    quarter_turns: u8,
+    turn: Turn,
     max_edge: u32,
 ) -> Option<Vec<u8>> {
     let rgb = bgra_to_rgb(bgra, width, height, stride, bottom_up)?;
-    encode_rgb_jpeg(crate::orientation::turn_rgb(rgb, quarter_turns), max_edge)
+    encode_rgb_jpeg(rgb, turn, max_edge)
 }
 
-pub(crate) fn encode_rgb_jpeg(rgb: RgbImage, max_edge: u32) -> Option<Vec<u8>> {
+pub(crate) fn encode_rgb_jpeg(rgb: RgbImage, turn: Turn, max_edge: u32) -> Option<Vec<u8>> {
     if rgb.width() == 0 || rgb.height() == 0 {
         return None;
     }
-    let rgb = downscale(rgb, max_edge);
+    let rgb = turned(downscale(rgb, max_edge), turn);
     let mut jpeg = Vec::new();
     JpegEncoder::new_with_quality(&mut jpeg, POSTER_JPEG_QUALITY)
         .write_image(
@@ -64,6 +96,20 @@ fn bgra_to_rgb(
         }
     }
     RgbImage::from_raw(width, height, rgb)
+}
+
+fn turned(image: RgbImage, turn: Turn) -> RgbImage {
+    let image = if turn.mirrored {
+        image::imageops::flip_horizontal(&image)
+    } else {
+        image
+    };
+    match turn.quarter_turns % 4 {
+        1 => image::imageops::rotate90(&image),
+        2 => image::imageops::rotate180(&image),
+        3 => image::imageops::rotate270(&image),
+        _ => image,
+    }
 }
 
 fn downscale(image: RgbImage, max_edge: u32) -> RgbImage {
@@ -128,13 +174,66 @@ mod tests {
 
     #[test]
     fn encode_rgb_jpeg_rejects_a_zero_sized_frame() {
-        assert!(encode_rgb_jpeg(RgbImage::new(0, 0), 480).is_none());
-        assert!(encode_rgb_jpeg(RgbImage::new(4, 0), 480).is_none());
+        assert!(encode_rgb_jpeg(RgbImage::new(0, 0), Turn::default(), 480).is_none());
+        assert!(encode_rgb_jpeg(RgbImage::new(4, 0), Turn::default(), 480).is_none());
+    }
+
+    #[test]
+    fn a_quarter_turn_swaps_the_side_lengths() {
+        let image = RgbImage::new(4, 2);
+        assert_eq!(
+            turned(image.clone(), Turn::clockwise(0)).dimensions(),
+            (4, 2)
+        );
+        assert_eq!(
+            turned(image.clone(), Turn::clockwise(1)).dimensions(),
+            (2, 4)
+        );
+        assert_eq!(
+            turned(image.clone(), Turn::clockwise(2)).dimensions(),
+            (4, 2)
+        );
+        assert_eq!(turned(image, Turn::clockwise(3)).dimensions(), (2, 4));
+    }
+
+    #[test]
+    fn a_turn_moves_the_reported_size_the_same_way() {
+        assert_eq!(Turn::clockwise(0).applied_to((640, 360)), (640, 360));
+        assert_eq!(Turn::clockwise(1).applied_to((640, 360)), (360, 640));
+        assert_eq!(Turn::clockwise(2).applied_to((640, 360)), (640, 360));
+        assert_eq!(Turn::clockwise(3).applied_to((640, 360)), (360, 640));
+    }
+
+    #[test]
+    fn a_mirror_is_applied_before_the_rotation() {
+        let mut image = RgbImage::new(2, 2);
+        image.put_pixel(0, 0, image::Rgb([1, 1, 1]));
+        image.put_pixel(1, 0, image::Rgb([2, 2, 2]));
+        image.put_pixel(0, 1, image::Rgb([3, 3, 3]));
+        image.put_pixel(1, 1, image::Rgb([4, 4, 4]));
+        let transposed = turned(
+            image,
+            Turn {
+                quarter_turns: 3,
+                mirrored: true,
+            },
+        );
+        let corners: Vec<u8> = transposed.pixels().map(|pixel| pixel[0]).collect();
+        assert_eq!(corners, vec![1, 3, 2, 4]);
+    }
+
+    #[test]
+    fn the_turn_happens_after_the_downscale() {
+        let jpeg =
+            encode_rgb_jpeg(RgbImage::new(1000, 500), Turn::clockwise(1), 100).expect("jpeg");
+        let turned = image::load_from_memory(&jpeg).expect("decode").to_rgb8();
+        assert_eq!(turned.dimensions(), (50, 100));
     }
 
     #[test]
     fn encode_poster_jpeg_writes_a_jpeg_header() {
-        let jpeg = encode_poster_jpeg(&[0u8; 4 * 4], 2, 2, 8, false, 0, 480).expect("jpeg");
+        let jpeg =
+            encode_poster_jpeg(&[0u8; 4 * 4], 2, 2, 8, false, Turn::default(), 480).expect("jpeg");
         assert_eq!(&jpeg[..2], &[0xFF, 0xD8]);
     }
 }

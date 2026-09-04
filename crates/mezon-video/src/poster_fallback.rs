@@ -5,6 +5,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use openh264::formats::YUVSource;
 
 use crate::VideoProbe;
+use crate::poster::Turn;
 
 const POSTER_SECONDS: f64 = 1.0;
 const MAX_SAMPLES_SCANNED: u32 = 300;
@@ -13,13 +14,10 @@ const DEFAULT_NAL_LENGTH_SIZE: usize = 4;
 
 struct VideoTrack {
     id: u32,
-    /// Display size: the container's, turned by [`VideoTrack::quarter_turns`].
     width: u32,
     height: u32,
     timescale: u32,
-    /// Clockwise quarter turns the `tkhd` display matrix asks for. Nothing else on
-    /// this path applies them — openh264 decodes the picture exactly as encoded.
-    quarter_turns: u8,
+    display: Turn,
     nal_length_size: usize,
     parameter_sets: Vec<u8>,
 }
@@ -77,15 +75,14 @@ fn video_track<R: std::io::Read + std::io::Seek>(reader: &mp4::Mp4Reader<R>) -> 
             .as_ref()
             .map(|avc1| &avc1.avcc);
         let matrix = &track.trak.tkhd.matrix;
-        let quarter_turns = quarter_turns(matrix.a, matrix.b, matrix.c, matrix.d);
+        let display = display_turn(matrix.a, matrix.b, matrix.c, matrix.d);
         let (width, height) = (u32::from(track.width()), u32::from(track.height()));
-        let swapped = quarter_turns % 2 == 1;
         Some(VideoTrack {
             id: *id,
-            width: if swapped { height } else { width },
-            height: if swapped { width } else { height },
+            width: display.applied_to((width, height)).0,
+            height: display.applied_to((width, height)).1,
             timescale: track.timescale(),
-            quarter_turns,
+            display,
             nal_length_size: avcc.map_or(DEFAULT_NAL_LENGTH_SIZE, |avcc| {
                 usize::from(avcc.length_size_minus_one & 0x3) + 1
             }),
@@ -127,7 +124,7 @@ fn decode_poster<R: std::io::Read + std::io::Seek>(
     let first_extra = keyframe.index.saturating_add(1);
     for next in first_extra..=first_extra.saturating_add(MAX_EXTRA_FEEDS) {
         match decoder.decode(&unit) {
-            Ok(Some(yuv)) => return encode(&yuv, track.quarter_turns, max_poster_edge),
+            Ok(Some(yuv)) => return encode(&yuv, track.display, max_poster_edge),
             Ok(None) => {}
             Err(error) => {
                 tracing::warn!(target: "mezon_video", %error, "openh264 could not decode this video");
@@ -145,7 +142,7 @@ fn decode_poster<R: std::io::Read + std::io::Seek>(
 
 fn encode(
     yuv: &openh264::decoder::DecodedYUV<'_>,
-    quarter_turns: u8,
+    display: Turn,
     max_poster_edge: u32,
 ) -> Option<Vec<u8>> {
     let (width, height) = yuv.dimensions();
@@ -153,18 +150,20 @@ fn encode(
     yuv.write_rgb8(&mut rgb);
     let rgb =
         image::RgbImage::from_raw(u32::try_from(width).ok()?, u32::try_from(height).ok()?, rgb)?;
-    crate::poster::encode_rgb_jpeg(
-        crate::orientation::turn_rgb(rgb, quarter_turns),
-        max_poster_edge,
-    )
+    crate::poster::encode_rgb_jpeg(rgb, display, max_poster_edge)
 }
 
-/// Clockwise quarter turns from a `tkhd` display matrix, whose entries are 16.16
-/// fixed point. Only the four axis-aligned rotations show up in real files;
-/// anything else (a shear, a mirror) is left alone.
-fn quarter_turns(a: i32, b: i32, c: i32, d: i32) -> u8 {
-    /// Half of 1.0 in 16.16: enough to tell -1, 0 and 1 apart however the encoder
-    /// rounded them.
+pub(crate) fn container_turn(path: &str) -> Option<Turn> {
+    catch_unwind(AssertUnwindSafe(|| {
+        let file = File::open(path).ok()?;
+        let size = file.metadata().ok()?.len();
+        let reader = mp4::Mp4Reader::read_header(BufReader::new(file), size).ok()?;
+        Some(video_track(&reader)?.display)
+    }))
+    .unwrap_or(None)
+}
+
+fn display_turn(a: i32, b: i32, c: i32, d: i32) -> Turn {
     const HALF: i32 = 1 << 15;
     fn unit(value: i32) -> i32 {
         match value {
@@ -173,11 +172,19 @@ fn quarter_turns(a: i32, b: i32, c: i32, d: i32) -> u8 {
             _ => 0,
         }
     }
-    match (unit(a), unit(b), unit(c), unit(d)) {
-        (0, 1, -1, 0) => 1,
-        (-1, 0, 0, -1) => 2,
-        (0, -1, 1, 0) => 3,
-        _ => 0,
+    let (mirrored, quarter_turns) = match (unit(a), unit(b), unit(c), unit(d)) {
+        (0, 1, -1, 0) => (false, 1),
+        (-1, 0, 0, -1) => (false, 2),
+        (0, -1, 1, 0) => (false, 3),
+        (-1, 0, 0, 1) => (true, 0),
+        (0, -1, -1, 0) => (true, 1),
+        (1, 0, 0, -1) => (true, 2),
+        (0, 1, 1, 0) => (true, 3),
+        _ => (false, 0),
+    };
+    Turn {
+        mirrored,
+        quarter_turns,
     }
 }
 
@@ -234,17 +241,41 @@ fn append_annex_b(out: &mut Vec<u8>, avcc: &[u8], nal_length_size: usize) {
 mod tests {
     use super::*;
 
+    const ONE: i32 = 1 << 16;
+
+    fn orientation(a: i32, b: i32, c: i32, d: i32) -> (bool, u8) {
+        let display = display_turn(a, b, c, d);
+        (display.mirrored, display.quarter_turns)
+    }
+
     #[test]
-    fn quarter_turns_reads_the_four_axis_aligned_display_matrices() {
-        const ONE: i32 = 1 << 16;
-        assert_eq!(quarter_turns(ONE, 0, 0, ONE), 0);
-        assert_eq!(quarter_turns(0, ONE, -ONE, 0), 1);
-        assert_eq!(quarter_turns(-ONE, 0, 0, -ONE), 2);
-        assert_eq!(quarter_turns(0, -ONE, ONE, 0), 3);
-        // A mirror is not a rotation: the picture is left as decoded.
-        assert_eq!(quarter_turns(-ONE, 0, 0, ONE), 0);
-        // Rounding an encoder may have applied still reads as the same turn.
-        assert_eq!(quarter_turns(3, ONE - 4, -ONE + 2, -5), 1);
+    fn the_display_matrix_maps_to_a_mirror_and_a_turn() {
+        assert_eq!(orientation(ONE, 0, 0, ONE), (false, 0));
+        assert_eq!(orientation(0, ONE, -ONE, 0), (false, 1));
+        assert_eq!(orientation(-ONE, 0, 0, -ONE), (false, 2));
+        assert_eq!(orientation(0, -ONE, ONE, 0), (false, 3));
+        assert_eq!(orientation(-ONE, 0, 0, ONE), (true, 0));
+        assert_eq!(orientation(0, -ONE, -ONE, 0), (true, 1));
+        assert_eq!(orientation(ONE, 0, 0, -ONE), (true, 2));
+        assert_eq!(orientation(0, ONE, ONE, 0), (true, 3));
+    }
+
+    #[test]
+    fn a_transposed_matrix_still_swaps_the_side_lengths() {
+        assert!(display_turn(0, ONE, ONE, 0).swaps_axes());
+        assert!(display_turn(0, -ONE, -ONE, 0).swaps_axes());
+        assert!(!display_turn(-ONE, 0, 0, ONE).swaps_axes());
+    }
+
+    #[test]
+    fn an_encoders_rounding_still_reads_as_the_same_turn() {
+        assert_eq!(orientation(3, ONE - 4, -ONE + 2, -5), (false, 1));
+    }
+
+    #[test]
+    fn an_unrecognised_matrix_is_left_alone() {
+        assert_eq!(orientation(0, 0, 0, 0), (false, 0));
+        assert_eq!(orientation(ONE * 2, 0, 0, ONE * 2), (false, 0));
     }
 
     #[test]

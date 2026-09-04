@@ -32,9 +32,10 @@ use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
 };
-use windows::Win32::System::Variant::{VT_I8, VT_UI4};
+use windows::Win32::System::Variant::{VT_I8, VT_UI4, VT_UI8};
 use windows::core::{BSTR, GUID, HSTRING, Interface, implement};
 
+use crate::poster::Turn;
 use crate::{PlayerError, VideoFrame, VideoProbe};
 
 fn ensure_media_foundation() -> windows::core::Result<()> {
@@ -76,16 +77,12 @@ struct StagingTextures {
 
 pub struct PlayerImpl {
     engine: IMFMediaEngine,
-    /// Only used to read the stream's rotation; every other call goes through
-    /// [`PlayerImpl::engine`].
     engine_ex: Option<IMFMediaEngineEx>,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     _dxgi_manager: IMFDXGIDeviceManager,
     _notify: IMFMediaEngineNotify,
     textures: RefCell<Option<StagingTextures>>,
-    /// Resolved on the first frame, once the source has loaded: the media engine
-    /// cannot be asked about the stream before then.
     quarter_turns: Cell<Option<u8>>,
     last_pts: Cell<i64>,
     max_size: Option<(u32, u32)>,
@@ -234,62 +231,73 @@ impl PlayerImpl {
                 return None;
             }
 
+            let quarter_turns = self.quarter_turns((width, height));
             let pitch = mapped.RowPitch as usize;
             let packed = if mapped.pData.is_null() {
                 None
             } else {
                 let region = pitch.saturating_mul(render_h as usize);
                 let data = std::slice::from_raw_parts(mapped.pData as *const u8, region);
-                crate::frame_util::pack_bgra_rows(data, pitch, render_w, render_h)
+                crate::frame_util::pack_bgra_rows_turned(
+                    data,
+                    pitch,
+                    render_w,
+                    render_h,
+                    quarter_turns,
+                )
             };
             self.context.Unmap(&textures.staging, 0);
 
-            let out = packed?;
-            let (frame_w, frame_h, out) = crate::orientation::turn_bgra(
-                out,
-                render_w,
-                render_h,
-                self.quarter_turns(width, height),
-            )?;
+            let (frame_w, frame_h, out) = packed?;
             self.last_pts.set(pts);
             crate::render_frame::bgra_to_frame(frame_w, frame_h, out)
         }
     }
 
-    /// The media engine hands back the picture as encoded — it does not apply the
-    /// rotation a phone stored in the file — so a portrait clip arrives sideways
-    /// and has to be turned here. The stream cannot be asked before the source has
-    /// loaded, which is why this resolves on the first frame and is then kept.
-    fn quarter_turns(&self, width: u32, height: u32) -> u8 {
+    fn quarter_turns(&self, delivered: (u32, u32)) -> u8 {
         if let Some(turns) = self.quarter_turns.get() {
             return turns;
         }
-        let turns = quarter_turns_from_rotation(self.stream_rotation().unwrap_or(0));
-        // Should a future media engine start correcting the rotation itself, the
-        // frame it reports is already upright and turning it again would put it
-        // back on its side. A quarter turn shows up as a swap, so only turn what
-        // still measures the way it was encoded.
-        let turns = if turns % 2 == 1 && height > width {
+        let Some(rotation) = self.stream_rotation() else {
+            return 0;
+        };
+        let turns = if rotation
+            .coded_size
+            .is_some_and(|coded| already_turned(coded, delivered))
+        {
             0
         } else {
-            turns
+            quarter_turns_from_rotation(rotation.degrees)
         };
         self.quarter_turns.set(Some(turns));
         turns
     }
 
-    /// The rotation the source declares, in counter-clockwise degrees. Audio
-    /// streams simply do not carry the attribute, so the first stream that does is
-    /// the video one.
-    fn stream_rotation(&self) -> Option<u32> {
+    fn stream_rotation(&self) -> Option<StreamRotation> {
         let engine = self.engine_ex.as_ref()?;
         unsafe {
             let streams = engine.GetNumberOfStreams().ok()?;
-            (0..streams).find_map(|stream| {
-                let value = engine
+            for stream in 0..streams {
+                let Some(degrees) = engine
                     .GetStreamAttribute(stream, &MF_MT_VIDEO_ROTATION)
-                    .ok()?;
-                propvariant_u32(&value)
+                    .ok()
+                    .and_then(|value| propvariant_u32(&value))
+                else {
+                    continue;
+                };
+                let coded_size = engine
+                    .GetStreamAttribute(stream, &MF_MT_FRAME_SIZE)
+                    .ok()
+                    .and_then(|value| propvariant_u64(&value))
+                    .map(unpack_frame_size);
+                return Some(StreamRotation {
+                    degrees,
+                    coded_size,
+                });
+            }
+            Some(StreamRotation {
+                degrees: 0,
+                coded_size: None,
             })
         }
     }
@@ -473,31 +481,36 @@ unsafe fn probe_with_source_reader(
         reader.SetCurrentMediaType(stream, None, &requested)?;
 
         let decoded = reader.GetCurrentMediaType(stream)?;
-        let frame_size = decoded.GetUINT64(&MF_MT_FRAME_SIZE)?;
-        let width = (frame_size >> 32) as u32;
-        let height = frame_size as u32;
+        let delivered = unpack_frame_size(decoded.GetUINT64(&MF_MT_FRAME_SIZE)?);
+        let (width, height) = delivered;
         if width == 0 || height == 0 {
             return Err(windows::core::Error::from(E_FAIL));
         }
 
-        // The reader's video processing converts and scales but never rotates, so
-        // the poster has to be turned here — and the size that goes on the wire is
-        // the turned one, since that is what every client lays the video out with.
-        let quarter_turns = quarter_turns_from_rotation(native_rotation(&reader, stream));
+        let native = reader.GetNativeMediaType(stream, 0).ok();
+        let turn = if native
+            .as_ref()
+            .and_then(|native| native.GetUINT64(&MF_MT_FRAME_SIZE).ok())
+            .is_some_and(|coded| already_turned(unpack_frame_size(coded), delivered))
+        {
+            Turn::default()
+        } else {
+            let degrees = native
+                .as_ref()
+                .and_then(|native| native.GetUINT32(&MF_MT_VIDEO_ROTATION).ok())
+                .unwrap_or(0);
+            Turn::clockwise(quarter_turns_from_rotation(degrees))
+        };
         let poster_jpeg = poster_frame(
             &reader,
             stream,
             &decoded,
             width,
             height,
-            quarter_turns,
+            turn,
             max_poster_edge,
         );
-        let (width, height) = if quarter_turns % 2 == 1 {
-            (height, width)
-        } else {
-            (width, height)
-        };
+        let (width, height) = turn.applied_to((width, height));
         Ok(VideoProbe {
             width,
             height,
@@ -513,7 +526,7 @@ unsafe fn poster_frame(
     decoded: &IMFMediaType,
     width: u32,
     height: u32,
-    quarter_turns: u8,
+    turn: Turn,
     max_poster_edge: u32,
 ) -> Option<Vec<u8>> {
     unsafe {
@@ -533,7 +546,7 @@ unsafe fn poster_frame(
                 height,
                 stride,
                 bottom_up,
-                quarter_turns,
+                turn,
                 max_poster_edge,
             )
         };
@@ -573,19 +586,11 @@ unsafe fn read_first_frame(reader: &IMFSourceReader, stream: u32) -> Option<IMFS
     }
 }
 
-/// `MF_MT_VIDEO_ROTATION` on the stream as the file stores it, before the reader's
-/// own conversion of the type.
-unsafe fn native_rotation(reader: &IMFSourceReader, stream: u32) -> u32 {
-    unsafe {
-        reader
-            .GetNativeMediaType(stream, 0)
-            .and_then(|native| native.GetUINT32(&MF_MT_VIDEO_ROTATION))
-            .unwrap_or(0)
-    }
+struct StreamRotation {
+    degrees: u32,
+    coded_size: Option<(u32, u32)>,
 }
 
-/// `MF_MT_VIDEO_ROTATION` counts how far the picture is turned **counter-clockwise**
-/// from upright, so the correction is that same angle clockwise.
 fn quarter_turns_from_rotation(counter_clockwise_degrees: u32) -> u8 {
     match counter_clockwise_degrees {
         90 => 1,
@@ -595,11 +600,30 @@ fn quarter_turns_from_rotation(counter_clockwise_degrees: u32) -> u8 {
     }
 }
 
+fn unpack_frame_size(frame_size: u64) -> (u32, u32) {
+    ((frame_size >> 32) as u32, frame_size as u32)
+}
+
+fn already_turned(coded: (u32, u32), delivered: (u32, u32)) -> bool {
+    coded.0 != coded.1 && delivered == (coded.1, coded.0)
+}
+
 fn propvariant_u32(value: &PROPVARIANT) -> Option<u32> {
     unsafe {
         let variant = &*value.Anonymous.Anonymous;
         if variant.vt == VT_UI4 {
             Some(variant.Anonymous.ulVal)
+        } else {
+            None
+        }
+    }
+}
+
+fn propvariant_u64(value: &PROPVARIANT) -> Option<u64> {
+    unsafe {
+        let variant = &*value.Anonymous.Anonymous;
+        if variant.vt == VT_UI8 {
+            Some(variant.Anonymous.uhVal)
         } else {
             None
         }
@@ -628,8 +652,21 @@ mod tests {
         assert_eq!(quarter_turns_from_rotation(90), 1);
         assert_eq!(quarter_turns_from_rotation(180), 2);
         assert_eq!(quarter_turns_from_rotation(270), 3);
-        // Anything the attribute is not supposed to hold leaves the frame alone.
         assert_eq!(quarter_turns_from_rotation(45), 0);
         assert_eq!(quarter_turns_from_rotation(360), 0);
+    }
+
+    #[test]
+    fn a_frame_size_is_the_width_over_the_height() {
+        assert_eq!(unpack_frame_size((1920 << 32) | 1080), (1920, 1080));
+    }
+
+    #[test]
+    fn only_a_delivered_frame_that_is_the_swap_of_the_coded_one_is_already_turned() {
+        assert!(already_turned((1920, 1080), (1080, 1920)));
+        assert!(already_turned((1080, 1920), (1920, 1080)));
+        assert!(!already_turned((1920, 1080), (1920, 1080)));
+        assert!(!already_turned((1080, 1080), (1080, 1080)));
+        assert!(!already_turned((1920, 1080), (960, 540)));
     }
 }
