@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::ffi::{CString, c_void};
 use std::ptr;
 
@@ -80,7 +81,11 @@ unsafe impl objc::Encode for CmTime {
 const CM_TIME_FLAG_VALID: u32 = 1;
 const CM_TIME_FLAG_INDEFINITE: u32 = 1 << 4;
 const SEEK_TIMESCALE: i32 = 600;
+const AV_PLAYER_ITEM_STATUS_READY_TO_PLAY: isize = 1;
 const AV_PLAYER_ITEM_STATUS_FAILED: isize = 2;
+/// How many already-rendered frames may be skipped while the video composition
+/// takes hold — bounded so a composition that never applies still plays.
+const STALE_FRAME_BUDGET: u8 = 10;
 
 fn cm_time_to_seconds(time: CmTime) -> f64 {
     if time.flags & CM_TIME_FLAG_VALID == 0
@@ -113,7 +118,19 @@ fn seconds_to_cm_time(seconds: f64) -> CmTime {
 
 pub struct PlayerImpl {
     player: StrongPtr,
+    asset: StrongPtr,
     output: StrongPtr,
+    /// The video output hands back the *encoded* frame, so a clip carrying a
+    /// rotation in its preferred transform (any phone portrait recording) plays
+    /// sideways unless the item renders through a video composition. Reading the
+    /// asset's tracks before the item is ready would block on a remote URL, so
+    /// the composition is installed on the first frame poll after that instead.
+    transform_checked: Cell<bool>,
+    /// Set while frames rendered before the composition went in may still be
+    /// queued: the orientation the composed frames will have, and how many
+    /// sideways ones may be dropped while waiting for the first of them.
+    upright_is_portrait: Cell<Option<bool>>,
+    stale_frames_left: Cell<u8>,
 }
 
 impl PlayerImpl {
@@ -169,11 +186,19 @@ impl PlayerImpl {
             }
             let player = StrongPtr::new(player);
 
-            Ok(Self { player, output })
+            Ok(Self {
+                player,
+                asset,
+                output,
+                transform_checked: Cell::new(false),
+                upright_is_portrait: Cell::new(None),
+                stale_frames_left: Cell::new(0),
+            })
         }
     }
 
     pub fn copy_frame(&self) -> Option<VideoFrame> {
+        self.apply_preferred_transform();
         unsafe {
             let time: CmTime = msg_send![*self.player, currentTime];
             let has_new: BOOL = msg_send![*self.output, hasNewPixelBufferForItemTime: time];
@@ -192,8 +217,99 @@ impl PlayerImpl {
             if !frame_format_is_renderable(frame.get_pixel_format()) {
                 return None;
             }
+            if self.is_stale_pre_composition_frame(&frame) {
+                return None;
+            }
             Some(frame)
         }
+    }
+
+    /// Route playback through a video composition when the track carries a
+    /// rotation, so the frames match the (transform-corrected) poster and the
+    /// layout box the attachment was sized with.
+    fn apply_preferred_transform(&self) {
+        if self.transform_checked.get() {
+            return;
+        }
+        objc::rc::autoreleasepool(|| unsafe {
+            let item = self.current_item();
+            if item.is_null() {
+                return;
+            }
+            let status: isize = msg_send![item, status];
+            if status != AV_PLAYER_ITEM_STATUS_READY_TO_PLAY {
+                return;
+            }
+            self.transform_checked.set(true);
+            let Some(track) = first_video_track(*self.asset) else {
+                return;
+            };
+            let transform = track_preferred_transform(track);
+            if transform_is_identity(transform) {
+                return;
+            }
+            let composition_class = class!(AVMutableVideoComposition);
+            let composition: *mut Object =
+                msg_send![composition_class, videoCompositionWithPropertiesOfAsset: *self.asset];
+            if composition.is_null() {
+                return;
+            }
+            if transform_swaps_axes(transform) {
+                let _: () = msg_send![item, setVideoComposition: composition];
+            } else {
+                self.restart_with_composition(composition);
+            }
+            let render_size: CgSize = msg_send![composition, renderSize];
+            if render_size.width != render_size.height {
+                self.upright_is_portrait
+                    .set(Some(render_size.height > render_size.width));
+                self.stale_frames_left.set(STALE_FRAME_BUDGET);
+            }
+        });
+    }
+
+    /// An item that has already begun rendering only picks up a composition that
+    /// changes the frame size, so a rotation that leaves it alone (180°, or a
+    /// mirror) needs a fresh item to render through.
+    fn restart_with_composition(&self, composition: *mut Object) {
+        unsafe {
+            let resume_at = self.current_time();
+            let item_class = class!(AVPlayerItem);
+            let item_alloc: *mut Object = msg_send![item_class, alloc];
+            let item: *mut Object = msg_send![item_alloc, initWithAsset: *self.asset];
+            if item.is_null() {
+                return;
+            }
+            let item = StrongPtr::new(item);
+            let _: () = msg_send![*item, setVideoComposition: composition];
+            let previous = self.current_item();
+            if !previous.is_null() {
+                let _: () = msg_send![previous, removeOutput: *self.output];
+            }
+            let _: () = msg_send![*item, addOutput: *self.output];
+            let _: () = msg_send![*self.player, replaceCurrentItemWithPlayerItem: *item];
+            self.seek(resume_at);
+        }
+    }
+
+    fn current_item(&self) -> *mut Object {
+        unsafe { msg_send![*self.player, currentItem] }
+    }
+
+    /// The output can still hand back a frame it rendered before the composition
+    /// was installed, which would flash the video sideways for a beat. Drop those
+    /// until the first composed frame arrives, within a fixed budget.
+    fn is_stale_pre_composition_frame(&self, frame: &VideoFrame) -> bool {
+        let Some(portrait) = self.upright_is_portrait.get() else {
+            return false;
+        };
+        let budget = self.stale_frames_left.get();
+        if budget == 0 || (frame.get_height() > frame.get_width()) == portrait {
+            self.upright_is_portrait.set(None);
+            return false;
+        }
+        self.stale_frames_left.set(budget - 1);
+        true
     }
 
     pub fn play(&self) {
@@ -223,11 +339,11 @@ impl PlayerImpl {
     }
 
     pub fn duration(&self) -> f64 {
+        let item = self.current_item();
+        if item.is_null() {
+            return 0.0;
+        }
         unsafe {
-            let item: *mut Object = msg_send![*self.player, currentItem];
-            if item.is_null() {
-                return 0.0;
-            }
             let time: CmTime = msg_send![item, duration];
             cm_time_to_seconds(time)
         }
@@ -279,11 +395,11 @@ impl PlayerImpl {
     }
 
     pub fn failed(&self) -> bool {
+        let item = self.current_item();
+        if item.is_null() {
+            return false;
+        }
         unsafe {
-            let item: *mut Object = msg_send![*self.player, currentItem];
-            if item.is_null() {
-                return false;
-            }
             let status: isize = msg_send![item, status];
             status == AV_PLAYER_ITEM_STATUS_FAILED
         }
@@ -383,7 +499,7 @@ pub fn probe_video(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
     })
 }
 
-fn video_natural_size(asset: *mut Object) -> Option<(u32, u32)> {
+fn first_video_track(asset: *mut Object) -> Option<*mut Object> {
     unsafe {
         let ns_string = class!(NSString);
         let media_type: *mut Object = msg_send![ns_string, stringWithUTF8String: c"vide".as_ptr()];
@@ -402,8 +518,33 @@ fn video_natural_size(asset: *mut Object) -> Option<(u32, u32)> {
         if track.is_null() {
             return None;
         }
+        Some(track)
+    }
+}
+
+fn transform_is_identity(transform: CgAffineTransform) -> bool {
+    const EPSILON: f64 = 1e-6;
+    (transform.a - 1.0).abs() < EPSILON
+        && transform.b.abs() < EPSILON
+        && transform.c.abs() < EPSILON
+        && (transform.d - 1.0).abs() < EPSILON
+}
+
+/// True for the quarter turns that swap width and height.
+fn transform_swaps_axes(transform: CgAffineTransform) -> bool {
+    const EPSILON: f64 = 1e-6;
+    transform.a.abs() < EPSILON && transform.d.abs() < EPSILON
+}
+
+fn track_preferred_transform(track: *mut Object) -> CgAffineTransform {
+    unsafe { msg_send![track, preferredTransform] }
+}
+
+fn video_natural_size(asset: *mut Object) -> Option<(u32, u32)> {
+    let track = first_video_track(asset)?;
+    let transform = track_preferred_transform(track);
+    unsafe {
         let size: CgSize = msg_send![track, naturalSize];
-        let transform: CgAffineTransform = msg_send![track, preferredTransform];
         let width = ((size.width * transform.a).abs() + (size.height * transform.c).abs()).round();
         let height = ((size.width * transform.b).abs() + (size.height * transform.d).abs()).round();
         if !(width.is_finite() && height.is_finite()) || width < 1.0 || height < 1.0 {
@@ -497,6 +638,53 @@ mod tests {
     const FOURCC_420V: u32 = 0x3432_3076;
     const FOURCC_X420: u32 = 0x7834_3230;
     const FOURCC_BGRA: u32 = 0x4247_5241;
+
+    const IDENTITY: CgAffineTransform = CgAffineTransform {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        tx: 0.0,
+        ty: 0.0,
+    };
+
+    fn quarter_turns(quarters: u32) -> CgAffineTransform {
+        let angle = std::f64::consts::FRAC_PI_2 * quarters as f64;
+        CgAffineTransform {
+            a: angle.cos(),
+            b: angle.sin(),
+            c: -angle.sin(),
+            d: angle.cos(),
+            tx: 0.0,
+            ty: 0.0,
+        }
+    }
+
+    #[test]
+    fn only_an_unrotated_track_reads_as_identity() {
+        assert!(transform_is_identity(IDENTITY));
+        assert!(transform_is_identity(CgAffineTransform {
+            tx: 120.0,
+            ty: -8.0,
+            ..IDENTITY
+        }));
+        for quarters in 1..4 {
+            assert!(!transform_is_identity(quarter_turns(quarters)));
+        }
+        // A mirrored front-camera clip needs the composition too.
+        assert!(!transform_is_identity(CgAffineTransform {
+            a: -1.0,
+            ..IDENTITY
+        }));
+    }
+
+    #[test]
+    fn only_the_quarter_turns_swap_width_and_height() {
+        assert!(transform_swaps_axes(quarter_turns(1)));
+        assert!(transform_swaps_axes(quarter_turns(3)));
+        assert!(!transform_swaps_axes(IDENTITY));
+        assert!(!transform_swaps_axes(quarter_turns(2)));
+    }
 
     #[test]
     fn cm_time_matches_core_media_layout() {

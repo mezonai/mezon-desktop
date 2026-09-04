@@ -19,20 +19,20 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SA
 use windows::Win32::Graphics::Dxgi::IDXGIAdapter;
 use windows::Win32::Media::MediaFoundation::{
     CLSID_MFMediaEngineClassFactory, IMFAttributes, IMFDXGIDeviceManager, IMFMediaEngine,
-    IMFMediaEngineClassFactory, IMFMediaEngineNotify, IMFMediaEngineNotify_Impl, IMFMediaType,
-    IMFSample, IMFSourceReader, MF_MEDIA_ENGINE_CALLBACK, MF_MEDIA_ENGINE_DXGI_MANAGER,
-    MF_MEDIA_ENGINE_EVENT_ERROR, MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, MF_MT_DEFAULT_STRIDE,
-    MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READER_ALL_STREAMS,
-    MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-    MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR, MF_VERSION, MFCreateAttributes,
-    MFCreateDXGIDeviceManager, MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Video,
-    MFSTARTUP_FULL, MFStartup, MFVideoFormat_RGB32,
+    IMFMediaEngineClassFactory, IMFMediaEngineEx, IMFMediaEngineNotify, IMFMediaEngineNotify_Impl,
+    IMFMediaType, IMFSample, IMFSourceReader, MF_MEDIA_ENGINE_CALLBACK,
+    MF_MEDIA_ENGINE_DXGI_MANAGER, MF_MEDIA_ENGINE_EVENT_ERROR, MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT,
+    MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_MT_VIDEO_ROTATION,
+    MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING,
+    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR,
+    MF_VERSION, MFCreateAttributes, MFCreateDXGIDeviceManager, MFCreateMediaType,
+    MFCreateSourceReaderFromURL, MFMediaType_Video, MFSTARTUP_FULL, MFStartup, MFVideoFormat_RGB32,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
 };
-use windows::Win32::System::Variant::VT_I8;
+use windows::Win32::System::Variant::{VT_I8, VT_UI4};
 use windows::core::{BSTR, GUID, HSTRING, Interface, implement};
 
 use crate::{PlayerError, VideoFrame, VideoProbe};
@@ -76,11 +76,17 @@ struct StagingTextures {
 
 pub struct PlayerImpl {
     engine: IMFMediaEngine,
+    /// Only used to read the stream's rotation; every other call goes through
+    /// [`PlayerImpl::engine`].
+    engine_ex: Option<IMFMediaEngineEx>,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     _dxgi_manager: IMFDXGIDeviceManager,
     _notify: IMFMediaEngineNotify,
     textures: RefCell<Option<StagingTextures>>,
+    /// Resolved on the first frame, once the source has loaded: the media engine
+    /// cannot be asked about the stream before then.
+    quarter_turns: Cell<Option<u8>>,
     last_pts: Cell<i64>,
     max_size: Option<(u32, u32)>,
     failed: Arc<AtomicBool>,
@@ -151,13 +157,16 @@ impl PlayerImpl {
 
             engine.SetSource(&BSTR::from(url))?;
 
+            let engine_ex: Option<IMFMediaEngineEx> = engine.cast().ok();
             Ok(Self {
                 engine,
+                engine_ex,
                 device,
                 context,
                 _dxgi_manager: dxgi_manager,
                 _notify: notify,
                 textures: RefCell::new(None),
+                quarter_turns: Cell::new(None),
                 last_pts: Cell::new(0),
                 max_size,
                 failed,
@@ -236,8 +245,52 @@ impl PlayerImpl {
             self.context.Unmap(&textures.staging, 0);
 
             let out = packed?;
+            let (frame_w, frame_h, out) = crate::orientation::turn_bgra(
+                out,
+                render_w,
+                render_h,
+                self.quarter_turns(width, height),
+            )?;
             self.last_pts.set(pts);
-            crate::render_frame::bgra_to_frame(render_w, render_h, out)
+            crate::render_frame::bgra_to_frame(frame_w, frame_h, out)
+        }
+    }
+
+    /// The media engine hands back the picture as encoded — it does not apply the
+    /// rotation a phone stored in the file — so a portrait clip arrives sideways
+    /// and has to be turned here. The stream cannot be asked before the source has
+    /// loaded, which is why this resolves on the first frame and is then kept.
+    fn quarter_turns(&self, width: u32, height: u32) -> u8 {
+        if let Some(turns) = self.quarter_turns.get() {
+            return turns;
+        }
+        let turns = quarter_turns_from_rotation(self.stream_rotation().unwrap_or(0));
+        // Should a future media engine start correcting the rotation itself, the
+        // frame it reports is already upright and turning it again would put it
+        // back on its side. A quarter turn shows up as a swap, so only turn what
+        // still measures the way it was encoded.
+        let turns = if turns % 2 == 1 && height > width {
+            0
+        } else {
+            turns
+        };
+        self.quarter_turns.set(Some(turns));
+        turns
+    }
+
+    /// The rotation the source declares, in counter-clockwise degrees. Audio
+    /// streams simply do not carry the attribute, so the first stream that does is
+    /// the video one.
+    fn stream_rotation(&self) -> Option<u32> {
+        let engine = self.engine_ex.as_ref()?;
+        unsafe {
+            let streams = engine.GetNumberOfStreams().ok()?;
+            (0..streams).find_map(|stream| {
+                let value = engine
+                    .GetStreamAttribute(stream, &MF_MT_VIDEO_ROTATION)
+                    .ok()?;
+                propvariant_u32(&value)
+            })
         }
     }
 
@@ -427,7 +480,24 @@ unsafe fn probe_with_source_reader(
             return Err(windows::core::Error::from(E_FAIL));
         }
 
-        let poster_jpeg = poster_frame(&reader, stream, &decoded, width, height, max_poster_edge);
+        // The reader's video processing converts and scales but never rotates, so
+        // the poster has to be turned here — and the size that goes on the wire is
+        // the turned one, since that is what every client lays the video out with.
+        let quarter_turns = quarter_turns_from_rotation(native_rotation(&reader, stream));
+        let poster_jpeg = poster_frame(
+            &reader,
+            stream,
+            &decoded,
+            width,
+            height,
+            quarter_turns,
+            max_poster_edge,
+        );
+        let (width, height) = if quarter_turns % 2 == 1 {
+            (height, width)
+        } else {
+            (width, height)
+        };
         Ok(VideoProbe {
             width,
             height,
@@ -436,12 +506,14 @@ unsafe fn probe_with_source_reader(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn poster_frame(
     reader: &IMFSourceReader,
     stream: u32,
     decoded: &IMFMediaType,
     width: u32,
     height: u32,
+    quarter_turns: u8,
     max_poster_edge: u32,
 ) -> Option<Vec<u8>> {
     unsafe {
@@ -461,6 +533,7 @@ unsafe fn poster_frame(
                 height,
                 stride,
                 bottom_up,
+                quarter_turns,
                 max_poster_edge,
             )
         };
@@ -500,6 +573,39 @@ unsafe fn read_first_frame(reader: &IMFSourceReader, stream: u32) -> Option<IMFS
     }
 }
 
+/// `MF_MT_VIDEO_ROTATION` on the stream as the file stores it, before the reader's
+/// own conversion of the type.
+unsafe fn native_rotation(reader: &IMFSourceReader, stream: u32) -> u32 {
+    unsafe {
+        reader
+            .GetNativeMediaType(stream, 0)
+            .and_then(|native| native.GetUINT32(&MF_MT_VIDEO_ROTATION))
+            .unwrap_or(0)
+    }
+}
+
+/// `MF_MT_VIDEO_ROTATION` counts how far the picture is turned **counter-clockwise**
+/// from upright, so the correction is that same angle clockwise.
+fn quarter_turns_from_rotation(counter_clockwise_degrees: u32) -> u8 {
+    match counter_clockwise_degrees {
+        90 => 1,
+        180 => 2,
+        270 => 3,
+        _ => 0,
+    }
+}
+
+fn propvariant_u32(value: &PROPVARIANT) -> Option<u32> {
+    unsafe {
+        let variant = &*value.Anonymous.Anonymous;
+        if variant.vt == VT_UI4 {
+            Some(variant.Anonymous.ulVal)
+        } else {
+            None
+        }
+    }
+}
+
 unsafe fn row_pitch(decoded: &IMFMediaType, width: u32) -> (usize, bool) {
     let tightly_packed = width as usize * 4;
     let Ok(declared) = (unsafe { decoded.GetUINT32(&MF_MT_DEFAULT_STRIDE) }) else {
@@ -509,5 +615,21 @@ unsafe fn row_pitch(decoded: &IMFMediaType, width: u32) -> (usize, bool) {
     match signed.unsigned_abs() as usize {
         0 => (tightly_packed, false),
         pitch => (pitch, signed < 0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rotation_is_corrected_by_the_same_angle_the_other_way() {
+        assert_eq!(quarter_turns_from_rotation(0), 0);
+        assert_eq!(quarter_turns_from_rotation(90), 1);
+        assert_eq!(quarter_turns_from_rotation(180), 2);
+        assert_eq!(quarter_turns_from_rotation(270), 3);
+        // Anything the attribute is not supposed to hold leaves the frame alone.
+        assert_eq!(quarter_turns_from_rotation(45), 0);
+        assert_eq!(quarter_turns_from_rotation(360), 0);
     }
 }

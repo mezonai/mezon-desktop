@@ -10,10 +10,11 @@ pub(crate) fn encode_poster_jpeg(
     height: u32,
     stride: usize,
     bottom_up: bool,
+    quarter_turns: u8,
     max_edge: u32,
 ) -> Option<Vec<u8>> {
     let rgb = bgra_to_rgb(bgra, width, height, stride, bottom_up)?;
-    encode_rgb_jpeg(rgb, max_edge)
+    encode_rgb_jpeg(crate::orientation::turn_rgb(rgb, quarter_turns), max_edge)
 }
 
 pub(crate) fn encode_rgb_jpeg(rgb: RgbImage, max_edge: u32) -> Option<Vec<u8>> {
@@ -133,7 +134,7 @@ mod tests {
 
     #[test]
     fn encode_poster_jpeg_writes_a_jpeg_header() {
-        let jpeg = encode_poster_jpeg(&[0u8; 4 * 4], 2, 2, 8, false, 480).expect("jpeg");
+        let jpeg = encode_poster_jpeg(&[0u8; 4 * 4], 2, 2, 8, false, 0, 480).expect("jpeg");
         assert_eq!(&jpeg[..2], &[0xFF, 0xD8]);
     }
 }

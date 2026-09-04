@@ -61,6 +61,9 @@ impl PlayerImpl {
             .build();
         playbin.set_property("uri", url);
         playbin.set_property("video-sink", &appsink);
+        if let Some(filter) = auto_orientation_filter() {
+            playbin.set_property("video-filter", &filter);
+        }
         Ok(Self {
             playbin,
             appsink,
@@ -183,11 +186,49 @@ impl Drop for PlayerImpl {
     }
 }
 
+/// `playbin` hands the sink the picture exactly as encoded. A phone recording in
+/// portrait does not rotate the pixels, it records the rotation in the container,
+/// and no decoder applies that on its own — so without this filter a portrait clip
+/// plays sideways inside the box its (upright) poster and dimensions asked for.
+/// `videoflip` set to follow the stream consumes the `image-orientation` tag and
+/// turns the picture the right way up.
+///
+/// It has to be `video-direction=auto`, not the older `method=automatic`: the tag
+/// arrives *after* caps, and `method` has already configured identity by then and
+/// never revisits it — measured, `method=automatic` leaves a rotate-270 clip
+/// exactly as encoded.
+fn auto_orientation_filter() -> Option<gst::Element> {
+    match gst::ElementFactory::make("videoflip")
+        .property_from_str("video-direction", "auto")
+        .build()
+    {
+        Ok(filter) => Some(filter),
+        Err(error) => {
+            tracing::warn!(
+                target: "mezon_video",
+                %error,
+                "no videoflip element: a rotated video will play as it was encoded"
+            );
+            None
+        }
+    }
+}
+
+/// The `image-orientation` values that turn the frame a quarter turn. The flips
+/// and `rotate-180` leave width and height where they are.
+fn orientation_swaps_axes(orientation: &str) -> bool {
+    matches!(
+        orientation,
+        "rotate-90" | "rotate-270" | "flip-rotate-90" | "flip-rotate-270"
+    )
+}
+
 fn clock_time_to_seconds(time: gst::ClockTime) -> f64 {
     time.nseconds() as f64 / 1_000_000_000.0
 }
 
 const VIDEO_PAD_SIGNAL: &str = "get-video-pad";
+const VIDEO_TAGS_SIGNAL: &str = "get-video-tags";
 const POSTER_TIME: gst::ClockTime = gst::ClockTime::from_seconds(1);
 const PROBE_TIMEOUT: gst::ClockTime = gst::ClockTime::from_seconds(5);
 
@@ -283,6 +324,9 @@ impl PosterPipeline {
         playbin.set_property("uri", uri);
         playbin.set_property("video-sink", &appsink);
         playbin.set_property("audio-sink", &audio_sink);
+        if let Some(filter) = auto_orientation_filter() {
+            playbin.set_property("video-filter", &filter);
+        }
         Some(Self {
             playbin,
             appsink,
@@ -317,6 +361,8 @@ impl PosterPipeline {
             height,
             stride,
             false,
+            // The pipeline's videoflip has already turned the picture upright.
+            0,
             max_poster_edge,
         );
         let (width, height) = if self.prescaled {
@@ -331,13 +377,35 @@ impl PosterPipeline {
         })
     }
 
+    /// The size the video decodes at, which is what goes on the wire for every
+    /// other client to lay the video out with — so it has to be the *displayed*
+    /// size. That pad sits upstream of the flip, where a portrait clip still
+    /// measures landscape, hence the swap.
     fn natural_size(&self) -> Option<(u32, u32)> {
         let pad = self
             .playbin
             .emit_by_name::<Option<gst::Pad>>(VIDEO_PAD_SIGNAL, &[&0i32])?;
         let caps = pad.current_caps()?;
         let info = gst_video::VideoInfo::from_caps(&caps).ok()?;
-        Some((info.width(), info.height()))
+        if self.orientation_swaps_axes() {
+            Some((info.height(), info.width()))
+        } else {
+            Some((info.width(), info.height()))
+        }
+    }
+
+    fn orientation_swaps_axes(&self) -> bool {
+        let Some(tags) = self.video_tags() else {
+            return false;
+        };
+        tags.get::<gst::tags::ImageOrientation>()
+            .is_some_and(|orientation| orientation_swaps_axes(orientation.get()))
+    }
+
+    fn video_tags(&self) -> Option<gst::TagList> {
+        gst::glib::subclass::SignalId::lookup(VIDEO_TAGS_SIGNAL, self.playbin.type_())?;
+        self.playbin
+            .emit_by_name::<Option<gst::TagList>>(VIDEO_TAGS_SIGNAL, &[&0i32])
     }
 }
 
@@ -346,5 +414,44 @@ impl Drop for PosterPipeline {
         if let Err(error) = self.playbin.set_state(gst::State::Null) {
             tracing::warn!(target: "mezon_video", %error, "gstreamer probe teardown failed");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_quarter_turns_swap_width_and_height() {
+        assert!(orientation_swaps_axes("rotate-90"));
+        assert!(orientation_swaps_axes("rotate-270"));
+        assert!(orientation_swaps_axes("flip-rotate-90"));
+        assert!(orientation_swaps_axes("flip-rotate-270"));
+        assert!(!orientation_swaps_axes("rotate-0"));
+        assert!(!orientation_swaps_axes("rotate-180"));
+        assert!(!orientation_swaps_axes("flip-rotate-0"));
+        assert!(!orientation_swaps_axes(""));
+    }
+
+    /// Guards the nick: `property_from_str` with a name GStreamer does not know
+    /// leaves the property at its default, silently playing every rotated video
+    /// sideways. Skipped where plugins-good is not installed.
+    #[test]
+    fn the_filter_follows_the_stream_orientation() {
+        if ensure_gstreamer().is_err() {
+            return;
+        }
+        let Some(filter) = auto_orientation_filter() else {
+            return;
+        };
+        assert_eq!(
+            filter
+                .property_value("video-direction")
+                .serialize()
+                .map(|nick| nick.to_string())
+                .ok()
+                .as_deref(),
+            Some("auto")
+        );
     }
 }

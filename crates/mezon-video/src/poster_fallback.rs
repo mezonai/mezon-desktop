@@ -13,9 +13,13 @@ const DEFAULT_NAL_LENGTH_SIZE: usize = 4;
 
 struct VideoTrack {
     id: u32,
+    /// Display size: the container's, turned by [`VideoTrack::quarter_turns`].
     width: u32,
     height: u32,
     timescale: u32,
+    /// Clockwise quarter turns the `tkhd` display matrix asks for. Nothing else on
+    /// this path applies them — openh264 decodes the picture exactly as encoded.
+    quarter_turns: u8,
     nal_length_size: usize,
     parameter_sets: Vec<u8>,
 }
@@ -72,11 +76,16 @@ fn video_track<R: std::io::Read + std::io::Seek>(reader: &mp4::Mp4Reader<R>) -> 
             .avc1
             .as_ref()
             .map(|avc1| &avc1.avcc);
+        let matrix = &track.trak.tkhd.matrix;
+        let quarter_turns = quarter_turns(matrix.a, matrix.b, matrix.c, matrix.d);
+        let (width, height) = (u32::from(track.width()), u32::from(track.height()));
+        let swapped = quarter_turns % 2 == 1;
         Some(VideoTrack {
             id: *id,
-            width: u32::from(track.width()),
-            height: u32::from(track.height()),
+            width: if swapped { height } else { width },
+            height: if swapped { width } else { height },
             timescale: track.timescale(),
+            quarter_turns,
             nal_length_size: avcc.map_or(DEFAULT_NAL_LENGTH_SIZE, |avcc| {
                 usize::from(avcc.length_size_minus_one & 0x3) + 1
             }),
@@ -118,7 +127,7 @@ fn decode_poster<R: std::io::Read + std::io::Seek>(
     let first_extra = keyframe.index.saturating_add(1);
     for next in first_extra..=first_extra.saturating_add(MAX_EXTRA_FEEDS) {
         match decoder.decode(&unit) {
-            Ok(Some(yuv)) => return encode(&yuv, max_poster_edge),
+            Ok(Some(yuv)) => return encode(&yuv, track.quarter_turns, max_poster_edge),
             Ok(None) => {}
             Err(error) => {
                 tracing::warn!(target: "mezon_video", %error, "openh264 could not decode this video");
@@ -134,13 +143,42 @@ fn decode_poster<R: std::io::Read + std::io::Seek>(
     None
 }
 
-fn encode(yuv: &openh264::decoder::DecodedYUV<'_>, max_poster_edge: u32) -> Option<Vec<u8>> {
+fn encode(
+    yuv: &openh264::decoder::DecodedYUV<'_>,
+    quarter_turns: u8,
+    max_poster_edge: u32,
+) -> Option<Vec<u8>> {
     let (width, height) = yuv.dimensions();
     let mut rgb = vec![0u8; width.checked_mul(height)?.checked_mul(3)?];
     yuv.write_rgb8(&mut rgb);
     let rgb =
         image::RgbImage::from_raw(u32::try_from(width).ok()?, u32::try_from(height).ok()?, rgb)?;
-    crate::poster::encode_rgb_jpeg(rgb, max_poster_edge)
+    crate::poster::encode_rgb_jpeg(
+        crate::orientation::turn_rgb(rgb, quarter_turns),
+        max_poster_edge,
+    )
+}
+
+/// Clockwise quarter turns from a `tkhd` display matrix, whose entries are 16.16
+/// fixed point. Only the four axis-aligned rotations show up in real files;
+/// anything else (a shear, a mirror) is left alone.
+fn quarter_turns(a: i32, b: i32, c: i32, d: i32) -> u8 {
+    /// Half of 1.0 in 16.16: enough to tell -1, 0 and 1 apart however the encoder
+    /// rounded them.
+    const HALF: i32 = 1 << 15;
+    fn unit(value: i32) -> i32 {
+        match value {
+            v if v > HALF => 1,
+            v if v < -HALF => -1,
+            _ => 0,
+        }
+    }
+    match (unit(a), unit(b), unit(c), unit(d)) {
+        (0, 1, -1, 0) => 1,
+        (-1, 0, 0, -1) => 2,
+        (0, -1, 1, 0) => 3,
+        _ => 0,
+    }
 }
 
 fn poster_sample<R: std::io::Read + std::io::Seek>(
@@ -195,6 +233,19 @@ fn append_annex_b(out: &mut Vec<u8>, avcc: &[u8], nal_length_size: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quarter_turns_reads_the_four_axis_aligned_display_matrices() {
+        const ONE: i32 = 1 << 16;
+        assert_eq!(quarter_turns(ONE, 0, 0, ONE), 0);
+        assert_eq!(quarter_turns(0, ONE, -ONE, 0), 1);
+        assert_eq!(quarter_turns(-ONE, 0, 0, -ONE), 2);
+        assert_eq!(quarter_turns(0, -ONE, ONE, 0), 3);
+        // A mirror is not a rotation: the picture is left as decoded.
+        assert_eq!(quarter_turns(-ONE, 0, 0, ONE), 0);
+        // Rounding an encoder may have applied still reads as the same turn.
+        assert_eq!(quarter_turns(3, ONE - 4, -ONE + 2, -5), 1);
+    }
 
     #[test]
     fn append_annex_b_restamps_every_length_prefixed_unit() {

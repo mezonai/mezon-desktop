@@ -11,6 +11,8 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(not(target_os = "macos"))]
+mod orientation;
+#[cfg(not(target_os = "macos"))]
 mod poster;
 #[cfg(target_os = "linux")]
 mod poster_fallback;
