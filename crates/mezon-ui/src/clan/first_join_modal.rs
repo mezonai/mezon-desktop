@@ -35,13 +35,7 @@ impl Focusable for FirstJoinModal {
 /// Whether this account is new enough, and empty enough, to be shown the prompt — and whether
 /// now is a moment to raise a modal at all.
 pub fn should_prompt(cx: &App) -> bool {
-    // Only over the surfaces someone lands on with no clans, the way the web only mounts the
-    // popup inside the chat page. Raising it over the invite page would cover the very button
-    // it is telling people to press, and a deep link lands there before the account arrives.
-    if !matches!(
-        Router::global(cx).read(cx).route(),
-        Route::Chat | Route::Direct | Route::DirectMessage { .. } | Route::Friends
-    ) {
+    if !route_allows_prompt(&Router::global(cx).read(cx).route()) {
         return false;
     }
     // A brand-new account with no clans is also exactly who the tour autostarts for; whichever
@@ -66,6 +60,17 @@ pub fn should_prompt(cx: &App) -> bool {
         .map(|since| since.as_secs())
         .unwrap_or_default();
     now.saturating_sub(u64::from(created)) <= NEW_ACCOUNT_WINDOW_SECS
+}
+
+/// Only over the surfaces someone with no clans lands on, the way the web only mounts the popup
+/// inside the chat page. Raising it over the invite page would cover the very button it is telling
+/// people to press — and a `mezonapp://invite/…` cold launch routes there before the account that
+/// makes the prompt due has even arrived.
+fn route_allows_prompt(route: &Route) -> bool {
+    matches!(
+        route,
+        Route::Chat | Route::Direct | Route::DirectMessage { .. } | Route::Friends
+    )
 }
 
 /// The invite id inside a full `…/invite/<id>` link, or the input itself when it already looks
@@ -282,5 +287,43 @@ impl Render for FirstJoinModal {
                             }),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mezon_store::{ChannelId, ClanId};
+
+    #[test]
+    fn the_prompt_stays_off_the_invite_page_it_sends_people_to() {
+        assert!(route_allows_prompt(&Route::Direct));
+        assert!(route_allows_prompt(&Route::Chat));
+        assert!(route_allows_prompt(&Route::Friends));
+        assert!(route_allows_prompt(&Route::DirectMessage {
+            direct_id: ChannelId(1),
+            message_type: String::new(),
+        }));
+        // The one that matters: a new account following an invite link lands here, and a modal
+        // over it would cover the accept button.
+        assert!(!route_allows_prompt(&Route::Invite {
+            invite_id: "abc123".into(),
+        }));
+        assert!(!route_allows_prompt(&Route::SettingsAccount));
+        assert!(!route_allows_prompt(&Route::Channel {
+            clan_id: ClanId(1),
+            channel_id: ChannelId(2),
+        }));
+    }
+
+    #[test]
+    fn an_invite_code_is_taken_bare_or_out_of_a_link() {
+        assert_eq!(
+            invite_code("https://mezon.ai/invite/1953363506703110144"),
+            Some("1953363506703110144".to_string())
+        );
+        assert_eq!(invite_code("  hTKzmak  "), Some("hTKzmak".to_string()));
+        assert_eq!(invite_code("short"), None);
+        assert_eq!(invite_code(""), None);
     }
 }
