@@ -54,6 +54,16 @@ pub fn open_pdf_viewer(request: OpenPdfRequest, window: &Window, cx: &mut App) {
     if request.url.is_empty() {
         return;
     }
+    // A machine with no renderer has nothing to show, and a window that opens only to
+    // say so is worse than no window: the click hands the document to whatever the OS
+    // opens pdfs with - the browser, on every platform we ship - and stays out of the way.
+    if !mezon_pdf::is_supported() {
+        if let Some(reason) = mezon_pdf::unavailable_reason() {
+            tracing::warn!("pdf viewer unavailable, opening externally: {reason}");
+        }
+        open_externally(&request.url, cx);
+        return;
+    }
     let placement = overlay_placement_from_window(window, cx);
     let mut pending = Some(request);
     if let Some(handle) = cx.try_global::<GlobalPdfViewer>().map(|g| g.0) {
@@ -223,21 +233,6 @@ impl PdfViewer {
     }
 
     fn start_load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !mezon_pdf::is_supported() {
-            let detail = mezon_pdf::unavailable_reason();
-            if let Some(detail) = &detail {
-                tracing::warn!("pdf viewer unavailable: {detail}");
-            }
-            self.state = LoadState::Failed {
-                message: SharedString::from(mezon_i18n::t(
-                    &self.locale(cx),
-                    "media.pdf.unsupported",
-                )),
-                detail: detail.map(SharedString::from),
-            };
-            cx.notify();
-            return;
-        }
         self.state = LoadState::Loading;
         let url = self.url.to_string();
         let client = cx.http_client();
@@ -245,8 +240,9 @@ impl PdfViewer {
             let bytes = match fetch_pdf(client, url).await {
                 Ok(bytes) => bytes,
                 Err(error) => {
-                    tracing::warn!("pdf download failed: {error}");
-                    let _ = this.update(cx, |this, cx| this.fail(cx));
+                    let reason = error.to_string();
+                    tracing::warn!("pdf download failed: {reason}");
+                    let _ = this.update(cx, move |this, cx| this.fail(reason, cx));
                     return;
                 }
             };
@@ -257,8 +253,9 @@ impl PdfViewer {
             let document = match opened {
                 Ok(document) => Arc::new(document),
                 Err(error) => {
-                    tracing::warn!("pdf open failed: {error}");
-                    let _ = this.update(cx, |this, cx| this.fail(cx));
+                    let reason = error.to_string();
+                    tracing::warn!("pdf open failed: {reason}");
+                    let _ = this.update(cx, move |this, cx| this.fail(reason, cx));
                     return;
                 }
             };
@@ -273,10 +270,13 @@ impl PdfViewer {
         cx.notify();
     }
 
-    fn fail(&mut self, cx: &mut Context<Self>) {
+    /// The reason rides along under the message. Without it a failed document looks
+    /// the same whether the download 404'd, the bytes were not a pdf, or the platform
+    /// renderer refused the page — and a report from another OS cannot be acted on.
+    fn fail(&mut self, reason: String, cx: &mut Context<Self>) {
         self.state = LoadState::Failed {
             message: SharedString::from(mezon_i18n::t(&self.locale(cx), "media.pdf.loadFailed")),
-            detail: None,
+            detail: Some(SharedString::from(reason)),
         };
         cx.notify();
     }
@@ -310,7 +310,13 @@ impl PdfViewer {
                         let Some(buffer) =
                             image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.bgra)
                         else {
-                            this.fail(cx);
+                            this.fail(
+                                format!(
+                                    "page bitmap does not fill {}x{}",
+                                    bitmap.width, bitmap.height
+                                ),
+                                cx,
+                            );
                             return;
                         };
                         this.clear_page_image(Some(window), cx);
@@ -327,7 +333,7 @@ impl PdfViewer {
                     }
                     Err(error) => {
                         tracing::warn!("pdf page render failed: {error}");
-                        this.fail(cx);
+                        this.fail(error.to_string(), cx);
                     }
                 }
             });
@@ -408,9 +414,7 @@ impl PdfViewer {
     }
 
     fn open_externally(&self, cx: &mut App) {
-        if let Some(store) = PlatformStore::try_global(cx) {
-            let _ = store.read(cx).open_url_external(&self.url);
-        }
+        open_externally(&self.url, cx);
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -423,6 +427,12 @@ impl PdfViewer {
             "0" => self.set_zoom(1.0, window, cx),
             _ => {}
         }
+    }
+}
+
+fn open_externally(url: &str, cx: &mut App) {
+    if let Some(store) = PlatformStore::try_global(cx) {
+        let _ = store.read(cx).open_url_external(url);
     }
 }
 
