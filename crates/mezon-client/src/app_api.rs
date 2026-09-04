@@ -3014,10 +3014,11 @@ impl AppApi {
         &self,
         channel_id: &str,
         clan_id: &str,
-        user_id: &str,
+        username: &str,
+        room_name: &str,
     ) -> Result<()> {
         self.transport
-            .remove_participant_mezon_meet(channel_id, clan_id, user_id)
+            .remove_participant_mezon_meet(channel_id, clan_id, username, room_name)
             .await
     }
 
@@ -3025,10 +3026,11 @@ impl AppApi {
         &self,
         channel_id: &str,
         clan_id: &str,
-        user_id: &str,
+        username: &str,
+        room_name: &str,
     ) -> Result<()> {
         self.transport
-            .mute_participant_mezon_meet(channel_id, clan_id, user_id)
+            .mute_participant_mezon_meet(channel_id, clan_id, username, room_name)
             .await
     }
 

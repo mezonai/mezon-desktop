@@ -9175,11 +9175,13 @@ impl MezonTransport {
         &self,
         channel_id: i64,
         clan_id: i64,
-        user_id: i64,
+        username: &str,
+        room_name: &str,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::MeetParticipantRequest {
-            user_id,
+            username: username.to_string(),
+            room_name: room_name.to_string(),
             channel_id,
             clan_id,
         }
@@ -9197,11 +9199,13 @@ impl MezonTransport {
         &self,
         channel_id: i64,
         clan_id: i64,
-        user_id: i64,
+        username: &str,
+        room_name: &str,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::MeetParticipantRequest {
-            user_id,
+            username: username.to_string(),
+            room_name: room_name.to_string(),
             channel_id,
             clan_id,
         }

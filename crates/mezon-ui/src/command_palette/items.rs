@@ -352,9 +352,7 @@ pub fn build_palette_items_from_ctrlk(state: &CtrlKSearchState, cx: &App) -> Vec
             }
             continue;
         }
-        if let Some(item) = ctrlk_channel_as_clan_channel(channel, channels, clans) {
-            items.push(item);
-        }
+        items.push(ctrlk_channel_as_clan_channel(channel, channels, clans));
     }
 
     for user in &state.users {
