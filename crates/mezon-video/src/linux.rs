@@ -8,6 +8,7 @@ use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
 use gstreamer_video::VideoFrameExt;
 
+use crate::poster::Turn;
 use crate::{PlayerError, VideoFrame};
 
 fn ensure_gstreamer() -> Result<(), PlayerError> {
@@ -61,6 +62,9 @@ impl PlayerImpl {
             .build();
         playbin.set_property("uri", url);
         playbin.set_property("video-sink", &appsink);
+        if let Some(filter) = auto_orientation_filter() {
+            playbin.set_property("video-filter", &filter);
+        }
         Ok(Self {
             playbin,
             appsink,
@@ -183,11 +187,57 @@ impl Drop for PlayerImpl {
     }
 }
 
+fn auto_orientation_filter() -> Option<gst::Element> {
+    let filter = match gst::ElementFactory::make("videoflip").build() {
+        Ok(filter) => filter,
+        Err(error) => {
+            tracing::warn!(
+                target: "mezon_video",
+                %error,
+                "no videoflip element: a rotated video plays as it was encoded"
+            );
+            return None;
+        }
+    };
+    if filter.find_property(VIDEO_DIRECTION_PROPERTY).is_none() {
+        tracing::warn!(
+            target: "mezon_video",
+            "videoflip has no {VIDEO_DIRECTION_PROPERTY}: a rotated video plays as it was encoded"
+        );
+        return None;
+    }
+    filter.set_property(
+        VIDEO_DIRECTION_PROPERTY,
+        gst_video::VideoOrientationMethod::Auto,
+    );
+    Some(filter)
+}
+
+fn turn_from_tag(orientation: &str) -> Option<Turn> {
+    let (mirrored, rotation) = match orientation.strip_prefix("flip-") {
+        Some(rotation) => (true, rotation),
+        None => (false, orientation),
+    };
+    let quarter_turns = match rotation {
+        "rotate-0" => 0,
+        "rotate-90" => 1,
+        "rotate-180" => 2,
+        "rotate-270" => 3,
+        _ => return None,
+    };
+    Some(Turn {
+        quarter_turns,
+        mirrored,
+    })
+}
+
 fn clock_time_to_seconds(time: gst::ClockTime) -> f64 {
     time.nseconds() as f64 / 1_000_000_000.0
 }
 
 const VIDEO_PAD_SIGNAL: &str = "get-video-pad";
+const VIDEO_TAGS_SIGNAL: &str = "get-video-tags";
+const VIDEO_DIRECTION_PROPERTY: &str = "video-direction";
 const POSTER_TIME: gst::ClockTime = gst::ClockTime::from_seconds(1);
 const PROBE_TIMEOUT: gst::ClockTime = gst::ClockTime::from_seconds(5);
 
@@ -212,7 +262,10 @@ fn gstreamer_probe(path: &str, max_poster_edge: u32) -> Option<crate::VideoProbe
         }
     };
     let pipeline = PosterPipeline::open(uri.as_str(), max_poster_edge)?;
-    let probe = pipeline.probe(max_poster_edge);
+    let probe = pipeline.probe(
+        max_poster_edge,
+        crate::poster_fallback::container_turn(path),
+    );
     if probe.is_none() {
         report_bus_errors(&pipeline.playbin, "video probe");
         tracing::warn!(target: "mezon_video", "video probe produced no frame");
@@ -252,6 +305,7 @@ struct PosterPipeline {
     playbin: gst::Element,
     appsink: gst_app::AppSink,
     prescaled: bool,
+    flipped: bool,
 }
 
 const PRESCALE_HEADROOM: u32 = 2;
@@ -283,14 +337,19 @@ impl PosterPipeline {
         playbin.set_property("uri", uri);
         playbin.set_property("video-sink", &appsink);
         playbin.set_property("audio-sink", &audio_sink);
+        let filter = auto_orientation_filter();
+        if let Some(filter) = filter.as_ref() {
+            playbin.set_property("video-filter", filter);
+        }
         Some(Self {
             playbin,
             appsink,
             prescaled: prescale_edge.is_some(),
+            flipped: filter.is_some(),
         })
     }
 
-    fn probe(&self, max_poster_edge: u32) -> Option<crate::VideoProbe> {
+    fn probe(&self, max_poster_edge: u32, container: Option<Turn>) -> Option<crate::VideoProbe> {
         self.playbin.set_state(gst::State::Paused).ok()?;
         self.playbin.state(PROBE_TIMEOUT).0.ok()?;
         if self.playbin.query_duration::<gst::ClockTime>() > Some(POSTER_TIME)
@@ -311,18 +370,29 @@ impl PosterPipeline {
         let width = frame.width();
         let height = frame.height();
         let stride = usize::try_from(*frame.plane_stride().first()?).ok()?;
+        let tagged = self.tagged_turn();
+        let display = container
+            .filter(|container| !container.is_none())
+            .or(tagged)
+            .unwrap_or_default();
+        let ours = if self.flipped && tagged.is_some() {
+            Turn::default()
+        } else {
+            display
+        };
         let poster_jpeg = crate::poster::encode_poster_jpeg(
             frame.plane_data(0).ok()?,
             width,
             height,
             stride,
             false,
+            ours,
             max_poster_edge,
         );
         let (width, height) = if self.prescaled {
-            self.natural_size()?
+            display.applied_to(self.natural_size()?)
         } else {
-            (width, height)
+            ours.applied_to((width, height))
         };
         Some(crate::VideoProbe {
             width,
@@ -339,6 +409,18 @@ impl PosterPipeline {
         let info = gst_video::VideoInfo::from_caps(&caps).ok()?;
         Some((info.width(), info.height()))
     }
+
+    fn tagged_turn(&self) -> Option<Turn> {
+        self.video_tags()?
+            .get::<gst::tags::ImageOrientation>()
+            .and_then(|orientation| turn_from_tag(orientation.get()))
+    }
+
+    fn video_tags(&self) -> Option<gst::TagList> {
+        gst::glib::subclass::SignalId::lookup(VIDEO_TAGS_SIGNAL, self.playbin.type_())?;
+        self.playbin
+            .emit_by_name::<Option<gst::TagList>>(VIDEO_TAGS_SIGNAL, &[&0i32])
+    }
 }
 
 impl Drop for PosterPipeline {
@@ -346,5 +428,48 @@ impl Drop for PosterPipeline {
         if let Err(error) = self.playbin.set_state(gst::State::Null) {
             tracing::warn!(target: "mezon_video", %error, "gstreamer probe teardown failed");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_orientation_tag_maps_to_a_mirror_and_a_clockwise_turn() {
+        assert_eq!(turn_from_tag("rotate-0"), Some(Turn::clockwise(0)));
+        assert_eq!(turn_from_tag("rotate-90"), Some(Turn::clockwise(1)));
+        assert_eq!(turn_from_tag("rotate-180"), Some(Turn::clockwise(2)));
+        assert_eq!(turn_from_tag("rotate-270"), Some(Turn::clockwise(3)));
+        assert_eq!(
+            turn_from_tag("flip-rotate-90"),
+            Some(Turn {
+                quarter_turns: 1,
+                mirrored: true
+            })
+        );
+        assert_eq!(
+            turn_from_tag("flip-rotate-0"),
+            Some(Turn {
+                quarter_turns: 0,
+                mirrored: true
+            })
+        );
+        assert_eq!(turn_from_tag("rotate-45"), None);
+        assert_eq!(turn_from_tag(""), None);
+    }
+
+    #[test]
+    fn the_filter_follows_the_stream_orientation() {
+        if ensure_gstreamer().is_err() {
+            return;
+        }
+        let Some(filter) = auto_orientation_filter() else {
+            return;
+        };
+        assert_eq!(
+            filter.property::<gst_video::VideoOrientationMethod>(VIDEO_DIRECTION_PROPERTY),
+            gst_video::VideoOrientationMethod::Auto
+        );
     }
 }
