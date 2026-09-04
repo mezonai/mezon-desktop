@@ -26,12 +26,39 @@ const BAN_ACTION_BANNED: i32 = 1;
 /// render loop would re-arm the request every frame for as long as the call keeps failing.
 const SELF_BAN_RETRY_BACKOFF: Duration = Duration::from_secs(30);
 
-/// Longest gap between repaints while a ban is counting down. The label is bucketed to whole
-/// minutes, so this only has to be fine enough that it never looks stuck.
-const SELF_BAN_TICK: Duration = Duration::from_secs(30);
-
 /// Floor on a scheduled wake, so a deadline that is already up cannot spin the timer.
 const SELF_BAN_MIN_WAKE: Duration = Duration::from_millis(250);
+
+/// The units the banned notice counts down in. Kept here because they decide *when* a repaint is
+/// owed, and `mezon_ui::util::time_ago` renders against the same three.
+pub const BAN_LABEL_MINUTE_SECS: u64 = 60;
+pub const BAN_LABEL_HOUR_SECS: u64 = 60 * BAN_LABEL_MINUTE_SECS;
+pub const BAN_LABEL_DAY_SECS: u64 = 24 * BAN_LABEL_HOUR_SECS;
+
+/// How long the banned notice will read the same, given `remaining` seconds of ban left.
+///
+/// The label is bucketed and rounded down — "2 giờ" stays "2 giờ" for a full hour — so waking on a
+/// fixed tick would repaint the chat hundreds of times to redraw an identical string: a day-long
+/// ban would cost 2880 repaints at 30s each. Waking on the bucket edge instead costs one repaint
+/// per edge, about fifty over that same day, and is exact rather than merely fine-grained.
+pub fn seconds_until_ban_label_changes(remaining: u64) -> u64 {
+    if remaining < BAN_LABEL_MINUTE_SECS {
+        // Under a minute the label stops counting and just says so, so the next thing to change is
+        // the ban ending — not a bucket edge.
+        return remaining;
+    }
+    let unit = if remaining >= BAN_LABEL_DAY_SECS {
+        BAN_LABEL_DAY_SECS
+    } else if remaining >= BAN_LABEL_HOUR_SECS {
+        BAN_LABEL_HOUR_SECS
+    } else {
+        BAN_LABEL_MINUTE_SECS
+    };
+    // The bucket turns over one second after the remainder runs out — at exactly two hours the
+    // label still reads two hours. Landing on the turn rather than just before it is what keeps a
+    // bucket edge to one repaint instead of two.
+    remaining % unit + 1
+}
 
 #[derive(Debug, Clone)]
 pub struct BannedEntry {
@@ -245,15 +272,23 @@ impl BannedUsersStore {
         !lapsed.is_empty()
     }
 
-    /// The soonest moment a wake would have anything to do: a ban running out, or a retry coming
-    /// due. `None` when nothing is outstanding.
-    fn next_self_ban_wake(&self) -> Option<Instant> {
-        let deadlines = self.self_ban.values().filter_map(|expires| *expires);
+    /// The soonest moment a wake would have anything to do: a countdown label about to read
+    /// differently, or a retry coming due. `None` when nothing is outstanding — a ban with no
+    /// expiry has nothing to count, so it schedules nothing at all.
+    fn next_self_ban_wake(&self, now: Instant) -> Option<Instant> {
+        let labels = self
+            .self_ban
+            .values()
+            .filter_map(|expires| *expires)
+            .map(|expires| {
+                let remaining = expires.saturating_duration_since(now).as_secs();
+                now + Duration::from_secs(seconds_until_ban_label_changes(remaining))
+            });
         let retries = self
             .self_ban_failed_at
             .values()
             .map(|at| *at + SELF_BAN_RETRY_BACKOFF);
-        deadlines.chain(retries).min()
+        labels.chain(retries).min()
     }
 
     /// Keep a wake running while a ban is counting down or a retry is owed. The notice is only
@@ -261,18 +296,19 @@ impl BannedUsersStore {
     /// own — without this the countdown would freeze and a lapsed ban would keep the composer
     /// hidden for the rest of the session.
     fn schedule_self_ban_wake(&mut self, cx: &mut Context<Self>) {
-        if self.self_ban_waking || self.next_self_ban_wake().is_none() {
+        if self.self_ban_waking || self.next_self_ban_wake(Instant::now()).is_none() {
             return;
         }
         self.self_ban_waking = true;
         self._self_ban_wake = Some(cx.spawn(async move |this, cx| {
-            while let Ok(Some(next)) = this.update(cx, |this, _| this.next_self_ban_wake()) {
-                // The label buckets to whole minutes, so a tick that coarse keeps it honest
-                // without repainting the chat any more often than it has to. The floor stops a
-                // moment that is already up from spinning the timer.
+            while let Ok(Some(next)) =
+                this.update(cx, |this, _| this.next_self_ban_wake(Instant::now()))
+            {
+                // The floor stops a moment that is already up from spinning the timer; there is
+                // no ceiling, because sleeping until the label actually changes is the point.
                 let delay = next
                     .saturating_duration_since(Instant::now())
-                    .clamp(SELF_BAN_MIN_WAKE, SELF_BAN_TICK);
+                    .max(SELF_BAN_MIN_WAKE);
                 cx.background_executor().timer(delay).await;
                 let woke = this.update(cx, |this, cx| {
                     let now = Instant::now();
@@ -530,6 +566,37 @@ mod tests {
         // composer replaced by an "Expired" notice for the rest of the session.
         let past = Some(now - Duration::from_secs(1));
         assert_eq!(self_ban_remaining_at(Some(&past), now), None);
+    }
+
+    #[test]
+    fn a_wake_is_owed_only_when_the_label_would_read_differently() {
+        // Mid-bucket: sleep out the remainder, then land on the second the bucket turns over.
+        assert_eq!(seconds_until_ban_label_changes(90_000), 90_000 - 86_400 + 1);
+        assert_eq!(seconds_until_ban_label_changes(7_000), 7_000 - 3_600 + 1);
+        assert_eq!(seconds_until_ban_label_changes(930), 31);
+        // Sitting exactly on an edge: one second, not a whole unit — and not zero either, or the
+        // wake would fire on a label that still reads the same and immediately re-arm.
+        assert_eq!(seconds_until_ban_label_changes(BAN_LABEL_DAY_SECS), 1);
+        assert_eq!(seconds_until_ban_label_changes(BAN_LABEL_HOUR_SECS), 1);
+        assert_eq!(seconds_until_ban_label_changes(900), 1);
+        // Under a minute the label stops counting, so the next change is the ban ending itself.
+        assert_eq!(seconds_until_ban_label_changes(59), 59);
+        assert_eq!(seconds_until_ban_label_changes(45), 45);
+        assert_eq!(seconds_until_ban_label_changes(1), 1);
+        assert_eq!(seconds_until_ban_label_changes(0), 0);
+        // Every wake lands on a label that reads differently, so a day-long ban costs one repaint
+        // an hour and then one a minute for the last hour — not the 2880 a thirty-second tick
+        // would have spent redrawing the same string.
+        let mut left = BAN_LABEL_DAY_SECS;
+        let mut wakes = 0;
+        while left > 0 {
+            left = left.saturating_sub(seconds_until_ban_label_changes(left).max(1));
+            wakes += 1;
+        }
+        assert!(
+            (80..=90).contains(&wakes),
+            "a day-long ban should cost about 84 repaints, got {wakes}"
+        );
     }
 
     #[test]
