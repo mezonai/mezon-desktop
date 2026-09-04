@@ -18,7 +18,9 @@ use gpui::{
     Animation, AnimationExt as _, AnyView, App, ClickEvent, Context, Entity, FontWeight,
     MouseButton, NavigationDirection, StyleRefinement, Task, Window, div, img, prelude::*, px,
 };
-use mezon_store::{AuthState, ChannelList, ClanId, ClanList, ConnectionStore, Settings};
+use mezon_store::{
+    AuthState, ChannelList, ClanId, ClanList, ConnectionStore, OnboardingStore, Settings,
+};
 use std::time::{Duration, Instant};
 
 pub struct RootView {
@@ -155,6 +157,7 @@ impl RootView {
             this.sync_clan_settings_page(cx);
             this.sync_channel_settings_tab(cx);
             this.schedule_tour_autostart(cx);
+            end_preview_off_its_own_screens(cx);
             cx.notify();
         })
         .detach();
@@ -177,6 +180,9 @@ impl RootView {
             },
         )
         .detach();
+
+        cx.observe(&OnboardingStore::global(cx), |_, _, cx| cx.notify())
+            .detach();
 
         cx.observe(&auth_state, |this, auth_state, cx| {
             if matches!(*auth_state.read(cx), AuthState::Connecting(_)) {
@@ -470,6 +476,7 @@ impl Render for RootView {
         let base_font_family = ::theme::theme_settings(cx).ui_font(cx).family.clone();
         let theme = cx.theme();
 
+        let mut preview_bar = None;
         let content: gpui::AnyElement = match self.auth_state.read(cx) {
             AuthState::NotAuthenticated | AuthState::OtpRequested { .. } => {
                 cached_fill(self.login_view.clone())
@@ -492,6 +499,14 @@ impl Render for RootView {
             }
             AuthState::Authenticated(_) => {
                 let route = Router::global(cx).read(cx).route();
+                if previewable_route(&route) {
+                    preview_bar = OnboardingStore::try_global(cx)
+                        .and_then(|store| store.read(cx).preview_clan())
+                        .filter(|clan_id| {
+                            ClanList::global(cx).read(cx).active_clan_id == Some(*clan_id)
+                        })
+                        .map(|clan_id| render_onboarding_preview_bar(clan_id, theme, locale));
+                }
                 match route {
                     Route::SettingsAccount
                     | Route::SettingsProfile
@@ -540,6 +555,7 @@ impl Render for RootView {
             .when(window_controls::HAS_CUSTOM_TITLE_BAR, |this| {
                 this.child(render_title_bar(self.title_bar.clone()))
             })
+            .children(preview_bar)
             .child(content)
             .when(window_controls::is_edge_resizable(), |this| {
                 this.child(window_controls::render_resize_edges(window))
@@ -547,6 +563,99 @@ impl Render for RootView {
             .child(self.shell.clone())
             .child(self.call_overlay.clone())
     }
+}
+
+/// The strip React drops across the top while an owner is previewing their clan the way a new
+/// member sees it. Closing it hands them back to the onboarding settings they opened it from.
+fn previewable_route(route: &Route) -> bool {
+    matches!(
+        route,
+        Route::Chat | Route::Channel { .. } | Route::ClanGuide { .. }
+    )
+}
+
+fn end_preview_off_its_own_screens(cx: &mut App) {
+    let Some(store) = OnboardingStore::try_global(cx) else {
+        return;
+    };
+    if store.read(cx).preview_clan().is_none() {
+        return;
+    }
+    let route = Router::global(cx).read(cx).route();
+    if !previewable_route(&route) {
+        store.update(cx, |store, cx| store.close_preview(cx));
+    }
+}
+
+fn render_onboarding_preview_bar(clan_id: ClanId, theme: &Theme, locale: &str) -> gpui::AnyElement {
+    let leading_inset = if cfg!(target_os = "macos") {
+        px(80.)
+    } else {
+        px(16.)
+    };
+    div()
+        .occlude()
+        .flex()
+        .flex_row()
+        .flex_none()
+        .items_center()
+        .gap_4()
+        .w_full()
+        .h(px(48.))
+        .pl(leading_inset)
+        .pr_4()
+        .bg(theme.bg_secondary)
+        .border_b_1()
+        .border_color(theme.border)
+        .child(
+            div()
+                .id("onboarding-close-preview")
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py(px(4.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(theme.border)
+                .cursor_pointer()
+                .text_color(theme.text_primary)
+                .hover(|style| style.bg(theme.bg_hover))
+                .child(
+                    Icon::new(IconName::ArrowLeft)
+                        .size(px(14.))
+                        .text_color(theme.text_primary),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(mezon_i18n::t(locale, "common.closePreviewMode")),
+                )
+                .on_click(move |_, _, cx| {
+                    OnboardingStore::global(cx).update(cx, |store, cx| store.close_preview(cx));
+                    crate::router::navigate(
+                        cx,
+                        Route::ClanSettings {
+                            clan_id,
+                            page: ClanSettingsPage::Onboarding,
+                        },
+                    );
+                }),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_center()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text_primary)
+                .child(mezon_i18n::t(locale, "common.previewModeDescription")),
+        )
+        .into_any_element()
 }
 
 fn render_title_bar(title_bar: Entity<TitleBar>) -> AnyView {

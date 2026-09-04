@@ -393,7 +393,7 @@ impl Render for ClanSidebar {
             .w_full()
             .h_full()
             .items_center()
-            .bg(theme.surface_for(theme.bg_tertiary))
+            .bg(theme.surfaces.primary.ramp())
             .child(
                 div()
                     .flex()

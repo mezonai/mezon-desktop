@@ -2,11 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{App, AppContext, Context, Entity, Global, Task};
+use gpui::{App, AppContext, Context, Entity, Global, Subscription, Task};
 use mezon_client::{AppApi, ConnectionStatus};
 
-use crate::clan::OnboardingItem;
-use crate::ids::ClanId;
+use crate::clan::{ClanEvent, ClanList, OnboardingItem};
+use crate::ids::{ChannelId, ClanId};
 
 const CACHE_TTL: Duration = Duration::from_secs(20 * 60);
 const FETCH_RETRY_BACKOFF: Duration = Duration::from_secs(30);
@@ -22,6 +22,12 @@ pub const MISSION_VISIT: i32 = 2;
 pub const MISSION_DO_SOMETHING: i32 = 3;
 
 pub const DONE_ONBOARDING_STATUS: i32 = 3;
+
+#[derive(Debug, Default)]
+struct PreviewRun {
+    done: usize,
+    answers: HashSet<(i64, usize)>,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ClanOnboarding {
@@ -64,10 +70,13 @@ pub struct OnboardingStore {
     steps_fetched_at: HashMap<ClanId, Instant>,
     steps_failed_at: HashMap<ClanId, Instant>,
     mission_done: HashMap<ClanId, usize>,
+    step_before_finish: HashMap<ClanId, i32>,
     answers: HashMap<ClanId, HashSet<(i64, usize)>>,
+    preview: Option<(ClanId, PreviewRun)>,
     reset_generation: u64,
     api: Arc<AppApi>,
     _connection_watch: Task<()>,
+    _clan_watch: Option<Subscription>,
 }
 
 struct GlobalOnboardingStore(Entity<OnboardingStore>);
@@ -82,6 +91,17 @@ impl OnboardingStore {
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         let connection_watch = Self::spawn_connection_watch(api.clone(), cx);
+        let clan_watch = ClanList::try_global(cx).map(|clans| {
+            cx.subscribe(&clans, |this, _, event: &ClanEvent, cx| {
+                if let ClanEvent::ActiveClanChanged(clan_id) = event
+                    && this
+                        .preview_clan()
+                        .is_some_and(|previewing| clan_id.is_none_or(|active| active != previewing))
+                {
+                    this.close_preview(cx);
+                }
+            })
+        });
         Self {
             clans: HashMap::new(),
             loading: HashSet::new(),
@@ -92,10 +112,13 @@ impl OnboardingStore {
             steps_fetched_at: HashMap::new(),
             steps_failed_at: HashMap::new(),
             mission_done: HashMap::new(),
+            step_before_finish: HashMap::new(),
             answers: HashMap::new(),
+            preview: None,
             reset_generation: 0,
             api,
             _connection_watch: connection_watch,
+            _clan_watch: clan_watch,
         }
     }
 
@@ -154,7 +177,9 @@ impl OnboardingStore {
         self.steps_fetched_at.clear();
         self.steps_failed_at.clear();
         self.mission_done.clear();
+        self.step_before_finish.clear();
         self.answers.clear();
+        self.preview = None;
         self.reset_generation = self.reset_generation.wrapping_add(1);
         cx.notify();
     }
@@ -175,28 +200,108 @@ impl OnboardingStore {
         self.clans.contains_key(&clan_id)
     }
 
-    pub fn mission_done(&self, clan_id: ClanId) -> usize {
-        if self.is_finished(clan_id) {
-            return self
-                .clans
-                .get(&clan_id)
-                .map_or(0, |onboarding| onboarding.missions.len());
-        }
-        self.mission_done.get(&clan_id).copied().unwrap_or(0)
+    pub fn load_attempted(&self, clan_id: ClanId) -> bool {
+        self.loading.contains(&clan_id)
+            || self.fetched_at.contains_key(&clan_id)
+            || self.failed_at.contains_key(&clan_id)
     }
 
     pub fn is_finished(&self, clan_id: ClanId) -> bool {
         self.steps.get(&clan_id).copied() == Some(DONE_ONBOARDING_STATUS)
     }
 
-    pub fn answer_selected(&self, clan_id: ClanId, question_id: i64, index: usize) -> bool {
-        self.answers
+    pub fn mission_total(&self, clan_id: ClanId) -> usize {
+        self.clans
             .get(&clan_id)
+            .map_or(0, |onboarding| onboarding.missions.len())
+    }
+
+    pub fn mission_progress(&self, clan_id: ClanId) -> usize {
+        if let Some(run) = self.preview_run(clan_id) {
+            return run.done;
+        }
+        if self.is_finished(clan_id) {
+            return self.mission_total(clan_id);
+        }
+        self.mission_done.get(&clan_id).copied().unwrap_or(0)
+    }
+
+    fn preview_run(&self, clan_id: ClanId) -> Option<&PreviewRun> {
+        self.preview
+            .as_ref()
+            .filter(|(previewing, _)| *previewing == clan_id)
+            .map(|(_, run)| run)
+    }
+
+    fn preview_run_mut(&mut self, clan_id: ClanId) -> Option<&mut PreviewRun> {
+        self.preview
+            .as_mut()
+            .filter(|(previewing, _)| *previewing == clan_id)
+            .map(|(_, run)| run)
+    }
+
+    /// The mission the member is expected to do next, or `None` once every one is ticked.
+    pub fn current_mission(&self, clan_id: ClanId) -> Option<&OnboardingItem> {
+        self.clans
+            .get(&clan_id)?
+            .missions
+            .get(self.mission_progress(clan_id))
+    }
+
+    /// Whether `ListOnboardingStep` has answered for this clan. The progress chrome stays hidden
+    /// until it has, so a member who already finished never sees it flash on the way in.
+    pub fn steps_loaded(&self, clan_id: ClanId) -> bool {
+        self.steps_fetched_at.contains_key(&clan_id)
+    }
+
+    pub fn preview_clan(&self) -> Option<ClanId> {
+        self.preview.as_ref().map(|(clan_id, _)| *clan_id)
+    }
+
+    pub fn is_previewing(&self, clan_id: ClanId) -> bool {
+        self.preview_clan() == Some(clan_id)
+    }
+
+    /// Look at the clan the way a brand new member would: the progress chrome shows even for the
+    /// owner, who has long since finished onboarding.
+    pub fn open_preview(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.preview = Some((clan_id, PreviewRun::default()));
+        cx.notify();
+    }
+
+    pub fn close_preview(&mut self, cx: &mut Context<Self>) {
+        if self.preview.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The gate the onboarding progress chrome shares — the sidebar card and the composer
+    /// mission banner. `clan_enabled` is the clan's `is_onboarding` flag, which lives on
+    /// `ClanList`.
+    pub fn show_progress(&self, clan_id: ClanId, clan_enabled: bool) -> bool {
+        if !clan_enabled || self.mission_total(clan_id) == 0 {
+            return false;
+        }
+        if self.is_previewing(clan_id) {
+            return true;
+        }
+        self.steps_loaded(clan_id) && !self.is_finished(clan_id)
+    }
+
+    pub fn answer_selected(&self, clan_id: ClanId, question_id: i64, index: usize) -> bool {
+        self.selected_answers(clan_id)
             .is_some_and(|answers| answers.contains(&(question_id, index)))
     }
 
     pub fn answered_count(&self, clan_id: ClanId) -> usize {
-        self.answers.get(&clan_id).map_or(0, HashSet::len)
+        self.selected_answers(clan_id).map_or(0, HashSet::len)
+    }
+
+    fn selected_answers(&self, clan_id: ClanId) -> Option<&HashSet<(i64, usize)>> {
+        match self.preview_run(clan_id) {
+            Some(run) => Some(&run.answers),
+            None => self.answers.get(&clan_id),
+        }
     }
 
     pub fn answered_percent(&self, clan_id: ClanId) -> f32 {
@@ -217,7 +322,10 @@ impl OnboardingStore {
         index: usize,
         cx: &mut Context<Self>,
     ) {
-        let answers = self.answers.entry(clan_id).or_default();
+        let answers = match self.preview_run_mut(clan_id) {
+            Some(run) => &mut run.answers,
+            None => self.answers.entry(clan_id).or_default(),
+        };
         if !answers.insert((question_id, index)) {
             answers.remove(&(question_id, index));
         }
@@ -225,7 +333,27 @@ impl OnboardingStore {
     }
 
     pub fn can_start_mission(&self, clan_id: ClanId, index: usize) -> bool {
-        self.is_finished(clan_id) || self.mission_done(clan_id) == index
+        if !self.is_previewing(clan_id) && self.is_finished(clan_id) {
+            return true;
+        }
+        self.mission_progress(clan_id) == index
+    }
+
+    pub fn note_message_sent(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.mission_is_satisfied_by_send(clan_id, channel_id) {
+            self.complete_mission(clan_id, cx);
+        }
+    }
+
+    fn mission_is_satisfied_by_send(&self, clan_id: ClanId, channel_id: ChannelId) -> bool {
+        self.current_mission(clan_id).is_some_and(|mission| {
+            mission.task_type == MISSION_SEND_MESSAGE && mission.channel_id == channel_id.get()
+        })
     }
 
     pub fn complete_mission(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
@@ -233,23 +361,33 @@ impl OnboardingStore {
             return;
         }
         cx.notify();
-        let total = self
-            .clans
-            .get(&clan_id)
-            .map_or(0, |onboarding| onboarding.missions.len());
-        if total > 0 && self.mission_done.get(&clan_id).copied().unwrap_or(0) >= total {
+        if self.should_persist_completion(clan_id) {
             self.finish_onboarding(clan_id, cx);
         }
     }
 
+    /// Whether ticking the last mission should tell the server the run is over. Previewing walks
+    /// the same missions to show the owner what a new member sees, so it must not record anything.
+    fn should_persist_completion(&self, clan_id: ClanId) -> bool {
+        if self.is_previewing(clan_id) {
+            return false;
+        }
+        let total = self.mission_total(clan_id);
+        total > 0 && self.mission_done.get(&clan_id).copied().unwrap_or(0) >= total
+    }
+
     fn advance_mission(&mut self, clan_id: ClanId) -> bool {
+        let total = self.mission_total(clan_id);
+        if let Some(run) = self.preview_run_mut(clan_id) {
+            if run.done >= total {
+                return false;
+            }
+            run.done += 1;
+            return true;
+        }
         if self.is_finished(clan_id) {
             return false;
         }
-        let total = self
-            .clans
-            .get(&clan_id)
-            .map_or(0, |onboarding| onboarding.missions.len());
         let done = self.mission_done.entry(clan_id).or_insert(0);
         if *done >= total {
             return false;
@@ -259,7 +397,9 @@ impl OnboardingStore {
     }
 
     fn finish_onboarding(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
-        self.steps.insert(clan_id, DONE_ONBOARDING_STATUS);
+        let step_before = self.steps.insert(clan_id, DONE_ONBOARDING_STATUS);
+        self.step_before_finish
+            .insert(clan_id, step_before.unwrap_or(0));
         let api = self.api.clone();
         let reset_generation = self.reset_generation;
         cx.spawn(async move |this, cx| {
@@ -272,12 +412,23 @@ impl OnboardingStore {
                     if this.reset_generation != reset_generation {
                         return;
                     }
-                    this.steps.remove(&clan_id);
+                    this.revert_finish(clan_id);
                     cx.notify();
                 });
             }
         })
         .detach();
+    }
+
+    /// Undo an optimistic finish the server refused. The tick that completed the run goes back
+    /// too, so the member is left on the mission they were on instead of on a finished count the
+    /// server never recorded.
+    fn revert_finish(&mut self, clan_id: ClanId) {
+        let step_before = self.step_before_finish.remove(&clan_id).unwrap_or(0);
+        self.steps.insert(clan_id, step_before);
+        if let Some(done) = self.mission_done.get_mut(&clan_id) {
+            *done = done.saturating_sub(1);
+        }
     }
 
     pub fn set_items(
@@ -437,13 +588,16 @@ mod tests {
             steps_fetched_at: HashMap::new(),
             steps_failed_at: HashMap::new(),
             mission_done: HashMap::new(),
+            step_before_finish: HashMap::new(),
             answers: HashMap::new(),
+            preview: None,
             reset_generation: 0,
             api: Arc::new(AppApi::new(
                 Arc::new(mezon_client::TransportClient::new(String::new())),
                 String::new(),
             )),
             _connection_watch: Task::ready(()),
+            _clan_watch: None,
         }
     }
 
@@ -479,11 +633,11 @@ mod tests {
         assert!(store.can_start_mission(CLAN, 0));
         assert!(!store.can_start_mission(CLAN, 1));
         assert!(store.advance_mission(CLAN));
-        assert_eq!(store.mission_done(CLAN), 1);
+        assert_eq!(store.mission_progress(CLAN), 1);
         assert!(store.can_start_mission(CLAN, 1));
         assert!(store.advance_mission(CLAN));
         assert!(!store.advance_mission(CLAN));
-        assert_eq!(store.mission_done(CLAN), 2);
+        assert_eq!(store.mission_progress(CLAN), 2);
     }
 
     #[test]
@@ -497,7 +651,7 @@ mod tests {
             ]),
         );
         store.steps.insert(CLAN, DONE_ONBOARDING_STATUS);
-        assert_eq!(store.mission_done(CLAN), 2);
+        assert_eq!(store.mission_progress(CLAN), 2);
         assert!(store.can_start_mission(CLAN, 1));
         assert!(!store.advance_mission(CLAN));
     }
@@ -513,6 +667,283 @@ mod tests {
             ClanOnboarding::from_items(vec![item(1, GUIDE_TYPE_RULE, 0)]),
         );
         assert!(!store.load_failed(CLAN));
+    }
+
+    #[test]
+    fn progress_chrome_waits_for_the_step_fetch_and_hides_once_finished() {
+        let mut store = test_store();
+        store.clans.insert(
+            CLAN,
+            ClanOnboarding::from_items(vec![item(1, GUIDE_TYPE_TASK, 0)]),
+        );
+        // Items are in, but `ListOnboardingStep` has not answered yet.
+        assert!(!store.show_progress(CLAN, true));
+
+        store.steps_fetched_at.insert(CLAN, Instant::now());
+        assert!(store.show_progress(CLAN, true));
+
+        // A clan that never switched onboarding on shows nothing either way.
+        assert!(!store.show_progress(CLAN, false));
+        store.steps.insert(CLAN, DONE_ONBOARDING_STATUS);
+        assert!(!store.show_progress(CLAN, false));
+        assert!(!store.show_progress(CLAN, true));
+    }
+
+    #[test]
+    fn a_clan_with_no_missions_shows_no_progress_even_while_previewing() {
+        let mut store = test_store();
+        store.clans.insert(
+            CLAN,
+            ClanOnboarding::from_items(vec![item(1, GUIDE_TYPE_RULE, 0)]),
+        );
+        store.steps_fetched_at.insert(CLAN, Instant::now());
+        store.preview = Some((CLAN, PreviewRun::default()));
+
+        assert!(
+            !store.show_progress(CLAN, true),
+            "a guide with no missions has no run to show"
+        );
+        assert!(!store.show_progress(CLAN, false));
+    }
+
+    #[test]
+    fn preview_forces_the_chrome_on_and_restarts_the_count() {
+        let mut store = test_store();
+        store.clans.insert(
+            CLAN,
+            ClanOnboarding::from_items(vec![
+                item(1, GUIDE_TYPE_TASK, 0),
+                item(2, GUIDE_TYPE_TASK, 0),
+            ]),
+        );
+        store.steps.insert(CLAN, DONE_ONBOARDING_STATUS);
+        assert!(!store.show_progress(CLAN, true));
+        assert_eq!(store.mission_progress(CLAN), 2);
+
+        store.preview = Some((CLAN, PreviewRun::default()));
+        assert!(store.show_progress(CLAN, true));
+        // The finished flag ticks every mission on the guide, but the owner previewing the clan
+        // still starts the run from the first one.
+        assert_eq!(store.mission_progress(CLAN), 0);
+        assert_eq!(store.current_mission(CLAN).map(|item| item.id), Some(1));
+        assert!(!store.show_progress(ClanId(8), true));
+    }
+
+    #[test]
+    fn preview_walks_the_missions_an_owner_already_finished() {
+        let mut store = test_store();
+        store.clans.insert(
+            CLAN,
+            ClanOnboarding::from_items(vec![
+                item(1, GUIDE_TYPE_TASK, 0),
+                item(2, GUIDE_TYPE_TASK, 0),
+            ]),
+        );
+        store.steps.insert(CLAN, DONE_ONBOARDING_STATUS);
+        store.preview = Some((CLAN, PreviewRun::default()));
+
+        assert!(store.can_start_mission(CLAN, 0));
+        assert!(
+            !store.can_start_mission(CLAN, 1),
+            "previewing follows the run in order, like a new member"
+        );
+        assert!(store.advance_mission(CLAN));
+        assert_eq!(store.mission_progress(CLAN), 1);
+        assert_eq!(store.current_mission(CLAN).map(|item| item.id), Some(2));
+        assert!(store.advance_mission(CLAN));
+        assert_eq!(store.mission_progress(CLAN), 2);
+        assert!(store.current_mission(CLAN).is_none());
+    }
+
+    #[test]
+    fn previewing_never_records_the_run_as_finished() {
+        let mut store = test_store();
+        store.clans.insert(
+            CLAN,
+            ClanOnboarding::from_items(vec![item(1, GUIDE_TYPE_TASK, 0)]),
+        );
+        store.mission_done.insert(CLAN, 1);
+        assert!(store.should_persist_completion(CLAN));
+
+        store.preview = Some((CLAN, PreviewRun::default()));
+        assert!(!store.should_persist_completion(CLAN));
+    }
+
+    #[test]
+    fn a_step_the_server_refused_takes_the_last_tick_back_with_it() {
+        let mut store = test_store();
+        store.clans.insert(
+            CLAN,
+            ClanOnboarding::from_items(vec![
+                item(1, GUIDE_TYPE_TASK, 0),
+                item(2, GUIDE_TYPE_TASK, 0),
+            ]),
+        );
+        store.mission_done.insert(CLAN, 2);
+        store.steps.insert(CLAN, DONE_ONBOARDING_STATUS);
+
+        store.revert_finish(CLAN);
+
+        assert!(!store.is_finished(CLAN));
+        assert_eq!(
+            store.mission_progress(CLAN),
+            1,
+            "the member is left on the mission they were on, not on a finished count"
+        );
+        assert_eq!(store.current_mission(CLAN).map(|item| item.id), Some(2));
+    }
+
+    #[test]
+    fn no_current_mission_once_every_one_is_done() {
+        let mut store = test_store();
+        store.clans.insert(
+            CLAN,
+            ClanOnboarding::from_items(vec![item(1, GUIDE_TYPE_TASK, 0)]),
+        );
+        assert_eq!(store.current_mission(CLAN).map(|item| item.id), Some(1));
+        store.mission_done.insert(CLAN, 1);
+        assert!(store.current_mission(CLAN).is_none());
+    }
+
+    #[test]
+    fn previewing_leaves_the_members_own_run_untouched() {
+        let mut store = test_store();
+        store.clans.insert(
+            CLAN,
+            ClanOnboarding::from_items(vec![
+                item(1, GUIDE_TYPE_TASK, 0),
+                item(2, GUIDE_TYPE_TASK, 0),
+            ]),
+        );
+        store.steps.insert(CLAN, 0);
+        store.mission_done.insert(CLAN, 1);
+
+        store.preview = Some((CLAN, PreviewRun::default()));
+        assert_eq!(
+            store.mission_progress(CLAN),
+            0,
+            "preview starts its own run"
+        );
+        assert!(store.advance_mission(CLAN));
+        assert!(store.advance_mission(CLAN));
+        assert_eq!(store.mission_progress(CLAN), 2);
+        assert!(!store.should_persist_completion(CLAN));
+
+        store.preview = None;
+        assert_eq!(
+            store.mission_progress(CLAN),
+            1,
+            "the member is still on the mission they were really on"
+        );
+        assert!(
+            store.advance_mission(CLAN),
+            "their own run must still be completable"
+        );
+        assert!(store.should_persist_completion(CLAN));
+    }
+
+    #[test]
+    fn every_preview_starts_over() {
+        let mut store = test_store();
+        store.clans.insert(
+            CLAN,
+            ClanOnboarding::from_items(vec![
+                item(1, GUIDE_TYPE_TASK, 0),
+                item(2, GUIDE_TYPE_TASK, 0),
+            ]),
+        );
+        store.preview = Some((CLAN, PreviewRun::default()));
+        assert!(store.advance_mission(CLAN));
+        assert_eq!(store.mission_progress(CLAN), 1);
+
+        store.preview = Some((CLAN, PreviewRun::default()));
+        assert_eq!(store.mission_progress(CLAN), 0);
+        assert_eq!(store.current_mission(CLAN).map(|item| item.id), Some(1));
+    }
+
+    #[test]
+    fn preview_answers_do_not_leak_into_the_real_ones() {
+        let mut store = test_store();
+        store.clans.insert(
+            CLAN,
+            ClanOnboarding::from_items(vec![item(1, GUIDE_TYPE_QUESTION, 4)]),
+        );
+        store.answers.entry(CLAN).or_default().insert((1, 0));
+
+        store.preview = Some((CLAN, PreviewRun::default()));
+        assert!(
+            !store.answer_selected(CLAN, 1, 0),
+            "preview starts unanswered"
+        );
+        store
+            .preview_run_mut(CLAN)
+            .expect("previewing")
+            .answers
+            .insert((1, 3));
+        assert_eq!(store.answered_count(CLAN), 1);
+
+        store.preview = None;
+        assert!(store.answer_selected(CLAN, 1, 0));
+        assert!(!store.answer_selected(CLAN, 1, 3));
+        assert_eq!(store.answered_count(CLAN), 1);
+    }
+
+    #[test]
+    fn a_refused_step_keeps_the_chrome_on_screen() {
+        let mut store = test_store();
+        store.clans.insert(
+            CLAN,
+            ClanOnboarding::from_items(vec![
+                item(1, GUIDE_TYPE_TASK, 0),
+                item(2, GUIDE_TYPE_TASK, 0),
+            ]),
+        );
+        store.steps_fetched_at.insert(CLAN, Instant::now());
+        store.steps.insert(CLAN, 0);
+        store.mission_done.insert(CLAN, 2);
+
+        store.step_before_finish.insert(CLAN, 0);
+        store.steps.insert(CLAN, DONE_ONBOARDING_STATUS);
+        store.revert_finish(CLAN);
+
+        assert!(!store.is_finished(CLAN));
+        assert!(
+            store.show_progress(CLAN, true),
+            "a refused step must not take the card and the banner with it"
+        );
+        assert_eq!(store.mission_progress(CLAN), 1);
+        assert_eq!(store.current_mission(CLAN).map(|item| item.id), Some(2));
+    }
+
+    #[test]
+    fn a_send_message_mission_is_ticked_by_the_send_that_satisfies_it() {
+        let mut store = test_store();
+        let mut mission = item(1, GUIDE_TYPE_TASK, 0);
+        mission.task_type = MISSION_SEND_MESSAGE;
+        mission.channel_id = 42;
+        let mut second = item(2, GUIDE_TYPE_TASK, 0);
+        second.task_type = MISSION_VISIT;
+        store
+            .clans
+            .insert(CLAN, ClanOnboarding::from_items(vec![mission, second]));
+
+        assert_eq!(store.current_mission(CLAN).map(|item| item.id), Some(1));
+        assert!(
+            !store.mission_is_satisfied_by_send(CLAN, ChannelId(7)),
+            "a send elsewhere is not this mission"
+        );
+        assert!(store.mission_is_satisfied_by_send(CLAN, ChannelId(42)));
+    }
+
+    #[test]
+    fn a_load_that_was_attempted_stops_the_sidebar_asking_again() {
+        let mut store = test_store();
+        assert!(!store.load_attempted(CLAN));
+        store.failed_at.insert(CLAN, Instant::now());
+        assert!(store.load_attempted(CLAN));
+        store.failed_at.remove(&CLAN);
+        store.fetched_at.insert(CLAN, Instant::now());
+        assert!(store.load_attempted(CLAN));
     }
 
     #[test]

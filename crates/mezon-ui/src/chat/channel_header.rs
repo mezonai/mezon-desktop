@@ -23,7 +23,7 @@ use crate::chat::pinned_popover::{PinnedPopoverPanel, pin_popover_on_open};
 use crate::chat::threads_popover::{ThreadsPopoverPanel, thread_popover_on_open};
 use crate::chat::{CanvasPopoverPanel, canvas_popover_on_open};
 use crate::components::compositions::channel_row::{ChannelIcon, render_channel_icon};
-use crate::components::primitives::{Avatar, Icon, IconName, InputState};
+use crate::components::primitives::{Avatar, Divider, Icon, IconName, InputState};
 use crate::components::{Button, ButtonVariant, ButtonVariants, Sizable, Size};
 use crate::theme::{ActiveTheme, Theme};
 
@@ -514,9 +514,9 @@ impl ChannelHeader {
                         div()
                             .flex()
                             .items_center()
-                            .pl_4()
-                            .border_l_1()
-                            .border_color(theme.tokens.border_primary)
+                            .ml(px(4.))
+                            .gap(px(8.))
+                            .child(Divider::vertical().flex_shrink_0().h(px(20.)))
                             .child(inbox)
                             .into_any_element()
                     }))

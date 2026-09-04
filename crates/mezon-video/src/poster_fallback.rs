@@ -5,6 +5,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use openh264::formats::YUVSource;
 
 use crate::VideoProbe;
+use crate::poster::Turn;
 
 const POSTER_SECONDS: f64 = 1.0;
 const MAX_SAMPLES_SCANNED: u32 = 300;
@@ -16,6 +17,7 @@ struct VideoTrack {
     width: u32,
     height: u32,
     timescale: u32,
+    display: Turn,
     nal_length_size: usize,
     parameter_sets: Vec<u8>,
 }
@@ -72,11 +74,15 @@ fn video_track<R: std::io::Read + std::io::Seek>(reader: &mp4::Mp4Reader<R>) -> 
             .avc1
             .as_ref()
             .map(|avc1| &avc1.avcc);
+        let matrix = &track.trak.tkhd.matrix;
+        let display = display_turn(matrix.a, matrix.b, matrix.c, matrix.d);
+        let (width, height) = (u32::from(track.width()), u32::from(track.height()));
         Some(VideoTrack {
             id: *id,
-            width: u32::from(track.width()),
-            height: u32::from(track.height()),
+            width: display.applied_to((width, height)).0,
+            height: display.applied_to((width, height)).1,
             timescale: track.timescale(),
+            display,
             nal_length_size: avcc.map_or(DEFAULT_NAL_LENGTH_SIZE, |avcc| {
                 usize::from(avcc.length_size_minus_one & 0x3) + 1
             }),
@@ -118,7 +124,7 @@ fn decode_poster<R: std::io::Read + std::io::Seek>(
     let first_extra = keyframe.index.saturating_add(1);
     for next in first_extra..=first_extra.saturating_add(MAX_EXTRA_FEEDS) {
         match decoder.decode(&unit) {
-            Ok(Some(yuv)) => return encode(&yuv, max_poster_edge),
+            Ok(Some(yuv)) => return encode(&yuv, track.display, max_poster_edge),
             Ok(None) => {}
             Err(error) => {
                 tracing::warn!(target: "mezon_video", %error, "openh264 could not decode this video");
@@ -134,13 +140,52 @@ fn decode_poster<R: std::io::Read + std::io::Seek>(
     None
 }
 
-fn encode(yuv: &openh264::decoder::DecodedYUV<'_>, max_poster_edge: u32) -> Option<Vec<u8>> {
+fn encode(
+    yuv: &openh264::decoder::DecodedYUV<'_>,
+    display: Turn,
+    max_poster_edge: u32,
+) -> Option<Vec<u8>> {
     let (width, height) = yuv.dimensions();
     let mut rgb = vec![0u8; width.checked_mul(height)?.checked_mul(3)?];
     yuv.write_rgb8(&mut rgb);
     let rgb =
         image::RgbImage::from_raw(u32::try_from(width).ok()?, u32::try_from(height).ok()?, rgb)?;
-    crate::poster::encode_rgb_jpeg(rgb, max_poster_edge)
+    crate::poster::encode_rgb_jpeg(rgb, display, max_poster_edge)
+}
+
+pub(crate) fn container_turn(path: &str) -> Option<Turn> {
+    catch_unwind(AssertUnwindSafe(|| {
+        let file = File::open(path).ok()?;
+        let size = file.metadata().ok()?.len();
+        let reader = mp4::Mp4Reader::read_header(BufReader::new(file), size).ok()?;
+        Some(video_track(&reader)?.display)
+    }))
+    .unwrap_or(None)
+}
+
+fn display_turn(a: i32, b: i32, c: i32, d: i32) -> Turn {
+    const HALF: i32 = 1 << 15;
+    fn unit(value: i32) -> i32 {
+        match value {
+            v if v > HALF => 1,
+            v if v < -HALF => -1,
+            _ => 0,
+        }
+    }
+    let (mirrored, quarter_turns) = match (unit(a), unit(b), unit(c), unit(d)) {
+        (0, 1, -1, 0) => (false, 1),
+        (-1, 0, 0, -1) => (false, 2),
+        (0, -1, 1, 0) => (false, 3),
+        (-1, 0, 0, 1) => (true, 0),
+        (0, -1, -1, 0) => (true, 1),
+        (1, 0, 0, -1) => (true, 2),
+        (0, 1, 1, 0) => (true, 3),
+        _ => (false, 0),
+    };
+    Turn {
+        mirrored,
+        quarter_turns,
+    }
 }
 
 fn poster_sample<R: std::io::Read + std::io::Seek>(
@@ -195,6 +240,43 @@ fn append_annex_b(out: &mut Vec<u8>, avcc: &[u8], nal_length_size: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ONE: i32 = 1 << 16;
+
+    fn orientation(a: i32, b: i32, c: i32, d: i32) -> (bool, u8) {
+        let display = display_turn(a, b, c, d);
+        (display.mirrored, display.quarter_turns)
+    }
+
+    #[test]
+    fn the_display_matrix_maps_to_a_mirror_and_a_turn() {
+        assert_eq!(orientation(ONE, 0, 0, ONE), (false, 0));
+        assert_eq!(orientation(0, ONE, -ONE, 0), (false, 1));
+        assert_eq!(orientation(-ONE, 0, 0, -ONE), (false, 2));
+        assert_eq!(orientation(0, -ONE, ONE, 0), (false, 3));
+        assert_eq!(orientation(-ONE, 0, 0, ONE), (true, 0));
+        assert_eq!(orientation(0, -ONE, -ONE, 0), (true, 1));
+        assert_eq!(orientation(ONE, 0, 0, -ONE), (true, 2));
+        assert_eq!(orientation(0, ONE, ONE, 0), (true, 3));
+    }
+
+    #[test]
+    fn a_transposed_matrix_still_swaps_the_side_lengths() {
+        assert!(display_turn(0, ONE, ONE, 0).swaps_axes());
+        assert!(display_turn(0, -ONE, -ONE, 0).swaps_axes());
+        assert!(!display_turn(-ONE, 0, 0, ONE).swaps_axes());
+    }
+
+    #[test]
+    fn an_encoders_rounding_still_reads_as_the_same_turn() {
+        assert_eq!(orientation(3, ONE - 4, -ONE + 2, -5), (false, 1));
+    }
+
+    #[test]
+    fn an_unrecognised_matrix_is_left_alone() {
+        assert_eq!(orientation(0, 0, 0, 0), (false, 0));
+        assert_eq!(orientation(ONE * 2, 0, 0, ONE * 2), (false, 0));
+    }
 
     #[test]
     fn append_annex_b_restamps_every_length_prefixed_unit() {

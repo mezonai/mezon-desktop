@@ -7,9 +7,9 @@ use gpui::{
     Subscription, Task, Window, div, prelude::*, px, rgb, rgba,
 };
 use mezon_store::{
-    BannedUsersStore, ChannelId, ChannelPermissionsStore, ClanId, DirectEvent, DirectKind,
-    DirectMessageStore, FriendEvent, FriendStore, InVoiceInfo, MessagesEvent, MessagesStore,
-    PERMISSION_SEND_MESSAGE, Settings,
+    BannedUsersStore, ChannelId, ChannelList, ChannelPermissionsStore, ClanId, ClanList,
+    DirectEvent, DirectKind, DirectMessageStore, FriendEvent, FriendStore, InVoiceInfo,
+    MessagesEvent, MessagesStore, OnboardingStore, PERMISSION_SEND_MESSAGE, Settings,
 };
 use ui::PopoverMenuHandle;
 
@@ -113,6 +113,101 @@ fn banned_notice(locale: &str, remaining: Option<i64>, cx: &App) -> gpui::AnyEle
                 .child(crate::util::time_ago::remaining(locale, left))
         }))
         .into_any_element()
+}
+
+/// The strip React parks directly on top of the composer while a member still has onboarding
+/// missions left: the next mission, and clicking it does the mission.
+fn onboarding_mission_banner(locale: &str, cx: &mut App) -> Option<gpui::AnyElement> {
+    let clan_id = ClanList::global(cx).read(cx).active_clan_id?;
+    let store = OnboardingStore::global(cx);
+    let store = store.read(cx);
+    // This runs on every chat render, so the clan with no missions — every clan, for most
+    // people — bails on one hash lookup, before the scan `ClanList::clan` costs.
+    if store.mission_total(clan_id) == 0 {
+        return None;
+    }
+    let clan_enabled = ClanList::global(cx)
+        .read(cx)
+        .clan(clan_id)
+        .is_some_and(|clan| clan.is_onboarding);
+    if !store.show_progress(clan_id, clan_enabled) {
+        return None;
+    }
+    let index = store.mission_progress(clan_id);
+    let mission = store.current_mission(clan_id)?;
+    let title: SharedString = mission.title.clone().into();
+    let task_type = mission.task_type;
+    let channel_id = ChannelId(mission.channel_id);
+    let channel_name = ChannelList::global(cx)
+        .read(cx)
+        .channel(clan_id, channel_id)
+        .map(|channel| SharedString::from(format!("#{}", channel.name)));
+    let theme = cx.theme();
+    Some(
+        div()
+            .flex_none()
+            .w_full()
+            .px_3()
+            .child(
+                div()
+                    .id("onboarding-mission-banner")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .w_full()
+                    .h(px(56.))
+                    .px_4()
+                    .rounded_t(px(6.))
+                    .cursor_pointer()
+                    .bg(theme.tokens.bg_tertiary)
+                    .hover(|style| style.bg(theme.tokens.bg_item_hover))
+                    .child(
+                        Icon::new(IconName::Hashtag)
+                            .size(px(20.))
+                            .text_color(theme.tokens.text_theme_primary),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.tokens.text_secondary)
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_1()
+                                    .text_size(px(10.))
+                                    .text_color(theme.tokens.text_theme_primary)
+                                    .child(crate::chat::clan_guide_page::mission_summary(
+                                        locale, task_type,
+                                    ))
+                                    .children(channel_name.map(|name| {
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.tokens.text_secondary)
+                                            .child(name)
+                                    })),
+                            ),
+                    )
+                    .on_click(move |_, _, cx| {
+                        crate::chat::clan_guide_page::start_mission(
+                            clan_id, channel_id, task_type, index, cx,
+                        );
+                    }),
+            )
+            .into_any_element(),
+    )
 }
 
 fn leave_removed_conversation(channel_id: ChannelId, cx: &mut App) {
@@ -812,6 +907,12 @@ impl ChatArea {
         };
         let banned = ban_notice.is_some();
 
+        let onboarding_mission = if !is_dm && !media_channel_view && !send_denied && !banned {
+            onboarding_mission_banner(locale, cx)
+        } else {
+            None
+        };
+
         let timeline_popover_open = self.timeline.read(cx).profile_popover_open();
         let member_popover_open = self
             .member_panel
@@ -869,7 +970,8 @@ impl ChatArea {
                     col.child(no_permission_notice)
                 })
                 .when(!banned && !send_denied, |col| {
-                    col.when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
+                    col.children(onboarding_mission)
+                        .when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
                         .when_some(app_channel_bar.as_ref(), |col, target| {
                             col.child(render_channel_app_bar(locale, target.clone(), cx.theme()))
                         })
