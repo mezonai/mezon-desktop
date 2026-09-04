@@ -4,7 +4,7 @@
 
 # Crates we own — vendored Zed crates are excluded (we don't lint/test their code;
 # some of their test targets don't even compile against our pinned deps).
-pkgs := "-p mezon-app -p mezon-ui -p mezon-store -p mezon-client -p mezon-native -p mezon-pdf -p mezon-proto -p mezon-i18n -p mezon-theme -p mezon-widgets -p mezon-canvas -p mezon-updater -p mezon-audio -p mezon-cli -p mezon-mcp -p mezon-voice -p mezon-stream -p mezon-record -p mezon-call -p mezon-active-windows -p mmn-client"
+pkgs := "-p mezon-app -p mezon-ui -p mezon-store -p mezon-client -p mezon-native -p mezon-pdf -p mezon-proto -p mezon-i18n -p mezon-theme -p mezon-widgets -p mezon-canvas -p mezon-video -p mezon-updater -p mezon-audio -p mezon-cli -p mezon-mcp -p mezon-voice -p mezon-stream -p mezon-record -p mezon-call -p mezon-active-windows -p mmn-client"
 
 # Formatting scope lives in scripts/fmt.sh — the one place the justfile, the
 # pre-commit hook and CI all read it from, so they cannot drift apart.

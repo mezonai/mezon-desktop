@@ -169,6 +169,9 @@ impl Global for SharedRoleIconCache {}
 struct SharedRoleIconPreviewCache(Entity<LruImageCache>);
 impl Global for SharedRoleIconPreviewCache {}
 
+struct SharedSpriteSheetCache(Entity<LruImageCache>);
+impl Global for SharedSpriteSheetCache {}
+
 const OGP_TIMELINE_CACHE_CAPACITY: usize = 12;
 const OGP_TIMELINE_CACHE_BYTES: u64 = 6 * 1024 * 1024;
 const OGP_AUX_CACHE_CAPACITY: usize = 4;
@@ -210,6 +213,23 @@ pub fn social_thumb_cache(label: &'static str, cx: &mut App) -> Entity<LruImageC
             cx,
         )
     })
+}
+
+pub fn shared_sprite_sheet_cache(cx: &mut App) -> Entity<LruImageCache> {
+    if let Some(existing) = cx.try_global::<SharedSpriteSheetCache>() {
+        return existing.0.clone();
+    }
+    let cache = cx.new(|cx| {
+        LruImageCache::sprite_sheet(
+            "message-sprites-shared",
+            SPRITE_SHEET_CACHE_CAPACITY,
+            SPRITE_SHEET_CACHE_BYTES,
+            SPRITE_SHEET_ENTRY_MAX_BYTES,
+            cx,
+        )
+    });
+    cx.set_global(SharedSpriteSheetCache(cache.clone()));
+    cache
 }
 
 /// Shared decode cache for role icons. They render at 12-20px everywhere, so
@@ -482,6 +502,9 @@ pub(crate) async fn read_body_limited(
 
 pub const MESSAGE_IMAGE_CACHE_CAPACITY: usize = 48;
 pub const MESSAGE_IMAGE_CACHE_BYTES: u64 = 32 * 1024 * 1024;
+const SPRITE_SHEET_CACHE_CAPACITY: usize = 4;
+const SPRITE_SHEET_CACHE_BYTES: u64 = 16 * 1024 * 1024;
+const SPRITE_SHEET_ENTRY_MAX_BYTES: u64 = 8 * 1024 * 1024;
 pub const AVATAR_IMAGE_CACHE_CAPACITY: usize = 256;
 pub const AVATAR_IMAGE_CACHE_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -532,6 +555,7 @@ const FRAME_BUMP_REARM: Duration = Duration::from_millis(100);
 const STATS_LOG_INTERVAL: u64 = 600;
 const MESSAGE_ANIMATION_MAX_PX: u32 = 400;
 const MESSAGE_STATIC_MAX_PX: u32 = 1024;
+const SPRITE_SHEET_MAX_PX: u32 = 8192;
 const SHARED_ANIMATION_MAX_PX: u32 = 400;
 const SHARED_STATIC_MAX_PX: u32 = 2048;
 /// Longest side (px) that an animated GIF/WebP is downscaled to for the image
@@ -656,6 +680,7 @@ enum LoaderKind {
     /// cards, capped at [`GALLERY_PREVIEW_DECODE_MAX_PX`].
     GalleryPreview,
     Message,
+    SpriteSheet,
     /// The image-viewer loader: still images keep near-full resolution
     /// ([`VIEWER_STATIC_MAX_PX`]); animated GIF/WebP keep every frame so they
     /// animate, but downscaled to [`VIEWER_ANIMATION_MAX_PX`] and bounded by an
@@ -887,6 +912,23 @@ impl LruImageCache {
         Self::with_loader(
             label,
             LoaderKind::Message,
+            max_items,
+            max_bytes,
+            max_entry_bytes,
+            cx,
+        )
+    }
+
+    pub fn sprite_sheet(
+        label: &'static str,
+        max_items: usize,
+        max_bytes: u64,
+        max_entry_bytes: u64,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_loader(
+            label,
+            LoaderKind::SpriteSheet,
             max_items,
             max_bytes,
             max_entry_bytes,
@@ -1275,6 +1317,9 @@ impl LruImageCache {
             }
             LoaderKind::Message => {
                 AssetLogger::<MessageImageLoader>::load(resource.clone(), cx).boxed()
+            }
+            LoaderKind::SpriteSheet => {
+                AssetLogger::<SpriteSheetImageLoader>::load(resource.clone(), cx).boxed()
             }
             LoaderKind::Viewer => {
                 AssetLogger::<ViewerImageLoader>::load(resource.clone(), cx).boxed()
@@ -1845,6 +1890,22 @@ fn canvas_dimensions(
     Ok(reader.into_dimensions()?)
 }
 
+fn sprite_sheet_decode_limits(bytes: &[u8]) -> Result<(u32, u32), ImageCacheError> {
+    let format = image::guess_format(bytes)?;
+    let (width, height) = canvas_dimensions(bytes, format)?;
+    let decoded_bytes = u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(4);
+    if width <= SPRITE_SHEET_MAX_PX
+        && height <= SPRITE_SHEET_MAX_PX
+        && decoded_bytes <= SPRITE_SHEET_ENTRY_MAX_BYTES
+    {
+        Ok((SPRITE_SHEET_MAX_PX, SPRITE_SHEET_MAX_PX))
+    } else {
+        Ok((MESSAGE_ANIMATION_MAX_PX, MESSAGE_STATIC_MAX_PX))
+    }
+}
+
 fn reject_oversized_canvas(
     bytes: &[u8],
     format: image::ImageFormat,
@@ -1882,7 +1943,9 @@ fn animated_webp_decoder(
 ) -> Result<image::codecs::webp::WebPDecoder<std::io::Cursor<&[u8]>>, ImageCacheError> {
     let mut decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))?;
     image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
-    decoder.set_background_color(image::Rgba([0, 0, 0, 0]))?;
+    if decoder.has_animation() {
+        decoder.set_background_color(image::Rgba([0, 0, 0, 0]))?;
+    }
     Ok(decoder)
 }
 
@@ -2287,6 +2350,26 @@ fn load_bounded(
     wide_lane: bool,
     cx: &mut App,
 ) -> impl Future<Output = Result<Arc<RenderImage>, ImageCacheError>> + Send + 'static {
+    load_bounded_inner(
+        source,
+        animation_max_px,
+        static_max_px,
+        animation_byte_budget,
+        false,
+        wide_lane,
+        cx,
+    )
+}
+
+fn load_bounded_inner(
+    source: Resource,
+    animation_max_px: u32,
+    static_max_px: u32,
+    animation_byte_budget: u64,
+    preserve_native: bool,
+    wide_lane: bool,
+    cx: &mut App,
+) -> impl Future<Output = Result<Arc<RenderImage>, ImageCacheError>> + Send + 'static {
     let client = cx.http_client();
     let svg_renderer = cx.svg_renderer();
     let asset_source = cx.asset_source().clone();
@@ -2328,17 +2411,26 @@ fn load_bounded(
             },
         };
 
-        if image::guess_format(&bytes).is_ok() {
-            decode_message_image(
-                &bytes,
-                animation_max_px,
-                static_max_px,
-                animation_byte_budget,
-            )
-        } else {
-            svg_renderer
+        match image::guess_format(&bytes) {
+            Ok(_) => {
+                let (animation_max_px, static_max_px) = if preserve_native {
+                    sprite_sheet_decode_limits(&bytes)?
+                } else {
+                    (animation_max_px, static_max_px)
+                };
+                decode_message_image(
+                    &bytes,
+                    animation_max_px,
+                    static_max_px,
+                    animation_byte_budget,
+                )
+            }
+            Err(_) if preserve_native => Err(ImageCacheError::Asset(
+                "sprite sheet must use a supported raster format".into(),
+            )),
+            Err(_) => svg_renderer
                 .render_single_frame(&bytes, 1.0)
-                .map_err(Into::into)
+                .map_err(Into::into),
         }
     }
 }
@@ -2363,6 +2455,28 @@ impl Asset for SharedImageLoader {
             SHARED_ANIMATION_MAX_PX,
             SHARED_STATIC_MAX_PX,
             SHARED_ENTRY_MAX_BYTES,
+            false,
+            cx,
+        )
+    }
+}
+
+pub enum SpriteSheetImageLoader {}
+
+impl Asset for SpriteSheetImageLoader {
+    type Source = Resource;
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn load(
+        source: Self::Source,
+        cx: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        load_bounded_inner(
+            source,
+            SPRITE_SHEET_MAX_PX,
+            SPRITE_SHEET_MAX_PX,
+            SPRITE_SHEET_ENTRY_MAX_BYTES,
+            true,
             false,
             cx,
         )
@@ -2807,6 +2921,103 @@ mod tests {
         let size = image.size(0);
         assert_eq!(size.width, size.height);
         assert_eq!(image.delay(0), image::Delay::from_numer_denom_ms(50, 1));
+    }
+
+    #[test]
+    fn avatar_cache_decodes_static_webp() {
+        use image::ImageEncoder as _;
+
+        let pixels = image::RgbaImage::from_pixel(8, 4, image::Rgba([10, 20, 30, 255]));
+        let mut bytes = Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut bytes)
+            .write_image(
+                pixels.as_raw(),
+                pixels.width(),
+                pixels.height(),
+                image::ExtendedColorType::Rgba8,
+            )
+            .expect("static WebP encodes");
+
+        let image = decode_avatar_image(
+            &bytes,
+            AVATAR_DECODE_MAX_PX,
+            AnimationCaps {
+                max_px: AVATAR_DECODE_MAX_PX,
+                max_frames: usize::MAX,
+                max_bytes: AVATAR_ENTRY_MAX_BYTES,
+            },
+        )
+        .expect("static WebP decodes");
+
+        assert_eq!(image.frame_count(), 1);
+        assert_eq!(image.size(0).width, image.size(0).height);
+    }
+
+    #[test]
+    fn sprite_sheet_cache_preserves_native_resolution() {
+        use image::ImageEncoder as _;
+
+        let pixels = image::RgbaImage::from_pixel(8000, 80, image::Rgba([255, 0, 0, 255]));
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(
+                pixels.as_raw(),
+                pixels.width(),
+                pixels.height(),
+                image::ExtendedColorType::Rgba8,
+            )
+            .expect("sprite sheet encodes");
+
+        let (animation_max_px, static_max_px) =
+            sprite_sheet_decode_limits(&bytes).expect("sprite sheet dimensions parse");
+        assert_eq!(
+            (animation_max_px, static_max_px),
+            (SPRITE_SHEET_MAX_PX, SPRITE_SHEET_MAX_PX)
+        );
+        let image = decode_message_image(
+            &bytes,
+            animation_max_px,
+            static_max_px,
+            SPRITE_SHEET_ENTRY_MAX_BYTES,
+        )
+        .expect("sprite sheet decodes");
+        let size = image.size(0);
+
+        assert_eq!((size.width.0 as u32, size.height.0 as u32), (8000, 80));
+    }
+
+    #[test]
+    fn sprite_sheet_cache_downscales_a_larger_valid_canvas() {
+        use image::ImageEncoder as _;
+
+        let pixels = image::RgbaImage::from_pixel(1812, 1510, image::Rgba([0, 0, 0, 0]));
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(
+                pixels.as_raw(),
+                pixels.width(),
+                pixels.height(),
+                image::ExtendedColorType::Rgba8,
+            )
+            .expect("sprite sheet encodes");
+
+        let (animation_max_px, static_max_px) =
+            sprite_sheet_decode_limits(&bytes).expect("sprite sheet dimensions parse");
+        assert_eq!(
+            (animation_max_px, static_max_px),
+            (MESSAGE_ANIMATION_MAX_PX, MESSAGE_STATIC_MAX_PX)
+        );
+        let image = decode_message_image(
+            &bytes,
+            animation_max_px,
+            static_max_px,
+            SPRITE_SHEET_ENTRY_MAX_BYTES,
+        )
+        .expect("larger sprite sheet falls back to bounded decoding");
+        let size = image.size(0);
+
+        assert!(size.width.0 <= MESSAGE_STATIC_MAX_PX as i32);
+        assert!(size.height.0 <= MESSAGE_STATIC_MAX_PX as i32);
     }
 
     /// A 64x64 animated WebP of a 16x16 sprite (opaque core, transparent margin,

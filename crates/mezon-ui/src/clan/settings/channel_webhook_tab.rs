@@ -229,15 +229,12 @@ impl ChannelWebhookTab {
             let finish = |this: &mut ChannelWebhookTab| {
                 this.avatar_uploading.remove(&webhook_id);
             };
-            let paths = match rx.await {
-                Ok(Ok(Some(p))) => p,
-                _ => {
-                    let _ = this.update(cx, |this, cx| {
-                        finish(this);
-                        cx.notify();
-                    });
-                    return;
-                }
+            let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
+                let _ = this.update(cx, |this, cx| {
+                    finish(this);
+                    cx.notify();
+                });
+                return;
             };
             let path = match paths.into_iter().next() {
                 Some(p) => p,

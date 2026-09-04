@@ -168,6 +168,7 @@ impl Render for UserInfoBar {
 
         div()
             .relative()
+            .children(crate::tour::probe(crate::tour::TourAnchor::UserInfoBar))
             .w_full()
             .min_h(px(56.0))
             .when_some(self.profile_popup.clone(), |bar, popup| {

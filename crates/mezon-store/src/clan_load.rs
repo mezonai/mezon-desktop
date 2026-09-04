@@ -6,6 +6,7 @@ use crate::clan_members::ClanMembersStore;
 use crate::emoji::EmojiStore;
 use crate::ids::ClanId;
 use crate::notification_setting::NotificationSettingStore;
+use crate::onboarding::OnboardingStore;
 use crate::permissions::PermissionStore;
 use crate::roles::RolesStore;
 use crate::sticker::StickerStore;
@@ -136,6 +137,21 @@ impl ClanLoadScheduler {
             cx.update(|cx| {
                 NotificationSettingStore::global(cx)
                     .update(cx, |store, cx| store.prefetch_clan(clan_id, cx));
+            });
+
+            // Onboarding chrome (the sidebar progress card, the composer mission banner) needs
+            // both the guide items and this member's step, and only clans that turned onboarding
+            // on have either — so the pair is fetched here rather than on the guide page, which
+            // most members never open.
+            cx.update(|cx| {
+                let enabled = ClanList::global(cx)
+                    .read(cx)
+                    .clan(clan_id)
+                    .is_some_and(|clan| clan.is_onboarding);
+                if enabled {
+                    OnboardingStore::global(cx)
+                        .update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
+                }
             });
 
             this.update(cx, |this, _| {

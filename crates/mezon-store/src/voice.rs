@@ -3033,15 +3033,17 @@ impl VoiceStore {
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_default();
         let receiver = cx.prompt_for_new_path(&directory, Some(suggested.as_str()));
+        let fallback_directory = directory.clone();
+        let fallback_name = suggested.clone();
 
         self.recording = RecordingState::Starting;
         let generation = self.session_generation;
         cx.notify();
 
         self._recording_start = Some(cx.spawn(async move |this, cx| {
-            let path = match receiver.await {
-                Ok(Ok(Some(path))) => path,
-                Ok(Ok(None)) => {
+            let path = match crate::dialog::classify_dialog(receiver.await) {
+                crate::dialog::DialogOutcome::Picked(path) => path,
+                crate::dialog::DialogOutcome::Cancelled => {
                     tracing::info!("the recording save dialog was cancelled");
                     let _ = this.update(cx, |this, cx| {
                         this.recording = RecordingState::Idle;
@@ -3049,20 +3051,48 @@ impl VoiceStore {
                     });
                     return;
                 }
-                failed => {
-                    let reason = match failed {
-                        Ok(Err(error)) => error.to_string(),
-                        _ => "the save dialog is unavailable".to_string(),
-                    };
-                    tracing::error!("could not ask where to save the recording: {reason}");
+                crate::dialog::DialogOutcome::Lost => {
+                    tracing::warn!("the recording save dialog went away before answering");
                     let _ = this.update(cx, |this, cx| {
                         this.recording = RecordingState::Idle;
-                        cx.emit(VoiceStoreEvent::RecordingFinished(RecordingToast::Failed(
-                            reason,
-                        )));
                         cx.notify();
                     });
                     return;
+                }
+                crate::dialog::DialogOutcome::Unavailable(failure) => {
+                    tracing::warn!(
+                        "could not ask where to save the recording: {}",
+                        failure.reason
+                    );
+                    // Being asked is the convenience; the recording is the point. Keep
+                    // it under the name we suggested so a machine with no working file
+                    // dialog can still record.
+                    let reserved = cx
+                        .background_executor()
+                        .spawn(async move {
+                            mezon_client::reserve_path_in(&fallback_directory, &fallback_name)
+                        })
+                        .await;
+                    match reserved {
+                        Ok(path) => path,
+                        Err(error) => {
+                            tracing::error!("could not reserve a path for the recording: {error}");
+                            let _ = this.update(cx, |this, cx| {
+                                let locale = crate::Settings::try_global(cx)
+                                    .map(|settings| settings.read(cx).language.clone())
+                                    .unwrap_or_default();
+                                this.recording = RecordingState::Idle;
+                                cx.emit(VoiceStoreEvent::RecordingFinished(
+                                    RecordingToast::Failed(
+                                        mezon_i18n::t(&locale, "file.dialogUnavailable")
+                                            .to_string(),
+                                    ),
+                                ));
+                                cx.notify();
+                            });
+                            return;
+                        }
+                    }
                 }
             };
             let _ = this.update(cx, |this, cx| {

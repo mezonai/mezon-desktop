@@ -23,7 +23,7 @@ use super::sound_setting_page::SoundSettingPage;
 use super::sticker_setting_page::StickerSettingPage;
 use crate::theme::{ActiveTheme, Theme};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClanSettingsPage {
     Overview,
     Roles,
@@ -632,7 +632,7 @@ impl Render for ClanSettingScreen {
             .is_some_and(|clan| clan.is_onboarding);
 
         fn nav_item(
-            id: &str,
+            page: ClanSettingsPage,
             label: SharedString,
             is_active: bool,
             theme: &Theme,
@@ -640,9 +640,12 @@ impl Render for ClanSettingScreen {
             status: Option<bool>,
             status_label: Option<SharedString>,
         ) -> impl IntoElement {
-            let id = id.to_string();
             div()
-                .id(id)
+                .id(page.slug())
+                .relative()
+                .children(crate::tour::probe(
+                    crate::tour::TourAnchor::ClanSettingsRow(page),
+                ))
                 .flex()
                 .items_center()
                 .w_full()
@@ -718,7 +721,7 @@ impl Render for ClanSettingScreen {
             for item in visible_pages {
                 let path = format!("/chat/clans/{}/settings/{}", clan_id.get(), item.slug());
                 nav = nav.child(nav_item(
-                    item.slug(),
+                    item,
                     self.page_title(item, &locale),
                     page == item,
                     &theme,
@@ -739,6 +742,10 @@ impl Render for ClanSettingScreen {
             }
             nav = nav.child(div().mt(px(4.0)).border_b_1().border_color(theme.border));
         }
+
+        nav = nav.child(
+            crate::tour::settings_entry_row("clan-settings-tour", &locale, &theme).mt(px(4.0)),
+        );
 
         let locale_for_delete = locale.clone();
         if perms.is_clan_owner {
@@ -780,6 +787,8 @@ impl Render for ClanSettingScreen {
             .child(
                 v_flex()
                     .id("clan-settings-nav")
+                    .relative()
+                    .children(crate::tour::probe(crate::tour::TourAnchor::ClanSettingsNav))
                     .flex_shrink_0()
                     .w(gpui::relative(0.25))
                     .min_w(px(220.0))

@@ -18,6 +18,7 @@ pub(super) struct ConfirmDeleteStickerModal {
 impl Render for ConfirmDeleteStickerModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let owner = cx.entity().entity_id();
         let clan_id = self.clan_id;
         let sticker_id = self.sticker_id.clone();
 
@@ -71,8 +72,9 @@ impl Render for ConfirmDeleteStickerModal {
                                 cx.spawn(async move |cx| match task.await {
                                     Ok(()) => {
                                         cx.update(|cx| {
-                                            Shell::global(cx)
-                                                .update(cx, |shell, cx| shell.close_modal(cx));
+                                            Shell::global(cx).update(cx, |shell, cx| {
+                                                shell.close_modal_if_current(owner, cx)
+                                            });
                                         });
                                     }
                                     Err(err) => {

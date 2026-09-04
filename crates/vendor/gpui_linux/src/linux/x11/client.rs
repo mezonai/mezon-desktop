@@ -435,6 +435,12 @@ impl X11ClientStatePtr {
         state.cursor_styles.remove(&x_window);
     }
 
+    pub fn reset_ime(&self) {
+        if let Some(client) = self.get_client() {
+            client.reset_ime();
+        }
+    }
+
     pub fn update_ime_position(&self, bounds: Bounds<Pixels>) {
         let Some(client) = self.get_client() else {
             return;
@@ -1103,9 +1109,15 @@ impl X11Client {
 
     pub fn reset_ime(&self) {
         let mut state = self.0.borrow_mut();
+        if let Some(compose_state) = state.compose_state.as_mut() {
+            compose_state.reset();
+        }
+        state.pre_edit_text.take();
         state.composing = false;
         if let Some(im) = state.im.as_mut() {
             im.reset();
+            drop(state);
+            self.discard_dbus_im_events();
             return;
         }
         if let Some(mut ximc) = state.ximc.take() {
@@ -1295,6 +1307,17 @@ impl X11Client {
         self.drain_dbus_im_with(false);
     }
 
+    fn discard_dbus_im_events(&self) {
+        let mut state = self.0.borrow_mut();
+        let Some(mut im) = state.im.take() else {
+            return;
+        };
+        drop(state);
+        im.process_io();
+        let _ = im.take_events();
+        self.0.borrow_mut().im = Some(im);
+    }
+
     fn drain_dbus_im_with(&self, keep_preedit: bool) {
         let mut state = self.0.borrow_mut();
         let Some(mut im) = state.im.take() else {
@@ -1447,7 +1470,7 @@ impl X11Client {
         if sync_surrounding && !composing {
             if let Some(window) = window.as_ref() {
                 let surrounding = window
-                    .get_ime_surrounding()
+                    .take_ime_surrounding_for_position_sync()
                     .unwrap_or_else(|| ImeSurroundingText::from_document("", 0, 0, None));
                 im.set_surrounding(&surrounding);
             }

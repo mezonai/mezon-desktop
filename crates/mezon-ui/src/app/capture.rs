@@ -289,7 +289,7 @@ pub fn set_composer_panel(cx: &mut App, kind: Option<&str>) -> anyhow::Result<Va
     cx.update_window(main_handle, |_, window, cx| {
         composer.update(cx, |composer, cx| match tab {
             Some(tab) => composer.show_panel(tab, window, cx),
-            None => composer.hide_panel(cx),
+            None => composer.hide_panel(window, cx),
         });
     })?;
     let open = composer.read(cx).active_panel(cx).map(|tab| match tab {
@@ -666,8 +666,8 @@ pub fn composer_panel_send(
     width: i32,
     height: i32,
 ) -> anyhow::Result<Value> {
-    with_composer(cx, |composer, _window, cx| {
-        composer.probe_panel_send(kind, url, filename, width, height, cx)
+    with_composer(cx, |composer, window, cx| {
+        composer.probe_panel_send(kind, url, filename, width, height, window, cx)
     })??;
     Ok(json!({ "ok": true, "kind": kind }))
 }

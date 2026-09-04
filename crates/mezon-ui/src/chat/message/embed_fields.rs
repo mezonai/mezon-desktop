@@ -267,7 +267,7 @@ fn render_embed_radio(
                 .to_vec()
         })
         .unwrap_or_default();
-    let mut column = div().flex().flex_col().w(px(INPUT_WIDTH));
+    let mut column = div().flex().flex_col().w_full().max_w(px(INPUT_WIDTH));
     for (index, option) in radio.options.iter().enumerate() {
         column = column.child(render_embed_radio_option(
             message_id,
@@ -316,11 +316,6 @@ fn render_embed_radio_option(
         .style
         .map_or(theme.tokens.text_theme_primary, button_bg);
     let mut button = div()
-        .id(SharedString::from(format!(
-            "embed-radio-{}-{embed_index}-{}-{index}",
-            message_id.get(),
-            radio.id
-        )))
         .flex()
         .flex_shrink_0()
         .items_center()
@@ -342,12 +337,25 @@ fn render_embed_radio_option(
                 .into_any_element(),
         );
     }
+    let mut row = div()
+        .id(SharedString::from(format!(
+            "embed-radio-{}-{embed_index}-{}-{index}",
+            message_id.get(),
+            radio.id
+        )))
+        .flex()
+        .flex_row()
+        .justify_between()
+        .items_center()
+        .gap_4()
+        .child(labels)
+        .child(button);
     if !option.disabled {
         let radio_id = radio.id.clone();
         let multiple = radio.allows_multiple();
         let max_options = radio.max_options;
         let value = option.value.clone();
-        button = button.cursor_pointer().on_click(move |_, _, cx| {
+        row = row.cursor_pointer().on_click(move |_, _, cx| {
             let radio_id = radio_id.clone();
             let value = value.clone();
             MessagesStore::global(cx).update(cx, |store, cx| {
@@ -356,15 +364,7 @@ fn render_embed_radio_option(
         });
     }
 
-    div()
-        .flex()
-        .flex_row()
-        .justify_between()
-        .items_center()
-        .gap_4()
-        .child(labels)
-        .child(button)
-        .into_any_element()
+    row.into_any_element()
 }
 
 fn render_embed_grid(grid: &EmbedGrid) -> AnyElement {
@@ -397,14 +397,14 @@ fn render_embed_animation(
     animation: &EmbedAnimation,
     ctx: &RowCtx,
 ) -> AnyElement {
-    let mut row = div().flex().gap_2().rounded_md();
+    let mut row = div().flex().min_w_0().w_full().gap_2().rounded_md();
     if animation.vertical {
         row = row.flex_col();
     }
     let Some(atlas) = ctx.sprite_atlases.get(&animation.url_position) else {
         let side = px(animation_box_size(animation, ctx));
         for _ in &animation.pool {
-            row = row.child(div().flex_shrink_0().w(side).h(side));
+            row = row.child(div().w(side).h(side));
         }
         return row.into_any_element();
     };
@@ -449,15 +449,16 @@ fn render_animation_box(
     let sheet_width = atlas.sheet_width * ratio;
     let sheet_height = atlas.sheet_height * ratio;
 
-    let sheet = img(animation.url_image.clone())
+    let sheet = div()
+        .image_cache(ctx.sprite_cache.clone())
         .absolute()
         .w(px(sheet_width))
-        .h(px(sheet_height));
+        .h(px(sheet_height))
+        .child(img(animation.url_image.clone()).size_full());
 
     let last = *rects.last()?;
     let clipped = div()
         .relative()
-        .flex_shrink_0()
         .w(px(width))
         .h(px(height))
         .overflow_hidden();

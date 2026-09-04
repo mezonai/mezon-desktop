@@ -387,6 +387,7 @@ impl Render for ClanSidebar {
 
         div()
             .image_cache(avatar_cache)
+            .children(crate::tour::probe(crate::tour::TourAnchor::ClanRail))
             .flex()
             .flex_col()
             .w_full()

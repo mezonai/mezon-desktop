@@ -221,6 +221,7 @@ impl LoginStore {
         if let Some(e) = crate::audit_log::AuditLogStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }
+        crate::clear_tour_progress(cx);
     }
 }
 

@@ -233,7 +233,7 @@ impl OverviewTab {
 
         if !self.is_topic_dirty(cx)
             && channel.topic != self.saved_topic
-            && !(channel.topic.is_empty() && !self.saved_topic.is_empty())
+            && (!channel.topic.is_empty() || self.saved_topic.is_empty())
         {
             self.saved_topic = channel.topic.clone();
             self.topic_input.update(cx, |state, cx| {

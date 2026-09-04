@@ -22,6 +22,7 @@ pub mod clan_members;
 pub mod compose;
 pub mod config;
 pub mod connection;
+pub mod dialog;
 pub mod direct;
 pub mod emoji;
 pub mod events;
@@ -136,7 +137,7 @@ pub use emoji::{
     is_valid_emoticon_shortname, normalize_emoji_shortname, strip_emoji_colons,
     validate_emoji_create_shortname, validate_emoticon_file,
 };
-pub use events::{ClanEventItem, CreateEventDraft, EventsEvent, EventsStore};
+pub use events::{ClanEventItem, CreateEventDraft, EventsEvent, EventsStore, UpdateEventDraft};
 pub use files::{
     ChannelDocument, FILES_CACHE_TTL, FILES_PAGE_SIZE, FILES_QUERY, FilesEvent, FilesStore,
     filename_matches_query, is_document, is_pdf, short_file_type_label, short_file_type_label_for,
@@ -155,7 +156,9 @@ pub use gifts::{
     flower_price, format_flower_amount, is_uncertain_transfer_error,
     parse_flower_interactive_params, serialize_flower_interactive_params,
 };
-pub use group_members::{GroupMember, GroupMembersEvent, GroupMembersStore};
+pub use group_members::{
+    AddGroupMembersError, GroupMember, GroupMembersEvent, GroupMembersStore, MAX_GROUP_MEMBERS,
+};
 pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};
 pub use inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxEvent, InboxStore};
 pub use invite::{InviteDetails, InviteEvent, InviteState, InviteStore};
@@ -295,6 +298,22 @@ pub(crate) fn running_from_windows_store() -> bool {
         })
 }
 
+pub fn clear_tour_progress(cx: &mut gpui::App) {
+    let Some(settings) = Settings::try_global(cx) else {
+        return;
+    };
+    let changed = settings.update(cx, |settings, cx| {
+        let changed = settings.clear_tour_progress();
+        if changed {
+            cx.notify();
+        }
+        changed
+    });
+    if changed {
+        schedule_settings_save(&settings, cx);
+    }
+}
+
 /// Persist [`Settings`] through one serialized, coalescing writer: burst
 /// changes (slider drags) collapse into a single debounced write, writes never
 /// overlap (so the shared tmp-file path cannot commit an older snapshot last),
@@ -395,6 +414,12 @@ pub struct Settings {
     pub mcp_read_only: bool,
     #[serde(default)]
     pub age_restricted_confirmed: Vec<ChannelId>,
+    #[serde(default)]
+    pub tour_seen_version: u32,
+    #[serde(default)]
+    pub tour_done_tracks: Vec<String>,
+    #[serde(default)]
+    pub tour_eligible: Option<bool>,
 }
 
 impl Default for Settings {
@@ -420,6 +445,9 @@ impl Default for Settings {
             last_channel_id: None,
             mcp_read_only: false,
             age_restricted_confirmed: Vec::new(),
+            tour_seen_version: 0,
+            tour_done_tracks: Vec::new(),
+            tour_eligible: None,
         }
     }
 }
@@ -519,6 +547,19 @@ impl Settings {
         Ok(())
     }
 
+    pub fn clear_tour_progress(&mut self) -> bool {
+        if self.tour_seen_version == 0
+            && self.tour_done_tracks.is_empty()
+            && self.tour_eligible.is_none()
+        {
+            return false;
+        }
+        self.tour_seen_version = 0;
+        self.tour_done_tracks.clear();
+        self.tour_eligible = None;
+        true
+    }
+
     pub fn init_global(entity: &gpui::Entity<Self>, cx: &mut gpui::App) {
         cx.set_global(GlobalSettings(entity.clone()));
     }
@@ -603,5 +644,58 @@ impl AuthState {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::Settings;
+
+    #[test]
+    fn a_settings_file_written_before_the_tour_existed_still_parses() {
+        let legacy = r#"{"auto_start":false,"hardware_acceleration":true,"zoom_factor":1.0,"theme":"dark","language":"vi"}"#;
+        let settings: Settings = serde_json::from_str(legacy).expect("legacy settings parse");
+        assert_eq!(settings.tour_seen_version, 0);
+        assert!(settings.tour_done_tracks.is_empty());
+        assert_eq!(settings.language, "vi");
+    }
+
+    #[test]
+    fn tour_progress_survives_a_roundtrip() {
+        let settings = Settings {
+            tour_seen_version: 1,
+            tour_done_tracks: vec!["start".to_string(), "wallet".to_string()],
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).expect("encode");
+        let restored: Settings = serde_json::from_str(&json).expect("decode");
+        assert_eq!(restored.tour_seen_version, 1);
+        assert_eq!(restored.tour_done_tracks, vec!["start", "wallet"]);
+    }
+
+    #[test]
+    fn logging_out_drops_the_previous_accounts_tour_verdict() {
+        let mut settings = Settings {
+            tour_seen_version: 1,
+            tour_done_tracks: vec!["start".to_string(), "dmstart".to_string()],
+            tour_eligible: Some(false),
+            ..Settings::default()
+        };
+
+        assert!(settings.clear_tour_progress());
+
+        assert_eq!(settings.tour_seen_version, 0);
+        assert!(settings.tour_done_tracks.is_empty());
+        assert_eq!(
+            settings.tour_eligible, None,
+            "a decided verdict must not survive into the next account, or a brand new \
+             one never gets the onboarding tour"
+        );
+    }
+
+    #[test]
+    fn clearing_an_untouched_tour_state_reports_no_change() {
+        let mut settings = Settings::default();
+        assert!(!settings.clear_tour_progress());
     }
 }

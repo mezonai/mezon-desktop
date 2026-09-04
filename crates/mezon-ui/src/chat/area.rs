@@ -7,9 +7,9 @@ use gpui::{
     Subscription, Task, Window, div, prelude::*, px, rgb, rgba,
 };
 use mezon_store::{
-    ChannelId, ChannelPermissionsStore, ClanId, DirectEvent, DirectKind, DirectMessageStore,
-    FriendEvent, FriendStore, InVoiceInfo, MessagesEvent, MessagesStore, PERMISSION_SEND_MESSAGE,
-    Settings,
+    ChannelId, ChannelList, ChannelPermissionsStore, ClanId, ClanList, DirectEvent, DirectKind,
+    DirectMessageStore, FriendEvent, FriendStore, InVoiceInfo, MessagesEvent, MessagesStore,
+    OnboardingStore, PERMISSION_SEND_MESSAGE, Settings,
 };
 use ui::PopoverMenuHandle;
 
@@ -29,6 +29,7 @@ use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::components::compositions::channel_row::ChannelIcon;
 use crate::components::primitives::{Icon, IconName, InputState};
 use crate::image_cache::LruImageCache;
+use crate::router::{Route, Router, navigate};
 use crate::theme::ActiveTheme;
 
 pub struct ChatArea {
@@ -63,6 +64,115 @@ pub struct ChatArea {
 
 const SEND_PERMISSION_DEBOUNCE: Duration = Duration::from_millis(500);
 
+/// The strip React parks directly on top of the composer while a member still has onboarding
+/// missions left: the next mission, and clicking it does the mission.
+fn onboarding_mission_banner(locale: &str, cx: &mut App) -> Option<gpui::AnyElement> {
+    let clan_id = ClanList::global(cx).read(cx).active_clan_id?;
+    let store = OnboardingStore::global(cx);
+    let store = store.read(cx);
+    // This runs on every chat render, so the clan with no missions — every clan, for most
+    // people — bails on one hash lookup, before the scan `ClanList::clan` costs.
+    if store.mission_total(clan_id) == 0 {
+        return None;
+    }
+    let clan_enabled = ClanList::global(cx)
+        .read(cx)
+        .clan(clan_id)
+        .is_some_and(|clan| clan.is_onboarding);
+    if !store.show_progress(clan_id, clan_enabled) {
+        return None;
+    }
+    let index = store.mission_progress(clan_id);
+    let mission = store.current_mission(clan_id)?;
+    let title: SharedString = mission.title.clone().into();
+    let task_type = mission.task_type;
+    let channel_id = ChannelId(mission.channel_id);
+    let channel_name = ChannelList::global(cx)
+        .read(cx)
+        .channel(clan_id, channel_id)
+        .map(|channel| SharedString::from(format!("#{}", channel.name)));
+    let theme = cx.theme();
+    Some(
+        div()
+            .flex_none()
+            .w_full()
+            .px_3()
+            .child(
+                div()
+                    .id("onboarding-mission-banner")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .w_full()
+                    .h(px(56.))
+                    .px_4()
+                    .rounded_t(px(6.))
+                    .cursor_pointer()
+                    .bg(theme.tokens.bg_tertiary)
+                    .hover(|style| style.bg(theme.tokens.bg_item_hover))
+                    .child(
+                        Icon::new(IconName::Hashtag)
+                            .size(px(20.))
+                            .text_color(theme.tokens.text_theme_primary),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.tokens.text_secondary)
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_1()
+                                    .text_size(px(10.))
+                                    .text_color(theme.tokens.text_theme_primary)
+                                    .child(crate::chat::clan_guide_page::mission_summary(
+                                        locale, task_type,
+                                    ))
+                                    .children(channel_name.map(|name| {
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.tokens.text_secondary)
+                                            .child(name)
+                                    })),
+                            ),
+                    )
+                    .on_click(move |_, _, cx| {
+                        crate::chat::clan_guide_page::start_mission(
+                            clan_id, channel_id, task_type, index, cx,
+                        );
+                    }),
+            )
+            .into_any_element(),
+    )
+}
+
+fn leave_removed_conversation(channel_id: ChannelId, cx: &mut App) {
+    let viewing = route_targets_conversation(&Router::global(cx).read(cx).route(), channel_id);
+    if viewing {
+        navigate(cx, Route::Friends);
+    }
+    // After the navigate, so the entry `navigate` just pushed goes too: a conversation the
+    // store dropped must not be reachable through Back or Forward either.
+    Router::global(cx).update(cx, |router, _| router.forget_conversation(channel_id));
+}
+
+fn route_targets_conversation(route: &Route, channel_id: ChannelId) -> bool {
+    matches!(route, Route::DirectMessage { direct_id, .. } if *direct_id == channel_id)
+}
+
 impl ChatArea {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<crate::ChatLayout>) -> Self {
         let timeline = cx.new({
@@ -91,9 +201,15 @@ impl ChatArea {
         let send_permission_direct_sub = cx.subscribe(
             &DirectMessageStore::global(cx),
             |this: &mut crate::ChatLayout, _, event: &DirectEvent, cx| {
-                let DirectEvent::Changed { channel_id } = event;
+                let channel_id = match event {
+                    DirectEvent::Changed { channel_id } => *channel_id,
+                    DirectEvent::Removed { channel_id } => {
+                        leave_removed_conversation(*channel_id, cx);
+                        Some(*channel_id)
+                    }
+                };
                 let active_channel = MessagesStore::global(cx).read(cx).active_channel_id();
-                if channel_id.is_none() || *channel_id == active_channel {
+                if channel_id.is_none() || channel_id == active_channel {
                     this.chat_area.sync_send_permission(cx);
                 }
             },
@@ -725,6 +841,12 @@ impl ChatArea {
             div().into_any_element()
         };
 
+        let onboarding_mission = if !is_dm && !media_channel_view && !send_denied {
+            onboarding_mission_banner(locale, cx)
+        } else {
+            None
+        };
+
         let timeline_popover_open = self.timeline.read(cx).profile_popover_open();
         let member_popover_open = self
             .member_panel
@@ -779,7 +901,8 @@ impl ChatArea {
                 ))
                 .when(send_denied, |col| col.child(no_permission_notice))
                 .when(!send_denied, |col| {
-                    col.when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
+                    col.children(onboarding_mission)
+                        .when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
                         .when_some(app_channel_bar.as_ref(), |col, target| {
                             col.child(render_channel_app_bar(locale, target.clone(), cx.theme()))
                         })
@@ -855,5 +978,32 @@ impl ChatArea {
             .when(!hide_header, |this| this.child(header))
             .child(body)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod removed_conversation_tests {
+    use super::{ChannelId, Route, route_targets_conversation};
+
+    fn direct(id: i64) -> Route {
+        Route::DirectMessage {
+            direct_id: ChannelId(id),
+            message_type: "2".to_string(),
+        }
+    }
+
+    #[test]
+    fn the_open_conversation_has_to_be_left() {
+        assert!(route_targets_conversation(&direct(7), ChannelId(7)));
+    }
+
+    #[test]
+    fn another_conversation_stays_put() {
+        assert!(!route_targets_conversation(&direct(7), ChannelId(8)));
+    }
+
+    #[test]
+    fn a_route_outside_direct_messages_stays_put() {
+        assert!(!route_targets_conversation(&Route::Friends, ChannelId(7)));
     }
 }

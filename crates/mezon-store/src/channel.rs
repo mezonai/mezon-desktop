@@ -237,6 +237,18 @@ pub fn delete_allowed_by_server(
     is_creator || has_owner || has_administrator || has_manage_clan || has_manage_channel
 }
 
+/// Mirrors `UpdateChannelDesc` in mezon-api: the channel creator is let through before any
+/// permission is read, everyone else needs at least the manage-channel level.
+pub fn manage_allowed_by_server(
+    is_creator: bool,
+    has_owner: bool,
+    has_administrator: bool,
+    has_manage_clan: bool,
+    has_manage_channel: bool,
+) -> bool {
+    is_creator || has_owner || has_administrator || has_manage_clan || has_manage_channel
+}
+
 pub fn can_archive_channel(clan_id: ClanId, channel_id: ChannelId, cx: &App) -> bool {
     ChannelList::global(cx)
         .read(cx)
@@ -247,6 +259,12 @@ pub fn can_delete_channel(clan_id: ClanId, channel_id: ChannelId, cx: &App) -> b
     ChannelList::global(cx)
         .read(cx)
         .can_delete_channel_for(clan_id, channel_id, cx)
+}
+
+pub fn can_manage_channel(clan_id: ClanId, channel_id: ChannelId, cx: &App) -> bool {
+    ChannelList::global(cx)
+        .read(cx)
+        .can_manage_channel_for(clan_id, channel_id, cx)
 }
 
 fn archive_permission_for(
@@ -324,6 +342,41 @@ fn delete_permission_for(
     };
     let permissions = permissions.read(cx);
     delete_allowed_by_server(
+        is_creator,
+        permissions.check(clan_id, None, PERMISSION_CLAN_OWNER, cx),
+        permissions.check(clan_id, None, PERMISSION_ADMINISTRATOR, cx),
+        permissions.check(clan_id, None, PERMISSION_MANAGE_CLAN, cx),
+        permissions.check(clan_id, None, PERMISSION_MANAGE_CHANNEL, cx),
+    )
+}
+
+fn manage_permission_for(
+    channel_list: &ChannelList,
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    cx: &App,
+) -> bool {
+    let creator_id = channel_list
+        .channel(clan_id, channel_id)
+        .map(|channel| channel.creator_id)
+        .or_else(|| {
+            ChannelSettingsStore::try_global(cx).and_then(|store| {
+                store
+                    .read(cx)
+                    .row_by_id(clan_id, channel_id)
+                    .map(|row| row.creator_id)
+            })
+        });
+    let is_creator = creator_id.is_some_and(|creator_id| {
+        BadgeService::try_global(cx)
+            .and_then(|badges| badges.read(cx).current_user_id(cx))
+            .is_some_and(|me| me == creator_id)
+    });
+    let Some(permissions) = PermissionStore::try_global(cx) else {
+        return is_creator;
+    };
+    let permissions = permissions.read(cx);
+    manage_allowed_by_server(
         is_creator,
         permissions.check(clan_id, None, PERMISSION_CLAN_OWNER, cx),
         permissions.check(clan_id, None, PERMISSION_ADMINISTRATOR, cx),
@@ -625,6 +678,10 @@ impl ChannelList {
 
     pub fn can_delete_channel_for(&self, clan_id: ClanId, channel_id: ChannelId, cx: &App) -> bool {
         delete_permission_for(self, clan_id, channel_id, cx)
+    }
+
+    pub fn can_manage_channel_for(&self, clan_id: ClanId, channel_id: ChannelId, cx: &App) -> bool {
+        manage_permission_for(self, clan_id, channel_id, cx)
     }
 
     pub fn fetch_channel_app_url(
@@ -5857,7 +5914,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|cx| {
-            let channels = init_authenticated_channel_list(cx);
+            let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
                 channels.apply_clan_structure(
                     ClanId(1),
@@ -10250,6 +10307,15 @@ mod tests {
         assert!(delete_allowed_by_server(false, false, false, true, false));
         assert!(delete_allowed_by_server(true, false, false, false, false));
         assert!(!delete_allowed_by_server(false, false, false, false, false));
+    }
+
+    #[test]
+    fn manage_allowed_accepts_creator_without_any_permission() {
+        assert!(manage_allowed_by_server(true, false, false, false, false));
+        assert!(manage_allowed_by_server(false, false, false, false, true));
+        assert!(manage_allowed_by_server(false, false, false, true, false));
+        assert!(manage_allowed_by_server(false, true, false, false, false));
+        assert!(!manage_allowed_by_server(false, false, false, false, false));
     }
 
     #[test]

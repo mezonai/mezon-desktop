@@ -4528,6 +4528,11 @@ impl MessagesStore {
         let is_public = self.is_public;
         let mode = self.mode;
         let has_attachments = !attachments.is_empty();
+        if let Some(onboarding) = crate::onboarding::OnboardingStore::try_global(cx) {
+            onboarding.update(cx, |store, cx| {
+                store.note_message_sent(clan_id, channel_id, cx);
+            });
+        }
         let reply = match reply_override {
             Some(draft) => Some(draft),
             None => self.take_reply_target(),
@@ -4920,6 +4925,30 @@ impl MessagesStore {
             sender_name,
             self.is_anonymous_mode(),
             None,
+            cx,
+        );
+    }
+
+    pub fn send_sticker_reply(
+        &mut self,
+        url: String,
+        filename: String,
+        sender_id: String,
+        sender_name: String,
+        reply_to: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        let reply = self.reply_draft_for(reply_to);
+        self.send_url_attachment(
+            url,
+            filename,
+            STICKER_FILETYPE.to_string(),
+            0,
+            0,
+            sender_id,
+            sender_name,
+            self.is_anonymous_mode(),
+            reply,
             cx,
         );
     }
@@ -8471,7 +8500,7 @@ fn parse_embed_input(value: Option<&serde_json::Value>) -> Option<EmbedInput> {
             if options.is_empty() {
                 return None;
             }
-            Some(EmbedInput::Radio(EmbedRadio {
+            let mut radio = EmbedRadio {
                 id: id.into(),
                 options: options
                     .into_iter()
@@ -8484,8 +8513,12 @@ fn parse_embed_input(value: Option<&serde_json::Value>) -> Option<EmbedInput> {
                         disabled: option.disabled,
                     })
                     .collect(),
-                max_options: Some(wrapper.max_options.filter(|max| *max > 0).unwrap_or(1)),
-            }))
+                max_options: wrapper.max_options.filter(|max| *max > 0),
+            };
+            if radio.max_options.is_none() && radio.allows_multiple() {
+                radio.max_options = Some(i32::try_from(radio.options.len()).unwrap_or(i32::MAX));
+            }
+            Some(EmbedInput::Radio(radio))
         }
         Some(EMBED_COMPONENT_TYPE_ANIMATION) => {
             let component: ApiAnimationComponent =
@@ -9975,6 +10008,11 @@ mod tests {
                 options: vec![radio_option("a", "a"), radio_option("b", "b")],
                 max_options: Some(1),
             };
+            let bounded_multi = EmbedRadio {
+                id: "implicit-picks".into(),
+                options: vec![radio_option("a", "a"), radio_option("b", "b")],
+                max_options: Some(2),
+            };
 
             store.update(cx, |store, cx| {
                 pick(store, &single, "y", cx);
@@ -9995,6 +10033,14 @@ mod tests {
                         .message_select_selection(message_id, "picks")
                         .is_empty(),
                     "picking the same option again clears it"
+                );
+
+                pick(store, &bounded_multi, "a", cx);
+                pick(store, &bounded_multi, "b", cx);
+                assert_eq!(
+                    store.message_select_selection(message_id, "implicit-picks"),
+                    ["a", "b"],
+                    "an inferred multi-choice radio accepts each available option"
                 );
             });
         });
@@ -10341,11 +10387,7 @@ mod tests {
             panic!("expected a radio");
         };
         assert!(radio.allows_multiple());
-        assert_eq!(
-            radio.max_options,
-            Some(1),
-            "React defaults a missing max_options to 1"
-        );
+        assert_eq!(radio.max_options, Some(2));
     }
 
     #[test]

@@ -693,6 +693,8 @@ impl Render for FriendsPage {
         let locale = self.settings.read(cx).language.clone();
 
         div()
+            .relative()
+            .children(crate::tour::probe(crate::tour::TourAnchor::FriendsPage))
             .flex()
             .flex_col()
             .flex_1()
@@ -783,6 +785,8 @@ impl FriendsPage {
 
         let add_button = div()
             .id("friend-add")
+            .relative()
+            .children(crate::tour::probe(crate::tour::TourAnchor::AddFriendButton))
             .px_2()
             .py(px(6.))
             .rounded_lg()

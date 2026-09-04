@@ -72,15 +72,19 @@ impl PlayerImpl {
         if let Some(bus) = self.playbin.bus() {
             while let Some(message) = bus.pop() {
                 match message.view() {
-                    gst::message::MessageView::Error(_) => {
-                        self.failed.set(true);
-                    }
+                    gst::message::MessageView::Error(error) => self.note_error(error),
                     gst::message::MessageView::Eos(_) => {
                         let _ = self.playbin.set_state(gst::State::Paused);
                     }
                     _ => {}
                 }
             }
+        }
+    }
+
+    fn note_error(&self, error: &gst::message::Error) {
+        if !self.failed.replace(true) {
+            log_pipeline_error(error, "playback");
         }
     }
 
@@ -183,6 +187,7 @@ fn clock_time_to_seconds(time: gst::ClockTime) -> f64 {
     time.nseconds() as f64 / 1_000_000_000.0
 }
 
+const VIDEO_PAD_SIGNAL: &str = "get-video-pad";
 const POSTER_TIME: gst::ClockTime = gst::ClockTime::from_seconds(1);
 const PROBE_TIMEOUT: gst::ClockTime = gst::ClockTime::from_seconds(5);
 
@@ -190,6 +195,14 @@ pub fn probe_video(path: &str, max_poster_edge: u32) -> Option<crate::VideoProbe
     if path.is_empty() {
         return None;
     }
+    let probe = gstreamer_probe(path, max_poster_edge);
+    if probe.as_ref().is_some_and(|p| p.poster_jpeg.is_some()) {
+        return probe;
+    }
+    crate::poster_fallback::probe_without_decoder(path, max_poster_edge).or(probe)
+}
+
+fn gstreamer_probe(path: &str, max_poster_edge: u32) -> Option<crate::VideoProbe> {
     ensure_gstreamer().ok()?;
     let uri = match gst::glib::filename_to_uri(path, None) {
         Ok(uri) => uri,
@@ -198,27 +211,70 @@ pub fn probe_video(path: &str, max_poster_edge: u32) -> Option<crate::VideoProbe
             return None;
         }
     };
-    let probe = PosterPipeline::open(uri.as_str())?.probe(max_poster_edge);
+    let pipeline = PosterPipeline::open(uri.as_str(), max_poster_edge)?;
+    let probe = pipeline.probe(max_poster_edge);
     if probe.is_none() {
+        report_bus_errors(&pipeline.playbin, "video probe");
         tracing::warn!(target: "mezon_video", "video probe produced no frame");
     }
     probe
 }
 
+fn log_pipeline_error(error: &gst::message::Error, what: &str) {
+    let detail = error.debug().unwrap_or_default();
+    tracing::warn!(
+        target: "mezon_video",
+        error = %error.error(),
+        detail = %detail,
+        "gstreamer {what} failed"
+    );
+    if error.error().matches(gst::CoreError::MissingPlugin) {
+        tracing::warn!(
+            target: "mezon_video",
+            "no gstreamer decoder installed for this video: install gstreamer1.0-libav \
+             (Debian/Ubuntu), gstreamer1-plugin-libav (Fedora) or gst-libav (Arch)"
+        );
+    }
+}
+
+fn report_bus_errors(element: &gst::Element, what: &str) {
+    let Some(bus) = element.bus() else {
+        return;
+    };
+    while let Some(message) = bus.pop() {
+        if let gst::message::MessageView::Error(error) = message.view() {
+            log_pipeline_error(error, what);
+        }
+    }
+}
+
 struct PosterPipeline {
     playbin: gst::Element,
     appsink: gst_app::AppSink,
+    prescaled: bool,
+}
+
+const PRESCALE_HEADROOM: u32 = 2;
+
+fn prescale_edge(playbin: &gst::Element, max_poster_edge: u32) -> Option<i32> {
+    gst::glib::subclass::SignalId::lookup(VIDEO_PAD_SIGNAL, playbin.type_())?;
+    let edge = max_poster_edge.checked_mul(PRESCALE_HEADROOM)?;
+    i32::try_from(edge).ok().filter(|edge| *edge > 0)
 }
 
 impl PosterPipeline {
-    fn open(uri: &str) -> Option<Self> {
+    fn open(uri: &str, max_poster_edge: u32) -> Option<Self> {
         let playbin = gst::ElementFactory::make("playbin").build().ok()?;
+        let prescale_edge = prescale_edge(&playbin, max_poster_edge);
+        let mut caps = gst_video::VideoCapsBuilder::new().format(gst_video::VideoFormat::Bgra);
+        if let Some(edge) = prescale_edge {
+            caps = caps
+                .width_range(1..=edge)
+                .height_range(1..=edge)
+                .pixel_aspect_ratio(gst::Fraction::new(1, 1));
+        }
         let appsink = gst_app::AppSink::builder()
-            .caps(
-                &gst_video::VideoCapsBuilder::new()
-                    .format(gst_video::VideoFormat::Bgra)
-                    .build(),
-            )
+            .caps(&caps.build())
             .max_buffers(1)
             .drop(false)
             .sync(false)
@@ -227,7 +283,11 @@ impl PosterPipeline {
         playbin.set_property("uri", uri);
         playbin.set_property("video-sink", &appsink);
         playbin.set_property("audio-sink", &audio_sink);
-        Some(Self { playbin, appsink })
+        Some(Self {
+            playbin,
+            appsink,
+            prescaled: prescale_edge.is_some(),
+        })
     }
 
     fn probe(&self, max_poster_edge: u32) -> Option<crate::VideoProbe> {
@@ -244,7 +304,7 @@ impl PosterPipeline {
         {
             self.playbin.state(PROBE_TIMEOUT).0.ok()?;
         }
-        let sample = self.appsink.pull_preroll().ok()?;
+        let sample = self.appsink.try_pull_preroll(PROBE_TIMEOUT)?;
         let buffer = sample.buffer()?;
         let info = gst_video::VideoInfo::from_caps(sample.caps()?).ok()?;
         let frame = gst_video::VideoFrameRef::from_buffer_ref_readable(buffer, &info).ok()?;
@@ -259,11 +319,25 @@ impl PosterPipeline {
             false,
             max_poster_edge,
         );
+        let (width, height) = if self.prescaled {
+            self.natural_size()?
+        } else {
+            (width, height)
+        };
         Some(crate::VideoProbe {
             width,
             height,
             poster_jpeg,
         })
+    }
+
+    fn natural_size(&self) -> Option<(u32, u32)> {
+        let pad = self
+            .playbin
+            .emit_by_name::<Option<gst::Pad>>(VIDEO_PAD_SIGNAL, &[&0i32])?;
+        let caps = pad.current_caps()?;
+        let info = gst_video::VideoInfo::from_caps(&caps).ok()?;
+        Some((info.width(), info.height()))
     }
 }
 

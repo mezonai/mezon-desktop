@@ -12,6 +12,7 @@ use mezon_store::{
     ClanId, ClanList, ClanMembersStore, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
     PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PermissionStore, Settings, UserId,
     archive_allowed_by_server, archive_menu_hidden, delete_allowed_by_server,
+    manage_allowed_by_server,
 };
 use ui::Tooltip;
 
@@ -945,7 +946,13 @@ fn build_channel_list_menu(
             has_manage_clan,
             has_manage_channel,
         );
-    let can_edit = is_creator || has_owner || has_admin || has_manage_clan || has_manage_channel;
+    let can_edit = manage_allowed_by_server(
+        is_creator,
+        has_owner,
+        has_admin,
+        has_manage_clan,
+        has_manage_channel,
+    );
     let can_delete = !is_welcome
         && delete_allowed_by_server(
             is_creator,

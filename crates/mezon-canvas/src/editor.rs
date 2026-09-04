@@ -1564,28 +1564,27 @@ impl CanvasEditorState {
         if self.read_only {
             return;
         }
-        let Some(item) = cx.read_from_clipboard() else {
-            return;
-        };
-        let images: Vec<Image> = item
-            .entries()
-            .iter()
-            .filter_map(|entry| match entry {
-                ClipboardEntry::Image(image) => Some(image.clone()),
-                _ => None,
-            })
-            .collect();
-        if !images.is_empty() {
-            self.paste_images(images, window, cx);
-            return;
-        }
-        if let Some(text) = item.text() {
-            self.replace_text_in_range(
-                self.selected_range.clone(),
-                &text.replace("\r\n", "\n"),
-                cx,
-            );
-        }
+        mezon_widgets::clipboard::read_then(self, window, cx, |this, item, window, cx| {
+            let images: Vec<Image> = item
+                .entries()
+                .iter()
+                .filter_map(|entry| match entry {
+                    ClipboardEntry::Image(image) => Some(image.clone()),
+                    _ => None,
+                })
+                .collect();
+            if !images.is_empty() {
+                this.paste_images(images, window, cx);
+                return;
+            }
+            if let Some(text) = item.text() {
+                this.replace_text_in_range(
+                    this.selected_range.clone(),
+                    &text.replace("\r\n", "\n"),
+                    cx,
+                );
+            }
+        });
     }
 
     fn paste_images(&mut self, images: Vec<Image>, _window: &mut Window, cx: &mut Context<Self>) {

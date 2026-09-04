@@ -5770,7 +5770,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-active-windows"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -5783,7 +5783,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-app"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -5814,7 +5814,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-audio"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "flume",
@@ -5829,7 +5829,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-call"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5847,7 +5847,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-canvas"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5869,7 +5869,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-cli"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "clap",
@@ -5885,7 +5885,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-client"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5922,14 +5922,14 @@ dependencies = [
 
 [[package]]
 name = "mezon-i18n"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "mezon-mcp"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "axum",
@@ -5950,7 +5950,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-native"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "auto-launch",
@@ -5977,7 +5977,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-pdf"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "core-graphics 0.24.0",
@@ -5990,7 +5990,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-proto"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "prost 0.13.5",
  "prost-build 0.13.5",
@@ -6001,7 +6001,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-record"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -6024,7 +6024,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-store"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6057,7 +6057,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-stream"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "flume",
@@ -6075,7 +6075,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-theme"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "gpui",
  "theme",
@@ -6083,7 +6083,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-ui"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6128,7 +6128,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-updater"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6149,7 +6149,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-video"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -6161,7 +6161,9 @@ dependencies = [
  "gstreamer-app",
  "gstreamer-video",
  "image",
+ "mp4",
  "objc",
+ "openh264",
  "smallvec",
  "thiserror 2.0.18",
  "tracing",
@@ -6171,7 +6173,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-voice"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "anyhow",
  "block",
@@ -6206,11 +6208,12 @@ dependencies = [
 
 [[package]]
 name = "mezon-widgets"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "gpui",
  "mezon-store",
  "mezon-theme",
+ "objc",
  "tracing",
  "unicode-segmentation",
 ]
@@ -6270,7 +6273,7 @@ dependencies = [
 
 [[package]]
 name = "mmn-client"
-version = "2.0.18"
+version = "2.0.19"
 dependencies = [
  "base64 0.22.1",
  "bs58",
@@ -6298,6 +6301,20 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
+]
+
+[[package]]
+name = "mp4"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9ef834d5ed55e494a2ae350220314dc4aacd1c43a9498b00e320e0ea352a5c3"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "num-rational",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -6389,6 +6406,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a51313c5820b0b02bd422f4b44776fbf47961755c74ce64afc73bfad10226c3"
 dependencies = [
  "getrandom 0.2.17",
+]
+
+[[package]]
+name = "nasm-rs"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "706bf8a5e8c8ddb99128c3291d31bd21f4bcde17f0f4c20ec678d85c74faa149"
+dependencies = [
+ "log",
 ]
 
 [[package]]
@@ -6700,6 +6726,7 @@ dependencies = [
  "num-bigint",
  "num-integer",
  "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -7186,6 +7213,27 @@ dependencies = [
  "is-wsl",
  "libc",
  "pathdiff",
+]
+
+[[package]]
+name = "openh264"
+version = "0.9.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcc9071a0b5f9c501ddd01066c2600d922cc799dc450a52975222bcda7755a08"
+dependencies = [
+ "openh264-sys2",
+ "wide",
+]
+
+[[package]]
+name = "openh264-sys2"
+version = "0.9.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ada29a4cadc13d4d326737af87c13e224210d7d99fe47594e9f3f9b0102fd70"
+dependencies = [
+ "cc",
+ "nasm-rs",
+ "walkdir",
 ]
 
 [[package]]
@@ -8916,6 +8964,15 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "safe_arch"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42c6efa15875e6ecb39ca61fb0b0c1a40b84fac5a5ffe71eef7d1000c8eb3f5f"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "safer-bytes"
@@ -11536,6 +11593,16 @@ dependencies = [
  "home",
  "rustix 0.38.44",
  "winsafe",
+]
+
+[[package]]
+name = "wide"
+version = "1.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8cf05ca94c9fba0c51316899caa1d1e74a064fc310a5efa7375e614343d415be"
+dependencies = [
+ "bytemuck",
+ "safe_arch",
 ]
 
 [[package]]

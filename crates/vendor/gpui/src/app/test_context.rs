@@ -336,6 +336,12 @@ impl TestAppContext {
         self.test_platform.simulate_new_path_selection(select_path);
     }
 
+    /// Fail a pending "save as" prompt instead of answering it, so a test can cover
+    /// the path a machine with no working file dialog actually takes.
+    pub fn simulate_new_path_failure(&self, error: anyhow::Error) {
+        self.test_platform.simulate_new_path_failure(error);
+    }
+
     /// Simulates responding to a `prompt_for_paths` ("Open") dialog.
     pub fn simulate_path_prompt_response(
         &self,

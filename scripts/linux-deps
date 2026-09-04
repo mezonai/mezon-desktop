@@ -46,6 +46,9 @@ install_apt() {
     libunwind-dev
     protobuf-compiler
     xdg-desktop-portal
+    # openh264 (the poster fallback for boxes with no system decoder) assembles its
+    # x86 fast paths with nasm; without it the build silently falls back to plain C.
+    nasm
     libgstreamer1.0-dev
     libgstreamer-plugins-base1.0-dev
     gstreamer1.0-plugins-base
@@ -97,6 +100,7 @@ install_dnf() {
     libx11-xcb-devel
     protobuf-compiler
     xdg-desktop-portal
+    nasm
     gstreamer1-devel
     gstreamer1-plugins-base-devel
     gstreamer1-plugins-base

@@ -150,12 +150,9 @@ impl CreateClanModal {
                 this._logo_task = None;
             };
 
-            let paths = match rx.await {
-                Ok(Ok(Some(p))) => p,
-                _ => {
-                    let _ = this.update(cx, |this, _| finish(this));
-                    return;
-                }
+            let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
+                let _ = this.update(cx, |this, _| finish(this));
+                return;
             };
             let path = match paths.into_iter().next() {
                 Some(p) => p,
