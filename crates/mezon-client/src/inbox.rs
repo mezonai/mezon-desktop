@@ -152,6 +152,71 @@ fn topic_id_from_raw_content(raw: &str) -> Option<String> {
     }
 }
 
+fn topic_id_i64_from_raw_content(raw: &str) -> Option<i64> {
+    topic_id_from_raw_content(raw)?
+        .parse()
+        .ok()
+        .filter(|id| *id > 0)
+}
+
+pub fn notification_ids_from_content(content: &[u8]) -> (i64, i64, i64) {
+    if content.is_empty() {
+        return (0, 0, 0);
+    }
+    if !matches!(content.first().copied(), Some(b'{') | Some(b'[')) {
+        if let Ok(fcm) = api::DirectFcmProto::decode(content) {
+            let topic_id = if fcm.topic_id > 0 {
+                fcm.topic_id
+            } else {
+                topic_id_i64_from_raw_content(&fcm.content).unwrap_or(0)
+            };
+            return (fcm.message_id, i64::from(fcm.create_time_seconds), topic_id);
+        }
+        if let Ok(message) = api::ChannelMessage::decode(content) {
+            let topic_id = if message.topic_id > 0 {
+                message.topic_id
+            } else {
+                topic_id_i64_from_raw_content(&message.content).unwrap_or(0)
+            };
+            return (
+                message.message_id,
+                i64::from(message.create_time_seconds),
+                topic_id,
+            );
+        }
+    }
+    let Ok(raw) = std::str::from_utf8(content) else {
+        return (0, 0, 0);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw.trim()) else {
+        return (0, 0, 0);
+    };
+    let message_id = match value.get("message_id") {
+        Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0),
+        Some(serde_json::Value::String(s)) => s.parse().unwrap_or(0),
+        _ => 0,
+    };
+    let create_time = match value.get("create_time_seconds") {
+        Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0),
+        Some(serde_json::Value::String(s)) => s.parse().unwrap_or(0),
+        _ => 0,
+    };
+    let topic_id = match value.get("topic_id") {
+        Some(serde_json::Value::Number(n)) => n.as_i64().filter(|id| *id > 0).unwrap_or(0),
+        Some(serde_json::Value::String(s)) => s.parse().ok().filter(|id| *id > 0).unwrap_or(0),
+        _ => topic_id_i64_from_raw_content(raw).unwrap_or(0),
+    };
+    (message_id, create_time, topic_id)
+}
+
+pub fn effective_notification_topic_id(envelope_topic_id: i64, content: &[u8]) -> Option<i64> {
+    if envelope_topic_id > 0 {
+        return Some(envelope_topic_id);
+    }
+    let (_, _, topic_id) = notification_ids_from_content(content);
+    (topic_id > 0).then_some(topic_id)
+}
+
 pub fn display_text_from_message_content(content: &str) -> String {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -1271,6 +1336,31 @@ mod tests {
         })
         .expect("notification");
         assert_eq!(notification.effective_topic_id().as_deref(), Some("88"));
+        assert_eq!(
+            effective_notification_topic_id(0, &fcm.encode_to_vec()),
+            Some(88)
+        );
+        assert_eq!(
+            notification_ids_from_content(&fcm.encode_to_vec()),
+            (42, 0, 88)
+        );
+    }
+
+    #[test]
+    fn notification_ids_from_content_reads_tp_when_envelope_topic_missing() {
+        let fcm = api::DirectFcmProto {
+            message_id: 42,
+            channel_id: 7,
+            clan_id: 1,
+            sender_id: 9,
+            content: r#"{"t":"hello","tp":"55"}"#.into(),
+            create_time_seconds: 100,
+            ..Default::default()
+        };
+        let bytes = fcm.encode_to_vec();
+        assert_eq!(notification_ids_from_content(&bytes), (42, 100, 55));
+        assert_eq!(effective_notification_topic_id(0, &bytes), Some(55));
+        assert_eq!(effective_notification_topic_id(99, &bytes), Some(99));
     }
 
     #[test]

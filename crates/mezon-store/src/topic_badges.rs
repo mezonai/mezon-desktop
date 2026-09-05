@@ -4,6 +4,7 @@ use std::sync::Arc;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global};
 use mezon_client::{
     AppApi, InboxNotification, RealtimeEvent, inbox_notification_from_channel_mention,
+    notification_ids_from_content,
 };
 use mezon_proto::api;
 use prost::Message;
@@ -221,23 +222,33 @@ impl TopicBadgeStore {
             if n.code != USER_MENTIONED && n.code != USER_REPLIED {
                 continue;
             }
-            if n.topic_id == 0 {
+            let (message_id_raw, content_time, content_topic_id) =
+                notification_ids_from_content(&n.content);
+            let topic_id_raw = if n.topic_id > 0 {
+                n.topic_id
+            } else if content_topic_id > 0 {
+                content_topic_id
+            } else {
                 continue;
-            }
-            let topic_id = n.topic_id.to_string();
+            };
+            let topic_id = topic_id_raw.to_string();
             let parent_channel_id = n.channel_id.to_string();
             let clan_id = n.clan_id.to_string();
-            let message_id = notification_message_id(n);
+            let message_id = if message_id_raw > 0 {
+                message_id_raw.to_string()
+            } else {
+                notification_message_id(n)
+            };
             let check_channel = topic_id.clone();
             if is_viewing_channel(&check_channel, cx) {
                 continue;
             }
-            if is_already_seen(
-                ClanId(n.clan_id),
-                ChannelId(n.topic_id),
-                notification_message_time(n),
-                cx,
-            ) {
+            let msg_time = if content_time > 0 {
+                u32::try_from(content_time).unwrap_or(n.create_time_seconds)
+            } else {
+                notification_message_time(n)
+            };
+            if is_already_seen(ClanId(n.clan_id), ChannelId(topic_id_raw), msg_time, cx) {
                 continue;
             }
             let dedupe_key = format!("{parent_channel_id}_{message_id}");

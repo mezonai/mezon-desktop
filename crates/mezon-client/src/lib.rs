@@ -45,11 +45,12 @@ pub use inbox::{
     INBOX_PAGE_LIMIT, INBOX_USER_MENTIONED_CODE, INBOX_USER_REPLIED_CODE, InboxCategory,
     InboxMentionSpan, InboxMessagePreview, InboxNotification, MarkedInboxMessageInput,
     TopicDiscussion, TopicReplyPreview, attachment_link_is_image, attachment_link_is_video,
-    display_text_from_message_content, inbox_notification_from_api,
-    inbox_notification_from_channel_mention, inbox_notification_from_marked_message,
-    inbox_notification_from_marked_message_local, inbox_notifications_from_list,
-    is_pending_inbox_notification_id, message_content_is_attachment, pending_inbox_notification_id,
-    topic_discussion_from_api, topic_reply_preview, topics_from_list,
+    display_text_from_message_content, effective_notification_topic_id,
+    inbox_notification_from_api, inbox_notification_from_channel_mention,
+    inbox_notification_from_marked_message, inbox_notification_from_marked_message_local,
+    inbox_notifications_from_list, is_pending_inbox_notification_id, message_content_is_attachment,
+    notification_ids_from_content, pending_inbox_notification_id, topic_discussion_from_api,
+    topic_reply_preview, topics_from_list,
 };
 pub use network_monitor::NetworkMonitor;
 pub use network_probe::{

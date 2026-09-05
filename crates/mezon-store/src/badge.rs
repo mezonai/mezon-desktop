@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Context, Entity, Global};
 use mezon_client::{
-    RealtimeEvent, inbox_notification_from_channel_mention, transport::parse_notification_content,
+    RealtimeEvent, inbox_notification_from_channel_mention, notification_ids_from_content,
 };
 use mezon_proto::api::{ChannelMessage, Notification};
 
@@ -558,7 +558,8 @@ impl BadgeService {
                 cl.ensure_thread_with_parent(channel_id, parent_id, clan_id, label, cx);
             });
         }
-        let (message_id_raw, content_time) = parse_notification_content(&notif.content);
+        let (message_id_raw, content_time, content_topic_id) =
+            notification_ids_from_content(&notif.content);
         let Some(message_id_raw) = (message_id_raw != 0).then_some(message_id_raw) else {
             tracing::debug!(
                 content_len = notif.content.len(),
@@ -578,8 +579,10 @@ impl BadgeService {
             content_len = notif.content.len(),
             "badge: parsed notification content"
         );
-        let badge_channel = if notif.topic_id != 0 {
+        let badge_channel = if notif.topic_id > 0 {
             ChannelId(notif.topic_id)
+        } else if content_topic_id > 0 {
+            ChannelId(content_topic_id)
         } else {
             channel_id
         };
