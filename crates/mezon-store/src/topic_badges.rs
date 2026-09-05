@@ -3,8 +3,7 @@ use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global};
 use mezon_client::{
-    AppApi, InboxNotification, RealtimeEvent, inbox_notification_from_api,
-    inbox_notification_from_channel_mention,
+    AppApi, InboxNotification, RealtimeEvent, inbox_notification_from_channel_mention,
 };
 use mezon_proto::api;
 use prost::Message;
@@ -13,7 +12,7 @@ use crate::AuthState;
 use crate::channel::{ChannelList, ChannelType};
 use crate::clan_members::ClanMembersStore;
 use crate::ids::{ChannelId, ClanId, RoleId, UserId};
-use crate::inbox::InboxStore;
+use crate::inbox::{InboxStore, skip_inbox_mention_code};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const USER_MENTIONED: i32 = -9;
@@ -196,10 +195,12 @@ impl TopicBadgeStore {
             Some(&message_id),
             &dedupe_key,
         ) {
-            (
-                vec![clan_id],
-                vec![inbox_notification_from_channel_mention(m)],
-            )
+            let inbox = if skip_inbox_mention_code(m.code) {
+                Vec::new()
+            } else {
+                vec![inbox_notification_from_channel_mention(m)]
+            };
+            (vec![clan_id], inbox)
         } else {
             (Vec::new(), Vec::new())
         }
@@ -211,7 +212,6 @@ impl TopicBadgeStore {
         cx: &App,
     ) -> (Vec<String>, Vec<InboxNotification>) {
         let mut changed_clans: Vec<String> = Vec::new();
-        let mut inbox_mentions: Vec<InboxNotification> = Vec::new();
         for n in &batch.notifications {
             if n.channel_type == ChannelType::App.as_raw() as i32
                 || n.channel_type == ChannelType::Voice.as_raw() as i32
@@ -247,16 +247,12 @@ impl TopicBadgeStore {
                 &topic_id,
                 Some(&message_id),
                 &dedupe_key,
-            ) {
-                if let Ok(notification) = inbox_notification_from_api(n.clone()) {
-                    inbox_mentions.push(notification);
-                }
-                if !changed_clans.contains(&clan_id) {
-                    changed_clans.push(clan_id);
-                }
+            ) && !changed_clans.contains(&clan_id)
+            {
+                changed_clans.push(clan_id);
             }
         }
-        (changed_clans, inbox_mentions)
+        (changed_clans, Vec::new())
     }
 
     fn handle_mark_as_read(&mut self, channel_id: i64, _cx: &App) -> Vec<String> {

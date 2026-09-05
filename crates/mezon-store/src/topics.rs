@@ -727,10 +727,20 @@ impl TopicsStore {
                 Ok(topic) => topic,
                 Err(e) => {
                     tracing::error!("get_topic_detail failed for inbox jump: {e}");
+                    let _ = this.update(cx, |_this, cx| {
+                        MessagesStore::global(cx).update(cx, |store, cx| {
+                            store.request_jump(channel_id, reply_id, cx);
+                        });
+                    });
                     return;
                 }
             };
-            let Ok(origin_id) = detail.message_id.parse::<i64>() else {
+            let Some(origin_id) = detail.message_id.parse::<i64>().ok().filter(|id| *id > 0) else {
+                let _ = this.update(cx, |_this, cx| {
+                    MessagesStore::global(cx).update(cx, |store, cx| {
+                        store.request_jump(channel_id, reply_id, cx);
+                    });
+                });
                 return;
             };
             let _ = this.update(cx, |this, cx| {

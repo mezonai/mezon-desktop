@@ -565,9 +565,6 @@ impl BadgeService {
             );
             return;
         };
-        InboxStore::global(cx).update(cx, |inbox, cx| {
-            inbox.note_mention(notification.clone(), cx);
-        });
         let Some(message_id_raw) = notification
             .effective_message_id()
             .and_then(|id| id.parse::<i64>().ok())

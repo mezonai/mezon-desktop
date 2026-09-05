@@ -1458,9 +1458,13 @@ impl MessagesStore {
         let Some(clan_id) = self.active_clan_id else {
             return;
         };
+        let topic_key = topic_id.get().to_string();
+        let live_badge = TopicBadgeStore::try_global(cx)
+            .map(|store| store.read(cx).topic_badge_count(&topic_key))
+            .unwrap_or(0);
         if let Some(store) = TopicBadgeStore::try_global(cx) {
             store.update(cx, |store, cx| {
-                store.clear_topic(&topic_id.get().to_string(), cx);
+                store.clear_topic(&topic_key, cx);
             });
         }
         ChannelList::global(cx).update(cx, |cl, cx| {
@@ -1473,13 +1477,17 @@ impl MessagesStore {
         ) {
             return;
         }
+        let badge_count = match &self.pending_last_seen {
+            Some(p) if p.channel_id == topic_id => p.badge_count.max(live_badge),
+            _ => live_badge,
+        };
         let pending = PendingLastSeen {
             clan_id,
             channel_id: topic_id,
             message_id,
             create_time,
-            mode: STREAM_MODE_THREAD,
-            badge_count: 0,
+            mode: self.mode,
+            badge_count,
         };
         self.set_last_read_message(topic_id, message_id);
         self.set_pending_last_seen(pending, cx);
@@ -3390,7 +3398,7 @@ impl MessagesStore {
                             cx,
                         );
                     }
-                    store.refresh_category(InboxCategory::Messages, cx);
+                    store.schedule_refresh_category(InboxCategory::Messages, cx);
                 });
             });
         })
@@ -7169,22 +7177,24 @@ impl MessagesStore {
     }
 
     fn replace_channel(&mut self, channel_id: ChannelId, messages: Vec<Message>, has_more: bool) {
-        let protect = self
-            .active_topic_id
-            .filter(|topic| *topic != channel_id)
-            .or(self.active_channel_id.filter(|ch| *ch != channel_id));
+        let protect: Vec<ChannelId> = [self.active_topic_id, self.active_channel_id]
+            .into_iter()
+            .flatten()
+            .filter(|id| *id != channel_id)
+            .collect();
+        let protect_refs: Vec<&ChannelId> = protect.iter().collect();
         if let Some(newest) = messages.last()
             && !self.last_message_by_channel.contains_key(&channel_id)
         {
             self.set_last_message(channel_id, newest.id);
         }
-        self.cache.insert(
+        self.cache.insert_protecting(
             channel_id,
             ChannelMessages {
                 messages: MessageList::from_messages(channel_id, messages),
                 has_more,
             },
-            protect.as_ref(),
+            &protect_refs,
         );
     }
 }

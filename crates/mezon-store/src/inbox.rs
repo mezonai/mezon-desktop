@@ -206,10 +206,7 @@ impl InboxStore {
         if bucket.items.is_empty() {
             return true;
         }
-        if bucket.fetched_at.is_some_and(|t| t.elapsed() < CACHE_TTL) {
-            return false;
-        }
-        false
+        bucket.fetched_at.is_none_or(|t| t.elapsed() >= CACHE_TTL)
     }
 
     pub fn fetch_if_empty(
@@ -310,7 +307,9 @@ impl InboxStore {
         let bucket = self.bucket_mut(category);
         let incoming_message_id = notification.effective_message_id();
         if let Some(pos) = bucket.items.iter().position(|existing| {
-            existing.id == notification.id
+            let same_id =
+                existing.id == notification.id && existing.channel_id == notification.channel_id;
+            same_id
                 || incoming_message_id.as_deref().is_some_and(|message_id| {
                     existing.channel_id == notification.channel_id
                         && existing.effective_message_id().as_deref() == Some(message_id)
@@ -383,12 +382,6 @@ impl InboxStore {
         );
     }
 
-    pub fn remembered_topic_id(&self, channel_id: &str, message_id: &str) -> Option<&str> {
-        self.topic_by_message
-            .get(&topic_remember_key(channel_id, message_id))
-            .map(String::as_str)
-    }
-
     fn apply_remembered_topic_ids(
         items: &mut [InboxNotification],
         remembered: &HashMap<String, String>,
@@ -412,20 +405,20 @@ impl InboxStore {
     }
 
     fn drop_pending_duplicates(items: &mut Vec<InboxNotification>, incoming: &[InboxNotification]) {
-        let incoming_message_ids: HashSet<String> = incoming
+        let incoming_keys: HashSet<(String, String)> = incoming
             .iter()
-            .filter_map(|n| n.effective_message_id())
+            .filter_map(|n| Some((n.channel_id.clone(), n.effective_message_id()?)))
             .collect();
-        if incoming_message_ids.is_empty() {
+        if incoming_keys.is_empty() {
             return;
         }
         items.retain(|existing| {
             if !is_pending_inbox_notification_id(&existing.id) {
                 return true;
             }
-            existing
-                .effective_message_id()
-                .is_none_or(|message_id| !incoming_message_ids.contains(&message_id))
+            existing.effective_message_id().is_none_or(|message_id| {
+                !incoming_keys.contains(&(existing.channel_id.clone(), message_id))
+            })
         });
     }
 
@@ -434,9 +427,9 @@ impl InboxStore {
         fetched: Vec<InboxNotification>,
     ) -> Vec<InboxNotification> {
         let fetched_ids: HashSet<String> = fetched.iter().map(|n| n.id.clone()).collect();
-        let fetched_message_ids: HashSet<String> = fetched
+        let fetched_keys: HashSet<(String, String)> = fetched
             .iter()
-            .filter_map(|n| n.effective_message_id())
+            .filter_map(|n| Some((n.channel_id.clone(), n.effective_message_id()?)))
             .collect();
         let mut merged: Vec<InboxNotification> = local
             .into_iter()
@@ -445,9 +438,9 @@ impl InboxStore {
                     return false;
                 }
                 if is_pending_inbox_notification_id(&item.id) {
-                    return item
-                        .effective_message_id()
-                        .is_none_or(|message_id| !fetched_message_ids.contains(&message_id));
+                    return item.effective_message_id().is_none_or(|message_id| {
+                        !fetched_keys.contains(&(item.channel_id.clone(), message_id))
+                    });
                 }
                 true
             })
@@ -664,17 +657,7 @@ impl InboxStore {
 }
 
 pub(crate) fn skip_inbox_mention_code(code: i32) -> bool {
-    matches!(
-        MessageCode::from_raw(code),
-        MessageCode::ChatUpdate
-            | MessageCode::ChatRemove
-            | MessageCode::UpdateEphemeralMsg
-            | MessageCode::DeleteEphemeralMsg
-            | MessageCode::CreatePin
-            | MessageCode::Typing
-            | MessageCode::Indicator
-            | MessageCode::Welcome
-    )
+    !MessageCode::from_raw(code).is_user_timeline()
 }
 
 #[cfg(test)]
@@ -941,7 +924,21 @@ mod tests {
     fn skip_inbox_mention_ignores_control_codes() {
         assert!(skip_inbox_mention_code(3));
         assert!(skip_inbox_mention_code(1));
+        assert!(skip_inbox_mention_code(6));
+        assert!(skip_inbox_mention_code(10));
         assert!(!skip_inbox_mention_code(0));
         assert!(!skip_inbox_mention_code(9));
+    }
+
+    #[test]
+    fn fetch_initial_when_cache_ttl_expired() {
+        let stale = CategoryBucket {
+            items: vec![sample_notification("7")],
+            last_id: Some("1".into()),
+            fetched_at: Some(Instant::now() - CACHE_TTL - std::time::Duration::from_secs(1)),
+            server_loaded: true,
+            ..CategoryBucket::default()
+        };
+        assert!(InboxStore::should_fetch_initial(Some(&stale)));
     }
 }

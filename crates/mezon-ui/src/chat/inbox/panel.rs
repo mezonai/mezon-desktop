@@ -44,7 +44,6 @@ pub struct InboxPopoverPanel {
     avatar_image_cache: Entity<LruImageCache>,
     message_image_cache: Entity<LruImageCache>,
     _inbox_sub: Subscription,
-    _inbox_obs: Subscription,
     _topics_sub: Subscription,
     _members_sub: Subscription,
     _channel_obs: Subscription,
@@ -110,13 +109,6 @@ impl InboxPopoverPanel {
             this.sync_from_store(cx, false);
             cx.notify();
         });
-        let _inbox_obs = cx.observe(&inbox_store, |this, _, cx| {
-            if this.tab == InboxTab::Topics {
-                return;
-            }
-            this.sync_from_store(cx, false);
-            cx.notify();
-        });
         if let Some(category) = InboxTab::Mentions.category() {
             inbox_store.update(cx, |store, cx| {
                 store.fetch_if_empty(&clan_id, category, cx);
@@ -168,7 +160,6 @@ impl InboxPopoverPanel {
             avatar_image_cache,
             message_image_cache,
             _inbox_sub,
-            _inbox_obs,
             _topics_sub,
             _members_sub,
             _channel_obs,
@@ -202,9 +193,18 @@ impl InboxPopoverPanel {
         let count = self.cached_items.len();
         let old_count = self.list_state.item_count();
         let first_id = self.cached_items.first().map(|row| row.id().to_string());
-        if pin_top || old_count == 0 || self.list_first_id != first_id {
+        if pin_top || old_count == 0 {
             self.list_state.reset(count);
             self.scroll_list_to_top();
+            self.list_first_id = first_id;
+            return;
+        }
+        if self.list_first_id != first_id {
+            if count > old_count {
+                self.list_state.splice(0..0, count - old_count);
+            } else if count != old_count {
+                self.list_state.reset(count);
+            }
             self.list_first_id = first_id;
             return;
         }

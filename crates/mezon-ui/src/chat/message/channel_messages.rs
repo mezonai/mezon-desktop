@@ -2289,11 +2289,7 @@ impl ChannelMessages {
     }
 
     fn on_topic_store_event(&mut self, event: &MessagesEvent, cx: &mut Context<Self>) {
-        if let MessagesEvent::JumpTo { message_id } = event {
-            if self.is_topic_jump_target(*message_id, cx) {
-                self.begin_highlight(*message_id, cx);
-                cx.notify();
-            }
+        if matches!(event, MessagesEvent::JumpTo { .. }) {
             return;
         }
         let concerns_topic = match event {

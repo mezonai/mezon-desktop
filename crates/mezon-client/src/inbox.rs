@@ -768,8 +768,8 @@ pub struct MarkedInboxMessageInput {
     pub topic_id: Option<i64>,
 }
 
-pub fn pending_inbox_notification_id(message_id: i64) -> String {
-    format!("pending-{message_id}")
+pub fn pending_inbox_notification_id(channel_id: i64, message_id: i64) -> String {
+    format!("pending-{channel_id}-{message_id}")
 }
 
 pub fn is_pending_inbox_notification_id(id: &str) -> bool {
@@ -784,7 +784,7 @@ pub fn inbox_notification_from_marked_message_local(
         marked.create_time_seconds,
         marked,
     );
-    notification.id = pending_inbox_notification_id(marked.message_id);
+    notification.id = pending_inbox_notification_id(marked.channel_id, marked.message_id);
     notification
 }
 
@@ -839,7 +839,7 @@ pub fn inbox_notification_from_marked_message(
 pub fn inbox_notification_from_channel_mention(message: &api::ChannelMessage) -> InboxNotification {
     let preview = preview_from_channel_message(message.clone());
     InboxNotification {
-        id: pending_inbox_notification_id(message.message_id),
+        id: pending_inbox_notification_id(message.channel_id, message.message_id),
         category: InboxCategory::Mentions,
         subject: String::new(),
         sender_id: id_str(message.sender_id),
@@ -1179,7 +1179,7 @@ mod tests {
             topic_id: None,
         };
         let notification = inbox_notification_from_marked_message_local(&marked);
-        assert_eq!(notification.id, "pending-42");
+        assert_eq!(notification.id, "pending-7-42");
         assert_eq!(notification.effective_message_id().as_deref(), Some("42"));
     }
 

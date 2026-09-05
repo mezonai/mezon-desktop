@@ -1028,8 +1028,16 @@ impl ChatHeader {
                 cx.notify();
             }
         });
-        let _inbox_observe =
-            cx.observe(&mezon_store::InboxStore::global(cx), |_, _, cx| cx.notify());
+        let _inbox_observe = cx.observe(&mezon_store::InboxStore::global(cx), |this, _, cx| {
+            let inbox_badge = this
+                .clan_id
+                .as_deref()
+                .is_some_and(|id| clan_has_inbox_badge(id, cx));
+            if this.inbox_badge != inbox_badge {
+                this.inbox_badge = inbox_badge;
+                cx.notify();
+            }
+        });
         let _pinned_observe = cx.observe(&PinnedMessagesStore::global(cx), |_, _, cx| cx.notify());
         // The DM store carries the group's label and avatar; the layout's own
         // change gate only tracks the label, so an avatar-only edit reaches the
