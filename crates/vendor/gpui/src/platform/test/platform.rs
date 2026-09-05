@@ -152,6 +152,19 @@ impl TestPlatform {
         tx.send(Ok(select_path(&path))).ok();
     }
 
+    /// Answer a pending "save as" prompt with a failure, the way a Linux box with no
+    /// xdg-desktop-portal backend does. Without this a test can only simulate picking
+    /// or cancelling, which is how a broken dialog stayed untested.
+    pub(crate) fn simulate_new_path_failure(&self, error: anyhow::Error) {
+        let (_, tx) = self
+            .prompts
+            .borrow_mut()
+            .new_path
+            .pop_front()
+            .expect("no pending new path prompt");
+        tx.send(Err(error)).ok();
+    }
+
     pub(crate) fn simulate_path_prompt_response(
         &self,
         select_paths: impl FnOnce(&PathPromptOptions) -> Option<Vec<std::path::PathBuf>>,
@@ -408,7 +421,7 @@ impl Platform for TestPlatform {
         unimplemented!()
     }
 
-    fn on_quit(&self, _callback: Box<dyn FnMut()>) {}
+    fn on_quit(&self, _callback: Box<dyn FnMut() -> bool>) {}
 
     fn on_reopen(&self, _callback: Box<dyn FnMut()>) {
         unimplemented!()

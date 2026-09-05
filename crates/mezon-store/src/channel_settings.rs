@@ -19,6 +19,7 @@ pub struct ChannelSetting {
     pub label: String,
     pub private: bool,
     pub channel_type: i32,
+    pub active: i32,
     pub user_ids: Vec<UserId>,
     pub message_count: i64,
     pub last_sender_id: UserId,
@@ -35,6 +36,7 @@ impl From<api::ChannelSettingItem> for ChannelSetting {
             label: item.channel_label,
             private: item.channel_private != 0,
             channel_type: item.channel_type,
+            active: item.active,
             user_ids: item.user_ids.into_iter().map(UserId).collect(),
             message_count: item.message_count,
             last_sender_id: UserId(last.sender_id),
@@ -57,6 +59,7 @@ pub struct ChannelSettingsStore {
     discarded: HashSet<(ClanId, ChannelId)>,
     pending_reload: HashSet<(ClanId, ChannelId)>,
     pending_events: HashMap<(ClanId, ChannelId), Vec<RealtimeEvent>>,
+    pending_restored_rows: HashMap<(ClanId, ChannelId), HashMap<ChannelId, ChannelSetting>>,
     api: Arc<AppApi>,
 }
 
@@ -73,6 +76,7 @@ impl ChannelSettingsStore {
                 discarded: HashSet::new(),
                 pending_reload: HashSet::new(),
                 pending_events: HashMap::new(),
+                pending_restored_rows: HashMap::new(),
                 api,
             };
             Self::register_realtime(cx);
@@ -86,11 +90,36 @@ impl ChannelSettingsStore {
         cx.global::<GlobalChannelSettingsStore>().0.clone()
     }
 
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalChannelSettingsStore>()
+            .map(|global| global.0.clone())
+    }
+
     pub fn rows(&self, clan_id: ClanId, parent_id: ChannelId) -> &[ChannelSetting] {
         self.rows
             .get(&(clan_id, parent_id))
             .map(Vec::as_slice)
             .unwrap_or_default()
+    }
+
+    pub fn row_by_id(&self, clan_id: ClanId, channel_id: ChannelId) -> Option<&ChannelSetting> {
+        self.rows
+            .iter()
+            .filter(|((row_clan_id, _), _)| *row_clan_id == clan_id)
+            .flat_map(|(_, rows)| rows)
+            .find(|row| row.id == channel_id)
+    }
+
+    pub fn remove_channel_locally(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        clear_pending_restore(&mut self.pending_restored_rows, clan_id, channel_id);
+        self.rows.remove(&(clan_id, channel_id));
+        let changed = remove_matching_rows(&mut self.rows, clan_id, channel_id);
+        self.notify_changed(clan_id, changed, cx);
     }
 
     pub fn is_loading(&self, clan_id: ClanId, parent_id: ChannelId) -> bool {
@@ -103,6 +132,8 @@ impl ChannelSettingsStore {
         self.pending_reload
             .retain(|(row_clan_id, _)| *row_clan_id != clan_id);
         self.pending_events
+            .retain(|(row_clan_id, _), _| *row_clan_id != clan_id);
+        self.pending_restored_rows
             .retain(|(row_clan_id, _), _| *row_clan_id != clan_id);
         self.discarded.extend(
             self.loading
@@ -130,12 +161,21 @@ impl ChannelSettingsStore {
         self.fetch(key, cx);
     }
 
+    pub fn refresh_rows(&mut self, clan_id: ClanId, parent_id: ChannelId, cx: &mut Context<Self>) {
+        let key = (clan_id, parent_id);
+        if self.rows.contains_key(&key) {
+            self.reload(key, cx);
+        } else {
+            self.ensure_loaded(clan_id, parent_id, cx);
+        }
+    }
+
     fn fetch(&self, key: (ClanId, ChannelId), cx: &mut Context<Self>) {
         let (clan_id, parent_id) = key;
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let mut page = 1;
-            let mut all = Vec::new();
+            let mut all: Vec<ChannelSetting> = Vec::new();
             let result = loop {
                 match api
                     .list_channel_setting_page(clan_id.get(), parent_id.get(), API_PAGE_SIZE, page)
@@ -148,7 +188,13 @@ impl ChannelSettingsStore {
                             response.thread_count.max(0) as usize
                         };
                         let received = response.channel_setting_list.len();
-                        all.extend(response.channel_setting_list.into_iter().map(Into::into));
+                        all.extend(
+                            response
+                                .channel_setting_list
+                                .into_iter()
+                                .filter(|item| setting_item_visible(item.parent_id, item.active))
+                                .map(Into::into),
+                        );
                         if received < API_PAGE_SIZE as usize || all.len() >= total {
                             break Ok(all);
                         }
@@ -165,7 +211,14 @@ impl ChannelSettingsStore {
                     return;
                 }
                 match result {
-                    Ok(rows) => {
+                    Ok(mut rows) => {
+                        merge_pending_restores(&mut rows, &mut this.pending_restored_rows, key);
+                        if let Some(channel_list) = crate::channel::ChannelList::try_global(cx) {
+                            let active_ids = active_row_ids(&rows);
+                            channel_list.update(cx, |channel_list, cx| {
+                                channel_list.reconcile_active_channels(clan_id, &active_ids, cx)
+                            });
+                        }
                         this.rows.insert(key, rows);
                         cx.emit(ChannelSettingsEvent::Changed { clan_id, parent_id });
                     }
@@ -237,6 +290,10 @@ impl ChannelSettingsStore {
     }
 
     fn handle_realtime_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        if matches!(event, RealtimeEvent::ChannelArchive(event) if event.active != 0) {
+            self.handle_channel_event(event, cx);
+            return;
+        }
         if let Some(key) = self.loading_key_for_event(event)
             && self.loading.contains(&key)
         {
@@ -322,6 +379,7 @@ impl ChannelSettingsStore {
                     label: event.channel_label.clone(),
                     private: event.channel_private != 0,
                     channel_type: event.channel_type,
+                    active: 1,
                     ..Default::default()
                 };
                 if rows.iter().any(|existing| existing.id == row.id) {
@@ -332,21 +390,38 @@ impl ChannelSettingsStore {
             }
             RealtimeEvent::ChannelUpdated(event) => {
                 let clan_id = ClanId(event.clan_id);
-                let changed = patch_matching_rows(
-                    &mut self.rows,
-                    clan_id,
-                    ChannelId(event.channel_id),
-                    |row| {
-                        row.label = event.channel_label.clone();
-                        row.private = event.channel_private;
-                        row.channel_type = event.channel_type;
-                    },
-                );
+                let parent_id = ChannelId(event.parent_id);
+                let channel_id = ChannelId(event.channel_id);
+                let key = (clan_id, parent_id);
+                let settings_key_is_tracked =
+                    self.rows.contains_key(&key) || self.loading.contains(&key);
+                let changed = patch_matching_rows(&mut self.rows, clan_id, channel_id, |row| {
+                    row.label = event.channel_label.clone();
+                    row.private = event.channel_private;
+                    row.channel_type = event.channel_type;
+                    row.active = event.active;
+                });
+                if missing_active_update_is_restore(event.active, &changed, settings_key_is_tracked)
+                {
+                    let restored = ChannelSetting {
+                        id: channel_id,
+                        creator_id: UserId(event.creator_id),
+                        parent_id,
+                        label: event.channel_label.clone(),
+                        private: event.channel_private,
+                        channel_type: event.channel_type,
+                        active: event.active,
+                        ..Default::default()
+                    };
+                    self.upsert_pending_restore(clan_id, parent_id, restored, cx);
+                    return;
+                }
                 (clan_id, changed)
             }
             RealtimeEvent::ChannelDeleted(event) => {
                 let clan_id = ClanId(event.clan_id);
                 let channel_id = ChannelId(event.channel_id);
+                clear_pending_restore(&mut self.pending_restored_rows, clan_id, channel_id);
                 self.rows.remove(&(clan_id, channel_id));
                 let changed = remove_matching_rows(&mut self.rows, clan_id, channel_id);
                 (clan_id, changed)
@@ -355,27 +430,24 @@ impl ChannelSettingsStore {
                 let clan_id = ClanId(event.clan_id);
                 let channel_id = ChannelId(event.channel_id);
                 if event.active == 0 {
+                    clear_pending_restore(&mut self.pending_restored_rows, clan_id, channel_id);
                     let changed = remove_matching_rows(&mut self.rows, clan_id, channel_id);
                     (clan_id, changed)
                 } else {
                     let parent_id = ChannelId(event.parent_id);
-                    let Some(rows) = self.rows.get_mut(&(clan_id, parent_id)) else {
-                        return;
-                    };
-                    if rows.iter().any(|row| row.id == channel_id) {
-                        return;
-                    }
-                    rows.push(ChannelSetting {
+                    let restored = ChannelSetting {
                         id: channel_id,
                         creator_id: UserId(event.creator_id),
                         parent_id,
                         label: event.channel_label.clone(),
                         private: event.channel_private,
                         channel_type: event.channel_type,
+                        active: event.active,
                         user_ids: event.user_ids.iter().copied().map(UserId).collect(),
                         ..Default::default()
-                    });
-                    (clan_id, vec![parent_id])
+                    };
+                    self.upsert_pending_restore(clan_id, parent_id, restored, cx);
+                    return;
                 }
             }
             RealtimeEvent::UserChannelAdded(event) => {
@@ -423,6 +495,30 @@ impl ChannelSettingsStore {
         self.notify_changed(changed.0, changed.1, cx);
     }
 
+    fn upsert_pending_restore(
+        &mut self,
+        clan_id: ClanId,
+        parent_id: ChannelId,
+        restored: ChannelSetting,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (clan_id, parent_id);
+        let channel_id = restored.id;
+        self.pending_restored_rows
+            .entry(key)
+            .or_default()
+            .insert(channel_id, restored.clone());
+        if let Some(rows) = self.rows.get_mut(&key) {
+            if let Some(row) = rows.iter_mut().find(|row| row.id == channel_id) {
+                *row = restored;
+            } else {
+                rows.push(restored);
+            }
+            self.notify_changed(clan_id, vec![parent_id], cx);
+        }
+        self.reload(key, cx);
+    }
+
     fn notify_changed(&self, clan_id: ClanId, parent_ids: Vec<ChannelId>, cx: &mut Context<Self>) {
         if parent_ids.is_empty() {
             return;
@@ -457,6 +553,10 @@ fn counts_as_channel_message(code: MessageCode) -> bool {
             | MessageCode::Location
             | MessageCode::Poll
     )
+}
+
+fn setting_item_visible(parent_id: i64, active: i32) -> bool {
+    parent_id != 0 || active != 0
 }
 
 fn patch_matching_rows(
@@ -496,6 +596,55 @@ fn remove_matching_rows(
     changed
 }
 
+fn merge_pending_restores(
+    rows: &mut Vec<ChannelSetting>,
+    pending_by_key: &mut HashMap<(ClanId, ChannelId), HashMap<ChannelId, ChannelSetting>>,
+    key: (ClanId, ChannelId),
+) {
+    let fetched_ids = rows.iter().map(|row| row.id).collect::<HashSet<_>>();
+    let mut remove_key = false;
+    if let Some(pending) = pending_by_key.get_mut(&key) {
+        pending.retain(|channel_id, _| !fetched_ids.contains(channel_id));
+        for restored in pending.values() {
+            if !rows.iter().any(|row| row.id == restored.id) {
+                rows.push(restored.clone());
+            }
+        }
+        remove_key = pending.is_empty();
+    }
+    if remove_key {
+        pending_by_key.remove(&key);
+    }
+}
+
+fn missing_active_update_is_restore(
+    active: i32,
+    changed: &[ChannelId],
+    settings_key_is_tracked: bool,
+) -> bool {
+    settings_key_is_tracked && active != 0 && changed.is_empty()
+}
+
+fn active_row_ids(rows: &[ChannelSetting]) -> Vec<ChannelId> {
+    rows.iter()
+        .filter(|row| row.active != 0)
+        .map(|row| row.id)
+        .collect()
+}
+
+fn clear_pending_restore(
+    pending_by_key: &mut HashMap<(ClanId, ChannelId), HashMap<ChannelId, ChannelSetting>>,
+    clan_id: ClanId,
+    channel_id: ChannelId,
+) {
+    for (&(pending_clan_id, _), pending) in pending_by_key.iter_mut() {
+        if pending_clan_id == clan_id {
+            pending.remove(&channel_id);
+        }
+    }
+    pending_by_key.retain(|_, pending| !pending.is_empty());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,6 +655,35 @@ mod tests {
             message_count: count,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn inactive_threads_remain_visible_but_archived_root_channels_do_not() {
+        assert!(setting_item_visible(42, 0));
+        assert!(setting_item_visible(0, 1));
+        assert!(!setting_item_visible(0, 0));
+    }
+
+    #[test]
+    fn active_update_for_a_missing_public_channel_is_treated_as_restore() {
+        assert!(missing_active_update_is_restore(1, &[], true));
+        assert!(!missing_active_update_is_restore(1, &[], false));
+        assert!(!missing_active_update_is_restore(0, &[], true));
+        assert!(!missing_active_update_is_restore(1, &[ChannelId(4)], true));
+    }
+
+    #[test]
+    fn reconcile_ids_exclude_inactive_threads() {
+        let mut active_channel = row(4, 20);
+        active_channel.active = 1;
+        let mut archived_thread = row(6, 10);
+        archived_thread.parent_id = ChannelId(4);
+        archived_thread.active = 0;
+
+        assert_eq!(
+            active_row_ids(&[active_channel, archived_thread]),
+            vec![ChannelId(4)]
+        );
     }
 
     #[test]
@@ -542,5 +720,51 @@ mod tests {
         assert_eq!(changed, vec![ChannelId(10)]);
         assert!(rows[&(ClanId(1), ChannelId(10))].is_empty());
         assert_eq!(rows[&(ClanId(1), ChannelId(0))].len(), 1);
+    }
+
+    #[test]
+    fn stale_fetch_keeps_a_realtime_restored_channel_visible() {
+        let key = (ClanId(1), ChannelId(0));
+        let mut rows = vec![row(6, 10)];
+        let mut pending = HashMap::from([(key, HashMap::from([(ChannelId(4), row(4, 20))]))]);
+
+        merge_pending_restores(&mut rows, &mut pending, key);
+
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<HashSet<_>>(),
+            HashSet::from([ChannelId(4), ChannelId(6)])
+        );
+        assert!(pending[&key].contains_key(&ChannelId(4)));
+    }
+
+    #[test]
+    fn fresh_fetch_confirms_pending_restore_without_duplicating_it() {
+        let key = (ClanId(1), ChannelId(0));
+        let mut rows = vec![row(4, 20), row(6, 10)];
+        let mut pending = HashMap::from([(key, HashMap::from([(ChannelId(4), row(4, 20))]))]);
+
+        merge_pending_restores(&mut rows, &mut pending, key);
+
+        assert_eq!(rows.iter().filter(|row| row.id == ChannelId(4)).count(), 1);
+        assert!(!pending.contains_key(&key));
+    }
+
+    #[test]
+    fn deleting_a_channel_clears_only_its_clans_pending_restore() {
+        let clan_one_key = (ClanId(1), ChannelId(0));
+        let clan_two_key = (ClanId(2), ChannelId(0));
+        let mut pending = HashMap::from([
+            (
+                clan_one_key,
+                HashMap::from([(ChannelId(4), row(4, 20)), (ChannelId(6), row(6, 10))]),
+            ),
+            (clan_two_key, HashMap::from([(ChannelId(4), row(4, 30))])),
+        ]);
+
+        clear_pending_restore(&mut pending, ClanId(1), ChannelId(4));
+
+        assert!(!pending[&clan_one_key].contains_key(&ChannelId(4)));
+        assert!(pending[&clan_one_key].contains_key(&ChannelId(6)));
+        assert!(pending[&clan_two_key].contains_key(&ChannelId(4)));
     }
 }

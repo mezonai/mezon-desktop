@@ -193,6 +193,10 @@ impl Freshness {
         self.fetched_at.is_some_and(|t| t.elapsed() < ttl)
     }
 
+    pub fn was_fetched(&self) -> bool {
+        self.fetched_at.is_some()
+    }
+
     pub fn mark_fetched(&mut self) {
         self.fetched_at = Some(Instant::now());
     }
@@ -233,13 +237,16 @@ mod tests {
     fn freshness_starts_stale_then_tracks_fetch_and_stale() {
         let mut f = Freshness::new();
         assert!(!f.is_fresh(Duration::from_secs(60)));
+        assert!(!f.was_fetched());
 
         f.mark_fetched();
         assert!(f.is_fresh(Duration::from_secs(60)));
         assert!(!f.is_fresh(Duration::from_millis(0)));
+        assert!(f.was_fetched());
 
         f.mark_stale();
         assert!(!f.is_fresh(Duration::from_secs(60)));
+        assert!(!f.was_fetched());
     }
 
     #[test]

@@ -2,7 +2,7 @@ use crate::channel::ChannelList;
 use crate::config::AppConfig;
 use crate::ids::{ChannelId, ClanId, UserId};
 use crate::ogp::trusted_invite_id;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,6 +26,7 @@ pub const MAX_COMMUNITY_BANNER_URL_BYTES: usize = 2048;
 pub struct OnboardingAnswer {
     pub title: String,
     pub description: String,
+    pub emoji: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -56,6 +57,7 @@ impl From<api::OnboardingAnswer> for OnboardingAnswer {
         Self {
             title: answer.title,
             description: answer.description,
+            emoji: answer.emoji,
         }
     }
 }
@@ -65,6 +67,7 @@ impl From<OnboardingAnswer> for api::OnboardingAnswer {
         Self {
             title: answer.title,
             description: answer.description,
+            emoji: answer.emoji,
             ..Default::default()
         }
     }
@@ -362,8 +365,14 @@ impl ClanOverviewDraft {
     }
 }
 
-fn carry_live_badges(previous: &[Clan], next: &mut [Clan]) {
-    if previous.is_empty() {
+/// Keep the live rail counts across a clan-list refetch.
+///
+/// `ListClanDescs` carries no badge, so a plain reload would paint every clan
+/// read. `authoritative` says the incoming rows came from `ListClanBadgeCount`
+/// instead — server truth, which also knows about reads made on other devices —
+/// and then it must win, or a reconnect could never correct a stale count.
+fn carry_live_badges(previous: &[Clan], next: &mut [Clan], authoritative: bool) {
+    if previous.is_empty() || authoritative {
         return;
     }
     let live: std::collections::HashMap<ClanId, (u32, bool)> = previous
@@ -438,6 +447,10 @@ pub enum ClanEvent {
     /// A clan was removed (server push).
     Deleted(ClanId),
     Joined(ClanId),
+    OwnerChanged {
+        clan_id: ClanId,
+        new_owner_id: UserId,
+    },
 }
 
 /// Clan store — owns the clan list, fetches it over REST, and self-subscribes to realtime
@@ -451,6 +464,7 @@ pub struct ClanList {
     pub active_clan_id: Option<ClanId>,
     api: Arc<AppApi>,
     loading: bool,
+    listed: bool,
     badges_loaded: bool,
     reload_pending: bool,
     reset_generation: u64,
@@ -480,6 +494,10 @@ impl ClanList {
         cx.global::<GlobalClanList>().0.clone()
     }
 
+    pub fn has_listed(&self) -> bool {
+        self.listed
+    }
+
     pub fn try_global(cx: &App) -> Option<Entity<Self>> {
         cx.try_global::<GlobalClanList>().map(|g| g.0.clone())
     }
@@ -488,6 +506,7 @@ impl ClanList {
         self.reset_generation = self.reset_generation.wrapping_add(1);
         self.clans.clear();
         self.loading = false;
+        self.listed = false;
         self.badges_loaded = false;
         self.reload_pending = false;
         self.joining_invite_urls.clear();
@@ -518,6 +537,7 @@ impl ClanList {
             active_clan_id: None,
             api,
             loading: false,
+            listed: false,
             badges_loaded: false,
             reload_pending: false,
             reset_generation: 0,
@@ -535,6 +555,7 @@ impl ClanList {
             for kind in [
                 RealtimeKind::ClanUpdated,
                 RealtimeKind::ClanDeleted,
+                RealtimeKind::TransferOwnership,
                 RealtimeKind::AddClanUser,
                 RealtimeKind::UserClanRemoved,
             ] {
@@ -544,7 +565,7 @@ impl ClanList {
             }
             dispatch.on_lagged(&entity, |this, cx| {
                 tracing::warn!("ClanList realtime lagged — reloading clans");
-                this.reload(cx);
+                this.reload_badges(cx);
             });
         });
     }
@@ -562,7 +583,7 @@ impl ClanList {
                     was_connected = true;
                     // Reconnected — realtime pushes were missed while offline, so the cached list
                     // is stale: always refetch (not just when empty).
-                    if this.update(cx, |this, cx| this.reload(cx)).is_err() {
+                    if this.update(cx, |this, cx| this.reload_badges(cx)).is_err() {
                         break;
                     }
                 } else if !connected {
@@ -570,6 +591,20 @@ impl ClanList {
                 }
             }
         })
+    }
+
+    /// `reload` plus a fresh `ListClanBadgeCount`, for the paths where the rail's
+    /// own counts are suspect and not just the clan list.
+    ///
+    /// The per-clan `ListChannelBadgeCount` re-seed is lazy — entering a clan
+    /// after a reconnect refetches it — but the rail is user-scoped and nothing
+    /// re-seeds it lazily, so an unvisited clan would keep a count from before
+    /// the drop for the rest of the session. Live traffic can't fill the gap
+    /// either: the rail's unread dot rides `ChannelMessage`, which needs the
+    /// clan to be joined.
+    pub fn reload_badges(&mut self, cx: &mut Context<Self>) {
+        self.badges_loaded = false;
+        self.reload(cx);
     }
 
     pub fn reload(&mut self, cx: &mut Context<Self>) {
@@ -642,13 +677,14 @@ impl ClanList {
                     return;
                 }
                 this.loading = false;
+                this.listed = true;
                 this.badges_loaded = this.badges_loaded || badges_fetched;
-                this.update_clans(mapped, cx);
-                if let Some(clan_id) = this.active_clan_id {
-                    this.fire_join_clan_chat(clan_id, cx);
-                } else if let Some(clan_id) = this.clans.first().map(|clan| clan.id) {
-                    this.fire_join_clan_chat(clan_id, cx);
-                }
+                this.update_clans_inner(mapped, badges_fetched, cx);
+                // No `clan_join` from here. The clan listing has not been fetched
+                // yet at this point, and a join that lands before it leaves the
+                // clan's private channels and threads unsubscribed for the whole
+                // gateway session — `ChannelList::ensure_clan_joined` owns the
+                // join and waits for the structure first.
                 if this.reload_pending {
                     this.reload_pending = false;
                     this.reload(cx);
@@ -663,6 +699,9 @@ impl ClanList {
         match event {
             RealtimeEvent::ClanDeleted(e) => {
                 self.drop_clan(ClanId(e.clan_id), cx);
+            }
+            RealtimeEvent::TransferOwnership(e) if e.curr_owner != 0 => {
+                self.set_clan_creator(ClanId(e.clan_id), UserId(e.curr_owner), cx);
             }
             RealtimeEvent::ClanUpdated(e) => {
                 let name = (!e.clan_name.is_empty()).then_some(e.clan_name.clone());
@@ -735,6 +774,40 @@ impl ClanList {
                 .map_err(|_| "store dropped".to_string())?;
             Ok(())
         })
+    }
+
+    pub fn transfer_ownership(
+        &mut self,
+        clan_id: ClanId,
+        new_owner_id: UserId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            api.transfer_ownership(clan_id.get(), new_owner_id.get())
+                .await
+                .map_err(|e| e.to_string())?;
+            this.update(cx, |this, cx| {
+                this.set_clan_creator(clan_id, new_owner_id, cx);
+            })
+            .map_err(|_| "store dropped".to_string())?;
+            Ok(())
+        })
+    }
+
+    fn set_clan_creator(&mut self, clan_id: ClanId, creator_id: UserId, cx: &mut Context<Self>) {
+        let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id) else {
+            return;
+        };
+        if clan.creator_id == creator_id {
+            return;
+        }
+        clan.creator_id = creator_id;
+        cx.emit(ClanEvent::OwnerChanged {
+            clan_id,
+            new_owner_id: creator_id,
+        });
+        cx.notify();
     }
 
     pub fn delete_clan(
@@ -854,19 +927,16 @@ impl ClanList {
             .and_then(|c| c.welcome_channel_id)
     }
 
-    fn fire_join_clan_chat(&self, clan_id: ClanId, cx: &mut Context<Self>) {
-        let api = self.api.clone();
-        let id = clan_id.get();
-        cx.spawn(async move |_, _| {
-            if let Err(e) = api.join_clan_chat(id).await {
-                tracing::error!("join_clan_chat failed for clan {id}: {e}");
-            }
-        })
-        .detach();
-    }
-
+    /// `clan_join` has exactly one owner — [`ChannelList::ensure_clan_joined`] —
+    /// because the gateway only fans the join out to the clan's private channels
+    /// and threads when it already holds that user's channel listing, and it
+    /// answers every later join for the clan from the tracker instead of
+    /// re-running the fan-out. A join sent from here, before the listing, would
+    /// be the one that counts.
     pub fn subscribe_clan_realtime(&self, clan_id: ClanId, cx: &mut Context<Self>) {
-        self.fire_join_clan_chat(clan_id, cx);
+        crate::channel::ChannelList::global(cx).update(cx, |channels, cx| {
+            drop(channels.ensure_clan_joined(clan_id, cx));
+        });
     }
 
     pub fn is_joining_invite(&self, invite_url: &str) -> bool {
@@ -918,8 +988,9 @@ impl ClanList {
                 match &result {
                     Ok(accept) => {
                         this.invite_join_failed_urls.remove(&invite_url_for_task);
+                        // `select_clan` runs the clan load, which joins the chat
+                        // once the channel listing has landed.
                         this.select_clan(accept.clan_id, cx);
-                        this.fire_join_clan_chat(accept.clan_id, cx);
                         this.reload(cx);
                     }
                     Err(AcceptInviteError::AlreadyJoining) => {}
@@ -949,10 +1020,24 @@ impl ClanList {
         }
     }
 
-    pub fn update_clans(&mut self, mut clans: Vec<Clan>, cx: &mut Context<Self>) {
+    pub fn update_clans(&mut self, clans: Vec<Clan>, cx: &mut Context<Self>) {
+        self.listed = true;
+        self.update_clans_inner(clans, false, cx);
+    }
+
+    fn update_clans_inner(
+        &mut self,
+        mut clans: Vec<Clan>,
+        authoritative_badges: bool,
+        cx: &mut Context<Self>,
+    ) {
         let prev_active = self.active_clan_id;
-        let previous: HashSet<ClanId> = self.clans.iter().map(|clan| clan.id).collect();
-        carry_live_badges(&self.clans, &mut clans);
+        let previous: HashMap<ClanId, UserId> = self
+            .clans
+            .iter()
+            .map(|clan| (clan.id, clan.creator_id))
+            .collect();
+        carry_live_badges(&self.clans, &mut clans, authoritative_badges);
         self.clans = clans;
         self.apply_saved_order_internal();
         let active_missing = self
@@ -965,8 +1050,15 @@ impl ClanList {
             cx.emit(ClanEvent::ActiveClanChanged(self.active_clan_id));
         }
         for clan in &self.clans {
-            if !previous.contains(&clan.id) {
-                cx.emit(ClanEvent::Joined(clan.id));
+            match previous.get(&clan.id) {
+                None => cx.emit(ClanEvent::Joined(clan.id)),
+                Some(creator_id) if *creator_id != clan.creator_id => {
+                    cx.emit(ClanEvent::OwnerChanged {
+                        clan_id: clan.id,
+                        new_owner_id: clan.creator_id,
+                    })
+                }
+                Some(_) => {}
             }
         }
         cx.notify();
@@ -1822,7 +1914,7 @@ mod tests {
         previous[0].badge_count = 4;
         previous[0].has_unread = true;
         let mut refetched = clans();
-        carry_live_badges(&previous, &mut refetched);
+        carry_live_badges(&previous, &mut refetched, false);
         assert_eq!(refetched[0].badge_count, 4);
         assert!(refetched[0].has_unread);
         assert_eq!(refetched[1].badge_count, 0);
@@ -1833,9 +1925,23 @@ mod tests {
         let mut fresh = clans();
         fresh[0].badge_count = 7;
         fresh[0].has_unread = true;
-        carry_live_badges(&[], &mut fresh);
+        carry_live_badges(&[], &mut fresh, false);
         assert_eq!(fresh[0].badge_count, 7);
         assert!(fresh[0].has_unread);
+    }
+
+    #[test]
+    fn a_badge_count_refetch_outranks_the_live_carry() {
+        let mut previous = clans();
+        previous[0].badge_count = 4;
+        previous[0].has_unread = true;
+        let mut refetched = clans();
+        refetched[0].badge_count = 1;
+        refetched[0].has_unread = true;
+        // Reconnect: ListClanBadgeCount ran, so the rows are server truth and must
+        // land — otherwise a count read on another device could never clear here.
+        carry_live_badges(&previous, &mut refetched, true);
+        assert_eq!(refetched[0].badge_count, 1);
     }
 
     #[test]
@@ -1843,7 +1949,7 @@ mod tests {
         let previous = vec![make_clan(1, "One", None)];
         let mut refetched = clans();
         refetched[1].badge_count = 9;
-        carry_live_badges(&previous, &mut refetched);
+        carry_live_badges(&previous, &mut refetched, false);
         assert_eq!(refetched[0].badge_count, 0);
         assert_eq!(refetched[1].badge_count, 9);
     }
@@ -2044,6 +2150,148 @@ mod tests {
         let msg = format!("{err}");
         assert_eq!(msg, "network timeout");
     }
+    #[gpui::test]
+    fn logging_out_forgets_that_the_clan_list_was_ever_fetched(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let clan_list = init_clan_list(cx);
+            clan_list.update(cx, |list, cx| {
+                list.update_clans(vec![make_clan(1, "One", None)], cx);
+                assert!(list.has_listed());
+
+                list.reset(cx);
+
+                assert!(
+                    !list.has_listed(),
+                    "a reset list must not read as a fetched-and-empty one, or the next \
+                     account is judged brand new before its clans arrive"
+                );
+                assert!(list.clans.is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_transfer_event_without_a_new_owner_is_ignored(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let clan_list = init_clan_list(cx);
+            clan_list.update(cx, |list, cx| {
+                list.update_clans(
+                    vec![Clan {
+                        creator_id: UserId(9),
+                        ..make_clan(1, "One", None)
+                    }],
+                    cx,
+                );
+
+                list.handle_event(
+                    &RealtimeEvent::TransferOwnership(
+                        mezon_proto::realtime::TransferOwnershipEvent {
+                            clan_id: 1,
+                            prev_owner: 9,
+                            curr_owner: 0,
+                        },
+                    ),
+                    cx,
+                );
+
+                assert_eq!(list.clan_by_id(ClanId(1)).unwrap().creator_id, UserId(9));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_refetch_that_changes_the_creator_emits_owner_changed(cx: &mut gpui::TestAppContext) {
+        let owner_changes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (clan_list, _sub) = cx.update(|cx| {
+            let clan_list = init_clan_list(cx);
+            let seen = owner_changes.clone();
+            let sub = cx.subscribe(&clan_list, move |_, event: &ClanEvent, _| {
+                if let ClanEvent::OwnerChanged {
+                    clan_id,
+                    new_owner_id,
+                } = event
+                {
+                    seen.lock().unwrap().push((*clan_id, *new_owner_id));
+                }
+            });
+            (clan_list, sub)
+        });
+
+        cx.update(|cx| {
+            clan_list.update(cx, |list, cx| {
+                list.update_clans(clans(), cx);
+                list.update_clans(
+                    vec![
+                        Clan {
+                            creator_id: UserId(55),
+                            ..make_clan(1, "One", None)
+                        },
+                        make_clan(2, "Two", Some("old.png")),
+                        make_clan(3, "Three", None),
+                    ],
+                    cx,
+                );
+            });
+        });
+
+        assert_eq!(
+            *owner_changes.lock().unwrap(),
+            vec![(ClanId(1), UserId(55))]
+        );
+    }
+
+    #[gpui::test]
+    fn a_pushed_transfer_ownership_event_updates_the_creator(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let clan_list = init_clan_list(cx);
+            clan_list.update(cx, |list, cx| {
+                list.update_clans(clans(), cx);
+
+                list.handle_event(
+                    &RealtimeEvent::TransferOwnership(
+                        mezon_proto::realtime::TransferOwnershipEvent {
+                            clan_id: 1,
+                            prev_owner: 0,
+                            curr_owner: 77,
+                        },
+                    ),
+                    cx,
+                );
+
+                assert_eq!(list.clan_by_id(ClanId(1)).unwrap().creator_id, UserId(77));
+                assert_eq!(list.clan_by_id(ClanId(2)).unwrap().creator_id, UserId(0));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn transferring_ownership_moves_creator_id_and_emits_once(cx: &mut gpui::TestAppContext) {
+        let emitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (clan_list, _sub) = cx.update(|cx| {
+            let clan_list = init_clan_list(cx);
+            let counter = emitted.clone();
+            let sub = cx.subscribe(&clan_list, move |_, event: &ClanEvent, _| {
+                if matches!(event, ClanEvent::OwnerChanged { .. }) {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
+            (clan_list, sub)
+        });
+
+        cx.update(|cx| {
+            clan_list.update(cx, |list, cx| {
+                list.update_clans(clans(), cx);
+                list.set_clan_creator(ClanId(1), UserId(42), cx);
+                assert_eq!(list.clan_by_id(ClanId(1)).unwrap().creator_id, UserId(42));
+
+                list.set_clan_creator(ClanId(1), UserId(42), cx);
+                list.set_clan_creator(ClanId(99), UserId(42), cx);
+            });
+        });
+
+        assert_eq!(emitted.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     #[gpui::test]
     fn user_clan_removed_keeps_the_clan_when_someone_else_is_kicked(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {

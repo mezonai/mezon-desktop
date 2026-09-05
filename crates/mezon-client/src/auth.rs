@@ -18,7 +18,9 @@ use http_client::{AsyncBody, HttpClient, http};
 use reqwest_client::ReqwestClient;
 use serde::{Deserialize, Serialize};
 
-use crate::session::{Session, decode_jwt_claims};
+use crate::session::{
+    HealthyEndpointReason, HealthyEndpointSession, Session, decode_jwt_claims, parse_endpoint,
+};
 
 fn observe_date_header(headers: &http::HeaderMap) {
     if let Some(date) = headers
@@ -43,6 +45,13 @@ pub const DEFAULT_API_SECURE: bool = true;
 pub const DEFAULT_SERVER_KEY: &str = "defaultkey";
 
 const PROTO_CONTENT_TYPE: &str = "application/proto";
+const MAX_ENDPOINT_RESPONSE_BYTES: u64 = 256 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+#[error("HTTP {status} fetching healthy endpoint")]
+pub struct HealthyEndpointStatusError {
+    pub status: u16,
+}
 
 /// Whether the server still recognises a session. `SessionRefresh` answers every failure with a
 /// 500 (`codes.Internal`), so it cannot tell a dead credential from a backend incident; a plain
@@ -77,6 +86,12 @@ struct ApiSession {
     ws_url: Option<String>,
     /// The TCP endpoint URL returned by the server after auth.
     tcp_url: Option<String>,
+    #[serde(
+        default,
+        alias = "endpointId",
+        deserialize_with = "crate::session::deserialize_endpoint_id"
+    )]
+    endpoint_id: i32,
 }
 
 /// Response from the OTP request endpoint.
@@ -374,8 +389,69 @@ impl MezonClient {
         }
     }
 
+    pub async fn get_healthy_endpoint(
+        &self,
+        token: &str,
+        current_endpoint_id: i32,
+        reason: HealthyEndpointReason,
+    ) -> Result<HealthyEndpointSession> {
+        let url = healthy_endpoint_url(&self.base_url(), current_endpoint_id, reason as i32)?;
+        let request = http::Request::builder()
+            .method(http::Method::GET)
+            .uri(url.as_str())
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Accept", "application/json")
+            .body(AsyncBody::empty())
+            .context("Failed to build healthy endpoint request")?;
+
+        let mut response = self
+            .http
+            .send(request)
+            .await
+            .context("Network error fetching healthy endpoint")?;
+        observe_date_header(response.headers());
+        let status = response.status();
+        let mut bytes = Vec::new();
+        response
+            .body_mut()
+            .take(MAX_ENDPOINT_RESPONSE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .context("Failed to read healthy endpoint response")?;
+        if bytes.len() as u64 > MAX_ENDPOINT_RESPONSE_BYTES {
+            bail!("healthy endpoint response exceeds {MAX_ENDPOINT_RESPONSE_BYTES} bytes");
+        }
+        if !status.is_success() {
+            return Err(HealthyEndpointStatusError {
+                status: status.as_u16(),
+            }
+            .into());
+        }
+
+        let endpoint: HealthyEndpointSession =
+            serde_json::from_slice(&bytes).context("Failed to decode healthy endpoint response")?;
+        if endpoint.tcp_url.as_deref().is_none_or(str::is_empty)
+            && endpoint.ws_url.as_deref().is_none_or(str::is_empty)
+        {
+            bail!("healthy endpoint response contains no realtime URL");
+        }
+        Ok(endpoint)
+    }
+
     /// Convert an `ApiSession` wire response into our internal `Session`.
     fn parse_session(&self, api: ApiSession) -> Session {
+        tracing::info!(
+            api_url_present = api
+                .api_url
+                .as_deref()
+                .is_some_and(|value| !value.is_empty()),
+            ws_url_present = api.ws_url.as_deref().is_some_and(|value| !value.is_empty()),
+            tcp_url_present = api
+                .tcp_url
+                .as_deref()
+                .is_some_and(|value| !value.is_empty()),
+            "Auth session decoded"
+        );
         let (user_id, username, expires_at) = decode_jwt_claims(&api.token);
         let (api_host, api_port, api_secure) = parse_endpoint(api.api_url.as_deref());
         let (ws_host, ws_port, ws_secure) = parse_endpoint(api.ws_url.as_deref());
@@ -394,6 +470,7 @@ impl MezonClient {
             tcp_url: api.tcp_url,
             tcp_host,
             tcp_port,
+            endpoint_id: api.endpoint_id,
             ws_url: api.ws_url,
             ws_host,
             ws_port,
@@ -497,37 +574,21 @@ impl MezonClient {
     }
 }
 
-fn parse_endpoint(endpoint: Option<&str>) -> (Option<String>, Option<u16>, Option<bool>) {
-    let Some(endpoint) = endpoint else {
-        return (None, None, None);
-    };
-
-    let endpoint = if endpoint.contains("://") {
-        endpoint.to_owned()
-    } else if endpoint.contains(':') {
-        format!("tcp://{endpoint}")
-    } else {
-        // Bare hostname (e.g. `sock.mezon.ai`) — host-only endpoint; port comes from
-        // session/config or TLS implicit default at connect time, not URL parsing.
-        return (Some(endpoint.to_owned()), None, Some(true));
-    };
-
-    let parsed = url::Url::parse(&endpoint);
-    let Ok(parsed) = parsed else {
-        return (None, None, None);
-    };
-
-    let secure = match parsed.scheme() {
-        "https" | "wss" => Some(true),
-        "http" | "ws" | "tcp" => Some(false),
-        _ => None,
-    };
-
-    (
-        parsed.host_str().map(str::to_owned),
-        parsed.port_or_known_default(),
-        secure,
-    )
+fn healthy_endpoint_url(
+    base_url: &str,
+    current_endpoint_id: i32,
+    reason_code: i32,
+) -> Result<url::Url> {
+    let mut url = url::Url::parse(&format!(
+        "{}/v2/healthy/endpoint",
+        base_url.trim_end_matches('/')
+    ))
+    .context("Invalid gateway URL")?;
+    url.query_pairs_mut()
+        .append_pair("currentEndpointId", &current_endpoint_id.to_string())
+        .append_pair("reasonCode", &reason_code.to_string())
+        .append_pair("geoIp", "");
+    Ok(url)
 }
 
 #[cfg(test)]
@@ -577,5 +638,93 @@ mod tests {
         assert_eq!(user_id, "");
         assert_eq!(username, "");
         assert_eq!(expires_at, None);
+    }
+
+    #[test]
+    fn healthy_endpoint_url_matches_the_gateway_query_contract() {
+        let url = healthy_endpoint_url("https://gw.example.com:8081/", 7, 2).expect("valid URL");
+        assert_eq!(url.path(), "/v2/healthy/endpoint");
+        assert_eq!(
+            url.query_pairs().collect::<Vec<_>>(),
+            vec![
+                ("currentEndpointId".into(), "7".into()),
+                ("reasonCode".into(), "2".into()),
+                ("geoIp".into(), "".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn healthy_endpoint_response_accepts_backend_field_names() {
+        let endpoint: HealthyEndpointSession = serde_json::from_str(
+            r#"{"user_id":"7","session_id":"sid","api_url":"https://api.example.com","ws_url":"wss://sock.example.com","tcp_url":"sock.example.com:4433","endpoint_id":2}"#,
+        )
+        .expect("valid backend response");
+        assert_eq!(endpoint.user_id, "7");
+        assert_eq!(endpoint.session_id, "sid");
+        assert_eq!(endpoint.tcp_url.as_deref(), Some("sock.example.com:4433"));
+        assert_eq!(endpoint.endpoint_id, 2);
+    }
+
+    #[test]
+    fn healthy_endpoint_status_errors_preserve_the_http_code() {
+        let error = anyhow::Error::new(HealthyEndpointStatusError { status: 401 });
+        assert_eq!(
+            error
+                .downcast_ref::<HealthyEndpointStatusError>()
+                .map(|error| error.status),
+            Some(401)
+        );
+    }
+
+    #[test]
+    fn login_session_keeps_the_backend_endpoint_id() {
+        let session = MezonClient::default().parse_session(ApiSession {
+            token: "header.payload.signature".into(),
+            refresh_token: "refresh".into(),
+            id_token: String::new(),
+            created: false,
+            is_remember: true,
+            session_id: Some("sid".into()),
+            api_url: Some("https://api2.example.com".into()),
+            ws_url: Some("wss://sock2.example.com".into()),
+            tcp_url: Some("sock2.example.com:4433".into()),
+            endpoint_id: 2,
+        });
+
+        assert_eq!(session.endpoint_id, 2);
+        let endpoint = session
+            .realtime_endpoint("default.example.com", Some(4433))
+            .expect("a node");
+        assert_eq!(endpoint.id, 2);
+        assert_eq!(endpoint.host, "sock2.example.com");
+        assert_eq!(endpoint.port, 4433);
+    }
+
+    #[test]
+    fn a_login_endpoint_id_sent_as_a_string_does_not_break_the_login() {
+        let api: ApiSession = serde_json::from_str(
+            r#"{"token":"t","refresh_token":"r","api_url":"https://api.example.com",
+                "tcp_url":"sock.example.com:4433","endpointId":"11"}"#,
+        )
+        .expect("an int64 endpoint id arrives as a JSON string");
+        assert_eq!(api.endpoint_id, 11);
+    }
+
+    #[test]
+    fn a_login_without_an_endpoint_id_still_names_the_node_it_landed_on() {
+        let api: ApiSession = serde_json::from_str(
+            r#"{"token":"t","refresh_token":"r","api_url":"http://127.0.0.1:7350",
+                "ws_url":"127.0.0.1:4433","tcp_url":"127.0.0.1:4433"}"#,
+        )
+        .expect("valid login response");
+        assert_eq!(api.endpoint_id, 0);
+
+        let session = MezonClient::default().parse_session(api);
+        let endpoint = session
+            .realtime_endpoint("default.example.com", Some(4433))
+            .expect("a node");
+        assert_eq!(endpoint.host, "127.0.0.1");
+        assert_eq!(endpoint.port, 4433);
     }
 }

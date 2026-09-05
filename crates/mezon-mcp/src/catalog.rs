@@ -166,6 +166,38 @@ Parameters: none.",
         write: false,
     },
     ToolSpec {
+        name: "tour_state",
+        description: "\
+Report the guided tour's current step.
+
+Always returns an object. `active` is false when no tour is running. While a tour runs it
+also carries `resolving` (true for the frame after start, before the first step resolves),
+`track`, `index`, `position`, `total`, `title_key`, `anchor`, `has_hole` and `hole`
+([x, y, w, h] in window points, null for a centered step). `has_hole` is false when the
+step's anchor was not recorded on screen this run and it fell back to a centered card.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "tour_start",
+        description: "\
+Start a guided tour track.
+
+Parameters:
+- track (optional): track id. Omitted starts the track matching the current route.",
+        write: true,
+    },
+    ToolSpec {
+        name: "tour_advance",
+        description: "\
+Move the running guided tour one step.
+
+Parameters:
+- forward (optional, default true): false steps back.",
+        write: true,
+    },
+    ToolSpec {
         name: "get_scroll_state",
         description: "\
 Report what the open channel's message list currently holds.
@@ -220,8 +252,25 @@ list_messages (which reads the server) to tell a delivery failure apart from a m
 the server accepted but the list never rendered.
 
 Parameters:
-- limit (optional, default 50): return at most this many rows from each end of the buffer.",
+- limit (optional, default 50): return at most this many rows from each end of the buffer.
+- topic (optional, default false): read the open topic panel's buffer instead. The topic is
+  a bucket of its own and the parent channel stays active while it is open, so a reply sent
+  into a topic only shows up here with this set.",
         write: false,
+    },
+    ToolSpec {
+        name: "reply_begin",
+        description: "\
+Aim the composer at a message, the way the row's Reply action does. Nothing is sent.
+
+Use this when the reply must carry something the composer holds — an attachment from
+composer_drop_paths, a mention picked with composer_pick. `reply_to_message` posts a
+text-only reply in one call and cannot carry either. Send with composer_submit;
+composer_state reports the pending target under `reply_target`.
+
+Parameters:
+- message_id (required): must be in the open channel's loaded history.",
+        write: true,
     },
     ToolSpec {
         name: "jump_to_present",
@@ -285,7 +334,8 @@ Parameters: none.",
 Return the member-list context menu that is currently open, if any.
 
 Includes the target user, the resolved permission/relationship flags that decide which rows show
-(is_friend, is_blocked, is_banned, show_ban, show_kick, show_remove_from_thread), and the item list
+(is_friend, is_blocked, is_banned, show_ban, show_kick, show_remove_from_thread,
+show_remove_from_group), and the item list
 with the index to pass to member_menu_pick.
 
 Parameters: none.",
@@ -316,14 +366,14 @@ Parameters: none.",
         name: "member_menu_pick",
         description: "\
 Run one row of the open member context menu (Profile, Message, Add Friend, Unblock, Remove Friend,
-Ban, Unban, Kick, Remove from thread).
+Ban, Unban, Kick, Remove from thread, Remove from group).
 
 Call member_menu_open first and pick the index from its item list. Rows of kind \"submenu\" or
 \"danger_submenu\" (Ban) additionally need value — one of the option values returned for that row
 (seconds; 0 means until the ban is lifted).
 
-Destructive: Kick, Ban and Remove-from-thread hit the server immediately; Remove Friend and Kick
-open a confirmation modal instead.
+Destructive: Ban and Remove-from-thread hit the server immediately; Remove Friend, Kick and
+Remove-from-group open a confirmation modal instead.
 
 Parameters:
 - index (required): item index from member_menu_open/member_menu_state.
@@ -404,6 +454,17 @@ Useful for making a throwaway empty category to exercise the category context me
 Parameters:
 - clan_id (required): clan snowflake id.
 - name (required): category name (letters, digits, space, - or _; must not start with a separator).",
+        write: true,
+    },
+    ToolSpec {
+        name: "mute_channel",
+        description: "\
+Mute or unmute a channel for the signed-in user (backend SetMuteChannel).
+
+Parameters:
+- clan_id (required): clan snowflake id. Use 0 for direct messages.
+- channel_id (required): channel snowflake id.
+- mute_minutes (optional): minutes to mute (-1 = forever, 0 = unmute, default 0).",
         write: true,
     },
     ToolSpec {
@@ -592,9 +653,27 @@ Parameters: none.",
         description: "\
 Replace the topic composer's text, the way typing into the panel does.
 
+Drives the real MentionInput, so trigger characters open their popup: @ (member/role),
+# (channel), : (emoji). Returns the composer state including the suggestion list; follow
+with topic_pick to accept one, then topic_submit to send.
+
 Parameters:
 - text (required)",
         write: false,
+    },
+    ToolSpec {
+        name: "topic_pick",
+        description: "\
+Accept one entry of the topic composer's suggestion popup.
+
+Typing `@name` on its own only produces literal text. A real mention needs the picked
+entry, because that is what writes the id into the message's `mentions` field — and the
+receiving client detects mentions from that field, never from the text. So a topic
+mention can only be exercised end to end through topic_type + topic_pick + topic_submit.
+
+Parameters:
+- index (optional, default 0): suggestion index from topic_type/topic_state.",
+        write: true,
     },
     ToolSpec {
         name: "topic_submit",
@@ -642,6 +721,20 @@ channel's media itself, so it can be paged once open.
 
 Parameters:
 - message_id (required): message carrying the attachment.
+- attachment_index (optional): zero-based index on that message. Default 0.",
+        write: false,
+    },
+    ToolSpec {
+        name: "open_pdf_viewer",
+        description: "\
+Open the pdf viewer window on a message's pdf attachment.
+
+Same reach as open_image_viewer: the message must be in the open channel's loaded
+history (or the open topic's), so call open_channel and load_more_messages first.
+The row only offers this for a pdf attachment, and so does this tool.
+
+Parameters:
+- message_id (required): message carrying the pdf attachment.
 - attachment_index (optional): zero-based index on that message. Default 0.",
         write: false,
     },
@@ -943,6 +1036,49 @@ Useful before capture_chat/capture_window so the window is visible.
 Parameters: none.",
         write: true,
     },
+    #[cfg(debug_assertions)]
+    ToolSpec {
+        name: "set_channel_age_restricted",
+        description: "\
+Turn a channel's age-restricted flag on or off (debug builds only).
+
+Goes through the same save path as Channel Settings, so it reaches the server.
+Use it to put a channel behind the age gate for testing.
+
+Parameters:
+- clan_id (required)
+- channel_id (required)
+- on (optional, default true)",
+        write: true,
+    },
+    #[cfg(debug_assertions)]
+    ToolSpec {
+        name: "set_local_dob",
+        description: "\
+Overwrite the signed-in account's date of birth in the local store (debug builds only).
+
+Nothing is sent to the server \u{2014} it only changes what this client believes, so the
+age gate and the birthday prompt can be exercised without a fresh account.
+
+Parameters:
+- seconds (required): unix seconds of the birthday; 0 means \"never entered\"",
+        write: true,
+    },
+    #[cfg(debug_assertions)]
+    ToolSpec {
+        name: "inject_preview_message",
+        description: "\
+Render a message locally in the open channel WITHOUT sending anything to the server.
+
+Debug builds only. The content object is a raw mezon message-content payload, so it can
+carry `embed`, `components`, attachments — anything the renderer understands. Use it to
+preview bot/embed layouts that no bot in reach produces.
+
+Parameters:
+- content (required): message content object, e.g. {\"t\": \"hi\", \"embed\": [ ... ]}
+- sender_name (optional): display name for the fake sender",
+        write: true,
+    },
     ToolSpec {
         name: "send_message",
         description: "\
@@ -1159,10 +1295,30 @@ Parameters:
         write: true,
     },
     ToolSpec {
+        name: "topic_drop_paths",
+        description: "\
+Drop local files onto the TOPIC panel's composer; send them with topic_submit.
+
+composer_drop_paths always targets the channel composer even while the topic
+panel is open, so use this one for attachments meant for a topic. Call
+open_topic first.
+
+Staging is asynchronous: this returns as soon as the paths are handed over, so
+poll topic_state until its `attachments` lists the files before topic_submit —
+submitting earlier sends the reply without them.
+
+Parameters:
+- paths (required): array of local file paths.",
+        write: true,
+    },
+    ToolSpec {
         name: "composer_drop_paths",
         description: "\
 Drop local files onto the composer, like a drag-and-drop. They become pending
 attachments; send them with composer_submit.
+
+The file is read on a background task, so poll composer_state until its
+`attachments` lists it before composer_submit.
 
 Parameters:
 - paths (required): array of local file paths.",

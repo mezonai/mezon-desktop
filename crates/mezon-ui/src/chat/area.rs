@@ -7,8 +7,9 @@ use gpui::{
     Subscription, Task, Window, div, prelude::*, px, rgb, rgba,
 };
 use mezon_store::{
-    ChannelId, ChannelPermissionsStore, ClanId, InVoiceInfo, MessagesEvent, MessagesStore,
-    PERMISSION_SEND_MESSAGE, Settings,
+    BannedUsersStore, ChannelId, ChannelList, ChannelPermissionsStore, ClanId, ClanList,
+    DirectEvent, DirectKind, DirectMessageStore, FriendEvent, FriendStore, InVoiceInfo,
+    MessagesEvent, MessagesStore, OnboardingStore, PERMISSION_SEND_MESSAGE, Settings,
 };
 use ui::PopoverMenuHandle;
 
@@ -28,6 +29,7 @@ use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::components::compositions::channel_row::ChannelIcon;
 use crate::components::primitives::{Icon, IconName, InputState};
 use crate::image_cache::LruImageCache;
+use crate::router::{Route, Router, navigate};
 use crate::theme::ActiveTheme;
 
 pub struct ChatArea {
@@ -46,18 +48,187 @@ pub struct ChatArea {
     send_permission_key: Option<(ClanId, ChannelId)>,
     send_permission_live: Option<bool>,
     can_send_message: Option<bool>,
-    no_permission_label: Option<(SharedString, SharedString)>,
+    dm_blocked: bool,
+    no_permission_label: Option<(SharedString, bool, SharedString)>,
     _submit_sub: Option<Subscription>,
     _reply_sub: Option<Subscription>,
     _edit_closed_sub: Option<Subscription>,
     _send_permission_sub: Subscription,
     _send_permission_channel_sub: Subscription,
+    _send_permission_direct_sub: Subscription,
+    _send_permission_friend_sub: Subscription,
     _send_permission_debounce: Option<Task<()>>,
     drop_title_cache: Option<(SharedString, SharedString, SharedString)>,
     drop_body_cache: Option<(SharedString, SharedString)>,
 }
 
 const SEND_PERMISSION_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// Replaces the composer while the signed-in user is banned from the channel. `remaining` is
+/// `None` when the server gave no expiry, i.e. the ban does not lift on its own.
+fn banned_notice(locale: &str, remaining: Option<i64>, cx: &App) -> gpui::AnyElement {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .flex_shrink_0()
+        .h(px(48.))
+        .ml(px(16.))
+        .mr(px(14.))
+        .mb(px(16.))
+        .px(px(12.))
+        .rounded(px(4.))
+        .opacity(0.8)
+        .bg(theme.tokens.bg_tertiary)
+        .text_color(theme.tokens.text_theme_primary)
+        .overflow_hidden()
+        .child(
+            Icon::new(IconName::TriangleAlert)
+                .size(px(24.))
+                .flex_none()
+                .text_color(theme.danger_text),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.tokens.text_secondary)
+                        .child(mezon_i18n::t(locale, "common.timeout")),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .truncate()
+                        .child(mezon_i18n::t(locale, "common.timeoutDesc")),
+                ),
+        )
+        .children(remaining.map(|left| {
+            div()
+                .flex_none()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.tokens.text_secondary)
+                .child(crate::util::time_ago::remaining(locale, left))
+        }))
+        .into_any_element()
+}
+
+/// The strip React parks directly on top of the composer while a member still has onboarding
+/// missions left: the next mission, and clicking it does the mission.
+fn onboarding_mission_banner(locale: &str, cx: &mut App) -> Option<gpui::AnyElement> {
+    let clan_id = ClanList::global(cx).read(cx).active_clan_id?;
+    let store = OnboardingStore::global(cx);
+    let store = store.read(cx);
+    // This runs on every chat render, so the clan with no missions — every clan, for most
+    // people — bails on one hash lookup, before the scan `ClanList::clan` costs.
+    if store.mission_total(clan_id) == 0 {
+        return None;
+    }
+    let clan_enabled = ClanList::global(cx)
+        .read(cx)
+        .clan(clan_id)
+        .is_some_and(|clan| clan.is_onboarding);
+    if !store.show_progress(clan_id, clan_enabled) {
+        return None;
+    }
+    let index = store.mission_progress(clan_id);
+    let mission = store.current_mission(clan_id)?;
+    let title: SharedString = mission.title.clone().into();
+    let task_type = mission.task_type;
+    let channel_id = ChannelId(mission.channel_id);
+    let channel_name = ChannelList::global(cx)
+        .read(cx)
+        .channel(clan_id, channel_id)
+        .map(|channel| SharedString::from(format!("#{}", channel.name)));
+    let theme = cx.theme();
+    Some(
+        div()
+            .flex_none()
+            .w_full()
+            .px_3()
+            .child(
+                div()
+                    .id("onboarding-mission-banner")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .w_full()
+                    .h(px(56.))
+                    .px_4()
+                    .rounded_t(px(6.))
+                    .cursor_pointer()
+                    .bg(theme.tokens.bg_tertiary)
+                    .hover(|style| style.bg(theme.tokens.bg_item_hover))
+                    .child(
+                        Icon::new(IconName::Hashtag)
+                            .size(px(20.))
+                            .text_color(theme.tokens.text_theme_primary),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.tokens.text_secondary)
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_1()
+                                    .text_size(px(10.))
+                                    .text_color(theme.tokens.text_theme_primary)
+                                    .child(crate::chat::clan_guide_page::mission_summary(
+                                        locale, task_type,
+                                    ))
+                                    .children(channel_name.map(|name| {
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.tokens.text_secondary)
+                                            .child(name)
+                                    })),
+                            ),
+                    )
+                    .on_click(move |_, _, cx| {
+                        crate::chat::clan_guide_page::start_mission(
+                            clan_id, channel_id, task_type, index, cx,
+                        );
+                    }),
+            )
+            .into_any_element(),
+    )
+}
+
+fn leave_removed_conversation(channel_id: ChannelId, cx: &mut App) {
+    let viewing = route_targets_conversation(&Router::global(cx).read(cx).route(), channel_id);
+    if viewing {
+        navigate(cx, Route::Friends);
+    }
+    // After the navigate, so the entry `navigate` just pushed goes too: a conversation the
+    // store dropped must not be reachable through Back or Forward either.
+    Router::global(cx).update(cx, |router, _| router.forget_conversation(channel_id));
+}
+
+fn route_targets_conversation(route: &Route, channel_id: ChannelId) -> bool {
+    matches!(route, Route::DirectMessage { direct_id, .. } if *direct_id == channel_id)
+}
 
 impl ChatArea {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<crate::ChatLayout>) -> Self {
@@ -84,6 +255,30 @@ impl ChatArea {
                 }
             },
         );
+        let send_permission_direct_sub = cx.subscribe(
+            &DirectMessageStore::global(cx),
+            |this: &mut crate::ChatLayout, _, event: &DirectEvent, cx| {
+                let channel_id = match event {
+                    DirectEvent::Changed { channel_id } => *channel_id,
+                    DirectEvent::Removed { channel_id } => {
+                        leave_removed_conversation(*channel_id, cx);
+                        Some(*channel_id)
+                    }
+                };
+                let active_channel = MessagesStore::global(cx).read(cx).active_channel_id();
+                if channel_id.is_none() || channel_id == active_channel {
+                    this.chat_area.sync_send_permission(cx);
+                }
+            },
+        );
+        let send_permission_friend_sub = cx.subscribe(
+            &FriendStore::global(cx),
+            |this: &mut crate::ChatLayout, _, event: &FriendEvent, cx| {
+                if matches!(event, FriendEvent::Changed) {
+                    this.chat_area.sync_send_permission(cx);
+                }
+            },
+        );
         Self {
             timeline,
             mention_input: None,
@@ -100,12 +295,15 @@ impl ChatArea {
             send_permission_key: None,
             send_permission_live: None,
             can_send_message: None,
+            dm_blocked: false,
             no_permission_label: None,
             _submit_sub: None,
             _reply_sub: None,
             _edit_closed_sub: None,
             _send_permission_sub: send_permission_sub,
             _send_permission_channel_sub: send_permission_channel_sub,
+            _send_permission_direct_sub: send_permission_direct_sub,
+            _send_permission_friend_sub: send_permission_friend_sub,
             _send_permission_debounce: None,
             drop_title_cache: None,
             drop_body_cache: None,
@@ -113,17 +311,32 @@ impl ChatArea {
     }
 
     pub fn sync_send_permission(&mut self, cx: &mut Context<crate::ChatLayout>) {
-        let key = {
+        let (key, dm_peer) = {
             let messages = MessagesStore::global(cx).read(cx);
             if messages.is_dm() {
-                None
+                let peer = messages.active_channel_id().and_then(|channel_id| {
+                    let direct_store = DirectMessageStore::try_global(cx)?;
+                    let direct_store = direct_store.read(cx);
+                    let direct = direct_store.find(channel_id)?;
+                    (direct.kind == DirectKind::Dm).then_some(direct.peer_user_id)?
+                });
+                (None, peer)
             } else {
-                messages
-                    .active_clan_id()
-                    .filter(|clan_id| !clan_id.is_zero())
-                    .zip(messages.active_channel_id())
+                (
+                    messages
+                        .active_clan_id()
+                        .filter(|clan_id| !clan_id.is_zero())
+                        .zip(messages.active_channel_id()),
+                    None,
+                )
             }
         };
+        let dm_blocked = dm_peer.is_some_and(|peer| {
+            FriendStore::try_global(cx)
+                .is_some_and(|store| store.read(cx).is_user_blocked_by_me(peer, cx))
+        });
+        let mut notify = self.dm_blocked != dm_blocked;
+        self.dm_blocked = dm_blocked;
         let live = key.and_then(|(clan_id, channel_id)| {
             ChannelPermissionsStore::try_global(cx).and_then(|store| {
                 store
@@ -132,6 +345,9 @@ impl ChatArea {
             })
         });
         if key == self.send_permission_key && live == self.send_permission_live {
+            if notify {
+                cx.notify();
+            }
             return;
         }
         let switched = key != self.send_permission_key;
@@ -141,9 +357,15 @@ impl ChatArea {
             self._send_permission_debounce = None;
             if self.can_send_message != live {
                 self.can_send_message = live;
+                notify = true;
+            }
+            if notify {
                 cx.notify();
             }
             return;
+        }
+        if notify {
+            cx.notify();
         }
         self._send_permission_debounce = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -157,6 +379,10 @@ impl ChatArea {
                 }
             });
         }));
+    }
+
+    pub(crate) fn send_denied(&self) -> bool {
+        self.dm_blocked || self.can_send_message == Some(false)
     }
 
     pub fn bind_channel_members(&mut self, cx: &mut Context<crate::ChatLayout>) {
@@ -281,7 +507,7 @@ impl ChatArea {
                 window,
                 |this: &mut crate::ChatLayout, _, event: &ChannelMessagesEvent, window, cx| {
                     let ChannelMessagesEvent::EditClosed = event;
-                    if this.chat_area.can_send_message == Some(false) {
+                    if this.chat_area.send_denied() {
                         return;
                     }
                     if let Some(input) = this.chat_area.mention_input.clone() {
@@ -314,6 +540,48 @@ impl ChatArea {
         show_search_options: bool,
         search_input: Option<Entity<InputState>>,
         canvas_body: gpui::AnyElement,
+        cx: &mut Context<crate::ChatLayout>,
+    ) -> gpui::AnyElement {
+        self.render_panel_body(
+            locale,
+            channel_name,
+            channel_icon,
+            channel_id,
+            show_members_button,
+            show_member_panel,
+            show_inbox,
+            inbox_handle,
+            clan_id,
+            pin_handle,
+            canvas_handle,
+            show_search_bar,
+            search_expanded,
+            show_search_options,
+            search_input,
+            canvas_body,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_panel_body(
+        &mut self,
+        locale: &str,
+        channel_name: Option<&str>,
+        channel_icon: Option<ChannelIcon>,
+        channel_id: Option<ChannelId>,
+        show_members_button: bool,
+        show_member_panel: bool,
+        show_inbox: bool,
+        inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
+        clan_id: Option<String>,
+        pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
+        canvas_handle: Option<PopoverMenuHandle<CanvasPopoverPanel>>,
+        show_search_bar: bool,
+        search_expanded: bool,
+        show_search_options: bool,
+        search_input: Option<Entity<InputState>>,
+        panel_body: gpui::AnyElement,
         cx: &mut Context<crate::ChatLayout>,
     ) -> gpui::AnyElement {
         self.header.update(cx, |header, cx| {
@@ -351,14 +619,14 @@ impl ChatArea {
                 .flex_shrink_0(),
         );
 
-        let canvas_column = div()
+        let panel_column = div()
             .flex()
             .flex_col()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
-            .child(canvas_body);
+            .child(panel_body);
 
         let body = div()
             .flex()
@@ -368,7 +636,7 @@ impl ChatArea {
             .h_full()
             .min_h_0()
             .overflow_hidden()
-            .child(canvas_column)
+            .child(panel_column)
             .when(show_member_panel, |row| match &self.member_panel {
                 Some(panel) => row.child(
                     AnyView::from(panel.clone()).cached(
@@ -586,15 +854,27 @@ impl ChatArea {
             )
         };
 
-        let send_denied = !media_channel_view && self.can_send_message == Some(false);
+        let send_denied = !media_channel_view && self.send_denied();
         let no_permission_notice = if send_denied {
             let label = match &self.no_permission_label {
-                Some((cached_locale, label)) if cached_locale.as_ref() == locale => label.clone(),
+                Some((cached_locale, cached_dm_blocked, label))
+                    if cached_locale.as_ref() == locale
+                        && *cached_dm_blocked == self.dm_blocked =>
+                {
+                    label.clone()
+                }
                 _ => {
-                    let label: SharedString =
-                        mezon_i18n::t(locale, "common.noPermissionToSendMessage").into();
-                    self.no_permission_label =
-                        Some((SharedString::from(locale.to_string()), label.clone()));
+                    let key = if self.dm_blocked {
+                        "message.blockedUserMessage"
+                    } else {
+                        "common.noPermissionToSendMessage"
+                    };
+                    let label: SharedString = mezon_i18n::t(locale, key).into();
+                    self.no_permission_label = Some((
+                        SharedString::from(locale.to_string()),
+                        self.dm_blocked,
+                        label.clone(),
+                    ));
                     label
                 }
             };
@@ -618,6 +898,27 @@ impl ChatArea {
             div().into_any_element()
         };
 
+        // A ban replaces the composer outright, the way the web client does — the moderator list
+        // only says *who* is banned, so the countdown has to come from `IsBanned`.
+        let ban_notice = if !is_dm
+            && !media_channel_view
+            && let Some(channel_id) = channel_id
+        {
+            let store = BannedUsersStore::global(cx);
+            store.update(cx, |store, cx| store.ensure_self_ban(channel_id, cx));
+            let remaining = store.read(cx).self_ban_remaining(channel_id);
+            remaining.map(|left| banned_notice(locale, left, cx))
+        } else {
+            None
+        };
+        let banned = ban_notice.is_some();
+
+        let onboarding_mission = if !is_dm && !media_channel_view && !send_denied && !banned {
+            onboarding_mission_banner(locale, cx)
+        } else {
+            None
+        };
+
         let timeline_popover_open = self.timeline.read(cx).profile_popover_open();
         let member_popover_open = self
             .member_panel
@@ -635,15 +936,15 @@ impl ChatArea {
             .overflow_hidden()
             .when(!media_channel_view, |col| {
                 let drop_input = mention_input;
-                let input_visible = !send_denied;
+                let input_visible = !send_denied && !banned;
                 col.on_drop(
                     move |paths: &ExternalPaths, window: &mut Window, cx: &mut App| {
-                        if let Some(drop_input) = drop_input.clone() {
+                        if let Some(drop_input) = drop_input.clone()
+                            && input_visible
+                        {
                             let dropped: Vec<PathBuf> = paths.paths().to_vec();
                             drop_input.update(cx, |input, cx| {
-                                if input_visible {
-                                    input.focus_input(window, cx);
-                                }
+                                input.focus_input(window, cx);
                                 input.add_dropped_paths(dropped, window, cx)
                             });
                         }
@@ -670,9 +971,13 @@ impl ChatArea {
                             .into_any_element()
                     },
                 ))
-                .when(send_denied, |col| col.child(no_permission_notice))
-                .when(!send_denied, |col| {
-                    col.when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
+                .when_some(ban_notice, |col, notice| col.child(notice))
+                .when(!banned && send_denied, |col| {
+                    col.child(no_permission_notice)
+                })
+                .when(!banned && !send_denied, |col| {
+                    col.children(onboarding_mission)
+                        .when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
                         .when_some(app_channel_bar.as_ref(), |col, target| {
                             col.child(render_channel_app_bar(locale, target.clone(), cx.theme()))
                         })
@@ -748,5 +1053,32 @@ impl ChatArea {
             .when(!hide_header, |this| this.child(header))
             .child(body)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod removed_conversation_tests {
+    use super::{ChannelId, Route, route_targets_conversation};
+
+    fn direct(id: i64) -> Route {
+        Route::DirectMessage {
+            direct_id: ChannelId(id),
+            message_type: "2".to_string(),
+        }
+    }
+
+    #[test]
+    fn the_open_conversation_has_to_be_left() {
+        assert!(route_targets_conversation(&direct(7), ChannelId(7)));
+    }
+
+    #[test]
+    fn another_conversation_stays_put() {
+        assert!(!route_targets_conversation(&direct(7), ChannelId(8)));
+    }
+
+    #[test]
+    fn a_route_outside_direct_messages_stays_put() {
+        assert!(!route_targets_conversation(&Route::Friends, ChannelId(7)));
     }
 }

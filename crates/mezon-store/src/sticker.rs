@@ -3,8 +3,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
-use mezon_client::{AppApi, ConnectionStatus};
-use mezon_proto::api;
+use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
+use mezon_proto::{api, realtime};
 
 use crate::Freshness;
 use crate::emoji::{
@@ -12,6 +12,7 @@ use crate::emoji::{
     upload_emoticon_file,
 };
 use crate::ids::ClanId;
+use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::voice::{MAX_SOUND_BYTES, upload_sound_file};
 
 pub const STICKER_MEDIA_TYPE: i32 = 0;
@@ -87,6 +88,18 @@ impl StickerStore {
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
+        let entity = cx.entity();
+        RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
+            for kind in [
+                RealtimeKind::StickerCreate,
+                RealtimeKind::StickerUpdate,
+                RealtimeKind::StickerDelete,
+            ] {
+                dispatch.on(kind, &entity, |this, event, cx| {
+                    this.handle_sticker_event(event, cx);
+                });
+            }
+        });
 
         Self {
             by_id: HashMap::new(),
@@ -179,6 +192,72 @@ impl StickerStore {
                 }
             });
         })
+    }
+
+    fn handle_sticker_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::Unhandled(message) = event else {
+            return;
+        };
+        let changed = match message {
+            realtime::envelope::Message::StickerCreateEvent(e) => self.insert_from_event(e),
+            realtime::envelope::Message::StickerUpdateEvent(e) => {
+                self.rename(&e.sticker_id.to_string(), &e.shortname)
+            }
+            realtime::envelope::Message::StickerDeleteEvent(e) => {
+                self.remove(&e.sticker_id.to_string())
+            }
+            _ => false,
+        };
+        if changed {
+            cx.emit(StickerEvent::Changed);
+            cx.notify();
+        }
+    }
+
+    fn insert_from_event(&mut self, e: &realtime::StickerCreateEvent) -> bool {
+        if e.sticker_id == 0 || e.source.is_empty() {
+            return false;
+        }
+        if is_audio_source(&e.source) {
+            let sound = sound_from_event(e);
+            if self.sounds.iter().any(|existing| existing.id == sound.id) {
+                return false;
+            }
+            self.sounds.push(sound);
+            return true;
+        }
+        match sticker_from_event(e) {
+            Some(sticker) => {
+                self.insert(sticker);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn rename(&mut self, id: &str, shortname: &str) -> bool {
+        if shortname.is_empty() {
+            return false;
+        }
+        if let Some(sticker) = self.by_id.get_mut(id) {
+            sticker.shortname = shortname.to_string();
+            return true;
+        }
+        if let Some(sound) = self.sounds.iter_mut().find(|sound| sound.id == id) {
+            sound.shortname = shortname.to_string();
+            return true;
+        }
+        false
+    }
+
+    fn remove(&mut self, id: &str) -> bool {
+        if self.by_id.remove(id).is_some() {
+            self.order.retain(|existing| existing != id);
+            return true;
+        }
+        let before = self.sounds.len();
+        self.sounds.retain(|sound| sound.id != id);
+        self.sounds.len() != before
     }
 
     fn insert(&mut self, sticker: Sticker) {
@@ -414,6 +493,49 @@ fn sticker_from_proto(s: api::ClanSticker) -> Option<Sticker> {
     })
 }
 
+fn is_audio_source(source: &str) -> bool {
+    let lowered = source.to_ascii_lowercase();
+    lowered.ends_with(".mp3") || lowered.ends_with(".wav") || lowered.contains("/sounds/")
+}
+
+fn sound_from_event(e: &realtime::StickerCreateEvent) -> ClanSound {
+    ClanSound {
+        id: e.sticker_id.to_string(),
+        shortname: if e.shortname.is_empty() {
+            "sound.mp3".to_string()
+        } else {
+            e.shortname.clone()
+        },
+        src: e.source.clone(),
+        clan_id: e.clan_id.to_string(),
+        clan_name: e.clan_name.clone(),
+        logo: e.logo.clone(),
+        creator_id: e.creator_id.to_string(),
+    }
+}
+
+fn sticker_from_event(e: &realtime::StickerCreateEvent) -> Option<Sticker> {
+    if e.sticker_id == 0 || e.source.is_empty() {
+        return None;
+    }
+    let category = if !e.category.is_empty() {
+        e.category.clone()
+    } else {
+        e.clan_name.clone()
+    };
+    Some(Sticker {
+        id: e.sticker_id.to_string(),
+        shortname: e.shortname.clone(),
+        src: e.source.clone(),
+        category,
+        clan_id: e.clan_id.to_string(),
+        clan_name: e.clan_name.clone(),
+        logo: e.logo.clone(),
+        creator_id: e.creator_id.to_string(),
+        is_for_sale: false,
+    })
+}
+
 fn sound_from_proto(s: api::ClanSticker) -> Option<ClanSound> {
     if s.id == 0 || s.source.is_empty() || s.media_type != AUDIO_MEDIA_TYPE {
         return None;
@@ -454,6 +576,137 @@ mod tests {
             media_type,
             ..Default::default()
         }
+    }
+
+    fn init_sticker_store(cx: &mut App) -> Entity<StickerStore> {
+        let api = Arc::new(mezon_client::AppApi::new(
+            Arc::new(mezon_client::TransportClient::new(String::new())),
+            String::new(),
+        ));
+        RealtimeDispatch::init(api.clone(), cx);
+        cx.new(|cx| StickerStore::new(api, cx))
+    }
+
+    #[gpui::test]
+    fn realtime_events_add_rename_and_remove_a_sticker(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_sticker_store(cx);
+            store.update(cx, |store, cx| {
+                let created = RealtimeEvent::Unhandled(
+                    realtime::envelope::Message::StickerCreateEvent(realtime::StickerCreateEvent {
+                        sticker_id: 7,
+                        source: "https://cdn/7.webp".into(),
+                        shortname: "wave".into(),
+                        clan_id: 3,
+                        clan_name: "MyClan".into(),
+                        ..Default::default()
+                    }),
+                );
+                store.handle_sticker_event(&created, cx);
+                let sticker = store.get("7").expect("sticker inserted");
+                assert_eq!(sticker.shortname, "wave");
+                assert_eq!(sticker.category, "MyClan");
+
+                let updated = RealtimeEvent::Unhandled(
+                    realtime::envelope::Message::StickerUpdateEvent(realtime::StickerUpdateEvent {
+                        sticker_id: 7,
+                        shortname: "hello".into(),
+                        ..Default::default()
+                    }),
+                );
+                store.handle_sticker_event(&updated, cx);
+                assert_eq!(store.get("7").map(|s| s.shortname.as_str()), Some("hello"));
+
+                let deleted = RealtimeEvent::Unhandled(
+                    realtime::envelope::Message::StickerDeleteEvent(realtime::StickerDeleteEvent {
+                        sticker_id: 7,
+                        ..Default::default()
+                    }),
+                );
+                store.handle_sticker_event(&deleted, cx);
+                assert!(store.get("7").is_none());
+                assert!(store.all().is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_created_sound_never_lands_in_the_sticker_list(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_sticker_store(cx);
+            store.update(cx, |store, cx| {
+                for (id, source) in [
+                    (11i64, "https://cdn/clip.mp3"),
+                    (12, "https://cdn/clip.WAV"),
+                    (13, "https://cdn/sounds/clip.ogg"),
+                ] {
+                    let created =
+                        RealtimeEvent::Unhandled(realtime::envelope::Message::StickerCreateEvent(
+                            realtime::StickerCreateEvent {
+                                sticker_id: id,
+                                source: source.into(),
+                                shortname: "boom".into(),
+                                clan_id: 3,
+                                clan_name: "MyClan".into(),
+                                ..Default::default()
+                            },
+                        ));
+                    store.handle_sticker_event(&created, cx);
+                }
+                assert!(store.all().is_empty(), "sounds must stay out of the picker");
+                assert_eq!(store.sounds().len(), 3);
+
+                let renamed = RealtimeEvent::Unhandled(
+                    realtime::envelope::Message::StickerUpdateEvent(realtime::StickerUpdateEvent {
+                        sticker_id: 11,
+                        shortname: "bang".into(),
+                        ..Default::default()
+                    }),
+                );
+                store.handle_sticker_event(&renamed, cx);
+                assert_eq!(
+                    store.get_sound("11").map(|s| s.shortname.as_str()),
+                    Some("bang")
+                );
+
+                let deleted = RealtimeEvent::Unhandled(
+                    realtime::envelope::Message::StickerDeleteEvent(realtime::StickerDeleteEvent {
+                        sticker_id: 11,
+                        ..Default::default()
+                    }),
+                );
+                store.handle_sticker_event(&deleted, cx);
+                assert_eq!(store.sounds().len(), 2);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn an_event_for_an_unknown_sticker_changes_nothing(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_sticker_store(cx);
+            store.update(cx, |store, cx| {
+                let updated = RealtimeEvent::Unhandled(
+                    realtime::envelope::Message::StickerUpdateEvent(realtime::StickerUpdateEvent {
+                        sticker_id: 99,
+                        shortname: "ghost".into(),
+                        ..Default::default()
+                    }),
+                );
+                store.handle_sticker_event(&updated, cx);
+                assert!(store.all().is_empty());
+
+                let sourceless = RealtimeEvent::Unhandled(
+                    realtime::envelope::Message::StickerCreateEvent(realtime::StickerCreateEvent {
+                        sticker_id: 8,
+                        shortname: "nosrc".into(),
+                        ..Default::default()
+                    }),
+                );
+                store.handle_sticker_event(&sourceless, cx);
+                assert!(store.all().is_empty());
+            });
+        });
     }
 
     fn store_with(stickers: Vec<Sticker>) -> (HashMap<String, Sticker>, Vec<String>) {

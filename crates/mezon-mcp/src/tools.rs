@@ -99,6 +99,28 @@ impl McpBackend {
             }
             "get_current_context" => self.get_current_context().await,
             "get_scroll_state" => self.get_scroll_state().await,
+            "tour_state" => {
+                self.send_ui_result(|reply| McpCommand::TourState { reply })
+                    .await
+            }
+            "tour_start" => {
+                self.require_write_mode("tour_start")?;
+                let track = arguments
+                    .get("track")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                self.send_ui_result(|reply| McpCommand::TourStart { track, reply })
+                    .await
+            }
+            "tour_advance" => {
+                self.require_write_mode("tour_advance")?;
+                let forward = arguments
+                    .get("forward")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                self.send_ui_result(|reply| McpCommand::TourAdvance { forward, reply })
+                    .await
+            }
             "scroll_wheel" => {
                 let delta_y = arguments
                     .get("delta_y")
@@ -146,6 +168,19 @@ impl McpBackend {
                 })
                 .await
             }
+            "open_pdf_viewer" => {
+                let message_id = parse_i64_field(&arguments, "message_id")?;
+                let attachment_index = arguments
+                    .get("attachment_index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                self.send_ui_result(|reply| McpCommand::OpenPdfViewer {
+                    message_id,
+                    attachment_index,
+                    reply,
+                })
+                .await
+            }
             "close_panel" => {
                 self.send_ui_result(|reply| McpCommand::SetPanel { kind: None, reply })
                     .await
@@ -155,8 +190,14 @@ impl McpBackend {
                 self.send_ui_result(|reply| McpCommand::OpenTopic { message_id, reply })
                     .await
             }
-            "close_topic" => self.send_ui_result(|reply| McpCommand::CloseTopic { reply }).await,
-            "topic_state" => self.send_ui_result(|reply| McpCommand::TopicState { reply }).await,
+            "close_topic" => {
+                self.send_ui_result(|reply| McpCommand::CloseTopic { reply })
+                    .await
+            }
+            "topic_state" => {
+                self.send_ui_result(|reply| McpCommand::TopicState { reply })
+                    .await
+            }
             "topic_type" => {
                 let text = arguments
                     .get("text")
@@ -164,6 +205,12 @@ impl McpBackend {
                     .ok_or_else(|| anyhow::anyhow!("topic_type requires string field text"))?
                     .to_string();
                 self.send_ui_result(|reply| McpCommand::TopicType { text, reply })
+                    .await
+            }
+            "topic_pick" => {
+                self.require_write_mode("topic_pick")?;
+                let index = arguments.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                self.send_ui_result(|reply| McpCommand::TopicPick { index, reply })
                     .await
             }
             "topic_submit" => {
@@ -224,7 +271,21 @@ impl McpBackend {
                     .and_then(Value::as_u64)
                     .unwrap_or(50)
                     .clamp(1, 500) as usize;
-                self.send_ui_result(|reply| McpCommand::ListLoadedMessages { limit, reply })
+                let topic = arguments
+                    .get("topic")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                self.send_ui_result(|reply| McpCommand::ListLoadedMessages {
+                    limit,
+                    topic,
+                    reply,
+                })
+                .await
+            }
+            "reply_begin" => {
+                self.require_write_mode("reply_begin")?;
+                let message_id = parse_i64_field(&arguments, "message_id")?;
+                self.send_ui_result(|reply| McpCommand::ReplyBegin { message_id, reply })
                     .await
             }
             "jump_to_message" => {
@@ -250,6 +311,10 @@ impl McpBackend {
             "clan_menu_state" => self.clan_menu_state().await,
             "list_categories" => self.list_categories(&arguments).await,
             "create_category" => self.create_category(&arguments).await,
+            "mute_channel" => {
+                self.require_write_mode("mute_channel")?;
+                self.mute_channel(&arguments).await
+            }
             "channel_menu_state" => self.channel_menu_state().await,
             "channel_menu_open" => self.channel_menu_open(&arguments).await,
             "channel_menu_close" => self.channel_menu_close().await,
@@ -363,6 +428,46 @@ impl McpBackend {
                 self.send_ui_ok(|reply| McpCommand::ShowWindow { reply })
                     .await
             }
+            #[cfg(debug_assertions)]
+            "set_channel_age_restricted" => {
+                self.require_write_mode("set_channel_age_restricted")?;
+                let clan_id = parse_i64_field(&arguments, "clan_id")?;
+                let channel_id = parse_i64_field(&arguments, "channel_id")?;
+                let on = arguments.get("on").and_then(Value::as_bool).unwrap_or(true);
+                self.send_ui_result(|reply| McpCommand::SetChannelAgeRestricted {
+                    clan_id,
+                    channel_id,
+                    on,
+                    reply,
+                })
+                .await
+            }
+            #[cfg(debug_assertions)]
+            "set_local_dob" => {
+                self.require_write_mode("set_local_dob")?;
+                let seconds = u32::try_from(parse_i64_field(&arguments, "seconds")?)
+                    .map_err(|_| anyhow::anyhow!("seconds must fit in u32"))?;
+                self.send_ui_result(|reply| McpCommand::SetLocalDob { seconds, reply })
+                    .await
+            }
+            #[cfg(debug_assertions)]
+            "inject_preview_message" => {
+                self.require_write_mode("inject_preview_message")?;
+                let content = arguments
+                    .get("content")
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("inject_preview_message requires content"))?;
+                let sender_name = arguments
+                    .get("sender_name")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                self.send_ui_result(|reply| McpCommand::InjectPreviewMessage {
+                    content,
+                    sender_name,
+                    reply,
+                })
+                .await
+            }
             "send_message" => {
                 self.require_write_mode("send_message")?;
                 let clan_id = parse_i64_field(&arguments, "clan_id")?;
@@ -442,10 +547,7 @@ impl McpBackend {
             }
             "composer_pick" => {
                 self.require_write_mode("composer_pick")?;
-                let index = arguments
-                    .get("index")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0) as usize;
+                let index = arguments.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                 self.send_ui_result(|reply| McpCommand::ComposerPick { index, reply })
                     .await
             }
@@ -472,10 +574,7 @@ impl McpBackend {
             }
             "edit_pick" => {
                 self.require_write_mode("edit_pick")?;
-                let index = arguments
-                    .get("index")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0) as usize;
+                let index = arguments.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                 self.send_ui_result(|reply| McpCommand::EditPick { index, reply })
                     .await
             }
@@ -500,7 +599,9 @@ impl McpBackend {
                 let url = arguments
                     .get("url")
                     .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow::anyhow!("composer_panel_send requires string field url"))?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("composer_panel_send requires string field url")
+                    })?
                     .to_string();
                 let filename = arguments
                     .get("filename")
@@ -518,6 +619,25 @@ impl McpBackend {
                     reply,
                 })
                 .await
+            }
+            "topic_drop_paths" => {
+                self.require_write_mode("topic_drop_paths")?;
+                let paths: Vec<String> = arguments
+                    .get("paths")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if paths.is_empty() {
+                    anyhow::bail!("topic_drop_paths requires a non-empty paths array");
+                }
+                self.send_ui_result(|reply| McpCommand::TopicDropPaths { paths, reply })
+                    .await
             }
             "composer_drop_paths" => {
                 self.require_write_mode("composer_drop_paths")?;
@@ -1304,6 +1424,26 @@ impl McpBackend {
         .await
     }
 
+    async fn mute_channel(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = optional_i64_field(arguments, "clan_id")
+            .ok_or_else(|| anyhow::anyhow!("mute_channel requires field clan_id"))?;
+        let channel_id = optional_i64_field(arguments, "channel_id")
+            .ok_or_else(|| anyhow::anyhow!("mute_channel requires field channel_id"))?;
+        let mute_minutes = arguments
+            .get("mute_minutes")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let mute_seconds = mute_seconds_from_minutes(mute_minutes)?;
+        self.api
+            .set_mute_channel(channel_id, mute_seconds, clan_id)
+            .await?;
+        to_json(&serde_json::json!({
+            "ok": true,
+            "channel_id": channel_id,
+            "mute_minutes": mute_minutes,
+        }))
+    }
+
     async fn channel_menu_state(&self) -> anyhow::Result<Value> {
         self.send_ui_result(|reply| McpCommand::ChannelMenuState { reply })
             .await
@@ -2004,12 +2144,28 @@ fn parse_search_content(raw: &str) -> String {
 struct MessageDetail {
     id: i64,
     content: String,
+    /// The content JSON as the server stored it. This is where `presign_finish`
+    /// lives, and comparing its keys against the attachment urls below is the
+    /// only way to see why a receiver still treats an attachment as pending.
+    content_raw: String,
     sender_id: i64,
     sender_name: String,
     create_time: i64,
     has_attachments: bool,
+    attachments: Vec<AttachmentSummary>,
     embeds: Vec<EmbedSummary>,
     components: Vec<ComponentRowSummary>,
+}
+
+#[derive(Serialize)]
+struct AttachmentSummary {
+    filename: String,
+    filetype: String,
+    size: i32,
+    url: String,
+    thumbnail: String,
+    width: i32,
+    height: i32,
 }
 
 #[derive(Serialize)]
@@ -2070,10 +2226,24 @@ fn message_detail(message: &ApiMessage) -> MessageDetail {
     MessageDetail {
         id: message.message_id,
         content: message.content.clone(),
+        content_raw: message.content_raw.clone(),
         sender_id: message.sender_id,
         sender_name: message.sender_name.clone(),
         create_time: message.create_time,
         has_attachments: !message.attachments.is_empty(),
+        attachments: message
+            .attachments
+            .iter()
+            .map(|a| AttachmentSummary {
+                filename: a.filename.clone(),
+                filetype: a.filetype.clone(),
+                size: a.size,
+                url: a.url.clone(),
+                thumbnail: a.thumbnail.clone(),
+                width: a.width,
+                height: a.height,
+            })
+            .collect(),
         embeds: message
             .content_tokens
             .embed
@@ -2232,6 +2402,18 @@ fn optional_i64_field(arguments: &Value, field: &str) -> Option<i64> {
         raw.as_i64()
             .or_else(|| raw.as_str().and_then(|s| s.parse::<i64>().ok()))
     })
+}
+
+fn mute_seconds_from_minutes(minutes: i64) -> anyhow::Result<i32> {
+    match minutes {
+        -1 => Ok(-1),
+        0 => Ok(0),
+        1.. => minutes
+            .checked_mul(60)
+            .and_then(|seconds| i32::try_from(seconds).ok())
+            .ok_or_else(|| anyhow::anyhow!("mute_minutes is too large")),
+        _ => anyhow::bail!("mute_minutes must be -1, 0, or positive"),
+    }
 }
 
 fn validate_navigate_path(path: &str) -> anyhow::Result<()> {
@@ -2415,5 +2597,14 @@ mod tests {
                 .expect("spans")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn mute_minutes_are_converted_to_wire_seconds() {
+        assert_eq!(mute_seconds_from_minutes(-1).unwrap(), -1);
+        assert_eq!(mute_seconds_from_minutes(0).unwrap(), 0);
+        assert_eq!(mute_seconds_from_minutes(15).unwrap(), 900);
+        assert!(mute_seconds_from_minutes(-2).is_err());
+        assert!(mute_seconds_from_minutes(i64::MAX).is_err());
     }
 }

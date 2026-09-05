@@ -81,10 +81,11 @@ impl ConfirmArchiveChannelModal {
                 return;
             };
             let result = task.await;
+            let owner = this.entity_id();
 
             cx.update(|cx| {
                 Shell::global(cx).update(cx, |shell, cx| {
-                    shell.close_modal(cx);
+                    shell.close_modal_if_current(owner, cx);
                     match &result {
                         Ok(()) => {
                             let key = if is_thread {

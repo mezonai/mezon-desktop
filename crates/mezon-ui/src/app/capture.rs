@@ -289,7 +289,7 @@ pub fn set_composer_panel(cx: &mut App, kind: Option<&str>) -> anyhow::Result<Va
     cx.update_window(main_handle, |_, window, cx| {
         composer.update(cx, |composer, cx| match tab {
             Some(tab) => composer.show_panel(tab, window, cx),
-            None => composer.hide_panel(cx),
+            None => composer.hide_panel(window, cx),
         });
     })?;
     let open = composer.read(cx).active_panel(cx).map(|tab| match tab {
@@ -322,8 +322,22 @@ fn composer_snapshot(cx: &mut App) -> anyhow::Result<Value> {
         .ok_or_else(|| anyhow::anyhow!("no composer is mounted; open a channel first"))?;
     let composer = composer.read(cx);
     let (popup_open, selected, suggestions) = composer.probe_suggestions();
+    let reply_target = mezon_store::MessagesStore::global(cx)
+        .read(cx)
+        .reply_target()
+        .map(|draft| {
+            json!({
+                "message_id": draft.message_ref_id.get().to_string(),
+                "sender": draft.sender_name,
+            })
+        });
     Ok(json!({
         "text": composer.probe_text(cx).to_string(),
+        // Staged, not dropped: a dropped file is read on a background task, so
+        // submitting before it lands here sends the message without it.
+        "attachments": composer.probe_attachments(),
+        // What the next submit will answer, if anything.
+        "reply_target": reply_target,
         "popup_open": popup_open,
         "selected": selected,
         "suggestions": suggestions,
@@ -443,8 +457,16 @@ fn topic_snapshot(cx: &App) -> anyhow::Result<Value> {
     let (item_count, first_visible, at_bottom) = topic_panel(cx)
         .map(|(_, timeline)| timeline.read(cx).viewport_state())
         .unwrap_or((0, 0, false));
+    let attachments = topic_panel(cx)
+        .map(|(composer, _)| composer.read(cx).probe_attachments())
+        .unwrap_or_default();
     Ok(json!({
+        // The store's flag and the mounted view are two different things: an
+        // occluded window drops the panel entity while the store still says the
+        // topic is open, and every write tool then fails with "no topic panel is
+        // mounted". Report both so a caller can tell those apart.
         "panel_open": topics.is_panel_open(),
+        "panel_mounted": topic_panel(cx).is_ok(),
         "topic_id": topic_id.map(|id| id.to_string()),
         "origin_message_id": topics.origin_message().map(|m| m.id.get().to_string()),
         "loaded_count": loaded,
@@ -455,6 +477,9 @@ fn topic_snapshot(cx: &App) -> anyhow::Result<Value> {
         "item_count": item_count,
         "first_visible_index": first_visible,
         "at_bottom": at_bottom,
+        // Same reason as composer_state: topic_drop_paths returns before the file
+        // is read, so this is what says the next topic_submit will carry it.
+        "attachments": attachments,
     }))
 }
 
@@ -493,7 +518,39 @@ pub fn topic_type(cx: &mut App, text: &str) -> anyhow::Result<Value> {
     cx.update_window(main_handle, |_, window, cx| {
         composer.update(cx, |composer, cx| composer.probe_set_text(text, window, cx));
     })?;
-    Ok(json!({ "ok": true, "text": text }))
+    topic_composer_snapshot(cx)
+}
+
+/// Accept one entry of the topic composer's suggestion popup — the `@`/`#`/`:` flow.
+///
+/// Typing `@name` alone only produces literal text: a real mention needs the picked
+/// entry, which is what writes the id into the message's `mentions` field. Detection on
+/// the receiving side reads that field, never the text, so a topic mention can only be
+/// exercised end-to-end through here.
+pub fn topic_pick(cx: &mut App, index: usize) -> anyhow::Result<Value> {
+    let (composer, _) = topic_panel(cx)?;
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    let accepted = cx.update_window(main_handle, |_, window, cx| {
+        composer.update(cx, |composer, cx| composer.probe_accept(index, window, cx))
+    })?;
+    if !accepted {
+        anyhow::bail!("no suggestion at index {index}; call topic_type first");
+    }
+    topic_composer_snapshot(cx)
+}
+
+fn topic_composer_snapshot(cx: &mut App) -> anyhow::Result<Value> {
+    let (composer, _) = topic_panel(cx)?;
+    let composer = composer.read(cx);
+    let (popup_open, selected, suggestions) = composer.probe_suggestions();
+    Ok(json!({
+        "ok": true,
+        "text": composer.probe_text(cx).to_string(),
+        "attachments": composer.probe_attachments(),
+        "popup_open": popup_open,
+        "selected": selected,
+        "suggestions": suggestions,
+    }))
 }
 
 pub fn topic_submit(cx: &mut App) -> anyhow::Result<Value> {
@@ -609,8 +666,8 @@ pub fn composer_panel_send(
     width: i32,
     height: i32,
 ) -> anyhow::Result<Value> {
-    with_composer(cx, |composer, _window, cx| {
-        composer.probe_panel_send(kind, url, filename, width, height, cx)
+    with_composer(cx, |composer, window, cx| {
+        composer.probe_panel_send(kind, url, filename, width, height, window, cx)
     })??;
     Ok(json!({ "ok": true, "kind": kind }))
 }
@@ -636,6 +693,54 @@ pub fn composer_submit(cx: &mut App) -> anyhow::Result<Value> {
         composer.probe_enter(window, cx);
     })?;
     Ok(json!({ "ok": true, "sent": before }))
+}
+
+/// Same as [`composer_drop_paths`] but onto the topic panel's own composer.
+/// `with_composer` resolves the ACTIVE composer, which stays the channel's even
+/// while the topic panel is open, so without this an attachment aimed at a topic
+/// silently lands in the parent channel instead.
+pub fn topic_drop_paths(cx: &mut App, paths: Vec<String>) -> anyhow::Result<Value> {
+    if let Some(path) = paths
+        .iter()
+        .find(|path| !std::path::Path::new(path).is_file())
+    {
+        anyhow::bail!("file not found: {path}");
+    }
+    let count = paths.len();
+    let (composer, _) = topic_panel(cx)?;
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    cx.update_window(main_handle, |_, window, cx| {
+        composer.update(cx, |composer, cx| {
+            composer.add_dropped_paths(paths.into_iter().map(Into::into).collect(), window, cx);
+        });
+    })?;
+    // Staging is asynchronous: this reports what was handed over, not what is
+    // ready. Poll topic_state until `attachments` lists the files before calling
+    // topic_submit, or the reply goes out without them.
+    Ok(json!({ "ok": true, "dropped": count, "staged": false }))
+}
+
+/// Aim the composer at a message without sending anything, the way the row's
+/// "Reply" action does. `reply_to_message` posts a text reply in one shot, so it
+/// cannot carry a staged attachment — this is what lets a caller build a reply
+/// that has one.
+pub fn reply_begin(cx: &mut App, message_id: i64) -> anyhow::Result<Value> {
+    let store = mezon_store::MessagesStore::global(cx);
+    store.update(cx, |store, cx| {
+        store.set_reply_to(mezon_store::MessageId::new(message_id), cx)
+    });
+    let target = store.read(cx).reply_target().map(|draft| {
+        json!({
+            "message_id": draft.message_ref_id.get().to_string(),
+            "sender": draft.sender_name,
+        })
+    });
+    let Some(target) = target else {
+        anyhow::bail!(
+            "message {message_id} is not in the open channel's loaded history; open_channel and load_more_messages first"
+        );
+    };
+    Ok(json!({ "ok": true, "reply_target": target }))
 }
 
 pub const WHEEL_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
@@ -988,10 +1093,27 @@ pub fn set_user_status(
     }))
 }
 
-pub fn list_loaded_messages(cx: &App, limit: usize) -> anyhow::Result<Value> {
+/// `topic` reads the open topic panel's buffer instead of the channel's. The
+/// two are separate buckets and the channel stays "active" while a topic is
+/// open, so without the switch a reply just sent into a topic is invisible here
+/// — the caller would be looking at the parent channel and see nothing arrive.
+pub fn list_loaded_messages(cx: &App, limit: usize, topic: bool) -> anyhow::Result<Value> {
     let store = mezon_store::MessagesStore::global(cx);
     let store = store.read(cx);
-    let rows = store.messages();
+    let topic_id = topic
+        .then(|| {
+            mezon_store::TopicsStore::global(cx)
+                .read(cx)
+                .active_topic_id()
+        })
+        .flatten();
+    if topic && topic_id.is_none() {
+        anyhow::bail!("no topic is open; call open_topic first");
+    }
+    let rows = match topic_id {
+        Some(id) => store.messages_in_channel(mezon_store::ChannelId(id)),
+        None => store.messages(),
+    };
     let row_json = |m: &mezon_store::Message| {
         json!({
             "message_id": m.id.to_string(),
@@ -999,7 +1121,21 @@ pub fn list_loaded_messages(cx: &App, limit: usize) -> anyhow::Result<Value> {
             "sort_id": m.sort_id,
             "sender": m.sender_name,
             "send_failed": m.send_failed,
+            // Unix seconds as the row holds them. The presign expiry is computed
+            // from this, so a row that shows 0 here is one the sweep can never act
+            // on however old it gets.
+            "create_time": m.create_time,
             "content": m.content.chars().take(60).collect::<String>(),
+            // Attachment delivery state, so a test can tell "still uploading" apart
+            // from "rendered" without reading pixels.
+            "attachments": m.attachments.iter().map(|a| json!({
+                "filetype": a.filetype,
+                "name": a.filename,
+                "uploading": a.uploading,
+                "presign_pending": a.presign_pending,
+                "upload_failed": a.upload_failed,
+                "url": a.url,
+            })).collect::<Vec<_>>(),
         })
     };
     let head: Vec<Value> = rows.iter().take(limit).map(row_json).collect();
@@ -1009,9 +1145,17 @@ pub fn list_loaded_messages(cx: &App, limit: usize) -> anyhow::Result<Value> {
         .map(row_json)
         .collect();
     Ok(json!({
-        "channel_id": store.active_channel_id().map(|id| id.to_string()),
+        "channel_id": match topic_id {
+            Some(id) => Some(id.to_string()),
+            None => store.active_channel_id().map(|id| id.to_string()),
+        },
+        "bucket": if topic_id.is_some() { "topic" } else { "channel" },
         "loaded_count": rows.len(),
-        "has_more_bottom": store.has_more_bottom(),
+        "has_more_bottom": if topic_id.is_some() {
+            store.topic_has_more_bottom()
+        } else {
+            store.has_more_bottom()
+        },
         "oldest": head,
         "newest": tail,
     }))
@@ -1031,6 +1175,39 @@ pub fn jump_to_present(cx: &mut App) -> anyhow::Result<Value> {
     Ok(json!({ "ok": true }))
 }
 
+// Mirror the row's own click gate (`parts.rs`): the tile is inert while the
+// bytes are still going up, after they failed, or before the url exists.
+// Without these a tool opens a viewer on an empty url and answers ok, which is
+// a pass for something a user cannot do.
+fn ensure_attachment_viewable(
+    attachment: &mezon_store::MessageAttachment,
+    message_id: i64,
+    attachment_index: usize,
+) -> anyhow::Result<()> {
+    if attachment.uploading {
+        anyhow::bail!(
+            "attachment {attachment_index} of message {message_id} is still uploading; the row \
+             does not open the viewer yet"
+        );
+    }
+    if attachment.upload_failed {
+        anyhow::bail!(
+            "attachment {attachment_index} of message {message_id} failed to upload, so there \
+             is nothing to view"
+        );
+    }
+    if attachment.presign_pending {
+        anyhow::bail!(
+            "attachment {attachment_index} of message {message_id} is still waiting for its \
+             presign to finish, so its url does not resolve yet"
+        );
+    }
+    if attachment.url.is_empty() {
+        anyhow::bail!("attachment {attachment_index} of message {message_id} has no url yet");
+    }
+    Ok(())
+}
+
 pub fn open_message_image_viewer(
     settings: &gpui::Entity<mezon_store::Settings>,
     message_id: i64,
@@ -1038,24 +1215,34 @@ pub fn open_message_image_viewer(
     cx: &mut App,
 ) -> anyhow::Result<Value> {
     let store = mezon_store::MessagesStore::global(cx);
+    let topic_id = mezon_store::TopicsStore::global(cx)
+        .read(cx)
+        .active_topic_id();
     let (seed, id, create_time, uploader_id) = {
         let store = store.read(cx);
+        // A reply lives in the topic's own bucket, not the channel's, so looking
+        // only at the channel makes every topic attachment unreachable from here.
         let message = store
             .messages()
             .iter()
             .find(|message| message.id.0 == message_id)
+            .or_else(|| {
+                topic_id.and_then(|id| {
+                    store
+                        .messages_in_channel(mezon_store::ChannelId(id))
+                        .iter()
+                        .find(|message| message.id.0 == message_id)
+                })
+            })
             .ok_or_else(|| {
-                anyhow::anyhow!("message {message_id} is not in the open channel's loaded history")
+                anyhow::anyhow!(
+                    "message {message_id} is not in the open channel's loaded history, nor in the open topic's"
+                )
             })?;
         let attachment = message.attachments.get(attachment_index).ok_or_else(|| {
             anyhow::anyhow!("message {message_id} has no attachment at index {attachment_index}")
         })?;
-        if attachment.presign_pending {
-            anyhow::bail!(
-                "attachment {attachment_index} of message {message_id} is still waiting for its \
-                 presign to finish, so its url does not resolve yet"
-            );
-        }
+        ensure_attachment_viewable(attachment, message_id, attachment_index)?;
         (
             mezon_store::AttachmentSeedInput::from_message(attachment),
             message.id,
@@ -1072,6 +1259,66 @@ pub fn open_message_image_viewer(
             id,
             create_time,
             uploader_id,
+            window,
+            cx,
+        );
+    })?;
+    Ok(serde_json::json!({ "ok": true, "url": opened }))
+}
+
+pub fn open_message_pdf_viewer(
+    settings: &gpui::Entity<mezon_store::Settings>,
+    message_id: i64,
+    attachment_index: usize,
+    cx: &mut App,
+) -> anyhow::Result<Value> {
+    let store = mezon_store::MessagesStore::global(cx);
+    let topic_id = mezon_store::TopicsStore::global(cx)
+        .read(cx)
+        .active_topic_id();
+    let (url, filename) = {
+        let store = store.read(cx);
+        let message = store
+            .messages()
+            .iter()
+            .find(|message| message.id.0 == message_id)
+            .or_else(|| {
+                topic_id.and_then(|id| {
+                    store
+                        .messages_in_channel(mezon_store::ChannelId(id))
+                        .iter()
+                        .find(|message| message.id.0 == message_id)
+                })
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "message {message_id} is not in the open channel's loaded history, nor in the open topic's"
+                )
+            })?;
+        let attachment = message.attachments.get(attachment_index).ok_or_else(|| {
+            anyhow::anyhow!("message {message_id} has no attachment at index {attachment_index}")
+        })?;
+        ensure_attachment_viewable(attachment, message_id, attachment_index)?;
+        if !mezon_store::is_pdf(&attachment.filetype, &attachment.filename) {
+            anyhow::bail!(
+                "attachment {attachment_index} of message {message_id} is not a pdf, so the row \
+                 shows no view button"
+            );
+        }
+        (
+            gpui::SharedString::from(attachment.url.clone()),
+            gpui::SharedString::from(attachment.filename.clone()),
+        )
+    };
+    let main_handle = handle(cx).ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    let opened = url.clone();
+    cx.update_window(main_handle, |_, window, cx| {
+        crate::pdf_viewer::open_pdf_viewer(
+            crate::pdf_viewer::OpenPdfRequest {
+                url,
+                filename,
+                settings: settings.clone(),
+            },
             window,
             cx,
         );

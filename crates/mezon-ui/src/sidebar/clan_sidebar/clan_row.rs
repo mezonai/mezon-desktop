@@ -126,6 +126,7 @@ pub(super) fn build_clan_rail_menu(
             value: *value,
             label: mezon_i18n::t(locale, key).into(),
             selected: *value == level,
+            disabled: false,
         })
         .collect();
     let sub_text = CLAN_NOTI_LEVELS

@@ -1,25 +1,17 @@
 use crate::app::shell::Shell;
-use crate::components::primitives::{Avatar, Input, InputEvent, InputState};
-use crate::router::{Route, navigate};
-use crate::theme::{ActiveTheme, Theme};
-use crate::util::imgproxy;
-use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, SharedString,
-    Subscription, UniformListScrollHandle, Window, div, prelude::*, px, svg, uniform_list,
+use crate::components::compositions::{
+    FRIEND_PICK_ROW_HEIGHT, FriendPickRow, render_friend_pick_row,
 };
-use mezon_store::{DirectMessageStore, FriendEvent, FriendState, FriendStore, UserId};
-
-const GROUP_CHAT_MAXIMUM_MEMBERS: usize = 20;
-
-#[derive(Clone)]
-struct FriendPickRow {
-    user_id: UserId,
-    key: SharedString,
-    name: SharedString,
-    username: SharedString,
-    avatar_src: SharedString,
-    avatar_raw: SharedString,
-}
+use crate::components::primitives::{Input, InputEvent, InputState};
+use crate::router::{Route, navigate};
+use crate::theme::ActiveTheme;
+use gpui::{
+    App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, SharedString,
+    Subscription, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+};
+use mezon_store::{
+    DirectMessageStore, FriendEvent, FriendState, FriendStore, MAX_GROUP_MEMBERS, UserId,
+};
 
 pub struct CreateMessageGroupModal {
     focus_handle: FocusHandle,
@@ -66,9 +58,11 @@ impl CreateMessageGroupModal {
         );
         let friend_sub = cx.subscribe(
             &FriendStore::global(cx),
-            |this: &mut Self, _store, _event: &FriendEvent, cx| {
-                this.rebuild_rows(cx);
-                cx.notify();
+            |this: &mut Self, _store, event: &FriendEvent, cx| {
+                if matches!(event, FriendEvent::Changed) {
+                    this.rebuild_rows(cx);
+                    cx.notify();
+                }
             },
         );
         search_input.update(cx, |input, cx| input.focus(window, cx));
@@ -92,26 +86,12 @@ impl CreateMessageGroupModal {
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         let friends = FriendStore::global(cx);
         let friends = friends.read(cx);
-        let mut rows = Vec::new();
-        for friend in friends.friends() {
-            if friend.state == FriendState::Blocked {
-                continue;
-            }
-            let avatar_src = if friend.avatar_url.is_empty() {
-                String::new()
-            } else {
-                imgproxy::avatar_url(cx, &friend.avatar_url)
-            };
-            rows.push(FriendPickRow {
-                user_id: friend.id,
-                key: format!("friend-{}", friend.id).into(),
-                name: SharedString::from(friend.label().to_string()),
-                username: SharedString::from(friend.username.clone()),
-                avatar_src: SharedString::from(avatar_src),
-                avatar_raw: SharedString::from(friend.avatar_url.clone()),
-            });
-        }
-        self.all_rows = rows;
+        self.all_rows = friends
+            .friends()
+            .iter()
+            .filter(|friend| friend.state != FriendState::Blocked)
+            .map(|friend| FriendPickRow::from_friend(friend, cx))
+            .collect();
         self.refilter(cx);
     }
 
@@ -121,13 +101,13 @@ impl CreateMessageGroupModal {
             .all_rows
             .iter()
             .enumerate()
-            .filter(|(_, row)| row_matches_query(row, &query))
+            .filter(|(_, row)| row.matches_lowercase_query(&query))
             .map(|(ix, _)| ix)
             .collect();
     }
 
     fn number_can_add(&self) -> usize {
-        (GROUP_CHAT_MAXIMUM_MEMBERS - 1).min(self.all_rows.len())
+        (MAX_GROUP_MEMBERS - 1).min(self.all_rows.len())
     }
 
     fn remaining_can_add(&self) -> usize {
@@ -142,7 +122,7 @@ impl CreateMessageGroupModal {
         if let Some(pos) = self.selected.iter().position(|id| *id == user_id) {
             self.selected.remove(pos);
         } else {
-            if self.selected.len() >= GROUP_CHAT_MAXIMUM_MEMBERS - 1 {
+            if self.selected.len() >= MAX_GROUP_MEMBERS - 1 {
                 return;
             }
             self.selected.push(user_id);
@@ -160,7 +140,7 @@ impl CreateMessageGroupModal {
         } else {
             "directMessage.createMessageGroup.createGroupChat"
         };
-        SharedString::from(mezon_i18n::t(&self.locale, key).to_string())
+        SharedString::from(mezon_i18n::t(&self.locale, key))
     }
 
     fn handle_create(&mut self, cx: &mut Context<Self>) {
@@ -188,6 +168,7 @@ impl CreateMessageGroupModal {
             return;
         }
 
+        let modal_id = cx.entity_id();
         self.creating = true;
         cx.notify();
 
@@ -218,7 +199,7 @@ impl CreateMessageGroupModal {
                             message_type: channel_type.to_string(),
                         },
                     );
-                    Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+                    Shell::global(cx).update(cx, |shell, cx| shell.close_modal_view(modal_id, cx));
                 });
             }
             Err(err) => {
@@ -255,7 +236,6 @@ impl Render for CreateMessageGroupModal {
         let create_label = self.create_label();
         let enabled = !self.creating && !self.selected.is_empty();
 
-        const ROW_HEIGHT: f32 = 40.;
         const LIST_HEIGHT: f32 = 190.;
 
         let row_count = self.visible.len();
@@ -285,13 +265,19 @@ impl Render for CreateMessageGroupModal {
                     range
                         .map(|ix| {
                             match modal.visible.get(ix).and_then(|i| modal.all_rows.get(*i)) {
-                                Some(row) => render_pick_row(
-                                    &theme,
-                                    row.clone(),
-                                    modal.is_selected(row.user_id),
-                                    list_entity.clone(),
-                                ),
-                                None => div().h(px(ROW_HEIGHT)).into_any_element(),
+                                Some(row) => {
+                                    let toggle_entity = list_entity.clone();
+                                    render_friend_pick_row(
+                                        &theme,
+                                        row,
+                                        modal.is_selected(row.user_id),
+                                        move |user_id, cx| {
+                                            toggle_entity
+                                                .update(cx, |this, cx| this.toggle(user_id, cx));
+                                        },
+                                    )
+                                }
+                                None => div().h(px(FRIEND_PICK_ROW_HEIGHT)).into_any_element(),
                             }
                         })
                         .collect::<Vec<_>>()
@@ -366,102 +352,4 @@ impl Render for CreateMessageGroupModal {
             .child(div().p(px(20.)).child(create_button))
             .into_any_element()
     }
-}
-
-fn row_matches_query(row: &FriendPickRow, query: &str) -> bool {
-    if query.is_empty() {
-        return true;
-    }
-    row.name.to_lowercase().contains(query) || row.username.to_lowercase().contains(query)
-}
-
-fn render_pick_row(
-    theme: &Theme,
-    row: FriendPickRow,
-    selected: bool,
-    entity: Entity<CreateMessageGroupModal>,
-) -> AnyElement {
-    let mut avatar = Avatar::new().name(row.name.clone()).size_px(px(32.));
-    if !row.avatar_src.is_empty() {
-        avatar = avatar.src(row.avatar_src.clone());
-        if !row.avatar_raw.is_empty() && row.avatar_raw != row.avatar_src {
-            avatar = avatar.fallback_src(row.avatar_raw.clone());
-        }
-    } else if !row.avatar_raw.is_empty() {
-        avatar = avatar.src(row.avatar_raw.clone());
-    }
-
-    let user_id = row.user_id;
-    let checkbox_border = if selected {
-        theme.brand
-    } else {
-        theme.interactive_normal
-    };
-
-    div()
-        .pl(px(12.))
-        .pr(px(8.))
-        .child(
-            div()
-                .id(SharedString::from(format!("pick-row-{}", row.key)))
-                .h(px(40.))
-                .w_full()
-                .px(px(8.))
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .rounded_lg()
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.tokens.bg_active_member_channel))
-                .on_click(move |_: &ClickEvent, _window, cx| {
-                    entity.update(cx, |this, cx| this.toggle(user_id, cx));
-                })
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .min_w_0()
-                        .flex_1()
-                        .child(avatar)
-                        .child(
-                            div()
-                                .truncate()
-                                .text_size(px(14.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.tokens.text_theme_primary)
-                                .child(row.name),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_size(px(14.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.text_secondary)
-                                .child(row.username),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(16.))
-                        .rounded(px(6.))
-                        .border_1()
-                        .border_color(checkbox_border)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .when(selected, |el| {
-                            el.child(
-                                svg()
-                                    .path("icons/check.svg")
-                                    .size(px(12.))
-                                    .flex_none()
-                                    .text_color(theme.brand),
-                            )
-                        }),
-                ),
-        )
-        .into_any_element()
 }

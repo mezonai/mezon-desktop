@@ -169,11 +169,17 @@ impl Global for SharedRoleIconCache {}
 struct SharedRoleIconPreviewCache(Entity<LruImageCache>);
 impl Global for SharedRoleIconPreviewCache {}
 
+struct SharedSpriteSheetCache(Entity<LruImageCache>);
+impl Global for SharedSpriteSheetCache {}
+
 const OGP_TIMELINE_CACHE_CAPACITY: usize = 12;
 const OGP_TIMELINE_CACHE_BYTES: u64 = 6 * 1024 * 1024;
 const OGP_AUX_CACHE_CAPACITY: usize = 4;
 const OGP_AUX_CACHE_BYTES: u64 = 2 * 1024 * 1024;
 const OGP_ENTRY_MAX_BYTES: u64 = 1024 * 1024;
+const SOCIAL_THUMB_CACHE_CAPACITY: usize = 12;
+const SOCIAL_THUMB_CACHE_BYTES: u64 = 12 * 1024 * 1024;
+const SOCIAL_THUMB_ENTRY_MAX_BYTES: u64 = 3 * 1024 * 1024 / 2;
 
 pub fn ogp_timeline_cache(label: &'static str, cx: &mut App) -> Entity<LruImageCache> {
     ogp_preview_cache(
@@ -195,6 +201,35 @@ fn ogp_preview_cache(
     cx: &mut App,
 ) -> Entity<LruImageCache> {
     cx.new(|cx| LruImageCache::ogp_thumbnail(label, capacity, bytes, OGP_ENTRY_MAX_BYTES, cx))
+}
+
+pub fn social_thumb_cache(label: &'static str, cx: &mut App) -> Entity<LruImageCache> {
+    cx.new(|cx| {
+        LruImageCache::social_thumbnail(
+            label,
+            SOCIAL_THUMB_CACHE_CAPACITY,
+            SOCIAL_THUMB_CACHE_BYTES,
+            SOCIAL_THUMB_ENTRY_MAX_BYTES,
+            cx,
+        )
+    })
+}
+
+pub fn shared_sprite_sheet_cache(cx: &mut App) -> Entity<LruImageCache> {
+    if let Some(existing) = cx.try_global::<SharedSpriteSheetCache>() {
+        return existing.0.clone();
+    }
+    let cache = cx.new(|cx| {
+        LruImageCache::sprite_sheet(
+            "message-sprites-shared",
+            SPRITE_SHEET_CACHE_CAPACITY,
+            SPRITE_SHEET_CACHE_BYTES,
+            SPRITE_SHEET_ENTRY_MAX_BYTES,
+            cx,
+        )
+    });
+    cx.set_global(SharedSpriteSheetCache(cache.clone()));
+    cache
 }
 
 /// Shared decode cache for role icons. They render at 12-20px everywhere, so
@@ -467,6 +502,9 @@ pub(crate) async fn read_body_limited(
 
 pub const MESSAGE_IMAGE_CACHE_CAPACITY: usize = 48;
 pub const MESSAGE_IMAGE_CACHE_BYTES: u64 = 32 * 1024 * 1024;
+const SPRITE_SHEET_CACHE_CAPACITY: usize = 4;
+const SPRITE_SHEET_CACHE_BYTES: u64 = 16 * 1024 * 1024;
+const SPRITE_SHEET_ENTRY_MAX_BYTES: u64 = 8 * 1024 * 1024;
 pub const AVATAR_IMAGE_CACHE_CAPACITY: usize = 256;
 pub const AVATAR_IMAGE_CACHE_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -517,6 +555,7 @@ const FRAME_BUMP_REARM: Duration = Duration::from_millis(100);
 const STATS_LOG_INTERVAL: u64 = 600;
 const MESSAGE_ANIMATION_MAX_PX: u32 = 400;
 const MESSAGE_STATIC_MAX_PX: u32 = 1024;
+const SPRITE_SHEET_MAX_PX: u32 = 8192;
 const SHARED_ANIMATION_MAX_PX: u32 = 400;
 const SHARED_STATIC_MAX_PX: u32 = 2048;
 /// Longest side (px) that an animated GIF/WebP is downscaled to for the image
@@ -636,10 +675,12 @@ enum LoaderKind {
     /// Aspect-preserving thumbnail for OGP link previews, capped at
     /// [`OGP_THUMB_DECODE_MAX_PX`].
     OgpThumbnail,
+    SocialThumbnail,
     /// Aspect-preserving thumbnail for Timeline/Events/Event-Detail preview
     /// cards, capped at [`GALLERY_PREVIEW_DECODE_MAX_PX`].
     GalleryPreview,
     Message,
+    SpriteSheet,
     /// The image-viewer loader: still images keep near-full resolution
     /// ([`VIEWER_STATIC_MAX_PX`]); animated GIF/WebP keep every frame so they
     /// animate, but downscaled to [`VIEWER_ANIMATION_MAX_PX`] and bounded by an
@@ -823,6 +864,23 @@ impl LruImageCache {
         )
     }
 
+    pub fn social_thumbnail(
+        label: &'static str,
+        max_items: usize,
+        max_bytes: u64,
+        max_entry_bytes: u64,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_loader(
+            label,
+            LoaderKind::SocialThumbnail,
+            max_items,
+            max_bytes,
+            max_entry_bytes,
+            cx,
+        )
+    }
+
     /// A cache for Timeline/Events/Event-Detail preview cards: aspect-preserving,
     /// downscaled to [`GALLERY_PREVIEW_DECODE_MAX_PX`] so landscape banners and
     /// square grid cells both stay sharp under `object-fit: cover` without the
@@ -854,6 +912,23 @@ impl LruImageCache {
         Self::with_loader(
             label,
             LoaderKind::Message,
+            max_items,
+            max_bytes,
+            max_entry_bytes,
+            cx,
+        )
+    }
+
+    pub fn sprite_sheet(
+        label: &'static str,
+        max_items: usize,
+        max_bytes: u64,
+        max_entry_bytes: u64,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_loader(
+            label,
+            LoaderKind::SpriteSheet,
             max_items,
             max_bytes,
             max_entry_bytes,
@@ -1234,11 +1309,17 @@ impl LruImageCache {
             LoaderKind::OgpThumbnail => {
                 AssetLogger::<OgpImageLoader>::load(resource.clone(), cx).boxed()
             }
+            LoaderKind::SocialThumbnail => {
+                AssetLogger::<SocialPosterLoader>::load(resource.clone(), cx).boxed()
+            }
             LoaderKind::GalleryPreview => {
                 AssetLogger::<GalleryPreviewLoader>::load(resource.clone(), cx).boxed()
             }
             LoaderKind::Message => {
                 AssetLogger::<MessageImageLoader>::load(resource.clone(), cx).boxed()
+            }
+            LoaderKind::SpriteSheet => {
+                AssetLogger::<SpriteSheetImageLoader>::load(resource.clone(), cx).boxed()
             }
             LoaderKind::Viewer => {
                 AssetLogger::<ViewerImageLoader>::load(resource.clone(), cx).boxed()
@@ -1343,6 +1424,8 @@ const GALLERY_THUMB_DECODE_MAX_PX: u32 = 320;
 /// side (aspect-preserving, ~2x for retina) so a large external OG image
 /// (typically 1200×630) can never decode oversized in the preview card.
 const OGP_THUMB_DECODE_MAX_PX: u32 = 512;
+const SOCIAL_THUMB_DECODE_MAX_PX: u32 = 640;
+const SOCIAL_POSTER_FETCH_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// Timeline/Events/Event-Detail preview cards render up to ~900px wide
 /// (featured banner) at aspect ratio; decode to this longest side so the
 /// featured image stays sharp while grid/card thumbnails (much smaller on
@@ -1783,6 +1866,7 @@ fn decode_static_image(
     if let Some(scaled) = decode_scaled_dynamic(bytes, max_px) {
         return Ok(scaled);
     }
+    reject_oversized_full_decode(bytes, format)?;
     Ok(image::load_from_memory_with_format(bytes, format)?)
 }
 
@@ -1797,18 +1881,49 @@ fn decoder_limits() -> image::Limits {
     limits
 }
 
+fn canvas_dimensions(
+    bytes: &[u8],
+    format: image::ImageFormat,
+) -> Result<(u32, u32), ImageCacheError> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes));
+    reader.set_format(format);
+    Ok(reader.into_dimensions()?)
+}
+
+fn sprite_sheet_decode_limits(bytes: &[u8]) -> Result<(u32, u32), ImageCacheError> {
+    let format = image::guess_format(bytes)?;
+    let (width, height) = canvas_dimensions(bytes, format)?;
+    let decoded_bytes = u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(4);
+    if width <= SPRITE_SHEET_MAX_PX
+        && height <= SPRITE_SHEET_MAX_PX
+        && decoded_bytes <= SPRITE_SHEET_ENTRY_MAX_BYTES
+    {
+        Ok((SPRITE_SHEET_MAX_PX, SPRITE_SHEET_MAX_PX))
+    } else {
+        Ok((MESSAGE_ANIMATION_MAX_PX, MESSAGE_STATIC_MAX_PX))
+    }
+}
+
 fn reject_oversized_canvas(
     bytes: &[u8],
     format: image::ImageFormat,
 ) -> Result<(), ImageCacheError> {
-    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes));
-    reader.set_format(format);
-    let (width, height) = reader.into_dimensions()?;
+    let (width, height) = canvas_dimensions(bytes, format)?;
     if width > 16_384 || height > 16_384 {
         return Err(ImageCacheError::Asset(
             format!("image dimension too large to decode: {width}x{height}").into(),
         ));
     }
+    Ok(())
+}
+
+fn reject_oversized_full_decode(
+    bytes: &[u8],
+    format: image::ImageFormat,
+) -> Result<(), ImageCacheError> {
+    let (width, height) = canvas_dimensions(bytes, format)?;
     if width as u64 * height as u64 > MAX_DECODE_PIXELS {
         return Err(ImageCacheError::Asset(
             format!("image dimensions too large to decode: {width}x{height}").into(),
@@ -1828,7 +1943,9 @@ fn animated_webp_decoder(
 ) -> Result<image::codecs::webp::WebPDecoder<std::io::Cursor<&[u8]>>, ImageCacheError> {
     let mut decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))?;
     image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
-    decoder.set_background_color(image::Rgba([0, 0, 0, 0]))?;
+    if decoder.has_animation() {
+        decoder.set_background_color(image::Rgba([0, 0, 0, 0]))?;
+    }
     Ok(decoder)
 }
 
@@ -1842,6 +1959,7 @@ fn decode_avatar_image(
     reject_oversized_canvas(bytes, format)?;
     let frames = match format {
         image::ImageFormat::Gif => {
+            reject_oversized_full_decode(bytes, format)?;
             let mut decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))?;
             image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
             match downscaled_avatar_animation_frames(
@@ -1861,6 +1979,7 @@ fn decode_avatar_image(
         image::ImageFormat::WebP => {
             let decoder = animated_webp_decoder(bytes)?;
             if decoder.has_animation() {
+                reject_oversized_full_decode(bytes, format)?;
                 match downscaled_avatar_animation_frames(
                     decoder.into_frames(),
                     animation.max_px,
@@ -1900,6 +2019,7 @@ fn decode_message_image(
     reject_oversized_canvas(bytes, format)?;
     let frames = match format {
         image::ImageFormat::Gif => {
+            reject_oversized_full_decode(bytes, format)?;
             let mut decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))?;
             image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
             match downscaled_animation_frames(
@@ -1920,6 +2040,7 @@ fn decode_message_image(
         image::ImageFormat::WebP => {
             let decoder = animated_webp_decoder(bytes)?;
             if decoder.has_animation() {
+                reject_oversized_full_decode(bytes, format)?;
                 match downscaled_animation_frames(
                     decoder.into_frames(),
                     animation_max_px,
@@ -2052,6 +2173,84 @@ impl Asset for OgpImageLoader {
     }
 }
 
+fn load_social_poster(
+    source: Resource,
+    max_px: u32,
+    cx: &mut App,
+) -> impl Future<Output = Result<Arc<RenderImage>, ImageCacheError>> + Send + 'static {
+    let client = cx.http_client();
+    async move {
+        let _permit = acquire_image_pipeline_permit().await?;
+        use anyhow::Context as _;
+        let Resource::Uri(uri) = source else {
+            return Err(ImageCacheError::Asset(
+                "a social poster needs a link url".into(),
+            ));
+        };
+        let poster = if mezon_client::social::is_tiktok_link(uri.as_ref()) {
+            mezon_client::social::fetch_tiktok_poster(uri.as_ref())
+                .await
+                .with_context(|| format!("resolving a tiktok poster for {uri:?}"))?
+        } else {
+            uri.to_string()
+        };
+        let mut candidate = poster;
+        let bytes = loop {
+            match fetch_social_poster_bytes(&client, &candidate).await {
+                Ok(bytes) => break bytes,
+                Err(err) => match mezon_client::social::youtube_poster_fallback(&candidate) {
+                    Some(next) => candidate = next,
+                    None => return Err(err),
+                },
+            }
+        };
+        let decoded = match decode_scaled_dynamic(&bytes, max_px) {
+            Some(image) => image,
+            None => image::load_from_memory(&bytes)?,
+        };
+        Ok(Arc::new(RenderImage::new(vec![downscaled_static_frame(
+            decoded, max_px,
+        )])))
+    }
+}
+
+async fn fetch_social_poster_bytes(
+    client: &Arc<dyn gpui::http_client::HttpClient>,
+    poster: &str,
+) -> Result<Vec<u8>, ImageCacheError> {
+    use anyhow::Context as _;
+    let mut response = client
+        .get(poster, ().into(), true)
+        .await
+        .with_context(|| format!("loading a social poster from {poster:?}"))?;
+    let bytes = read_body_limited(&mut response, SOCIAL_POSTER_FETCH_MAX_BYTES).await?;
+    if !response.status().is_success() {
+        let mut body = String::from_utf8_lossy(&bytes).into_owned();
+        let first_line = body.lines().next().unwrap_or("").trim_end();
+        body.truncate(first_line.len());
+        return Err(ImageCacheError::BadStatus {
+            uri: poster.to_string().into(),
+            status: response.status(),
+            body,
+        });
+    }
+    Ok(bytes)
+}
+
+pub enum SocialPosterLoader {}
+
+impl Asset for SocialPosterLoader {
+    type Source = Resource;
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn load(
+        source: Self::Source,
+        cx: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        load_social_poster(source, SOCIAL_THUMB_DECODE_MAX_PX, cx)
+    }
+}
+
 pub enum GalleryPreviewLoader {}
 
 impl Asset for GalleryPreviewLoader {
@@ -2151,6 +2350,26 @@ fn load_bounded(
     wide_lane: bool,
     cx: &mut App,
 ) -> impl Future<Output = Result<Arc<RenderImage>, ImageCacheError>> + Send + 'static {
+    load_bounded_inner(
+        source,
+        animation_max_px,
+        static_max_px,
+        animation_byte_budget,
+        false,
+        wide_lane,
+        cx,
+    )
+}
+
+fn load_bounded_inner(
+    source: Resource,
+    animation_max_px: u32,
+    static_max_px: u32,
+    animation_byte_budget: u64,
+    preserve_native: bool,
+    wide_lane: bool,
+    cx: &mut App,
+) -> impl Future<Output = Result<Arc<RenderImage>, ImageCacheError>> + Send + 'static {
     let client = cx.http_client();
     let svg_renderer = cx.svg_renderer();
     let asset_source = cx.asset_source().clone();
@@ -2192,17 +2411,26 @@ fn load_bounded(
             },
         };
 
-        if image::guess_format(&bytes).is_ok() {
-            decode_message_image(
-                &bytes,
-                animation_max_px,
-                static_max_px,
-                animation_byte_budget,
-            )
-        } else {
-            svg_renderer
+        match image::guess_format(&bytes) {
+            Ok(_) => {
+                let (animation_max_px, static_max_px) = if preserve_native {
+                    sprite_sheet_decode_limits(&bytes)?
+                } else {
+                    (animation_max_px, static_max_px)
+                };
+                decode_message_image(
+                    &bytes,
+                    animation_max_px,
+                    static_max_px,
+                    animation_byte_budget,
+                )
+            }
+            Err(_) if preserve_native => Err(ImageCacheError::Asset(
+                "sprite sheet must use a supported raster format".into(),
+            )),
+            Err(_) => svg_renderer
                 .render_single_frame(&bytes, 1.0)
-                .map_err(Into::into)
+                .map_err(Into::into),
         }
     }
 }
@@ -2227,6 +2455,28 @@ impl Asset for SharedImageLoader {
             SHARED_ANIMATION_MAX_PX,
             SHARED_STATIC_MAX_PX,
             SHARED_ENTRY_MAX_BYTES,
+            false,
+            cx,
+        )
+    }
+}
+
+pub enum SpriteSheetImageLoader {}
+
+impl Asset for SpriteSheetImageLoader {
+    type Source = Resource;
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn load(
+        source: Self::Source,
+        cx: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        load_bounded_inner(
+            source,
+            SPRITE_SHEET_MAX_PX,
+            SPRITE_SHEET_MAX_PX,
+            SPRITE_SHEET_ENTRY_MAX_BYTES,
+            true,
             false,
             cx,
         )
@@ -2671,6 +2921,103 @@ mod tests {
         let size = image.size(0);
         assert_eq!(size.width, size.height);
         assert_eq!(image.delay(0), image::Delay::from_numer_denom_ms(50, 1));
+    }
+
+    #[test]
+    fn avatar_cache_decodes_static_webp() {
+        use image::ImageEncoder as _;
+
+        let pixels = image::RgbaImage::from_pixel(8, 4, image::Rgba([10, 20, 30, 255]));
+        let mut bytes = Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut bytes)
+            .write_image(
+                pixels.as_raw(),
+                pixels.width(),
+                pixels.height(),
+                image::ExtendedColorType::Rgba8,
+            )
+            .expect("static WebP encodes");
+
+        let image = decode_avatar_image(
+            &bytes,
+            AVATAR_DECODE_MAX_PX,
+            AnimationCaps {
+                max_px: AVATAR_DECODE_MAX_PX,
+                max_frames: usize::MAX,
+                max_bytes: AVATAR_ENTRY_MAX_BYTES,
+            },
+        )
+        .expect("static WebP decodes");
+
+        assert_eq!(image.frame_count(), 1);
+        assert_eq!(image.size(0).width, image.size(0).height);
+    }
+
+    #[test]
+    fn sprite_sheet_cache_preserves_native_resolution() {
+        use image::ImageEncoder as _;
+
+        let pixels = image::RgbaImage::from_pixel(8000, 80, image::Rgba([255, 0, 0, 255]));
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(
+                pixels.as_raw(),
+                pixels.width(),
+                pixels.height(),
+                image::ExtendedColorType::Rgba8,
+            )
+            .expect("sprite sheet encodes");
+
+        let (animation_max_px, static_max_px) =
+            sprite_sheet_decode_limits(&bytes).expect("sprite sheet dimensions parse");
+        assert_eq!(
+            (animation_max_px, static_max_px),
+            (SPRITE_SHEET_MAX_PX, SPRITE_SHEET_MAX_PX)
+        );
+        let image = decode_message_image(
+            &bytes,
+            animation_max_px,
+            static_max_px,
+            SPRITE_SHEET_ENTRY_MAX_BYTES,
+        )
+        .expect("sprite sheet decodes");
+        let size = image.size(0);
+
+        assert_eq!((size.width.0 as u32, size.height.0 as u32), (8000, 80));
+    }
+
+    #[test]
+    fn sprite_sheet_cache_downscales_a_larger_valid_canvas() {
+        use image::ImageEncoder as _;
+
+        let pixels = image::RgbaImage::from_pixel(1812, 1510, image::Rgba([0, 0, 0, 0]));
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(
+                pixels.as_raw(),
+                pixels.width(),
+                pixels.height(),
+                image::ExtendedColorType::Rgba8,
+            )
+            .expect("sprite sheet encodes");
+
+        let (animation_max_px, static_max_px) =
+            sprite_sheet_decode_limits(&bytes).expect("sprite sheet dimensions parse");
+        assert_eq!(
+            (animation_max_px, static_max_px),
+            (MESSAGE_ANIMATION_MAX_PX, MESSAGE_STATIC_MAX_PX)
+        );
+        let image = decode_message_image(
+            &bytes,
+            animation_max_px,
+            static_max_px,
+            SPRITE_SHEET_ENTRY_MAX_BYTES,
+        )
+        .expect("larger sprite sheet falls back to bounded decoding");
+        let size = image.size(0);
+
+        assert!(size.width.0 <= MESSAGE_STATIC_MAX_PX as i32);
+        assert!(size.height.0 <= MESSAGE_STATIC_MAX_PX as i32);
     }
 
     /// A 64x64 animated WebP of a 16x16 sprite (opaque core, transparent margin,

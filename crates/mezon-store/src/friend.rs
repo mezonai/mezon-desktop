@@ -268,6 +268,10 @@ impl FriendStore {
             .any(|f| f.state == FriendState::Blocked && f.source_id == me && f.username == username)
     }
 
+    pub fn is_user_blocked_by_me(&self, user_id: UserId, cx: &App) -> bool {
+        is_blocked_by(&self.friends, user_id, self.current_user_id(cx))
+    }
+
     /// Count of incoming friend requests awaiting the current user's response
     /// (React `quantityPendingRequest` = friends with state `MY_PENDING`).
     pub fn pending_incoming_count(&self) -> usize {
@@ -284,6 +288,12 @@ impl FriendStore {
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.fetch(cx);
+    }
+
+    /// Whether `ListFriends` has landed at least once. Callers that refuse an action for a
+    /// non-friend have to tell "not a friend" apart from "the list is not here yet".
+    pub fn has_loaded(&self) -> bool {
+        self.freshness.was_fetched()
     }
 
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
@@ -661,6 +671,8 @@ mod tests {
             logo: None,
             status: String::new(),
             user_status: String::new(),
+            dob_seconds: 0,
+            create_time_seconds: 0,
         }
     }
 

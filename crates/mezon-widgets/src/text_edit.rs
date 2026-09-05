@@ -189,6 +189,193 @@ pub fn should_coalesce(last: Option<EditKind>, kind: EditKind) -> bool {
     matches!(kind, EditKind::Insert | EditKind::Delete) && last == Some(kind)
 }
 
+pub fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let index = index.min(text.len());
+    if text.is_char_boundary(index) {
+        return index;
+    }
+    let mut i = index;
+    while i > 0 {
+        i -= 1;
+        if text.is_char_boundary(i) {
+            return i;
+        }
+    }
+    0
+}
+
+pub fn ceil_char_boundary(text: &str, index: usize) -> usize {
+    let index = index.min(text.len());
+    if text.is_char_boundary(index) {
+        return index;
+    }
+    let mut i = index + 1;
+    while i < text.len() {
+        if text.is_char_boundary(i) {
+            return i;
+        }
+        i += 1;
+    }
+    text.len()
+}
+
+pub fn ime_replace_range(selected: &Range<usize>, marked: Option<&Range<usize>>) -> Range<usize> {
+    marked.cloned().unwrap_or_else(|| selected.clone())
+}
+
+pub fn splice_out_byte_range(
+    content: &str,
+    range: Range<usize>,
+) -> Option<(String, String, usize)> {
+    if range.start >= range.end {
+        return None;
+    }
+    let start = floor_char_boundary(content, range.start);
+    let end = ceil_char_boundary(content, range.end).max(start);
+    if start >= end {
+        return None;
+    }
+    let discarded = content[start..end].to_string();
+    let mut next = String::with_capacity(content.len() - (end - start));
+    next.push_str(&content[..start]);
+    next.push_str(&content[end..]);
+    Some((next, discarded, start))
+}
+
+fn offset_after_delete(offset: usize, deleted: &Range<usize>) -> usize {
+    if offset <= deleted.start {
+        offset
+    } else if offset <= deleted.end {
+        deleted.start
+    } else {
+        offset - (deleted.end - deleted.start)
+    }
+}
+
+pub fn marked_range_after_delete(
+    marked: Option<&Range<usize>>,
+    deleted: &Range<usize>,
+) -> Option<Range<usize>> {
+    let marked = marked?;
+    let start = offset_after_delete(marked.start, deleted);
+    let end = offset_after_delete(marked.end, deleted);
+    (start < end).then_some(start..end)
+}
+
+pub fn swallow_discarded_ime_commit(
+    discard: &mut Option<String>,
+    _range_utf16: Option<&Range<usize>>,
+    _has_marked: bool,
+    new_text: &str,
+) -> bool {
+    let Some(expected) = discard.as_deref() else {
+        return false;
+    };
+    if new_text.is_empty() {
+        return false;
+    }
+    if new_text.chars().count() < expected.chars().count() {
+        return false;
+    }
+    if ime_token_eq(expected, new_text) {
+        return true;
+    }
+    *discard = None;
+    false
+}
+
+fn ime_token_eq(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let folded_a = fold_ime_token(a);
+    let folded_b = fold_ime_token(b);
+    folded_a == folded_b && folded_a.chars().count() > 1
+}
+
+fn fold_ime_token(s: &str) -> String {
+    s.chars()
+        .filter(|c| !is_combining_mark(*c))
+        .map(fold_latin_letter)
+        .collect()
+}
+
+fn is_combining_mark(c: char) -> bool {
+    matches!(c, '\u{0300}'..='\u{036F}')
+}
+
+fn fold_latin_letter(c: char) -> char {
+    let c = c.to_lowercase().next().unwrap_or(c);
+    match c {
+        'à' | 'á' | 'ả' | 'ã' | 'ạ' | 'ă' | 'ằ' | 'ắ' | 'ẳ' | 'ẵ' | 'ặ' | 'â' | 'ầ' | 'ấ' | 'ẩ'
+        | 'ẫ' | 'ậ' => 'a',
+        'è' | 'é' | 'ẻ' | 'ẽ' | 'ẹ' | 'ê' | 'ề' | 'ế' | 'ể' | 'ễ' | 'ệ' => 'e',
+        'ì' | 'í' | 'ỉ' | 'ĩ' | 'ị' => 'i',
+        'ò' | 'ó' | 'ỏ' | 'õ' | 'ọ' | 'ô' | 'ồ' | 'ố' | 'ổ' | 'ỗ' | 'ộ' | 'ơ' | 'ờ' | 'ớ' | 'ở'
+        | 'ỡ' | 'ợ' => 'o',
+        'ù' | 'ú' | 'ủ' | 'ũ' | 'ụ' | 'ư' | 'ừ' | 'ứ' | 'ử' | 'ữ' | 'ự' => 'u',
+        'ỳ' | 'ý' | 'ỷ' | 'ỹ' | 'ỵ' => 'y',
+        'đ' => 'd',
+        _ => c,
+    }
+}
+
+pub fn surrounding_delete_range(
+    text: &str,
+    selected_range: &Range<usize>,
+    marked_range: Option<&Range<usize>>,
+    selection_reversed: bool,
+    before_len: usize,
+    after_len: usize,
+) -> Range<usize> {
+    if selected_range.start != selected_range.end {
+        return selected_range.start.min(text.len())..selected_range.end.min(text.len());
+    }
+    let (left, right) = if let Some(marked) = marked_range {
+        (marked.start.min(text.len()), marked.end.min(text.len()))
+    } else {
+        let caret = if selection_reversed {
+            selected_range.start
+        } else {
+            selected_range.end
+        }
+        .min(text.len());
+        (caret, caret)
+    };
+    let start = floor_char_boundary(text, left.saturating_sub(before_len));
+    let end = ceil_char_boundary(text, right.saturating_add(after_len));
+    start..end
+}
+
+pub fn utf16_offset_to_bytes(text: &str, utf16_offset: usize) -> usize {
+    let mut units = 0;
+    for (byte, ch) in text.char_indices() {
+        if units >= utf16_offset {
+            return byte;
+        }
+        units += ch.len_utf16();
+    }
+    text.len()
+}
+
+pub fn marked_caret_range(
+    marked_start: usize,
+    new_text: &str,
+    selected_utf16: Option<&Range<usize>>,
+) -> Range<usize> {
+    match selected_utf16 {
+        Some(range) => {
+            let start = marked_start + utf16_offset_to_bytes(new_text, range.start);
+            let end = marked_start + utf16_offset_to_bytes(new_text, range.end);
+            start..end
+        }
+        None => {
+            let end = marked_start + new_text.len();
+            end..end
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,6 +478,14 @@ mod tests {
     }
 
     #[test]
+    fn word_range_treats_vietnamese_letters_as_one_word() {
+        let text = "tiếng Việt";
+        assert_eq!(word_range_at(text, 2), 0.."tiếng".len());
+        assert_eq!(next_word_boundary(text, 0), "tiếng".len());
+        assert_eq!(previous_word_boundary(text, text.len()), "tiếng ".len());
+    }
+
+    #[test]
     fn word_range_on_empty_text_is_empty() {
         assert_eq!(word_range_at("", 0), 0..0);
         assert_eq!(word_range_at("   ", 1), 0..3);
@@ -335,5 +530,252 @@ mod tests {
             extend_range_for_granularity(text, &anchor, 5, SelectGranularity::Word, false);
         assert_eq!(range, 4..7);
         assert!(!reversed);
+    }
+
+    #[test]
+    fn ime_replace_uses_marked_when_selection_is_inside_preedit() {
+        assert_eq!(ime_replace_range(&(2..4), Some(&(0..5))), 0..5);
+    }
+
+    #[test]
+    fn ime_replace_uses_marked_when_preedit_is_present() {
+        assert_eq!(ime_replace_range(&(0..6), Some(&(3..5))), 3..5);
+    }
+
+    #[test]
+    fn splice_out_byte_range_snaps_off_boundary_vietnamese_preedit() {
+        let content = "xin chào";
+        assert_eq!("chào".len(), 5);
+        assert!(!content.is_char_boundary(7));
+        let (next, discarded, caret) = splice_out_byte_range(content, 7..8).unwrap();
+        assert_eq!(discarded, "à");
+        assert_eq!(next, "xin cho");
+        assert_eq!(caret, 6);
+        assert!(next.is_char_boundary(caret));
+    }
+
+    #[test]
+    fn splice_out_byte_range_drops_cjk_preedit() {
+        let content = "你好";
+        assert_eq!("你".len(), 3);
+        let (next, discarded, caret) = splice_out_byte_range(content, 0..3).unwrap();
+        assert_eq!(discarded, "你");
+        assert_eq!(next, "好");
+        assert_eq!(caret, 0);
+    }
+
+    #[test]
+    fn splice_out_byte_range_returns_none_when_empty_after_clamp() {
+        assert_eq!(splice_out_byte_range("à", 1..1), None);
+        assert_eq!(splice_out_byte_range("", 0..0), None);
+    }
+
+    #[test]
+    fn splice_out_byte_range_ceils_end_so_last_preedit_char_is_not_left_behind() {
+        let content = "xin chào";
+        assert!(!content.is_char_boundary(7));
+        let (next, discarded, caret) = splice_out_byte_range(content, 6..7).unwrap();
+        assert_eq!(discarded, "à");
+        assert_eq!(next, "xin cho");
+        assert_eq!(caret, 6);
+        assert!(next.is_char_boundary(caret));
+    }
+
+    #[test]
+    fn marked_range_shrinks_after_tail_delete_within_preedit() {
+        let text = "được";
+        let len = text.len();
+        assert_eq!(
+            marked_range_after_delete(Some(&(0..len)), &(len - 1..len)),
+            Some(0..len - 1)
+        );
+    }
+
+    #[test]
+    fn marked_range_clears_after_full_preedit_delete() {
+        let text = "được";
+        let len = text.len();
+        assert_eq!(marked_range_after_delete(Some(&(0..len)), &(0..len)), None);
+    }
+
+    #[test]
+    fn marked_range_shifts_left_when_delete_is_before_it() {
+        assert_eq!(
+            marked_range_after_delete(Some(&(2..5)), &(0..1)),
+            Some(1..4)
+        );
+        assert_eq!(
+            marked_range_after_delete(Some(&(2..5)), &(0..2)),
+            Some(0..3)
+        );
+    }
+
+    #[test]
+    fn marked_range_is_untouched_when_delete_is_after_it() {
+        assert_eq!(
+            marked_range_after_delete(Some(&(2..5)), &(5..8)),
+            Some(2..5)
+        );
+    }
+
+    #[test]
+    fn marked_range_keeps_the_surviving_side_on_partial_overlap() {
+        assert_eq!(
+            marked_range_after_delete(Some(&(2..6)), &(1..3)),
+            Some(1..4)
+        );
+        assert_eq!(
+            marked_range_after_delete(Some(&(2..6)), &(5..8)),
+            Some(2..5)
+        );
+    }
+
+    #[test]
+    fn ime_replace_with_none_deletes_whole_mark_not_partial_selection() {
+        let selected = 2..4;
+        let marked = 0..5;
+        assert_eq!(ime_replace_range(&selected, Some(&marked)), marked);
+        assert_ne!(ime_replace_range(&selected, Some(&marked)), selected);
+    }
+
+    #[test]
+    fn discarded_ime_commit_swallows_the_echoed_preedit() {
+        let mut discard = Some("hoa".to_string());
+        assert!(swallow_discarded_ime_commit(
+            &mut discard,
+            None,
+            false,
+            "hoa"
+        ));
+        assert_eq!(discard.as_deref(), Some("hoa"));
+    }
+
+    #[test]
+    fn discarded_ime_commit_swallows_composed_vietnamese() {
+        let mut discard = Some("ban".to_string());
+        assert!(swallow_discarded_ime_commit(
+            &mut discard,
+            None,
+            false,
+            "bạn"
+        ));
+        assert_eq!(discard.as_deref(), Some("ban"));
+    }
+
+    #[test]
+    fn discarded_ime_commit_does_not_swallow_the_next_sentence_first_char() {
+        let mut discard = Some("ban".to_string());
+        assert!(!swallow_discarded_ime_commit(
+            &mut discard,
+            None,
+            false,
+            "t"
+        ));
+        assert_eq!(discard.as_deref(), Some("ban"));
+        assert!(!swallow_discarded_ime_commit(
+            &mut discard,
+            None,
+            true,
+            "to"
+        ));
+        assert_eq!(discard.as_deref(), Some("ban"));
+    }
+
+    #[test]
+    fn discarded_ime_commit_keeps_the_token_until_the_echo_arrives() {
+        let mut discard = Some("ban".to_string());
+        assert!(!swallow_discarded_ime_commit(
+            &mut discard,
+            None,
+            false,
+            "t"
+        ));
+        assert_eq!(discard.as_deref(), Some("ban"));
+        assert!(swallow_discarded_ime_commit(
+            &mut discard,
+            None,
+            true,
+            "bạn"
+        ));
+        assert_eq!(discard.as_deref(), Some("ban"));
+    }
+
+    #[test]
+    fn discarded_ime_commit_clears_on_a_new_word_of_equal_length() {
+        let mut discard = Some("ban".to_string());
+        assert!(!swallow_discarded_ime_commit(
+            &mut discard,
+            None,
+            false,
+            "xin"
+        ));
+        assert!(discard.is_none());
+    }
+
+    #[test]
+    fn discarded_ime_commit_does_not_swallow_a_shorter_preedit_update() {
+        let mut discard = Some("được".to_string());
+        assert!(!swallow_discarded_ime_commit(
+            &mut discard,
+            None,
+            true,
+            "đượ"
+        ));
+        assert_eq!(discard.as_deref(), Some("được"));
+    }
+
+    #[test]
+    fn discarded_ime_commit_does_not_swallow_telex_d_as_echo_of_d() {
+        let mut discard = Some("đ".to_string());
+        assert!(!swallow_discarded_ime_commit(
+            &mut discard,
+            None,
+            false,
+            "d"
+        ));
+        assert!(discard.is_none());
+    }
+
+    #[test]
+    fn surrounding_delete_removes_the_vowel_before_a_telex_tone() {
+        assert_eq!(
+            surrounding_delete_range("hoa", &(3..3), None, false, 1, 0),
+            2..3
+        );
+    }
+
+    #[test]
+    fn surrounding_delete_keeps_a_full_selection_instead_of_the_last_marked_char() {
+        assert_eq!(
+            surrounding_delete_range("hoas", &(0..4), Some(&(3..4)), false, 1, 0),
+            0..4
+        );
+    }
+
+    #[test]
+    fn surrounding_delete_snaps_mid_character_offsets_to_utf8_boundaries() {
+        let text = "á";
+        let end = text.len();
+        let range = surrounding_delete_range(text, &(end..end), None, false, 1, 0);
+        assert!(text.is_char_boundary(range.start));
+        assert!(text.is_char_boundary(range.end));
+        assert_eq!(&text[range], "á");
+    }
+
+    #[test]
+    fn marked_caret_is_relative_to_preedit_not_the_document() {
+        let prefix = "câu có nhiều từ dễ gõ sai ";
+        let preedit = "dấu";
+        let vowel = marked_caret_range(prefix.len(), preedit, Some(&(2..2)));
+        assert_eq!(vowel, prefix.len() + "dấ".len()..prefix.len() + "dấ".len());
+        let at_end = marked_caret_range(prefix.len(), preedit, None);
+        assert_eq!(
+            at_end,
+            prefix.len() + preedit.len()..prefix.len() + preedit.len()
+        );
+        assert_eq!(
+            marked_caret_range(prefix.len(), preedit, Some(&(3..3))),
+            at_end
+        );
     }
 }

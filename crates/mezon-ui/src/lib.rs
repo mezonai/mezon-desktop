@@ -12,12 +12,16 @@ pub mod gallery;
 pub mod image_cache;
 pub mod image_viewer;
 pub mod invite;
+pub mod pdf_viewer;
 pub mod router;
 pub mod settings;
 pub mod sidebar;
 pub mod theme;
+pub mod tour;
 pub mod util;
 pub mod window_layout;
+
+pub use mezon_widgets::clipboard;
 
 pub use app::root::RootView;
 pub use app::shell::Shell;
@@ -30,6 +34,7 @@ pub use chat::layout::ChatLayout;
 pub use dev::gallery::DevGallery;
 pub use gallery::GalleryModal;
 pub use image_viewer::{OpenViewerRequest, open_image_viewer};
+pub use pdf_viewer::{OpenPdfRequest, open_pdf_viewer};
 pub use router::{Route, Router};
 pub use settings::SettingsScreen;
 pub use sidebar::channel_sidebar::ChannelSidebar;
@@ -104,6 +109,7 @@ pub fn init(cx: &mut gpui::App) {
     canvas_navigation::init(cx);
     chat::message_search::init(cx);
     command_palette::init(cx);
+    tour::init(cx);
     router::Router::init(cx);
     init_menus(cx);
 }

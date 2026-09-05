@@ -10,12 +10,12 @@ use gpui::{
     Anchor, AnyElement, App, Bounds, ClickEvent, ClipboardEntry, ClipboardItem, Context,
     CursorStyle, DispatchPhase, Display, Div, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, FontStyle, FontWeight, GlobalElementId, Hsla,
-    Image, ImageFormat, InspectorElementId, InteractiveElement as _, IntoElement, KeyBinding,
-    KeyContext, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    Pixels, Point, Position, Render, RenderOnce, ScrollDelta, ScrollHandle, ScrollWheelEvent,
-    ShapedLine, SharedString, StrikethroughStyle, Style, StyleRefinement, Styled, TextAlign,
-    TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, anchored, deferred, div,
-    fill, point, prelude::*, px, size,
+    Image, ImageFormat, ImeSurroundingText, InspectorElementId, InteractiveElement as _,
+    IntoElement, KeyBinding, KeyContext, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Position, Render, RenderOnce,
+    ScrollDelta, ScrollHandle, ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle,
+    Style, StyleRefinement, Styled, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    WrappedLine, actions, anchored, deferred, div, fill, point, prelude::*, px, size,
 };
 use mezon_store::{CanvasStore, PlatformStore};
 use serde_json::{Value, json};
@@ -40,8 +40,9 @@ use mezon_widgets::text_actions::{
     SelectToNextWordEnd, SelectToPreviousWordStart, SelectUp, TEXT_INPUT_CONTEXT, Up,
 };
 use mezon_widgets::text_edit::{
-    SelectGranularity, extend_range_for_granularity, granularity_for_click, next_word_boundary,
-    previous_word_boundary, range_for_granularity,
+    SelectGranularity, extend_range_for_granularity, granularity_for_click, ime_replace_range,
+    marked_caret_range, marked_range_after_delete, next_word_boundary, previous_word_boundary,
+    range_for_granularity, surrounding_delete_range, swallow_discarded_ime_commit,
 };
 use mezon_widgets::{
     Button, ButtonVariants, Icon, IconName, Input, InputState, Sizable, Size, h_flex, v_flex,
@@ -200,6 +201,7 @@ pub struct CanvasEditorState {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
+    discard_ime_commit: Option<String>,
     last_lines: Vec<DocLine>,
     last_bounds: Option<Bounds<Pixels>>,
     line_height: Pixels,
@@ -246,6 +248,7 @@ impl CanvasEditorState {
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
+            discard_ime_commit: None,
             last_lines: Vec::new(),
             last_bounds: None,
             line_height: Pixels::ZERO,
@@ -665,7 +668,11 @@ impl CanvasEditorState {
         let new_cursor = start + inserted_len;
         self.selected_range = new_cursor..new_cursor;
         self.selection_reversed = false;
-        self.marked_range = None;
+        self.marked_range = if new_text.is_empty() {
+            marked_range_after_delete(self.marked_range.as_ref(), &(start..end))
+        } else {
+            None
+        };
         self.caret_blink.pause_blinking(cx);
         cx.notify();
     }
@@ -1463,6 +1470,7 @@ impl CanvasEditorState {
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.dismiss_bubble_menus();
+        self.marked_range = None;
         self.selected_range = 0..self.content.len();
         self.selection_reversed = false;
         cx.notify();
@@ -1556,28 +1564,27 @@ impl CanvasEditorState {
         if self.read_only {
             return;
         }
-        let Some(item) = cx.read_from_clipboard() else {
-            return;
-        };
-        let images: Vec<Image> = item
-            .entries()
-            .iter()
-            .filter_map(|entry| match entry {
-                ClipboardEntry::Image(image) => Some(image.clone()),
-                _ => None,
-            })
-            .collect();
-        if !images.is_empty() {
-            self.paste_images(images, window, cx);
-            return;
-        }
-        if let Some(text) = item.text() {
-            self.replace_text_in_range(
-                self.selected_range.clone(),
-                &text.replace("\r\n", "\n"),
-                cx,
-            );
-        }
+        mezon_widgets::clipboard::read_then(self, window, cx, |this, item, window, cx| {
+            let images: Vec<Image> = item
+                .entries()
+                .iter()
+                .filter_map(|entry| match entry {
+                    ClipboardEntry::Image(image) => Some(image.clone()),
+                    _ => None,
+                })
+                .collect();
+            if !images.is_empty() {
+                this.paste_images(images, window, cx);
+                return;
+            }
+            if let Some(text) = item.text() {
+                this.replace_text_in_range(
+                    this.selected_range.clone(),
+                    &text.replace("\r\n", "\n"),
+                    cx,
+                );
+            }
+        });
     }
 
     fn paste_images(&mut self, images: Vec<Image>, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1626,6 +1633,10 @@ impl CanvasEditorState {
             }
         })
         .detach();
+    }
+
+    fn on_key_down(&mut self, _: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {
+        self.discard_ime_commit = None;
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -1702,6 +1713,11 @@ impl EntityInputHandler for CanvasEditorState {
     }
 
     fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        if let Some(marked) = self.marked_range.clone() {
+            let start = marked.start.min(self.content.len());
+            let end = marked.end.min(self.content.len()).max(start);
+            self.discard_ime_commit = self.content.get(start..end).map(str::to_string);
+        }
         self.marked_range = None;
     }
 
@@ -1712,11 +1728,19 @@ impl EntityInputHandler for CanvasEditorState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let range = range_utf16
-            .as_ref()
-            .map(|r| self.range_from_utf16(r))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
+        if swallow_discarded_ime_commit(
+            &mut self.discard_ime_commit,
+            range_utf16.as_ref(),
+            self.marked_range.is_some(),
+            new_text,
+        ) {
+            return;
+        }
+        let range = if let Some(range_utf16) = range_utf16.as_ref() {
+            self.range_from_utf16(range_utf16)
+        } else {
+            ime_replace_range(&self.selected_range, self.marked_range.as_ref())
+        };
         self.replace_text_in_range(range, new_text, cx);
     }
 
@@ -1728,6 +1752,14 @@ impl EntityInputHandler for CanvasEditorState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if swallow_discarded_ime_commit(
+            &mut self.discard_ime_commit,
+            range_utf16.as_ref(),
+            self.marked_range.is_some(),
+            new_text,
+        ) {
+            return;
+        }
         let range = range_utf16
             .as_ref()
             .map(|r| self.range_from_utf16(r))
@@ -1740,9 +1772,9 @@ impl EntityInputHandler for CanvasEditorState {
         } else {
             self.marked_range = None;
         }
-        if let Some(sel) = new_selected_range_utf16 {
-            let sel = self.range_from_utf16(&sel);
-            self.selected_range = insert_start + sel.start..insert_start + sel.end;
+        if new_selected_range_utf16.is_some() {
+            self.selected_range =
+                marked_caret_range(insert_start, new_text, new_selected_range_utf16.as_ref());
             self.selection_reversed = false;
         }
         cx.notify();
@@ -1765,6 +1797,40 @@ impl EntityInputHandler for CanvasEditorState {
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
         Some(self.offset_to_utf16(self.index_for_mouse_position(point)))
+    }
+
+    fn surrounding_text(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<ImeSurroundingText> {
+        Some(ImeSurroundingText::from_selection(
+            &self.content,
+            self.selected_range.clone(),
+            self.selection_reversed,
+            self.marked_range.clone(),
+        ))
+    }
+
+    fn delete_surrounding_text(
+        &mut self,
+        before_len: usize,
+        after_len: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = surrounding_delete_range(
+            &self.content,
+            &self.selected_range,
+            self.marked_range.as_ref(),
+            self.selection_reversed,
+            before_len,
+            after_len,
+        );
+        if range.is_empty() {
+            return;
+        }
+        self.replace_text_in_range(range, "", cx);
     }
 }
 
@@ -1848,7 +1914,8 @@ impl Render for CanvasEditorState {
                 el.key_context(editor_key_context())
                     .track_focus(&self.focus_handle)
                     .when(focused, |el| {
-                        el.on_action(cx.listener(Self::backspace))
+                        el.on_key_down(cx.listener(Self::on_key_down))
+                            .on_action(cx.listener(Self::backspace))
                             .on_action(cx.listener(Self::delete))
                             .on_action(cx.listener(Self::enter))
                             .on_action(cx.listener(Self::shift_enter))
@@ -4238,6 +4305,50 @@ mod tests {
         });
         let content = cx.update(|_, cx| entity.read(cx).content.to_string());
         assert_eq!(content, "Chu");
+    }
+
+    #[gpui::test]
+    fn ime_reset_echo_commit_is_swallowed(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let entity = cx.update(|window, cx| {
+            cx.new(|cx| CanvasEditorState::new(window, cx, "placeholder", "en"))
+        });
+        cx.update(|window, cx| {
+            entity.update(cx, |state, cx| {
+                <CanvasEditorState as EntityInputHandler>::replace_and_mark_text_in_range(
+                    state, None, "hoa", None, window, cx,
+                );
+                <CanvasEditorState as EntityInputHandler>::unmark_text(state, window, cx);
+                <CanvasEditorState as EntityInputHandler>::replace_text_in_range(
+                    state, None, "hoa", window, cx,
+                );
+            });
+        });
+        let content = cx.update(|_, cx| entity.read(cx).content.to_string());
+        assert_eq!(content, "hoa");
+    }
+
+    #[gpui::test]
+    fn ime_delete_surrounding_rewrites_the_last_vowel(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let entity = cx.update(|window, cx| {
+            cx.new(|cx| CanvasEditorState::new(window, cx, "placeholder", "en"))
+        });
+        cx.update(|window, cx| {
+            entity.update(cx, |state, cx| {
+                <CanvasEditorState as EntityInputHandler>::replace_text_in_range(
+                    state, None, "hoa", window, cx,
+                );
+                <CanvasEditorState as EntityInputHandler>::delete_surrounding_text(
+                    state, 1, 0, window, cx,
+                );
+                <CanvasEditorState as EntityInputHandler>::replace_text_in_range(
+                    state, None, "á", window, cx,
+                );
+            });
+        });
+        let content = cx.update(|_, cx| entity.read(cx).content.to_string());
+        assert_eq!(content, "hoá");
     }
 
     #[test]

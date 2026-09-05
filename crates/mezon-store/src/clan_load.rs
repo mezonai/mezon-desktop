@@ -6,6 +6,7 @@ use crate::clan_members::ClanMembersStore;
 use crate::emoji::EmojiStore;
 use crate::ids::ClanId;
 use crate::notification_setting::NotificationSettingStore;
+use crate::onboarding::OnboardingStore;
 use crate::permissions::PermissionStore;
 use crate::roles::RolesStore;
 use crate::sticker::StickerStore;
@@ -54,7 +55,7 @@ impl ClanLoadScheduler {
                         this.start(*clan_id, cx);
                     }
                 }
-                ClanEvent::Deleted(_) => {}
+                ClanEvent::Deleted(_) | ClanEvent::OwnerChanged { .. } => {}
             },
         );
 
@@ -84,6 +85,19 @@ impl ClanLoadScheduler {
                 ChannelList::global(cx)
                     .update(cx, |channels, cx| channels.load_for_clan(clan_id, cx));
             });
+
+            // The gate: `clan_join` fans out to the clan's private channels and
+            // threads only if the gateway already has the channel listing cached
+            // for this user, so it has to follow the structure fetch, never race
+            // it. See `ChannelList::ensure_clan_joined`.
+            cx.update(|cx| {
+                ChannelList::global(cx)
+                    .update(cx, |channels, cx| channels.ensure_clan_joined(clan_id, cx))
+            })
+            .await;
+            if !is_current(&this, cx, generation) {
+                return;
+            }
 
             cx.update(|cx| {
                 ChannelList::global(cx).update(cx, |channels, cx| channels.seed_badges(clan_id, cx))
@@ -123,6 +137,21 @@ impl ClanLoadScheduler {
             cx.update(|cx| {
                 NotificationSettingStore::global(cx)
                     .update(cx, |store, cx| store.prefetch_clan(clan_id, cx));
+            });
+
+            // Onboarding chrome (the sidebar progress card, the composer mission banner) needs
+            // both the guide items and this member's step, and only clans that turned onboarding
+            // on have either — so the pair is fetched here rather than on the guide page, which
+            // most members never open.
+            cx.update(|cx| {
+                let enabled = ClanList::global(cx)
+                    .read(cx)
+                    .clan(clan_id)
+                    .is_some_and(|clan| clan.is_onboarding);
+                if enabled {
+                    OnboardingStore::global(cx)
+                        .update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
+                }
             });
 
             this.update(cx, |this, _| {

@@ -1,4 +1,6 @@
-use crate::{App, Bounds, Context, Entity, InputHandler, Pixels, UTF16Selection, Window};
+use crate::{
+    App, Bounds, Context, Entity, ImeSurroundingText, InputHandler, Pixels, UTF16Selection, Window,
+};
 use std::ops::Range;
 
 /// Implement this trait to allow views to handle textual input when implementing an editor, field, etc.
@@ -74,6 +76,25 @@ pub trait EntityInputHandler: 'static + Sized {
     /// See [`InputHandler::accepts_text_input`] for details
     fn accepts_text_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
         true
+    }
+
+    /// See [`InputHandler::surrounding_text`] for details
+    fn surrounding_text(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<ImeSurroundingText> {
+        None
+    }
+
+    /// See [`InputHandler::delete_surrounding_text`] for details
+    fn delete_surrounding_text(
+        &mut self,
+        _before_len: usize,
+        _after_len: usize,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
     }
 }
 
@@ -191,5 +212,26 @@ impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
     fn prefers_ime_for_printable_keys(&mut self, window: &mut Window, cx: &mut App) -> bool {
         self.view
             .update(cx, |view, cx| view.accepts_text_input(window, cx))
+    }
+
+    fn surrounding_text(
+        &mut self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<ImeSurroundingText> {
+        self.view
+            .update(cx, |view, cx| view.surrounding_text(window, cx))
+    }
+
+    fn delete_surrounding_text(
+        &mut self,
+        before_len: usize,
+        after_len: usize,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.view.update(cx, |view, cx| {
+            view.delete_surrounding_text(before_len, after_len, window, cx)
+        });
     }
 }

@@ -7,7 +7,7 @@ use gpui::{
 };
 use mezon_store::{
     ChannelList, ClanId, ClanList, ClanMembersStore, OnboardingAnswer, OnboardingContent,
-    OnboardingItem, Settings,
+    OnboardingItem, OnboardingStore, Settings,
 };
 
 use crate::app::shell::Shell;
@@ -39,6 +39,7 @@ enum Page {
 struct AnswerDraft {
     title: String,
     description: String,
+    emoji: String,
 }
 
 #[derive(Clone)]
@@ -356,7 +357,11 @@ impl OnboardingSettingPage {
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
                 match result {
-                    Ok(items) => this.apply_items(items),
+                    Ok(items) => {
+                        OnboardingStore::global(cx)
+                            .update(cx, |store, cx| store.set_items(clan_id, items.clone(), cx));
+                        this.apply_items(items);
+                    }
                     Err(error) => {
                         tracing::error!("fetch onboarding failed: {error}");
                         this.load_error = Some(error);
@@ -387,6 +392,7 @@ impl OnboardingSettingPage {
                         .map(|answer| AnswerDraft {
                             title: answer.title,
                             description: answer.description,
+                            emoji: answer.emoji,
                         })
                         .collect(),
                     expanded: false,
@@ -667,6 +673,7 @@ impl OnboardingSettingPage {
                     .map(|answer| OnboardingAnswer {
                         title: answer.title.clone(),
                         description: answer.description.clone(),
+                        emoji: answer.emoji.clone(),
                     })
                     .collect(),
                 ..Default::default()
@@ -847,6 +854,8 @@ impl OnboardingSettingPage {
     fn render_main(&self, theme: &Theme, locale: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
         let setup = cx.entity().downgrade();
         let guide = cx.entity().downgrade();
+        let preview_clan = self.clan_id;
+        let preview_blocked = self.dirty;
         v_flex()
             .gap_5()
             .child(
@@ -868,8 +877,28 @@ impl OnboardingSettingPage {
                             )))
                             .child(
                                 div()
-                                    .text_color(rgb(0x5865f2))
-                                    .child(mezon_i18n::t(locale, "common.preview")),
+                                    .id("onboarding-open-preview")
+                                    .when(!preview_blocked, |link| {
+                                        link.cursor_pointer()
+                                            .text_color(rgb(0x5865f2))
+                                            .hover(|style| style.text_color(rgb(0x818cf8)))
+                                            .on_click(move |_, _, cx| {
+                                                OnboardingStore::global(cx).update(
+                                                    cx,
+                                                    |store, cx| {
+                                                        store.open_preview(preview_clan, cx)
+                                                    },
+                                                );
+                                                crate::router::navigate(
+                                                    cx,
+                                                    crate::router::Route::ClanGuide {
+                                                        clan_id: preview_clan,
+                                                    },
+                                                );
+                                            })
+                                    })
+                                    .when(preview_blocked, |link| link.text_color(theme.text_muted))
+                                    .child(mezon_i18n::t(locale, "onBoardingClan.buttons.preview")),
                             ),
                     ),
             )
@@ -1224,12 +1253,9 @@ impl OnboardingSettingPage {
                     .justify_between()
                     .child(
                         div().text_size(px(12.)).child(
-                            format!(
-                                "{} {}",
-                                mezon_i18n::t(locale, "onBoardingClan.questionsPage.title"),
-                                index + 1
-                            )
-                            .to_uppercase(),
+                            mezon_i18n::t(locale, "onBoardingClan.questionsPage.questionNumber")
+                                .replace("{{number}}", &(index + 1).to_string())
+                                .to_uppercase(),
                         ),
                     )
                     .child(
@@ -1297,12 +1323,12 @@ impl OnboardingSettingPage {
             if let Some(input) = &question.title_input {
                 card = card.child(Input::new(input).w_full());
             }
-            card = card.child(div().text_color(theme.text_secondary).child(format!(
-                "{} - {} / {}",
-                mezon_i18n::t(locale, "onBoardingClan.questionsPage.addAnswer"),
-                question.answers.len(),
-                MAX_ANSWERS
-            )));
+            card = card.child(
+                div().text_color(theme.text_secondary).child(
+                    mezon_i18n::t(locale, "onBoardingClan.questionsPage.availableAnswers")
+                        .replace("{{count}}", &question.answers.len().to_string()),
+                ),
+            );
             let mut answers = h_flex().gap_2().flex_wrap();
             for (answer_index, answer) in question.answers.iter().enumerate() {
                 let edit = cx.entity().downgrade();
@@ -2308,13 +2334,15 @@ impl OnboardingSettingPage {
                 description,
             }) => {
                 let title = title.read(cx).value().trim().to_string();
-                let value = AnswerDraft {
+                let mut value = AnswerDraft {
                     title,
                     description: description.read(cx).value().trim().to_string(),
+                    emoji: String::new(),
                 };
                 if let Some(question_draft) = self.questions.get_mut(question) {
                     if let Some(index) = answer {
                         if let Some(answer) = question_draft.answers.get_mut(index) {
+                            value.emoji.clone_from(&answer.emoji);
                             *answer = value;
                             applied = true;
                         }
@@ -2482,7 +2510,7 @@ impl OnboardingSettingPage {
             prompt: None,
         });
         self._upload_task = Some(cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else {
+            let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
                 return;
             };
             let Some(path) = paths.into_iter().next() else {

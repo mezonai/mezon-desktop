@@ -4,6 +4,7 @@
 //! Any view can surface a toast or a modal from anywhere via [`Shell::global`], instead of each
 //! page wiring its own local toast/dialog state.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
@@ -22,17 +23,20 @@ mod confirm_delete_channel_modal;
 mod confirm_delete_clan_modal;
 mod confirm_delete_emoji_modal;
 mod confirm_delete_message_modal;
+mod confirm_delete_quick_menu_modal;
 mod confirm_delete_role_modal;
 mod confirm_delete_sound_modal;
 mod confirm_delete_sticker_modal;
 mod confirm_delete_thread_modal;
 mod confirm_delete_webhook_modal;
+mod confirm_destructive_modal;
 mod confirm_kick_member_modal;
 mod confirm_leave_clan_modal;
-mod confirm_leave_dm_group_modal;
 mod confirm_leave_thread_modal;
 mod confirm_remove_friend_modal;
+mod confirm_remove_group_member_modal;
 mod disable_clan_community_modal;
+mod transfer_owner_modal;
 mod upload_limit_modal;
 mod wallet_not_available_modal;
 use confirm_archive_channel_modal::ConfirmArchiveChannelModal;
@@ -43,18 +47,21 @@ use confirm_delete_channel_modal::ConfirmDeleteChannelModal;
 use confirm_delete_clan_modal::ConfirmDeleteClanModal;
 use confirm_delete_emoji_modal::ConfirmDeleteEmojiModal;
 use confirm_delete_message_modal::ConfirmDeleteMessageModal;
+use confirm_delete_quick_menu_modal::ConfirmDeleteQuickMenuModal;
 use confirm_delete_role_modal::ConfirmDeleteRoleModal;
 use confirm_delete_sound_modal::ConfirmDeleteSoundModal;
 use confirm_delete_sticker_modal::ConfirmDeleteStickerModal;
 use confirm_delete_thread_modal::ConfirmDeleteThreadModal;
 use confirm_delete_webhook_modal::{ConfirmDeleteWebhookModal, WebhookDeleteTarget};
+use confirm_destructive_modal::{ConfirmDestructive, ConfirmDestructiveModal};
 use confirm_kick_member_modal::ConfirmKickMemberModal;
 use confirm_leave_clan_modal::ConfirmLeaveClanModal;
-use confirm_leave_dm_group_modal::ConfirmLeaveDmGroupModal;
 use confirm_leave_thread_modal::ConfirmLeaveThreadModal;
 pub use confirm_remove_friend_modal::FriendRemovalKind;
 use confirm_remove_friend_modal::{ConfirmRemoveFriendModal, interpolate_username};
+use confirm_remove_group_member_modal::ConfirmRemoveGroupMemberModal;
 use disable_clan_community_modal::DisableClanCommunityModal;
+use transfer_owner_modal::{TransferOwnerModal, TransferOwnerParty};
 use upload_limit_modal::UploadLimitModal;
 use wallet_not_available_modal::WalletNotAvailableModal;
 
@@ -89,8 +96,8 @@ impl Render for StackedModalHost {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_overlay()
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_overlay(cx)
     }
 }
 
@@ -99,7 +106,10 @@ pub struct Shell {
     toasts: Vec<ToastItem>,
     modal: Option<AnyView>,
     modal_underlay: Option<(AnyView, bool, bool, Option<gpui::FocusHandle>)>,
+    /// Focus saved by a stacked modal whose owner finished while it was the underlay.
+    modal_restore_focus: Option<gpui::FocusHandle>,
     modal_fullscreen: bool,
+    modal_backdrop_dismissible: bool,
     command_palette_open: bool,
     next_id: usize,
 }
@@ -113,7 +123,9 @@ impl Shell {
             toasts: Vec::new(),
             modal: None,
             modal_underlay: None,
+            modal_restore_focus: None,
             modal_fullscreen: false,
+            modal_backdrop_dismissible: true,
             command_palette_open: false,
             next_id: 0,
         });
@@ -290,24 +302,64 @@ impl Shell {
     /// Show `view` as the active modal (backdrop click dismisses). The view renders its own card.
     pub fn show_modal(&mut self, view: AnyView, cx: &mut Context<Self>) {
         self.modal_underlay = None;
+        self.modal_restore_focus = None;
         self.command_palette_open = false;
         self.modal_fullscreen = false;
+        self.modal_backdrop_dismissible = true;
         self.modal = Some(view);
         cx.notify();
+    }
+
+    pub fn show_modal_keyboard_dismiss_only(&mut self, view: AnyView, cx: &mut Context<Self>) {
+        self.show_modal(view, cx);
+        self.modal_backdrop_dismissible = false;
+    }
+
+    pub fn modal_view_id(&self) -> Option<gpui::EntityId> {
+        self.modal.as_ref().map(|modal| modal.entity_id())
     }
 
     /// Show `view` as a fullscreen modal (e.g. an image/media viewer): it renders its own
     /// full-viewport backdrop, so the overlay skips the centered card treatment and dim layer.
     pub fn show_fullscreen_modal(&mut self, view: AnyView, cx: &mut Context<Self>) {
         self.modal_underlay = None;
+        self.modal_restore_focus = None;
         self.command_palette_open = false;
         self.modal_fullscreen = true;
         self.modal = Some(view);
         cx.notify();
     }
 
+    pub fn show_stacked_modal(
+        &mut self,
+        view: AnyView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let previous_focus = window.focused(cx);
+        if let Some(current) = self.modal.take() {
+            self.modal_underlay = Some((
+                current,
+                self.modal_fullscreen,
+                self.command_palette_open,
+                previous_focus,
+            ));
+        }
+        let host = cx.new(|cx| StackedModalHost {
+            view,
+            focus_handle: cx.focus_handle(),
+        });
+        let focus_handle = host.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.command_palette_open = false;
+        self.modal_fullscreen = false;
+        self.modal = Some(host.into());
+        cx.notify();
+    }
+
     pub fn show_command_palette(&mut self, view: AnyView, cx: &mut Context<Self>) {
         self.modal_underlay = None;
+        self.modal_restore_focus = None;
         self.command_palette_open = true;
         self.modal = Some(view);
         cx.notify();
@@ -419,6 +471,12 @@ impl Shell {
             .read(cx)
             .channel(clan_id, channel_id)
             .and_then(|channel| channel.parent_id)
+            .or_else(|| {
+                mezon_store::ChannelSettingsStore::global(cx)
+                    .read(cx)
+                    .row_by_id(clan_id, channel_id)
+                    .map(|row| row.parent_id)
+            })
             .unwrap_or(mezon_store::ChannelId(0));
         let view = cx.new(|cx| ConfirmArchiveChannelModal {
             focus_handle: cx.focus_handle(),
@@ -454,6 +512,12 @@ impl Shell {
                     channel.name.clone(),
                     channel.parent_id.unwrap_or(mezon_store::ChannelId(0)),
                 )
+            })
+            .or_else(|| {
+                mezon_store::ChannelSettingsStore::global(cx)
+                    .read(cx)
+                    .row_by_id(clan_id, channel_id)
+                    .map(|row| (row.label.clone(), row.parent_id))
             })
             .unwrap_or_else(|| ("Unknown Channel".to_string(), mezon_store::ChannelId(0)));
         let title: SharedString =
@@ -498,6 +562,12 @@ impl Shell {
             .read(cx)
             .channel(clan_id, channel_id)
             .map(|channel| channel.name.clone())
+            .or_else(|| {
+                mezon_store::ChannelSettingsStore::global(cx)
+                    .read(cx)
+                    .row_by_id(clan_id, channel_id)
+                    .map(|row| row.label.clone())
+            })
             .unwrap_or_else(|| "Unknown Channel".to_string());
         let title: SharedString =
             mezon_i18n::t(locale, "channelSetting.confirm.deleteChannel.title")
@@ -744,6 +814,52 @@ impl Shell {
         self.show_modal(view.into(), cx);
     }
 
+    pub fn confirm_delete_quick_menu(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        channel_id: mezon_store::ChannelId,
+        item_id: i64,
+        command_label: &str,
+        is_flash: bool,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let type_name = if is_flash {
+            mezon_i18n::t(locale, "channelSetting.quickAction.flashMessage")
+        } else {
+            mezon_i18n::t(locale, "channelSetting.quickAction.quickMenu")
+        };
+        let title: SharedString = format!(
+            "{} {}",
+            mezon_i18n::t(locale, "channelSetting.quickAction.delete"),
+            type_name
+        )
+        .into();
+        let description: SharedString =
+            mezon_i18n::t(locale, "channelSetting.quickAction.deleteTitle")
+                .replace("{{command}}", command_label)
+                .into();
+        let view = cx.new(|cx| ConfirmDeleteQuickMenuModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            channel_id,
+            item_id,
+            title,
+            description,
+            cancel_label: mezon_i18n::t(locale, "channelSetting.quickAction.cancel")
+                .to_string()
+                .into(),
+            delete_label: mezon_i18n::t(locale, "channelSetting.quickAction.delete")
+                .to_string()
+                .into(),
+            submitting: false,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
     pub fn confirm_delete_sound(
         &mut self,
         clan_id: mezon_store::ClanId,
@@ -865,6 +981,121 @@ impl Shell {
                 error_message,
                 reason_input,
             }
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_transfer_ownership(
+        &mut self,
+        clan_id: mezon_store::ClanId,
+        new_owner_id: mezon_store::UserId,
+        new_owner_name: &str,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let clan_name = mezon_store::ClanList::global(cx)
+            .read(cx)
+            .clan_by_id(clan_id)
+            .map(|clan| clan.name.clone())
+            .unwrap_or_default();
+        let members = mezon_store::ClanMembersStore::global(cx);
+        let party = |user_id: mezon_store::UserId, fallback_name: &str| {
+            let known =
+                members
+                    .read(cx)
+                    .member(clan_id, user_id)
+                    .map(|member| TransferOwnerParty {
+                        name: member.name().to_string().into(),
+                        avatar: member.avatar().to_string().into(),
+                    });
+            match known {
+                Some(party) if !party.name.is_empty() => party,
+                Some(party) => TransferOwnerParty {
+                    name: fallback_name.to_string().into(),
+                    ..party
+                },
+                None => TransferOwnerParty {
+                    name: fallback_name.to_string().into(),
+                    avatar: SharedString::default(),
+                },
+            }
+        };
+        let Some(current_user_id) = mezon_store::BadgeService::try_global(cx)
+            .and_then(|badges| badges.read(cx).current_user_id(cx))
+        else {
+            tracing::error!("transfer ownership of {clan_id}: no signed-in user");
+            let message = mezon_i18n::t(
+                locale,
+                "clanOverviewSetting.permissions.toast.transferOwnershipFailed",
+            )
+            .to_string();
+            self.error(message, cx);
+            return;
+        };
+        let self_account = mezon_store::AccountStore::try_global(cx)
+            .and_then(|store| store.read(cx).account.clone());
+        let self_name = self_account
+            .as_ref()
+            .map(|account| {
+                if account.display_name.is_empty() {
+                    account.username.clone()
+                } else {
+                    account.display_name.clone()
+                }
+            })
+            .unwrap_or_default();
+        let mut current_owner = party(current_user_id, &self_name);
+        if current_owner.avatar.is_empty()
+            && let Some(avatar) = self_account.and_then(|account| account.avatar_url)
+        {
+            current_owner.avatar = avatar.into();
+        }
+        let new_owner = party(new_owner_id, new_owner_name);
+        let title: SharedString = mezon_i18n::t(locale, "transferOwner.title")
+            .to_string()
+            .into();
+        let description: SharedString = mezon_i18n::t(locale, "transferOwner.description")
+            .replace("{{clanName}}", &clan_name)
+            .replace("{{memberName}}", &new_owner.name)
+            .into();
+        let confirmation: SharedString = mezon_i18n::t(locale, "transferOwner.confirmation")
+            .replace("{{memberName}}", &new_owner.name)
+            .into();
+        let transfer_label: SharedString = mezon_i18n::t(locale, "transferOwner.buttons.transfer")
+            .to_string()
+            .into();
+        let cancel_label: SharedString = mezon_i18n::t(locale, "transferOwner.buttons.cancel")
+            .to_string()
+            .into();
+        let success_message: SharedString = mezon_i18n::t(locale, "common.transferredSuccessfully")
+            .to_string()
+            .into();
+        let error_message: SharedString = mezon_i18n::t(
+            locale,
+            "clanOverviewSetting.permissions.toast.transferOwnershipFailed",
+        )
+        .to_string()
+        .into();
+        let avatar_cache = crate::image_cache::shared_avatar_cache(cx);
+        let view = cx.new(|cx| TransferOwnerModal {
+            focus_handle: cx.focus_handle(),
+            clan_id,
+            new_owner_id,
+            title,
+            description,
+            confirmation,
+            transfer_label,
+            cancel_label,
+            success_message,
+            error_message,
+            current_owner,
+            new_owner,
+            avatar_cache,
+            acknowledged: false,
+            pending: false,
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
@@ -1097,6 +1328,63 @@ impl Shell {
         cx.notify();
     }
 
+    pub fn confirm_close_dm(
+        &mut self,
+        channel_id: mezon_store::ChannelId,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.confirm_destructive(
+            ConfirmDestructive {
+                id: "confirm-close-dm",
+                title: mezon_i18n::t(locale, "dmMessage.closeDmConfirm.title").into(),
+                description: mezon_i18n::t(locale, "dmMessage.closeDmConfirm.content").into(),
+                cancel_label: mezon_i18n::t(locale, "common.cancel").into(),
+                confirm_label: mezon_i18n::t(locale, "dmMessage.closeDmConfirm.confirmText").into(),
+                failed_message: mezon_i18n::t(locale, "dmMessage.closeDmConfirm.error").into(),
+                action: Rc::new(move |cx: &mut App| {
+                    mezon_store::DirectMessageStore::global(cx)
+                        .update(cx, |store, cx| store.close_conversation(channel_id, cx))
+                }),
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn confirm_destructive(
+        &mut self,
+        params: ConfirmDestructive,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ConfirmDestructive {
+            id,
+            title,
+            description,
+            cancel_label,
+            confirm_label,
+            failed_message,
+            action,
+        } = params;
+        let view = cx.new(|cx| ConfirmDestructiveModal {
+            focus_handle: cx.focus_handle(),
+            cancel_id: SharedString::from(format!("{id}-cancel")),
+            confirm_id: SharedString::from(format!("{id}-confirm")),
+            title,
+            description,
+            cancel_label,
+            confirm_label,
+            failed_message,
+            action,
+            running: false,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
     pub fn confirm_leave_dm_group(
         &mut self,
         channel_id: mezon_store::ChannelId,
@@ -1107,17 +1395,50 @@ impl Shell {
     ) {
         let description =
             mezon_i18n::t(locale, "leaveGroup.confirmMessage").replace("{{groupName}}", group_name);
-        let view = cx.new(|cx| ConfirmLeaveDmGroupModal {
+        self.confirm_destructive(
+            ConfirmDestructive {
+                id: "confirm-leave-dm-group",
+                title: mezon_i18n::t(locale, "leaveGroup.title")
+                    .replace("{{groupName}}", group_name)
+                    .into(),
+                description: description.into(),
+                cancel_label: mezon_i18n::t(locale, "leaveGroup.cancel").into(),
+                confirm_label: mezon_i18n::t(locale, "leaveGroup.leaveGroup").into(),
+                failed_message: mezon_i18n::t(locale, "common.somethingWentWrong").into(),
+                action: Rc::new(move |cx: &mut App| {
+                    mezon_store::DirectMessageStore::global(cx)
+                        .update(cx, |store, cx| store.leave_group(channel_id, cx))
+                }),
+            },
+            window,
+            cx,
+        );
+    }
+
+    pub fn confirm_remove_group_member(
+        &mut self,
+        channel_id: mezon_store::ChannelId,
+        user_id: mezon_store::UserId,
+        display_name: &str,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let description = mezon_i18n::t(locale, "directMessage.removeFromGroup.description")
+            .replace("{{username}}", display_name);
+        let view = cx.new(|cx| ConfirmRemoveGroupMemberModal {
             focus_handle: cx.focus_handle(),
             channel_id,
-            title: mezon_i18n::t(locale, "leaveGroup.title")
-                .replace("{{groupName}}", group_name)
-                .into(),
+            user_id,
+            title: mezon_i18n::t(locale, "directMessage.contextMenu.removeFromGroup").into(),
             description: description.into(),
-            cancel_label: mezon_i18n::t(locale, "leaveGroup.cancel").into(),
-            confirm_label: mezon_i18n::t(locale, "leaveGroup.leaveGroup").into(),
-            failed_message: mezon_i18n::t(locale, "common.somethingWentWrong").into(),
-            leaving: false,
+            cancel_label: mezon_i18n::t(locale, "common.cancel").into(),
+            confirm_label: mezon_i18n::t(locale, "common.confirm").into(),
+            success_message: mezon_i18n::t(locale, "userProfile.userInfoDM.menu.removeSuccess")
+                .into(),
+            failed_message: mezon_i18n::t(locale, "userProfile.userInfoDM.menu.removeFailed")
+                .into(),
+            removing: false,
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
@@ -1194,10 +1515,20 @@ impl Shell {
         } else {
             self.command_palette_open = false;
             self.modal_fullscreen = false;
-            None
+            self.modal_restore_focus.take()
         };
         cx.notify();
         focus
+    }
+
+    pub fn close_modal_view(&mut self, view: gpui::EntityId, cx: &mut Context<Self>) {
+        if self
+            .modal
+            .as_ref()
+            .is_some_and(|modal| modal.entity_id() == view)
+        {
+            self.close_modal(cx);
+        }
     }
 
     pub fn close_modal(&mut self, cx: &mut Context<Self>) {
@@ -1205,10 +1536,30 @@ impl Shell {
             return;
         }
         self.modal_underlay.take();
+        self.modal_restore_focus = None;
         self.modal.take();
         self.command_palette_open = false;
         self.modal_fullscreen = false;
         cx.notify();
+    }
+
+    pub fn close_modal_if_current(&mut self, owner: gpui::EntityId, cx: &mut Context<Self>) {
+        if self.modal.as_ref().map(AnyView::entity_id) == Some(owner) {
+            // Pop, not close: a modal stacked underneath this one is not ours to tear down.
+            self.modal_restore_focus = self.pop_modal(cx);
+            return;
+        }
+        if self
+            .modal_underlay
+            .as_ref()
+            .map(|(view, ..)| view.entity_id())
+            == Some(owner)
+        {
+            // The owner is buried under a newer modal. Drop it, but hand the focus it saved
+            // to whoever dismisses the modal now on top, or that focus is lost for good.
+            self.modal_restore_focus = self.modal_underlay.take().and_then(|(.., focus)| focus);
+            cx.notify();
+        }
     }
 
     pub fn has_modal(&self) -> bool {
@@ -1216,7 +1567,7 @@ impl Shell {
     }
 
     /// The overlay (modal backdrop + toast stack), rendered on top by `RootView`.
-    pub fn render_overlay(&self) -> impl IntoElement {
+    pub fn render_overlay(&self, cx: &App) -> impl IntoElement {
         let modal = self.modal.clone();
         let fullscreen = self.modal_fullscreen;
         let modal_underlay = self
@@ -1262,6 +1613,7 @@ impl Shell {
                         .top_0()
                         .left_0()
                         .size_full()
+                        .occlude()
                         .key_context("modal_backdrop")
                         .on_action(|_: &::menu::Cancel, window, cx| {
                             Shell::global(cx)
@@ -1279,19 +1631,24 @@ impl Shell {
                         .items_center()
                         .justify_center()
                         .bg(hsla(0., 0., 0., 0.5))
+                        .occlude()
                         .key_context("modal_backdrop")
                         .on_action(|_: &::menu::Cancel, window, cx| {
                             Shell::global(cx)
                                 .update(cx, |shell, cx| shell.dismiss_modal(window, cx));
                         })
                         .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                            Shell::global(cx)
-                                .update(cx, |shell, cx| shell.dismiss_modal(window, cx));
+                            Shell::global(cx).update(cx, |shell, cx| {
+                                if shell.modal_backdrop_dismissible {
+                                    shell.dismiss_modal(window, cx);
+                                }
+                            });
                         })
                         .child(div().occlude().child(view))
                         .into_any_element()
                 }))
             })
+            .children(crate::tour::layer(cx))
             .when(has_toasts, |el| {
                 el.child(deferred(
                     div()
@@ -1358,6 +1715,21 @@ mod tests {
             clan_id: ClanId(7),
             channel_id: ChannelId(42),
         }
+    }
+
+    #[gpui::test]
+    fn a_late_request_cannot_close_the_modal_that_replaced_it(cx: &mut TestAppContext) {
+        let shell = open_shell_with_modal(cx);
+        let stale = cx.update(|cx| cx.new(|_| StubModal).entity_id());
+
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| shell.close_modal_if_current(stale, cx));
+        });
+
+        assert!(
+            shell.read_with(cx, |shell, _| shell.has_modal()),
+            "a request that outlived its dismissed modal must not close whichever modal took              its place"
+        );
     }
 
     #[gpui::test]

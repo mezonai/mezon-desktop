@@ -922,6 +922,8 @@ impl VoiceStore {
             return;
         }
         self.interactive_launches.insert(launch_key, now);
+        let api = self.api.clone();
+        let app_id = app.app_id();
         let config = AppConfig::global(cx);
         let base_url = match app {
             VoiceInteractiveApp::Quiz => config.quiz_url.clone(),
@@ -936,20 +938,41 @@ impl VoiceStore {
                 .clan(ClanId(clan_id))
                 .map(|clan| clan.name.clone())
         });
-        let url = build_channel_app_url(
-            &base_url,
-            ChannelAppLaunchParams {
-                web_app_data: "",
-                clan_id: &clan_id_string,
-                clan_name: clan_name.as_deref(),
-            },
-        );
-        tracing::info!(
-            url = %redact_interactive_app_url(&url),
-            event_type = app.event_type() as i32,
-            "opening built-in voice interactive app"
-        );
-        crate::PlatformStore::open_app_window(url, cx);
+        cx.spawn(async move |this, cx| {
+            let hash = match api.generate_hash_channel_apps(app_id).await {
+                Ok(hash) if !hash.web_app_data.is_empty() => hash,
+                Ok(_) => {
+                    tracing::warn!(app_id, "voice app hash returned empty web_app_data");
+                    let _ = this.update(cx, |store, _| {
+                        store.interactive_launches.remove(&launch_key);
+                    });
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(app_id, "generate voice app hash failed: {error:#}");
+                    let _ = this.update(cx, |store, _| {
+                        store.interactive_launches.remove(&launch_key);
+                    });
+                    return;
+                }
+            };
+            let url = build_channel_app_url(
+                &base_url,
+                ChannelAppLaunchParams {
+                    web_app_data: &hash.web_app_data,
+                    clan_id: &clan_id_string,
+                    clan_name: clan_name.as_deref(),
+                },
+            );
+            tracing::info!(
+                url = %redact_interactive_app_url(&url),
+                event_type = app.event_type() as i32,
+                app_id,
+                "opening built-in voice interactive app"
+            );
+            cx.update(|cx| crate::PlatformStore::open_app_window(url, cx));
+        })
+        .detach();
     }
 
     fn handle_voice_reaction(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
@@ -3010,15 +3033,17 @@ impl VoiceStore {
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_default();
         let receiver = cx.prompt_for_new_path(&directory, Some(suggested.as_str()));
+        let fallback_directory = directory.clone();
+        let fallback_name = suggested.clone();
 
         self.recording = RecordingState::Starting;
         let generation = self.session_generation;
         cx.notify();
 
         self._recording_start = Some(cx.spawn(async move |this, cx| {
-            let path = match receiver.await {
-                Ok(Ok(Some(path))) => path,
-                Ok(Ok(None)) => {
+            let path = match crate::dialog::classify_dialog(receiver.await) {
+                crate::dialog::DialogOutcome::Picked(path) => path,
+                crate::dialog::DialogOutcome::Cancelled => {
                     tracing::info!("the recording save dialog was cancelled");
                     let _ = this.update(cx, |this, cx| {
                         this.recording = RecordingState::Idle;
@@ -3026,20 +3051,48 @@ impl VoiceStore {
                     });
                     return;
                 }
-                failed => {
-                    let reason = match failed {
-                        Ok(Err(error)) => error.to_string(),
-                        _ => "the save dialog is unavailable".to_string(),
-                    };
-                    tracing::error!("could not ask where to save the recording: {reason}");
+                crate::dialog::DialogOutcome::Lost => {
+                    tracing::warn!("the recording save dialog went away before answering");
                     let _ = this.update(cx, |this, cx| {
                         this.recording = RecordingState::Idle;
-                        cx.emit(VoiceStoreEvent::RecordingFinished(RecordingToast::Failed(
-                            reason,
-                        )));
                         cx.notify();
                     });
                     return;
+                }
+                crate::dialog::DialogOutcome::Unavailable(failure) => {
+                    tracing::warn!(
+                        "could not ask where to save the recording: {}",
+                        failure.reason
+                    );
+                    // Being asked is the convenience; the recording is the point. Keep
+                    // it under the name we suggested so a machine with no working file
+                    // dialog can still record.
+                    let reserved = cx
+                        .background_executor()
+                        .spawn(async move {
+                            mezon_client::reserve_path_in(&fallback_directory, &fallback_name)
+                        })
+                        .await;
+                    match reserved {
+                        Ok(path) => path,
+                        Err(error) => {
+                            tracing::error!("could not reserve a path for the recording: {error}");
+                            let _ = this.update(cx, |this, cx| {
+                                let locale = crate::Settings::try_global(cx)
+                                    .map(|settings| settings.read(cx).language.clone())
+                                    .unwrap_or_default();
+                                this.recording = RecordingState::Idle;
+                                cx.emit(VoiceStoreEvent::RecordingFinished(
+                                    RecordingToast::Failed(
+                                        mezon_i18n::t(&locale, "file.dialogUnavailable")
+                                            .to_string(),
+                                    ),
+                                ));
+                                cx.notify();
+                            });
+                            return;
+                        }
+                    }
                 }
             };
             let _ = this.update(cx, |this, cx| {

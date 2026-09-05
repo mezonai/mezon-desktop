@@ -9,7 +9,7 @@ use gpui::{
 use mezon_store::{
     AccountStore, ChannelId, ClanMembersStore, DirectMessageStore, Embed, Message,
     MessageAttachment, MessageId, MessageSpan, MessagesStore, PinnedMessage, PinnedMessagesStore,
-    RichLayout, Settings, UsersByUserStore, strip_code_fence,
+    PollData, RichLayout, Settings, UsersByUserStore, strip_code_fence,
 };
 use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -18,9 +18,9 @@ use crate::chat::message::parts::{
     effective_clan_id, resolve_pin_avatar_url, resolve_pin_sender_label_with_message,
 };
 use crate::chat::message::{
-    ConfirmUnpinMessageModal, heading_line_height, heading_size, pin_link_element,
-    render_ogp_preview, render_pin_rich_layout_element, resolve_message_link_url,
-    text_wrap_children,
+    ConfirmUnpinMessageModal, code_block_copy_overlay, heading_line_height, heading_size,
+    pin_link_element, render_ogp_preview, render_pin_rich_layout_element,
+    render_poll_card_readonly, resolve_message_link_url, text_wrap_children,
 };
 use crate::components::primitives::{
     Avatar, Button, ButtonVariants, Icon, IconName, Sizable, Size, Spinner, h_flex, v_flex,
@@ -54,6 +54,8 @@ struct PinCardVm {
     avatar_fallback: Option<SharedString>,
     pin: Arc<PinnedMessage>,
     text_spans: Arc<[MessageSpan]>,
+    poll: Option<Arc<PollData>>,
+    poll_my_vote: Arc<[i32]>,
 }
 
 impl PinCardVm {
@@ -72,6 +74,7 @@ impl PinCardVm {
             cx,
         );
         let (avatar_src, avatar_fallback) = resolve_pin_avatar_urls(msg, clan_id, channel_id, cx);
+        let (poll, poll_my_vote) = resolve_pin_poll(msg, channel_id, cx);
         Self {
             pin_id: msg.id.clone().into(),
             message_id: msg.message_id.clone().into(),
@@ -82,18 +85,52 @@ impl PinCardVm {
             avatar_fallback,
             pin: Arc::new(msg.clone()),
             text_spans: prepare_pin_text_spans(msg),
+            poll,
+            poll_my_vote,
         }
     }
+}
+
+fn resolve_pin_poll(
+    pin: &PinnedMessage,
+    channel_id: Option<ChannelId>,
+    cx: &App,
+) -> (Option<Arc<PollData>>, Arc<[i32]>) {
+    if pin.poll.is_none() {
+        return (None, Arc::default());
+    }
+    let Ok(message_id) = pin.message_id.parse::<MessageId>() else {
+        return (pin.poll.clone().map(Arc::from), Arc::default());
+    };
+    let store = MessagesStore::global(cx).read(cx);
+    let live = channel_id
+        .and_then(|channel_id| store.message_in_channel(channel_id, message_id))
+        .and_then(|msg| msg.poll.clone());
+    let my_vote: Arc<[i32]> = store
+        .poll_my_vote(message_id)
+        .map(Arc::from)
+        .unwrap_or_default();
+    (live.or_else(|| pin.poll.clone()).map(Arc::from), my_vote)
 }
 
 pub(crate) fn render_pinned_message_preview(
     pin: &PinnedMessage,
     theme: &Theme,
+    locale: &str,
     image_cache: Entity<LruImageCache>,
     ogp_cache: Entity<LruImageCache>,
 ) -> gpui::AnyElement {
     let text_spans = prepare_pin_text_spans(pin);
-    render_pin_body(pin, &text_spans, theme, image_cache, ogp_cache)
+    let poll = pin.poll.as_deref().map(|poll| (poll, &[] as &[i32]));
+    render_pin_body(
+        pin,
+        &text_spans,
+        poll,
+        theme,
+        locale,
+        image_cache,
+        ogp_cache,
+    )
 }
 
 fn pinned_message_from_chat_message(msg: &Message) -> PinnedMessage {
@@ -111,6 +148,7 @@ fn pinned_message_from_chat_message(msg: &Message) -> PinnedMessage {
         ogp: msg.ogp.clone(),
         embeds: msg.embeds.clone(),
         attachments: msg.attachments.clone(),
+        poll: msg.poll.clone(),
         create_time: msg.create_time,
     }
 }
@@ -118,12 +156,14 @@ fn pinned_message_from_chat_message(msg: &Message) -> PinnedMessage {
 pub(crate) fn render_pin_message_preview(
     msg: &Message,
     theme: &Theme,
+    locale: &str,
     image_cache: Entity<LruImageCache>,
     ogp_cache: Entity<LruImageCache>,
 ) -> gpui::AnyElement {
     render_pinned_message_preview(
         &pinned_message_from_chat_message(msg),
         theme,
+        locale,
         image_cache,
         ogp_cache,
     )
@@ -537,7 +577,19 @@ fn pin_card(
                 .child(format_pin_time(vm.create_time, locale)),
         );
 
-    let content = render_pin_body(&vm.pin, &vm.text_spans, theme, message_cache, ogp_cache);
+    let poll = vm
+        .poll
+        .as_deref()
+        .map(|poll| (poll, vm.poll_my_vote.as_ref()));
+    let content = render_pin_body(
+        &vm.pin,
+        &vm.text_spans,
+        poll,
+        theme,
+        locale,
+        message_cache,
+        ogp_cache,
+    );
 
     let jump_message_id = vm.message_id.clone();
     let jump_handle = popover_handle.clone();
@@ -613,12 +665,24 @@ fn pin_card(
 fn render_pin_body(
     pin: &PinnedMessage,
     text_spans: &[MessageSpan],
+    poll: Option<(&PollData, &[i32])>,
     theme: &Theme,
+    locale: &str,
     image_cache: Entity<LruImageCache>,
     ogp_cache: Entity<LruImageCache>,
 ) -> gpui::AnyElement {
     let message_id = pin.message_id.parse::<MessageId>().unwrap_or(MessageId(0));
-    let text_body = render_pin_text_body(pin, text_spans, theme);
+    let text_body = match poll {
+        Some((poll, voted)) => render_poll_card_readonly(
+            poll,
+            voted,
+            theme,
+            locale,
+            mezon_store::message_time::unix_now_seconds(),
+            &image_cache,
+        ),
+        None => render_pin_text_body(pin, text_spans, theme),
+    };
     let image_preview = pin
         .attachments
         .iter()
@@ -654,7 +718,7 @@ fn render_pin_text_body(
     theme: &Theme,
 ) -> gpui::AnyElement {
     if !text_spans.is_empty() {
-        return render_pin_spans(text_spans, theme);
+        return render_pin_spans(text_spans, &pin.message_id, theme);
     }
     if let Some(layout) = pin.rich_layout.as_ref()
         && !layout.text.is_empty()
@@ -841,7 +905,7 @@ fn pin_plain_line(text: &str, color: gpui::Rgba, link_key: &mut usize) -> gpui::
         .into_any_element()
 }
 
-fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
+fn render_pin_spans(spans: &[MessageSpan], message_id: &str, theme: &Theme) -> gpui::AnyElement {
     let link_color = theme.tokens.mention_color;
     let mention_bg = theme.tokens.mention_primary;
     let mention_color = theme.tokens.mention_color;
@@ -851,6 +915,7 @@ fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
     let mut row = pin_inline_row();
     let mut has_inline = false;
     let mut link_key = 0usize;
+    let mut code_key = 0usize;
 
     for span in spans {
         match span {
@@ -967,7 +1032,11 @@ fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
                         .child(text.clone()),
                 );
             }
-            MessageSpan::CodeBlock { text, .. } => {
+            MessageSpan::CodeBlock {
+                text,
+                fenced_source,
+                ..
+            } => {
                 if has_inline {
                     col = col.child(row);
                     row = pin_inline_row();
@@ -990,6 +1059,8 @@ fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
                             .child(line.to_string()),
                     );
                 }
+                let copy_id = SharedString::from(format!("pin-code-copy-{message_id}-{code_key}"));
+                code_key += 1;
                 col = col.child(
                     div()
                         .w_full()
@@ -1002,7 +1073,12 @@ fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
                         .border_1()
                         .border_color(theme.tokens.border_primary)
                         .bg(code_bg)
-                        .child(code_col),
+                        .child(code_col)
+                        .child(code_block_copy_overlay(
+                            copy_id,
+                            fenced_source.clone(),
+                            theme,
+                        )),
                 );
             }
         }

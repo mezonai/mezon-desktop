@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -26,6 +26,7 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 const NO_ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
 const ICE_DISCONNECT_GRACE: Duration = Duration::from_secs(12);
 const MAX_PENDING_ICE: usize = 128;
+const MAX_KNOWN_OFFER_SESSIONS: usize = 8;
 const DM_STREAM_MODE: i32 = 4;
 
 static DIALTONE_SOUND: &[u8] = include_bytes!("../assets/audio/dialtone.mp3");
@@ -39,6 +40,11 @@ pub struct CallPeer {
     pub channel_id: i64,
     pub name: String,
     pub avatar: Option<String>,
+}
+
+struct KnownOfferSession {
+    peer_id: i64,
+    session_id: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,6 +133,7 @@ pub struct CallStore {
     generation: u64,
     pending_remote_ice: Vec<IcePayload>,
     pending_local_ice: Vec<IcePayload>,
+    known_offer_sessions: VecDeque<KnownOfferSession>,
     render_cache: Mutex<HashMap<u64, CachedRenderFrame>>,
     pending_texture_drops: Mutex<Vec<Arc<RenderImage>>>,
     pending_texture_replaces: Mutex<Vec<Arc<RenderImage>>>,
@@ -177,6 +184,7 @@ impl CallStore {
             tones: CallTones::default(),
             pending_remote_ice: Vec::new(),
             pending_local_ice: Vec::new(),
+            known_offer_sessions: VecDeque::new(),
             generation: 0,
             render_cache: Mutex::new(HashMap::new()),
             pending_texture_drops: Mutex::new(Vec::new()),
@@ -813,39 +821,21 @@ impl CallStore {
             tracing::warn!("call: failed to decompress/parse remote offer");
             return;
         };
-        if matches!(self.phase, CallPhase::Idle) {
-            self.generation += 1;
-            if let Some((self_id, self_name, self_avatar)) = self_identity(cx) {
-                self.self_id = self_id;
-                self.self_name = self_name;
-                self.self_avatar = self_avatar;
-            }
-            self.peer = Some(CallPeer {
-                user_id: caller_id,
-                channel_id,
-                name: offer.caller_name,
-                avatar: (!offer.caller_avatar.is_empty()).then_some(offer.caller_avatar),
-            });
-            self.is_caller = false;
-            self.incoming_offer = Some(offer.sdp);
-            self.media = MediaKind::Audio;
-            self.local = MediaFlags::default();
-            self.remote = MediaFlags {
-                mic_on: true,
-                cam_on: false,
-            };
-            self.connected_at = None;
-            self.phase = CallPhase::Incoming;
-            self.play_tone(ToneSlot::Ring, RINGING_SOUND, true, cx);
-            self.start_timeout(cx);
-            cx.notify();
-        } else if self.peer.as_ref().map(|p| p.user_id) == Some(caller_id) {
+        let from_peer = self.peer.as_ref().map(|p| p.user_id) == Some(caller_id);
+        if from_peer && !matches!(self.phase, CallPhase::Idle) {
+            self.remember_offer_session(caller_id, &offer.sdp);
             if let Some(engine) = &self.engine {
                 engine.send(EngineCommand::ApplyRemoteOffer(offer.sdp));
             } else {
                 tracing::warn!("call: renegotiation offer but no engine");
             }
-        } else {
+            return;
+        }
+        if self.is_known_offer_session(caller_id, &offer.sdp) {
+            tracing::info!("call: re-offer from {caller_id} for a call live elsewhere -> ignored");
+            return;
+        }
+        if !matches!(self.phase, CallPhase::Idle) {
             tracing::info!("call: offer from a different peer -> reply JOINED_OTHER_CALL");
             self.forward(
                 caller_id,
@@ -854,7 +844,59 @@ impl CallStore {
                 channel_id,
                 cx,
             );
+            return;
         }
+        self.remember_offer_session(caller_id, &offer.sdp);
+        self.generation += 1;
+        if let Some((self_id, self_name, self_avatar)) = self_identity(cx) {
+            self.self_id = self_id;
+            self.self_name = self_name;
+            self.self_avatar = self_avatar;
+        }
+        self.peer = Some(CallPeer {
+            user_id: caller_id,
+            channel_id,
+            name: offer.caller_name,
+            avatar: (!offer.caller_avatar.is_empty()).then_some(offer.caller_avatar),
+        });
+        self.is_caller = false;
+        self.incoming_offer = Some(offer.sdp);
+        self.media = MediaKind::Audio;
+        self.local = MediaFlags::default();
+        self.remote = MediaFlags {
+            mic_on: true,
+            cam_on: false,
+        };
+        self.connected_at = None;
+        self.phase = CallPhase::Incoming;
+        self.play_tone(ToneSlot::Ring, RINGING_SOUND, true, cx);
+        self.start_timeout(cx);
+        cx.notify();
+    }
+
+    fn is_known_offer_session(&self, peer_id: i64, sdp: &str) -> bool {
+        let Some(session_id) = sdp_session_id(sdp) else {
+            return false;
+        };
+        self.known_offer_sessions
+            .iter()
+            .any(|known| known.peer_id == peer_id && known.session_id == session_id)
+    }
+
+    fn remember_offer_session(&mut self, peer_id: i64, sdp: &str) {
+        let Some(session_id) = sdp_session_id(sdp) else {
+            return;
+        };
+        if self.is_known_offer_session(peer_id, sdp) {
+            return;
+        }
+        if self.known_offer_sessions.len() >= MAX_KNOWN_OFFER_SESSIONS {
+            self.known_offer_sessions.pop_front();
+        }
+        self.known_offer_sessions.push_back(KnownOfferSession {
+            peer_id,
+            session_id: session_id.to_string(),
+        });
     }
 
     fn on_remote_answer(&mut self, caller_id: i64, json: &str, cx: &mut Context<Self>) {
@@ -1315,4 +1357,10 @@ fn now_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or_default()
+}
+
+fn sdp_session_id(sdp: &str) -> Option<&str> {
+    sdp.lines()
+        .find_map(|line| line.strip_prefix("o="))
+        .and_then(|origin| origin.split_whitespace().nth(1))
 }

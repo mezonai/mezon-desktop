@@ -774,7 +774,7 @@ impl MentionInput {
         self.committed = committed_from_compose_tokens(&text, tokens);
         self.pending_attachments = attachments;
         self.reset_popup();
-        self.close_popup();
+        self.close_popup(window, cx);
         self.clear_suggestions(cx);
         self.clear_ephemeral(cx);
         self.clear_ogp_preview(cx);
@@ -815,6 +815,7 @@ impl MentionInput {
         Vec<OutgoingAttachment>,
         Option<OutgoingOgp>,
     )> {
+        let swallow = self.input.read(cx).pending_send_ime_token();
         let raw = self.input.read(cx).value().to_string();
         if raw.trim().is_empty() && self.pending_attachments.is_empty() {
             return None;
@@ -831,11 +832,11 @@ impl MentionInput {
             self.convert_text_to_file(text, window, cx);
             self.committed.clear();
             self.reset_popup();
-            self.close_popup();
+            self.close_popup(window, cx);
             self.clear_ogp_preview(cx);
             self.input.update(cx, |input, cx| {
                 input.set_mention_spans(Vec::new(), cx);
-                input.set_value("", window, cx);
+                input.clear_after_send(swallow.clone(), window, cx);
             });
             return None;
         }
@@ -844,10 +845,10 @@ impl MentionInput {
         let ogp = self.take_outgoing_ogp();
         self.committed.clear();
         self.reset_popup();
-        self.close_popup();
+        self.close_popup(window, cx);
         self.input.update(cx, |input, cx| {
             input.set_mention_spans(Vec::new(), cx);
-            input.set_value("", window, cx);
+            input.clear_after_send(swallow, window, cx);
         });
         Some((text, content, attachments, ogp))
     }
@@ -1004,7 +1005,7 @@ impl MentionInput {
             prompt: None,
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else {
+            let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
                 return;
             };
             let pending = cx
@@ -1683,7 +1684,9 @@ impl MentionInput {
             cx.subscribe(
                 &DirectMessageStore::global(cx),
                 |this, _, event: &DirectEvent, cx| {
-                    let DirectEvent::Changed { channel_id } = event;
+                    let DirectEvent::Changed { channel_id } = event else {
+                        return;
+                    };
                     if channel_id.is_none() || *channel_id == mention_direct_id(cx) {
                         this.invalidate_pool(Sigil::At, cx);
                     }
@@ -1739,6 +1742,11 @@ impl MentionInput {
         if let Some(store) = EmojiStore::try_global(cx) {
             subs.push(cx.subscribe(&store, |this, _, _: &EmojiEvent, cx| {
                 this.invalidate_pool(Sigil::Colon, cx)
+            }));
+        }
+        if let Some(store) = QuickMenuStore::try_global(cx) {
+            subs.push(cx.observe(&store, |this, _, cx| {
+                this.invalidate_pool(Sigil::Slash, cx);
             }));
         }
         subs
@@ -1801,7 +1809,7 @@ impl MentionInput {
         let query_lc = query.to_lowercase();
         self.session_commands
             .iter()
-            .filter(|command| command.display_lc.starts_with(&query_lc))
+            .filter(|command| command.display_lc.contains(&query_lc))
             .map(|command| Suggestion::SlashCommand(command.clone()))
             .collect()
     }
@@ -2036,7 +2044,7 @@ impl MentionInput {
     fn toggle_tab(&mut self, tab: SubPanel, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(popup) = &self.popup {
             if popup.read(cx).active_tab() == tab {
-                self.close_popup();
+                self.close_popup(window, cx);
             } else {
                 popup.update(cx, |popup, cx| popup.set_tab(tab, window, cx));
             }
@@ -2049,8 +2057,15 @@ impl MentionInput {
     }
 
     fn open_popup(&mut self, tab: SubPanel, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| {
+            input.drop_uncommitted_preedit(cx);
+        });
+        window.reset_ime();
         let locale = self.locale(cx);
         let popup = cx.new(|cx| GifStickerEmojiPopup::new(tab, locale, window, cx));
+        popup.update(cx, |popup, cx| {
+            popup.focus_search(window, cx);
+        });
         let pick_sub = cx.subscribe_in(
             &popup,
             window,
@@ -2065,7 +2080,8 @@ impl MentionInput {
                     cx,
                 ),
                 GifStickerEmojiEvent::Sticker { url, filename } => {
-                    this.close_popup();
+                    this.abandon_search_ime(window, cx);
+                    this.close_popup(window, cx);
                     cx.emit(MentionInputEvent::SendSticker {
                         url: url.clone(),
                         filename: filename.clone(),
@@ -2073,7 +2089,8 @@ impl MentionInput {
                     cx.notify();
                 }
                 GifStickerEmojiEvent::Gif { url, width, height } => {
-                    this.close_popup();
+                    this.abandon_search_ime(window, cx);
+                    this.close_popup(window, cx);
                     cx.emit(MentionInputEvent::SendGif {
                         url: url.clone(),
                         width: *width,
@@ -2082,7 +2099,8 @@ impl MentionInput {
                     cx.notify();
                 }
                 GifStickerEmojiEvent::Sound { url, filename } => {
-                    this.close_popup();
+                    this.abandon_search_ime(window, cx);
+                    this.close_popup(window, cx);
                     cx.emit(MentionInputEvent::SendSound {
                         url: url.clone(),
                         filename: filename.clone(),
@@ -2091,17 +2109,26 @@ impl MentionInput {
                 }
             },
         );
-        let dismiss_sub = cx.subscribe(&popup, |this, _popup, _: &DismissEvent, cx| {
-            this.close_popup();
-            cx.notify();
-        });
+        let dismiss_sub = cx.subscribe_in(
+            &popup,
+            window,
+            |this, _popup, _: &DismissEvent, window, cx| {
+                this.close_popup(window, cx);
+                cx.notify();
+            },
+        );
         self._popup_subs = vec![pick_sub, dismiss_sub];
         self.popup = Some(popup);
     }
 
-    fn close_popup(&mut self) {
+    fn close_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let was_open = self.popup.is_some();
         self.popup = None;
         self._popup_subs.clear();
+        if was_open {
+            let handle = self.input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
     }
 
     pub fn show_panel(&mut self, tab: SubPanel, window: &mut Window, cx: &mut Context<Self>) {
@@ -2113,8 +2140,8 @@ impl MentionInput {
         cx.notify();
     }
 
-    pub fn hide_panel(&mut self, cx: &mut Context<Self>) {
-        self.close_popup();
+    pub fn hide_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_popup(window, cx);
         cx.notify();
     }
 
@@ -2124,6 +2151,10 @@ impl MentionInput {
 
     pub fn register_as_active_composer(entity: &Entity<Self>, cx: &mut App) {
         cx.set_global(ActiveComposer(entity.downgrade()));
+    }
+
+    pub fn is_composing(&self, cx: &App) -> bool {
+        self.input.read(cx).is_composing()
     }
 
     pub fn active_composer(cx: &App) -> Option<Entity<Self>> {
@@ -2145,6 +2176,17 @@ impl MentionInput {
 
     pub(crate) fn probe_text(&self, cx: &App) -> SharedString {
         self.input.read(cx).value_shared()
+    }
+
+    /// Names of the files staged on the composer, in the order they will be
+    /// sent. Reading a file off disk happens on a background task, so a drop
+    /// only shows up here once the attachment is actually staged — which is what
+    /// makes it the thing to poll before submitting.
+    pub(crate) fn probe_attachments(&self) -> Vec<String> {
+        self.pending_attachments
+            .iter()
+            .map(|att| att.filename.clone())
+            .collect()
     }
 
     pub(crate) fn probe_suggestions(&self) -> (bool, usize, Vec<String>) {
@@ -2180,9 +2222,10 @@ impl MentionInput {
         filename: String,
         width: i32,
         height: i32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
-        self.close_popup();
+        self.close_popup(window, cx);
         match kind {
             "sticker" => cx.emit(MentionInputEvent::SendSticker { url, filename }),
             "gif" => cx.emit(MentionInputEvent::SendGif {
@@ -2197,12 +2240,21 @@ impl MentionInput {
         Ok(())
     }
 
+    fn abandon_search_ime(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(popup) = &self.popup {
+            popup.update(cx, |popup, cx| popup.drop_search_preedit(window, cx));
+        } else {
+            window.reset_ime();
+        }
+    }
+
     fn insert_emoji(
         &mut self,
         emoji: EmojiSuggestRaw,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.abandon_search_ime(window, cx);
         let content_len = self.input.read(cx).value().len();
         let at = self.input.read(cx).cursor().min(content_len);
         let display = emoji.shortname;
@@ -2273,7 +2325,7 @@ impl MentionInput {
                 input.set_value("", window, cx);
             });
         } else if self.popup.is_some() {
-            self.close_popup();
+            self.close_popup(window, cx);
             cx.notify();
         } else {
             cx.emit(MentionInputEvent::Cancel);
@@ -2476,11 +2528,11 @@ impl MentionInput {
                     .mb(px(10.))
                     .occlude()
                     .on_mouse_down_out(cx.listener(
-                        move |this, event: &gpui::MouseDownEvent, _, cx| {
+                        move |this, event: &gpui::MouseDownEvent, window, cx| {
                             if toggle_bounds.get().contains(&event.position) {
                                 return;
                             }
-                            this.close_popup();
+                            this.close_popup(window, cx);
                             cx.notify();
                         },
                     ))
@@ -2946,6 +2998,7 @@ impl Render for MentionInput {
             .child(
                 div()
                     .absolute()
+                    .children(crate::tour::probe(crate::tour::TourAnchor::ComposerTools))
                     .right(px(12.))
                     .top(px(12.))
                     .flex()
@@ -3014,6 +3067,8 @@ impl Render for MentionInput {
             });
 
         div()
+            .relative()
+            .children(crate::tour::probe(crate::tour::TourAnchor::Composer))
             .flex()
             .flex_col()
             .w_full()

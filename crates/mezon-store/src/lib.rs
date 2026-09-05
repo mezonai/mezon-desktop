@@ -22,6 +22,7 @@ pub mod clan_members;
 pub mod compose;
 pub mod config;
 pub mod connection;
+pub mod dialog;
 pub mod direct;
 pub mod emoji;
 pub mod events;
@@ -42,6 +43,7 @@ pub mod messages;
 pub mod notification_push;
 pub mod notification_setting;
 pub mod ogp;
+pub mod onboarding;
 pub mod permissions;
 pub mod pinned;
 pub mod platform;
@@ -50,6 +52,7 @@ pub mod presign;
 pub mod quick_menu;
 pub mod realtime;
 pub mod roles;
+pub mod sprite_atlas;
 pub mod sticker;
 pub mod stream;
 pub mod threads;
@@ -93,7 +96,9 @@ pub use auto_update::{AutoUpdateStatus, AutoUpdateStore};
 pub use badge::BadgeService;
 pub use banned_users::{
     BAN_FOR_1_HOUR_SEC, BAN_FOR_3_HOURS_SEC, BAN_FOR_8_HOURS_SEC, BAN_FOR_15_MINUTES_SEC,
-    BAN_FOR_24_HOURS_SEC, BAN_FOREVER, BannedEntry, BannedUsersEvent, BannedUsersStore,
+    BAN_FOR_24_HOURS_SEC, BAN_FOREVER, BAN_LABEL_DAY_SECS, BAN_LABEL_HOUR_SECS,
+    BAN_LABEL_MINUTE_SECS, BannedEntry, BannedUsersEvent, BannedUsersStore,
+    seconds_until_ban_label_changes,
 };
 pub use cache::{Freshness, KeyedCache};
 pub use call::{CallPeer, CallPhase, CallStore, MediaFlags, MediaKind};
@@ -134,10 +139,10 @@ pub use emoji::{
     is_valid_emoticon_shortname, normalize_emoji_shortname, strip_emoji_colons,
     validate_emoji_create_shortname, validate_emoticon_file,
 };
-pub use events::{ClanEventItem, CreateEventDraft, EventsEvent, EventsStore};
+pub use events::{ClanEventItem, CreateEventDraft, EventsEvent, EventsStore, UpdateEventDraft};
 pub use files::{
     ChannelDocument, FILES_CACHE_TTL, FILES_PAGE_SIZE, FILES_QUERY, FilesEvent, FilesStore,
-    filename_matches_query, is_document, short_file_type_label, short_file_type_label_for,
+    filename_matches_query, is_document, is_pdf, short_file_type_label, short_file_type_label_for,
 };
 pub use friend::{Friend, FriendEvent, FriendState, FriendStore};
 pub use gallery::{
@@ -153,7 +158,9 @@ pub use gifts::{
     flower_price, format_flower_amount, is_uncertain_transfer_error,
     parse_flower_interactive_params, serialize_flower_interactive_params,
 };
-pub use group_members::{GroupMember, GroupMembersEvent, GroupMembersStore};
+pub use group_members::{
+    AddGroupMembersError, GroupMember, GroupMembersEvent, GroupMembersStore, MAX_GROUP_MEMBERS,
+};
 pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};
 pub use inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxEvent, InboxStore};
 pub use invite::{InviteDetails, InviteEvent, InviteState, InviteStore};
@@ -186,6 +193,11 @@ pub use ogp::{
     OgpResult, OutgoingOgp, fetch_invite_preview, fetch_ogp, first_previewable_url,
     internal_invite_id, invite_id_from_url, trusted_invite_id,
 };
+pub use onboarding::{
+    ClanOnboarding, DONE_ONBOARDING_STATUS, GUIDE_TYPE_GREETING, GUIDE_TYPE_QUESTION,
+    GUIDE_TYPE_RULE, GUIDE_TYPE_TASK, MISSION_DO_SOMETHING, MISSION_SEND_MESSAGE, MISSION_VISIT,
+    OnboardingStore,
+};
 pub use permissions::{
     ClanSettingsPermissions, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
     PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PERMISSION_SCOPE_CHANNEL,
@@ -199,17 +211,22 @@ pub use platform::{
     download_url_with_dialog,
 };
 pub use presence::*;
-pub use quick_menu::{QuickMenuItem, QuickMenuStore};
+pub use quick_menu::{
+    QUICK_MENU_ACTION_MSG_MAX_BYTES, QUICK_MENU_NAME_MAX_RUNES, QUICK_MENU_TYPE_FLASH,
+    QUICK_MENU_TYPE_QUICK, QuickMenuItem, QuickMenuStore, is_valid_action_msg, is_valid_menu_name,
+    name_exists,
+};
 pub use realtime::{RealtimeDispatch, RealtimeKind};
 pub use roles::{
     ClanRoleDetail, DEFAULT_ROLE_COLOR, MAX_ROLE_ICON_BYTES, Role, RoleDraft, RolePermission,
     RoleStyle, RoleUser, RolesEvent, RolesStore, everyone_slug, parse_role_color,
 };
+pub use sprite_atlas::{SpriteAtlas, SpriteFrame, fetch_sprite_atlas, parse_sprite_atlas};
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
 pub use stream::{StreamMember, StreamPhase, StreamStore};
 pub use threads::{
     GroupedThreadIndexes, THREAD_STATUS_ARCHIVED, THREAD_STATUS_JOINED, ThreadCreateFailReason,
-    ThreadSummary, ThreadsEvent, ThreadsStore, group_threads,
+    ThreadSummary, ThreadsEvent, ThreadsStore, group_threads, thread_preview_display,
 };
 pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
 pub use topics::{TopicsEvent, TopicsStore};
@@ -281,6 +298,22 @@ pub(crate) fn running_from_windows_store() -> bool {
             exe.components()
                 .any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"))
         })
+}
+
+pub fn clear_tour_progress(cx: &mut gpui::App) {
+    let Some(settings) = Settings::try_global(cx) else {
+        return;
+    };
+    let changed = settings.update(cx, |settings, cx| {
+        let changed = settings.clear_tour_progress();
+        if changed {
+            cx.notify();
+        }
+        changed
+    });
+    if changed {
+        schedule_settings_save(&settings, cx);
+    }
 }
 
 /// Persist [`Settings`] through one serialized, coalescing writer: burst
@@ -381,6 +414,14 @@ pub struct Settings {
     /// Start the HTTP MCP server in read-only mode (no write tools)
     #[serde(default)]
     pub mcp_read_only: bool,
+    #[serde(default)]
+    pub age_restricted_confirmed: Vec<ChannelId>,
+    #[serde(default)]
+    pub tour_seen_version: u32,
+    #[serde(default)]
+    pub tour_done_tracks: Vec<String>,
+    #[serde(default)]
+    pub tour_eligible: Option<bool>,
 }
 
 impl Default for Settings {
@@ -405,6 +446,10 @@ impl Default for Settings {
             last_clan_id: None,
             last_channel_id: None,
             mcp_read_only: false,
+            age_restricted_confirmed: Vec::new(),
+            tour_seen_version: 0,
+            tour_done_tracks: Vec::new(),
+            tour_eligible: None,
         }
     }
 }
@@ -504,6 +549,19 @@ impl Settings {
         Ok(())
     }
 
+    pub fn clear_tour_progress(&mut self) -> bool {
+        if self.tour_seen_version == 0
+            && self.tour_done_tracks.is_empty()
+            && self.tour_eligible.is_none()
+        {
+            return false;
+        }
+        self.tour_seen_version = 0;
+        self.tour_done_tracks.clear();
+        self.tour_eligible = None;
+        true
+    }
+
     pub fn init_global(entity: &gpui::Entity<Self>, cx: &mut gpui::App) {
         cx.set_global(GlobalSettings(entity.clone()));
     }
@@ -588,5 +646,58 @@ impl AuthState {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::Settings;
+
+    #[test]
+    fn a_settings_file_written_before_the_tour_existed_still_parses() {
+        let legacy = r#"{"auto_start":false,"hardware_acceleration":true,"zoom_factor":1.0,"theme":"dark","language":"vi"}"#;
+        let settings: Settings = serde_json::from_str(legacy).expect("legacy settings parse");
+        assert_eq!(settings.tour_seen_version, 0);
+        assert!(settings.tour_done_tracks.is_empty());
+        assert_eq!(settings.language, "vi");
+    }
+
+    #[test]
+    fn tour_progress_survives_a_roundtrip() {
+        let settings = Settings {
+            tour_seen_version: 1,
+            tour_done_tracks: vec!["start".to_string(), "wallet".to_string()],
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).expect("encode");
+        let restored: Settings = serde_json::from_str(&json).expect("decode");
+        assert_eq!(restored.tour_seen_version, 1);
+        assert_eq!(restored.tour_done_tracks, vec!["start", "wallet"]);
+    }
+
+    #[test]
+    fn logging_out_drops_the_previous_accounts_tour_verdict() {
+        let mut settings = Settings {
+            tour_seen_version: 1,
+            tour_done_tracks: vec!["start".to_string(), "dmstart".to_string()],
+            tour_eligible: Some(false),
+            ..Settings::default()
+        };
+
+        assert!(settings.clear_tour_progress());
+
+        assert_eq!(settings.tour_seen_version, 0);
+        assert!(settings.tour_done_tracks.is_empty());
+        assert_eq!(
+            settings.tour_eligible, None,
+            "a decided verdict must not survive into the next account, or a brand new \
+             one never gets the onboarding tour"
+        );
+    }
+
+    #[test]
+    fn clearing_an_untouched_tour_state_reports_no_change() {
+        let mut settings = Settings::default();
+        assert!(!settings.clear_tour_progress());
     }
 }

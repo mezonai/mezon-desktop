@@ -7,17 +7,18 @@ use gpui::{
     linear_gradient, prelude::*, px, relative,
 };
 use mezon_store::{
-    AuthState, AutoUpdateStatus, AutoUpdateStore, CHANNEL_ACTIVE_ARCHIVED, CHANNEL_ACTIVE_JOINED,
-    CallStore, Channel, ChannelEvent, ChannelId, ChannelList, ChannelType, ClanId, ClanList,
-    ClanMembersStore, DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
-    MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
-    Settings, StreamStore, THREAD_STATUS_ARCHIVED, ThreadsEvent, ThreadsStore, TopicBadgeStore,
-    TopicsEvent, TopicsStore, UiState, VoiceConnection, VoiceMember, VoiceModerationError,
-    VoiceStore, expand_mention_name_tokens,
+    AccountEvent, AccountStore, AuthState, AutoUpdateStatus, AutoUpdateStore,
+    CHANNEL_ACTIVE_ARCHIVED, CHANNEL_ACTIVE_JOINED, CallStore, Channel, ChannelEvent, ChannelId,
+    ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore, DirectChannel, DirectKind,
+    DirectMessageStore, GroupMembersStore, InboxStore, MessageSearchEvent, MessageSearchStore,
+    MessagesStore, PinnedEvent, PinnedMessagesStore, Settings, StreamStore, THREAD_STATUS_ARCHIVED,
+    ThreadsEvent, ThreadsStore, TopicBadgeStore, TopicsEvent, TopicsStore, UiState,
+    VoiceConnection, VoiceMember, VoiceModerationError, VoiceStore, expand_mention_name_tokens,
 };
 use ui::PopoverMenuHandle;
 
 use crate::app::shell::Shell;
+use crate::chat::age_restricted::{AgeRestrictedGate, age_gate_blocks};
 use crate::chat::area::ChatArea;
 use crate::chat::call_window::{CallPanelView, render_call_mini_bar};
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
@@ -48,6 +49,7 @@ pub struct ChatLayout {
     friends_page: Entity<crate::chat::FriendsPage>,
     clan_members_page: Entity<crate::chat::clan_members_page::ClanMembersPage>,
     clan_channels_page: Entity<crate::chat::clan_channels_page::ClanChannelsPage>,
+    clan_guide_page: Entity<crate::chat::clan_guide_page::ClanGuidePage>,
     direct_store: Entity<DirectMessageStore>,
     user_info_bar: Entity<UserInfoBar>,
     clan_list: Entity<ClanList>,
@@ -100,6 +102,7 @@ pub struct ChatLayout {
     pin_popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
     canvas_popover_handle: PopoverMenuHandle<CanvasPopoverPanel>,
     canvas_view: Option<Entity<CanvasView>>,
+    age_gate: Option<Entity<AgeRestrictedGate>>,
     displayed_active_channel: Option<ActiveChannelSlice>,
     focused_channel_id: Option<ChannelId>,
     displayed_voice_mini: Option<VoiceMiniSlice>,
@@ -189,6 +192,18 @@ impl ChatLayout {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(
+            &AccountStore::global(cx),
+            |_, _, event: &AccountEvent, cx| {
+                if matches!(
+                    event,
+                    AccountEvent::AccountLoaded | AccountEvent::DateOfBirthSaved
+                ) {
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
 
         let channel_list = ChannelList::global(cx);
 
@@ -225,6 +240,9 @@ impl ChatLayout {
         let clan_channels_page = cx.new(move |cx| {
             crate::chat::clan_channels_page::ClanChannelsPage::new(channels_settings, cx)
         });
+        let guide_settings = settings.clone();
+        let clan_guide_page =
+            cx.new(move |cx| crate::chat::clan_guide_page::ClanGuidePage::new(guide_settings, cx));
 
         let direct_store = DirectMessageStore::global(cx);
 
@@ -412,6 +430,17 @@ impl ChatLayout {
         .detach();
         cx.observe(&MessageSearchStore::global(cx), |_, _, cx| cx.notify())
             .detach();
+        // The banned notice replaces the composer, and its answer arrives from `IsBanned` well
+        // after the channel opened — without this the strip would not paint until something
+        // else happened to redraw the chat.
+        cx.observe(&mezon_store::BannedUsersStore::global(cx), |_, _, cx| {
+            cx.notify()
+        })
+        .detach();
+        cx.observe(&mezon_store::OnboardingStore::global(cx), |_, _, cx| {
+            cx.notify()
+        })
+        .detach();
         cx.subscribe(&TopicsStore::global(cx), |this, _, event, cx| match event {
             TopicsEvent::Opened => {
                 ThreadsStore::global(cx).update(cx, |threads, cx| threads.cancel_create(cx));
@@ -496,6 +525,7 @@ impl ChatLayout {
             friends_page,
             clan_members_page,
             clan_channels_page,
+            clan_guide_page,
             direct_store,
             user_info_bar,
             clan_list,
@@ -549,6 +579,7 @@ impl ChatLayout {
             pin_popover_handle: PopoverMenuHandle::default(),
             canvas_popover_handle: PopoverMenuHandle::default(),
             canvas_view: None,
+            age_gate: None,
             displayed_active_channel: None,
             focused_channel_id: None,
             displayed_voice_mini: None,
@@ -1919,13 +1950,13 @@ impl Render for ChatLayout {
                             .inset_0()
                             .flex()
                             .flex_row()
+                            .child(div().w(px(72.0)).h_full().bg(theme.surfaces.primary.ramp()))
                             .child(
                                 div()
-                                    .w(px(72.0))
+                                    .flex_1()
                                     .h_full()
-                                    .bg(theme.surface_for(theme.bg_tertiary)),
-                            )
-                            .child(div().flex_1().h_full().bg(theme.bg_secondary)),
+                                    .bg(theme.surfaces.direct_message.ramp()),
+                            ),
                     )
                     .child(
                         div()
@@ -1997,6 +2028,9 @@ impl Render for ChatLayout {
 
 impl ChatLayout {
     pub(crate) fn send_current_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chat_area.send_denied() {
+            return;
+        }
         let Some(mention_input) = self.chat_area.mention_input.clone() else {
             return;
         };
@@ -2334,6 +2368,9 @@ impl ChatLayout {
     }
 
     pub(crate) fn send_sticker(&mut self, url: String, filename: String, cx: &mut Context<Self>) {
+        if self.chat_area.send_denied() {
+            return;
+        }
         crate::chat::ChatSending::send_sticker(url, filename, &self.auth_state, cx);
     }
 
@@ -2344,10 +2381,16 @@ impl ChatLayout {
         height: u32,
         cx: &mut Context<Self>,
     ) {
+        if self.chat_area.send_denied() {
+            return;
+        }
         crate::chat::ChatSending::send_gif(url, width, height, &self.auth_state, cx);
     }
 
     pub(crate) fn send_sound(&mut self, url: String, filename: String, cx: &mut Context<Self>) {
+        if self.chat_area.send_denied() {
+            return;
+        }
         crate::chat::ChatSending::send_sound(url, filename, &self.auth_state, cx);
     }
 
@@ -2722,7 +2765,43 @@ impl ChatLayout {
         })
     }
 
+    fn gated_channel(&self, cx: &App) -> Option<(ClanId, ChannelId)> {
+        let channel = self.channel_list.read(cx).active_channel()?;
+        if !age_gate_blocks(channel, cx) {
+            return None;
+        }
+        let ids = (channel.clan_id, channel.id);
+        matches!(
+            Router::global(cx).read(cx).route(),
+            Route::Chat | Route::Channel { .. } | Route::Thread { .. } | Route::Canvas { .. }
+        )
+        .then_some(ids)
+    }
+
+    fn sync_age_gate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((clan_id, channel_id)) = self.gated_channel(cx) else {
+            if let Some(gate) = self.age_gate.take() {
+                gate.update(cx, |gate, cx| gate.dismiss_birthday_prompt(cx));
+            }
+            return;
+        };
+        let gate = match self.age_gate.clone() {
+            Some(gate) if gate.read(cx).is_for(clan_id, channel_id) => gate,
+            previous => {
+                if let Some(previous) = previous {
+                    previous.update(cx, |gate, cx| gate.dismiss_birthday_prompt(cx));
+                }
+                let settings = self.settings.clone();
+                let gate = cx.new(|_| AgeRestrictedGate::new(clan_id, channel_id, settings));
+                self.age_gate = Some(gate.clone());
+                gate
+            }
+        };
+        gate.update(cx, |gate, cx| gate.sync_birthday_prompt(window, cx));
+    }
+
     fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        self.sync_age_gate(window, cx);
         let window_width = window.viewport_size().width;
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
@@ -2754,6 +2833,12 @@ impl ChatLayout {
             self.clan_channels_page
                 .update(cx, |page, cx| page.set_clan(clan_id, cx));
             return self.clan_channels_page.clone().into_any_element();
+        }
+
+        if let Route::ClanGuide { clan_id } = Router::global(cx).read(cx).route() {
+            self.clan_guide_page
+                .update(cx, |page, cx| page.set_clan(clan_id, cx));
+            return self.clan_guide_page.clone().into_any_element();
         }
 
         if self.is_dm_route(cx) {
@@ -2858,6 +2943,34 @@ impl ChatLayout {
         }
 
         if let Some(ch) = self.channel_list.read(cx).active_channel() {
+            if let Some(gate) = self.age_gate.clone() {
+                let channel_name = ch.name.clone();
+                let active_channel_id = ch.id;
+                let header_icon = channel_icon(ch.channel_type, ch.private);
+                return self
+                    .chat_area
+                    .render_panel_body(
+                        &locale,
+                        Some(channel_name.as_str()),
+                        Some(header_icon),
+                        Some(active_channel_id),
+                        true,
+                        self.show_member_list && !show_results_panel && !side_panel_open,
+                        true,
+                        Some(inbox_handle.clone()),
+                        active_clan_id.clone(),
+                        Some(pin_handle.clone()),
+                        Some(canvas_handle.clone()),
+                        show_search_bar,
+                        search_expanded,
+                        show_search_options,
+                        search_input.clone(),
+                        gate.into_any_element(),
+                        cx,
+                    )
+                    .into_any_element();
+            }
+
             if let Route::Canvas {
                 clan_id,
                 channel_id,
@@ -3228,9 +3341,10 @@ impl ChatLayout {
                 &format!("Direct {direct_id}"),
                 &current_path,
             ),
-            Route::Channel { .. } | Route::ClanMembers { .. } | Route::ClanChannels { .. } => {
-                div().into_any_element()
-            }
+            Route::Channel { .. }
+            | Route::ClanMembers { .. }
+            | Route::ClanChannels { .. }
+            | Route::ClanGuide { .. } => div().into_any_element(),
             Route::Friends => self.render_placeholder(
                 theme,
                 crate::components::primitives::IconName::IconFriends,

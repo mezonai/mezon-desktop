@@ -8,13 +8,16 @@ fn test_get_active_window() {
     match get_active_window() {
         Ok(info) => {
             println!("Active Window Info: {:#?}", info);
-            assert_eq!(info.os, if cfg!(target_os = "windows") {
-                "windows"
-            } else if cfg!(target_os = "macos") {
-                "macos"
-            } else {
-                "linux"
-            });
+            assert_eq!(
+                info.os,
+                if cfg!(target_os = "windows") {
+                    "windows"
+                } else if cfg!(target_os = "macos") {
+                    "macos"
+                } else {
+                    "linux"
+                }
+            );
         }
         Err(e) => {
             println!("Handled Active Window Query Error: {}", e);

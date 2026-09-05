@@ -65,6 +65,18 @@ impl Focusable for CreateClanModal {
 }
 
 impl CreateClanModal {
+    /// Open the modal on the app shell. Callers that only have an `App` (menus, other modals)
+    /// use this rather than wiring the two stores themselves.
+    pub fn open(window: &mut Window, cx: &mut App) {
+        let clan_list = ClanList::global(cx);
+        let Some(settings) = Settings::try_global(cx) else {
+            return;
+        };
+        let modal = cx.new(|cx| Self::new(clan_list, settings, window, cx));
+        crate::app::shell::Shell::global(cx)
+            .update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
+    }
+
     pub fn new(
         clan_list: Entity<ClanList>,
         settings: Entity<Settings>,
@@ -150,12 +162,9 @@ impl CreateClanModal {
                 this._logo_task = None;
             };
 
-            let paths = match rx.await {
-                Ok(Ok(Some(p))) => p,
-                _ => {
-                    let _ = this.update(cx, |this, _| finish(this));
-                    return;
-                }
+            let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
+                let _ = this.update(cx, |this, _| finish(this));
+                return;
             };
             let path = match paths.into_iter().next() {
                 Some(p) => p,

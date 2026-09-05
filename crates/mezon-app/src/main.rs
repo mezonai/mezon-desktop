@@ -52,29 +52,62 @@ impl tracing_tracy::Config for TracyConfig {
 }
 
 #[cfg(target_os = "linux")]
+fn prefers_native_wayland(wayland_display: Option<&str>, session_override: Option<&str>) -> bool {
+    let has_wayland = wayland_display.is_some_and(|display| !display.is_empty());
+    let force_wayland = session_override.is_some_and(|value| value.eq_ignore_ascii_case("wayland"));
+    has_wayland && force_wayland
+}
+
+#[cfg(target_os = "linux")]
+fn wayland_display_set() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some_and(|display| !display.is_empty())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_session_override() -> Option<String> {
+    std::env::var("MEZON_LINUX_SESSION").ok()
+}
+
+#[cfg(target_os = "linux")]
 fn configure_linux_session() {
     if mezon_store::record_wayland_session() {
         unsafe { std::env::set_var("MEZON_WAYLAND_SESSION", "1") };
     }
+    ensure_linux_utf8_ctype();
+    if prefers_native_wayland(
+        std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
+        linux_session_override().as_deref(),
+    ) {
+        return;
+    }
     if std::env::var_os("DISPLAY").is_none() {
+        if linux_session_override().is_some_and(|value| value.eq_ignore_ascii_case("x11")) {
+            tracing::warn!("MEZON_LINUX_SESSION=x11 ignored: DISPLAY is unset");
+        }
         return;
     }
     ensure_linux_ui_scale_factor();
     unsafe {
         std::env::set_var("GDK_BACKEND", "x11");
         std::env::remove_var("WAYLAND_DISPLAY");
-        let ctype = std::env::var("LC_CTYPE").unwrap_or_default();
-        if ctype.is_empty() || ctype == "C" || ctype == "POSIX" {
-            let lang = std::env::var("LANG").unwrap_or_default();
-            let fallback = if !lang.is_empty() && lang != "C" && lang != "POSIX" {
-                lang
-            } else {
-                "en_US.UTF-8".into()
-            };
-            std::env::set_var("LC_CTYPE", fallback);
-        }
     }
-    ensure_fcitx_xim_on_the_spot();
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_linux_utf8_ctype() {
+    let ctype = std::env::var("LC_CTYPE").unwrap_or_default();
+    if !ctype.is_empty() && ctype != "C" && ctype != "POSIX" {
+        return;
+    }
+    let lang = std::env::var("LANG").unwrap_or_default();
+    let fallback = if !lang.is_empty() && lang != "C" && lang != "POSIX" {
+        lang
+    } else {
+        "en_US.UTF-8".into()
+    };
+    unsafe {
+        std::env::set_var("LC_CTYPE", fallback);
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -236,83 +269,27 @@ fn parse_xft_dpi_scale(xrdb_output: &str) -> Option<f32> {
 }
 
 #[cfg(target_os = "linux")]
-fn ensure_fcitx_xim_on_the_spot() {
-    let uses_fcitx = std::env::var("XMODIFIERS")
-        .map(|v| v.contains("fcitx"))
-        .unwrap_or(false);
-    if !uses_fcitx {
-        return;
-    }
-    let Some(home) = std::env::var_os("HOME") else {
-        return;
-    };
-    let conf_dir = std::path::PathBuf::from(home).join(".config/fcitx5/conf");
-    let conf_path = conf_dir.join("xim.conf");
-    let existing = std::fs::read_to_string(&conf_path).unwrap_or_default();
-    let already_on = existing
-        .lines()
-        .any(|line| line.trim().eq_ignore_ascii_case("UseOnTheSpot=True"));
-    if already_on {
-        return;
-    }
-    if let Err(error) = std::fs::create_dir_all(&conf_dir) {
-        tracing::warn!("fcitx5 XIM OnTheSpot: create conf dir failed: {error}");
-        return;
-    }
-    let next = if existing.trim().is_empty() {
-        "UseOnTheSpot=True\n".to_string()
-    } else if existing
-        .lines()
-        .any(|line| line.trim().starts_with("UseOnTheSpot="))
-    {
-        existing
-            .lines()
-            .map(|line| {
-                if line.trim().starts_with("UseOnTheSpot=") {
-                    "UseOnTheSpot=True"
-                } else {
-                    line
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n"
-    } else {
-        format!("{}\nUseOnTheSpot=True\n", existing.trim_end())
-    };
-    if let Err(error) = std::fs::write(&conf_path, next) {
-        tracing::warn!("fcitx5 XIM OnTheSpot: write conf failed: {error}");
-        return;
-    }
-    tracing::info!(
-        "Enabled fcitx5 XIM UseOnTheSpot for inline preedit; restarting fcitx5 once \
-         (the xim addon only reads this setting at startup)"
-    );
-    match std::process::Command::new("fcitx5").args(["-rd"]).spawn() {
-        Ok(mut child) => {
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-            std::thread::sleep(std::time::Duration::from_millis(1200));
-        }
-        Err(error) => tracing::debug!("fcitx5 not available for restart: {error}"),
-    }
-}
-
-#[cfg(target_os = "linux")]
 fn log_linux_session_notes() {
-    match std::env::var("MEZON_LINUX_SESSION")
-        .ok()
+    match linux_session_override()
+        .as_deref()
         .map(|value| value.to_ascii_lowercase())
         .as_deref()
     {
-        Some("wayland") => {
-            tracing::warn!("MEZON_LINUX_SESSION=wayland: the app runs on X11/XWayland")
+        Some("x11") => {
+            tracing::info!("MEZON_LINUX_SESSION=x11: GPUI uses X11/XWayland")
         }
-        Some(other) if other != "x11" => {
+        Some("wayland") if !wayland_display_set() => {
+            tracing::warn!("MEZON_LINUX_SESSION=wayland ignored: WAYLAND_DISPLAY is unset")
+        }
+        Some(other) if other != "wayland" => {
             tracing::warn!("Unknown MEZON_LINUX_SESSION={other}; expected x11 or wayland")
         }
         _ => {}
+    }
+    if wayland_display_set() {
+        tracing::info!("Linux compositor: Wayland");
+    } else if std::env::var_os("DISPLAY").is_some() {
+        tracing::info!("Linux compositor: X11");
     }
 }
 
@@ -365,10 +342,13 @@ fn log_dir() -> std::path::PathBuf {
 /// Initialise tracing to stdout **and** a daily-rotated log file. Uses a blocking file writer
 /// (not `non_blocking`) so a panic is flushed to disk before the process aborts.
 fn init_logging() {
+    // `noti` is an explicit target rather than a module path, so it needs its own
+    // directive — the whole notification chain logs there and has to stay readable in
+    // release, where `mezon=info` alone would drop it to the global `warn` floor.
     let default_filter = if cfg!(debug_assertions) {
-        "mezon=debug,info"
+        "mezon=debug,noti=debug,info"
     } else {
-        "mezon=info,warn"
+        "mezon=info,noti=info,warn"
     };
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
@@ -667,6 +647,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
         }
 
         init_ui(cx);
+        mezon_ui::clipboard::enable_off_main_thread_reads();
 
         AppConfig::init_global(app_config_handle, cx);
 
@@ -968,7 +949,7 @@ fn open_main_window(
     mezon_store::ChannelSettingsStore::init(api.clone(), cx);
     mezon_store::DirectMessageStore::init(api.clone(), cx);
     mezon_store::FriendStore::init(api.clone(), cx);
-    mezon_store::ActivityStore::init(api.clone(), cx);
+    mezon_store::ActivityStore::init(api.clone(), settings_entity.clone(), cx);
     mezon_store::BadgeService::init(auth_state.clone(), cx);
     mezon_store::MessagesStore::init(api.clone(), cx);
     mezon_store::ThreadsStore::init(api.clone(), cx);
@@ -997,6 +978,7 @@ fn open_main_window(
     mezon_store::RolesStore::init(api.clone(), cx);
     mezon_store::WebhookStore::init(api.clone(), cx);
     mezon_store::EventsStore::init(api.clone(), cx);
+    mezon_store::OnboardingStore::init(api.clone(), cx);
     mezon_store::GalleryStore::init(api.clone(), cx);
     mezon_store::ChannelMediaStore::init(api.clone(), cx);
     mezon_store::FilesStore::init(api.clone(), cx);
@@ -1455,8 +1437,28 @@ mod tests {
     mod linux_scale {
         use super::super::{
             parse_ui_scale_value, parse_xfce_active_scale, parse_xfce_xft_dpi_scale,
-            parse_xft_dpi_scale,
+            parse_xft_dpi_scale, prefers_native_wayland,
         };
+
+        #[test]
+        fn xwayland_default_when_wayland_display_is_set() {
+            assert!(!prefers_native_wayland(Some("wayland-0"), None));
+            assert!(!prefers_native_wayland(Some("wayland-0"), Some("x11")));
+            assert!(!prefers_native_wayland(Some("wayland-0"), Some("X11")));
+        }
+
+        #[test]
+        fn native_wayland_only_when_session_override_is_wayland() {
+            assert!(prefers_native_wayland(Some("wayland-0"), Some("wayland")));
+            assert!(prefers_native_wayland(Some("wayland-1"), Some("Wayland")));
+        }
+
+        #[test]
+        fn x11_when_wayland_display_is_missing() {
+            assert!(!prefers_native_wayland(None, None));
+            assert!(!prefers_native_wayland(Some(""), None));
+            assert!(!prefers_native_wayland(None, Some("wayland")));
+        }
 
         #[test]
         fn xft_dpi_96_maps_to_unity_scale() {

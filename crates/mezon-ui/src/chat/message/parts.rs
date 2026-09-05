@@ -4,14 +4,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    Anchor, AnyElement, App, ClickEvent, Entity, FontWeight, Hsla, MouseButton, ObjectFit, Pixels,
+    Anchor, AnyElement, App, ClickEvent, Entity, FontWeight, Hsla, MouseButton, ObjectFit,
     SharedString, Transformation, Window, div, img, prelude::*, px, radians, rems, rgba,
 };
 use mezon_store::{
     AccountStore, AlbumLayout, AppConfig, AttachmentSeedInput, BadgeService, ChannelType, ClanId,
     ClanList, ClanMembersStore, Emoji, Message, MessageAttachment, MessageCode, MessageId,
-    MessageReference, MessagesStore, PlatformStore, ProfileContext, Reaction, ThreadsStore,
-    TopicsStore, UserId, UsersByUserStore, ViewerMedia, resolve_avatar_url, resolve_user_profile,
+    MessageReference, MessagesStore, ProfileContext, Reaction, ThreadsStore, TopicsStore, UserId,
+    UsersByUserStore, ViewerMedia, resolve_avatar_url, resolve_user_profile,
 };
 use smallvec::SmallVec;
 
@@ -31,6 +31,7 @@ use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, Spinn
 use crate::theme::Theme;
 
 const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
+const SYSTEM_AVATAR_PATH: &str = "images/mezon_logo.png";
 pub(crate) const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 
 pub fn effective_clan_id(clan_id: Option<ClanId>, cx: &App) -> Option<ClanId> {
@@ -292,6 +293,16 @@ fn reference_avatar(
     resolved.map(|(_, proxied)| proxied)
 }
 
+fn system_sender_avatar(cx: &App) -> SharedString {
+    static AVATAR: std::sync::OnceLock<SharedString> = std::sync::OnceLock::new();
+    AVATAR
+        .get_or_init(|| {
+            let logo = crate::util::imgproxy::cdn_asset_url(cx, SYSTEM_AVATAR_PATH);
+            SharedString::from(crate::util::imgproxy::avatar_url(cx, &logo))
+        })
+        .clone()
+}
+
 fn resolve_reference_identity(
     reference: &MessageReference,
     is_anonymous: bool,
@@ -305,6 +316,9 @@ fn resolve_reference_identity(
             SharedString::from(mezon_store::ANONYMOUS_SENDER_NAME),
             SharedString::default(),
         );
+    }
+    if reference.sender_id.is_zero() && reference.sender_avatar.is_empty() {
+        return (baked_name(), system_sender_avatar(cx));
     }
     let clan_id = role_scope(ctx.profile_context).filter(|_| !reference.sender_id.is_zero());
     let Some(clan_id) = clan_id else {
@@ -759,25 +773,44 @@ struct Uploader {
     avatar: SharedString,
 }
 
-fn attachment_spinner(size: Pixels, theme: &Theme) -> impl IntoElement {
-    div()
-        .size(size)
-        .rounded_full()
-        .border_2()
-        .border_color(theme.text_secondary)
-}
+/// Width below which the label is dropped: an album tile can be ~100px and the
+/// text would spill out of it. The spinner alone still reads as "working".
+const SENDING_LABEL_MIN_WIDTH: f32 = 160.;
+/// The spinner is 32px and the caption another ~16 above the gap. In a box
+/// shorter than this the stack does not fit and spills out of the tile, which is
+/// what makes a wide, short picture look broken rather than busy.
+const SENDING_LABEL_MIN_HEIGHT: f32 = 92.;
 
-fn attachment_sending_overlay(theme: &Theme) -> impl IntoElement {
+fn attachment_sending_overlay(
+    theme: &Theme,
+    locale: &str,
+    box_width: f32,
+    box_height: f32,
+) -> impl IntoElement {
     div()
         .absolute()
         .inset_0()
         .flex()
+        .flex_col()
         .items_center()
         .justify_center()
+        .overflow_hidden()
+        .gap_2()
         .child(
             Spinner::new()
                 .with_size(Size::Large)
                 .color(theme.text_secondary.into()),
+        )
+        .when(
+            box_width >= SENDING_LABEL_MIN_WIDTH && box_height >= SENDING_LABEL_MIN_HEIGHT,
+            |d| {
+                d.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme.text_secondary)
+                        .child(mezon_i18n::t(locale, "message.attachment.uploading")),
+                )
+            },
         )
 }
 
@@ -812,11 +845,18 @@ fn render_audio(
     sending: bool,
 ) -> AnyElement {
     let duration = att.duration.max(0) as f64;
+    // `uploading` only ever covers OUR OWN outgoing message. A recipient sees
+    // the message the moment it is posted, with `presign_pending` set until the
+    // sender's upload lands — play it then and the player fetches an object the
+    // CDN does not have yet, and the not-found is what gets cached. React drops
+    // pending audio from the list entirely; the pill says the same thing and
+    // keeps the row's height.
+    let sending = sending || att.presign_pending;
     if att.upload_failed {
         return audio_failed_pill(duration);
     }
     if sending {
-        return audio_sending_pill(duration);
+        return audio_sending_pill(duration, ctx.locale);
     }
     if let Some(view) = ctx.active_audios.get(&(msg_id, index)) {
         return div().w_full().child(view.clone()).into_any_element();
@@ -933,7 +973,14 @@ fn render_album(
                 tile.height,
             ));
         } else if att.presign_pending {
-            tile_element = presign_child(tile_element, att, theme);
+            tile_element = presign_child(
+                tile_element,
+                att,
+                theme,
+                ctx.locale,
+                tile.width,
+                tile.height,
+            );
         } else {
             let selection = ctx.selection.clone();
             let src = album_tile_src(cfg, att, tile.width, tile.height);
@@ -964,7 +1011,12 @@ fn render_album(
         if att.upload_failed {
             tile_element = tile_element.child(attachment_failed_overlay(theme));
         } else if att.uploading {
-            tile_element = tile_element.child(attachment_sending_overlay(theme));
+            tile_element = tile_element.child(attachment_sending_overlay(
+                theme,
+                ctx.locale,
+                tile.width,
+                tile.height,
+            ));
         }
         container = container.child(tile_element);
     }
@@ -1021,21 +1073,27 @@ fn presign_child(
     parent: gpui::Stateful<gpui::Div>,
     att: &MessageAttachment,
     theme: &Theme,
+    locale: &str,
+    box_width: f32,
+    box_height: f32,
 ) -> gpui::Stateful<gpui::Div> {
+    // A recipient never sees `uploading` — only `presign_pending` — so without
+    // this the whole upload window is a bare spinner on their side while the
+    // sender gets a labelled one.
     if att.thumbnail.is_empty() {
-        parent.child(attachment_spinner(px(30.), theme))
+        parent.child(attachment_sending_overlay(
+            theme, locale, box_width, box_height,
+        ))
     } else {
-        parent.child(
-            img(SharedString::from(att.thumbnail.clone()))
-                .size_full()
-                .object_fit(ObjectFit::Cover),
-        )
-    }
-}
-
-fn open_external(url: &str, cx: &mut App) {
-    if let Some(store) = PlatformStore::try_global(cx) {
-        let _ = store.read(cx).open_url_external(url);
+        parent
+            .child(
+                img(SharedString::from(att.thumbnail.clone()))
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            )
+            .child(attachment_sending_overlay(
+                theme, locale, box_width, box_height,
+            ))
     }
 }
 
@@ -1117,7 +1175,12 @@ fn render_photo(
         if att.upload_failed {
             el = el.child(attachment_failed_overlay(theme));
         } else if sending {
-            el = el.child(attachment_sending_overlay(theme));
+            el = el.child(attachment_sending_overlay(
+                theme,
+                ctx.locale,
+                att.display_width,
+                att.display_height,
+            ));
         }
         return el.into_any_element();
     }
@@ -1133,11 +1196,23 @@ fn render_photo(
             .items_center()
             .justify_center()
             .bg(theme.bg_tertiary);
-        placeholder = presign_child(placeholder, att, theme);
+        placeholder = presign_child(
+            placeholder,
+            att,
+            theme,
+            ctx.locale,
+            att.display_width,
+            att.display_height,
+        );
         if att.upload_failed {
             placeholder = placeholder.child(attachment_failed_overlay(theme));
         } else if sending {
-            placeholder = placeholder.child(attachment_sending_overlay(theme));
+            placeholder = placeholder.child(attachment_sending_overlay(
+                theme,
+                ctx.locale,
+                att.display_width,
+                att.display_height,
+            ));
         }
         return placeholder.into_any_element();
     }
@@ -1166,7 +1241,10 @@ fn render_photo(
         .h(px(att.display_height))
         .rounded_md()
         .overflow_hidden();
-    el = el.when(!is_sticker && !att.upload_failed, |d| {
+    // `render_album` already refuses to open a tile that is still uploading;
+    // the single-image path is the same picture with the same half-written
+    // object behind it.
+    el = el.when(!is_sticker && !att.upload_failed && !sending, |d| {
         d.cursor_pointer().on_click(move |_, window, cx| {
             if !selection.borrow().has_selection() {
                 open_viewer_from_message(
@@ -1205,7 +1283,12 @@ fn render_photo(
     if att.upload_failed {
         el = el.child(attachment_failed_overlay(theme));
     } else if sending {
-        el = el.child(attachment_sending_overlay(theme));
+        el = el.child(attachment_sending_overlay(
+            theme,
+            ctx.locale,
+            att.display_width,
+            att.display_height,
+        ));
     }
     el.into_any_element()
 }
@@ -1246,6 +1329,7 @@ fn render_video_poster(
     let width = att.display_width;
     let height = att.display_height;
     let host = ctx.video_host.clone();
+    let locale = SharedString::from(ctx.locale.to_string());
     let selection = ctx.selection.clone();
     let container = div()
         .id(("msg-video", index))
@@ -1273,11 +1357,24 @@ fn render_video_poster(
     }
     if sending {
         return container
-            .child(attachment_sending_overlay(theme))
+            .child(attachment_sending_overlay(
+                theme,
+                ctx.locale,
+                att.display_width,
+                att.display_height,
+            ))
             .into_any_element();
     }
     if att.presign_pending {
-        return presign_child(container, att, theme).into_any_element();
+        return presign_child(
+            container,
+            att,
+            theme,
+            ctx.locale,
+            att.display_width,
+            att.display_height,
+        )
+        .into_any_element();
     }
     let overlay = div()
         .absolute()
@@ -1327,6 +1424,7 @@ fn render_video_poster(
                 fullscreen_mode: VideoFullscreenMode::default(),
                 layout: VideoLayout::default(),
                 decode_max_size: None,
+                locale: locale.clone(),
             };
             let _ = host.update(cx, |host, cx| {
                 host.activate_video((msg_id, index), activation, window, cx);
@@ -1379,7 +1477,11 @@ fn render_file_box(
     ctx: &RowCtx,
 ) -> AnyElement {
     let theme = ctx.theme;
-    let sending = att.uploading;
+    // Same reason as `render_audio`: a recipient's copy is never `uploading`,
+    // only `presign_pending`, and every button in this box (download, open PDF)
+    // hits the object URL directly. React filters pending documents out of the
+    // list; the spinner state already disables all of them.
+    let sending = att.uploading || att.presign_pending;
     let failed = att.upload_failed;
     let is_owner = ctx.current_user_id == msg.sender_id.as_str();
     let filename = if att.filename.is_empty() {
@@ -1387,10 +1489,16 @@ fn render_file_box(
     } else {
         SharedString::from(att.filename.clone())
     };
-    let is_pdf =
-        att.filetype == "application/pdf" || att.filename.to_ascii_lowercase().ends_with(".pdf");
+    let is_pdf = mezon_store::is_pdf(&att.filetype, &att.filename);
     let url = SharedString::from(att.url.clone());
-    let size_line = SharedString::from(format!("size: {}", att.size_label));
+    // While the object is not on the CDN yet the size we have is the sender's
+    // claim about a file nobody can fetch, so say what is actually happening
+    // instead — the spinner alone reads as a stuck row.
+    let size_line = if sending {
+        SharedString::from(mezon_i18n::t(ctx.locale, "message.attachment.uploading"))
+    } else {
+        SharedString::from(format!("size: {}", att.size_label))
+    };
     let group_name = SharedString::from(format!("file-box-{}-{}", msg.id.0, index));
 
     let download_url = url.clone();
@@ -1398,6 +1506,9 @@ fn render_file_box(
     let body_url = url.clone();
     let body_name = filename.clone();
     let pdf_url = url.clone();
+    let pdf_name = filename.clone();
+    let pdf_settings = ctx.settings.clone();
+    let body_settings = ctx.settings.clone();
     let body_selection = ctx.selection.clone();
     let download_selection = ctx.selection.clone();
     let remove_selection = ctx.selection.clone();
@@ -1462,14 +1573,27 @@ fn render_file_box(
                 .flex_1()
                 .min_w_0()
                 .when(!sending && !failed, |d| {
-                    d.cursor_pointer().on_click(move |_, _, cx| {
-                        if !body_selection.borrow().has_selection() {
-                            crate::util::download::save_with_progress_toast(
-                                body_url.clone(),
-                                body_name.clone(),
+                    d.cursor_pointer().on_click(move |_, window, cx| {
+                        if body_selection.borrow().has_selection() {
+                            return;
+                        }
+                        if is_pdf {
+                            crate::pdf_viewer::open_pdf_viewer(
+                                crate::pdf_viewer::OpenPdfRequest {
+                                    url: body_url.clone(),
+                                    filename: body_name.clone(),
+                                    settings: body_settings.clone(),
+                                },
+                                window,
                                 cx,
                             );
+                            return;
                         }
+                        crate::util::download::save_with_progress_toast(
+                            body_url.clone(),
+                            body_name.clone(),
+                            cx,
+                        );
                     })
                 })
                 .child(
@@ -1535,10 +1659,19 @@ fn render_file_box(
                             ("file-pdf", index),
                             IconName::FileIcon,
                             theme,
-                            move |_, _, cx| {
-                                if !pdf_selection.borrow().has_selection() {
-                                    open_external(&pdf_url, cx);
+                            move |_, window, cx| {
+                                if pdf_selection.borrow().has_selection() {
+                                    return;
                                 }
+                                crate::pdf_viewer::open_pdf_viewer(
+                                    crate::pdf_viewer::OpenPdfRequest {
+                                        url: pdf_url.clone(),
+                                        filename: pdf_name.clone(),
+                                        settings: pdf_settings.clone(),
+                                    },
+                                    window,
+                                    cx,
+                                );
                             },
                         ))
                     }),

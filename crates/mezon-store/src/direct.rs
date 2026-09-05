@@ -81,9 +81,15 @@ pub enum DirectEvent {
     /// message, read-state change) so consumers can skip irrelevant channels;
     /// `None` means a bulk change (fetch page, reset) — treat as "anything".
     Changed { channel_id: Option<ChannelId> },
+    /// The signed-in user is no longer part of `channel_id` — removed, or left
+    /// on their own. The conversation is already gone from the store, so a view
+    /// sitting on it has to leave.
+    Removed { channel_id: ChannelId },
 }
 
 const DM_PAGE_SIZE: i32 = 500;
+const DM_FETCH_MAX_ATTEMPTS: u32 = 3;
+const DM_FETCH_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(400);
 const MESSAGE_CODE_SEND_TOKEN: i32 = 11;
 /// Incoming DM traffic bumps last-message/unread state per message; the
 /// sidebar and unread rail only need to converge, not animate every packet,
@@ -254,6 +260,12 @@ pub struct DirectMessageStore {
     current: Option<(ChannelId, i32)>,
     pending_changed: Vec<ChannelId>,
     changed_notify_task: Option<Task<()>>,
+    dm_space_joined: bool,
+    /// Bumped when the socket comes back. A listing issued on the socket that
+    /// died carries the old value and drops its result, so the reconnect can
+    /// clear `loading` and re-issue without the dead fetch clearing the flag —
+    /// or applying its stale page — behind the replacement.
+    socket_generation: u64,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
 }
@@ -282,6 +294,9 @@ impl DirectMessageStore {
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.channels = DirectChannelList::default();
+        // Same fence as a reconnect: a listing still in flight must not repopulate
+        // the store, or re-join the DM space, for the account that just left.
+        self.socket_generation = self.socket_generation.wrapping_add(1);
         self.loading = false;
         self.freshness.mark_stale();
         self.has_more = true;
@@ -291,6 +306,7 @@ impl DirectMessageStore {
         self.persist_pinned(cx);
         self.pending_changed.clear();
         self.changed_notify_task = None;
+        self.dm_space_joined = false;
         cx.emit(DirectEvent::Changed { channel_id: None });
         cx.notify();
     }
@@ -308,6 +324,8 @@ impl DirectMessageStore {
             current: None,
             pending_changed: Vec::new(),
             changed_notify_task: None,
+            dm_space_joined: false,
+            socket_generation: 0,
             api,
             _conn_watch: conn_watch,
         }
@@ -320,7 +338,11 @@ impl DirectMessageStore {
     fn register_realtime(cx: &mut Context<Self>) {
         let entity = cx.entity();
         RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
-            for kind in [RealtimeKind::UserChannelAdded, RealtimeKind::ChannelUpdated] {
+            for kind in [
+                RealtimeKind::UserChannelAdded,
+                RealtimeKind::UserChannelRemoved,
+                RealtimeKind::ChannelUpdated,
+            ] {
                 dispatch.on(kind, &entity, |this, event, cx| {
                     this.handle_event(event, cx)
                 });
@@ -342,6 +364,9 @@ impl DirectMessageStore {
                     was_connected = true;
                     if this
                         .update(cx, |this, cx| {
+                            this.socket_generation = this.socket_generation.wrapping_add(1);
+                            this.dm_space_joined = false;
+                            this.loading = false;
                             this.freshness.mark_stale();
                             this.fetch(cx);
                         })
@@ -351,6 +376,7 @@ impl DirectMessageStore {
                     }
                 } else if !connected {
                     was_connected = false;
+                    let _ = this.update(cx, |this, _| this.dm_space_joined = false);
                 }
             }
         })
@@ -687,6 +713,7 @@ impl DirectMessageStore {
         let next_page = self.current_page + 1;
         self.loading = true;
         let api = self.api.clone();
+        let socket_generation = self.socket_generation;
         cx.spawn(async move |this, cx| {
             let (result, badges) = tokio::join!(
                 api.list_dm_channels(next_page as i32),
@@ -699,6 +726,9 @@ impl DirectMessageStore {
             }
             let badge_map = badge_map_from_descs(badges.unwrap_or_default());
             let _ = this.update(cx, |this, cx| {
+                if this.socket_generation != socket_generation {
+                    return;
+                }
                 this.loading = false;
                 match result {
                     Ok(list) => {
@@ -725,25 +755,81 @@ impl DirectMessageStore {
         .detach();
     }
 
+    /// Subscribe the socket to the DM space, once per gateway session.
+    ///
+    /// `clan_join{clan_id: 0}` fans out to the DM and group streams from the
+    /// gateway's cached channel listing for this user, and the listing is only
+    /// cached once `ListChannelDescs` has been served — a join that runs first
+    /// subscribes to nothing, so unopened conversations stop pushing
+    /// `ChannelMessage` for the rest of the session. Hence: only ever called
+    /// after the DM listing round-trip has completed.
+    fn join_dm_space(&mut self, cx: &mut Context<Self>) {
+        if self.dm_space_joined {
+            return;
+        }
+        self.dm_space_joined = true;
+        let api = self.api.clone();
+        let socket_generation = self.socket_generation;
+        cx.spawn(async move |this, cx| match api.join_clan_chat(0).await {
+            Ok(()) => tracing::info!("DM-space subscribed (clan_join clan_id=0)"),
+            Err(e) => {
+                tracing::warn!("DM-space join (clan_join clan_id=0) failed: {e}");
+                let _ = this.update(cx, |this, _| {
+                    if this.socket_generation == socket_generation {
+                        this.dm_space_joined = false;
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
     fn fetch(&mut self, cx: &mut Context<Self>) {
         if self.loading {
             return;
         }
         self.loading = true;
         let api = self.api.clone();
+        let socket_generation = self.socket_generation;
+        let timer = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
-            let (result, badges) =
-                tokio::join!(api.list_dm_channels(1), api.list_channel_badge_counts(0),);
+            // Retried, because a failure here does more than leave the list stale:
+            // the DM-space `clan_join` hangs off this call landing, and nothing
+            // else re-triggers it while the socket stays up.
+            let mut attempt = 1u32;
+            let (result, badges) = loop {
+                let pair = tokio::join!(api.list_dm_channels(1), api.list_channel_badge_counts(0));
+                if pair.0.is_ok() || attempt >= DM_FETCH_MAX_ATTEMPTS {
+                    break pair;
+                }
+                if let Err(e) = &pair.0 {
+                    tracing::warn!("list_dm_channels failed (attempt {attempt}): {e}, retrying");
+                }
+                timer.timer(DM_FETCH_RETRY_BACKOFF * attempt).await;
+                let current = this
+                    .update(cx, |this, _| this.socket_generation == socket_generation)
+                    .unwrap_or(false);
+                if !current {
+                    return;
+                }
+                attempt += 1;
+            };
             let badges_complete = badges.is_ok();
             if let Err(e) = &badges {
                 tracing::warn!("list_channel_badge_counts failed alongside the DM list: {e}");
             }
             let badge_map = badge_map_from_descs(badges.unwrap_or_default());
             let _ = this.update(cx, |this, cx| {
+                if this.socket_generation != socket_generation {
+                    return;
+                }
                 this.loading = false;
                 match result {
                     Ok(list) => {
                         tracing::info!("DirectMessageStore: fetched {} DM channels", list.len());
+                        // The gateway has just served this user's clan-0 channel
+                        // listing, so its cache is warm and the join can fan out.
+                        this.join_dm_space(cx);
                         let has_more = list.len() >= DM_PAGE_SIZE as usize;
                         let channels: Vec<DirectChannel> =
                             list.into_iter().map(direct_from_api).collect();
@@ -807,16 +893,42 @@ impl DirectMessageStore {
                 let self_id = crate::badge::BadgeService::try_global(cx)
                     .and_then(|badge| badge.read(cx).current_user_id(cx));
                 enrich_direct_from_event_users(&mut channel, &e.users, self_id);
+                let member_count = channel.member_count;
                 let inserted = self.channels.push_new(channel);
                 tracing::info!(
                     "user_channel_added: direct channel {} inserted={inserted}",
                     desc.channel_id
                 );
                 if !inserted {
+                    let channel_id = ChannelId(desc.channel_id);
+                    let recounted = self
+                        .channels
+                        .find_mut(channel_id)
+                        .is_some_and(|existing| apply_member_count(existing, member_count));
+                    if recounted {
+                        cx.emit(DirectEvent::Changed {
+                            channel_id: Some(channel_id),
+                        });
+                        cx.notify();
+                    }
                     return;
                 }
                 cx.emit(DirectEvent::Changed { channel_id: None });
                 cx.notify();
+            }
+            RealtimeEvent::UserChannelRemoved(e) => {
+                let channel_id = ChannelId(e.channel_id);
+                if self.channels.find(channel_id).is_none() {
+                    return;
+                }
+                let me = crate::badge::BadgeService::try_global(cx)
+                    .and_then(|badge| badge.read(cx).current_user_id(cx));
+                let Some(me) = me else {
+                    return;
+                };
+                if e.user_ids.iter().any(|id| UserId(*id) == me) {
+                    self.forget_conversation(channel_id, cx);
+                }
             }
             _ => {}
         }
@@ -937,6 +1049,7 @@ impl DirectMessageStore {
         if self.current.map(|(id, _)| id) == Some(channel_id) {
             self.current = None;
         }
+        cx.emit(DirectEvent::Removed { channel_id });
         cx.emit(DirectEvent::Changed { channel_id: None });
         cx.notify();
     }
@@ -960,19 +1073,63 @@ impl DirectMessageStore {
         channel_id: ChannelId,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<()>> {
-        if self.channels.find(channel_id).is_none() {
-            return Task::ready(Err(anyhow::anyhow!("group not found")));
-        }
-        let api = self.api.clone();
         let me = crate::badge::BadgeService::try_global(cx)
             .and_then(|badge| badge.read(cx).current_user_id(cx));
-        cx.spawn(async move |this, cx| {
+        let api = self.api.clone();
+        self.forget_once(channel_id, cx, move |channel_id| async move {
             let Some(me) = me else {
                 return Err(anyhow::anyhow!("no signed-in user"));
             };
-            let result = api
-                .remove_channel_users(channel_id.get(), vec![me.to_string()])
-                .await;
+            api.remove_channel_users(channel_id.get(), vec![me.to_string()])
+                .await
+        })
+    }
+
+    pub fn close_conversation(
+        &mut self,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        // CloseDMByChannelId is a 1:1 endpoint: given a group the server picks an arbitrary
+        // other member and evicts *that* pair's DM cache, then answers OK. Groups leave
+        // through `leave_group`.
+        if self
+            .channels
+            .find(channel_id)
+            .is_some_and(|dm| dm.kind == DirectKind::Group)
+        {
+            return Task::ready(Err(anyhow::anyhow!(
+                "conversation {channel_id} is a group; leave it instead of closing it"
+            )));
+        }
+        let api = self.api.clone();
+        self.forget_once(channel_id, cx, move |channel_id| async move {
+            api.close_dm_by_channel_id(channel_id.get()).await
+        })
+    }
+
+    pub fn group_owned_by_me(&self, channel_id: ChannelId, cx: &App) -> bool {
+        let me = crate::badge::BadgeService::try_global(cx)
+            .and_then(|badge| badge.read(cx).current_user_id(cx));
+        self.channels
+            .find(channel_id)
+            .is_some_and(|dm| dm.kind == DirectKind::Group && me.is_some() && dm.creator_id == me)
+    }
+
+    fn forget_once<Fut>(
+        &mut self,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+        request: impl FnOnce(ChannelId) -> Fut + 'static,
+    ) -> Task<anyhow::Result<()>>
+    where
+        Fut: Future<Output = anyhow::Result<()>> + 'static,
+    {
+        if self.channels.find(channel_id).is_none() {
+            return Task::ready(Err(anyhow::anyhow!("conversation {channel_id} not found")));
+        }
+        cx.spawn(async move |this, cx| {
+            let result = request(channel_id).await;
             let _ = this.update(cx, |this, cx| {
                 if result.is_ok() {
                     this.forget_conversation(channel_id, cx);
@@ -1286,6 +1443,17 @@ fn enrich_direct_from_event_users(
     }
 }
 
+fn apply_member_count(channel: &mut DirectChannel, member_count: u32) -> bool {
+    if channel.kind != DirectKind::Group
+        || member_count == 0
+        || channel.member_count == member_count
+    {
+        return false;
+    }
+    channel.member_count = member_count;
+    true
+}
+
 fn direct_from_message(
     m: &mezon_proto::api::ChannelMessage,
     from_me: bool,
@@ -1320,7 +1488,10 @@ fn direct_from_message(
         avatar: m.avatar.clone(),
         peer_user_id,
         peer_username,
-        creator_id: (m.sender_id != 0).then_some(UserId(m.sender_id)),
+        creator_id: match kind {
+            DirectKind::Dm => (m.sender_id != 0).then_some(UserId(m.sender_id)),
+            DirectKind::Group => None,
+        },
         online: true,
         member_count: 0,
         unread_count: u32::from(increment_unread),
@@ -1517,6 +1688,60 @@ mod tests {
         assert_eq!(channel.label, "potinoc605");
         assert_eq!(channel.peer_user_id, Some(UserId(2)));
         assert_eq!(channel.peer_username, "potinoc605");
+    }
+
+    #[test]
+    fn member_count_follows_the_roster_size_in_the_event() {
+        let mut channel = group_channel_with_members(5);
+        assert!(apply_member_count(&mut channel, 7));
+        assert_eq!(channel.member_count, 7);
+        assert!(apply_member_count(&mut channel, 6));
+        assert_eq!(channel.member_count, 6);
+    }
+
+    #[test]
+    fn member_count_ignores_a_repeat_or_missing_count() {
+        let mut channel = group_channel_with_members(5);
+        assert!(!apply_member_count(&mut channel, 5));
+        assert!(!apply_member_count(&mut channel, 0));
+        assert_eq!(channel.member_count, 5);
+    }
+
+    #[test]
+    fn member_count_leaves_a_one_to_one_dm_alone() {
+        let mut channel = group_channel_with_members(2);
+        channel.kind = DirectKind::Dm;
+        assert!(!apply_member_count(&mut channel, 1));
+        assert_eq!(channel.member_count, 2);
+    }
+
+    #[test]
+    fn a_group_row_from_a_message_claims_no_creator() {
+        let mut m = incoming_dm_message();
+        m.mode = STREAM_MODE_GROUP;
+        let group = direct_from_message(&m, false, true);
+        assert_eq!(group.kind, DirectKind::Group);
+        assert_eq!(group.creator_id, None);
+
+        let dm = direct_from_message(&incoming_dm_message(), false, true);
+        assert_eq!(dm.creator_id, Some(UserId(dm.peer_user_id.unwrap().0)));
+    }
+
+    fn group_channel_with_members(member_count: u32) -> DirectChannel {
+        DirectChannel {
+            id: ChannelId(9),
+            label: "group".into(),
+            kind: DirectKind::Group,
+            avatar: String::new(),
+            peer_user_id: None,
+            peer_username: String::new(),
+            creator_id: None,
+            online: false,
+            member_count,
+            unread_count: 0,
+            last_sent_timestamp: 0,
+            last_seen_timestamp: 0,
+        }
     }
 
     #[test]
@@ -2487,6 +2712,118 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn a_successful_close_forgets_the_conversation_and_frees_its_pin(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (store, settings) = cx.update(|cx| {
+            let settings = cx.new(|_| crate::Settings::default());
+            crate::Settings::init_global(&settings, cx);
+            (dm_store(cx), settings)
+        });
+        let task = cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                seed(store, &[(1, 10), (2, 20)]);
+                store.toggle_pin(ChannelId(1), cx);
+                store.set_current(ChannelId(1), DirectKind::Dm.channel_type());
+                store.forget_once(ChannelId(1), cx, |_| async { Ok(()) })
+            })
+        });
+
+        task.await.expect("close succeeds");
+
+        cx.update(|cx| {
+            store.read_with(cx, |store, _| {
+                assert!(store.find(ChannelId(1)).is_none());
+                assert!(store.find(ChannelId(2)).is_some());
+                assert!(!store.is_pinned(ChannelId(1)));
+                assert_eq!(store.current().map(|(id, _)| id), None);
+            });
+            assert!(
+                settings.read(cx).pinned_dms.is_empty(),
+                "a closed conversation must free its pinned slot on disk too"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_failed_close_keeps_the_conversation_in_the_list(cx: &mut gpui::TestAppContext) {
+        let store = cx.update(dm_store);
+        let task = cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                seed(store, &[(1, 10)]);
+                store.forget_once(ChannelId(1), cx, |_| async {
+                    Err(anyhow::anyhow!("server said no"))
+                })
+            })
+        });
+
+        assert!(task.await.is_err());
+
+        cx.update(|cx| {
+            store.read_with(cx, |store, _| {
+                assert!(
+                    store.find(ChannelId(1)).is_some(),
+                    "a rejected close must not drop the conversation locally"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn closing_an_unknown_conversation_is_rejected_and_leaves_the_list_alone(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let store = cx.update(dm_store);
+        let task = cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                seed(store, &[(1, 10), (2, 20)]);
+                store.close_conversation(ChannelId(99), cx)
+            })
+        });
+
+        // Await it: dropping the task cancels it, so the guard would go untested.
+        let err = task.await.expect_err("an unknown conversation is rejected");
+        assert!(
+            err.to_string().contains("not found"),
+            "the guard must reject before any request goes out, got: {err}"
+        );
+
+        cx.update(|cx| {
+            store.read_with(cx, |store, _| {
+                assert!(store.find(ChannelId(1)).is_some());
+                assert!(store.find(ChannelId(2)).is_some());
+                assert_eq!(store.channels().len(), 2);
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn closing_a_group_is_rejected_because_that_endpoint_is_for_one_to_one_dms(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let store = cx.update(dm_store);
+        let task = cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                let mut group = conversation(1, 10);
+                group.kind = DirectKind::Group;
+                store.channels.replace(vec![group], &HashMap::new());
+                store.close_conversation(ChannelId(1), cx)
+            })
+        });
+
+        let err = task.await.expect_err("a group cannot be closed");
+        assert!(err.to_string().contains("group"), "got: {err}");
+        cx.update(|cx| {
+            store.read_with(cx, |store, _| {
+                assert!(
+                    store.find(ChannelId(1)).is_some(),
+                    "the group must stay in the list"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
     fn leaving_a_pinned_group_frees_its_slot_on_disk_too(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let settings = cx.new(|_| crate::Settings::default());
@@ -2568,7 +2905,9 @@ mod tests {
             let store = dm_store(cx);
             let collected = seen.clone();
             let sub = cx.subscribe(&store, move |_, event: &DirectEvent, _| {
-                let DirectEvent::Changed { channel_id } = event;
+                let DirectEvent::Changed { channel_id } = event else {
+                    return;
+                };
                 collected.lock().expect("lock").push(*channel_id);
             });
             store.update(cx, |store, cx| {

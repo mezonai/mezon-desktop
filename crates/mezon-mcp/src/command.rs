@@ -16,6 +16,24 @@ pub enum McpCommand {
         path: String,
         reply: oneshot::Sender<anyhow::Result<()>>,
     },
+    #[cfg(debug_assertions)]
+    SetChannelAgeRestricted {
+        clan_id: i64,
+        channel_id: i64,
+        on: bool,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    #[cfg(debug_assertions)]
+    SetLocalDob {
+        seconds: u32,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    #[cfg(debug_assertions)]
+    InjectPreviewMessage {
+        content: Value,
+        sender_name: Option<String>,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
     Logout {
         reply: oneshot::Sender<anyhow::Result<()>>,
     },
@@ -71,11 +89,27 @@ pub enum McpCommand {
     GetScrollState {
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
+    TourState {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    TourStart {
+        track: Option<String>,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    TourAdvance {
+        forward: bool,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
     SetPanel {
         kind: Option<String>,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
     OpenImageViewer {
+        message_id: i64,
+        attachment_index: usize,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    OpenPdfViewer {
         message_id: i64,
         attachment_index: usize,
         reply: oneshot::Sender<anyhow::Result<Value>>,
@@ -115,6 +149,14 @@ pub enum McpCommand {
     },
     TopicType {
         text: String,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    TopicPick {
+        index: usize,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    TopicDropPaths {
+        paths: Vec<String>,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
     TopicSubmit {
@@ -178,6 +220,11 @@ pub enum McpCommand {
     },
     ListLoadedMessages {
         limit: usize,
+        topic: bool,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    ReplyBegin {
+        message_id: i64,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
     JumpToMessage {

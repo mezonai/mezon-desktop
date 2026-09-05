@@ -37,7 +37,7 @@ pub fn render_actions_panel(msg: &Message, ctx: &RowCtx) -> AnyElement {
             match component {
                 MessageComponent::Button(button) => {
                     row_element = row_element.child(render_message_button(
-                        button, msg.id, sender_id, user_id, index,
+                        button, msg.id, sender_id, user_id, index, false, ctx,
                     ));
                 }
                 MessageComponent::Select(select) => {
@@ -53,12 +53,14 @@ pub fn render_actions_panel(msg: &Message, ctx: &RowCtx) -> AnyElement {
     panel.into_any_element()
 }
 
-fn render_message_button(
+pub(super) fn render_message_button(
     button: &MessageButton,
     message_id: MessageId,
     sender_id: i64,
     user_id: i64,
     index: usize,
+    inside: bool,
+    ctx: &RowCtx,
 ) -> AnyElement {
     let has_url = button.url.is_some();
     let icon = if has_url {
@@ -67,17 +69,25 @@ fn render_message_button(
         button_icon(button.icon.as_deref())
     };
     let element_id = SharedString::from(format!("msg-action-button-{}-{index}", message_id.get()));
+    let text_color = if inside {
+        ctx.theme.tokens.text_theme_message
+    } else {
+        rgb(BUTTON_TEXT)
+    };
 
     let mut element = div()
         .id(element_id)
         .flex()
         .items_center()
-        .px_5()
-        .py_1()
+        .when(inside, |el| el.p_2())
+        .when(!inside, |el| {
+            el.px_5()
+                .py_1()
+                .bg(button_bg(button.style))
+                .font_weight(FontWeight::MEDIUM)
+        })
         .rounded(px(4.))
-        .bg(button_bg(button.style))
-        .text_color(rgb(BUTTON_TEXT))
-        .font_weight(FontWeight::MEDIUM)
+        .text_color(text_color)
         .cursor_pointer()
         .hover(|s| s.opacity(0.7));
 
@@ -106,7 +116,7 @@ fn render_message_button(
     }
 
     if let Some(icon) = icon {
-        element = element.child(Icon::new(icon).size_4().text_color(rgb(BUTTON_TEXT)));
+        element = element.child(Icon::new(icon).size_4().text_color(text_color));
     }
     element = element.child(div().child(button.label.clone()));
     if has_url {
@@ -114,7 +124,7 @@ fn render_message_button(
             Icon::new(IconName::ForwardRightClick)
                 .size_4()
                 .ml_2()
-                .text_color(rgb(BUTTON_TEXT)),
+                .text_color(text_color),
         );
     }
     element.into_any_element()
@@ -283,7 +293,7 @@ pub(super) fn render_message_select(
         .into_any_element()
 }
 
-fn button_bg(style: i32) -> Rgba {
+pub(super) fn button_bg(style: i32) -> Rgba {
     match style {
         3 => rgb(COLOR_SUCCESS),
         4 => rgb(COLOR_DANGER),
@@ -406,6 +416,16 @@ impl SelectDropdown {
         let multiple = select_allows_multiple(self.min, self.max);
         let new_values = if multiple {
             if current.contains(&value) {
+                let remaining: Vec<SharedString> =
+                    current.into_iter().filter(|item| *item != value).collect();
+                store.update(cx, |store, cx| {
+                    store.set_message_select_selection(
+                        self.message_id,
+                        self.select_id.clone(),
+                        remaining,
+                        cx,
+                    );
+                });
                 cx.emit(DismissEvent);
                 return;
             }

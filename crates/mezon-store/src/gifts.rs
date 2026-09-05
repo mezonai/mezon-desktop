@@ -26,6 +26,14 @@ pub enum VoiceInteractiveApp {
 }
 
 impl VoiceInteractiveApp {
+    pub fn app_id(self) -> i64 {
+        match self {
+            Self::Quiz => 2_089_257_413_122_199_552,
+            Self::Blackboard => 2_089_294_331_818_020_864,
+            Self::Interactive => 2_089_273_739_668_623_360,
+        }
+    }
+
     pub fn event_type(self) -> VoiceInteractiveEventType {
         match self {
             Self::Quiz => VoiceInteractiveEventType::AppQuiz,
@@ -410,6 +418,18 @@ mod tests {
         assert_eq!(
             VoiceInteractiveApp::Interactive.event_type(),
             VoiceInteractiveEventType::AppInteractive
+        );
+        assert_eq!(
+            VoiceInteractiveApp::Quiz.app_id(),
+            2_089_257_413_122_199_552
+        );
+        assert_eq!(
+            VoiceInteractiveApp::Blackboard.app_id(),
+            2_089_294_331_818_020_864
+        );
+        assert_eq!(
+            VoiceInteractiveApp::Interactive.app_id(),
+            2_089_273_739_668_623_360
         );
     }
 

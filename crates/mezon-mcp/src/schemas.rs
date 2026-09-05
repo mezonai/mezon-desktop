@@ -81,6 +81,7 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
         | "get_account"
         | "get_current_context"
         | "get_scroll_state"
+        | "tour_state"
         | "close_panel"
         | "get_settings"
         | "get_voice_status"
@@ -153,6 +154,26 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["clan_id", "name"],
         )),
+        "tour_start" => Arc::new(object(
+            json!({
+                "track": { "type": "string", "description": "Track id. Omit to start the one matching the current route." },
+            }),
+            &[],
+        )),
+        "tour_advance" => Arc::new(object(
+            json!({
+                "forward": { "type": "boolean", "description": "true for the next step, false to go back. Default true." },
+            }),
+            &[],
+        )),
+        "mute_channel" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id. Use 0 for direct messages."),
+                "channel_id": id("Channel snowflake id."),
+                "mute_minutes": integer("Minutes to mute. Use -1 forever or 0 to unmute.", Some(0)),
+            }),
+            &["clan_id", "channel_id"],
+        )),
         "channel_menu_open" => Arc::new(object(
             json!({
                 "clan_id": id("Clan snowflake id from list_clans."),
@@ -221,6 +242,33 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
                 "pin_id": id("Pin entry id from list_pinned_messages."),
             }),
             &["clan_id", "channel_id", "message_id", "pin_id"],
+        )),
+        #[cfg(debug_assertions)]
+        "set_channel_age_restricted" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id."),
+                "channel_id": id("Channel snowflake id."),
+                "on": { "type": "boolean", "description": "Enable the gate. Default true." },
+            }),
+            &["clan_id", "channel_id"],
+        )),
+        #[cfg(debug_assertions)]
+        "set_local_dob" => Arc::new(object(
+            json!({
+                "seconds": { "type": "integer", "description": "Unix seconds of the birthday. 0 = never entered." },
+            }),
+            &["seconds"],
+        )),
+        #[cfg(debug_assertions)]
+        "inject_preview_message" => Arc::new(object(
+            json!({
+                "content": {
+                    "type": "object",
+                    "description": "Raw mezon message content payload, e.g. {\"t\": \"hi\", \"embed\": [...], \"components\": [...]}."
+                },
+                "sender_name": string("Display name for the injected sender. Default \"Embed Preview\"."),
+            }),
+            &["content"],
         )),
         "create_poll" => Arc::new(object(
             json!({
@@ -340,6 +388,13 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["message_id"],
         )),
+        "open_pdf_viewer" => Arc::new(object(
+            json!({
+                "message_id": id("Message carrying the pdf attachment."),
+                "attachment_index": integer("Zero-based attachment index. Default 0.", Some(0)),
+            }),
+            &["message_id"],
+        )),
         "scroll_wheel" => Arc::new(object(
             json!({
                 "delta_y": { "type": "number", "description": "Pixels per tick. Negative scrolls toward older messages. Default -120.", "default": -120 },
@@ -445,6 +500,16 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             json!({ "text": string("Full composer text to set.") }),
             &["text"],
         )),
+        "topic_pick" => Arc::new(object(
+            json!({
+                "index": json!({
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Index into the suggestion list (default 0)."
+                }),
+            }),
+            &[],
+        )),
         "composer_pick" => Arc::new(object(
             json!({
                 "index": json!({
@@ -483,6 +548,16 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["kind", "url"],
         )),
+        "topic_drop_paths" => Arc::new(object(
+            json!({
+                "paths": json!({
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Local file paths to drop on the topic composer."
+                }),
+            }),
+            &["paths"],
+        )),
         "composer_drop_paths" => Arc::new(object(
             json!({
                 "paths": json!({
@@ -493,10 +568,7 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["paths"],
         )),
-        "send_buzz" => Arc::new(object(
-            json!({ "text": string("Buzz text.") }),
-            &[],
-        )),
+        "send_buzz" => Arc::new(object(json!({ "text": string("Buzz text.") }), &[])),
         "send_attachment" => Arc::new(object(
             json!({
                 "path": string("Local filesystem path to one file to send."),
@@ -542,8 +614,15 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
         "list_loaded_messages" => Arc::new(object(
             json!({
                 "limit": integer("Max rows from each end of the buffer. Default 50.", Some(50)),
+                "topic": bool("Read the open topic panel's buffer instead of the channel's. Default false."),
             }),
             &[],
+        )),
+        "reply_begin" => Arc::new(object(
+            json!({
+                "message_id": id("Message to reply to; must be in the open channel's loaded history."),
+            }),
+            &["message_id"],
         )),
         "jump_to_message" => Arc::new(object(
             json!({

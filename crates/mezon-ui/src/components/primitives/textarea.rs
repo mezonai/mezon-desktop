@@ -3,10 +3,10 @@ use std::ops::Range;
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Div, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla,
-    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce, SharedString, Style,
-    StyleRefinement, Styled, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
-    WrappedLine, div, fill, point, prelude::*, px, size,
+    ImeSurroundingText, InspectorElementId, IntoElement, KeyDownEvent, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce,
+    SharedString, Style, StyleRefinement, Styled, TextAlign, TextRun, UTF16Selection,
+    UnderlineStyle, Window, WrappedLine, div, fill, point, prelude::*, px, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -23,8 +23,9 @@ use crate::components::primitives::text_actions::{
 };
 use crate::util::text_edit::{
     EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
-    granularity_for_click, home_target, line_end, line_start, next_word_boundary,
-    previous_word_boundary, range_for_granularity, should_coalesce,
+    granularity_for_click, home_target, ime_replace_range, line_end, line_start,
+    marked_caret_range, marked_range_after_delete, next_word_boundary, previous_word_boundary,
+    range_for_granularity, should_coalesce, surrounding_delete_range, swallow_discarded_ime_commit,
 };
 
 const DEFAULT_MAX_VISIBLE_LINES: usize = 8;
@@ -37,6 +38,12 @@ pub enum TextAreaEvent {
 
 fn normalize_pasted(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn keep_numeric(text: &str) -> String {
+    text.chars()
+        .filter(|ch| ch.is_ascii_digit() || *ch == '.' || *ch == '-')
+        .collect()
 }
 
 fn byte_offset_to_utf16(text: &str, byte_offset: usize) -> usize {
@@ -95,6 +102,7 @@ pub struct TextArea {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
+    discard_ime_commit: Option<String>,
     last_lines: Vec<DocLine>,
     last_bounds: Option<Bounds<Pixels>>,
     line_height: Pixels,
@@ -106,6 +114,7 @@ pub struct TextArea {
     select_granularity: SelectGranularity,
     select_anchor: Range<usize>,
     single_line: bool,
+    numeric: bool,
     bg: Option<Hsla>,
     text_color: Option<Hsla>,
     text_size: Pixels,
@@ -145,6 +154,7 @@ impl TextArea {
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
+            discard_ime_commit: None,
             last_lines: Vec::new(),
             last_bounds: None,
             line_height: px(20.),
@@ -156,6 +166,7 @@ impl TextArea {
             select_granularity: SelectGranularity::Character,
             select_anchor: 0..0,
             single_line: false,
+            numeric: false,
             bg: None,
             text_color: None,
             text_size: px(14.),
@@ -192,6 +203,11 @@ impl TextArea {
         if single_line {
             self.max_visible_lines = 1;
         }
+        self
+    }
+
+    pub fn numeric(mut self, numeric: bool) -> Self {
+        self.numeric = numeric;
         self
     }
 
@@ -458,6 +474,7 @@ impl TextArea {
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.marked_range = None;
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx);
     }
@@ -559,7 +576,7 @@ impl TextArea {
             }
             self.extend_selection(prev, cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_selected_range(window, cx);
     }
 
     fn delete_to_next_word_end(
@@ -575,7 +592,7 @@ impl TextArea {
             }
             self.extend_selection(next, cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_selected_range(window, cx);
     }
 
     fn delete_to_line_start(
@@ -591,7 +608,7 @@ impl TextArea {
             }
             self.extend_selection(target, cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_selected_range(window, cx);
     }
 
     fn delete_to_line_end(
@@ -607,7 +624,7 @@ impl TextArea {
             }
             self.extend_selection(target, cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_selected_range(window, cx);
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
@@ -673,7 +690,7 @@ impl TextArea {
             }
             self.extend_selection(prev, cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_selected_range(window, cx);
     }
 
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
@@ -684,7 +701,12 @@ impl TextArea {
             }
             self.extend_selection(next, cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_selected_range(window, cx);
+    }
+
+    fn delete_selected_range(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let range_utf16 = self.range_to_utf16(&self.selected_range);
+        self.replace_text_in_range(Some(range_utf16), "", window, cx);
     }
 
     fn enter(&mut self, _: &Enter, window: &mut Window, cx: &mut Context<Self>) {
@@ -696,16 +718,22 @@ impl TextArea {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-            return;
-        };
-        let normalized = normalize_pasted(&text);
-        let sanitized = if self.single_line {
-            normalized.replace('\n', " ")
-        } else {
-            normalized
-        };
-        self.replace_text_in_range(None, &sanitized, window, cx);
+        mezon_widgets::clipboard::read_then(self, window, cx, |this, item, window, cx| {
+            let Some(text) = item.text() else {
+                return;
+            };
+            let normalized = normalize_pasted(&text);
+            let sanitized = if this.single_line {
+                normalized.replace('\n', " ")
+            } else {
+                normalized
+            };
+            this.replace_text_in_range(None, &sanitized, window, cx);
+        });
+    }
+
+    fn on_key_down(&mut self, _: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {
+        self.discard_ime_commit = None;
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -721,7 +749,7 @@ impl TextArea {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
             ));
-            self.replace_text_in_range(None, "", window, cx);
+            self.delete_selected_range(window, cx);
         }
     }
 
@@ -866,6 +894,11 @@ impl EntityInputHandler for TextArea {
     }
 
     fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        #[cfg(target_os = "linux")]
+        if let Some(marked) = self.marked_range.clone() {
+            let marked = self.clamp_range(marked);
+            self.discard_ime_commit = self.content.get(marked).map(str::to_string);
+        }
         self.marked_range = None;
     }
 
@@ -876,17 +909,34 @@ impl EntityInputHandler for TextArea {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let range = range_utf16
-            .as_ref()
-            .map(|range| self.range_from_utf16(range))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
+        if swallow_discarded_ime_commit(
+            &mut self.discard_ime_commit,
+            range_utf16.as_ref(),
+            self.marked_range.is_some(),
+            new_text,
+        ) {
+            return;
+        }
+        let range = if let Some(range_utf16) = range_utf16.as_ref() {
+            self.range_from_utf16(range_utf16)
+        } else {
+            ime_replace_range(&self.selected_range, self.marked_range.as_ref())
+        };
         let range = self.clamp_range(range);
-        let kind = if self.marked_range.is_some() {
-            EditKind::Insert
-        } else if new_text.is_empty() {
+        let prior_marked = self.marked_range.clone();
+        let numeric_text;
+        let new_text = if self.numeric && !new_text.is_empty() {
+            numeric_text = keep_numeric(new_text);
+            if numeric_text.is_empty() {
+                return;
+            }
+            numeric_text.as_str()
+        } else {
+            new_text
+        };
+        let kind = if new_text.is_empty() {
             EditKind::Delete
-        } else if range.is_empty() && !new_text.contains('\n') {
+        } else if self.marked_range.is_some() || (range.is_empty() && !new_text.contains('\n')) {
             EditKind::Insert
         } else {
             EditKind::Other
@@ -896,7 +946,11 @@ impl EntityInputHandler for TextArea {
         self.set_content(next);
         let cursor = self.clamp_offset((range.start + new_text.len()).min(self.content.len()));
         self.selected_range = cursor..cursor;
-        self.marked_range = None;
+        if new_text.is_empty() {
+            self.marked_range = marked_range_after_delete(prior_marked.as_ref(), &range);
+        } else {
+            self.marked_range = None;
+        }
         self.caret_blink.pause_blinking(cx);
         cx.notify();
         cx.emit(TextAreaEvent::Change);
@@ -910,6 +964,17 @@ impl EntityInputHandler for TextArea {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if swallow_discarded_ime_commit(
+            &mut self.discard_ime_commit,
+            range_utf16.as_ref(),
+            self.marked_range.is_some(),
+            new_text,
+        ) {
+            return;
+        }
+        if new_text.is_empty() && range_utf16.is_none() && self.marked_range.is_none() {
+            return;
+        }
         let range = range_utf16
             .as_ref()
             .map(|range| self.range_from_utf16(range))
@@ -929,11 +994,8 @@ impl EntityInputHandler for TextArea {
                     range.start..(range.start + new_text.len()).min(self.content.len()),
                 ));
         }
-        self.selected_range = new_selected_range_utf16
-            .as_ref()
-            .map(|range| self.range_from_utf16(range))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.start)
-            .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+        self.selected_range =
+            marked_caret_range(range.start, new_text, new_selected_range_utf16.as_ref());
         self.caret_blink.pause_blinking(cx);
         cx.notify();
         cx.emit(TextAreaEvent::Change);
@@ -990,6 +1052,41 @@ impl EntityInputHandler for TextArea {
         self.last_bounds?;
         Some(self.offset_to_utf16(self.index_for_mouse_position(point)))
     }
+
+    fn surrounding_text(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<ImeSurroundingText> {
+        Some(ImeSurroundingText::from_selection(
+            &self.content,
+            self.selected_range.clone(),
+            self.selection_reversed,
+            self.marked_range.clone(),
+        ))
+    }
+
+    fn delete_surrounding_text(
+        &mut self,
+        before_len: usize,
+        after_len: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = surrounding_delete_range(
+            &self.content,
+            &self.selected_range,
+            self.marked_range.as_ref(),
+            self.selection_reversed,
+            before_len,
+            after_len,
+        );
+        if range.is_empty() {
+            return;
+        }
+        let range_utf16 = self.range_to_utf16(&range);
+        self.replace_text_in_range(Some(range_utf16), "", window, cx);
+    }
 }
 
 impl Render for TextArea {
@@ -1008,6 +1105,7 @@ impl Render for TextArea {
             .key_context(TEXT_INPUT_CONTEXT)
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
+            .on_key_down(cx.listener(Self::on_key_down))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::enter))

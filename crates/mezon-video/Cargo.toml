@@ -28,6 +28,10 @@ gstreamer = "0.23"
 gstreamer-app = "0.23"
 gstreamer-video = "0.23"
 gdk-pixbuf = "0.20"
+# A stock Ubuntu desktop has no h264 decoder, so the GStreamer probe finds nothing
+# there. These two let us decode the keyframe ourselves; see poster_fallback.rs.
+mp4 = "0.14"
+openh264 = "0.9"
 
 [target.'cfg(windows)'.dependencies]
 windows-core.workspace = true
