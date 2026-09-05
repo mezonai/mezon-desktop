@@ -170,10 +170,33 @@ impl Session {
         }
     }
 
+    /// Adopt the gateway's answer to a health report. The `session_id` we hold is presumed live,
+    /// so it is only replaced when the gateway moves us to another node (or we hold none) — a
+    /// working session slot must not be burned for nothing.
     pub fn apply_healthy_endpoint(
         &mut self,
         endpoint: &HealthyEndpointSession,
         default_port: Option<u16>,
+    ) -> bool {
+        self.apply_healthy_endpoint_with(endpoint, default_port, false)
+    }
+
+    /// Adopt the gateway's answer to a *refused* `session_id`. The credential we hold is exactly
+    /// the one to replace, so the minted one is taken even when the gateway keeps us on the
+    /// same node.
+    pub fn apply_reminted_endpoint(
+        &mut self,
+        endpoint: &HealthyEndpointSession,
+        default_port: Option<u16>,
+    ) -> bool {
+        self.apply_healthy_endpoint_with(endpoint, default_port, true)
+    }
+
+    fn apply_healthy_endpoint_with(
+        &mut self,
+        endpoint: &HealthyEndpointSession,
+        default_port: Option<u16>,
+        adopt_session_id: bool,
     ) -> bool {
         if endpoint.realtime_endpoint(default_port).is_none() {
             return false;
@@ -203,22 +226,28 @@ impl Session {
         let (tcp_host, tcp_port, _) = parse_endpoint(tcp_url.as_deref());
 
         self.api_url = api_url;
-        self.api_host = api_host;
-        self.api_port = api_port;
-        self.api_secure = api_secure;
+        if let Some(host) = api_host.filter(|h| !h.is_empty()) {
+            self.api_host = Some(host);
+            self.api_port = api_port;
+            self.api_secure = api_secure;
+        }
         self.ws_url = ws_url;
-        self.ws_host = ws_host;
-        self.ws_port = ws_port;
-        self.ws_secure = ws_secure;
+        if let Some(host) = ws_host.filter(|h| !h.is_empty()) {
+            self.ws_host = Some(host);
+            self.ws_port = ws_port;
+            self.ws_secure = ws_secure;
+        }
         self.tcp_url = tcp_url;
-        self.tcp_host = tcp_host;
-        self.tcp_port = tcp_port;
+        if let Some(host) = tcp_host.filter(|h| !h.is_empty()) {
+            self.tcp_host = Some(host);
+            self.tcp_port = tcp_port;
+        }
 
         let node_after = (self.named_realtime_host(), self.realtime_port(default_port));
         let stays_on_the_same_node = node_before.0.is_some() && node_before == node_after;
 
         if !endpoint.session_id.is_empty()
-            && (!stays_on_the_same_node || self.session_id.is_empty())
+            && (adopt_session_id || !stays_on_the_same_node || self.session_id.is_empty())
         {
             self.session_id = endpoint.session_id.clone();
         }
@@ -626,5 +655,70 @@ mod tests {
         };
         assert!(session.apply_healthy_endpoint(&moved, Some(4433)));
         assert_eq!(session.endpoint_id, 0);
+    }
+
+    #[test]
+    fn a_remint_on_the_same_node_replaces_the_refused_session_id() {
+        let session = Session {
+            user_id: "7".into(),
+            session_id: "dead-sid".into(),
+            tcp_url: Some("sock.example.com:4433".into()),
+            tcp_host: Some("sock.example.com".into()),
+            tcp_port: Some(4433),
+            ..Default::default()
+        };
+        let minted = HealthyEndpointSession {
+            user_id: "7".into(),
+            session_id: "minted-sid".into(),
+            tcp_url: Some("sock.example.com:4433".into()),
+            ..Default::default()
+        };
+
+        // A health report keeps the credential it believes is live.
+        let mut reported = session.clone();
+        assert!(reported.apply_healthy_endpoint(&minted, Some(4433)));
+        assert_eq!(reported.session_id, "dead-sid");
+
+        // A remint exists because that credential was refused — the minted one must win.
+        let mut reminted = session;
+        assert!(reminted.apply_reminted_endpoint(&minted, Some(4433)));
+        assert_eq!(reminted.session_id, "minted-sid");
+        assert_eq!(reminted.tcp_host.as_deref(), Some("sock.example.com"));
+        assert_eq!(reminted.tcp_port, Some(4433));
+    }
+
+    #[test]
+    fn apply_healthy_endpoint_keeps_hosts_when_url_does_not_parse() {
+        let mut session = Session {
+            user_id: "7".into(),
+            session_id: "old".into(),
+            api_url: Some("https://api.mezon.ai:443".into()),
+            api_host: Some("api.mezon.ai".into()),
+            api_port: Some(443),
+            ws_url: Some("wss://ws.mezon.ai:443".into()),
+            ws_host: Some("ws.mezon.ai".into()),
+            ws_port: Some(443),
+            tcp_url: Some("tcp://tcp.mezon.ai:7349".into()),
+            tcp_host: Some("tcp.mezon.ai".into()),
+            tcp_port: Some(7349),
+            ..Default::default()
+        };
+        let bad = HealthyEndpointSession {
+            user_id: "7".into(),
+            session_id: "new-sid".into(),
+            api_url: Some("https://[".into()),
+            ws_url: Some("://bad".into()),
+            tcp_url: Some("tcp://[".into()),
+            ..Default::default()
+        };
+        assert!(!session.apply_healthy_endpoint(&bad, Some(7349)));
+        assert_eq!(session.session_id, "old");
+        assert_eq!(session.api_host.as_deref(), Some("api.mezon.ai"));
+        assert_eq!(session.api_url.as_deref(), Some("https://api.mezon.ai:443"));
+        assert_eq!(session.ws_host.as_deref(), Some("ws.mezon.ai"));
+        assert_eq!(session.ws_url.as_deref(), Some("wss://ws.mezon.ai:443"));
+        assert_eq!(session.tcp_host.as_deref(), Some("tcp.mezon.ai"));
+        assert_eq!(session.tcp_url.as_deref(), Some("tcp://tcp.mezon.ai:7349"));
+        assert_eq!(session.tcp_port, Some(7349));
     }
 }

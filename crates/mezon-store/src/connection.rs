@@ -39,29 +39,28 @@ const DEBUG_FAILOVER_SIMULATION_ENV: &str = "MEZON_DEBUG_FAILOVER_SIMULATION";
 const DEBUG_FAILOVER_FULL_CYCLE: &str = "full-cycle";
 #[cfg(debug_assertions)]
 const DEBUG_FAILOVER_SLOW_SWITCH: &str = "slow-switch";
-/// The gateway discards its own 401 before it reaches the wire (`cleanup_connection` clears the
-/// write queue that `flush_ssl_wbio` had only queued), so a dead `session_id`, the per-user session
-/// limit and a plain outage all arrive as an identical silent close. After this many silent
-/// refusals we stop guessing and re-handshake with the JWT — the one credential the server has just
-/// confirmed by minting it.
+/// After this many SID handshake failures (explicit 401/403 *or* silent drop) we re-handshake with
+/// the JWT. Proto-server often cleans up before the 401 reaches the wire, so a dead SID arrives as
+/// a silent drop — credential *switch* must treat that as recoverable. This counter never logs out.
 const SSID_REFUSALS_BEFORE_JWT: u32 = 1;
-/// How many refusals of the JWT itself before asking the API host whether the account still
-/// exists. The JWT was just minted by the server, so its refusal means either the whole session is
-/// gone or the gateway is turning connections away for its own reasons — only an authenticated
-/// HTTP call separates the two.
+/// How many JWT handshake failures (explicit 401/403 *or* silent drop) before asking the API host
+/// whether the account still exists. Proto-server often drops the 401 before it reaches the wire,
+/// so a dead JWT arrives as SilentDrop — counting only ExplicitReject would never run the probe.
 const JWT_REFUSALS_BEFORE_PROBE: u32 = 1;
 const JWT_SKEW: std::time::Duration = std::time::Duration::from_secs(60);
-/// Result of a single reconnect attempt. Only a rejected credential (the server accepted the TCP
-/// connection but refused the handshake) is treated as a dead session; an unreachable server must
-/// never discard the persisted session.
+/// Result of a single reconnect attempt. Credential *switch* (SID → JWT) and *logout* are separate
+/// policies: SID silent/explicit failures may remint then JWT; JWT silent/explicit failures plus
+/// a rejected GetAccount probe may log out.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ConnectOutcome {
     Confirmed,
-    /// The gateway took the connection and then dropped it. It is up and choosing not to serve us,
-    /// so the credentials are worth questioning.
-    Refused,
+    /// Gateway returned HTTP 401/403 for the handshake credential.
+    ExplicitReject,
+    /// TCP opened then closed without an explicit 401/403. Dead SID, session-limit, and many
+    /// gateway incidents look like this — never logout from this alone.
+    SilentDrop,
     /// The host never answered — DNS, routing, a dead port. This says nothing about credentials
-    /// and must never advance the checks that can end in a logout.
+    /// and must never advance credential switch or logout.
     Unreachable,
 }
 
@@ -223,6 +222,10 @@ impl ConnectionStore {
         let api_server_key = AppConfig::try_global(cx)
             .map(|cfg| cfg.api_key.clone())
             .unwrap_or_default();
+        let gw_base = AppConfig::try_global(cx)
+            .filter(|cfg| !cfg.client_host().trim().is_empty())
+            .map(|cfg| cfg.client_base_url())
+            .unwrap_or_default();
 
         let manager = cx.spawn(async move |this, cx| {
             let exec = cx.background_executor().clone();
@@ -237,6 +240,10 @@ impl ConnectionStore {
             let mut gateway_refusals = 0u32;
             let mut jwt_refusals = 0u32;
             let mut probed_this_outage = false;
+            let mut reminted_this_outage = false;
+            let mut last_remint_attempt_at: Option<Instant> = None;
+            let mut remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+            let mut remint_unsupported = false;
             let mut endpoint_refresh_rx = endpoint_refresh_rx;
             let mut pending_endpoint_refresh: Option<EndpointRefreshRequest> = None;
             let mut last_endpoint_refresh_at: Option<Instant> = None;
@@ -273,6 +280,13 @@ impl ConnectionStore {
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
                     network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
+                    gateway_refusals = 0;
+                    jwt_refusals = 0;
+                    probed_this_outage = false;
+                    reminted_this_outage = false;
+                    last_remint_attempt_at = None;
+                    remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+                    remint_unsupported = false;
                     wake.notified().await;
                     continue;
                 };
@@ -389,6 +403,7 @@ impl ConnectionStore {
                                 &session.user_id,
                                 &response,
                                 tcp_default_port,
+                                MintedSessionId::KeepUnlessMoved,
                                 cx,
                             ) else {
                                 tracing::warn!(
@@ -455,9 +470,9 @@ impl ConnectionStore {
                     &api_server_key,
                 ));
 
-                if connected_user_id.as_deref() == Some(session.user_id.as_str())
-                    && transport.is_open().await
-                {
+                let already_connected = connected_user_id.as_deref() == Some(session.user_id.as_str())
+                    && transport.is_open().await;
+                if already_connected && !session.session_id.is_empty() {
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
                     if pending_endpoint_refresh.is_some() {
@@ -513,18 +528,128 @@ impl ConnectionStore {
 
                 }
 
-                // Two credentials authenticate the same session; the JWT is the escape hatch when
-                // the stored `session_id` keeps being refused.
-                let use_jwt = should_lead_with_jwt(&session, gateway_refusals);
-                if use_jwt && !jwt_is_fresh(&session) {
+                // Two credentials authenticate the same session. SID handshake failures (including
+                // silent drops — proto-server often drops the 401 before it reaches the wire) first
+                // try GetHealthyEndpoint to mint a fresh SID. JWT socket is only the fallback when
+                // remint fails. Logout follows a JWT handshake failure (silent or explicit) plus a
+                // rejected authenticated HTTP probe.
+                //
+                // `reminted_this_outage` latches only on *success* so a dead reminted SID is not
+                // re-minted in a tight loop; remint *errors* must not latch — otherwise one gw 503
+                // leaves the session SID-empty for the whole outage. Errors are paced instead
+                // (5s doubling to 60s): a connected JWT-only session wakes on every auth-state
+                // change, and each wake would otherwise cost the gateway a call. A 404 says the
+                // gateway has no such route at all, so that one does latch until the next
+                // confirmed handshake.
+                let remint_due_in = endpoint_refresh_retry_in(
+                    last_remint_attempt_at,
+                    remint_retry_secs,
+                    Instant::now(),
+                );
+                let needs_sid_recovery = should_attempt_sid_remint(
+                    &session,
+                    gateway_refusals,
+                    reminted_this_outage,
+                    !gw_base.is_empty() && !remint_unsupported,
+                );
+                if (needs_sid_recovery || should_lead_with_jwt(&session, gateway_refusals))
+                    && !jwt_is_fresh(&session)
+                {
                     let (renewed, verdict) =
                         refresh_jwt_for_fallback(&api, &auth_state, session.clone(), cx).await;
                     session = renewed;
                     if verdict == RefreshVerdict::Renewed {
-                        // This rotation counts as the once-per-run keep-alive.
                         refreshed_this_run = true;
                     }
                 }
+                if needs_sid_recovery && remint_due_in.is_zero() {
+                    if jwt_is_fresh(&session) {
+                        last_remint_attempt_at = Some(Instant::now());
+                        match remint_session_via_healthy_endpoint(
+                            &auth_client,
+                            &api,
+                            &auth_state,
+                            &session,
+                            configured_api_base.as_deref(),
+                            &api_server_key,
+                            &exec,
+                            tcp_default_port,
+                            cx,
+                        )
+                        .await
+                        {
+                            Ok(renewed) => {
+                                session = renewed;
+                                gateway_refusals = 0;
+                                reminted_this_outage = true;
+                                last_remint_attempt_at = None;
+                                remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+                                tracing::info!(
+                                    "Reminted session_id via GetHealthyEndpoint — retrying SID handshake"
+                                );
+                                // Retire a JWT-only connection the way a node move does: bump the
+                                // generation first so its close callback cannot land on the SID
+                                // handshake that follows.
+                                if connected_user_id.take().is_some() || transport.is_open().await {
+                                    connection_generation.fetch_add(1, Ordering::AcqRel);
+                                    api.set_status(ConnectionStatus::Disconnected);
+                                    if let Err(e) = transport.close().await {
+                                        tracing::warn!(
+                                            "Failed to close the JWT-only transport before the SID handshake: {e}"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                remint_retry_secs =
+                                    next_healthy_endpoint_retry_secs(remint_retry_secs);
+                                if healthy_endpoint_route_missing(&e) {
+                                    remint_unsupported = true;
+                                    tracing::warn!(
+                                        "The gateway has no healthy-endpoint route ({e}) — staying on the JWT handshake until the next confirmed connection"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "GetHealthyEndpoint could not remint session_id ({e}) — falling back to JWT handshake, next remint in {remint_retry_secs}s"
+                                    );
+                                }
+                                if already_connected {
+                                    retry_backoff_secs = 1;
+                                    consecutive_failures = 0;
+                                    if remint_unsupported {
+                                        wake.notified().await;
+                                    } else {
+                                        tokio::select! {
+                                            _ = wake.notified() => {}
+                                            _ = exec.timer(Duration::from_secs(remint_retry_secs)) => {}
+                                        }
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                    } else if already_connected {
+                        retry_backoff_secs = 1;
+                        consecutive_failures = 0;
+                        wake.notified().await;
+                        continue;
+                    }
+                } else if already_connected {
+                    retry_backoff_secs = 1;
+                    consecutive_failures = 0;
+                    if needs_sid_recovery {
+                        // A JWT-only connection whose remint is paced out: come back when it is due.
+                        tokio::select! {
+                            _ = wake.notified() => {}
+                            _ = exec.timer(remint_due_in) => {}
+                        }
+                    } else {
+                        wake.notified().await;
+                    }
+                    continue;
+                }
+
+                let use_jwt = should_lead_with_jwt(&session, gateway_refusals);
 
                 // Probe only with a token the server would still accept. A JWT we failed to renew
                 // (a 503 from SessionRefresh is enough) answers 403 because it is expired, not
@@ -561,6 +686,11 @@ impl ConnectionStore {
                                 consecutive_failures = 0;
                                 gateway_refusals = 0;
                                 jwt_refusals = 0;
+                                reminted_this_outage = false;
+                                last_remint_attempt_at = None;
+                                remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+                                remint_unsupported = false;
+                                probed_this_outage = false;
                                 retry_backoff_secs = 1;
                                 continue;
                             }
@@ -603,7 +733,7 @@ impl ConnectionStore {
                 api.set_status(ConnectionStatus::Connecting);
                 let token = if use_jwt {
                     tracing::info!(
-                        "Handshaking with the JWT after {gateway_refusals} refusals by the gateway"
+                        "Handshaking with the JWT after {gateway_refusals} SID handshake failures (session_id kept)"
                     );
                     session.token.clone()
                 } else {
@@ -681,12 +811,19 @@ impl ConnectionStore {
                             ConnectOutcome::Confirmed
                         } else {
                             let rejected = transport.credential_rejected();
+                            let frames = transport.frames_received();
                             let _ = transport.close().await;
-                            tracing::warn!(
-                                "Gateway dropped the connection (explicit rejection: {rejected}, server frames: {})",
-                                transport.frames_received()
-                            );
-                            ConnectOutcome::Refused
+                            if rejected {
+                                tracing::warn!(
+                                    "Gateway explicitly rejected the credential (server frames: {frames})"
+                                );
+                                ConnectOutcome::ExplicitReject
+                            } else {
+                                tracing::warn!(
+                                    "Gateway dropped the connection without an explicit reject (server frames: {frames}) — treating as transient"
+                                );
+                                ConnectOutcome::SilentDrop
+                            }
                         }
                     }
                     Err(e) => {
@@ -706,6 +843,10 @@ impl ConnectionStore {
                     gateway_refusals = 0;
                     jwt_refusals = 0;
                     probed_this_outage = false;
+                    reminted_this_outage = false;
+                    last_remint_attempt_at = None;
+                    remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+                    remint_unsupported = false;
                     pending_endpoint_refresh = None;
                     if endpoint_refresh_retry_in(
                         last_endpoint_refresh_at,
@@ -801,17 +942,38 @@ impl ConnectionStore {
                 connected_user_id = None;
                 api.set_status(ConnectionStatus::Disconnected);
                 consecutive_failures += 1;
-                let refused = outcome == ConnectOutcome::Refused;
-                if refused {
-                    gateway_refusals += 1;
-                    if use_jwt && network_confirmed {
-                        jwt_refusals += 1;
-                    } else if use_jwt {
+
+                let refused = matches!(
+                    outcome,
+                    ConnectOutcome::ExplicitReject | ConnectOutcome::SilentDrop
+                );
+
+                let switched_to_jwt = match (outcome, use_jwt) {
+                    (
+                        ConnectOutcome::ExplicitReject | ConnectOutcome::SilentDrop,
+                        false,
+                    ) => {
+                        gateway_refusals += 1;
                         tracing::info!(
-                            "JWT refusal seen without a confirmed network — not counting it against the session"
+                            "SID handshake failed ({outcome:?}) — reminting session_id and retrying SID before JWT fallback, without discarding session_id"
                         );
+                        true
                     }
-                }
+                    (
+                        ConnectOutcome::ExplicitReject | ConnectOutcome::SilentDrop,
+                        true,
+                    ) => {
+                        if network_confirmed {
+                            jwt_refusals += 1;
+                        } else {
+                            tracing::info!(
+                                "JWT handshake failed without a confirmed network — not counting it against the session"
+                            );
+                        }
+                        false
+                    }
+                    (ConnectOutcome::Unreachable | ConnectOutcome::Confirmed, _) => false,
+                };
 
                 let node_is_not_serving = outcome == ConnectOutcome::Unreachable
                     || (refused && use_jwt && jwt_refusals >= JWT_REFUSALS_BEFORE_PROBE);
@@ -824,14 +986,6 @@ impl ConnectionStore {
                     });
                 }
 
-                let switched_to_jwt = if refused && !use_jwt {
-                    discard_session_id(&auth_state, cx).await
-                } else {
-                    false
-                };
-
-                // No connect failure ends the session: a refusal is answered by trying the other
-                // credential and then asking the API host, an unreachable host by waiting.
                 if reached_failure_limit(consecutive_failures) {
                     promote_connecting_to_authenticated(&auth_state, cx);
                 }
@@ -1178,53 +1332,77 @@ async fn refresh_jwt_for_fallback(
     (session, RefreshVerdict::Renewed)
 }
 
-fn should_lead_with_jwt(session: &Session, gateway_refusals: u32) -> bool {
-    session.session_id.is_empty() || gateway_refusals >= SSID_REFUSALS_BEFORE_JWT
-}
+async fn remint_session_via_healthy_endpoint(
+    auth_client: &MezonClient,
+    api: &Arc<AppApi>,
+    auth_state: &Entity<AuthState>,
+    session: &Session,
+    configured_api_base: Option<&str>,
+    api_server_key: &str,
+    exec: &BackgroundExecutor,
+    tcp_default_port: Option<u16>,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<Session> {
+    let healthy = fetch_healthy_endpoint_with_timeout(
+        exec,
+        auth_client,
+        &session.token,
+        session.endpoint_id,
+        HealthyEndpointReason::Unreachable,
+    )
+    .await?;
 
-fn clear_socket_credential(session: &mut Session) -> bool {
-    if session.session_id.is_empty() {
-        return false;
+    let renewed = apply_healthy_endpoint_to_auth(
+        auth_state,
+        &session.user_id,
+        &healthy,
+        tcp_default_port,
+        MintedSessionId::Adopt,
+        cx,
+    )
+    .ok_or_else(|| anyhow::anyhow!("auth state changed during GetHealthyEndpoint"))?;
+    // A gateway that only mints when the node changes answers with the old credential — retrying
+    // the SID handshake with it would just fail again.
+    if renewed.session_id.is_empty() || renewed.session_id == session.session_id {
+        anyhow::bail!("the gateway answered without minting a new session_id");
     }
-    session.session_id.clear();
-    true
+
+    api.set_http_fallback(http_fallback_session(
+        &renewed,
+        configured_api_base,
+        api_server_key,
+    ));
+
+    let persisted = renewed.clone();
+    exec.spawn(async move {
+        if let Err(e) = keychain::save_session(&persisted) {
+            tracing::warn!("Failed to persist reminted session_id: {e}");
+        }
+    })
+    .await;
+
+    Ok(renewed)
 }
 
-async fn discard_session_id(auth_state: &Entity<AuthState>, cx: &mut AsyncApp) -> bool {
-    let cleared = cx.update(|cx| {
-        auth_state.update(cx, |state, cx| {
-            let session = match state {
-                AuthState::Authenticated(s) | AuthState::Connecting(s) => s,
-                _ => return None,
-            };
-            if !clear_socket_credential(session) {
-                return None;
-            }
-            cx.notify();
-            Some(session.clone())
-        })
-    });
-    let Some(session) = cleared else {
-        return false;
-    };
-
-    tracing::info!(
-        "The gateway refused the stored session_id — dropping it so the JWT leads until the server pushes a new one"
-    );
-    cx.background_executor()
-        .spawn(async move {
-            if let Err(e) = keychain::save_session(&session) {
-                tracing::warn!("Failed to persist the session without its refused session_id: {e}");
-            }
-        })
-        .await;
-    true
+fn should_attempt_sid_remint(
+    session: &Session,
+    sid_failures: u32,
+    reminted_successfully_this_outage: bool,
+    gw_configured: bool,
+) -> bool {
+    gw_configured
+        && !reminted_successfully_this_outage
+        && (session.session_id.is_empty() || sid_failures >= SSID_REFUSALS_BEFORE_JWT)
 }
 
-/// Whether the JWT can still authenticate a handshake or an HTTP call.
+fn should_lead_with_jwt(session: &Session, sid_failures: u32) -> bool {
+    session.session_id.is_empty() || sid_failures >= SSID_REFUSALS_BEFORE_JWT
+}
+
 fn jwt_is_fresh(session: &Session) -> bool {
     !session.token.is_empty()
-        && (session.expires_at == 0 || now_secs() + JWT_SKEW.as_secs() < session.expires_at)
+        && session.expires_at != 0
+        && now_secs() + JWT_SKEW.as_secs() < session.expires_at
 }
 
 fn healthy_endpoint_credential(session: &Session) -> Option<HealthyEndpointCredential> {
@@ -1265,6 +1443,14 @@ fn healthy_endpoint_auth_rejected(error: &anyhow::Error) -> bool {
         .is_some_and(|error| matches!(error.status, 401 | 403))
 }
 
+/// The gateway answered 404: it has no healthy-endpoint route (not deployed yet), which no retry
+/// within this connection will change.
+fn healthy_endpoint_route_missing(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<HealthyEndpointStatusError>()
+        .is_some_and(|error| error.status == 404)
+}
+
 fn endpoint_observation_is_current(
     endpoint_health: &Mutex<EndpointHealth>,
     connection_generation: &AtomicU64,
@@ -1275,11 +1461,21 @@ fn endpoint_observation_is_current(
         && endpoint_health.lock().connected_endpoint().as_ref() == Some(endpoint)
 }
 
+/// What to do with the `session_id` a healthy-endpoint answer carries.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MintedSessionId {
+    /// A health report: the credential we hold is live, keep it unless the gateway moves us.
+    KeepUnlessMoved,
+    /// A remint after a refused handshake: the credential we hold is the one to replace.
+    Adopt,
+}
+
 fn apply_healthy_endpoint_to_auth(
     auth_state: &Entity<AuthState>,
     expected_user_id: &str,
     response: &HealthyEndpointSession,
     default_port: Option<u16>,
+    minted: MintedSessionId,
     cx: &mut AsyncApp,
 ) -> Option<Session> {
     let updated = cx.update(|cx| {
@@ -1288,9 +1484,16 @@ fn apply_healthy_endpoint_to_auth(
                 AuthState::Authenticated(session) | AuthState::Connecting(session) => session,
                 _ => return None,
             };
-            if session.user_id != expected_user_id
-                || !session.apply_healthy_endpoint(response, default_port)
-            {
+            if session.user_id != expected_user_id {
+                return None;
+            }
+            let applied = match minted {
+                MintedSessionId::KeepUnlessMoved => {
+                    session.apply_healthy_endpoint(response, default_port)
+                }
+                MintedSessionId::Adopt => session.apply_reminted_endpoint(response, default_port),
+            };
+            if !applied {
                 return None;
             }
             cx.notify();
@@ -1612,6 +1815,20 @@ mod tests {
     }
 
     #[test]
+    fn reminting_sid_clears_sid_failures_so_jwt_is_not_needed() {
+        let session = Session {
+            token: "jwt".into(),
+            session_id: "fresh-sid".into(),
+            expires_at: now_secs() + 600,
+            ..Default::default()
+        };
+        assert!(
+            !should_lead_with_jwt(&session, 0),
+            "after GetHealthyEndpoint remint, SID handshake leads again"
+        );
+    }
+
+    #[test]
     fn asking_the_gateway_backs_off_so_it_cannot_burn_the_session_slots() {
         assert_eq!(
             next_healthy_endpoint_retry_secs(HEALTHY_ENDPOINT_RETRY_SECS),
@@ -1626,6 +1843,72 @@ mod tests {
             next_healthy_endpoint_retry_secs(HEALTHY_ENDPOINT_RETRY_CAP_SECS),
             HEALTHY_ENDPOINT_RETRY_CAP_SECS
         );
+    }
+
+    #[test]
+    fn a_missing_healthy_endpoint_route_is_told_apart_from_a_refusal() {
+        let missing: anyhow::Error = HealthyEndpointStatusError { status: 404 }.into();
+        let refused: anyhow::Error = HealthyEndpointStatusError { status: 401 }.into();
+        let outage: anyhow::Error = HealthyEndpointStatusError { status: 503 }.into();
+        let timeout = anyhow::anyhow!("healthy endpoint request timed out");
+        assert!(healthy_endpoint_route_missing(&missing));
+        assert!(!healthy_endpoint_route_missing(&refused));
+        assert!(!healthy_endpoint_route_missing(&outage));
+        assert!(!healthy_endpoint_route_missing(&timeout));
+        assert!(healthy_endpoint_auth_rejected(&refused));
+        assert!(!healthy_endpoint_auth_rejected(&missing));
+    }
+
+    #[test]
+    fn remint_errors_are_paced_like_gateway_asks() {
+        let attempted_at = Instant::now();
+        let mut retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+        assert_eq!(
+            endpoint_refresh_retry_in(None, retry_secs, attempted_at),
+            Duration::ZERO,
+            "the first remint of an outage is immediate"
+        );
+        retry_secs = next_healthy_endpoint_retry_secs(retry_secs);
+        assert_eq!(
+            endpoint_refresh_retry_in(Some(attempted_at), retry_secs, attempted_at),
+            Duration::from_secs(10),
+            "a failed remint waits before the gateway is asked again"
+        );
+        for _ in 0..8 {
+            retry_secs = next_healthy_endpoint_retry_secs(retry_secs);
+        }
+        assert_eq!(retry_secs, HEALTHY_ENDPOINT_RETRY_CAP_SECS);
+    }
+
+    #[test]
+    fn remint_is_retried_after_errors_but_not_after_a_successful_mint() {
+        let empty_sid = Session {
+            token: "jwt".into(),
+            expires_at: now_secs() + 600,
+            ..Default::default()
+        };
+        assert!(should_attempt_sid_remint(&empty_sid, 0, false, true));
+        assert!(
+            should_attempt_sid_remint(&empty_sid, 0, false, true),
+            "a failed remint must not latch — the next loop may retry"
+        );
+        assert!(
+            !should_attempt_sid_remint(&empty_sid, 0, true, true),
+            "a successful remint latches until the outage clears so a dead mint is not tight-looped"
+        );
+        assert!(!should_attempt_sid_remint(&empty_sid, 0, false, false));
+
+        let with_sid = Session {
+            session_id: "sid".into(),
+            ..empty_sid
+        };
+        assert!(!should_attempt_sid_remint(&with_sid, 0, false, true));
+        assert!(should_attempt_sid_remint(
+            &with_sid,
+            SSID_REFUSALS_BEFORE_JWT,
+            false,
+            true
+        ));
     }
 
     #[test]
@@ -1820,6 +2103,7 @@ mod tests {
         assert!(jwt_only.session_id.is_empty());
         assert_eq!(jwt_only.ws_credential(), "jwt");
         assert!(jwt_is_fresh(&jwt_only));
+        assert!(should_lead_with_jwt(&jwt_only, 0));
         assert_eq!(
             healthy_endpoint_credential(&jwt_only),
             Some(HealthyEndpointCredential::Jwt)
@@ -1827,32 +2111,17 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_socket_credential_is_dropped_and_the_jwt_takes_over() {
-        let mut session = Session {
+    fn a_sid_failure_switches_to_jwt_without_clearing_session_id() {
+        let session = Session {
             token: "jwt".into(),
-            session_id: "dead-sid".into(),
+            session_id: "sid".into(),
             expires_at: now_secs() + 600,
             ..Default::default()
         };
         assert!(!should_lead_with_jwt(&session, 0));
-
-        assert!(clear_socket_credential(&mut session));
-        assert!(should_lead_with_jwt(&session, 0));
-        assert_eq!(session.ws_credential(), "jwt");
-        assert!(jwt_is_fresh(&session));
-
-        assert!(!clear_socket_credential(&mut session));
-    }
-
-    #[test]
-    fn a_single_gateway_refusal_moves_the_ladder_to_the_jwt() {
-        let session = Session {
-            token: "jwt".into(),
-            session_id: "sid".into(),
-            ..Default::default()
-        };
-        assert!(!should_lead_with_jwt(&session, 0));
         assert!(should_lead_with_jwt(&session, SSID_REFUSALS_BEFORE_JWT));
+        assert_eq!(session.session_id, "sid");
+        assert_eq!(session.ws_credential(), "sid");
     }
 
     #[test]
@@ -1863,6 +2132,16 @@ mod tests {
             ..Default::default()
         };
         assert!(!jwt_is_fresh(&stale));
+
+        let missing_exp = Session {
+            token: "jwt".into(),
+            expires_at: 0,
+            ..Default::default()
+        };
+        assert!(
+            !jwt_is_fresh(&missing_exp),
+            "expires_at=0 matches Session::is_expired — do not treat as fresh"
+        );
 
         let inside_skew = Session {
             expires_at: now_secs() + JWT_SKEW.as_secs() / 2,
@@ -1892,11 +2171,12 @@ mod tests {
         LoggedOut,
     }
 
-    /// Models the loop's decision state: what a connect outcome advances, and what may end in a
-    /// logout. Only a gateway refusal followed by a refused API probe may.
+    /// Models reconnect decisions with credential-switch separate from logout:
+    /// SID silent/explicit failures may remint then JWT; JWT silent/explicit failures plus a
+    /// refused API probe may log out.
     struct ReconnectSim {
         consecutive_failures: u32,
-        gateway_refusals: u32,
+        sid_failures: u32,
         jwt_refusals: u32,
         logout_count: u32,
         surface: Surface,
@@ -1907,7 +2187,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 consecutive_failures: 0,
-                gateway_refusals: 0,
+                sid_failures: 0,
                 jwt_refusals: 0,
                 logout_count: 0,
                 surface: Surface::Connecting,
@@ -1928,7 +2208,7 @@ mod tests {
         }
 
         fn uses_jwt(&self) -> bool {
-            self.gateway_refusals >= SSID_REFUSALS_BEFORE_JWT
+            self.sid_failures >= SSID_REFUSALS_BEFORE_JWT
         }
 
         fn record_unreachable(&mut self) {
@@ -1938,19 +2218,34 @@ mod tests {
             }
         }
 
-        fn record_refusal(&mut self) {
+        fn record_sid_silent_drop(&mut self) {
             self.consecutive_failures += 1;
-            let was_jwt = self.uses_jwt();
-            self.gateway_refusals += 1;
-            if was_jwt {
-                self.jwt_refusals += 1;
-            }
+            self.sid_failures += 1;
             if reached_failure_limit(self.consecutive_failures) {
                 self.surface = Surface::AppShell;
             }
         }
 
-        /// The API host answering 403 is the only thing that ends the session.
+        fn record_sid_explicit_reject(&mut self) {
+            self.record_sid_silent_drop();
+        }
+
+        fn record_jwt_silent_drop(&mut self) {
+            assert!(
+                self.uses_jwt(),
+                "JWT silent drop only applies after SID→JWT switch"
+            );
+            self.consecutive_failures += 1;
+            self.jwt_refusals += 1;
+            if reached_failure_limit(self.consecutive_failures) {
+                self.surface = Surface::AppShell;
+            }
+        }
+
+        fn record_jwt_explicit_reject(&mut self) {
+            self.record_jwt_silent_drop();
+        }
+
         fn record_api_probe(&mut self, session_alive: bool) {
             if self.jwt_refusals < JWT_REFUSALS_BEFORE_PROBE {
                 return;
@@ -1963,40 +2258,43 @@ mod tests {
 
         fn record_connect_success(&mut self) {
             self.consecutive_failures = 0;
-            self.gateway_refusals = 0;
+            self.sid_failures = 0;
             self.jwt_refusals = 0;
             self.surface = Surface::AppShell;
         }
     }
 
-    /// The whole point: a network problem produces refusals of a kind that can never reach the
-    /// logout branch, however long it lasts.
     #[test]
-    fn an_unreachable_host_never_logs_out() {
+    fn an_unreachable_host_never_logs_out_or_switches_credential() {
         let mut sim = ReconnectSim::new();
         for _ in 0..200 {
             sim.record_unreachable();
             sim.record_api_probe(false);
         }
         assert_eq!(sim.logout_count, 0);
-        assert_eq!(
-            sim.gateway_refusals, 0,
-            "reachability failures are not refusals"
-        );
-        assert!(!sim.uses_jwt(), "the JWT escape hatch must stay disarmed");
+        assert_eq!(sim.sid_failures, 0);
+        assert!(!sim.uses_jwt());
         assert_eq!(sim.surface, Surface::AppShell);
     }
 
-    /// A dead session must be decided fast: one refusal of each credential, then the probe.
     #[test]
-    fn a_dead_session_logs_out_after_one_refusal_of_each_credential() {
+    fn a_sid_silent_drop_switches_to_jwt_then_confirms_without_logout() {
         let mut sim = ReconnectSim::new();
-        sim.record_refusal();
-        assert!(
-            sim.uses_jwt(),
-            "the JWT is tried straight after the first refusal"
-        );
-        sim.record_refusal();
+        sim.record_sid_silent_drop();
+        assert!(sim.uses_jwt());
+        assert_eq!(sim.logout_count, 0);
+        sim.record_connect_success();
+        assert!(!sim.uses_jwt());
+        assert_eq!(sim.logout_count, 0);
+        assert_eq!(sim.surface, Surface::AppShell);
+    }
+
+    #[test]
+    fn jwt_silent_drops_count_toward_logout_probe() {
+        let mut sim = ReconnectSim::new();
+        sim.record_sid_silent_drop();
+        assert!(sim.uses_jwt());
+        sim.record_jwt_silent_drop();
         assert_eq!(sim.jwt_refusals, JWT_REFUSALS_BEFORE_PROBE);
 
         sim.record_api_probe(false);
@@ -2004,12 +2302,37 @@ mod tests {
         assert_eq!(sim.surface, Surface::LoggedOut);
     }
 
-    /// Same refusals, but the account is fine — the gateway is simply turning us away.
     #[test]
-    fn refusals_with_a_live_account_keep_the_session() {
+    fn jwt_silent_drops_with_a_live_account_keep_the_session() {
         let mut sim = ReconnectSim::new();
+        sim.record_sid_silent_drop();
         for _ in 0..20 {
-            sim.record_refusal();
+            sim.record_jwt_silent_drop();
+            sim.record_api_probe(true);
+        }
+        assert_eq!(sim.logout_count, 0);
+        assert_eq!(sim.surface, Surface::AppShell);
+    }
+
+    #[test]
+    fn a_dead_session_logs_out_after_explicit_jwt_reject_and_probe() {
+        let mut sim = ReconnectSim::new();
+        sim.record_sid_explicit_reject();
+        assert!(sim.uses_jwt());
+        sim.record_jwt_explicit_reject();
+        assert_eq!(sim.jwt_refusals, JWT_REFUSALS_BEFORE_PROBE);
+
+        sim.record_api_probe(false);
+        assert_eq!(sim.logout_count, 1);
+        assert_eq!(sim.surface, Surface::LoggedOut);
+    }
+
+    #[test]
+    fn explicit_rejects_with_a_live_account_keep_the_session() {
+        let mut sim = ReconnectSim::new();
+        sim.record_sid_explicit_reject();
+        for _ in 0..20 {
+            sim.record_jwt_explicit_reject();
             sim.record_api_probe(true);
         }
         assert_eq!(sim.logout_count, 0);
@@ -2019,10 +2342,10 @@ mod tests {
     #[test]
     fn a_successful_connect_disarms_everything() {
         let mut sim = ReconnectSim::new();
-        sim.record_refusal();
-        sim.record_refusal();
+        sim.record_sid_silent_drop();
+        sim.record_jwt_explicit_reject();
         sim.record_connect_success();
-        assert_eq!(sim.gateway_refusals, 0);
+        assert_eq!(sim.sid_failures, 0);
         assert_eq!(sim.jwt_refusals, 0);
         assert!(!sim.uses_jwt());
     }
@@ -2046,8 +2369,8 @@ mod tests {
         sim.begin_iteration();
         assert_eq!(sim.displayed_attempt, 0);
 
-        sim.record_refusal();
-        sim.record_refusal();
+        sim.record_sid_silent_drop();
+        sim.record_jwt_explicit_reject();
         sim.begin_iteration();
         assert_eq!(sim.displayed_attempt, 2);
 
@@ -2062,7 +2385,7 @@ mod tests {
         let mut sim = ReconnectSim::new();
         sim.record_connect_success();
         for _ in 0..4 {
-            sim.record_refusal();
+            sim.record_sid_silent_drop();
             sim.begin_iteration();
             assert_eq!(sim.surface, Surface::AppShell);
             assert_eq!(sim.displayed_attempt, 0);
