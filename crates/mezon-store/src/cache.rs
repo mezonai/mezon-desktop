@@ -86,6 +86,14 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
     /// Insert (or replace) `key` with a fresh timestamp; evicts the LRU entry past `max`,
     /// never evicting `protect` (e.g. the active channel).
     pub fn insert(&mut self, key: K, value: V, protect: Option<&K>) {
+        match protect {
+            Some(p) => self.insert_protecting(key, value, &[p]),
+            None => self.insert_protecting(key, value, &[]),
+        }
+    }
+
+    /// Like [`insert`], but never evicts any key in `protect` (e.g. active channel + topic).
+    pub fn insert_protecting(&mut self, key: K, value: V, protect: &[&K]) {
         self.order.retain(|k| k != &key);
         self.entries.insert(
             key.clone(),
@@ -158,7 +166,7 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
         }
     }
 
-    fn evict(&mut self, protect: Option<&K>) {
+    fn evict(&mut self, protect: &[&K]) {
         let Some(max) = self.max else {
             return;
         };
@@ -166,7 +174,7 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
             let Some(victim) = self.order.front().cloned() else {
                 break;
             };
-            if protect == Some(&victim) {
+            if protect.contains(&&victim) {
                 if self.order.len() < 2 {
                     break;
                 }
@@ -325,5 +333,20 @@ mod tests {
         c.insert("b".into(), 2, Some(&"b".to_string()));
         assert_eq!(c.get("a"), None);
         assert_eq!(c.get("b"), Some(&2));
+    }
+
+    #[test]
+    fn protect_keeps_multiple_protected_keys() {
+        let channel = "channel".to_string();
+        let topic = "topic".to_string();
+        let mut c: KeyedCache<String, i32> = KeyedCache::new(Some(3));
+        c.insert(channel.clone(), 1, None);
+        c.insert(topic.clone(), 2, None);
+        c.insert("old".into(), 0, None);
+        c.insert_protecting("extra".into(), 3, &[&channel, &topic]);
+        assert_eq!(c.get("old"), None);
+        assert_eq!(c.get(&channel), Some(&1));
+        assert_eq!(c.get(&topic), Some(&2));
+        assert_eq!(c.get("extra"), Some(&3));
     }
 }

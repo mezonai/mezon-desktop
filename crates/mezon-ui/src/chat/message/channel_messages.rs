@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,7 +20,8 @@ use mezon_store::{
     Emoji, EmojiStore, GroupMembersStore, MessageCode, MessageId, MessagesEvent, MessagesStore,
     PERMISSION_DELETE_MESSAGE, PERMISSION_MANAGE_THREAD, PERMISSION_SEND_MESSAGE, PermissionStore,
     ProfileContext, QUICK_MENU_TYPE_QUICK, QuickMenuStore, RolesEvent, RolesStore, Settings,
-    SpriteAtlas, TopicsEvent, TopicsStore, UserId, UsersByUserStore,
+    SpriteAtlas, TopicBadgeEvent, TopicBadgeStore, TopicsEvent, TopicsStore, UserId,
+    UsersByUserStore,
     message::{Message, markdown_edit_source},
 };
 
@@ -1498,35 +1498,21 @@ impl ChannelMessages {
             }
         });
 
-        let topics_event_sub = cx.subscribe(&TopicsStore::global(cx), |this, store, event, cx| {
+        let topics_event_sub = cx.subscribe(&TopicsStore::global(cx), |this, _, event, cx| {
             if this.is_topic_box || !matches!(event, TopicsEvent::Updated) {
                 return;
             }
-            let topics = store.read(cx);
-            let messages = MessagesStore::global(cx).read(cx);
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            let mut any_topic = false;
-            for msg in messages.viewport_messages() {
-                let Some(topic_id) = msg.topic_id else {
-                    continue;
-                };
-                any_topic = true;
-                topic_id.hash(&mut hasher);
-                if let Some(meta) = topics.topic_meta_for_topic(topic_id) {
-                    meta.rpl.hash(&mut hasher);
-                    meta.lsnt.hash(&mut hasher);
-                }
-            }
-            if !any_topic {
-                return;
-            }
-            let fp = hasher.finish();
-            if this.topics_viewport_fp == Some(fp) {
-                return;
-            }
-            this.topics_viewport_fp = Some(fp);
-            cx.notify();
+            this.notify_if_topics_viewport_changed(cx);
         });
+
+        let topic_badge_sub = cx.subscribe(&TopicBadgeStore::global(cx), |this, _, event, cx| {
+            if this.is_topic_box {
+                return;
+            }
+            let TopicBadgeEvent::Updated { .. } = event;
+            this.notify_if_topics_viewport_changed(cx);
+        });
+        subs.push(topic_badge_sub);
 
         let store = MessagesStore::global(cx);
         subs.push(cx.subscribe(&store, |this, _store, event, cx| {
@@ -1694,18 +1680,11 @@ impl ChannelMessages {
                         }
                     }
                 }
-                MessagesEvent::JumpTo { message_id } => {
-                    this.pending_jump = Some(*message_id);
-                    this.highlight_id = Some(*message_id);
-                    this._highlight_timer = Some(cx.spawn(async move |this, cx| {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(1500))
-                            .await;
-                        let _ = this.update(cx, |this, cx| {
-                            this.highlight_id = None;
-                            cx.notify();
-                        });
-                    }));
+                MessagesEvent::JumpTo { message_id, .. } => {
+                    if this.is_topic_jump_target(*message_id, cx) {
+                        return;
+                    }
+                    this.begin_highlight(*message_id, cx);
                 }
                 MessagesEvent::UnreadBelowChanged => {
                     this.refresh_derived_state(cx);
@@ -1789,6 +1768,12 @@ impl ChannelMessages {
                 this.mark_scroll_activity(cx);
 
                 if this.is_topic_box {
+                    if at_bottom_changed && at_bottom {
+                        this.sync_topic_seen(cx);
+                    }
+                    if visible_range_changed {
+                        this.schedule_pagination_check(window, cx);
+                    }
                     return;
                 }
 
@@ -2044,6 +2029,9 @@ impl ChannelMessages {
             cx.subscribe(&TopicsStore::global(cx), |this, _, event, cx| match event {
                 TopicsEvent::Opened => {
                     this.refresh_topic_messages(cx);
+                    if this.at_bottom {
+                        this.sync_topic_seen(cx);
+                    }
                     cx.notify();
                 }
                 TopicsEvent::ReplyTargetChanged => cx.notify(),
@@ -2051,7 +2039,96 @@ impl ChannelMessages {
             }),
         );
         this.refresh_topic_messages(cx);
+        if let Some(target) = MessagesStore::global(cx).read(cx).pending_topic_jump() {
+            this.begin_highlight(target, cx);
+        }
         this
+    }
+
+    fn begin_highlight(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        self.pending_jump = Some(message_id);
+        self.highlight_id = Some(message_id);
+        self._highlight_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1500))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.highlight_id = None;
+                cx.notify();
+            });
+        }));
+    }
+
+    fn is_topic_jump_target(&self, message_id: MessageId, cx: &App) -> bool {
+        if self.is_topic_box {
+            return false;
+        }
+        if MessagesStore::global(cx).read(cx).pending_topic_jump() != Some(message_id) {
+            return false;
+        }
+        let Some(topic_id) = TopicsStore::global(cx).read(cx).active_topic_id() else {
+            return false;
+        };
+        MessagesStore::global(cx)
+            .read(cx)
+            .messages_in_channel(ChannelId(topic_id))
+            .iter()
+            .any(|m| m.id == message_id)
+    }
+
+    fn notify_if_topics_viewport_changed(&mut self, cx: &mut Context<Self>) {
+        use std::hash::{Hash, Hasher};
+        let topics = TopicsStore::global(cx).read(cx);
+        let badges = TopicBadgeStore::try_global(cx);
+        let messages = MessagesStore::global(cx).read(cx);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut any_topic = false;
+        for msg in messages.viewport_messages() {
+            let Some(topic_id) = msg.topic_id else {
+                continue;
+            };
+            any_topic = true;
+            topic_id.hash(&mut hasher);
+            if let Some(meta) = topics.topic_meta_for_topic(topic_id) {
+                meta.rpl.hash(&mut hasher);
+                meta.lsnt.hash(&mut hasher);
+            }
+            let badge = badges
+                .as_ref()
+                .map(|store| store.read(cx).topic_badge_count(&topic_id.to_string()))
+                .unwrap_or(0);
+            badge.hash(&mut hasher);
+        }
+        if !any_topic {
+            return;
+        }
+        let fp = hasher.finish();
+        if self.topics_viewport_fp == Some(fp) {
+            return;
+        }
+        self.topics_viewport_fp = Some(fp);
+        cx.notify();
+    }
+
+    fn apply_topic_jump(&mut self, header_shown: bool, cx: &mut Context<Self>) {
+        let target = self
+            .pending_jump
+            .or_else(|| MessagesStore::global(cx).read(cx).pending_topic_jump());
+        let Some(target) = target else {
+            return;
+        };
+        let Some(pos) = self.topic_row_ids.iter().position(|id| *id == target) else {
+            return;
+        };
+        if self.highlight_id != Some(target) {
+            self.begin_highlight(target, cx);
+        }
+        self.pending_jump = None;
+        MessagesStore::global(cx).update(cx, |store, _| {
+            store.clear_pending_topic_jump();
+        });
+        self.list_state
+            .scroll_to_reveal_item(usize::from(header_shown) + pos);
     }
 
     fn collect_topic_messages(cx: &App) -> Vec<Message> {
@@ -2215,6 +2292,14 @@ impl ChannelMessages {
     }
 
     fn on_topic_store_event(&mut self, event: &MessagesEvent, cx: &mut Context<Self>) {
+        if let MessagesEvent::JumpTo { message_id, .. } = event {
+            if MessagesStore::global(cx).read(cx).pending_topic_jump() == Some(*message_id) {
+                self.refresh_topic_messages(cx);
+                self.apply_topic_jump(self.header_shown, cx);
+                cx.notify();
+            }
+            return;
+        }
         let concerns_topic = match event {
             MessagesEvent::TopicUpdated { topic_id } => {
                 TopicsStore::global(cx).read(cx).active_topic_id() == Some(*topic_id)
@@ -2243,6 +2328,10 @@ impl ChannelMessages {
                 Some(ix) => self.remeasure_topic_rows(ix..ix + 1),
                 None => self.remeasure_topic_rows(0..self.topic_row_ids.len()),
             }
+        }
+        self.apply_topic_jump(self.header_shown, cx);
+        if self.at_bottom {
+            self.sync_topic_seen(cx);
         }
         cx.notify();
     }
@@ -2680,6 +2769,13 @@ impl ChannelMessages {
                 view.update(cx, |gif, cx| gif.set_playing(true, cx));
             }
             if self.is_topic_box {
+                if self
+                    .list_state
+                    .is_scrolled_to_end()
+                    .unwrap_or(self.at_bottom)
+                {
+                    self.sync_topic_seen(cx);
+                }
                 return;
             }
             if self
@@ -3753,6 +3849,38 @@ impl ChannelMessages {
         self.sync_channel_seen_when_focused(app_focused, cx);
     }
 
+    fn sync_topic_seen(&mut self, cx: &mut Context<Self>) {
+        if !self.is_topic_box {
+            return;
+        }
+        let store_entity = MessagesStore::global(cx);
+        if store_entity.read(cx).topic_has_more_bottom() {
+            return;
+        }
+        let app_focused = cx.active_window().is_some();
+        let Some(last) = self
+            .topic_messages
+            .last()
+            .filter(|message| !message.id.is_optimistic())
+        else {
+            return;
+        };
+        let Some(topic_id) = TopicsStore::global(cx).read(cx).active_topic_id() else {
+            return;
+        };
+        let last_id = last.id;
+        let last_create_time = last.create_time;
+        MessagesStore::global(cx).update(cx, |store, cx| {
+            store.note_topic_viewport_seen(
+                ChannelId(topic_id),
+                last_id,
+                last_create_time,
+                app_focused,
+                cx,
+            );
+        });
+    }
+
     fn sync_channel_seen_when_focused(&mut self, app_focused: bool, cx: &mut Context<Self>) {
         let store_entity = MessagesStore::global(cx);
         if store_entity.read(cx).has_more_bottom() {
@@ -4619,6 +4747,7 @@ impl ChannelMessages {
         let social_image_cache = self.social_image_cache.clone();
         let sprite_image_cache = self.sprite_image_cache.clone();
         let icon_image_cache = self.icon_image_cache.clone();
+        let highlight_id = self.highlight_id;
         let reply_highlight_id = TopicsStore::global(cx)
             .read(cx)
             .reply_target()
@@ -4685,7 +4814,7 @@ impl ChannelMessages {
                         social_cache: social_image_cache.clone(),
                         sprite_cache: sprite_image_cache.clone(),
                         unread_boundary_id: None,
-                        highlight_id: None,
+                        highlight_id,
                         reply_highlight_id,
                         profile_context,
                         settings: settings.clone(),
@@ -4860,15 +4989,19 @@ impl Render for ChannelMessages {
         let skeleton_overlay = self.skeleton_overlay(cx.theme());
         let header_shown = self.header_shown;
 
-        if let Some(target) = self.pending_jump.take()
-            && let Some(pos) = store
+        if let Some(target) = self.pending_jump {
+            if let Some(pos) = store
                 .read(cx)
                 .viewport_messages()
                 .iter()
                 .position(|m| m.id == target)
-        {
-            self.list_state
-                .scroll_to_reveal_item(usize::from(header_shown) + pos);
+            {
+                self.pending_jump = None;
+                self.list_state
+                    .scroll_to_reveal_item(usize::from(header_shown) + pos);
+            } else if self.is_topic_jump_target(target, cx) {
+                self.pending_jump = None;
+            }
         }
 
         let locale = self.cached_locale.clone();

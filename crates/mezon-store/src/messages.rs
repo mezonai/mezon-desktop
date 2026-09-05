@@ -21,9 +21,10 @@ use mezon_client::transport::{
     mention_content_tokens,
 };
 use mezon_client::{
-    AppApi, AttachmentUploadOutcome, ConnectionStatus, InboxCategory, InboxMentionSpan,
-    MarkedInboxMessageInput, MezonTransport, PresignedAttachment, RealtimeEvent, UploadFile,
-    UploadThumbnail, UrlAttachment, inbox_notification_from_marked_message_local,
+    ApiStatusError, AppApi, AttachmentUploadOutcome, ConnectionStatus, InboxCategory,
+    InboxMentionSpan, MarkedInboxMessageInput, MezonTransport, PresignedAttachment, RealtimeEvent,
+    UploadFile, UploadThumbnail, UrlAttachment, api_status_from_error,
+    inbox_notification_from_marked_message_local,
 };
 
 use crate::AppConfig;
@@ -54,6 +55,7 @@ use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::roles::RolesStore;
 use crate::threads::ThreadsStore;
+use crate::topic_badges::TopicBadgeStore;
 use crate::topics::TopicsStore;
 use crate::wallet::{SendTokenRequest, WalletEvent, WalletStore};
 
@@ -65,6 +67,7 @@ const DIRECTION_AFTER: i32 = 1;
 /// `Direction_Mode.AROUND_TIMESTAMP` — fetch a window centered on a message
 /// (used by jump-to-message when the target is not loaded).
 const DIRECTION_AROUND: i32 = 2;
+
 const CHANNEL_TYPE_CHANNEL: i32 = 1;
 const CHANNEL_TYPE_THREAD: i32 = 7;
 use crate::message::STICKER_FILETYPE;
@@ -146,6 +149,7 @@ pub enum MessagesEvent {
     /// AROUND fetch (which emits `Reset` first) just brought it in.
     JumpTo {
         message_id: MessageId,
+        request_id: Option<u64>,
     },
     RemovedAt {
         index: usize,
@@ -576,6 +580,8 @@ struct ChannelMessages {
     messages: MessageList,
     /// More history exists above (older). Mirrors React `hasMoreTop`.
     has_more: bool,
+    /// Newer messages may exist below an AROUND window whose tip is unknown.
+    gap_bottom: bool,
 }
 
 const POLL_RESULT_ANIMATION_WINDOW: Duration = Duration::from_millis(1200);
@@ -601,7 +607,10 @@ pub struct MessagesStore {
     /// realtime replies to a non-active topic bucket still notify the panel.
     active_topic_id: Option<ChannelId>,
     active_topic_parent: Option<ChannelId>,
-    pending_jump: Option<(ChannelId, MessageId)>,
+    pending_jump: Option<(ChannelId, MessageId, Option<u64>)>,
+    pending_topic_jump: Option<MessageId>,
+    next_jump_request_id: u64,
+    _pending_topic_jump_timer: Option<Task<()>>,
     is_public: bool,
     is_dm: bool,
     mode: i32,
@@ -630,7 +639,7 @@ pub struct MessagesStore {
     api: Arc<AppApi>,
     _channel_sub: Subscription,
     _conn_watch: Task<()>,
-    pending_last_seen: Option<PendingLastSeen>,
+    pending_last_seen: HashMap<ChannelId, PendingLastSeen>,
     _last_seen_timer: Option<Task<()>>,
     last_seen_fingerprint: HashMap<ChannelId, String>,
     queued_last_seen: Vec<PendingLastSeen>,
@@ -988,6 +997,7 @@ impl MessagesStore {
         self.active_clan_id = None;
         self.active_topic_id = None;
         self.active_topic_parent = None;
+        self.pending_topic_jump = None;
         self.is_public = true;
         self.is_dm = false;
         self.mode = STREAM_MODE_CHANNEL;
@@ -1007,7 +1017,7 @@ impl MessagesStore {
         self.editing = None;
         self.joined_channels.clear();
         self.pending_self_adds.clear();
-        self.pending_last_seen = None;
+        self.pending_last_seen.clear();
         self.last_seen_fingerprint.clear();
         self.queued_last_seen.clear();
         self.poll_ui.clear();
@@ -1059,6 +1069,9 @@ impl MessagesStore {
             active_topic_id: None,
             active_topic_parent: None,
             pending_jump: None,
+            pending_topic_jump: None,
+            next_jump_request_id: 1,
+            _pending_topic_jump_timer: None,
             is_public: true,
             is_dm: false,
             mode: STREAM_MODE_CHANNEL,
@@ -1083,7 +1096,7 @@ impl MessagesStore {
             api,
             _channel_sub: channel_sub,
             _conn_watch: conn_watch,
-            pending_last_seen: None,
+            pending_last_seen: HashMap::new(),
             _last_seen_timer: None,
             last_seen_fingerprint: HashMap::new(),
             queued_last_seen: Vec::new(),
@@ -1410,10 +1423,11 @@ impl MessagesStore {
             return;
         }
         let live_badge = self.channel_badge_count(channel_id, clan_id, cx);
-        let badge_count = match &self.pending_last_seen {
-            Some(p) if p.channel_id == channel_id => p.badge_count.max(live_badge),
-            _ => live_badge,
-        };
+        let badge_count = self
+            .pending_last_seen
+            .get(&channel_id)
+            .map(|p| p.badge_count.max(live_badge))
+            .unwrap_or(live_badge);
         tracing::debug!(
             target: "badge_flow",
             clan = clan_id.get(),
@@ -1435,8 +1449,57 @@ impl MessagesStore {
         } else {
             self.set_last_read_message(channel_id, message_id);
         }
-        self.pending_last_seen = Some(pending);
-        self.arm_last_seen_debounce(cx);
+        self.set_pending_last_seen(pending, cx);
+    }
+
+    pub fn note_topic_viewport_seen(
+        &mut self,
+        topic_id: ChannelId,
+        message_id: MessageId,
+        create_time: i64,
+        app_focused: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !app_focused || message_id.is_optimistic() || topic_id.is_zero() {
+            return;
+        }
+        let Some(clan_id) = self.active_clan_id else {
+            return;
+        };
+        let topic_key = topic_id.get().to_string();
+        let live_badge = TopicBadgeStore::try_global(cx)
+            .map(|store| store.read(cx).topic_badge_count(&topic_key))
+            .unwrap_or(0);
+        if let Some(store) = TopicBadgeStore::try_global(cx) {
+            store.update(cx, |store, cx| {
+                store.clear_topic(&topic_key, cx);
+            });
+        }
+        ChannelList::global(cx).update(cx, |cl, cx| {
+            cl.apply_topic_read(topic_id, cx);
+        });
+        if !should_write_last_seen(
+            self.known_last_seen_id(topic_id, cx),
+            self.last_message_by_channel.get(&topic_id).copied(),
+            message_id,
+        ) {
+            return;
+        }
+        let badge_count = self
+            .pending_last_seen
+            .get(&topic_id)
+            .map(|p| p.badge_count.max(live_badge))
+            .unwrap_or(live_badge);
+        let pending = PendingLastSeen {
+            clan_id,
+            channel_id: topic_id,
+            message_id,
+            create_time,
+            mode: self.mode,
+            badge_count,
+        };
+        self.set_last_read_message(topic_id, message_id);
+        self.set_pending_last_seen(pending, cx);
     }
 
     fn known_last_seen_id(&self, channel_id: ChannelId, cx: &App) -> Option<MessageId> {
@@ -1504,8 +1567,7 @@ impl MessagesStore {
             "empty channel opened — clearing its unread state"
         );
         self.apply_local_last_seen(&pending, cx);
-        self.pending_last_seen = Some(pending);
-        self.arm_last_seen_debounce(cx);
+        self.set_pending_last_seen(pending, cx);
     }
 
     fn channel_is_unread(&self, channel_id: ChannelId, clan_id: ClanId, cx: &App) -> bool {
@@ -1525,7 +1587,7 @@ impl MessagesStore {
     }
 
     fn arm_last_seen_debounce(&mut self, cx: &mut Context<Self>) {
-        if self.pending_last_seen.is_none() {
+        if self.pending_last_seen.is_empty() {
             return;
         }
         self._last_seen_timer = Some(cx.spawn(async move |this, cx| {
@@ -1535,12 +1597,30 @@ impl MessagesStore {
         }));
     }
 
-    fn flush_pending_last_seen(&mut self, cx: &mut Context<Self>) {
-        let Some(pending) = self.pending_last_seen.take() else {
+    fn set_pending_last_seen(&mut self, pending: PendingLastSeen, cx: &mut Context<Self>) {
+        if self
+            .pending_last_seen
+            .get(&pending.channel_id)
+            .is_some_and(|existing| {
+                existing.message_id == pending.message_id
+                    && existing.badge_count == pending.badge_count
+                    && existing.create_time == pending.create_time
+                    && existing.mode == pending.mode
+                    && existing.clan_id == pending.clan_id
+            })
+        {
             return;
-        };
+        }
+        self.pending_last_seen.insert(pending.channel_id, pending);
+        self.arm_last_seen_debounce(cx);
+    }
+
+    fn flush_pending_last_seen(&mut self, cx: &mut Context<Self>) {
+        let pending = std::mem::take(&mut self.pending_last_seen);
         self._last_seen_timer = None;
-        self.send_last_seen(pending, cx);
+        for pending in pending.into_values() {
+            self.send_last_seen(pending, cx);
+        }
     }
 
     fn flush_queued_last_seen(&mut self, cx: &mut Context<Self>) {
@@ -2032,14 +2112,32 @@ impl MessagesStore {
         true
     }
 
-    /// Jump to a message (cf. React `jumpToMessage`, used by reply previews).
-    /// If the target is already in the buffer, emit [`MessagesEvent::JumpTo`] so
-    /// the UI scrolls to it. Otherwise fetch a window centered on it
-    /// (`AROUND_TIMESTAMP`), replace the buffer, and emit `Reset` then `JumpTo`.
     pub fn request_jump(
         &mut self,
         channel_id: ChannelId,
         message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        self.request_jump_with_id(channel_id, message_id, None, cx);
+    }
+
+    pub fn request_inbox_origin_jump(
+        &mut self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        let request_id = self.next_jump_request_id;
+        self.next_jump_request_id = self.next_jump_request_id.wrapping_add(1).max(1);
+        self.request_jump_with_id(channel_id, message_id, Some(request_id), cx);
+        request_id
+    }
+
+    fn request_jump_with_id(
+        &mut self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        request_id: Option<u64>,
         cx: &mut Context<Self>,
     ) {
         if message_id.is_optimistic() {
@@ -2049,7 +2147,7 @@ impl MessagesStore {
             );
             return;
         }
-        self.pending_jump = Some((channel_id, message_id));
+        self.pending_jump = Some((channel_id, message_id, request_id));
         self.try_consume_pending_jump(cx);
     }
 
@@ -2059,17 +2157,22 @@ impl MessagesStore {
     }
 
     fn try_consume_pending_jump(&mut self, cx: &mut Context<Self>) {
-        let Some((channel_id, message_id)) = self.pending_jump else {
+        let Some((channel_id, message_id, request_id)) = self.pending_jump else {
             return;
         };
         if self.active_channel_id != Some(channel_id) || self.loading || self.loading_more {
             return;
         }
         self.pending_jump = None;
-        self.jump_to_message(message_id, cx);
+        self.jump_to_message(message_id, request_id, cx);
     }
 
-    pub fn jump_to_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+    pub fn jump_to_message(
+        &mut self,
+        message_id: MessageId,
+        request_id: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(channel_id) = self.active_channel_id else {
             return;
         };
@@ -2078,15 +2181,18 @@ impl MessagesStore {
             .get(&channel_id)
             .is_some_and(|c| c.messages.contains_id(message_id))
         {
-            cx.emit(MessagesEvent::JumpTo { message_id });
+            cx.emit(MessagesEvent::JumpTo {
+                message_id,
+                request_id,
+            });
             return;
         }
         if self.loading_more || self.loading {
-            self.pending_jump = Some((channel_id, message_id));
+            self.pending_jump = Some((channel_id, message_id, request_id));
             return;
         }
         let Some(clan_id) = self.active_clan_id else {
-            self.pending_jump = Some((channel_id, message_id));
+            self.pending_jump = Some((channel_id, message_id, request_id));
             return;
         };
         let anchor = message_id.get();
@@ -2162,7 +2268,10 @@ impl MessagesStore {
                 if this.active_channel_id == Some(channel_id) {
                     let count = this.messages().len();
                     cx.emit(MessagesEvent::Reset { count });
-                    cx.emit(MessagesEvent::JumpTo { message_id });
+                    cx.emit(MessagesEvent::JumpTo {
+                        message_id,
+                        request_id,
+                    });
                 }
                 this.try_consume_pending_jump(cx);
                 cx.notify();
@@ -3095,6 +3204,75 @@ impl MessagesStore {
         .detach();
     }
 
+    fn inbox_source_message(&self, message_id: MessageId, cx: &App) -> Option<Message> {
+        let storage_id = self.reaction_storage_channel(message_id);
+        if let Some(msg) = self
+            .cache
+            .get(&storage_id)
+            .and_then(|channel| channel.messages.get_by_id(message_id).cloned())
+        {
+            return Some(msg);
+        }
+        if let Some(parent) = self.active_channel_id
+            && parent != storage_id
+            && let Some(msg) = self
+                .cache
+                .get(&parent)
+                .and_then(|channel| channel.messages.get_by_id(message_id).cloned())
+        {
+            return Some(msg);
+        }
+        TopicsStore::try_global(cx).and_then(|topics| {
+            topics
+                .read(cx)
+                .origin_message()
+                .filter(|msg| msg.id == message_id)
+                .cloned()
+        })
+    }
+
+    async fn save_message_2_inbox(
+        api: &Arc<AppApi>,
+        request: mezon_proto::api::Message2InboxRequest,
+    ) -> bool {
+        let Err(error) = api.create_message_2_inbox(request.clone()).await else {
+            return true;
+        };
+        let refused_avatar =
+            api_status_from_error(&error).is_some_and(ApiStatusError::is_invalid_argument);
+        let Some(retry) = refused_avatar
+            .then(|| Self::message_2_inbox_without_avatar(&request))
+            .flatten()
+        else {
+            tracing::error!("add_to_inbox create_message_2_inbox failed: {error}");
+            return false;
+        };
+        match api.create_message_2_inbox(retry).await {
+            Ok(()) => {
+                tracing::warn!(
+                    "add_to_inbox: CreateMessage2Inbox returned InvalidArgument (server ValidateImageURLSecure on avatar); saved without avatar"
+                );
+                true
+            }
+            Err(retry_error) => {
+                tracing::error!("add_to_inbox create_message_2_inbox retry failed: {retry_error}");
+                false
+            }
+        }
+    }
+
+    fn message_2_inbox_without_avatar(
+        request: &mezon_proto::api::Message2InboxRequest,
+    ) -> Option<mezon_proto::api::Message2InboxRequest> {
+        if request.avatar.is_empty() {
+            return None;
+        }
+        Some(mezon_proto::api::Message2InboxRequest {
+            avatar: String::new(),
+            ..request.clone()
+        })
+    }
+
     pub fn add_to_inbox(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
         let Some(channel_id) = self.active_channel_id else {
             return;
@@ -3102,11 +3280,30 @@ impl MessagesStore {
         let storage_id = self.reaction_storage_channel(message_id);
         let clan_id = self.active_clan_id.map_or(0, |c| c.get());
         let channel_type = self.mode;
-        let Some(channel) = self.cache.get(&storage_id) else {
+        let Some(msg) = self.inbox_source_message(message_id, cx) else {
+            tracing::warn!(
+                message_id = message_id.get(),
+                storage_id = storage_id.get(),
+                channel_id = channel_id.get(),
+                "add_to_inbox: message not in cache"
+            );
             return;
         };
-        let Some(msg) = channel.messages.get_by_id(message_id).cloned() else {
-            return;
+        let topic_id = if msg.code == MessageCode::Topic {
+            0
+        } else {
+            msg.topic_id
+                .map(|topic| topic.get())
+                .filter(|id| *id != 0)
+                .or_else(|| {
+                    self.active_topic_id
+                        .filter(|topic| *topic == storage_id)
+                        .map(|topic| topic.get())
+                })
+                .or_else(|| {
+                    (storage_id != channel_id && storage_id.get() != 0).then_some(storage_id.get())
+                })
+                .unwrap_or(0)
         };
         let content_json = msg
             .raw_content
@@ -3173,7 +3370,10 @@ impl MessagesStore {
         let avatar = msg.avatar_url.to_string();
         let sender_id = msg.sender_id.parse().unwrap_or(0);
         let display_name = msg.sender_name.to_string();
-        let create_time_seconds = u32::try_from(msg.create_time.max(0)).unwrap_or(0);
+        let create_time_seconds = u32::try_from(msg.create_time.max(0))
+            .ok()
+            .filter(|ts| *ts > 0)
+            .unwrap_or_else(|| u32::try_from(unix_now_seconds().max(0)).unwrap_or(0));
         let mention_spans: Vec<InboxMentionSpan> = msg
             .mention_targets
             .iter()
@@ -3203,7 +3403,7 @@ impl MessagesStore {
             has_more_attachment,
             mention_spans,
             channel_type,
-            topic_id: msg.topic_id.map(|topic| topic.get()),
+            topic_id: (topic_id != 0).then_some(topic_id),
         };
         let request = mezon_proto::api::Message2InboxRequest {
             message_id: message_id.get(),
@@ -3213,30 +3413,34 @@ impl MessagesStore {
             content: content_json,
             mentions,
             attachments,
-            topic_id: msg.topic_id.map(|topic| topic.get()).unwrap_or(0),
+            topic_id,
             ..Default::default()
         };
+        tracing::info!(
+            message_id = message_id.get(),
+            channel_id = channel_id.get(),
+            storage_id = storage_id.get(),
+            topic_id,
+            "add_to_inbox"
+        );
         let api = self.api.clone();
-        cx.spawn(
-            async move |_this, cx| match api.create_message_2_inbox(request).await {
-                Ok(()) => {
-                    let notification = inbox_notification_from_marked_message_local(&marked);
-                    cx.update(|cx| {
-                        InboxStore::global(cx).update(cx, |store, cx| {
-                            store.prepend_local(
-                                GLOBAL_INBOX_BUCKET_CLAN_ID,
-                                InboxCategory::Messages,
-                                notification,
-                                cx,
-                            );
-                        });
-                    });
-                }
-                Err(e) => {
-                    tracing::error!("add_to_inbox create_message_2_inbox failed: {e}");
-                }
-            },
-        )
+        cx.spawn(async move |_this, cx| {
+            let saved = Self::save_message_2_inbox(&api, request).await;
+            if !saved {
+                return;
+            }
+            let notification = inbox_notification_from_marked_message_local(&marked);
+            cx.update(|cx| {
+                InboxStore::global(cx).update(cx, |store, cx| {
+                    store.prepend_local(
+                        GLOBAL_INBOX_BUCKET_CLAN_ID,
+                        InboxCategory::Messages,
+                        notification,
+                        cx,
+                    );
+                });
+            });
+        })
         .detach();
     }
 
@@ -3287,8 +3491,33 @@ impl MessagesStore {
         }
         self.active_topic_id = next;
         self.active_topic_parent = None;
+        self.pending_topic_jump = None;
         self.sync_anonymous_mode(cx);
         cx.notify();
+    }
+
+    pub fn pending_topic_jump(&self) -> Option<MessageId> {
+        self.pending_topic_jump
+    }
+
+    pub fn queue_topic_jump(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        self.pending_topic_jump = Some(message_id);
+        self._pending_topic_jump_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(20))
+                .await;
+            let _ = this.update(cx, |this, _| {
+                if this.pending_topic_jump == Some(message_id) {
+                    this.pending_topic_jump = None;
+                }
+                this._pending_topic_jump_timer = None;
+            });
+        }));
+    }
+
+    pub fn clear_pending_topic_jump(&mut self) {
+        self.pending_topic_jump = None;
+        self._pending_topic_jump_timer = None;
     }
 
     fn drop_topic_bucket(&mut self, topic_id: ChannelId) {
@@ -3316,10 +3545,11 @@ impl MessagesStore {
         let Some(channel) = self.cache.get(&topic_key) else {
             return false;
         };
-        has_more_bottom_for(
-            self.last_message_by_channel.get(&topic_key).copied(),
-            &channel.messages,
-        )
+        channel.gap_bottom
+            || has_more_bottom_for(
+                self.last_message_by_channel.get(&topic_key).copied(),
+                &channel.messages,
+            )
     }
 
     /// Load a discussion topic's replies into their own bucket (keyed by topic id).
@@ -3368,11 +3598,120 @@ impl MessagesStore {
                     cx.notify();
                     return;
                 }
-                this.set_channel(topic_key, parsed);
-                if let Some(channel) = this.cache.get_mut(&topic_key) {
-                    channel.has_more = fetched >= TOPIC_FULL_PAGE_LEN;
-                }
+                this.replace_channel(topic_key, parsed, fetched >= TOPIC_FULL_PAGE_LEN);
                 cx.emit(MessagesEvent::TopicUpdated { topic_id });
+                if let Some(jump_id) = this.pending_topic_jump {
+                    if this.bucket_contains(topic_key, jump_id) {
+                        this.emit_topic_jump(jump_id, cx);
+                    } else {
+                        this.request_topic_jump(topic_id, jump_id, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn emit_topic_jump(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        self.queue_topic_jump(message_id, cx);
+        cx.emit(MessagesEvent::JumpTo {
+            message_id,
+            request_id: None,
+        });
+    }
+
+    pub fn request_topic_jump(
+        &mut self,
+        topic_id: i64,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        if message_id.is_optimistic() {
+            return;
+        }
+        let topic_key = ChannelId(topic_id);
+        if self
+            .cache
+            .get(&topic_key)
+            .is_some_and(|channel| channel.messages.contains_id(message_id))
+        {
+            if let Some(parent) = self.active_topic_parent.or(self.active_channel_id) {
+                self.active_topic_parent = Some(parent);
+            }
+            self.emit_topic_jump(message_id, cx);
+            return;
+        }
+        let Some(clan_id) = self.active_clan_id else {
+            return;
+        };
+        let Some(parent_channel_id) = self.active_topic_parent.or(self.active_channel_id) else {
+            return;
+        };
+        self.active_topic_parent = Some(parent_channel_id);
+        self.topic_loading = true;
+        cx.notify();
+        let api = self.api.clone();
+        let cfg = AppConfig::try_global(cx).cloned();
+        let viewer_id = viewer_user_id(cx);
+        let anchor = message_id.get();
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .list_topic_messages(
+                    clan_id.get(),
+                    parent_channel_id.get(),
+                    topic_id,
+                    anchor,
+                    DIRECTION_AROUND,
+                    MESSAGE_PAGE_LIMIT,
+                )
+                .await;
+            let msgs = match result {
+                Ok(page) => page.messages,
+                Err(e) => {
+                    tracing::error!(
+                        "request_topic_jump AROUND fetch failed for topic {topic_id}: {e}"
+                    );
+                    let _ = this.update(cx, |this, cx| {
+                        this.topic_loading = false;
+                        this.clear_pending_topic_jump();
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let parsed = prepare_messages(msgs, cfg.as_ref(), viewer_id);
+            let _ = this.update(cx, |this, cx| {
+                this.topic_loading = false;
+                if this.active_topic_id != Some(topic_key) {
+                    cx.notify();
+                    return;
+                }
+                let mut window = parsed;
+                sort_messages(&mut window);
+                if window.len() > MAX_MESSAGES_PER_CHANNEL {
+                    let target = window.iter().position(|m| m.id == message_id).unwrap_or(0);
+                    let half = MAX_MESSAGES_PER_CHANNEL / 2;
+                    let start = target
+                        .saturating_sub(half)
+                        .min(window.len() - MAX_MESSAGES_PER_CHANNEL);
+                    window = window[start..start + MAX_MESSAGES_PER_CHANNEL].to_vec();
+                }
+                let found = window.iter().any(|m| m.id == message_id);
+                if !found {
+                    tracing::warn!(
+                        message_id = anchor,
+                        "request_topic_jump: target not in AROUND window"
+                    );
+                    this.clear_pending_topic_jump();
+                    cx.notify();
+                    return;
+                }
+                recompute_message_grouping(&mut window);
+                let has_more = has_more_from_oldest(&window);
+                this.replace_channel_ex(topic_key, window, has_more, false, true);
+                cx.emit(MessagesEvent::TopicUpdated { topic_id });
+                this.emit_topic_jump(message_id, cx);
                 cx.notify();
             });
         })
@@ -3525,7 +3864,7 @@ impl MessagesStore {
             return false;
         };
         let expected_tail = self.last_message_by_channel.get(&topic_key).copied();
-        if !has_more_bottom_for(expected_tail, &channel.messages) {
+        if !channel.gap_bottom && !has_more_bottom_for(expected_tail, &channel.messages) {
             return false;
         }
         let Some(newest_id) = channel
@@ -3596,6 +3935,8 @@ impl MessagesStore {
                             if dropped > 0 {
                                 channel.has_more = true;
                             }
+                        } else {
+                            channel.gap_bottom = false;
                         }
                         appended
                     }
@@ -3609,6 +3950,9 @@ impl MessagesStore {
                     )
                 {
                     this.last_message_by_channel.insert(topic_key, tail);
+                    if let Some(channel) = this.cache.get_mut(&topic_key) {
+                        channel.gap_bottom = false;
+                    }
                 }
                 tracing::debug!(
                     topic_id = topic_key.get(),
@@ -3684,7 +4028,8 @@ impl MessagesStore {
                 channel.messages.push_grouped(msg);
             }
         } else {
-            self.set_channel(topic_key, vec![msg]);
+            let has_more = has_more_from_oldest(std::slice::from_ref(&msg));
+            self.replace_channel(topic_key, vec![msg], has_more);
         }
         if is_new_topic && let Some(channel) = self.cache.get_mut(&topic_key) {
             channel.has_more = false;
@@ -4342,6 +4687,7 @@ impl MessagesStore {
             references: Vec::new(),
             reactions: Vec::new(),
             entity_mentions: Vec::new(),
+            topic_id: 0,
         };
         let cfg = AppConfig::try_global(cx);
         let viewer_id = viewer_user_id(cx);
@@ -5385,7 +5731,7 @@ impl MessagesStore {
     ) {
         let previous_reply_target = self.reply_target().cloned();
         self.flush_pending_last_seen(cx);
-        if self.pending_jump.is_some_and(|(pc, _)| pc != channel_id) {
+        if self.pending_jump.is_some_and(|(pc, _, _)| pc != channel_id) {
             self.pending_jump = None;
         }
         self.active_channel_id = Some(channel_id);
@@ -6886,20 +7232,42 @@ impl MessagesStore {
     }
 
     fn set_channel(&mut self, channel_id: ChannelId, messages: Vec<Message>) {
-        let active = self.active_channel_id;
         let has_more = has_more_from_oldest(&messages);
-        if let Some(newest) = messages.last()
+        self.replace_channel(channel_id, messages, has_more);
+    }
+
+    fn replace_channel(&mut self, channel_id: ChannelId, messages: Vec<Message>, has_more: bool) {
+        self.replace_channel_ex(channel_id, messages, has_more, true, false);
+    }
+
+    fn replace_channel_ex(
+        &mut self,
+        channel_id: ChannelId,
+        messages: Vec<Message>,
+        has_more: bool,
+        touch_last: bool,
+        gap_bottom: bool,
+    ) {
+        let protect: Vec<ChannelId> = [self.active_topic_id, self.active_channel_id]
+            .into_iter()
+            .flatten()
+            .filter(|id| *id != channel_id)
+            .collect();
+        let protect_refs: Vec<&ChannelId> = protect.iter().collect();
+        if touch_last
+            && let Some(newest) = messages.last()
             && !self.last_message_by_channel.contains_key(&channel_id)
         {
             self.set_last_message(channel_id, newest.id);
         }
-        self.cache.insert(
+        self.cache.insert_protecting(
             channel_id,
             ChannelMessages {
                 messages: MessageList::from_messages(channel_id, messages),
                 has_more,
+                gap_bottom,
             },
-            active.as_ref(),
+            &protect_refs,
         );
     }
 }
@@ -7892,6 +8260,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
         .as_deref()
         .and_then(|s| s.parse::<i64>().ok())
         .filter(|&id| id != 0)
+        .or_else(|| (m.topic_id != 0).then_some(m.topic_id))
         .map(ChannelId);
     let topic_creator_id = m
         .content_tokens
@@ -9293,6 +9662,45 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_new_topic_reply_does_not_claim_older_history(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let clan = ClanId(1);
+            let parent = ChannelId(10);
+            let topic = ChannelId(77);
+
+            store.update(cx, |store, cx| {
+                store.activate(clan, parent, true, false, 1, 2, cx);
+                store.set_active_topic(Some(topic.get()), cx);
+                store.append_topic_message(
+                    topic.get(),
+                    api_page(&[5]).messages.into_iter().next().unwrap(),
+                    false,
+                    Vec::new(),
+                    true,
+                    cx,
+                );
+                assert!(
+                    !store.topic_has_more_top(),
+                    "the first reply of a new topic has no older history"
+                );
+                assert!(
+                    !store.load_more_topic(cx),
+                    "a new topic must not page older replies"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
     fn a_topic_pages_newer_replies_once_its_tail_was_trimmed(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let api = Arc::new(mezon_client::AppApi::new(
@@ -9485,6 +9893,7 @@ mod tests {
                     references: vec![],
                     reactions: vec![],
                     entity_mentions: vec![],
+                    topic_id: 0,
                 })
                 .collect(),
             last_seen_message_id: 0,
@@ -10978,6 +11387,25 @@ mod tests {
     }
 
     #[test]
+    fn an_inbox_request_refused_for_its_avatar_is_retried_without_one() {
+        let request = mezon_proto::api::Message2InboxRequest {
+            message_id: 42,
+            channel_id: 7,
+            clan_id: 1,
+            avatar: "https://cdn.example/avatar.png".into(),
+            content: r#"{"t":"hi"}"#.into(),
+            topic_id: 88,
+            ..Default::default()
+        };
+        let retry = MessagesStore::message_2_inbox_without_avatar(&request).expect("retry request");
+        assert!(retry.avatar.is_empty());
+        assert_eq!(retry.message_id, 42);
+        assert_eq!(retry.topic_id, 88);
+        assert_eq!(retry.content, request.content);
+        assert!(MessagesStore::message_2_inbox_without_avatar(&retry).is_none());
+    }
+
+    #[test]
     fn message_from_api_maps_fields() {
         let m = message_from_api(
             ApiMessage {
@@ -10999,6 +11427,7 @@ mod tests {
                 references: vec![],
                 reactions: vec![],
                 entity_mentions: vec![],
+                topic_id: 0,
             },
             None,
             None,
@@ -11010,6 +11439,36 @@ mod tests {
         assert_eq!(m.sender_name, "Alice");
         assert_eq!(m.avatar_url, "av.png");
         assert_eq!(m.avatar_proxied, "av.png");
+    }
+
+    #[test]
+    fn message_from_api_uses_proto_topic_id_when_content_has_no_tp() {
+        let m = message_from_api(
+            ApiMessage {
+                message_id: 1,
+                content: "hi".into(),
+                content_raw: String::new(),
+                content_tokens: mezon_client::transport::ApiMessageContent {
+                    t: "hi".into(),
+                    ..Default::default()
+                },
+                code: 0,
+                sender_id: 1,
+                sender_name: "Alice".into(),
+                avatar: String::new(),
+                create_time: 100,
+                update_time: 0,
+                hide_editted: false,
+                attachments: vec![],
+                references: vec![],
+                reactions: vec![],
+                entity_mentions: vec![],
+                topic_id: 99,
+            },
+            None,
+            None,
+        );
+        assert_eq!(m.topic_id, Some(ChannelId(99)));
     }
 
     #[test]
@@ -11041,6 +11500,7 @@ mod tests {
                 references: vec![],
                 reactions: vec![],
                 entity_mentions: vec![],
+                topic_id: 0,
             },
             None,
             None,
@@ -11086,6 +11546,7 @@ mod tests {
             references: vec![],
             reactions: vec![],
             entity_mentions: vec![],
+            topic_id: 0,
         };
 
         let pending = message_from_api(msg(Some(vec![])), Some(&cfg), None);
@@ -11241,6 +11702,7 @@ mod tests {
             references,
             reactions: vec![],
             entity_mentions: vec![],
+            topic_id: 0,
         }
     }
 
@@ -11727,6 +12189,7 @@ mod tests {
     fn channel_msgs(msgs: Vec<Message>) -> ChannelMessages {
         ChannelMessages {
             messages: MessageList::from_messages(ChannelId(1), msgs),
+            gap_bottom: false,
             has_more: false,
         }
     }

@@ -600,7 +600,7 @@ fn pin_card(
         .on_click(move |_: &ClickEvent, _window, cx| {
             if let Ok(jump_target) = jump_message_id.parse::<MessageId>() {
                 MessagesStore::global(cx).update(cx, |store, cx| {
-                    store.jump_to_message(jump_target, cx);
+                    store.jump_to_message(jump_target, None, cx);
                 });
             }
             jump_handle.hide(cx);

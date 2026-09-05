@@ -43,8 +43,8 @@ pub struct ApiStatusError {
 }
 
 impl ApiStatusError {
-    pub const OUT_OF_RANGE: u32 = 11;
     pub const INVALID_ARGUMENT: u32 = 3;
+    pub const OUT_OF_RANGE: u32 = 11;
 
     pub fn is_out_of_range(self) -> bool {
         self.code == Self::OUT_OF_RANGE
@@ -1763,21 +1763,8 @@ fn json_field_i64(value: &serde_json::Value, key: &str) -> i64 {
 }
 
 pub fn parse_notification_content(content: &[u8]) -> (i64, i64) {
-    if content.is_empty() {
-        return (0, 0);
-    }
-    if !matches!(content.first().copied(), Some(b'{') | Some(b'['))
-        && let Ok(fcm) = api::DirectFcmProto::decode(content)
-    {
-        return (fcm.message_id, i64::from(fcm.create_time_seconds));
-    }
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(content) else {
-        return (0, 0);
-    };
-    (
-        json_field_i64(&value, "message_id"),
-        json_field_i64(&value, "create_time_seconds"),
-    )
+    let (message_id, create_time, _) = crate::inbox::notification_ids_from_content(content);
+    (message_id, create_time)
 }
 
 pub fn is_mention_or_reply(
@@ -3586,6 +3573,7 @@ pub struct ApiMessage {
     pub references: Vec<ApiMessageRef>,
     pub reactions: Vec<ApiMessageReaction>,
     pub entity_mentions: Vec<ApiEntityMention>,
+    pub topic_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4152,6 +4140,7 @@ impl MezonTransport {
             references,
             reactions,
             entity_mentions,
+            topic_id: message.topic_id,
         }
     }
 
@@ -5494,6 +5483,7 @@ impl MezonTransport {
             references: Vec::new(),
             reactions: Vec::new(),
             entity_mentions: Vec::new(),
+            topic_id,
         })
     }
 
@@ -8357,7 +8347,7 @@ impl MezonTransport {
             .send_api_request(cid, "CreateMessage2Inbox", body)
             .await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
         Ok(())
     }
