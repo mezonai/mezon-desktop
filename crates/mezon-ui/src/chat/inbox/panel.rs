@@ -760,12 +760,6 @@ fn schedule_inbox_jump(
     channel_id: ChannelId,
     message_id: MessageId,
 ) {
-    if let Route::Channel { clan_id, .. } = &route {
-        let clan_id = *clan_id;
-        ChannelList::global(cx).update(cx, |store, cx| {
-            store.apply_read(clan_id, channel_id, cx);
-        });
-    }
     navigate(cx, route);
     MessagesStore::global(cx).update(cx, |store, cx| {
         store.request_jump(channel_id, message_id, cx);

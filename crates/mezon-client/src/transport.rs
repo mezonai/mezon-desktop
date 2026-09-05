@@ -5218,7 +5218,7 @@ impl MezonTransport {
             references: Vec::new(),
             reactions: Vec::new(),
             entity_mentions: Vec::new(),
-            topic_id: 0,
+            topic_id,
         })
     }
 

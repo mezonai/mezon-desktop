@@ -639,7 +639,7 @@ impl BadgeService {
         ClanList::global(cx).update(cx, |cls, cx| {
             cls.increment_clan_badge(clan_id, cx);
         });
-        if notif.topic_id != 0 {
+        if badge_channel != channel_id {
             ChannelList::global(cx).update(cx, |cl, cx| {
                 cl.increment_channel_for_topic(clan_id, channel_id, badge_channel, cx);
             });

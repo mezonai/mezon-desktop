@@ -2048,6 +2048,12 @@ impl ChannelMessages {
     }
 
     fn is_topic_jump_target(&self, message_id: MessageId, cx: &App) -> bool {
+        if self.is_topic_box {
+            return false;
+        }
+        if MessagesStore::global(cx).read(cx).pending_topic_jump() != Some(message_id) {
+            return false;
+        }
         let Some(topic_id) = TopicsStore::global(cx).read(cx).active_topic_id() else {
             return false;
         };
@@ -3576,6 +3582,10 @@ impl ChannelMessages {
 
     fn sync_topic_seen(&mut self, cx: &mut Context<Self>) {
         if !self.is_topic_box {
+            return;
+        }
+        let store_entity = MessagesStore::global(cx);
+        if store_entity.read(cx).topic_has_more_bottom() {
             return;
         }
         let app_focused = cx.active_window().is_some();

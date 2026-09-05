@@ -286,8 +286,9 @@ struct PendingInboxTopicJump {
 }
 
 impl PendingInboxTopicJump {
-    fn matches(&self, message_id: MessageId, now: Instant) -> bool {
+    fn matches(&self, message_id: MessageId, channel_id: ChannelId, now: Instant) -> bool {
         self.origin_id == message_id
+            && self.channel_id == channel_id
             && now.duration_since(self.requested_at) <= INBOX_TOPIC_JUMP_TIMEOUT
     }
 
@@ -688,7 +689,10 @@ impl TopicsStore {
             self.pending_inbox_jump = None;
             return;
         }
-        if !pending.matches(*message_id, now) {
+        let Some(active_channel_id) = MessagesStore::global(cx).read(cx).active_channel_id() else {
+            return;
+        };
+        if !pending.matches(*message_id, active_channel_id, now) {
             return;
         }
         let Some(pending) = self.pending_inbox_jump.take() else {
@@ -1627,8 +1631,8 @@ mod tests {
     fn a_pending_inbox_jump_only_opens_its_own_origin() {
         let now = Instant::now();
         let pending = pending_jump(now);
-        assert!(pending.matches(MessageId(7), now));
-        assert!(!pending.matches(MessageId(8), now));
+        assert!(pending.matches(MessageId(7), ChannelId(3), now));
+        assert!(!pending.matches(MessageId(8), ChannelId(3), now));
     }
 
     #[test]
@@ -1637,7 +1641,7 @@ mod tests {
         let pending = pending_jump(requested_at);
         let later = requested_at + INBOX_TOPIC_JUMP_TIMEOUT + Duration::from_secs(1);
         assert!(pending.is_expired(later));
-        assert!(!pending.matches(MessageId(7), later));
+        assert!(!pending.matches(MessageId(7), ChannelId(3), later));
     }
 
     fn sample_message(code: MessageCode) -> Message {

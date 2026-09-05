@@ -1395,8 +1395,7 @@ impl MessagesStore {
         } else {
             self.set_last_read_message(channel_id, message_id);
         }
-        self.pending_last_seen = Some(pending);
-        self.arm_last_seen_debounce(cx);
+        self.set_pending_last_seen(pending, cx);
     }
 
     pub fn note_topic_viewport_seen(
@@ -1437,8 +1436,7 @@ impl MessagesStore {
             badge_count: 0,
         };
         self.set_last_read_message(topic_id, message_id);
-        self.pending_last_seen = Some(pending);
-        self.arm_last_seen_debounce(cx);
+        self.set_pending_last_seen(pending, cx);
     }
 
     fn known_last_seen_id(&self, channel_id: ChannelId, cx: &App) -> Option<MessageId> {
@@ -1506,8 +1504,7 @@ impl MessagesStore {
             "empty channel opened — clearing its unread state"
         );
         self.apply_local_last_seen(&pending, cx);
-        self.pending_last_seen = Some(pending);
-        self.arm_last_seen_debounce(cx);
+        self.set_pending_last_seen(pending, cx);
     }
 
     fn channel_is_unread(&self, channel_id: ChannelId, clan_id: ClanId, cx: &App) -> bool {
@@ -1535,6 +1532,18 @@ impl MessagesStore {
             this.update(cx, |this, cx| this.flush_pending_last_seen(cx))
                 .ok();
         }));
+    }
+
+    fn set_pending_last_seen(&mut self, pending: PendingLastSeen, cx: &mut Context<Self>) {
+        if self
+            .pending_last_seen
+            .as_ref()
+            .is_some_and(|existing| existing.channel_id != pending.channel_id)
+        {
+            self.flush_pending_last_seen(cx);
+        }
+        self.pending_last_seen = Some(pending);
+        self.arm_last_seen_debounce(cx);
     }
 
     fn flush_pending_last_seen(&mut self, cx: &mut Context<Self>) {
@@ -3197,19 +3206,22 @@ impl MessagesStore {
             );
             return;
         };
-        let topic_id = msg
-            .topic_id
-            .map(|topic| topic.get())
-            .filter(|id| *id != 0)
-            .or_else(|| {
-                self.active_topic_id
-                    .filter(|topic| *topic == storage_id)
-                    .map(|topic| topic.get())
-            })
-            .or_else(|| {
-                (storage_id != channel_id && storage_id.get() != 0).then_some(storage_id.get())
-            })
-            .unwrap_or(0);
+        let topic_id = if msg.code == MessageCode::Topic {
+            0
+        } else {
+            msg.topic_id
+                .map(|topic| topic.get())
+                .filter(|id| *id != 0)
+                .or_else(|| {
+                    self.active_topic_id
+                        .filter(|topic| *topic == storage_id)
+                        .map(|topic| topic.get())
+                })
+                .or_else(|| {
+                    (storage_id != channel_id && storage_id.get() != 0).then_some(storage_id.get())
+                })
+                .unwrap_or(0)
+        };
         let content_json = msg
             .raw_content
             .as_deref()
@@ -3571,6 +3583,7 @@ impl MessagesStore {
                     );
                     let _ = this.update(cx, |this, cx| {
                         this.topic_loading = false;
+                        this.clear_pending_topic_jump();
                         cx.notify();
                     });
                     return;
@@ -3599,11 +3612,12 @@ impl MessagesStore {
                         message_id = anchor,
                         "request_topic_jump: target not in AROUND window"
                     );
+                    this.clear_pending_topic_jump();
                     cx.notify();
                     return;
                 }
                 recompute_message_grouping(&mut window);
-                let has_more = window.len() >= TOPIC_FULL_PAGE_LEN;
+                let has_more = has_more_from_oldest(&window);
                 this.replace_channel(topic_key, window, has_more);
                 cx.emit(MessagesEvent::TopicUpdated { topic_id });
                 this.emit_topic_jump(message_id, cx);
@@ -3890,7 +3904,8 @@ impl MessagesStore {
                 channel.messages.push_grouped(msg);
             }
         } else {
-            self.replace_channel(topic_key, vec![msg], false);
+            let has_more = has_more_from_oldest(std::slice::from_ref(&msg));
+            self.replace_channel(topic_key, vec![msg], has_more);
         }
         self.set_last_message(topic_key, message_id);
         let should_count_reply = topic_id != 0
