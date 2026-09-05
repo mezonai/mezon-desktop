@@ -9,8 +9,8 @@ use gpui::{App, AppContext as _, KeyBinding};
 pub use anchor::{TourAnchor, probe};
 pub use launcher::{TourLauncher, settings_entry_row};
 pub use state::{
-    TourState, TourStatus, auto_start_core, eligibility_undecided, layer, pending_core_track,
-    shutdown,
+    TourState, TourStatus, auto_start_core, eligibility_undecided, is_running, layer,
+    pending_core_track, shutdown,
 };
 
 pub struct McpAdvance {

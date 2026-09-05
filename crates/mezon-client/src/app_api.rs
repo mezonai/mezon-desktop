@@ -1785,6 +1785,11 @@ impl AppApi {
         self.transport.delete_friends(ids, usernames).await
     }
 
+    /// Whether the signed-in user is banned from a channel, and for how much longer.
+    pub async fn is_banned(&self, channel_id: i64) -> Result<mezon_proto::api::IsBannedResponse> {
+        self.transport.is_banned(channel_id).await
+    }
+
     /// Block users by id.
     pub async fn block_friends(&self, ids: Vec<i64>) -> Result<()> {
         self.transport.block_friends(ids).await

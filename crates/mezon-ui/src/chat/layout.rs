@@ -430,6 +430,13 @@ impl ChatLayout {
         .detach();
         cx.observe(&MessageSearchStore::global(cx), |_, _, cx| cx.notify())
             .detach();
+        // The banned notice replaces the composer, and its answer arrives from `IsBanned` well
+        // after the channel opened — without this the strip would not paint until something
+        // else happened to redraw the chat.
+        cx.observe(&mezon_store::BannedUsersStore::global(cx), |_, _, cx| {
+            cx.notify()
+        })
+        .detach();
         cx.observe(&mezon_store::OnboardingStore::global(cx), |_, _, cx| {
             cx.notify()
         })
@@ -1931,13 +1938,13 @@ impl Render for ChatLayout {
                             .inset_0()
                             .flex()
                             .flex_row()
+                            .child(div().w(px(72.0)).h_full().bg(theme.surfaces.primary.ramp()))
                             .child(
                                 div()
-                                    .w(px(72.0))
+                                    .flex_1()
                                     .h_full()
-                                    .bg(theme.surface_for(theme.bg_tertiary)),
-                            )
-                            .child(div().flex_1().h_full().bg(theme.bg_secondary)),
+                                    .bg(theme.surfaces.direct_message.ramp()),
+                            ),
                     )
                     .child(
                         div()

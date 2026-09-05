@@ -97,7 +97,9 @@ pub use auto_update::{AutoUpdateStatus, AutoUpdateStore};
 pub use badge::BadgeService;
 pub use banned_users::{
     BAN_FOR_1_HOUR_SEC, BAN_FOR_3_HOURS_SEC, BAN_FOR_8_HOURS_SEC, BAN_FOR_15_MINUTES_SEC,
-    BAN_FOR_24_HOURS_SEC, BAN_FOREVER, BannedEntry, BannedUsersEvent, BannedUsersStore,
+    BAN_FOR_24_HOURS_SEC, BAN_FOREVER, BAN_LABEL_DAY_SECS, BAN_LABEL_HOUR_SECS,
+    BAN_LABEL_MINUTE_SECS, BannedEntry, BannedUsersEvent, BannedUsersStore,
+    seconds_until_ban_label_changes,
 };
 pub use cache::{Freshness, KeyedCache};
 pub use call::{CallPeer, CallPhase, CallStore, MediaFlags, MediaKind};

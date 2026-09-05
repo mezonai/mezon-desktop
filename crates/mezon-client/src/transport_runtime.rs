@@ -763,6 +763,14 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn is_banned(&self, channel_id: i64) -> Result<mezon_proto::api::IsBannedResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.is_banned(channel_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_banned_users(
         &self,
         clan_id: i64,

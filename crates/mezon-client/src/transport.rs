@@ -804,6 +804,9 @@ pub struct ApiAccount {
     pub user_status: String,
     #[serde(default)]
     pub dob_seconds: u32,
+    /// When the account was created, in epoch seconds. Drives the "new here" onboarding prompt.
+    #[serde(default)]
+    pub create_time_seconds: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3986,6 +3989,7 @@ impl MezonTransport {
             status: user.status,
             user_status: user.user_status,
             dob_seconds: user.dob_seconds,
+            create_time_seconds: user.create_time_seconds,
         }
     }
 

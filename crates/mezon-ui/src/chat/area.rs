@@ -7,9 +7,9 @@ use gpui::{
     Subscription, Task, Window, div, prelude::*, px, rgb, rgba,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelPermissionsStore, ClanId, ClanList, DirectEvent, DirectKind,
-    DirectMessageStore, FriendEvent, FriendStore, InVoiceInfo, MessagesEvent, MessagesStore,
-    OnboardingStore, PERMISSION_SEND_MESSAGE, Settings,
+    BannedUsersStore, ChannelId, ChannelList, ChannelPermissionsStore, ClanId, ClanList,
+    DirectEvent, DirectKind, DirectMessageStore, FriendEvent, FriendStore, InVoiceInfo,
+    MessagesEvent, MessagesStore, OnboardingStore, PERMISSION_SEND_MESSAGE, Settings,
 };
 use ui::PopoverMenuHandle;
 
@@ -63,6 +63,63 @@ pub struct ChatArea {
 }
 
 const SEND_PERMISSION_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// Replaces the composer while the signed-in user is banned from the channel. `remaining` is
+/// `None` when the server gave no expiry, i.e. the ban does not lift on its own.
+fn banned_notice(locale: &str, remaining: Option<i64>, cx: &App) -> gpui::AnyElement {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .flex_shrink_0()
+        .h(px(48.))
+        .ml(px(16.))
+        .mr(px(14.))
+        .mb(px(16.))
+        .px(px(12.))
+        .rounded(px(4.))
+        .opacity(0.8)
+        .bg(theme.tokens.bg_tertiary)
+        .text_color(theme.tokens.text_theme_primary)
+        .overflow_hidden()
+        .child(
+            Icon::new(IconName::TriangleAlert)
+                .size(px(24.))
+                .flex_none()
+                .text_color(theme.danger_text),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.tokens.text_secondary)
+                        .child(mezon_i18n::t(locale, "common.timeout")),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .truncate()
+                        .child(mezon_i18n::t(locale, "common.timeoutDesc")),
+                ),
+        )
+        .children(remaining.map(|left| {
+            div()
+                .flex_none()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.tokens.text_secondary)
+                .child(crate::util::time_ago::remaining(locale, left))
+        }))
+        .into_any_element()
+}
 
 /// The strip React parks directly on top of the composer while a member still has onboarding
 /// missions left: the next mission, and clicking it does the mission.
@@ -841,7 +898,22 @@ impl ChatArea {
             div().into_any_element()
         };
 
-        let onboarding_mission = if !is_dm && !media_channel_view && !send_denied {
+        // A ban replaces the composer outright, the way the web client does — the moderator list
+        // only says *who* is banned, so the countdown has to come from `IsBanned`.
+        let ban_notice = if !is_dm
+            && !media_channel_view
+            && let Some(channel_id) = channel_id
+        {
+            let store = BannedUsersStore::global(cx);
+            store.update(cx, |store, cx| store.ensure_self_ban(channel_id, cx));
+            let remaining = store.read(cx).self_ban_remaining(channel_id);
+            remaining.map(|left| banned_notice(locale, left, cx))
+        } else {
+            None
+        };
+        let banned = ban_notice.is_some();
+
+        let onboarding_mission = if !is_dm && !media_channel_view && !send_denied && !banned {
             onboarding_mission_banner(locale, cx)
         } else {
             None
@@ -864,7 +936,7 @@ impl ChatArea {
             .overflow_hidden()
             .when(!media_channel_view, |col| {
                 let drop_input = mention_input;
-                let input_visible = !send_denied;
+                let input_visible = !send_denied && !banned;
                 col.on_drop(
                     move |paths: &ExternalPaths, window: &mut Window, cx: &mut App| {
                         if let Some(drop_input) = drop_input.clone()
@@ -899,8 +971,11 @@ impl ChatArea {
                             .into_any_element()
                     },
                 ))
-                .when(send_denied, |col| col.child(no_permission_notice))
-                .when(!send_denied, |col| {
+                .when_some(ban_notice, |col, notice| col.child(notice))
+                .when(!banned && send_denied, |col| {
+                    col.child(no_permission_notice)
+                })
+                .when(!banned && !send_denied, |col| {
                     col.children(onboarding_mission)
                         .when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
                         .when_some(app_channel_bar.as_ref(), |col, target| {
