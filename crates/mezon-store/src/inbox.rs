@@ -203,9 +203,6 @@ impl InboxStore {
         if !bucket.server_loaded {
             return true;
         }
-        if bucket.items.is_empty() {
-            return true;
-        }
         bucket.fetched_at.is_none_or(|t| t.elapsed() >= CACHE_TTL)
     }
 
@@ -385,15 +382,17 @@ impl InboxStore {
     fn apply_remembered_topic_ids(
         items: &mut [InboxNotification],
         remembered: &HashMap<String, String>,
-    ) {
+    ) -> HashSet<String> {
+        let mut touched = HashSet::new();
         for item in items {
-            if item.effective_topic_id().is_some() {
-                continue;
-            }
             let Some(message_id) = item.effective_message_id() else {
                 continue;
             };
             let key = topic_remember_key(&item.channel_id, &message_id);
+            touched.insert(key.clone());
+            if has_concrete_topic_id(item) {
+                continue;
+            }
             let Some(topic_id) = remembered.get(&key) else {
                 continue;
             };
@@ -402,6 +401,7 @@ impl InboxStore {
                 preview.topic_id = Some(topic_id.clone());
             }
         }
+        touched
     }
 
     fn drop_pending_duplicates(items: &mut Vec<InboxNotification>, incoming: &[InboxNotification]) {
@@ -487,8 +487,9 @@ impl InboxStore {
             } else {
                 bucket.loading = false;
                 match result {
-                    Ok(items) => {
+                    Ok(mut items) => {
                         bucket.has_more = items.len() >= INBOX_PAGE_LIMIT as usize;
+                        let touched = Self::apply_remembered_topic_ids(&mut items, &remembered);
                         if is_first_page {
                             let local = std::mem::take(&mut bucket.items);
                             bucket.items = Self::merge_server_page(local, items);
@@ -501,15 +502,14 @@ impl InboxStore {
                             );
                             Self::sort_items(&mut bucket.items);
                         }
-                        Self::apply_remembered_topic_ids(&mut bucket.items, &remembered);
                         bucket.last_id = Self::page_cursor(&bucket.items);
                         bucket.fetched_at = Some(Instant::now());
                         bucket.server_loaded = true;
-                        Ok(remembered)
+                        Ok((remembered, touched))
                     }
                     Err(e) => {
                         tracing::error!("list_notifications failed: {e}");
-                        Ok(remembered)
+                        Ok((remembered, HashSet::new()))
                     }
                 }
             }
@@ -518,29 +518,39 @@ impl InboxStore {
             Err(remembered) => {
                 self.topic_by_message = remembered;
             }
-            Ok(remembered) => {
+            Ok((remembered, touched)) => {
                 self.topic_by_message = remembered;
-                self.prune_topic_by_message();
+                self.prune_topic_keys(category, &touched);
                 self.emit_updated(cx);
                 cx.notify();
             }
         }
     }
 
-    fn prune_topic_by_message(&mut self) {
-        if self.topic_by_message.is_empty() {
+    fn prune_topic_keys(&mut self, category: InboxCategory, touched: &HashSet<String>) {
+        if touched.is_empty() || self.topic_by_message.is_empty() {
             return;
         }
-        let keep: HashSet<String> = self
-            .buckets
-            .values()
-            .flat_map(|bucket| bucket.items.iter())
-            .filter_map(|item| {
-                let message_id = item.effective_message_id()?;
-                Some(topic_remember_key(&item.channel_id, &message_id))
+        let Some(bucket) = self.bucket(category) else {
+            for key in touched {
+                self.topic_by_message.remove(key);
+            }
+            return;
+        };
+        let stale: Vec<String> = touched
+            .iter()
+            .filter(|key| {
+                !bucket.items.iter().any(|item| {
+                    item.effective_message_id().is_some_and(|message_id| {
+                        topic_remember_key(&item.channel_id, &message_id) == **key
+                    })
+                })
             })
+            .cloned()
             .collect();
-        self.topic_by_message.retain(|key, _| keep.contains(key));
+        for key in stale {
+            self.topic_by_message.remove(&key);
+        }
     }
 
     pub fn delete(
@@ -658,6 +668,17 @@ impl InboxStore {
 
 pub(crate) fn skip_inbox_mention_code(code: i32) -> bool {
     !MessageCode::from_raw(code).is_user_timeline()
+}
+
+fn has_concrete_topic_id(item: &InboxNotification) -> bool {
+    item.topic_id
+        .as_deref()
+        .is_some_and(|id| !id.is_empty() && id != "0")
+        || item
+            .message
+            .as_ref()
+            .and_then(|preview| preview.topic_id.as_deref())
+            .is_some_and(|id| !id.is_empty() && id != "0")
 }
 
 #[cfg(test)]
@@ -830,7 +851,17 @@ mod tests {
             server_loaded: true,
             ..CategoryBucket::default()
         };
-        assert!(InboxStore::should_fetch_initial(Some(&empty_loaded)));
+        assert!(!InboxStore::should_fetch_initial(Some(&empty_loaded)));
+    }
+
+    #[test]
+    fn refetch_empty_bucket_when_cache_ttl_expired() {
+        let stale_empty = CategoryBucket {
+            fetched_at: Some(Instant::now() - CACHE_TTL - std::time::Duration::from_secs(1)),
+            server_loaded: true,
+            ..CategoryBucket::default()
+        };
+        assert!(InboxStore::should_fetch_initial(Some(&stale_empty)));
     }
 
     #[test]

@@ -149,6 +149,7 @@ pub enum MessagesEvent {
     /// AROUND fetch (which emits `Reset` first) just brought it in.
     JumpTo {
         message_id: MessageId,
+        request_id: Option<u64>,
     },
     RemovedAt {
         index: usize,
@@ -579,6 +580,8 @@ struct ChannelMessages {
     messages: MessageList,
     /// More history exists above (older). Mirrors React `hasMoreTop`.
     has_more: bool,
+    /// Newer messages may exist below an AROUND window whose tip is unknown.
+    gap_bottom: bool,
 }
 
 const POLL_RESULT_ANIMATION_WINDOW: Duration = Duration::from_millis(1200);
@@ -604,8 +607,10 @@ pub struct MessagesStore {
     /// realtime replies to a non-active topic bucket still notify the panel.
     active_topic_id: Option<ChannelId>,
     active_topic_parent: Option<ChannelId>,
-    pending_jump: Option<(ChannelId, MessageId)>,
+    pending_jump: Option<(ChannelId, MessageId, Option<u64>)>,
     pending_topic_jump: Option<MessageId>,
+    next_jump_request_id: u64,
+    _pending_topic_jump_timer: Option<Task<()>>,
     is_public: bool,
     is_dm: bool,
     mode: i32,
@@ -634,7 +639,7 @@ pub struct MessagesStore {
     api: Arc<AppApi>,
     _channel_sub: Subscription,
     _conn_watch: Task<()>,
-    pending_last_seen: Option<PendingLastSeen>,
+    pending_last_seen: HashMap<ChannelId, PendingLastSeen>,
     _last_seen_timer: Option<Task<()>>,
     last_seen_fingerprint: HashMap<ChannelId, String>,
     queued_last_seen: Vec<PendingLastSeen>,
@@ -1012,7 +1017,7 @@ impl MessagesStore {
         self.editing = None;
         self.joined_channels.clear();
         self.pending_self_adds.clear();
-        self.pending_last_seen = None;
+        self.pending_last_seen.clear();
         self.last_seen_fingerprint.clear();
         self.queued_last_seen.clear();
         self.poll_ui.clear();
@@ -1065,6 +1070,8 @@ impl MessagesStore {
             active_topic_parent: None,
             pending_jump: None,
             pending_topic_jump: None,
+            next_jump_request_id: 1,
+            _pending_topic_jump_timer: None,
             is_public: true,
             is_dm: false,
             mode: STREAM_MODE_CHANNEL,
@@ -1089,7 +1096,7 @@ impl MessagesStore {
             api,
             _channel_sub: channel_sub,
             _conn_watch: conn_watch,
-            pending_last_seen: None,
+            pending_last_seen: HashMap::new(),
             _last_seen_timer: None,
             last_seen_fingerprint: HashMap::new(),
             queued_last_seen: Vec::new(),
@@ -1416,10 +1423,11 @@ impl MessagesStore {
             return;
         }
         let live_badge = self.channel_badge_count(channel_id, clan_id, cx);
-        let badge_count = match &self.pending_last_seen {
-            Some(p) if p.channel_id == channel_id => p.badge_count.max(live_badge),
-            _ => live_badge,
-        };
+        let badge_count = self
+            .pending_last_seen
+            .get(&channel_id)
+            .map(|p| p.badge_count.max(live_badge))
+            .unwrap_or(live_badge);
         tracing::debug!(
             target: "badge_flow",
             clan = clan_id.get(),
@@ -1477,10 +1485,11 @@ impl MessagesStore {
         ) {
             return;
         }
-        let badge_count = match &self.pending_last_seen {
-            Some(p) if p.channel_id == topic_id => p.badge_count.max(live_badge),
-            _ => live_badge,
-        };
+        let badge_count = self
+            .pending_last_seen
+            .get(&topic_id)
+            .map(|p| p.badge_count.max(live_badge))
+            .unwrap_or(live_badge);
         let pending = PendingLastSeen {
             clan_id,
             channel_id: topic_id,
@@ -1578,7 +1587,7 @@ impl MessagesStore {
     }
 
     fn arm_last_seen_debounce(&mut self, cx: &mut Context<Self>) {
-        if self.pending_last_seen.is_none() {
+        if self.pending_last_seen.is_empty() {
             return;
         }
         self._last_seen_timer = Some(cx.spawn(async move |this, cx| {
@@ -1591,21 +1600,27 @@ impl MessagesStore {
     fn set_pending_last_seen(&mut self, pending: PendingLastSeen, cx: &mut Context<Self>) {
         if self
             .pending_last_seen
-            .as_ref()
-            .is_some_and(|existing| existing.channel_id != pending.channel_id)
+            .get(&pending.channel_id)
+            .is_some_and(|existing| {
+                existing.message_id == pending.message_id
+                    && existing.badge_count == pending.badge_count
+                    && existing.create_time == pending.create_time
+                    && existing.mode == pending.mode
+                    && existing.clan_id == pending.clan_id
+            })
         {
-            self.flush_pending_last_seen(cx);
+            return;
         }
-        self.pending_last_seen = Some(pending);
+        self.pending_last_seen.insert(pending.channel_id, pending);
         self.arm_last_seen_debounce(cx);
     }
 
     fn flush_pending_last_seen(&mut self, cx: &mut Context<Self>) {
-        let Some(pending) = self.pending_last_seen.take() else {
-            return;
-        };
+        let pending = std::mem::take(&mut self.pending_last_seen);
         self._last_seen_timer = None;
-        self.send_last_seen(pending, cx);
+        for pending in pending.into_values() {
+            self.send_last_seen(pending, cx);
+        }
     }
 
     fn flush_queued_last_seen(&mut self, cx: &mut Context<Self>) {
@@ -2103,6 +2118,28 @@ impl MessagesStore {
         message_id: MessageId,
         cx: &mut Context<Self>,
     ) {
+        self.request_jump_with_id(channel_id, message_id, None, cx);
+    }
+
+    pub fn request_inbox_origin_jump(
+        &mut self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        let request_id = self.next_jump_request_id;
+        self.next_jump_request_id = self.next_jump_request_id.wrapping_add(1).max(1);
+        self.request_jump_with_id(channel_id, message_id, Some(request_id), cx);
+        request_id
+    }
+
+    fn request_jump_with_id(
+        &mut self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        request_id: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
         if message_id.is_optimistic() {
             tracing::debug!(
                 channel_id = channel_id.get(),
@@ -2110,7 +2147,7 @@ impl MessagesStore {
             );
             return;
         }
-        self.pending_jump = Some((channel_id, message_id));
+        self.pending_jump = Some((channel_id, message_id, request_id));
         self.try_consume_pending_jump(cx);
     }
 
@@ -2120,17 +2157,22 @@ impl MessagesStore {
     }
 
     fn try_consume_pending_jump(&mut self, cx: &mut Context<Self>) {
-        let Some((channel_id, message_id)) = self.pending_jump else {
+        let Some((channel_id, message_id, request_id)) = self.pending_jump else {
             return;
         };
         if self.active_channel_id != Some(channel_id) || self.loading || self.loading_more {
             return;
         }
         self.pending_jump = None;
-        self.jump_to_message(message_id, cx);
+        self.jump_to_message(message_id, request_id, cx);
     }
 
-    pub fn jump_to_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+    pub fn jump_to_message(
+        &mut self,
+        message_id: MessageId,
+        request_id: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(channel_id) = self.active_channel_id else {
             return;
         };
@@ -2139,15 +2181,18 @@ impl MessagesStore {
             .get(&channel_id)
             .is_some_and(|c| c.messages.contains_id(message_id))
         {
-            cx.emit(MessagesEvent::JumpTo { message_id });
+            cx.emit(MessagesEvent::JumpTo {
+                message_id,
+                request_id,
+            });
             return;
         }
         if self.loading_more || self.loading {
-            self.pending_jump = Some((channel_id, message_id));
+            self.pending_jump = Some((channel_id, message_id, request_id));
             return;
         }
         let Some(clan_id) = self.active_clan_id else {
-            self.pending_jump = Some((channel_id, message_id));
+            self.pending_jump = Some((channel_id, message_id, request_id));
             return;
         };
         let anchor = message_id.get();
@@ -2223,7 +2268,10 @@ impl MessagesStore {
                 if this.active_channel_id == Some(channel_id) {
                     let count = this.messages().len();
                     cx.emit(MessagesEvent::Reset { count });
-                    cx.emit(MessagesEvent::JumpTo { message_id });
+                    cx.emit(MessagesEvent::JumpTo {
+                        message_id,
+                        request_id,
+                    });
                 }
                 this.try_consume_pending_jump(cx);
                 cx.notify();
@@ -3375,30 +3423,21 @@ impl MessagesStore {
             topic_id,
             "add_to_inbox"
         );
-        let notification = inbox_notification_from_marked_message_local(&marked);
-        let pending_id = notification.id.clone();
-        InboxStore::global(cx).update(cx, |store, cx| {
-            store.prepend_local(
-                GLOBAL_INBOX_BUCKET_CLAN_ID,
-                InboxCategory::Messages,
-                notification,
-                cx,
-            );
-        });
         let api = self.api.clone();
         cx.spawn(async move |_this, cx| {
             let saved = Self::save_message_2_inbox(&api, request).await;
+            if !saved {
+                return;
+            }
+            let notification = inbox_notification_from_marked_message_local(&marked);
             cx.update(|cx| {
                 InboxStore::global(cx).update(cx, |store, cx| {
-                    if !saved {
-                        store.delete(
-                            GLOBAL_INBOX_BUCKET_CLAN_ID,
-                            &pending_id,
-                            InboxCategory::Messages,
-                            cx,
-                        );
-                    }
-                    store.schedule_refresh_category(InboxCategory::Messages, cx);
+                    store.prepend_local(
+                        GLOBAL_INBOX_BUCKET_CLAN_ID,
+                        InboxCategory::Messages,
+                        notification,
+                        cx,
+                    );
                 });
             });
         })
@@ -3461,12 +3500,24 @@ impl MessagesStore {
         self.pending_topic_jump
     }
 
-    pub fn queue_topic_jump(&mut self, message_id: MessageId) {
+    pub fn queue_topic_jump(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
         self.pending_topic_jump = Some(message_id);
+        self._pending_topic_jump_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(20))
+                .await;
+            let _ = this.update(cx, |this, _| {
+                if this.pending_topic_jump == Some(message_id) {
+                    this.pending_topic_jump = None;
+                }
+                this._pending_topic_jump_timer = None;
+            });
+        }));
     }
 
     pub fn clear_pending_topic_jump(&mut self) {
         self.pending_topic_jump = None;
+        self._pending_topic_jump_timer = None;
     }
 
     fn drop_topic_bucket(&mut self, topic_id: ChannelId) {
@@ -3494,10 +3545,11 @@ impl MessagesStore {
         let Some(channel) = self.cache.get(&topic_key) else {
             return false;
         };
-        has_more_bottom_for(
-            self.last_message_by_channel.get(&topic_key).copied(),
-            &channel.messages,
-        )
+        channel.gap_bottom
+            || has_more_bottom_for(
+                self.last_message_by_channel.get(&topic_key).copied(),
+                &channel.messages,
+            )
     }
 
     /// Load a discussion topic's replies into their own bucket (keyed by topic id).
@@ -3562,8 +3614,11 @@ impl MessagesStore {
     }
 
     fn emit_topic_jump(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
-        self.pending_topic_jump = Some(message_id);
-        cx.emit(MessagesEvent::JumpTo { message_id });
+        self.queue_topic_jump(message_id, cx);
+        cx.emit(MessagesEvent::JumpTo {
+            message_id,
+            request_id: None,
+        });
     }
 
     pub fn request_topic_jump(
@@ -3654,7 +3709,7 @@ impl MessagesStore {
                 }
                 recompute_message_grouping(&mut window);
                 let has_more = has_more_from_oldest(&window);
-                this.replace_channel(topic_key, window, has_more);
+                this.replace_channel_ex(topic_key, window, has_more, false, true);
                 cx.emit(MessagesEvent::TopicUpdated { topic_id });
                 this.emit_topic_jump(message_id, cx);
                 cx.notify();
@@ -3809,7 +3864,7 @@ impl MessagesStore {
             return false;
         };
         let expected_tail = self.last_message_by_channel.get(&topic_key).copied();
-        if !has_more_bottom_for(expected_tail, &channel.messages) {
+        if !channel.gap_bottom && !has_more_bottom_for(expected_tail, &channel.messages) {
             return false;
         }
         let Some(newest_id) = channel
@@ -3880,6 +3935,8 @@ impl MessagesStore {
                             if dropped > 0 {
                                 channel.has_more = true;
                             }
+                        } else {
+                            channel.gap_bottom = false;
                         }
                         appended
                     }
@@ -3893,6 +3950,9 @@ impl MessagesStore {
                     )
                 {
                     this.last_message_by_channel.insert(topic_key, tail);
+                    if let Some(channel) = this.cache.get_mut(&topic_key) {
+                        channel.gap_bottom = false;
+                    }
                 }
                 tracing::debug!(
                     topic_id = topic_key.get(),
@@ -5671,7 +5731,7 @@ impl MessagesStore {
     ) {
         let previous_reply_target = self.reply_target().cloned();
         self.flush_pending_last_seen(cx);
-        if self.pending_jump.is_some_and(|(pc, _)| pc != channel_id) {
+        if self.pending_jump.is_some_and(|(pc, _, _)| pc != channel_id) {
             self.pending_jump = None;
         }
         self.active_channel_id = Some(channel_id);
@@ -7177,13 +7237,25 @@ impl MessagesStore {
     }
 
     fn replace_channel(&mut self, channel_id: ChannelId, messages: Vec<Message>, has_more: bool) {
+        self.replace_channel_ex(channel_id, messages, has_more, true, false);
+    }
+
+    fn replace_channel_ex(
+        &mut self,
+        channel_id: ChannelId,
+        messages: Vec<Message>,
+        has_more: bool,
+        touch_last: bool,
+        gap_bottom: bool,
+    ) {
         let protect: Vec<ChannelId> = [self.active_topic_id, self.active_channel_id]
             .into_iter()
             .flatten()
             .filter(|id| *id != channel_id)
             .collect();
         let protect_refs: Vec<&ChannelId> = protect.iter().collect();
-        if let Some(newest) = messages.last()
+        if touch_last
+            && let Some(newest) = messages.last()
             && !self.last_message_by_channel.contains_key(&channel_id)
         {
             self.set_last_message(channel_id, newest.id);
@@ -7193,6 +7265,7 @@ impl MessagesStore {
             ChannelMessages {
                 messages: MessageList::from_messages(channel_id, messages),
                 has_more,
+                gap_bottom,
             },
             &protect_refs,
         );
@@ -12116,6 +12189,7 @@ mod tests {
     fn channel_msgs(msgs: Vec<Message>) -> ChannelMessages {
         ChannelMessages {
             messages: MessageList::from_messages(ChannelId(1), msgs),
+            gap_bottom: false,
             has_more: false,
         }
     }

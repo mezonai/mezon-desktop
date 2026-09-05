@@ -1164,7 +1164,7 @@ pub fn list_loaded_messages(cx: &App, limit: usize, topic: bool) -> anyhow::Resu
 pub fn jump_to_message(cx: &mut App, message_id: i64) -> anyhow::Result<Value> {
     let store = mezon_store::MessagesStore::global(cx);
     store.update(cx, |store, cx| {
-        store.jump_to_message(mezon_store::MessageId::new(message_id), cx)
+        store.jump_to_message(mezon_store::MessageId::new(message_id), None, cx)
     });
     Ok(json!({ "ok": true, "message_id": message_id.to_string() }))
 }

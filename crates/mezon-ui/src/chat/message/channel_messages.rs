@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1499,34 +1498,11 @@ impl ChannelMessages {
             }
         });
 
-        let topics_event_sub = cx.subscribe(&TopicsStore::global(cx), |this, store, event, cx| {
+        let topics_event_sub = cx.subscribe(&TopicsStore::global(cx), |this, _, event, cx| {
             if this.is_topic_box || !matches!(event, TopicsEvent::Updated) {
                 return;
             }
-            let topics = store.read(cx);
-            let messages = MessagesStore::global(cx).read(cx);
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            let mut any_topic = false;
-            for msg in messages.viewport_messages() {
-                let Some(topic_id) = msg.topic_id else {
-                    continue;
-                };
-                any_topic = true;
-                topic_id.hash(&mut hasher);
-                if let Some(meta) = topics.topic_meta_for_topic(topic_id) {
-                    meta.rpl.hash(&mut hasher);
-                    meta.lsnt.hash(&mut hasher);
-                }
-            }
-            if !any_topic {
-                return;
-            }
-            let fp = hasher.finish();
-            if this.topics_viewport_fp == Some(fp) {
-                return;
-            }
-            this.topics_viewport_fp = Some(fp);
-            cx.notify();
+            this.notify_if_topics_viewport_changed(cx);
         });
 
         let topic_badge_sub = cx.subscribe(&TopicBadgeStore::global(cx), |this, _, event, cx| {
@@ -1534,14 +1510,7 @@ impl ChannelMessages {
                 return;
             }
             let TopicBadgeEvent::Updated { .. } = event;
-            let messages = MessagesStore::global(cx).read(cx);
-            if messages
-                .viewport_messages()
-                .iter()
-                .any(|msg| msg.topic_id.is_some())
-            {
-                cx.notify();
-            }
+            this.notify_if_topics_viewport_changed(cx);
         });
         subs.push(topic_badge_sub);
 
@@ -1711,7 +1680,7 @@ impl ChannelMessages {
                         }
                     }
                 }
-                MessagesEvent::JumpTo { message_id } => {
+                MessagesEvent::JumpTo { message_id, .. } => {
                     if this.is_topic_jump_target(*message_id, cx) {
                         return;
                     }
@@ -1799,7 +1768,7 @@ impl ChannelMessages {
                 this.mark_scroll_activity(cx);
 
                 if this.is_topic_box {
-                    if at_bottom {
+                    if at_bottom_changed && at_bottom {
                         this.sync_topic_seen(cx);
                     }
                     if visible_range_changed {
@@ -2107,6 +2076,40 @@ impl ChannelMessages {
             .any(|m| m.id == message_id)
     }
 
+    fn notify_if_topics_viewport_changed(&mut self, cx: &mut Context<Self>) {
+        use std::hash::{Hash, Hasher};
+        let topics = TopicsStore::global(cx).read(cx);
+        let badges = TopicBadgeStore::try_global(cx);
+        let messages = MessagesStore::global(cx).read(cx);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut any_topic = false;
+        for msg in messages.viewport_messages() {
+            let Some(topic_id) = msg.topic_id else {
+                continue;
+            };
+            any_topic = true;
+            topic_id.hash(&mut hasher);
+            if let Some(meta) = topics.topic_meta_for_topic(topic_id) {
+                meta.rpl.hash(&mut hasher);
+                meta.lsnt.hash(&mut hasher);
+            }
+            let badge = badges
+                .as_ref()
+                .map(|store| store.read(cx).topic_badge_count(&topic_id.to_string()))
+                .unwrap_or(0);
+            badge.hash(&mut hasher);
+        }
+        if !any_topic {
+            return;
+        }
+        let fp = hasher.finish();
+        if self.topics_viewport_fp == Some(fp) {
+            return;
+        }
+        self.topics_viewport_fp = Some(fp);
+        cx.notify();
+    }
+
     fn apply_topic_jump(&mut self, header_shown: bool, cx: &mut Context<Self>) {
         let target = self
             .pending_jump
@@ -2289,7 +2292,12 @@ impl ChannelMessages {
     }
 
     fn on_topic_store_event(&mut self, event: &MessagesEvent, cx: &mut Context<Self>) {
-        if matches!(event, MessagesEvent::JumpTo { .. }) {
+        if let MessagesEvent::JumpTo { message_id, .. } = event {
+            if MessagesStore::global(cx).read(cx).pending_topic_jump() == Some(*message_id) {
+                self.refresh_topic_messages(cx);
+                self.apply_topic_jump(self.header_shown, cx);
+                cx.notify();
+            }
             return;
         }
         let concerns_topic = match event {
@@ -2321,6 +2329,7 @@ impl ChannelMessages {
                 None => self.remeasure_topic_rows(0..self.topic_row_ids.len()),
             }
         }
+        self.apply_topic_jump(self.header_shown, cx);
         if self.at_bottom {
             self.sync_topic_seen(cx);
         }
@@ -4683,7 +4692,6 @@ impl ChannelMessages {
         self.sync_topic_header(cx);
         self.maybe_paginate_topic(cx);
         let header_shown = self.header_shown;
-        self.apply_topic_jump(header_shown, cx);
         let topic_id = TopicsStore::global(cx).read(cx).active_topic_id();
         let first_load = {
             let store = MessagesStore::global(cx);

@@ -500,7 +500,7 @@ pub(crate) fn selectable_system_message_text(msg: &Message, locale: &str) -> Str
 
 fn jump_to_message(message_id: MessageId, cx: &mut App) {
     MessagesStore::global(cx).update(cx, |store, cx| {
-        store.jump_to_message(message_id, cx);
+        store.jump_to_message(message_id, None, cx);
     });
 }
 

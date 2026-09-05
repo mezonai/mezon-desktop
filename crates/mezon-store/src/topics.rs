@@ -282,13 +282,21 @@ struct PendingInboxTopicJump {
     origin_id: MessageId,
     reply_id: MessageId,
     channel_id: ChannelId,
+    request_id: u64,
     requested_at: Instant,
 }
 
 impl PendingInboxTopicJump {
-    fn matches(&self, message_id: MessageId, channel_id: ChannelId, now: Instant) -> bool {
+    fn matches(
+        &self,
+        message_id: MessageId,
+        channel_id: ChannelId,
+        request_id: Option<u64>,
+        now: Instant,
+    ) -> bool {
         self.origin_id == message_id
             && self.channel_id == channel_id
+            && Some(self.request_id) == request_id
             && now.duration_since(self.requested_at) <= INBOX_TOPIC_JUMP_TIMEOUT
     }
 
@@ -316,7 +324,7 @@ pub struct TopicsStore {
     api: Arc<AppApi>,
     updated_notify_task: Option<Task<()>>,
     _conn_watch: Task<()>,
-    _messages_sub: Subscription,
+    _messages_sub: Option<Subscription>,
 }
 
 struct GlobalTopicsStore(Entity<TopicsStore>);
@@ -334,8 +342,10 @@ impl TopicsStore {
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
         Self::register_realtime(cx);
-        let messages_sub = cx.subscribe(&MessagesStore::global(cx), |this, _, event, cx| {
-            this.on_messages_event(event, cx);
+        let messages_sub = MessagesStore::try_global(cx).map(|store| {
+            cx.subscribe(&store, |this, _, event, cx| {
+                this.on_messages_event(event, cx);
+            })
         });
         Self {
             data: TopicsData::default(),
@@ -678,7 +688,11 @@ impl TopicsStore {
     }
 
     fn on_messages_event(&mut self, event: &MessagesEvent, cx: &mut Context<Self>) {
-        let MessagesEvent::JumpTo { message_id } = event else {
+        let MessagesEvent::JumpTo {
+            message_id,
+            request_id,
+        } = event
+        else {
             return;
         };
         let now = Instant::now();
@@ -689,10 +703,12 @@ impl TopicsStore {
             self.pending_inbox_jump = None;
             return;
         }
-        let Some(active_channel_id) = MessagesStore::global(cx).read(cx).active_channel_id() else {
+        let Some(active_channel_id) =
+            MessagesStore::try_global(cx).and_then(|store| store.read(cx).active_channel_id())
+        else {
             return;
         };
-        if !pending.matches(*message_id, active_channel_id, now) {
+        if !pending.matches(*message_id, active_channel_id, *request_id, now) {
             return;
         }
         let Some(pending) = self.pending_inbox_jump.take() else {
@@ -767,15 +783,16 @@ impl TopicsStore {
         if topic_id <= 0 || origin_id.get() <= 0 {
             return;
         }
+        let request_id = MessagesStore::global(cx).update(cx, |store, cx| {
+            store.request_inbox_origin_jump(channel_id, origin_id, cx)
+        });
         self.pending_inbox_jump = Some(PendingInboxTopicJump {
             topic_id,
             origin_id,
             reply_id,
             channel_id,
+            request_id,
             requested_at: Instant::now(),
-        });
-        MessagesStore::global(cx).update(cx, |store, cx| {
-            store.request_jump(channel_id, origin_id, cx);
         });
     }
 
@@ -869,7 +886,7 @@ impl TopicsStore {
         messages.update(cx, |store, cx| {
             store.set_active_topic(topic_id, cx);
             if let Some(reply_id) = jump_reply {
-                store.queue_topic_jump(reply_id);
+                store.queue_topic_jump(reply_id, cx);
             }
         });
         cx.emit(TopicsEvent::Opened);
@@ -1658,6 +1675,7 @@ mod tests {
             origin_id: MessageId(7),
             reply_id: MessageId(8),
             channel_id: ChannelId(3),
+            request_id: 42,
             requested_at,
         }
     }
@@ -1666,8 +1684,10 @@ mod tests {
     fn a_pending_inbox_jump_only_opens_its_own_origin() {
         let now = Instant::now();
         let pending = pending_jump(now);
-        assert!(pending.matches(MessageId(7), ChannelId(3), now));
-        assert!(!pending.matches(MessageId(8), ChannelId(3), now));
+        assert!(pending.matches(MessageId(7), ChannelId(3), Some(42), now));
+        assert!(!pending.matches(MessageId(8), ChannelId(3), Some(42), now));
+        assert!(!pending.matches(MessageId(7), ChannelId(3), Some(99), now));
+        assert!(!pending.matches(MessageId(7), ChannelId(3), None, now));
     }
 
     #[test]
@@ -1676,7 +1696,7 @@ mod tests {
         let pending = pending_jump(requested_at);
         let later = requested_at + INBOX_TOPIC_JUMP_TIMEOUT + Duration::from_secs(1);
         assert!(pending.is_expired(later));
-        assert!(!pending.matches(MessageId(7), ChannelId(3), later));
+        assert!(!pending.matches(MessageId(7), ChannelId(3), Some(42), later));
     }
 
     fn sample_message(code: MessageCode) -> Message {

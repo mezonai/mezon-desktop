@@ -567,7 +567,7 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
         .when(!jump_target.is_zero(), |d| {
             d.on_click(move |_, _, cx| {
                 MessagesStore::global(cx)
-                    .update(cx, |store, cx| store.jump_to_message(jump_target, cx));
+                    .update(cx, |store, cx| store.jump_to_message(jump_target, None, cx));
             })
         })
         .child(
