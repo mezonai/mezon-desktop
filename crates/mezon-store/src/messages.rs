@@ -2089,36 +2089,6 @@ impl MessagesStore {
         true
     }
 
-    pub fn topic_id_for_message(&self, message_id: MessageId, cx: &App) -> Option<i64> {
-        if let Some(topic) = self.active_topic_id
-            && self.bucket_contains(topic, message_id)
-        {
-            return Some(topic.get());
-        }
-        for (bucket_id, channel) in self.cache.iter() {
-            if !channel.messages.contains_id(message_id) {
-                continue;
-            }
-            if let Some(msg) = channel.messages.get_by_id(message_id)
-                && let Some(topic) = msg.topic_id.filter(|id| id.get() != 0)
-            {
-                return Some(topic.get());
-            }
-            if self.active_topic_id == Some(*bucket_id) {
-                return Some(bucket_id.get());
-            }
-            if TopicsStore::try_global(cx).is_some_and(|store| {
-                store
-                    .read(cx)
-                    .topic_by_id(&bucket_id.get().to_string())
-                    .is_some()
-            }) {
-                return Some(bucket_id.get());
-            }
-        }
-        None
-    }
-
     pub fn request_jump(
         &mut self,
         channel_id: ChannelId,
@@ -9550,11 +9520,6 @@ mod tests {
     }
 
     #[test]
-    fn topic_jump_skips_around_fetch_when_reply_is_cached() {
-        assert_eq!(DIRECTION_AROUND, 2);
-    }
-
-    #[test]
     fn name_for_prioritize_matches_reacts_order() {
         assert_eq!(name_for_prioritize("nick", "display", "user"), "nick");
         assert_eq!(name_for_prioritize("", "display", "user"), "display");
@@ -9636,6 +9601,8 @@ mod tests {
                     topic.get(),
                     api_page(&[5]).messages.into_iter().next().unwrap(),
                     false,
+                    Vec::new(),
+                    true,
                     cx,
                 );
                 assert!(

@@ -107,7 +107,7 @@ impl InboxPopoverPanel {
             if this.tab == InboxTab::Topics {
                 return;
             }
-            this.sync_from_store(cx, true);
+            this.sync_from_store(cx, false);
             cx.notify();
         });
         let _inbox_obs = cx.observe(&inbox_store, |this, _, cx| {

@@ -493,19 +493,29 @@ mod tests {
         assert_eq!(total, 5);
     }
 
-    #[test]
-    fn reset_topic_removes_entry() {
-        let mut store_map = HashMap::new();
-        store_map.insert(
-            "99".to_string(),
-            TopicParentEntry {
-                clan_id: "10".into(),
-                _parent_channel_id: "5".into(),
-                count: 2,
-            },
-        );
-        let removed = store_map.remove("99").map(|entry| entry.clan_id);
-        assert_eq!(removed.as_deref(), Some("10"));
-        assert!(store_map.is_empty());
+    #[gpui::test]
+    fn clear_topic_removes_entry(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = std::sync::Arc::new(mezon_client::AppApi::new(
+                std::sync::Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            let auth_state = cx.new(|_| AuthState::NotAuthenticated);
+            let store = TopicBadgeStore::init(api, auth_state, cx);
+            store.update(cx, |store, cx| {
+                store.topic_parent_map.insert(
+                    "99".into(),
+                    TopicParentEntry {
+                        clan_id: "10".into(),
+                        _parent_channel_id: "5".into(),
+                        count: 2,
+                    },
+                );
+                store.clear_topic("99", cx);
+                assert_eq!(store.topic_badge_count("99"), 0);
+                assert!(store.topic_parent_map.is_empty());
+            });
+        });
     }
 }
