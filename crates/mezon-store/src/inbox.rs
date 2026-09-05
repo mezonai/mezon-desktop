@@ -31,7 +31,6 @@ struct CategoryBucket {
     items: Vec<InboxNotification>,
     last_id: Option<String>,
     loading: bool,
-    refresh_pending: bool,
     has_more: bool,
     fetch_generation: u64,
     fetched_at: Option<Instant>,
@@ -44,7 +43,6 @@ impl Default for CategoryBucket {
             items: Vec::new(),
             last_id: None,
             loading: false,
-            refresh_pending: false,
             has_more: true,
             fetch_generation: 0,
             fetched_at: None,
@@ -218,24 +216,6 @@ impl InboxStore {
         self.fetch_page(clan_id, category, None, cx);
     }
 
-    fn invalidate(bucket: &mut CategoryBucket) {
-        bucket.fetched_at = None;
-        bucket.server_loaded = false;
-    }
-
-    pub fn refresh_category(&mut self, category: InboxCategory, cx: &mut Context<Self>) {
-        Self::invalidate(self.bucket_mut(category));
-        self.fetch_page(GLOBAL_INBOX_BUCKET_CLAN_ID, category, None, cx);
-    }
-
-    pub fn schedule_refresh_category(&mut self, category: InboxCategory, cx: &mut Context<Self>) {
-        if self.bucket(category).is_some_and(|bucket| bucket.loading) {
-            self.bucket_mut(category).refresh_pending = true;
-            return;
-        }
-        self.refresh_category(category, cx);
-    }
-
     pub fn fetch_more(&mut self, clan_id: &str, category: InboxCategory, cx: &mut Context<Self>) {
         let Some(last_id) = self.bucket(category).and_then(|b| b.last_id.clone()) else {
             return;
@@ -281,13 +261,6 @@ impl InboxStore {
                     return;
                 }
                 this.apply_fetch_result(category, generation, result, is_first_page, cx);
-                if this
-                    .bucket(category)
-                    .is_some_and(|bucket| bucket.refresh_pending)
-                {
-                    this.bucket_mut(category).refresh_pending = false;
-                    this.refresh_category(category, cx);
-                }
             });
         })
         .detach();
@@ -537,19 +510,16 @@ impl InboxStore {
             }
             return;
         };
-        let stale: Vec<String> = touched
+        let present: HashSet<String> = bucket
+            .items
             .iter()
-            .filter(|key| {
-                !bucket.items.iter().any(|item| {
-                    item.effective_message_id().is_some_and(|message_id| {
-                        topic_remember_key(&item.channel_id, &message_id) == **key
-                    })
-                })
+            .filter_map(|item| {
+                let message_id = item.effective_message_id()?;
+                Some(topic_remember_key(&item.channel_id, &message_id))
             })
-            .cloned()
             .collect();
-        for key in stale {
-            self.topic_by_message.remove(&key);
+        for key in touched.difference(&present) {
+            self.topic_by_message.remove(key);
         }
     }
 
@@ -612,20 +582,18 @@ impl InboxStore {
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
-        match event {
-            RealtimeEvent::Notifications(batch) => {
-                for raw in &batch.notifications {
-                    let Ok(notification) = inbox_notification_from_api(raw.clone()) else {
-                        continue;
-                    };
-                    if !self.should_prepend_realtime(&notification) {
-                        continue;
-                    }
-                    let category = notification.category;
-                    self.prepend_local(GLOBAL_INBOX_BUCKET_CLAN_ID, category, notification, cx);
-                }
+        let RealtimeEvent::Notifications(batch) = event else {
+            return;
+        };
+        for raw in &batch.notifications {
+            let Ok(notification) = inbox_notification_from_api(raw.clone()) else {
+                continue;
+            };
+            if !self.should_prepend_realtime(&notification) {
+                continue;
             }
-            _ => {}
+            let category = notification.category;
+            self.prepend_local(GLOBAL_INBOX_BUCKET_CLAN_ID, category, notification, cx);
         }
     }
 
@@ -739,25 +707,6 @@ mod tests {
         assert!(store.should_prepend_realtime(&mention));
     }
 
-    #[gpui::test]
-    fn schedule_refresh_queues_when_already_loading(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            let api = Arc::new(AppApi::new(
-                Arc::new(mezon_client::TransportClient::new(String::new())),
-                String::new(),
-            ));
-            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
-            let store = InboxStore::init(api, cx);
-            store.update(cx, |store, cx| {
-                store.bucket_mut(InboxCategory::Mentions).loading = true;
-                store.schedule_refresh_category(InboxCategory::Mentions, cx);
-                let bucket = store.bucket(InboxCategory::Mentions).unwrap();
-                assert!(bucket.refresh_pending);
-                assert!(bucket.loading);
-            });
-        });
-    }
-
     #[test]
     fn fetch_initial_when_realtime_items_exist_before_server_page() {
         let local_only = CategoryBucket {
@@ -818,7 +767,8 @@ mod tests {
             ..CategoryBucket::default()
         };
         assert!(!InboxStore::should_fetch_initial(Some(&loaded)));
-        InboxStore::invalidate(&mut loaded);
+        loaded.fetched_at = None;
+        loaded.server_loaded = false;
         assert!(InboxStore::should_fetch_initial(Some(&loaded)));
         loaded.items.clear();
         assert!(InboxStore::should_fetch_initial(Some(&loaded)));

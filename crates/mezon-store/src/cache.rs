@@ -174,7 +174,7 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
             let Some(victim) = self.order.front().cloned() else {
                 break;
             };
-            if protect.iter().any(|p| *p == &victim) {
+            if protect.contains(&&victim) {
                 if self.order.len() < 2 {
                     break;
                 }
