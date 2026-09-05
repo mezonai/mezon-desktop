@@ -9161,6 +9161,9 @@ impl MezonTransport {
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
+        if let Some(token) = bare_jwt(&response) {
+            return Ok(api::GenerateMeetTokenResponse { token });
+        }
         Ok(api::GenerateMeetTokenResponse::decode(response.as_slice())?)
     }
 
@@ -9169,13 +9172,11 @@ impl MezonTransport {
         &self,
         channel_id: i64,
         clan_id: i64,
-        username: &str,
-        room_name: &str,
+        user_id: i64,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::MeetParticipantRequest {
-            username: username.to_string(),
-            room_name: room_name.to_string(),
+            user_id,
             channel_id,
             clan_id,
         }
@@ -9193,13 +9194,11 @@ impl MezonTransport {
         &self,
         channel_id: i64,
         clan_id: i64,
-        username: &str,
-        room_name: &str,
+        user_id: i64,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::MeetParticipantRequest {
-            username: username.to_string(),
-            room_name: room_name.to_string(),
+            user_id,
             channel_id,
             clan_id,
         }
@@ -9933,6 +9932,20 @@ impl MezonTransport {
         }
         Ok(())
     }
+}
+
+/// Recovers a token from a `GenerateMeetToken` reply that is not protobuf.
+///
+/// The SFU-era backend answers this RPC with the bare JWT — sometimes wrapped in
+/// JSON quotes — where older builds returned a `GenerateMeetTokenResponse`.
+/// Decoding the raw text as protobuf fails deep inside the base64 with a
+/// nonsense wire type, so sniff for the JWT shape first and fall back to the
+/// protobuf path for servers that still send it.
+fn bare_jwt(body: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(body).ok()?.trim().trim_matches('"');
+    let looks_like_jwt =
+        text.starts_with("eyJ") && text.matches('.').count() == 2 && !text.ends_with('.');
+    looks_like_jwt.then(|| text.to_owned())
 }
 
 #[cfg(test)]
@@ -11593,5 +11606,35 @@ mod tests {
         assert!(is_channel_limit_api_error(&err));
         let err: anyhow::Error = ApiStatusError { code: 13 }.into();
         assert!(!is_channel_limit_api_error(&err));
+    }
+
+    #[test]
+    fn a_bare_jwt_body_is_recovered_as_the_token() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
+        assert_eq!(bare_jwt(jwt.as_bytes()).as_deref(), Some(jwt));
+    }
+
+    #[test]
+    fn a_json_quoted_jwt_is_unwrapped() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
+        let quoted = format!("\"{jwt}\"\n");
+        assert_eq!(bare_jwt(quoted.as_bytes()).as_deref(), Some(jwt));
+    }
+
+    #[test]
+    fn a_protobuf_body_is_left_for_the_real_decoder() {
+        let encoded = api::GenerateMeetTokenResponse {
+            token: "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln".to_owned(),
+        }
+        .encode_to_vec();
+        assert_eq!(bare_jwt(&encoded), None);
+    }
+
+    #[test]
+    fn text_that_is_not_a_three_part_jwt_is_rejected() {
+        assert_eq!(bare_jwt(b"eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ"), None);
+        assert_eq!(bare_jwt(b"eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ."), None);
+        assert_eq!(bare_jwt(b"not a token"), None);
+        assert_eq!(bare_jwt(&[0xff, 0xfe, 0x00]), None);
     }
 }

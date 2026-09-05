@@ -56,11 +56,15 @@ members = [
     "crates/vendor/theme",
     "crates/vendor/menu",
     "crates/vendor/ui",
+    # Vendored WebRTC binding (trimmed to used modules)
+    "crates/vendor/libwebrtc",
+    "crates/vendor/webrtc-sys",
+    "crates/vendor/webrtc-sys-build",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "2.0.22"
+version = "2.0.23"
 edition = "2024"
 authors = ["Mezon Team"]
 license = "GPL-3.0-or-later"
@@ -305,9 +309,7 @@ chrono               = { version = "0.4", features = ["serde"] }
 cpal                 = "0.17.3"
 ogg                  = "0.9"
 rodio                = { git = "https://github.com/RustAudio/rodio", rev = "e50e726ddd0292f6ef9de0dda6b90af4ed1fb66a", default-features = false, features = ["playback"] }
-livekit              = { version = "0.8", features = ["rustls-tls-native-roots"] }
-livekit-protocol     = "0.7"
-libwebrtc            = "0.3.44"
+libwebrtc            = { path = "crates/vendor/libwebrtc" }
 flume                = "0.11"
 rayon                = "1.8"
 heapless             = "0.9.2"

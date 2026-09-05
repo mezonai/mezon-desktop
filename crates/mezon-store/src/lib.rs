@@ -245,10 +245,11 @@ pub use voice::record_wayland_session;
 pub use voice::{
     DeviceKind, DeviceMenuKind, DisplayedFlower, DisplayedReaction, MAX_SOUND_BYTES,
     NetworkQuality, PickedScreen, RecordingState, RecordingToast, SOUND_ALLOWED_EXTENSIONS,
-    ScreenShareKind, ScreenShareListError, ScreenShareOption, ScreenSharePreview, VideoFrameData,
-    VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceModerationError, VoiceParticipant,
-    VoiceRenderFrame, VoiceStore, VoiceStoreEvent, camera_tile_id, capture_screen_share_preview,
-    list_screen_share_options, peek_screen_share_options, screen_tile_id, system_screen_share_pick,
+    ScreenShareKind, ScreenShareListError, ScreenShareOption, ScreenSharePreview, SfuRole,
+    VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceModerationError,
+    VoiceParticipant, VoiceRenderFrame, VoiceStore, VoiceStoreEvent, camera_tile_id,
+    capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
+    screen_tile_id, system_screen_share_pick,
     upload_sound_file, validate_sound_file,
 };
 pub use wallet::{

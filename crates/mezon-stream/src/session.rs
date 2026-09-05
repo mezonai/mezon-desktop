@@ -3,18 +3,18 @@ use std::sync::Arc;
 use anyhow::{Context as _, anyhow};
 use flume::{Receiver, Sender};
 use futures::{SinkExt, StreamExt};
-use livekit::webrtc::audio_stream::native::NativeAudioStream;
-use livekit::webrtc::ice_candidate::IceCandidate;
-use livekit::webrtc::media_stream_track::MediaStreamTrack;
-use livekit::webrtc::peer_connection::OfferOptions;
-use livekit::webrtc::peer_connection_factory::{
+use libwebrtc::audio_stream::native::NativeAudioStream;
+use libwebrtc::ice_candidate::IceCandidate;
+use libwebrtc::media_stream_track::MediaStreamTrack;
+use libwebrtc::peer_connection::OfferOptions;
+use libwebrtc::peer_connection_factory::{
     ContinualGatheringPolicy, IceServer, IceTransportsType, PeerConnectionFactory, RtcConfiguration,
 };
-use livekit::webrtc::prelude::MediaType;
-use livekit::webrtc::prelude::VideoBuffer;
-use livekit::webrtc::rtp_transceiver::{RtpTransceiverDirection, RtpTransceiverInit};
-use livekit::webrtc::session_description::{SdpType, SessionDescription};
-use livekit::webrtc::video_stream::native::NativeVideoStream;
+use libwebrtc::prelude::MediaType;
+use libwebrtc::prelude::VideoBuffer;
+use libwebrtc::rtp_transceiver::{RtpTransceiverDirection, RtpTransceiverInit};
+use libwebrtc::session_description::{SdpType, SessionDescription};
+use libwebrtc::video_stream::native::NativeVideoStream;
 use mezon_voice::{StreamAudioOutput, VideoFrameStore, i420_to_bgra_into};
 use parking_lot::Mutex;
 use tokio_tungstenite::connect_async;
@@ -349,7 +349,7 @@ async fn send_ws(
 }
 
 fn pump_video_track(
-    video_track: livekit::webrtc::video_track::RtcVideoTrack,
+    video_track: libwebrtc::video_track::RtcVideoTrack,
     frame_store: Arc<VideoFrameStore>,
     event_tx: Sender<StreamEvent>,
     runtime_handle: tokio::runtime::Handle,
@@ -387,7 +387,7 @@ fn pump_video_track(
 }
 
 fn pump_audio_track(
-    audio_track: livekit::webrtc::audio_track::RtcAudioTrack,
+    audio_track: libwebrtc::audio_track::RtcAudioTrack,
     player: Arc<StreamAudioOutput>,
     out_fmt: mezon_voice::AudioFormat,
     event_tx: Sender<StreamEvent>,

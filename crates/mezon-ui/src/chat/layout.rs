@@ -72,6 +72,10 @@ pub struct ChatLayout {
     displayed_stream_fullscreen: bool,
     stream_fullscreen_focus: FocusHandle,
     stream_fullscreen_focused: bool,
+    /// Focus scope for the voice pane. Space is push-to-talk only while focus
+    /// sits inside it, so typing a space in the side chat never opens the mic.
+    voice_focus: FocusHandle,
+    _voice_ptt_activation: Option<Subscription>,
     pending_channel_id: Option<ChannelId>,
     prefetched_voice_channel: Option<ChannelId>,
     dm_view_fingerprint: Option<(ChannelId, DirectKind, String)>,
@@ -537,6 +541,8 @@ impl ChatLayout {
             displayed_stream_fullscreen: false,
             stream_fullscreen_focus: cx.focus_handle(),
             stream_fullscreen_focused: false,
+            voice_focus: cx.focus_handle(),
+            _voice_ptt_activation: None,
             pending_channel_id: None,
             prefetched_voice_channel: None,
             dm_view_fingerprint: None,
@@ -2410,6 +2416,8 @@ impl ChatLayout {
         let mic_enabled = store.mic_enabled();
         let camera_enabled = store.camera_enabled();
         let screen_enabled = store.screen_share_enabled();
+        let is_audience = store.is_audience();
+        let ptt_active = store.push_to_talk_active();
         let link_copied = store.link_copied();
         let noise_control = self.render_noise_control(cx);
         let theme = cx.theme();
@@ -2426,6 +2434,8 @@ impl ChatLayout {
             mic_enabled,
             camera_enabled,
             screen_enabled,
+            is_audience,
+            ptt_active,
             link_copied,
             noise_control,
         ))
@@ -2997,6 +3007,18 @@ impl ChatLayout {
 
             if ch.channel_type == ChannelType::Voice {
                 self.sync_voice_session_defaults(cx);
+                // A window that goes inactive never delivers the matching key up,
+                // which would otherwise leave the mic open with nothing held.
+                if self._voice_ptt_activation.is_none() {
+                    self._voice_ptt_activation =
+                        Some(cx.observe_window_activation(window, |this, window, cx| {
+                            if !window.is_window_active() {
+                                this.voice_store.update(cx, |store, cx| {
+                                    store.set_push_to_talk(false, cx);
+                                });
+                            }
+                        }));
+                }
                 let channel = ch.clone();
                 let (input_device_id, output_device_id, camera_device_id) = {
                     let settings = self.settings.read(cx);
@@ -3072,6 +3094,8 @@ impl ChatLayout {
                     .min_w_0()
                     .child(
                         div()
+                            .id("voice-focus-scope")
+                            .track_focus(&self.voice_focus)
                             .relative()
                             .flex()
                             .flex_col()
@@ -3079,6 +3103,32 @@ impl ChatLayout {
                             .min_w_0()
                             .min_h_0()
                             .overflow_hidden()
+                            .on_mouse_down(gpui::MouseButton::Left, {
+                                let focus = self.voice_focus.clone();
+                                move |_, window, cx| window.focus(&focus, cx)
+                            })
+                            .on_key_down({
+                                let voice = self.voice_store.clone();
+                                move |event, _, cx| {
+                                    if event.keystroke.key.as_str() != "space" || event.is_held {
+                                        return;
+                                    }
+                                    voice.update(cx, |store, cx| {
+                                        store.set_push_to_talk(true, cx);
+                                    });
+                                }
+                            })
+                            .on_key_up({
+                                let voice = self.voice_store.clone();
+                                move |event, _, cx| {
+                                    if event.keystroke.key.as_str() != "space" {
+                                        return;
+                                    }
+                                    voice.update(cx, |store, cx| {
+                                        store.set_push_to_talk(false, cx);
+                                    });
+                                }
+                            })
                             .child(voice_view)
                             .when_some(self.voice_emoji_picker.clone(), |el, picker| {
                                 el.child(deferred(

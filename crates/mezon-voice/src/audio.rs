@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use livekit::webrtc::native::apm::AudioProcessingModule;
+use libwebrtc::native::apm::AudioProcessingModule;
 use parking_lot::Mutex;
 
 struct CaptureChunk {
@@ -1673,4 +1673,294 @@ fn build_output(
         other => bail!("unsupported output sample format: {other:?}"),
     };
     Ok(stream)
+}
+
+/// Linear resampler from a capture device's rate to a fixed uplink rate, mixing
+/// any number of input channels down to mono.
+///
+/// It keeps the fractional read position across calls rather than resampling
+/// each buffer independently, so buffers that do not divide evenly into the
+/// output rate neither drift nor click at the seams.
+pub struct MicResampler {
+    out_rate: u32,
+    in_rate: u32,
+    step: f64,
+    out_pos: f64,
+    consumed: u64,
+    prev: f32,
+    have_prev: bool,
+    started: bool,
+}
+
+impl MicResampler {
+    pub fn new(out_rate: u32) -> Self {
+        Self {
+            out_rate: out_rate.max(1),
+            in_rate: 0,
+            step: 1.0,
+            out_pos: 0.0,
+            consumed: 0,
+            prev: 0.0,
+            have_prev: false,
+            started: false,
+        }
+    }
+
+    fn reset(&mut self, in_rate: u32) {
+        self.in_rate = in_rate;
+        self.step = in_rate as f64 / self.out_rate as f64;
+        self.out_pos = 0.0;
+        self.consumed = 0;
+        self.prev = 0.0;
+        self.have_prev = false;
+        self.started = false;
+    }
+
+    pub fn process(&mut self, samples: &[i16], in_rate: u32, in_channels: u32, out: &mut Vec<i16>) {
+        if in_rate != self.in_rate {
+            self.reset(in_rate);
+        }
+        let channels = in_channels.max(1) as usize;
+        let mono: Vec<f32> = if channels == 1 {
+            samples.iter().map(|&s| s as f32).collect()
+        } else {
+            samples
+                .chunks_exact(channels)
+                .map(|c| c.iter().map(|&s| s as f32).sum::<f32>() / channels as f32)
+                .collect()
+        };
+        let Some(&last) = mono.last() else {
+            return;
+        };
+        if (self.step - 1.0).abs() < f64::EPSILON {
+            out.extend(mono.iter().map(|&v| clamp_i16(v)));
+            self.prev = last;
+            self.have_prev = true;
+            self.consumed += mono.len() as u64;
+            return;
+        }
+        if !self.started {
+            self.out_pos = self.consumed as f64;
+            self.started = true;
+        }
+        let base = self.consumed;
+        let n = mono.len() as u64;
+        let last_abs = (base + n - 1) as f64;
+        while self.out_pos < last_abs {
+            let left = self.out_pos.floor();
+            let frac = (self.out_pos - left) as f32;
+            let li = left as i64;
+            let sl = self.sample_at(li, base, &mono);
+            let sr = self.sample_at(li + 1, base, &mono);
+            out.push(clamp_i16(sl + (sr - sl) * frac));
+            self.out_pos += self.step;
+        }
+        self.prev = last;
+        self.have_prev = true;
+        self.consumed += n;
+    }
+
+    fn sample_at(&self, abs: i64, base: u64, mono: &[f32]) -> f32 {
+        if abs < base as i64 {
+            if self.have_prev { self.prev } else { mono[0] }
+        } else {
+            let idx = (abs - base as i64) as usize;
+            mono.get(idx).copied().unwrap_or(self.prev)
+        }
+    }
+}
+
+pub fn clamp_i16(v: f32) -> i16 {
+    v.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
+}
+
+#[cfg(test)]
+mod resampler_tests {
+    use super::MicResampler;
+
+    #[test]
+    fn a_matching_rate_passes_mono_samples_straight_through() {
+        let mut resampler = MicResampler::new(48_000);
+        let mut out = Vec::new();
+        resampler.process(&[1, 2, 3, 4], 48_000, 1, &mut out);
+        assert_eq!(out, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn stereo_input_is_averaged_down_to_mono() {
+        let mut resampler = MicResampler::new(48_000);
+        let mut out = Vec::new();
+        resampler.process(&[100, 200, 300, 500], 48_000, 2, &mut out);
+        assert_eq!(out, [150, 400]);
+    }
+
+    #[test]
+    fn halving_the_rate_produces_about_half_the_samples() {
+        let mut resampler = MicResampler::new(24_000);
+        let mut out = Vec::new();
+        let input: Vec<i16> = (0..480).map(|i| i as i16).collect();
+        resampler.process(&input, 48_000, 1, &mut out);
+        assert!(
+            (out.len() as i64 - 240).abs() <= 1,
+            "expected ~240 samples, got {}",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn doubling_the_rate_produces_about_twice_the_samples() {
+        let mut resampler = MicResampler::new(48_000);
+        let mut out = Vec::new();
+        let input: Vec<i16> = (0..240).map(|i| i as i16).collect();
+        resampler.process(&input, 24_000, 1, &mut out);
+        assert!(
+            (out.len() as i64 - 480).abs() <= 2,
+            "expected ~480 samples, got {}",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn the_read_position_carries_across_buffers_without_drifting() {
+        let mut resampler = MicResampler::new(48_000);
+        let mut total = 0usize;
+        for _ in 0..10 {
+            let mut out = Vec::new();
+            resampler.process(&[0i16; 441], 44_100, 1, &mut out);
+            total += out.len();
+        }
+        let expected = 4410.0 * 48_000.0 / 44_100.0;
+        assert!(
+            (total as f64 - expected).abs() < 12.0,
+            "expected ~{expected}, got {total}"
+        );
+    }
+
+    #[test]
+    fn an_empty_buffer_is_a_no_op() {
+        let mut resampler = MicResampler::new(48_000);
+        let mut out = Vec::new();
+        resampler.process(&[], 44_100, 1, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn changing_the_input_rate_restarts_cleanly() {
+        let mut resampler = MicResampler::new(48_000);
+        let mut out = Vec::new();
+        resampler.process(&[0i16; 441], 44_100, 1, &mut out);
+        out.clear();
+        resampler.process(&[7i16; 480], 48_000, 1, &mut out);
+        assert_eq!(out.len(), 480);
+        assert!(out.iter().all(|&s| s == 7));
+    }
+
+    #[test]
+    fn clamping_saturates_rather_than_wrapping() {
+        assert_eq!(super::clamp_i16(40_000.0), i16::MAX);
+        assert_eq!(super::clamp_i16(-40_000.0), i16::MIN);
+        assert_eq!(super::clamp_i16(1.4), 1);
+    }
+}
+
+/// Tracks which audio streams are currently carrying speech.
+///
+/// The PCM is already flowing through the playback and uplink pumps, so the
+/// level is measured there rather than by polling `getStats`, which would cost
+/// a round trip to the signalling thread several times a second.
+///
+/// A stream counts as speaking for a short window after the last loud frame.
+/// That hold is what stops the ring around a tile strobing on every pause
+/// between syllables.
+pub struct SpeakingLevels {
+    loud_since: parking_lot::Mutex<std::collections::HashMap<u64, std::time::Instant>>,
+}
+
+/// Root-mean-square of one frame, above which the frame counts as speech.
+/// Comfortable speech sits several times higher; room tone sits well below.
+const SPEAKING_RMS_THRESHOLD: f32 = 800.0;
+const SPEAKING_HOLD: std::time::Duration = std::time::Duration::from_millis(400);
+
+impl Default for SpeakingLevels {
+    fn default() -> Self {
+        Self {
+            loud_since: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
+impl SpeakingLevels {
+    pub fn observe(&self, key: u64, samples: &[i16]) {
+        if rms(samples) < SPEAKING_RMS_THRESHOLD {
+            return;
+        }
+        self.loud_since
+            .lock()
+            .insert(key, std::time::Instant::now());
+    }
+
+    pub fn is_speaking(&self, key: u64) -> bool {
+        self.loud_since
+            .lock()
+            .get(&key)
+            .is_some_and(|at| at.elapsed() < SPEAKING_HOLD)
+    }
+
+    pub fn forget(&self, key: u64) {
+        self.loud_since.lock().remove(&key);
+    }
+}
+
+fn rms(samples: &[i16]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    // f64 for the accumulator: a full frame of loud 16-bit samples overflows an
+    // f32 mantissa long before the average is taken.
+    let sum: f64 = samples.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
+    (sum / samples.len() as f64).sqrt() as f32
+}
+
+#[cfg(test)]
+mod speaking_tests {
+    use super::{SPEAKING_RMS_THRESHOLD, SpeakingLevels, rms};
+
+    #[test]
+    fn silence_measures_zero() {
+        assert_eq!(rms(&[0i16; 480]), 0.0);
+        assert_eq!(rms(&[]), 0.0);
+    }
+
+    #[test]
+    fn a_loud_frame_measures_its_amplitude() {
+        assert!((rms(&[10_000i16; 480]) - 10_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn room_tone_stays_under_the_threshold() {
+        assert!(rms(&[200i16; 480]) < SPEAKING_RMS_THRESHOLD);
+    }
+
+    #[test]
+    fn a_quiet_stream_never_counts_as_speaking() {
+        let levels = SpeakingLevels::default();
+        levels.observe(7, &[100i16; 480]);
+        assert!(!levels.is_speaking(7));
+    }
+
+    #[test]
+    fn a_loud_stream_counts_as_speaking_and_only_for_itself() {
+        let levels = SpeakingLevels::default();
+        levels.observe(7, &[9_000i16; 480]);
+        assert!(levels.is_speaking(7));
+        assert!(!levels.is_speaking(8));
+    }
+
+    #[test]
+    fn forgetting_a_stream_clears_it() {
+        let levels = SpeakingLevels::default();
+        levels.observe(7, &[9_000i16; 480]);
+        levels.forget(7);
+        assert!(!levels.is_speaking(7));
+    }
 }

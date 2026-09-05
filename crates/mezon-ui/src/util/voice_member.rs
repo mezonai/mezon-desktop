@@ -26,7 +26,7 @@ pub(crate) fn resolve_stream_display(
     resolve_user_display(cx, clan_id, m.user_id, &m.display_name, "")
 }
 
-fn resolve_user_display(
+pub(crate) fn resolve_user_display(
     cx: &App,
     clan_id: Option<ClanId>,
     user_id: UserId,

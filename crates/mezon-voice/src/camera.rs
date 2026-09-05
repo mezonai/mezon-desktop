@@ -2,11 +2,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use livekit::track::LocalVideoTrack;
-use livekit::webrtc::prelude::VideoBuffer;
-use livekit::webrtc::video_frame::{I420Buffer, VideoFrame, VideoRotation};
-use livekit::webrtc::video_source::native::NativeVideoSource;
-use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
+use libwebrtc::prelude::VideoBuffer;
+use libwebrtc::video_frame::{I420Buffer, VideoFrame, VideoRotation};
+use libwebrtc::video_source::native::NativeVideoSource;
+use libwebrtc::video_source::VideoResolution;
 use nokhwa::Camera;
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{
@@ -18,10 +17,10 @@ use nokhwa::{native_api_backend, query};
 use crate::video::{VideoFrameStore, local_camera_key, rgb_to_i420, yuyv422_to_i420};
 
 const TARGET_WIDTH: u32 = 640;
-const TARGET_HEIGHT: u32 = 480;
-const TARGET_FPS: u32 = 30;
-const MAX_CAMERA_WIDTH: u32 = 1280;
-const MAX_CAMERA_HEIGHT: u32 = 720;
+const TARGET_HEIGHT: u32 = 360;
+const TARGET_FPS: u32 = 24;
+const MAX_CAMERA_WIDTH: u32 = 640;
+const MAX_CAMERA_HEIGHT: u32 = 360;
 const CAMERA_ENUM_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
@@ -133,7 +132,7 @@ pub fn start_camera(
     device_id: Option<String>,
 ) -> (
     CameraController,
-    flume::Receiver<Result<LocalVideoTrack, String>>,
+    flume::Receiver<Result<NativeVideoSource, String>>,
 ) {
     let stop = Arc::new(AtomicBool::new(false));
     let (switch_tx, switch_rx) = flume::unbounded::<Option<String>>();
@@ -170,11 +169,7 @@ pub fn start_camera(
                 },
                 false,
             );
-            let track = LocalVideoTrack::create_video_track(
-                "camera",
-                RtcVideoSource::Native(source.clone()),
-            );
-            if track_tx.send(Ok(track)).is_err() {
+            if track_tx.send(Ok(source.clone())).is_err() {
                 return;
             }
 
