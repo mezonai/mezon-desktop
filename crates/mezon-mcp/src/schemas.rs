@@ -81,6 +81,7 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
         | "get_account"
         | "get_current_context"
         | "get_scroll_state"
+        | "tour_state"
         | "close_panel"
         | "get_settings"
         | "get_voice_status"
@@ -152,6 +153,18 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
                 "name": { "type": "string", "description": "Category name (letters, digits, space, - or _; must not start with a separator)." },
             }),
             &["clan_id", "name"],
+        )),
+        "tour_start" => Arc::new(object(
+            json!({
+                "track": { "type": "string", "description": "Track id. Omit to start the one matching the current route." },
+            }),
+            &[],
+        )),
+        "tour_advance" => Arc::new(object(
+            json!({
+                "forward": { "type": "boolean", "description": "true for the next step, false to go back. Default true." },
+            }),
+            &[],
         )),
         "mute_channel" => Arc::new(object(
             json!({
@@ -555,10 +568,7 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["paths"],
         )),
-        "send_buzz" => Arc::new(object(
-            json!({ "text": string("Buzz text.") }),
-            &[],
-        )),
+        "send_buzz" => Arc::new(object(json!({ "text": string("Buzz text.") }), &[])),
         "send_attachment" => Arc::new(object(
             json!({
                 "path": string("Local filesystem path to one file to send."),

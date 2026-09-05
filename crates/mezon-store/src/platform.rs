@@ -1,11 +1,36 @@
+use crate::dialog::{DialogOutcome, classify_dialog};
 use gpui::{App, AppContext, ClipboardItem, Entity, Global, Image, ImageFormat, SharedString};
 use std::sync::Arc;
 
 pub enum DownloadEvent {
     Started,
-    Progress { written: u64, total: Option<u64> },
-    Finished { path: std::path::PathBuf },
+    Progress {
+        written: u64,
+        total: Option<u64>,
+    },
+    Finished {
+        path: std::path::PathBuf,
+        asked: bool,
+    },
     Failed,
+    DialogFailed,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Where the no-dialog fallback writes during tests. Production always uses the
+    /// real downloads folder; a test must never write into the user's own.
+    static TEST_DOWNLOAD_DIR: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Where a download goes when the user could not be asked.
+fn downloads_dir() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = TEST_DOWNLOAD_DIR.with(|dir| dir.borrow().clone()) {
+        return Some(dir);
+    }
+    dirs::download_dir().or_else(dirs::home_dir)
 }
 
 pub fn download_url_with_dialog(
@@ -14,16 +39,51 @@ pub fn download_url_with_dialog(
     on_event: impl Fn(DownloadEvent, &mut App) + 'static,
     cx: &mut App,
 ) {
-    let directory = dirs::download_dir()
-        .or_else(dirs::home_dir)
+    let downloads = downloads_dir();
+    let directory = downloads
+        .clone()
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let suggested = filename.to_string();
     let receiver = cx.prompt_for_new_path(&directory, Some(suggested.as_str()));
     let url = url.to_string();
     cx.spawn(async move |cx| {
-        let path = match receiver.await {
-            Ok(Ok(Some(path))) => path,
-            _ => return,
+        let mut asked = true;
+        let path = match classify_dialog(receiver.await) {
+            DialogOutcome::Picked(path) => path,
+            DialogOutcome::Cancelled => return,
+            DialogOutcome::Lost => {
+                tracing::warn!("the save dialog went away before answering");
+                return;
+            }
+            DialogOutcome::Unavailable(failure) => {
+                tracing::warn!(
+                    "could not ask where to save the download: {}",
+                    failure.reason
+                );
+                // Asking is a convenience; the download itself is what the user wanted.
+                // Fall back to their downloads folder so a machine with no desktop
+                // portal can still receive files.
+                let Some(downloads) = downloads else {
+                    cx.update(|cx| on_event(DownloadEvent::DialogFailed, cx));
+                    return;
+                };
+                let suggested = suggested.clone();
+                let reserved = cx
+                    .background_executor()
+                    .spawn(async move { mezon_client::reserve_path_in(&downloads, &suggested) })
+                    .await;
+                match reserved {
+                    Ok(path) => {
+                        asked = false;
+                        path
+                    }
+                    Err(error) => {
+                        tracing::error!("could not reserve a path for the download: {error}");
+                        cx.update(|cx| on_event(DownloadEvent::DialogFailed, cx));
+                        return;
+                    }
+                }
+            }
         };
         let finished_path = path.clone();
         cx.update(|cx| on_event(DownloadEvent::Started, cx));
@@ -40,6 +100,7 @@ pub fn download_url_with_dialog(
         let event = match download.await {
             Ok(()) => DownloadEvent::Finished {
                 path: finished_path,
+                asked,
             },
             Err(error) => {
                 tracing::error!("attachment download failed: {error}");
@@ -353,3 +414,139 @@ impl PlatformStore {
 
 struct GlobalPlatformStore(Entity<PlatformStore>);
 impl Global for GlobalPlatformStore {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    const PORTAL_MISSING: &str =
+        "Couldn't open file picker due to missing xdg-desktop-portal implementation.";
+
+    fn scratch_dir(label: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let dir =
+            std::env::temp_dir().join(format!("mezon-{label}-{}-{unique}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn record(seen: &Rc<RefCell<Vec<&'static str>>>) -> impl Fn(DownloadEvent, &mut App) + use<> {
+        let seen = seen.clone();
+        move |event, _| {
+            seen.borrow_mut().push(match event {
+                DownloadEvent::Started => "started",
+                DownloadEvent::Progress { .. } => "progress",
+                DownloadEvent::Finished { asked: true, .. } => "finished-asked",
+                DownloadEvent::Finished { asked: false, .. } => "finished-unasked",
+                DownloadEvent::Failed => "failed",
+                DownloadEvent::DialogFailed => "dialog-failed",
+            })
+        }
+    }
+
+    #[gpui::test]
+    async fn dismissing_the_save_dialog_emits_no_download_events(cx: &mut TestAppContext) {
+        let seen: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        let on_event = record(&seen);
+        cx.update(|cx| {
+            download_url_with_dialog(
+                "https://cdn.example/1/2.crt".into(),
+                "ca.crt".into(),
+                on_event,
+                cx,
+            );
+        });
+
+        cx.simulate_new_path_selection(|_| None);
+        cx.run_until_parked();
+
+        assert!(
+            seen.borrow().is_empty(),
+            "a dismissed save dialog must not toast anything, got {:?}",
+            seen.borrow()
+        );
+    }
+
+    #[gpui::test]
+    async fn a_dialog_that_cannot_open_still_downloads_the_file(cx: &mut TestAppContext) {
+        let dir = scratch_dir("dl-fallback");
+        TEST_DOWNLOAD_DIR.with(|slot| *slot.borrow_mut() = Some(dir.clone()));
+
+        let seen: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        let on_event = record(&seen);
+        cx.update(|cx| {
+            download_url_with_dialog(
+                "https://cdn.example/1/2.crt".into(),
+                // A name straight off the wire, chosen by whoever sent the attachment.
+                "../../.config/autostart/x.desktop".into(),
+                on_event,
+                cx,
+            );
+        });
+
+        cx.simulate_new_path_failure(anyhow::anyhow!(PORTAL_MISSING));
+        cx.run_until_parked();
+
+        let events = seen.borrow().clone();
+        assert!(
+            events.contains(&"started"),
+            "a machine with no file dialog must still get its download, got {events:?}"
+        );
+        assert!(
+            !events.contains(&"dialog-failed"),
+            "there is a folder to save into, so nothing should be reported as a dead end: {events:?}"
+        );
+
+        let reserved: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read scratch dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            reserved.iter().all(|name| name == "x.desktop"),
+            "the wire name must be reduced to a plain file inside the folder, got {reserved:?}"
+        );
+
+        TEST_DOWNLOAD_DIR.with(|slot| *slot.borrow_mut() = None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    async fn with_nowhere_to_save_the_user_is_told_instead(cx: &mut TestAppContext) {
+        let dir = scratch_dir("dl-nowhere");
+        let blocked = dir.join("not-a-directory");
+        std::fs::write(&blocked, b"x").expect("occupy the path");
+        TEST_DOWNLOAD_DIR.with(|slot| *slot.borrow_mut() = Some(blocked.join("Downloads")));
+
+        let seen: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        let on_event = record(&seen);
+        cx.update(|cx| {
+            download_url_with_dialog(
+                "https://cdn.example/1/2.crt".into(),
+                "ca.crt".into(),
+                on_event,
+                cx,
+            );
+        });
+
+        cx.simulate_new_path_failure(anyhow::anyhow!(PORTAL_MISSING));
+        cx.run_until_parked();
+
+        let events = seen.borrow().clone();
+        assert_eq!(
+            events,
+            vec!["dialog-failed"],
+            "no dialog and nowhere to save is the one case the user has to hear about"
+        );
+
+        TEST_DOWNLOAD_DIR.with(|slot| *slot.borrow_mut() = None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

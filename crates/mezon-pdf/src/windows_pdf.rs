@@ -1,12 +1,26 @@
+use std::sync::OnceLock;
+
 use windows::Data::Pdf::{PdfDocument as WinPdfDocument, PdfPageRenderOptions};
 use windows::Storage::Streams::{DataReader, DataWriter, InMemoryRandomAccessStream};
 
+/// `Windows.Data.Pdf` ships with the desktop SKUs, but Server Core and the trimmed
+/// images leave the class unregistered, and activating it there fails with
+/// `REGDB_E_CLASSNOTREG`. Probe once so a machine that genuinely cannot render says
+/// so with the reason attached, instead of reporting every document as unreadable.
+fn probe() -> &'static Option<String> {
+    static PROBE: OnceLock<Option<String>> = OnceLock::new();
+    PROBE.get_or_init(|| match PdfPageRenderOptions::new() {
+        Ok(_) => None,
+        Err(error) => Some(format!("Windows.Data.Pdf could not be activated: {error}")),
+    })
+}
+
 pub fn is_available() -> bool {
-    true
+    probe().is_none()
 }
 
 pub fn unavailable_reason() -> Option<String> {
-    None
+    probe().clone()
 }
 
 pub struct Document {

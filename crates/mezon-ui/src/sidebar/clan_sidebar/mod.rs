@@ -387,12 +387,13 @@ impl Render for ClanSidebar {
 
         div()
             .image_cache(avatar_cache)
+            .children(crate::tour::probe(crate::tour::TourAnchor::ClanRail))
             .flex()
             .flex_col()
             .w_full()
             .h_full()
             .items_center()
-            .bg(theme.surface_for(theme.bg_tertiary))
+            .bg(theme.surfaces.primary.ramp())
             .child(
                 div()
                     .flex()

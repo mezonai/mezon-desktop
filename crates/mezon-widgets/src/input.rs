@@ -27,7 +27,8 @@ use crate::text_edit::{
     EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
     granularity_for_click, home_target, ime_replace_range, line_end, line_start,
     marked_caret_range, marked_range_after_delete, next_word_boundary, previous_word_boundary,
-    range_for_granularity, should_coalesce, surrounding_delete_range, swallow_discarded_ime_commit,
+    range_for_granularity, should_coalesce, splice_out_byte_range, surrounding_delete_range,
+    swallow_discarded_ime_commit,
 };
 
 const MASK: char = '\u{2022}';
@@ -236,6 +237,21 @@ impl InputState {
 
     pub fn is_composing(&self) -> bool {
         self.marked_range.is_some()
+    }
+
+    pub fn drop_uncommitted_preedit(&mut self, cx: &mut Context<Self>) {
+        let Some(marked) = self.marked_range.take() else {
+            return;
+        };
+        let Some((next, discarded, caret)) = splice_out_byte_range(&self.content, marked) else {
+            return;
+        };
+        self.discard_ime_commit = Some(discarded);
+        self.content = next.into();
+        self.selected_range = caret..caret;
+        self.refresh_filter_token_chips(cx);
+        cx.notify();
+        cx.emit(InputEvent::Change);
     }
 
     pub fn set_value(
@@ -740,14 +756,16 @@ impl InputState {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            let sanitized = if self.multi_line {
-                text
-            } else {
-                text.replace('\n', " ")
-            };
-            self.replace_text_in_range(None, &sanitized, window, cx);
-        }
+        crate::clipboard::read_then(self, window, cx, |this, item, window, cx| {
+            if let Some(text) = item.text() {
+                let sanitized = if this.multi_line {
+                    text
+                } else {
+                    text.replace('\n', " ")
+                };
+                this.replace_text_in_range(None, &sanitized, window, cx);
+            }
+        });
     }
 
     fn on_key_down(&mut self, _: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {

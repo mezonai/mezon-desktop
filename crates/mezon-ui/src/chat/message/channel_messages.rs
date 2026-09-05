@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,7 +20,8 @@ use mezon_store::{
     Emoji, EmojiStore, GroupMembersStore, MessageCode, MessageId, MessagesEvent, MessagesStore,
     PERMISSION_DELETE_MESSAGE, PERMISSION_MANAGE_THREAD, PERMISSION_SEND_MESSAGE, PermissionStore,
     ProfileContext, QUICK_MENU_TYPE_QUICK, QuickMenuStore, RolesEvent, RolesStore, Settings,
-    SpriteAtlas, TopicsEvent, TopicsStore, UserId, UsersByUserStore,
+    SpriteAtlas, TopicBadgeEvent, TopicBadgeStore, TopicsEvent, TopicsStore, UserId,
+    UsersByUserStore,
     message::{Message, markdown_edit_source},
 };
 
@@ -1498,35 +1498,21 @@ impl ChannelMessages {
             }
         });
 
-        let topics_event_sub = cx.subscribe(&TopicsStore::global(cx), |this, store, event, cx| {
+        let topics_event_sub = cx.subscribe(&TopicsStore::global(cx), |this, _, event, cx| {
             if this.is_topic_box || !matches!(event, TopicsEvent::Updated) {
                 return;
             }
-            let topics = store.read(cx);
-            let messages = MessagesStore::global(cx).read(cx);
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            let mut any_topic = false;
-            for msg in messages.viewport_messages() {
-                let Some(topic_id) = msg.topic_id else {
-                    continue;
-                };
-                any_topic = true;
-                topic_id.hash(&mut hasher);
-                if let Some(meta) = topics.topic_meta_for_topic(topic_id) {
-                    meta.rpl.hash(&mut hasher);
-                    meta.lsnt.hash(&mut hasher);
-                }
-            }
-            if !any_topic {
-                return;
-            }
-            let fp = hasher.finish();
-            if this.topics_viewport_fp == Some(fp) {
-                return;
-            }
-            this.topics_viewport_fp = Some(fp);
-            cx.notify();
+            this.notify_if_topics_viewport_changed(cx);
         });
+
+        let topic_badge_sub = cx.subscribe(&TopicBadgeStore::global(cx), |this, _, event, cx| {
+            if this.is_topic_box {
+                return;
+            }
+            let TopicBadgeEvent::Updated { .. } = event;
+            this.notify_if_topics_viewport_changed(cx);
+        });
+        subs.push(topic_badge_sub);
 
         let store = MessagesStore::global(cx);
         subs.push(cx.subscribe(&store, |this, _store, event, cx| {
@@ -1694,18 +1680,11 @@ impl ChannelMessages {
                         }
                     }
                 }
-                MessagesEvent::JumpTo { message_id } => {
-                    this.pending_jump = Some(*message_id);
-                    this.highlight_id = Some(*message_id);
-                    this._highlight_timer = Some(cx.spawn(async move |this, cx| {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(1500))
-                            .await;
-                        let _ = this.update(cx, |this, cx| {
-                            this.highlight_id = None;
-                            cx.notify();
-                        });
-                    }));
+                MessagesEvent::JumpTo { message_id, .. } => {
+                    if this.is_topic_jump_target(*message_id, cx) {
+                        return;
+                    }
+                    this.begin_highlight(*message_id, cx);
                 }
                 MessagesEvent::UnreadBelowChanged => {
                     this.refresh_derived_state(cx);
@@ -1789,6 +1768,12 @@ impl ChannelMessages {
                 this.mark_scroll_activity(cx);
 
                 if this.is_topic_box {
+                    if at_bottom_changed && at_bottom {
+                        this.sync_topic_seen(cx);
+                    }
+                    if visible_range_changed {
+                        this.schedule_pagination_check(window, cx);
+                    }
                     return;
                 }
 
@@ -2044,6 +2029,9 @@ impl ChannelMessages {
             cx.subscribe(&TopicsStore::global(cx), |this, _, event, cx| match event {
                 TopicsEvent::Opened => {
                     this.refresh_topic_messages(cx);
+                    if this.at_bottom {
+                        this.sync_topic_seen(cx);
+                    }
                     cx.notify();
                 }
                 TopicsEvent::ReplyTargetChanged => cx.notify(),
@@ -2051,7 +2039,96 @@ impl ChannelMessages {
             }),
         );
         this.refresh_topic_messages(cx);
+        if let Some(target) = MessagesStore::global(cx).read(cx).pending_topic_jump() {
+            this.begin_highlight(target, cx);
+        }
         this
+    }
+
+    fn begin_highlight(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        self.pending_jump = Some(message_id);
+        self.highlight_id = Some(message_id);
+        self._highlight_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1500))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.highlight_id = None;
+                cx.notify();
+            });
+        }));
+    }
+
+    fn is_topic_jump_target(&self, message_id: MessageId, cx: &App) -> bool {
+        if self.is_topic_box {
+            return false;
+        }
+        if MessagesStore::global(cx).read(cx).pending_topic_jump() != Some(message_id) {
+            return false;
+        }
+        let Some(topic_id) = TopicsStore::global(cx).read(cx).active_topic_id() else {
+            return false;
+        };
+        MessagesStore::global(cx)
+            .read(cx)
+            .messages_in_channel(ChannelId(topic_id))
+            .iter()
+            .any(|m| m.id == message_id)
+    }
+
+    fn notify_if_topics_viewport_changed(&mut self, cx: &mut Context<Self>) {
+        use std::hash::{Hash, Hasher};
+        let topics = TopicsStore::global(cx).read(cx);
+        let badges = TopicBadgeStore::try_global(cx);
+        let messages = MessagesStore::global(cx).read(cx);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut any_topic = false;
+        for msg in messages.viewport_messages() {
+            let Some(topic_id) = msg.topic_id else {
+                continue;
+            };
+            any_topic = true;
+            topic_id.hash(&mut hasher);
+            if let Some(meta) = topics.topic_meta_for_topic(topic_id) {
+                meta.rpl.hash(&mut hasher);
+                meta.lsnt.hash(&mut hasher);
+            }
+            let badge = badges
+                .as_ref()
+                .map(|store| store.read(cx).topic_badge_count(&topic_id.to_string()))
+                .unwrap_or(0);
+            badge.hash(&mut hasher);
+        }
+        if !any_topic {
+            return;
+        }
+        let fp = hasher.finish();
+        if self.topics_viewport_fp == Some(fp) {
+            return;
+        }
+        self.topics_viewport_fp = Some(fp);
+        cx.notify();
+    }
+
+    fn apply_topic_jump(&mut self, header_shown: bool, cx: &mut Context<Self>) {
+        let target = self
+            .pending_jump
+            .or_else(|| MessagesStore::global(cx).read(cx).pending_topic_jump());
+        let Some(target) = target else {
+            return;
+        };
+        let Some(pos) = self.topic_row_ids.iter().position(|id| *id == target) else {
+            return;
+        };
+        if self.highlight_id != Some(target) {
+            self.begin_highlight(target, cx);
+        }
+        self.pending_jump = None;
+        MessagesStore::global(cx).update(cx, |store, _| {
+            store.clear_pending_topic_jump();
+        });
+        self.list_state
+            .scroll_to_reveal_item(usize::from(header_shown) + pos);
     }
 
     fn collect_topic_messages(cx: &App) -> Vec<Message> {
@@ -2078,17 +2155,7 @@ impl ChannelMessages {
             .active_topic_id()
             .map(|topic_id| store.messages_in_channel(ChannelId(topic_id)))
             .unwrap_or_default();
-        let mut messages = Vec::with_capacity(replies.len() + usize::from(origin.is_some()));
-        if let Some(mut origin) = origin {
-            origin.combined_with_prev = false;
-            messages.push(origin);
-        }
-        for msg in replies {
-            if origin_id != Some(msg.id) {
-                messages.push(msg.clone());
-            }
-        }
-        messages
+        merge_topic_rows(origin, replies)
     }
 
     fn refresh_topic_messages(&mut self, cx: &App) -> bool {
@@ -2225,6 +2292,14 @@ impl ChannelMessages {
     }
 
     fn on_topic_store_event(&mut self, event: &MessagesEvent, cx: &mut Context<Self>) {
+        if let MessagesEvent::JumpTo { message_id, .. } = event {
+            if MessagesStore::global(cx).read(cx).pending_topic_jump() == Some(*message_id) {
+                self.refresh_topic_messages(cx);
+                self.apply_topic_jump(self.header_shown, cx);
+                cx.notify();
+            }
+            return;
+        }
         let concerns_topic = match event {
             MessagesEvent::TopicUpdated { topic_id } => {
                 TopicsStore::global(cx).read(cx).active_topic_id() == Some(*topic_id)
@@ -2253,6 +2328,10 @@ impl ChannelMessages {
                 Some(ix) => self.remeasure_topic_rows(ix..ix + 1),
                 None => self.remeasure_topic_rows(0..self.topic_row_ids.len()),
             }
+        }
+        self.apply_topic_jump(self.header_shown, cx);
+        if self.at_bottom {
+            self.sync_topic_seen(cx);
         }
         cx.notify();
     }
@@ -2300,15 +2379,14 @@ impl ChannelMessages {
         cx: &App,
     ) -> Vec<MessageId> {
         let messages = Self::collect_topic_messages(cx);
-        message_context_menu::resolve_forward_group_in(&messages, message_id, sender_id)
+        let start = topic_row_index(&messages, message_id, active_topic_bucket(cx)).unwrap_or(0);
+        message_context_menu::resolve_forward_group_in(&messages[start..], message_id, sender_id)
     }
 
     fn find_local_message(&self, message_id: MessageId, cx: &App) -> Option<Message> {
         if self.is_topic_box {
-            self.topic_messages
-                .iter()
-                .find(|m| m.id == message_id)
-                .cloned()
+            topic_row_index(&self.topic_messages, message_id, active_topic_bucket(cx))
+                .map(|idx| self.topic_messages[idx].clone())
         } else {
             MessagesStore::global(cx)
                 .read(cx)
@@ -2531,8 +2609,11 @@ impl ChannelMessages {
         self.context_menu_forward_all = match sender_and_poll {
             Some((sender_id, false)) => {
                 if self.is_topic_box {
+                    let start =
+                        topic_row_index(&self.topic_messages, message_id, active_topic_bucket(cx))
+                            .unwrap_or(0);
                     message_context_menu::resolve_forward_group_in(
-                        &self.topic_messages,
+                        &self.topic_messages[start..],
                         message_id,
                         sender_id.as_str(),
                     )
@@ -2688,6 +2769,13 @@ impl ChannelMessages {
                 view.update(cx, |gif, cx| gif.set_playing(true, cx));
             }
             if self.is_topic_box {
+                if self
+                    .list_state
+                    .is_scrolled_to_end()
+                    .unwrap_or(self.at_bottom)
+                {
+                    self.sync_topic_seen(cx);
+                }
                 return;
             }
             if self
@@ -3761,6 +3849,38 @@ impl ChannelMessages {
         self.sync_channel_seen_when_focused(app_focused, cx);
     }
 
+    fn sync_topic_seen(&mut self, cx: &mut Context<Self>) {
+        if !self.is_topic_box {
+            return;
+        }
+        let store_entity = MessagesStore::global(cx);
+        if store_entity.read(cx).topic_has_more_bottom() {
+            return;
+        }
+        let app_focused = cx.active_window().is_some();
+        let Some(last) = self
+            .topic_messages
+            .last()
+            .filter(|message| !message.id.is_optimistic())
+        else {
+            return;
+        };
+        let Some(topic_id) = TopicsStore::global(cx).read(cx).active_topic_id() else {
+            return;
+        };
+        let last_id = last.id;
+        let last_create_time = last.create_time;
+        MessagesStore::global(cx).update(cx, |store, cx| {
+            store.note_topic_viewport_seen(
+                ChannelId(topic_id),
+                last_id,
+                last_create_time,
+                app_focused,
+                cx,
+            );
+        });
+    }
+
     fn sync_channel_seen_when_focused(&mut self, app_focused: bool, cx: &mut Context<Self>) {
         let store_entity = MessagesStore::global(cx);
         if store_entity.read(cx).has_more_bottom() {
@@ -3954,7 +4074,7 @@ impl ChannelMessages {
             div()
                 .absolute()
                 .inset_0()
-                .bg(theme.bg_primary)
+                .bg(theme.surfaces.secondary.ramp())
                 .flex()
                 .flex_col()
                 .justify_end()
@@ -4627,6 +4747,7 @@ impl ChannelMessages {
         let social_image_cache = self.social_image_cache.clone();
         let sprite_image_cache = self.sprite_image_cache.clone();
         let icon_image_cache = self.icon_image_cache.clone();
+        let highlight_id = self.highlight_id;
         let reply_highlight_id = TopicsStore::global(cx)
             .read(cx)
             .reply_target()
@@ -4693,7 +4814,7 @@ impl ChannelMessages {
                         social_cache: social_image_cache.clone(),
                         sprite_cache: sprite_image_cache.clone(),
                         unread_boundary_id: None,
-                        highlight_id: None,
+                        highlight_id,
                         reply_highlight_id,
                         profile_context,
                         settings: settings.clone(),
@@ -4712,6 +4833,7 @@ impl ChannelMessages {
                         channel_top_level,
                         can_manage_thread,
                         can_send_message,
+                        is_dm,
                         editing_id,
                         edit_input: edit_input.clone(),
                         emoji_recent: &emoji_recent,
@@ -4867,15 +4989,19 @@ impl Render for ChannelMessages {
         let skeleton_overlay = self.skeleton_overlay(cx.theme());
         let header_shown = self.header_shown;
 
-        if let Some(target) = self.pending_jump.take()
-            && let Some(pos) = store
+        if let Some(target) = self.pending_jump {
+            if let Some(pos) = store
                 .read(cx)
                 .viewport_messages()
                 .iter()
                 .position(|m| m.id == target)
-        {
-            self.list_state
-                .scroll_to_reveal_item(usize::from(header_shown) + pos);
+            {
+                self.pending_jump = None;
+                self.list_state
+                    .scroll_to_reveal_item(usize::from(header_shown) + pos);
+            } else if self.is_topic_jump_target(target, cx) {
+                self.pending_jump = None;
+            }
         }
 
         let locale = self.cached_locale.clone();
@@ -4933,11 +5059,13 @@ impl Render for ChannelMessages {
         });
         let selection_host = cx.entity().downgrade();
         let selection_state = self.selection.clone();
+        let tour_probe = crate::tour::probe(crate::tour::TourAnchor::MessageTimeline);
         let scroll_down_fab = self.scroll_down_fab(show_scroll_down, unread_count, cx);
 
         let content = div()
             .size_full()
             .relative()
+            .children(tour_probe)
             .overflow_hidden()
             .image_cache(self.image_cache.clone())
             .track_focus(&self.focus_handle)
@@ -4993,6 +5121,7 @@ impl Render for ChannelMessages {
                         channel_top_level,
                         can_manage_thread,
                         can_send_message,
+                        is_dm,
                         editing_id,
                         edit_input: edit_input.clone(),
                         emoji_recent: &emoji_recent,
@@ -5493,6 +5622,159 @@ mod skeleton_tests {
 
         let many: Vec<MessageId> = (1..=150).rev().map(MessageId).collect();
         assert!(fab_unread_count(Some(MessageId(0)), many.iter().copied()) > 99);
+    }
+}
+
+/// The rows the topic panel shows: the origin message it hangs off, then that
+/// topic's replies.
+///
+/// The two come from different id spaces. The server mints a message id as
+/// `(sequence << shift) | node | year` with a **per-channel** sequence and no
+/// channel component, so the Nth message of the parent channel and the Nth reply
+/// of the topic carry byte-identical ids. The origin is a parent-channel row and
+/// the replies live in the topic's own bucket, so a collision is not a duplicate
+/// — dropping a reply that matches `origin.id` hid one real reply from every
+/// topic (the one whose sequence position equals the origin's) while the topic
+/// reply count kept counting it. There is nothing to de-duplicate either: the
+/// bucket never holds the origin, since replies are stored under
+/// `channel_id = topic_id` and the origin has `topic_id == 0`.
+///
+/// `Message::channel_id` carries which bucket a row came from, so the two are
+/// still told apart after they are merged into one list. Element ids are keyed on
+/// a single integer (`row_anchor_id`) and cannot hold the pair, so the origin's is
+/// moved out of the replies' (positive) id space rather than a row being thrown
+/// away. Mirrors mezon-react, which renders `firstMsgOfThisTopic` outside the
+/// id-keyed message list and never filters the replies (`ChannelMessages.tsx`).
+fn active_topic_bucket(cx: &App) -> Option<ChannelId> {
+    TopicsStore::global(cx)
+        .read(cx)
+        .active_topic_id()
+        .map(ChannelId)
+}
+
+/// Which row an id-keyed row action in the topic panel refers to.
+///
+/// The panel is one list over two buckets (see `merge_topic_rows`) and a message
+/// id is only unique inside one of them, so an id can match both the origin row
+/// and one reply. It resolves to the reply: the origin is context, every other row
+/// is the topic's, and an action that lands on the wrong one is far cheaper on a
+/// reply than on the message the whole topic hangs off — deleting that one takes
+/// the topic with it.
+fn topic_row_index(
+    messages: &[Message],
+    message_id: MessageId,
+    topic: Option<ChannelId>,
+) -> Option<usize> {
+    messages
+        .iter()
+        .position(|m| m.id == message_id && Some(m.channel_id) == topic)
+        .or_else(|| messages.iter().position(|m| m.id == message_id))
+}
+
+fn merge_topic_rows(origin: Option<Message>, replies: &[Message]) -> Vec<Message> {
+    let mut messages = Vec::with_capacity(replies.len() + usize::from(origin.is_some()));
+    if let Some(mut origin) = origin {
+        origin.combined_with_prev = false;
+        origin.row_anchor_id = MessageId(origin.id.get().wrapping_neg());
+        messages.push(origin);
+    }
+    messages.extend_from_slice(replies);
+    messages
+}
+
+#[cfg(test)]
+mod topic_row_tests {
+    use super::{merge_topic_rows, topic_row_index};
+    use mezon_store::{ChannelId, Message, MessageId};
+
+    fn reply(id: i64, text: &str) -> Message {
+        Message::new(MessageId(id), text, "1", "u", 0)
+    }
+
+    #[test]
+    fn a_reply_sharing_the_origins_id_is_still_shown() {
+        // Message ids are per-channel sequences: the topic's 4th reply carries the
+        // same id as the 4th message of the parent channel, which is the origin.
+        let origin = reply(104, "hhh");
+        let replies = [
+            reply(101, "test"),
+            reply(102, "hi"),
+            reply(103, "he"),
+            reply(104, "hi"),
+            reply(105, "ok"),
+        ];
+
+        let rows = merge_topic_rows(Some(origin), &replies);
+
+        let shown: Vec<&str> = rows.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(shown, ["hhh", "test", "hi", "he", "hi", "ok"]);
+    }
+
+    #[test]
+    fn the_origin_row_cannot_collide_with_a_reply_element_id() {
+        let rows = merge_topic_rows(Some(reply(104, "hhh")), &[reply(104, "hi")]);
+
+        assert_eq!(rows[0].row_anchor_id, MessageId(-104));
+        assert_eq!(rows[1].row_anchor_id, MessageId(104));
+        assert!(!rows[0].combined_with_prev);
+    }
+
+    #[test]
+    fn each_row_keeps_the_bucket_it_came_from() {
+        let mut origin = reply(104, "hhh");
+        origin.channel_id = ChannelId(10);
+        let mut in_topic = reply(104, "hi");
+        in_topic.channel_id = ChannelId(77);
+
+        let rows = merge_topic_rows(Some(origin), &[in_topic]);
+
+        // Same id, different bucket — which is what tells the two rows apart.
+        assert_eq!(rows[0].id, rows[1].id);
+        assert_eq!(rows[0].channel_id, ChannelId(10));
+        assert_eq!(rows[1].channel_id, ChannelId(77));
+    }
+
+    #[test]
+    fn a_row_action_on_a_colliding_id_resolves_to_the_reply() {
+        let mut origin = reply(104, "hhh");
+        origin.channel_id = ChannelId(10);
+        let mut collides = reply(104, "hi");
+        collides.channel_id = ChannelId(77);
+        let rows = merge_topic_rows(Some(origin), &[collides]);
+
+        // Row 0 is the origin, row 1 the reply that happens to share its id.
+        assert_eq!(
+            topic_row_index(&rows, MessageId(104), Some(ChannelId(77))),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn the_origin_is_still_reachable_when_nothing_collides() {
+        let mut origin = reply(104, "hhh");
+        origin.channel_id = ChannelId(10);
+        let mut other = reply(101, "test");
+        other.channel_id = ChannelId(77);
+        let rows = merge_topic_rows(Some(origin), &[other]);
+
+        assert_eq!(
+            topic_row_index(&rows, MessageId(104), Some(ChannelId(77))),
+            Some(0)
+        );
+        assert_eq!(
+            topic_row_index(&rows, MessageId(101), Some(ChannelId(77))),
+            Some(1)
+        );
+        assert_eq!(
+            topic_row_index(&rows, MessageId(999), Some(ChannelId(77))),
+            None
+        );
+    }
+
+    #[test]
+    fn without_an_origin_only_the_replies_are_shown() {
+        let rows = merge_topic_rows(None, &[reply(101, "test"), reply(102, "hi")]);
+        assert_eq!(rows.len(), 2);
     }
 }
 

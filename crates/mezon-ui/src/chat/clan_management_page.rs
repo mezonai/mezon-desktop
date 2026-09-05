@@ -12,7 +12,7 @@ pub fn management_page(title: impl Into<SharedString>, body: AnyElement, theme: 
         .bg(theme.bg_primary)
         .child(
             div()
-                .h(px(58.))
+                .h(px(50.))
                 .px_4()
                 .flex()
                 .items_center()

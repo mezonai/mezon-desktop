@@ -7,7 +7,8 @@ use crate::chat::role_style::role_fallback_color;
 use crate::chat::user_profile_modal::UserProfileModal;
 use crate::chat::user_profile_popover::role_is_assignable;
 use crate::components::primitives::{
-    Avatar, ContextMenu, Icon, IconName, Input, InputEvent, InputState, context_menu_at,
+    Avatar, ContextMenu, Icon, IconName, Input, InputEvent, InputState, PaginationButton,
+    context_menu_at, pagination_button, pagination_items,
 };
 use crate::image_cache::shared_avatar_cache;
 use crate::theme::{ActiveTheme, Theme};
@@ -915,41 +916,58 @@ impl ClanMembersPage {
         let current = self.page;
         let mut bar = div().flex().items_center().gap_2();
         bar = bar.child(
-            page_arrow(true, "previous", current == 0, cx.theme()).on_click(cx.listener(
-                |this, _, _, cx| {
-                    if this.page > 0 {
-                        this.page -= 1;
-                        this.scroll_to_top();
-                        cx.notify();
-                    }
-                },
-            )),
+            pagination_button(
+                "clan-members",
+                PaginationButton::Previous,
+                current == 0,
+                false,
+                cx.theme(),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                if this.page > 0 {
+                    this.page -= 1;
+                    this.scroll_to_top();
+                    cx.notify();
+                }
+            })),
         );
         for item in pagination_items(current, pages) {
             match item {
                 Some(page) => {
                     let selected = page == current;
-                    bar = bar.child(page_number(page + 1, selected, cx.theme()).on_click(
-                        cx.listener(move |this, _, _, cx| {
+                    bar = bar.child(
+                        pagination_button(
+                            "clan-members",
+                            PaginationButton::Page(page + 1),
+                            false,
+                            selected,
+                            cx.theme(),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
                             this.page = page;
                             this.scroll_to_top();
                             cx.notify();
-                        }),
-                    ));
+                        })),
+                    );
                 }
                 None => bar = bar.child(div().px_2().text_color(cx.theme().text_muted).child("…")),
             }
         }
         bar.child(
-            page_arrow(false, "next", current + 1 >= pages, cx.theme()).on_click(cx.listener(
-                move |this, _, _, cx| {
-                    if this.page + 1 < pages {
-                        this.page += 1;
-                        this.scroll_to_top();
-                        cx.notify();
-                    }
-                },
-            )),
+            pagination_button(
+                "clan-members",
+                PaginationButton::Next,
+                current + 1 >= pages,
+                false,
+                cx.theme(),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.page + 1 < pages {
+                    this.page += 1;
+                    this.scroll_to_top();
+                    cx.notify();
+                }
+            })),
         )
         .into_any_element()
     }
@@ -1315,93 +1333,6 @@ fn parse_hex_color(raw: &str) -> Option<gpui::Rgba> {
         b: (value & 0xff) as f32 / 255.,
         a: 1.,
     })
-}
-
-fn pagination_items(current: usize, pages: usize) -> Vec<Option<usize>> {
-    if pages <= 6 {
-        return (0..pages).map(Some).collect();
-    }
-    if current <= 2 {
-        let mut items = (0..5).map(Some).collect::<Vec<_>>();
-        items.push(None);
-        items.push(Some(pages - 1));
-        return items;
-    }
-    if current >= pages - 3 {
-        let mut items = vec![Some(0), None];
-        items.extend(((pages - 6)..pages).map(Some));
-        return items;
-    }
-    vec![
-        Some(0),
-        None,
-        Some(current - 1),
-        Some(current),
-        Some(current + 1),
-        None,
-        Some(pages - 1),
-    ]
-}
-
-fn page_arrow(
-    left: bool,
-    id: &'static str,
-    disabled: bool,
-    theme: &crate::theme::Theme,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(format!("members-page-{id}"))
-        .w(px(40.))
-        .h(px(32.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(5.))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.brand)
-        .text_color(gpui::white())
-        .when(disabled, |element| element.opacity(0.5))
-        .when(!disabled, |element| element.cursor_pointer())
-        .child(
-            Icon::new(IconName::ArrowRight)
-                .size(px(20.))
-                .text_color(gpui::white())
-                .when(left, |element| {
-                    element.with_transformation(gpui::Transformation::rotate(gpui::radians(
-                        std::f32::consts::PI,
-                    )))
-                }),
-        )
-}
-
-fn page_number(
-    page: usize,
-    selected: bool,
-    theme: &crate::theme::Theme,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(format!("members-page-{page}"))
-        .w(px(40.))
-        .h(px(32.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(5.))
-        .cursor_pointer()
-        .border_1()
-        .border_color(if selected {
-            theme.text_primary
-        } else {
-            theme.border
-        })
-        .bg(if selected {
-            theme.tokens.bg_active_button
-        } else {
-            theme.brand
-        })
-        .text_color(theme.text_primary)
-        .child(page.to_string())
 }
 
 fn tr(locale: &str, key: &'static str) -> String {

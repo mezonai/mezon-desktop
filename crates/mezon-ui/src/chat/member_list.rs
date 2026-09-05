@@ -298,7 +298,9 @@ impl MemberListPanel {
                 );
                 subs.push(
                     cx.subscribe(&DirectMessageStore::global(cx), |this, _, event, cx| {
-                        let DirectEvent::Changed { channel_id } = event;
+                        let DirectEvent::Changed { channel_id } = event else {
+                            return;
+                        };
                         let relevant = match channel_id {
                             Some(id) => shows_group(*id, cx),
                             None => true,
@@ -718,6 +720,7 @@ fn member_menu_json(panel: &Entity<MemberListPanel>, cx: &App) -> serde_json::Va
             "show_ban": permissions.show_ban,
             "show_kick": permissions.show_kick,
             "show_remove_from_thread": permissions.show_remove_from_thread,
+            "show_remove_from_group": permissions.show_remove_from_group,
             "clan_id": permissions.clan_id.map(|id| id.to_string()),
             "channel_id": permissions.channel_id.map(|id| id.to_string()),
         },
@@ -1300,6 +1303,7 @@ impl Render for MemberListPanel {
         .pr(px(2.));
 
         div()
+            .children(crate::tour::probe(crate::tour::TourAnchor::MemberList))
             .flex()
             .flex_col()
             .w(px(245.))
@@ -1331,6 +1335,7 @@ struct MemberMenuPermissions {
     show_ban: bool,
     show_kick: bool,
     show_remove_from_thread: bool,
+    show_remove_from_group: bool,
     is_friend: bool,
     is_blocked: bool,
     blocked_by_me: bool,
@@ -1356,11 +1361,24 @@ impl MemberMenuPermissions {
             })
             .unwrap_or((false, false, false));
         let Some(ProfileContext::Clan(clan_id)) = context else {
+            let group_channel = match context {
+                Some(ProfileContext::Direct(channel_id)) => Some(channel_id),
+                _ => None,
+            };
+            let show_remove_from_group = group_channel.is_some_and(|channel_id| {
+                DirectMessageStore::try_global(cx).is_some_and(|store| {
+                    store.read(cx).find(channel_id).is_some_and(|dm| {
+                        can_remove_from_group(is_self, me, dm.kind, dm.creator_id)
+                    })
+                })
+            });
             return Self {
                 is_self,
                 is_friend,
                 is_blocked,
                 blocked_by_me,
+                show_remove_from_group,
+                channel_id: group_channel.filter(|_| show_remove_from_group),
                 ..Default::default()
             };
         };
@@ -1397,6 +1415,7 @@ impl MemberMenuPermissions {
             show_ban: has_administrator && !is_self,
             show_kick: !is_self && elevated,
             show_remove_from_thread: !is_self && is_thread && (is_channel_creator || elevated),
+            show_remove_from_group: false,
             is_friend,
             is_blocked,
             blocked_by_me,
@@ -1702,7 +1721,41 @@ fn build_member_menu(args: MemberMenuArgs) -> ContextMenu {
         }
     }
 
+    if permissions.show_remove_from_group
+        && let Some(channel_id) = permissions.channel_id
+    {
+        menu = menu
+            .separator()
+            .danger_item(t("directMessage.contextMenu.removeFromGroup"), {
+                let panel = panel.clone();
+                let locale = locale.clone();
+                let display_name = display_name.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    close_member_menu(&panel, cx);
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.confirm_remove_group_member(
+                            channel_id,
+                            user_id,
+                            display_name.as_ref(),
+                            &locale,
+                            window,
+                            cx,
+                        );
+                    });
+                }
+            });
+    }
+
     menu
+}
+
+fn can_remove_from_group(
+    is_self: bool,
+    me: Option<UserId>,
+    kind: DirectKind,
+    creator_id: Option<UserId>,
+) -> bool {
+    !is_self && me.is_some() && kind == DirectKind::Group && creator_id == me
 }
 
 fn remove_member_from_thread(channel_id: ChannelId, user_id: UserId, locale: &str, cx: &mut App) {
@@ -1733,6 +1786,49 @@ fn remove_member_from_thread(channel_id: ChannelId, user_id: UserId, locale: &st
         });
     })
     .detach();
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::can_remove_from_group;
+    use mezon_store::{DirectKind, UserId};
+
+    const ME: Option<UserId> = Some(UserId(1));
+
+    #[test]
+    fn the_group_owner_can_remove_another_member() {
+        assert!(can_remove_from_group(false, ME, DirectKind::Group, ME));
+    }
+
+    #[test]
+    fn a_plain_member_cannot_remove_anyone() {
+        assert!(!can_remove_from_group(
+            false,
+            ME,
+            DirectKind::Group,
+            Some(UserId(2))
+        ));
+    }
+
+    #[test]
+    fn the_owner_does_not_get_the_item_on_themselves() {
+        assert!(!can_remove_from_group(true, ME, DirectKind::Group, ME));
+    }
+
+    #[test]
+    fn a_group_with_no_known_creator_offers_nothing() {
+        assert!(!can_remove_from_group(false, ME, DirectKind::Group, None));
+    }
+
+    #[test]
+    fn a_one_to_one_dm_never_offers_it() {
+        assert!(!can_remove_from_group(false, ME, DirectKind::Dm, ME));
+    }
+
+    #[test]
+    fn a_signed_out_reader_never_matches_a_missing_creator() {
+        assert!(!can_remove_from_group(false, None, DirectKind::Group, None));
+    }
 }
 
 #[cfg(test)]

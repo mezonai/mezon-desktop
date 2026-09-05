@@ -57,6 +57,7 @@ pub struct ClanEventItem {
     pub event_status: i32,
     pub is_private: bool,
     pub external_link: String,
+    pub repeat_type: i32,
 }
 
 impl ClanEventItem {
@@ -79,6 +80,7 @@ impl ClanEventItem {
                 .meet_room
                 .map(|room| room.external_link)
                 .unwrap_or_default(),
+            repeat_type: event.repeat_type,
         }
     }
 
@@ -102,7 +104,14 @@ impl ClanEventItem {
                 .as_ref()
                 .map(|room| room.external_link.clone())
                 .unwrap_or_default(),
+            repeat_type: event.repeat_type,
         }
+    }
+
+    fn from_create_response(event: api::EventManagement, requested_repeat_type: i32) -> Self {
+        let mut item = Self::from_api(event);
+        item.repeat_type = requested_repeat_type;
+        item
     }
 
     fn apply_realtime(&mut self, event: &api::CreateEventRequest) {
@@ -119,6 +128,7 @@ impl ClanEventItem {
             self.event_status = event.event_status;
         }
         self.is_private = event.is_private;
+        self.repeat_type = event.repeat_type;
         if let Some(room) = &event.meet_room {
             self.external_link.clone_from(&room.external_link);
         }
@@ -147,6 +157,23 @@ pub struct CreateEventDraft {
     pub channel_id: Option<ChannelId>,
     pub repeat_type: i32,
     pub is_private: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct UpdateEventDraft {
+    pub event_id: i64,
+    pub clan_id: ClanId,
+    pub creator_id: UserId,
+    pub channel_id_old: Option<ChannelId>,
+    pub title: String,
+    pub logo: String,
+    pub description: String,
+    pub channel_voice_id: Option<ChannelId>,
+    pub address: String,
+    pub start_time_seconds: u32,
+    pub end_time_seconds: u32,
+    pub channel_id: Option<ChannelId>,
+    pub repeat_type: i32,
 }
 
 pub struct EventsStore {
@@ -215,6 +242,7 @@ impl EventsStore {
     ) -> Task<anyhow::Result<()>> {
         let api = self.api.clone();
         let requested_clan_id = draft.clan_id;
+        let requested_repeat_type = draft.repeat_type;
         let request = api::CreateEventRequest {
             title: draft.title,
             logo: draft.logo,
@@ -237,7 +265,10 @@ impl EventsStore {
                 } else {
                     ClanId(event.clan_id)
                 };
-                let item = ClanEventItem::from_api(event);
+                let mut item = ClanEventItem::from_create_response(event, requested_repeat_type);
+                if item.creator_id.0 != 0 && !item.user_ids.contains(&item.creator_id) {
+                    item.user_ids.push(item.creator_id);
+                }
                 let events = this.events.entry(clan_id).or_default();
                 if let Some(existing) = events.iter_mut().find(|existing| existing.id == item.id) {
                     *existing = item;
@@ -248,6 +279,117 @@ impl EventsStore {
                 cx.emit(EventsEvent::Changed { clan_id });
                 cx.notify();
             })?;
+            Ok(())
+        })
+    }
+
+    pub fn update_event(
+        &mut self,
+        draft: UpdateEventDraft,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        let api = self.api.clone();
+        let clan_id = draft.clan_id;
+        let event_id = draft.event_id;
+        let request = api::UpdateEventRequest {
+            title: draft.title,
+            logo: draft.logo,
+            description: draft.description,
+            event_id,
+            channel_id: draft.channel_id.map_or(0, |id| id.0),
+            address: draft.address,
+            start_time_seconds: draft.start_time_seconds,
+            end_time_seconds: draft.end_time_seconds,
+            clan_id: clan_id.0,
+            creator_id: draft.creator_id.0,
+            channel_voice_id: draft.channel_voice_id.map_or(0, |id| id.0),
+            channel_id_old: draft.channel_id_old.map_or(0, |id| id.0),
+            repeat_type: draft.repeat_type,
+        };
+        cx.spawn(async move |this, cx| {
+            api.update_event(request).await?;
+            this.update(cx, |this, cx| this.fetch(clan_id, cx))?;
+            Ok(())
+        })
+    }
+
+    pub fn delete_event(
+        &mut self,
+        event: ClanEventItem,
+        clan_id: ClanId,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        let api = self.api.clone();
+        let event_id = event.id;
+        let request = api::DeleteEventRequest {
+            event_id,
+            clan_id: clan_id.0,
+            creator_id: event.creator_id.0,
+            event_label: event.title,
+            channel_id: event.channel_id.map_or(0, |id| id.0),
+        };
+        cx.spawn(async move |this, cx| {
+            api.delete_event(request).await?;
+            this.update(cx, |this, cx| {
+                if let Some(events) = this.events.get_mut(&clan_id) {
+                    events.retain(|item| item.id != event_id);
+                }
+                cx.emit(EventsEvent::Changed { clan_id });
+                cx.notify();
+            })?;
+            Ok(())
+        })
+    }
+
+    pub fn set_user_interested(
+        &mut self,
+        clan_id: ClanId,
+        event_id: i64,
+        user_id: UserId,
+        interested: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        let api = self.api.clone();
+        if let Some(event) = self
+            .events
+            .get_mut(&clan_id)
+            .and_then(|events| events.iter_mut().find(|event| event.id == event_id))
+        {
+            if interested {
+                if !event.user_ids.contains(&user_id) {
+                    event.user_ids.push(user_id);
+                }
+            } else {
+                event.user_ids.retain(|id| *id != user_id);
+            }
+        }
+        cx.emit(EventsEvent::Changed { clan_id });
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = if interested {
+                api.add_user_event(clan_id.0, event_id).await
+            } else {
+                api.delete_user_event(clan_id.0, event_id).await
+            };
+            if let Err(error) = result {
+                this.update(cx, |this, cx| {
+                    if let Some(event) = this
+                        .events
+                        .get_mut(&clan_id)
+                        .and_then(|events| events.iter_mut().find(|event| event.id == event_id))
+                    {
+                        if interested {
+                            event.user_ids.retain(|id| *id != user_id);
+                        } else if !event.user_ids.contains(&user_id) {
+                            event.user_ids.push(user_id);
+                        }
+                    }
+                    cx.emit(EventsEvent::Changed { clan_id });
+                    cx.notify();
+                })?;
+                return Err(error);
+            }
             Ok(())
         })
     }
@@ -494,5 +636,23 @@ impl EventsStore {
         cx: &App,
     ) -> usize {
         self.visible_in_clan(clan_id, current_user, cx).count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ClanEventItem;
+    use mezon_proto::api;
+
+    #[test]
+    fn create_response_preserves_the_requested_repeat_type() {
+        let response = api::EventManagement {
+            repeat_type: 0,
+            ..Default::default()
+        };
+
+        let item = ClanEventItem::from_create_response(response, 4);
+
+        assert_eq!(item.repeat_type, 4);
     }
 }

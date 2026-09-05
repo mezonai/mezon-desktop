@@ -225,6 +225,18 @@ impl McpRuntime {
                         let result = cx.update(scroll_state);
                         let _ = reply.send(result);
                     }
+                    McpCommand::TourState { reply } => {
+                        let result = cx.update(tour_state);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::TourStart { track, reply } => {
+                        let result = cx.update(|cx| tour_start(track.as_deref(), cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::TourAdvance { forward, reply } => {
+                        let result = cx.update(|cx| tour_advance(forward, cx));
+                        let _ = reply.send(result);
+                    }
                     McpCommand::SetPanel { kind, reply } => {
                         let result = cx.update(|cx| {
                             mezon_ui::app::capture::set_composer_panel(cx, kind.as_deref())
@@ -824,6 +836,54 @@ async fn topic_scroll_wheel(cx: &mut AsyncApp, delta_y: f32, ticks: u32) -> anyh
         "first_visible_index": first_visible,
         "at_bottom": at_bottom,
     }))
+}
+
+fn tour_state(cx: &mut App) -> anyhow::Result<Value> {
+    let Some(entity) = mezon_ui::tour::TourState::try_global(cx) else {
+        return Ok(json!({ "active": false }));
+    };
+    let status = entity.read(cx).status(cx);
+    Ok(match status {
+        None => json!({ "active": false }),
+        Some(status) => json!({
+            "active": true,
+            "resolving": status.resolving,
+            "hole": status.hole.map(|(x, y, w, h)| json!([x, y, w, h])),
+            "track": status.track,
+            "index": status.index,
+            "position": status.position,
+            "total": status.total,
+            "title_key": status.title_key,
+            "anchor": status.anchor,
+            "has_hole": status.has_hole,
+        }),
+    })
+}
+
+fn tour_start(track: Option<&str>, cx: &mut App) -> anyhow::Result<Value> {
+    match mezon_ui::tour::mcp_start(track, cx)? {
+        Some(id) => Ok(json!({ "ok": true, "track": id })),
+        None => Ok(json!({
+            "ok": false,
+            "reason": "no track matched this route, it is already done, or a tour is already running",
+        })),
+    }
+}
+
+fn tour_advance(forward: bool, cx: &mut App) -> anyhow::Result<Value> {
+    match mezon_ui::tour::mcp_advance(forward, cx)? {
+        Some(advance) => Ok(json!({
+            "ok": true,
+            "moved": advance.moved,
+            "active": advance.still_active,
+        })),
+        None => Ok(json!({
+            "ok": false,
+            "moved": false,
+            "active": false,
+            "reason": "no tour is running",
+        })),
+    }
 }
 
 fn scroll_state(cx: &mut App) -> anyhow::Result<Value> {

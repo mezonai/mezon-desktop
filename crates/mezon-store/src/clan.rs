@@ -464,6 +464,7 @@ pub struct ClanList {
     pub active_clan_id: Option<ClanId>,
     api: Arc<AppApi>,
     loading: bool,
+    listed: bool,
     badges_loaded: bool,
     reload_pending: bool,
     reset_generation: u64,
@@ -493,6 +494,10 @@ impl ClanList {
         cx.global::<GlobalClanList>().0.clone()
     }
 
+    pub fn has_listed(&self) -> bool {
+        self.listed
+    }
+
     pub fn try_global(cx: &App) -> Option<Entity<Self>> {
         cx.try_global::<GlobalClanList>().map(|g| g.0.clone())
     }
@@ -501,6 +506,7 @@ impl ClanList {
         self.reset_generation = self.reset_generation.wrapping_add(1);
         self.clans.clear();
         self.loading = false;
+        self.listed = false;
         self.badges_loaded = false;
         self.reload_pending = false;
         self.joining_invite_urls.clear();
@@ -531,6 +537,7 @@ impl ClanList {
             active_clan_id: None,
             api,
             loading: false,
+            listed: false,
             badges_loaded: false,
             reload_pending: false,
             reset_generation: 0,
@@ -670,6 +677,7 @@ impl ClanList {
                     return;
                 }
                 this.loading = false;
+                this.listed = true;
                 this.badges_loaded = this.badges_loaded || badges_fetched;
                 this.update_clans_inner(mapped, badges_fetched, cx);
                 // No `clan_join` from here. The clan listing has not been fetched
@@ -1013,6 +1021,7 @@ impl ClanList {
     }
 
     pub fn update_clans(&mut self, clans: Vec<Clan>, cx: &mut Context<Self>) {
+        self.listed = true;
         self.update_clans_inner(clans, false, cx);
     }
 
@@ -2141,6 +2150,26 @@ mod tests {
         let msg = format!("{err}");
         assert_eq!(msg, "network timeout");
     }
+    #[gpui::test]
+    fn logging_out_forgets_that_the_clan_list_was_ever_fetched(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let clan_list = init_clan_list(cx);
+            clan_list.update(cx, |list, cx| {
+                list.update_clans(vec![make_clan(1, "One", None)], cx);
+                assert!(list.has_listed());
+
+                list.reset(cx);
+
+                assert!(
+                    !list.has_listed(),
+                    "a reset list must not read as a fetched-and-empty one, or the next \
+                     account is judged brand new before its clans arrive"
+                );
+                assert!(list.clans.is_empty());
+            });
+        });
+    }
+
     #[gpui::test]
     fn a_transfer_event_without_a_new_owner_is_ignored(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {

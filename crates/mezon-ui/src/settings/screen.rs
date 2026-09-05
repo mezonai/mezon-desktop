@@ -572,6 +572,7 @@ impl Render for SettingsScreen {
                 &theme,
                 "/settings/advanced",
             ))
+            .child(crate::tour::settings_entry_row("guided-tour-btn", &locale, &theme).mb(px(4.0)))
             .child(div().mt(px(4.0)).border_b_1().border_color(theme.border))
             .child(
                 div()

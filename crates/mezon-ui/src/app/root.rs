@@ -18,7 +18,9 @@ use gpui::{
     Animation, AnimationExt as _, AnyView, App, ClickEvent, Context, Entity, FontWeight,
     MouseButton, NavigationDirection, StyleRefinement, Task, Window, div, img, prelude::*, px,
 };
-use mezon_store::{AuthState, ChannelList, ClanId, ClanList, ConnectionStore, Settings};
+use mezon_store::{
+    AuthState, ChannelList, ClanId, ClanList, ConnectionStore, OnboardingStore, Settings,
+};
 use std::time::{Duration, Instant};
 
 pub struct RootView {
@@ -40,6 +42,12 @@ pub struct RootView {
     call_overlay: Entity<CallOverlay>,
     _splash_delay: Option<Task<()>>,
     _recording_toasts: Option<gpui::Subscription>,
+    tour_autostart: Option<Task<()>>,
+    tour_autostart_for: Option<&'static str>,
+    tour_autostart_last: Option<&'static str>,
+    tour_autostart_attempts: u8,
+    tour_autostart_armed: bool,
+    first_join_prompted: bool,
 }
 
 fn surface_recording_toast(
@@ -100,6 +108,14 @@ fn spawn_splash_delay(cx: &mut Context<RootView>) -> Task<()> {
 }
 
 impl RootView {
+    /// Repaint only when the first-join prompt has actually become showable — the root view is
+    /// expensive to redraw, and these stores notify on every badge and profile change.
+    fn notify_if_first_join_due(&self, cx: &mut Context<Self>) {
+        if !self.first_join_prompted && crate::clan::first_join_modal::should_prompt(cx) {
+            cx.notify();
+        }
+    }
+
     pub fn new(
         title_bar: Entity<TitleBar>,
         auth_state: Entity<AuthState>,
@@ -140,7 +156,41 @@ impl RootView {
             this.sync_settings_page(cx);
             this.sync_clan_settings_page(cx);
             this.sync_channel_settings_tab(cx);
+            this.schedule_tour_autostart(cx);
+            end_preview_off_its_own_screens(cx);
             cx.notify();
+        })
+        .detach();
+
+        cx.observe(&ClanList::global(cx), |this, _clans, cx| {
+            if crate::tour::eligibility_undecided(cx) {
+                this.schedule_tour_autostart(cx);
+            }
+            this.notify_if_first_join_due(cx);
+        })
+        .detach();
+
+        // The clan list and the account both land after the render that follows sign-in, and
+        // neither observer above repaints the root — without this the first-join prompt would
+        // become due while nothing was left to notice it.
+        cx.observe(
+            &mezon_store::AccountStore::global(cx),
+            |this, _account, cx| {
+                this.notify_if_first_join_due(cx);
+            },
+        )
+        .detach();
+
+        cx.observe(&OnboardingStore::global(cx), |_, _, cx| cx.notify())
+            .detach();
+
+        // Nothing else re-arms the tour once a modal has waved it off, and dismissing a modal is
+        // not a route change — without this the first-join prompt would swallow the tour for good.
+        cx.observe(&shell, |this, shell, cx| {
+            if !shell.read(cx).has_modal() {
+                this.schedule_tour_autostart(cx);
+                this.notify_if_first_join_due(cx);
+            }
         })
         .detach();
 
@@ -154,7 +204,19 @@ impl RootView {
                 this.connecting_since = None;
                 this._splash_delay = None;
             }
+            if matches!(*auth_state.read(cx), AuthState::Authenticated(_)) {
+                this.tour_autostart_armed = true;
+                this.schedule_tour_autostart(cx);
+            }
             if matches!(*auth_state.read(cx), AuthState::NotAuthenticated) {
+                this.tour_autostart_armed = false;
+                this.first_join_prompted = false;
+                this.tour_autostart = None;
+                this.tour_autostart_for = None;
+                this.tour_autostart_last = None;
+                this.tour_autostart_attempts = 0;
+                crate::tour::shutdown(cx);
+                Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
                 crate::image_viewer::close_image_viewer(cx);
                 crate::pdf_viewer::close_pdf_viewer(cx);
                 crate::chat::media_channel::close_media_image_modal(cx);
@@ -296,7 +358,55 @@ impl RootView {
             network_online,
             _splash_delay: splash_delay,
             _recording_toasts: recording_toasts,
+            tour_autostart: None,
+            tour_autostart_for: None,
+            tour_autostart_last: None,
+            tour_autostart_attempts: 0,
+            tour_autostart_armed: false,
+            first_join_prompted: false,
         }
+    }
+
+    fn schedule_tour_autostart(&mut self, cx: &mut Context<Self>) {
+        if !self.tour_autostart_armed {
+            return;
+        }
+        let Some(id) = crate::tour::pending_core_track(cx) else {
+            return;
+        };
+        if self.tour_autostart_for == Some(id) {
+            return;
+        }
+        if self.tour_autostart_last == Some(id) {
+            if self.tour_autostart_attempts >= TOUR_AUTOSTART_MAX_ATTEMPTS {
+                return;
+            }
+        } else {
+            self.tour_autostart_attempts = 0;
+        }
+        self.tour_autostart_attempts += 1;
+        self.tour_autostart_last = Some(id);
+        self.tour_autostart_for = Some(id);
+        self.tour_autostart = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TOUR_AUTOSTART_DELAY).await;
+            let started = cx.update(|cx| crate::tour::auto_start_if_context_holds(id, cx));
+            if !started {
+                // A modal on screen is a "not yet", not a "this context will never hold": the
+                // first-join prompt goes up for exactly the account the tour autostarts for, and
+                // counting that would spend the whole budget before anybody dismissed it.
+                let blocked_by_modal = cx.update(|cx| Shell::global(cx).read(cx).has_modal());
+                this.update(cx, |this, _| {
+                    if this.tour_autostart_for == Some(id) {
+                        this.tour_autostart_for = None;
+                    }
+                    if blocked_by_modal {
+                        this.tour_autostart_attempts =
+                            this.tour_autostart_attempts.saturating_sub(1);
+                    }
+                })
+                .ok();
+            }
+        }));
     }
 
     fn sync_settings_page(&mut self, cx: &mut Context<Self>) {
@@ -366,10 +476,25 @@ impl Render for RootView {
         crate::trace_render!("RootView");
         crate::image_cache::flush_atlas_drops(window, cx);
         crate::image_cache::flush_atlas_replaces(window, cx);
+
+        // Someone who just signed up and has landed with no clans gets the same nudge the web
+        // client gives them. Deferred because a modal cannot be opened from inside a render.
+        let authenticated = matches!(*self.auth_state.read(cx), AuthState::Authenticated(_));
+        if authenticated
+            && !self.first_join_prompted
+            && crate::clan::first_join_modal::should_prompt(cx)
+        {
+            self.first_join_prompted = true;
+            cx.defer_in(window, |_, window, cx| {
+                crate::clan::first_join_modal::FirstJoinModal::open(window, cx);
+            });
+        }
+
         let locale = self.cached_locale.as_str();
         let base_font_family = ::theme::theme_settings(cx).ui_font(cx).family.clone();
         let theme = cx.theme();
 
+        let mut preview_bar = None;
         let content: gpui::AnyElement = match self.auth_state.read(cx) {
             AuthState::NotAuthenticated | AuthState::OtpRequested { .. } => {
                 cached_fill(self.login_view.clone())
@@ -392,6 +517,14 @@ impl Render for RootView {
             }
             AuthState::Authenticated(_) => {
                 let route = Router::global(cx).read(cx).route();
+                if previewable_route(&route) {
+                    preview_bar = OnboardingStore::try_global(cx)
+                        .and_then(|store| store.read(cx).preview_clan())
+                        .filter(|clan_id| {
+                            ClanList::global(cx).read(cx).active_clan_id == Some(*clan_id)
+                        })
+                        .map(|clan_id| render_onboarding_preview_bar(clan_id, theme, locale));
+                }
                 match route {
                     Route::SettingsAccount
                     | Route::SettingsProfile
@@ -440,6 +573,7 @@ impl Render for RootView {
             .when(window_controls::HAS_CUSTOM_TITLE_BAR, |this| {
                 this.child(render_title_bar(self.title_bar.clone()))
             })
+            .children(preview_bar)
             .child(content)
             .when(window_controls::is_edge_resizable(), |this| {
                 this.child(window_controls::render_resize_edges(window))
@@ -447,6 +581,99 @@ impl Render for RootView {
             .child(self.shell.clone())
             .child(self.call_overlay.clone())
     }
+}
+
+/// The strip React drops across the top while an owner is previewing their clan the way a new
+/// member sees it. Closing it hands them back to the onboarding settings they opened it from.
+fn previewable_route(route: &Route) -> bool {
+    matches!(
+        route,
+        Route::Chat | Route::Channel { .. } | Route::ClanGuide { .. }
+    )
+}
+
+fn end_preview_off_its_own_screens(cx: &mut App) {
+    let Some(store) = OnboardingStore::try_global(cx) else {
+        return;
+    };
+    if store.read(cx).preview_clan().is_none() {
+        return;
+    }
+    let route = Router::global(cx).read(cx).route();
+    if !previewable_route(&route) {
+        store.update(cx, |store, cx| store.close_preview(cx));
+    }
+}
+
+fn render_onboarding_preview_bar(clan_id: ClanId, theme: &Theme, locale: &str) -> gpui::AnyElement {
+    let leading_inset = if cfg!(target_os = "macos") {
+        px(80.)
+    } else {
+        px(16.)
+    };
+    div()
+        .occlude()
+        .flex()
+        .flex_row()
+        .flex_none()
+        .items_center()
+        .gap_4()
+        .w_full()
+        .h(px(48.))
+        .pl(leading_inset)
+        .pr_4()
+        .bg(theme.bg_secondary)
+        .border_b_1()
+        .border_color(theme.border)
+        .child(
+            div()
+                .id("onboarding-close-preview")
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py(px(4.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(theme.border)
+                .cursor_pointer()
+                .text_color(theme.text_primary)
+                .hover(|style| style.bg(theme.bg_hover))
+                .child(
+                    Icon::new(IconName::ArrowLeft)
+                        .size(px(14.))
+                        .text_color(theme.text_primary),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(mezon_i18n::t(locale, "common.closePreviewMode")),
+                )
+                .on_click(move |_, _, cx| {
+                    OnboardingStore::global(cx).update(cx, |store, cx| store.close_preview(cx));
+                    crate::router::navigate(
+                        cx,
+                        Route::ClanSettings {
+                            clan_id,
+                            page: ClanSettingsPage::Onboarding,
+                        },
+                    );
+                }),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_center()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text_primary)
+                .child(mezon_i18n::t(locale, "common.previewModeDescription")),
+        )
+        .into_any_element()
 }
 
 fn render_title_bar(title_bar: Entity<TitleBar>) -> AnyView {
@@ -497,6 +724,8 @@ fn render_awaiting_callback(theme: &Theme, locale: &str) -> gpui::AnyElement {
         .into_any_element()
 }
 
+const TOUR_AUTOSTART_DELAY: Duration = Duration::from_millis(1500);
+const TOUR_AUTOSTART_MAX_ATTEMPTS: u8 = 3;
 const NETWORK_OFFLINE_TOAST_KEY: &str = "network-offline";
 const SPLASH_BG: u32 = 0x1e1f22;
 const SPLASH_ACCENT: u32 = 0x5865f2;
