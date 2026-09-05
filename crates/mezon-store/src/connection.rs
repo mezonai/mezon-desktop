@@ -241,6 +241,9 @@ impl ConnectionStore {
             let mut jwt_refusals = 0u32;
             let mut probed_this_outage = false;
             let mut reminted_this_outage = false;
+            let mut last_remint_attempt_at: Option<Instant> = None;
+            let mut remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+            let mut remint_unsupported = false;
             let mut endpoint_refresh_rx = endpoint_refresh_rx;
             let mut pending_endpoint_refresh: Option<EndpointRefreshRequest> = None;
             let mut last_endpoint_refresh_at: Option<Instant> = None;
@@ -281,6 +284,9 @@ impl ConnectionStore {
                     jwt_refusals = 0;
                     probed_this_outage = false;
                     reminted_this_outage = false;
+                    last_remint_attempt_at = None;
+                    remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+                    remint_unsupported = false;
                     wake.notified().await;
                     continue;
                 };
@@ -397,6 +403,7 @@ impl ConnectionStore {
                                 &session.user_id,
                                 &response,
                                 tcp_default_port,
+                                MintedSessionId::KeepUnlessMoved,
                                 cx,
                             ) else {
                                 tracing::warn!(
@@ -529,12 +536,21 @@ impl ConnectionStore {
                 //
                 // `reminted_this_outage` latches only on *success* so a dead reminted SID is not
                 // re-minted in a tight loop; remint *errors* must not latch — otherwise one gw 503
-                // leaves the session SID-empty for the whole outage.
+                // leaves the session SID-empty for the whole outage. Errors are paced instead
+                // (5s doubling to 60s): a connected JWT-only session wakes on every auth-state
+                // change, and each wake would otherwise cost the gateway a call. A 404 says the
+                // gateway has no such route at all, so that one does latch until the next
+                // confirmed handshake.
+                let remint_due_in = endpoint_refresh_retry_in(
+                    last_remint_attempt_at,
+                    remint_retry_secs,
+                    Instant::now(),
+                );
                 let needs_sid_recovery = should_attempt_sid_remint(
                     &session,
                     gateway_refusals,
                     reminted_this_outage,
-                    !gw_base.is_empty(),
+                    !gw_base.is_empty() && !remint_unsupported,
                 );
                 if (needs_sid_recovery || should_lead_with_jwt(&session, gateway_refusals))
                     && !jwt_is_fresh(&session)
@@ -546,8 +562,9 @@ impl ConnectionStore {
                         refreshed_this_run = true;
                     }
                 }
-                if needs_sid_recovery {
+                if needs_sid_recovery && remint_due_in.is_zero() {
                     if jwt_is_fresh(&session) {
+                        last_remint_attempt_at = Some(Instant::now());
                         match remint_session_via_healthy_endpoint(
                             &auth_client,
                             &api,
@@ -565,22 +582,48 @@ impl ConnectionStore {
                                 session = renewed;
                                 gateway_refusals = 0;
                                 reminted_this_outage = true;
+                                last_remint_attempt_at = None;
+                                remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
                                 tracing::info!(
                                     "Reminted session_id via GetHealthyEndpoint — retrying SID handshake"
                                 );
-                                if transport.is_open().await {
-                                    let _ = transport.close().await;
+                                // Retire a JWT-only connection the way a node move does: bump the
+                                // generation first so its close callback cannot land on the SID
+                                // handshake that follows.
+                                if connected_user_id.take().is_some() || transport.is_open().await {
+                                    connection_generation.fetch_add(1, Ordering::AcqRel);
                                     api.set_status(ConnectionStatus::Disconnected);
+                                    if let Err(e) = transport.close().await {
+                                        tracing::warn!(
+                                            "Failed to close the JWT-only transport before the SID handshake: {e}"
+                                        );
+                                    }
                                 }
                             }
                             Err(e) => {
-                                tracing::warn!(
-                                    "GetHealthyEndpoint could not remint session_id ({e}) — falling back to JWT handshake"
-                                );
+                                remint_retry_secs =
+                                    next_healthy_endpoint_retry_secs(remint_retry_secs);
+                                if healthy_endpoint_route_missing(&e) {
+                                    remint_unsupported = true;
+                                    tracing::warn!(
+                                        "The gateway has no healthy-endpoint route ({e}) — staying on the JWT handshake until the next confirmed connection"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "GetHealthyEndpoint could not remint session_id ({e}) — falling back to JWT handshake, next remint in {remint_retry_secs}s"
+                                    );
+                                }
                                 if already_connected {
                                     retry_backoff_secs = 1;
                                     consecutive_failures = 0;
-                                    wake.notified().await;
+                                    if remint_unsupported {
+                                        wake.notified().await;
+                                    } else {
+                                        tokio::select! {
+                                            _ = wake.notified() => {}
+                                            _ = exec.timer(Duration::from_secs(remint_retry_secs)) => {}
+                                        }
+                                    }
                                     continue;
                                 }
                             }
@@ -594,7 +637,15 @@ impl ConnectionStore {
                 } else if already_connected {
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
-                    wake.notified().await;
+                    if needs_sid_recovery {
+                        // A JWT-only connection whose remint is paced out: come back when it is due.
+                        tokio::select! {
+                            _ = wake.notified() => {}
+                            _ = exec.timer(remint_due_in) => {}
+                        }
+                    } else {
+                        wake.notified().await;
+                    }
                     continue;
                 }
 
@@ -636,6 +687,9 @@ impl ConnectionStore {
                                 gateway_refusals = 0;
                                 jwt_refusals = 0;
                                 reminted_this_outage = false;
+                                last_remint_attempt_at = None;
+                                remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+                                remint_unsupported = false;
                                 probed_this_outage = false;
                                 retry_backoff_secs = 1;
                                 continue;
@@ -790,6 +844,9 @@ impl ConnectionStore {
                     jwt_refusals = 0;
                     probed_this_outage = false;
                     reminted_this_outage = false;
+                    last_remint_attempt_at = None;
+                    remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+                    remint_unsupported = false;
                     pending_endpoint_refresh = None;
                     if endpoint_refresh_retry_in(
                         last_endpoint_refresh_at,
@@ -1300,9 +1357,15 @@ async fn remint_session_via_healthy_endpoint(
         &session.user_id,
         &healthy,
         tcp_default_port,
+        MintedSessionId::Adopt,
         cx,
     )
     .ok_or_else(|| anyhow::anyhow!("auth state changed during GetHealthyEndpoint"))?;
+    // A gateway that only mints when the node changes answers with the old credential — retrying
+    // the SID handshake with it would just fail again.
+    if renewed.session_id.is_empty() || renewed.session_id == session.session_id {
+        anyhow::bail!("the gateway answered without minting a new session_id");
+    }
 
     api.set_http_fallback(http_fallback_session(
         &renewed,
@@ -1380,6 +1443,14 @@ fn healthy_endpoint_auth_rejected(error: &anyhow::Error) -> bool {
         .is_some_and(|error| matches!(error.status, 401 | 403))
 }
 
+/// The gateway answered 404: it has no healthy-endpoint route (not deployed yet), which no retry
+/// within this connection will change.
+fn healthy_endpoint_route_missing(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<HealthyEndpointStatusError>()
+        .is_some_and(|error| error.status == 404)
+}
+
 fn endpoint_observation_is_current(
     endpoint_health: &Mutex<EndpointHealth>,
     connection_generation: &AtomicU64,
@@ -1390,11 +1461,21 @@ fn endpoint_observation_is_current(
         && endpoint_health.lock().connected_endpoint().as_ref() == Some(endpoint)
 }
 
+/// What to do with the `session_id` a healthy-endpoint answer carries.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MintedSessionId {
+    /// A health report: the credential we hold is live, keep it unless the gateway moves us.
+    KeepUnlessMoved,
+    /// A remint after a refused handshake: the credential we hold is the one to replace.
+    Adopt,
+}
+
 fn apply_healthy_endpoint_to_auth(
     auth_state: &Entity<AuthState>,
     expected_user_id: &str,
     response: &HealthyEndpointSession,
     default_port: Option<u16>,
+    minted: MintedSessionId,
     cx: &mut AsyncApp,
 ) -> Option<Session> {
     let updated = cx.update(|cx| {
@@ -1403,9 +1484,16 @@ fn apply_healthy_endpoint_to_auth(
                 AuthState::Authenticated(session) | AuthState::Connecting(session) => session,
                 _ => return None,
             };
-            if session.user_id != expected_user_id
-                || !session.apply_healthy_endpoint(response, default_port)
-            {
+            if session.user_id != expected_user_id {
+                return None;
+            }
+            let applied = match minted {
+                MintedSessionId::KeepUnlessMoved => {
+                    session.apply_healthy_endpoint(response, default_port)
+                }
+                MintedSessionId::Adopt => session.apply_reminted_endpoint(response, default_port),
+            };
+            if !applied {
                 return None;
             }
             cx.notify();
@@ -1755,6 +1843,41 @@ mod tests {
             next_healthy_endpoint_retry_secs(HEALTHY_ENDPOINT_RETRY_CAP_SECS),
             HEALTHY_ENDPOINT_RETRY_CAP_SECS
         );
+    }
+
+    #[test]
+    fn a_missing_healthy_endpoint_route_is_told_apart_from_a_refusal() {
+        let missing: anyhow::Error = HealthyEndpointStatusError { status: 404 }.into();
+        let refused: anyhow::Error = HealthyEndpointStatusError { status: 401 }.into();
+        let outage: anyhow::Error = HealthyEndpointStatusError { status: 503 }.into();
+        let timeout = anyhow::anyhow!("healthy endpoint request timed out");
+        assert!(healthy_endpoint_route_missing(&missing));
+        assert!(!healthy_endpoint_route_missing(&refused));
+        assert!(!healthy_endpoint_route_missing(&outage));
+        assert!(!healthy_endpoint_route_missing(&timeout));
+        assert!(healthy_endpoint_auth_rejected(&refused));
+        assert!(!healthy_endpoint_auth_rejected(&missing));
+    }
+
+    #[test]
+    fn remint_errors_are_paced_like_gateway_asks() {
+        let attempted_at = Instant::now();
+        let mut retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+        assert_eq!(
+            endpoint_refresh_retry_in(None, retry_secs, attempted_at),
+            Duration::ZERO,
+            "the first remint of an outage is immediate"
+        );
+        retry_secs = next_healthy_endpoint_retry_secs(retry_secs);
+        assert_eq!(
+            endpoint_refresh_retry_in(Some(attempted_at), retry_secs, attempted_at),
+            Duration::from_secs(10),
+            "a failed remint waits before the gateway is asked again"
+        );
+        for _ in 0..8 {
+            retry_secs = next_healthy_endpoint_retry_secs(retry_secs);
+        }
+        assert_eq!(retry_secs, HEALTHY_ENDPOINT_RETRY_CAP_SECS);
     }
 
     #[test]

@@ -170,10 +170,33 @@ impl Session {
         }
     }
 
+    /// Adopt the gateway's answer to a health report. The `session_id` we hold is presumed live,
+    /// so it is only replaced when the gateway moves us to another node (or we hold none) — a
+    /// working session slot must not be burned for nothing.
     pub fn apply_healthy_endpoint(
         &mut self,
         endpoint: &HealthyEndpointSession,
         default_port: Option<u16>,
+    ) -> bool {
+        self.apply_healthy_endpoint_with(endpoint, default_port, false)
+    }
+
+    /// Adopt the gateway's answer to a *refused* `session_id`. The credential we hold is exactly
+    /// the one to replace, so the minted one is taken even when the gateway keeps us on the
+    /// same node.
+    pub fn apply_reminted_endpoint(
+        &mut self,
+        endpoint: &HealthyEndpointSession,
+        default_port: Option<u16>,
+    ) -> bool {
+        self.apply_healthy_endpoint_with(endpoint, default_port, true)
+    }
+
+    fn apply_healthy_endpoint_with(
+        &mut self,
+        endpoint: &HealthyEndpointSession,
+        default_port: Option<u16>,
+        adopt_session_id: bool,
     ) -> bool {
         if endpoint.realtime_endpoint(default_port).is_none() {
             return false;
@@ -224,7 +247,7 @@ impl Session {
         let stays_on_the_same_node = node_before.0.is_some() && node_before == node_after;
 
         if !endpoint.session_id.is_empty()
-            && (!stays_on_the_same_node || self.session_id.is_empty())
+            && (adopt_session_id || !stays_on_the_same_node || self.session_id.is_empty())
         {
             self.session_id = endpoint.session_id.clone();
         }
@@ -632,6 +655,36 @@ mod tests {
         };
         assert!(session.apply_healthy_endpoint(&moved, Some(4433)));
         assert_eq!(session.endpoint_id, 0);
+    }
+
+    #[test]
+    fn a_remint_on_the_same_node_replaces_the_refused_session_id() {
+        let session = Session {
+            user_id: "7".into(),
+            session_id: "dead-sid".into(),
+            tcp_url: Some("sock.example.com:4433".into()),
+            tcp_host: Some("sock.example.com".into()),
+            tcp_port: Some(4433),
+            ..Default::default()
+        };
+        let minted = HealthyEndpointSession {
+            user_id: "7".into(),
+            session_id: "minted-sid".into(),
+            tcp_url: Some("sock.example.com:4433".into()),
+            ..Default::default()
+        };
+
+        // A health report keeps the credential it believes is live.
+        let mut reported = session.clone();
+        assert!(reported.apply_healthy_endpoint(&minted, Some(4433)));
+        assert_eq!(reported.session_id, "dead-sid");
+
+        // A remint exists because that credential was refused — the minted one must win.
+        let mut reminted = session;
+        assert!(reminted.apply_reminted_endpoint(&minted, Some(4433)));
+        assert_eq!(reminted.session_id, "minted-sid");
+        assert_eq!(reminted.tcp_host.as_deref(), Some("sock.example.com"));
+        assert_eq!(reminted.tcp_port, Some(4433));
     }
 
     #[test]
