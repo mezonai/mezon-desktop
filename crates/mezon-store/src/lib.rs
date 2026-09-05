@@ -22,6 +22,7 @@ pub mod clan_members;
 pub mod compose;
 pub mod config;
 pub mod connection;
+pub mod ctrlk_search;
 pub mod dialog;
 pub mod direct;
 pub mod emoji;
@@ -128,6 +129,9 @@ pub use clan_members::{
 pub use compose::{ComposeDraft, ComposeStore, ComposeToken, ComposeTokenKind, PendingAttachment};
 pub use config::AppConfig;
 pub use connection::{ConnectionStore, resolve_initial_auth_state};
+pub use ctrlk_search::{
+    CtrlKChannel, CtrlKSearchEvent, CtrlKSearchState, CtrlKSearchStore, CtrlKSearchType, CtrlKUser,
+};
 pub use direct::{
     DirectChannel, DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore,
     dm_counts_toward_unread_badge,

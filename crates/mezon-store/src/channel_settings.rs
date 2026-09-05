@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global};
 use mezon_client::{AppApi, RealtimeEvent};
-use mezon_proto::api;
+use mezon_proto::{api, realtime};
 
 use crate::message::MessageCode;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
-use crate::{ChannelId, ClanId, UserId};
+use crate::{BadgeService, ChannelId, ClanId, ClanMembersStore, UserId};
 
 const API_PAGE_SIZE: i32 = 100;
 
@@ -258,8 +258,49 @@ impl ChannelSettingsStore {
                     this.handle_realtime_event(event, cx)
                 });
             }
+            dispatch.on(RealtimeKind::RoleEvent, &entity, |this, event, cx| {
+                this.handle_role_event(event, cx)
+            });
             dispatch.on_lagged(&entity, |this, cx| this.reload_loaded(cx));
         });
+    }
+
+    fn handle_role_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::Unhandled(realtime::envelope::Message::RoleEvent(role_event)) = event
+        else {
+            return;
+        };
+        let Some(role) = role_event.role.as_ref() else {
+            return;
+        };
+        let clan_id = ClanId(role.clan_id);
+        let Some(current_user_id) =
+            BadgeService::try_global(cx).and_then(|badges| badges.read(cx).current_user_id(cx))
+        else {
+            return;
+        };
+        let holds_role = ClanMembersStore::try_global(cx)
+            .and_then(|members| {
+                members
+                    .read(cx)
+                    .self_role_ids(clan_id)
+                    .map(|role_ids| role_ids.contains(&role.id))
+            })
+            .unwrap_or(false);
+        if !role_event_affects_user(role_event, current_user_id, holds_role) {
+            return;
+        }
+
+        let keys = self
+            .rows
+            .keys()
+            .copied()
+            .chain(self.loading.iter().copied())
+            .filter(|(row_clan_id, _)| *row_clan_id == clan_id)
+            .collect::<HashSet<_>>();
+        for key in keys {
+            self.reload(key, cx);
+        }
     }
 
     fn handle_message(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
@@ -645,6 +686,21 @@ fn clear_pending_restore(
     pending_by_key.retain(|_, pending| !pending.is_empty());
 }
 
+fn role_event_affects_user(
+    role_event: &realtime::RoleEvent,
+    current_user_id: UserId,
+    holds_role: bool,
+) -> bool {
+    if role_event.user_add_ids.contains(&current_user_id.get())
+        || role_event.user_remove_ids.contains(&current_user_id.get())
+    {
+        return true;
+    }
+    holds_role
+        && (!role_event.active_permission_ids.is_empty()
+            || !role_event.remove_permission_ids.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -766,5 +822,33 @@ mod tests {
         assert!(!pending[&clan_one_key].contains_key(&ChannelId(4)));
         assert!(pending[&clan_one_key].contains_key(&ChannelId(6)));
         assert!(pending[&clan_two_key].contains_key(&ChannelId(4)));
+    }
+
+    #[test]
+    fn role_events_refresh_settings_only_when_they_affect_current_user() {
+        let current_user_id = UserId(7);
+        let added = realtime::RoleEvent {
+            user_add_ids: vec![current_user_id.get()],
+            ..Default::default()
+        };
+        let removed = realtime::RoleEvent {
+            user_remove_ids: vec![current_user_id.get()],
+            ..Default::default()
+        };
+        let permission_changed = realtime::RoleEvent {
+            active_permission_ids: vec![10],
+            ..Default::default()
+        };
+        let unrelated = realtime::RoleEvent::default();
+
+        assert!(role_event_affects_user(&added, current_user_id, false));
+        assert!(role_event_affects_user(&removed, current_user_id, false));
+        assert!(role_event_affects_user(
+            &permission_changed,
+            current_user_id,
+            true
+        ));
+        assert!(!role_event_affects_user(&unrelated, current_user_id, true));
+        assert!(!role_event_affects_user(&unrelated, current_user_id, false));
     }
 }

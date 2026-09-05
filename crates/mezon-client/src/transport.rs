@@ -4422,6 +4422,7 @@ impl MezonTransport {
             "DeletePinMessage" => 207,
             "MarkAsRead" => 208,
             "UploadBatchAttachmentFile" => 209,
+            "SearchCtrlK" => 210,
             _ => {
                 tracing::warn!("unknown API name: {api_name}");
                 return None;
@@ -6849,6 +6850,31 @@ impl MezonTransport {
         Ok(api::SearchMessageResponse::decode(response.as_slice())?)
     }
 
+    pub async fn search_ctrl_k(
+        &self,
+        text: &str,
+        search_type: i32,
+    ) -> Result<api::SearchCtrlKResponse> {
+        let text = text.trim();
+        if text.is_empty() {
+            anyhow::bail!("SearchCtrlK text must not be empty");
+        }
+        if text.len() > 255 {
+            anyhow::bail!("SearchCtrlK text exceeds 255 bytes");
+        }
+        let cid = self.generate_cid();
+        let body = api::SearchCtrlKRequest {
+            text: text.to_string(),
+            r#type: search_type,
+        }
+        .encode_to_vec();
+        let (code, response) = self.send_api_request(cid, "SearchCtrlK", body).await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        Ok(api::SearchCtrlKResponse::decode(response.as_slice())?)
+    }
+
     /// Search threads by label within a parent channel.
     pub async fn search_thread(
         &self,
@@ -9176,7 +9202,6 @@ impl MezonTransport {
         Ok(())
     }
 
-    /// Mute participant Mezon meet.
     pub async fn mute_participant_mezon_meet(
         &self,
         channel_id: i64,

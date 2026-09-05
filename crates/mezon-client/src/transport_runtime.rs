@@ -1769,6 +1769,20 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn search_ctrl_k(
+        &self,
+        text: &str,
+        search_type: i32,
+    ) -> Result<mezon_proto::api::SearchCtrlKResponse> {
+        let transport = self.inner.clone();
+        let text = text.to_string();
+
+        runtime()
+            .spawn(async move { transport.search_ctrl_k(&text, search_type).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn join_chat(
         &self,
         clan_id: i64,
