@@ -1115,20 +1115,7 @@ pub fn clan_has_inbox_badge(clan_id: &str, cx: &App) -> bool {
     let Ok(clan) = clan_id.parse::<ClanId>() else {
         return false;
     };
-    let has_clan_badge = ClanList::try_global(cx)
+    ClanList::try_global(cx)
         .and_then(|list| list.read(cx).clan(clan).map(|c| c.badge_count > 0))
-        .unwrap_or(false);
-    let has_mentions = InboxStore::try_global(cx)
-        .map(|store| {
-            store
-                .read(cx)
-                .items(clan_id, InboxCategory::Mentions)
-                .iter()
-                .any(|item| item.clan_id == clan_id)
-        })
-        .unwrap_or(false);
-    let has_topic_mentions = TopicBadgeStore::try_global(cx)
-        .map(|store| store.read(cx).all_topic_noti_clan(clan_id) > 0)
-        .unwrap_or(false);
-    has_clan_badge || has_mentions || has_topic_mentions
+        .unwrap_or(false)
 }
