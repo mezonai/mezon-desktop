@@ -159,6 +159,17 @@ fn topic_id_i64_from_raw_content(raw: &str) -> Option<i64> {
         .filter(|id| *id > 0)
 }
 
+fn json_value_i64(value: &serde_json::Value) -> i64 {
+    match value {
+        serde_json::Value::String(raw) => raw.parse().unwrap_or(0),
+        serde_json::Value::Number(num) => num
+            .as_i64()
+            .or_else(|| num.as_f64().map(|n| n as i64))
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
 pub fn notification_ids_from_content(content: &[u8]) -> (i64, i64, i64) {
     if content.is_empty() {
         return (0, 0, 0);
@@ -191,20 +202,16 @@ pub fn notification_ids_from_content(content: &[u8]) -> (i64, i64, i64) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(raw.trim()) else {
         return (0, 0, 0);
     };
-    let message_id = match value.get("message_id") {
-        Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0),
-        Some(serde_json::Value::String(s)) => s.parse().unwrap_or(0),
-        _ => 0,
-    };
-    let create_time = match value.get("create_time_seconds") {
-        Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0),
-        Some(serde_json::Value::String(s)) => s.parse().unwrap_or(0),
-        _ => 0,
-    };
-    let topic_id = match value.get("topic_id") {
-        Some(serde_json::Value::Number(n)) => n.as_i64().filter(|id| *id > 0).unwrap_or(0),
-        Some(serde_json::Value::String(s)) => s.parse().ok().filter(|id| *id > 0).unwrap_or(0),
-        _ => topic_id_i64_from_raw_content(raw).unwrap_or(0),
+    let message_id = value.get("message_id").map(json_value_i64).unwrap_or(0);
+    let create_time = value
+        .get("create_time_seconds")
+        .map(json_value_i64)
+        .unwrap_or(0);
+    let field_topic_id = value.get("topic_id").map(json_value_i64).unwrap_or(0);
+    let topic_id = if field_topic_id > 0 {
+        field_topic_id
+    } else {
+        topic_id_i64_from_raw_content(raw).unwrap_or(0)
     };
     (message_id, create_time, topic_id)
 }
@@ -402,7 +409,7 @@ fn enrich_message_preview_from_raw(preview: &mut InboxMessagePreview, raw: &[u8]
     if is_valid_inbox_message_id(&preview.message_id) {
         return;
     }
-    let (message_id, _) = crate::transport::parse_notification_content(raw);
+    let (message_id, _, _) = notification_ids_from_content(raw);
     if message_id > 0 {
         preview.message_id = message_id.to_string();
     }
@@ -1361,6 +1368,13 @@ mod tests {
         assert_eq!(notification_ids_from_content(&bytes), (42, 100, 55));
         assert_eq!(effective_notification_topic_id(0, &bytes), Some(55));
         assert_eq!(effective_notification_topic_id(99, &bytes), Some(99));
+    }
+
+    #[test]
+    fn notification_ids_from_content_json_zero_topic_falls_back_to_tp() {
+        let json = br#"{"message_id":42,"create_time_seconds":1.7e9,"topic_id":0,"tp":"55"}"#;
+        assert_eq!(notification_ids_from_content(json), (42, 1700000000, 55));
+        assert_eq!(effective_notification_topic_id(0, json), Some(55));
     }
 
     #[test]

@@ -1763,21 +1763,8 @@ fn json_field_i64(value: &serde_json::Value, key: &str) -> i64 {
 }
 
 pub fn parse_notification_content(content: &[u8]) -> (i64, i64) {
-    if content.is_empty() {
-        return (0, 0);
-    }
-    if !matches!(content.first().copied(), Some(b'{') | Some(b'['))
-        && let Ok(fcm) = api::DirectFcmProto::decode(content)
-    {
-        return (fcm.message_id, i64::from(fcm.create_time_seconds));
-    }
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(content) else {
-        return (0, 0);
-    };
-    (
-        json_field_i64(&value, "message_id"),
-        json_field_i64(&value, "create_time_seconds"),
-    )
+    let (message_id, create_time, _) = crate::inbox::notification_ids_from_content(content);
+    (message_id, create_time)
 }
 
 pub fn is_mention_or_reply(
