@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Context, Entity, Global};
-use mezon_client::RealtimeEvent;
+use mezon_client::{
+    RealtimeEvent, inbox_notification_from_channel_mention, notification_ids_from_content,
+};
 use mezon_proto::api::{ChannelMessage, Notification};
 
 use crate::AuthState;
@@ -11,6 +13,7 @@ use crate::clan::ClanList;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::DirectMessageStore;
 use crate::ids::{ChannelId, ClanId, MessageId, UserId};
+use crate::inbox::{InboxStore, skip_inbox_mention_code};
 use crate::message::MessageCode;
 use crate::messages::MessagesStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
@@ -420,6 +423,16 @@ impl BadgeService {
                             });
                         }
                     }
+                    if !from_me
+                        && is_new_message
+                        && mentions_me
+                        && !skip_unread_activity
+                        && !skip_inbox_mention_code(m.code)
+                    {
+                        InboxStore::global(cx).update(cx, |inbox, cx| {
+                            inbox.note_mention(inbox_notification_from_channel_mention(m), cx);
+                        });
+                    }
                     if removed_by_other && mentions_me {
                         let message_ts = deleted_message_timestamp(m);
                         let deleted_channel = ChannelId(m.channel_id);
@@ -545,30 +558,31 @@ impl BadgeService {
                 cl.ensure_thread_with_parent(channel_id, parent_id, clan_id, label, cx);
             });
         }
-        let (message_id_raw, content_time) =
-            mezon_client::transport::parse_notification_content(&notif.content);
-        tracing::debug!(
-            message_id = message_id_raw,
-            content_time,
-            content_len = notif.content.len(),
-            content_first_byte = notif.content.first().copied(),
-            "badge: parsed notification content"
-        );
-        let message_id = MessageId(message_id_raw);
-        if message_id.is_zero() {
+        let (message_id_raw, content_time, content_topic_id) =
+            notification_ids_from_content(&notif.content);
+        let Some(message_id_raw) = (message_id_raw != 0).then_some(message_id_raw) else {
             tracing::debug!(
                 content_len = notif.content.len(),
                 "badge: skip notification, no message_id in content"
             );
             return;
-        }
+        };
+        let message_id = MessageId(message_id_raw);
         let msg_time = if content_time > 0 {
             content_time
         } else {
             i64::from(notif.create_time_seconds)
         };
-        let badge_channel = if notif.topic_id != 0 {
+        tracing::debug!(
+            message_id = message_id.get(),
+            msg_time,
+            content_len = notif.content.len(),
+            "badge: parsed notification content"
+        );
+        let badge_channel = if notif.topic_id > 0 {
             ChannelId(notif.topic_id)
+        } else if content_topic_id > 0 {
+            ChannelId(content_topic_id)
         } else {
             channel_id
         };
@@ -612,7 +626,7 @@ impl BadgeService {
         ClanList::global(cx).update(cx, |cls, cx| {
             cls.increment_clan_badge(clan_id, cx);
         });
-        if notif.topic_id != 0 {
+        if badge_channel != channel_id {
             ChannelList::global(cx).update(cx, |cl, cx| {
                 cl.increment_channel_for_topic(clan_id, channel_id, badge_channel, cx);
             });

@@ -99,6 +99,28 @@ impl McpBackend {
             }
             "get_current_context" => self.get_current_context().await,
             "get_scroll_state" => self.get_scroll_state().await,
+            "tour_state" => {
+                self.send_ui_result(|reply| McpCommand::TourState { reply })
+                    .await
+            }
+            "tour_start" => {
+                self.require_write_mode("tour_start")?;
+                let track = arguments
+                    .get("track")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                self.send_ui_result(|reply| McpCommand::TourStart { track, reply })
+                    .await
+            }
+            "tour_advance" => {
+                self.require_write_mode("tour_advance")?;
+                let forward = arguments
+                    .get("forward")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                self.send_ui_result(|reply| McpCommand::TourAdvance { forward, reply })
+                    .await
+            }
             "scroll_wheel" => {
                 let delta_y = arguments
                     .get("delta_y")
@@ -411,10 +433,7 @@ impl McpBackend {
                 self.require_write_mode("set_channel_age_restricted")?;
                 let clan_id = parse_i64_field(&arguments, "clan_id")?;
                 let channel_id = parse_i64_field(&arguments, "channel_id")?;
-                let on = arguments
-                    .get("on")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true);
+                let on = arguments.get("on").and_then(Value::as_bool).unwrap_or(true);
                 self.send_ui_result(|reply| McpCommand::SetChannelAgeRestricted {
                     clan_id,
                     channel_id,
@@ -528,10 +547,7 @@ impl McpBackend {
             }
             "composer_pick" => {
                 self.require_write_mode("composer_pick")?;
-                let index = arguments
-                    .get("index")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0) as usize;
+                let index = arguments.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                 self.send_ui_result(|reply| McpCommand::ComposerPick { index, reply })
                     .await
             }
@@ -558,10 +574,7 @@ impl McpBackend {
             }
             "edit_pick" => {
                 self.require_write_mode("edit_pick")?;
-                let index = arguments
-                    .get("index")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0) as usize;
+                let index = arguments.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                 self.send_ui_result(|reply| McpCommand::EditPick { index, reply })
                     .await
             }
@@ -586,7 +599,9 @@ impl McpBackend {
                 let url = arguments
                     .get("url")
                     .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow::anyhow!("composer_panel_send requires string field url"))?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("composer_panel_send requires string field url")
+                    })?
                     .to_string();
                 let filename = arguments
                     .get("filename")

@@ -237,6 +237,17 @@ impl GifStickerEmojiPopup {
         self.apply_query(query, cx);
         cx.notify();
     }
+
+    pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    pub fn drop_search_preedit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.update(cx, |input, cx| {
+            input.drop_uncommitted_preedit(cx);
+        });
+        window.reset_ime();
+    }
 }
 
 impl Render for GifStickerEmojiPopup {

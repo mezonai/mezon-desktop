@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
 use mezon_client::transport::OutgoingMessageFlags;
 use mezon_client::{
     AppApi, AttachmentUploadOutcome, ConnectionStatus, RealtimeEvent, TopicDiscussion, UploadFile,
@@ -14,8 +14,8 @@ use crate::channel_permissions::ChannelPermissionsStore;
 use crate::message::MessageCode;
 use crate::message_time::{normalize_unix_seconds, unix_now_seconds};
 use crate::messages::{
-    MessagesStore, OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag,
-    OutgoingMention, ReplyDraft, viewer_user_id,
+    MessagesEvent, MessagesStore, OutgoingAttachment, OutgoingContent, OutgoingEmoji,
+    OutgoingHashtag, OutgoingMention, ReplyDraft, viewer_user_id,
 };
 use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
@@ -275,6 +275,36 @@ impl TopicsData {
 
 const MAX_TOPIC_FETCH_FAILURES: u32 = 3;
 
+const INBOX_TOPIC_JUMP_TIMEOUT: Duration = Duration::from_secs(20);
+
+struct PendingInboxTopicJump {
+    topic_id: i64,
+    origin_id: MessageId,
+    reply_id: MessageId,
+    channel_id: ChannelId,
+    request_id: u64,
+    requested_at: Instant,
+}
+
+impl PendingInboxTopicJump {
+    fn matches(
+        &self,
+        message_id: MessageId,
+        channel_id: ChannelId,
+        request_id: Option<u64>,
+        now: Instant,
+    ) -> bool {
+        self.origin_id == message_id
+            && self.channel_id == channel_id
+            && Some(self.request_id) == request_id
+            && now.duration_since(self.requested_at) <= INBOX_TOPIC_JUMP_TIMEOUT
+    }
+
+    fn is_expired(&self, now: Instant) -> bool {
+        now.duration_since(self.requested_at) > INBOX_TOPIC_JUMP_TIMEOUT
+    }
+}
+
 pub struct TopicsStore {
     data: TopicsData,
     clan_id: Option<String>,
@@ -290,9 +320,11 @@ pub struct TopicsStore {
     compose: TopicCompose,
     compose_generation: u64,
     creating_topic_for: Option<MessageId>,
+    pending_inbox_jump: Option<PendingInboxTopicJump>,
     api: Arc<AppApi>,
     updated_notify_task: Option<Task<()>>,
     _conn_watch: Task<()>,
+    _messages_sub: Option<Subscription>,
 }
 
 struct GlobalTopicsStore(Entity<TopicsStore>);
@@ -310,6 +342,11 @@ impl TopicsStore {
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
         Self::register_realtime(cx);
+        let messages_sub = MessagesStore::try_global(cx).map(|store| {
+            cx.subscribe(&store, |this, _, event, cx| {
+                this.on_messages_event(event, cx);
+            })
+        });
         Self {
             data: TopicsData::default(),
             clan_id: None,
@@ -325,9 +362,11 @@ impl TopicsStore {
             compose: TopicCompose::default(),
             compose_generation: 0,
             creating_topic_for: None,
+            pending_inbox_jump: None,
             api,
             updated_notify_task: None,
             _conn_watch: conn_watch,
+            _messages_sub: messages_sub,
         }
     }
 
@@ -396,6 +435,7 @@ impl TopicsStore {
         self.updated_notify_task = None;
         self.compose_generation = self.compose_generation.wrapping_add(1);
         self.creating_topic_for = None;
+        self.pending_inbox_jump = None;
         self.close_panel(cx);
         cx.emit(TopicsEvent::Updated);
         cx.notify();
@@ -647,6 +687,123 @@ impl TopicsStore {
         self.upsert_topic_meta(tp_id, ev.rpl, lsnt, cx);
     }
 
+    fn on_messages_event(&mut self, event: &MessagesEvent, cx: &mut Context<Self>) {
+        let MessagesEvent::JumpTo {
+            message_id,
+            request_id,
+        } = event
+        else {
+            return;
+        };
+        let now = Instant::now();
+        let Some(pending) = self.pending_inbox_jump.as_ref() else {
+            return;
+        };
+        if pending.is_expired(now) {
+            self.pending_inbox_jump = None;
+            return;
+        }
+        let Some(active_channel_id) =
+            MessagesStore::try_global(cx).and_then(|store| store.read(cx).active_channel_id())
+        else {
+            return;
+        };
+        if !pending.matches(*message_id, active_channel_id, *request_id, now) {
+            return;
+        }
+        let Some(pending) = self.pending_inbox_jump.take() else {
+            return;
+        };
+        self.open_existing_topic(
+            pending.origin_id,
+            pending.topic_id,
+            pending.reply_id,
+            pending.channel_id,
+            cx,
+        );
+    }
+
+    pub fn begin_inbox_topic_jump(
+        &mut self,
+        channel_id: ChannelId,
+        topic_id: i64,
+        reply_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        if topic_id <= 0 {
+            return;
+        }
+        if let Some(origin_id) = self.known_topic_origin(topic_id) {
+            self.begin_inbox_topic_jump_to_origin(channel_id, topic_id, origin_id, reply_id, cx);
+            return;
+        }
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let detail = match api.get_topic_detail(&topic_id.to_string()).await {
+                Ok(topic) => topic,
+                Err(e) => {
+                    tracing::error!("get_topic_detail failed for inbox jump: {e}");
+                    let _ = this.update(cx, |_this, cx| {
+                        MessagesStore::global(cx).update(cx, |store, cx| {
+                            store.request_jump(channel_id, reply_id, cx);
+                        });
+                    });
+                    return;
+                }
+            };
+            let Some(origin_id) = detail.message_id.parse::<i64>().ok().filter(|id| *id > 0) else {
+                let _ = this.update(cx, |_this, cx| {
+                    MessagesStore::global(cx).update(cx, |store, cx| {
+                        store.request_jump(channel_id, reply_id, cx);
+                    });
+                });
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.begin_inbox_topic_jump_to_origin(
+                    channel_id,
+                    topic_id,
+                    MessageId(origin_id),
+                    reply_id,
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
+    pub fn begin_inbox_topic_jump_to_origin(
+        &mut self,
+        channel_id: ChannelId,
+        topic_id: i64,
+        origin_id: MessageId,
+        reply_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        if topic_id <= 0 || origin_id.get() <= 0 {
+            return;
+        }
+        let request_id = MessagesStore::global(cx).update(cx, |store, cx| {
+            store.request_inbox_origin_jump(channel_id, origin_id, cx)
+        });
+        self.pending_inbox_jump = Some(PendingInboxTopicJump {
+            topic_id,
+            origin_id,
+            reply_id,
+            channel_id,
+            request_id,
+            requested_at: Instant::now(),
+        });
+    }
+
+    fn known_topic_origin(&self, topic_id: i64) -> Option<MessageId> {
+        self.data
+            .topic_by_id(&topic_id.to_string())
+            .and_then(|topic| topic.message_id.parse::<i64>().ok())
+            .filter(|origin_id| *origin_id > 0)
+            .map(MessageId)
+    }
+
     pub fn start_create_for_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
         let Some(origin) = MessagesStore::global(cx)
             .read(cx)
@@ -658,10 +815,44 @@ impl TopicsStore {
         self.start_create(origin, cx);
     }
 
+    pub fn open_existing_topic(
+        &mut self,
+        origin_id: MessageId,
+        topic_id: i64,
+        reply_id: MessageId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        let origin = {
+            let store = MessagesStore::global(cx).read(cx);
+            store
+                .viewport_message_by_id(origin_id)
+                .cloned()
+                .or_else(|| store.message_in_channel(channel_id, origin_id).cloned())
+        };
+        let Some(mut origin) = origin else {
+            return;
+        };
+        origin.topic_id = Some(ChannelId(topic_id));
+        let jump_reply = (reply_id != origin_id).then_some(reply_id);
+        self.open_topic_panel(origin, Some(topic_id), jump_reply, cx);
+    }
+
     /// Open the discussion panel for `origin` (mezon-react `handleCreateTopic`).
     /// Reuses `origin.topic_id` when already set (topic button or card footer);
     /// otherwise the topic is created on first reply.
     pub fn start_create(&mut self, origin: Message, cx: &mut Context<Self>) {
+        let topic_id = origin.topic_id.map(|t| t.get()).filter(|id| *id != 0);
+        self.open_topic_panel(origin, topic_id, None, cx);
+    }
+
+    fn open_topic_panel(
+        &mut self,
+        origin: Message,
+        topic_id: Option<i64>,
+        jump_reply: Option<MessageId>,
+        cx: &mut Context<Self>,
+    ) {
         let messages = MessagesStore::global(cx);
         let (parent_channel_id, clan_id, mode, is_public) = {
             let store = messages.read(cx);
@@ -676,8 +867,6 @@ impl TopicsStore {
             return;
         };
 
-        let existing_topic_id = origin.topic_id.map(|t| t.get()).filter(|id| *id != 0);
-
         self.compose_generation = self.compose_generation.wrapping_add(1);
         self.init_topic_message_id = Some(origin.id);
         self.compose = TopicCompose {
@@ -687,7 +876,7 @@ impl TopicsStore {
             clan_id: Some(clan_id),
             mode,
             is_public,
-            active_topic_id: existing_topic_id,
+            active_topic_id: topic_id,
             submitting: false,
             creating: false,
             error: None,
@@ -695,15 +884,17 @@ impl TopicsStore {
         self.panel_open = true;
 
         messages.update(cx, |store, cx| {
-            store.set_active_topic(existing_topic_id, cx);
+            store.set_active_topic(topic_id, cx);
+            if let Some(reply_id) = jump_reply {
+                store.queue_topic_jump(reply_id, cx);
+            }
         });
-        if let Some(topic_id) = existing_topic_id {
+        cx.emit(TopicsEvent::Opened);
+        if let Some(topic_id) = topic_id {
             messages.update(cx, |store, cx| {
                 store.fetch_topic_messages(clan_id, parent_channel_id, topic_id, cx);
             });
         }
-
-        cx.emit(TopicsEvent::Opened);
         cx.notify();
     }
 
@@ -1477,6 +1668,36 @@ fn sd_topic_from_event(ev: &realtime::SdTopicEvent) -> api::SdTopic {
 mod tests {
     use super::*;
     use crate::message::MessageCode;
+
+    fn pending_jump(requested_at: Instant) -> PendingInboxTopicJump {
+        PendingInboxTopicJump {
+            topic_id: 99,
+            origin_id: MessageId(7),
+            reply_id: MessageId(8),
+            channel_id: ChannelId(3),
+            request_id: 42,
+            requested_at,
+        }
+    }
+
+    #[test]
+    fn a_pending_inbox_jump_only_opens_its_own_origin() {
+        let now = Instant::now();
+        let pending = pending_jump(now);
+        assert!(pending.matches(MessageId(7), ChannelId(3), Some(42), now));
+        assert!(!pending.matches(MessageId(8), ChannelId(3), Some(42), now));
+        assert!(!pending.matches(MessageId(7), ChannelId(3), Some(99), now));
+        assert!(!pending.matches(MessageId(7), ChannelId(3), None, now));
+    }
+
+    #[test]
+    fn a_stale_pending_inbox_jump_is_dropped_instead_of_hijacking_a_later_jump() {
+        let requested_at = Instant::now();
+        let pending = pending_jump(requested_at);
+        let later = requested_at + INBOX_TOPIC_JUMP_TIMEOUT + Duration::from_secs(1);
+        assert!(pending.is_expired(later));
+        assert!(!pending.matches(MessageId(7), ChannelId(3), Some(42), later));
+    }
 
     fn sample_message(code: MessageCode) -> Message {
         Message::new(MessageId(1), "hello", "1", "user", 0).with_code(code)

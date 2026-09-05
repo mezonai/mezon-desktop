@@ -1,6 +1,25 @@
 use std::cmp::Ordering;
 
+use mezon_store::CtrlKSearchType;
+
 use super::items::{PaletteItem, PaletteItemKind, normalize_search_string};
+
+pub fn parse_ctrlk_query(raw_query: &str) -> (String, CtrlKSearchType) {
+    let trimmed = raw_query.trim();
+    if trimmed.starts_with('@') {
+        (
+            trimmed.get(1..).unwrap_or_default().trim().to_string(),
+            CtrlKSearchType::Users,
+        )
+    } else if trimmed.starts_with('#') {
+        (
+            trimmed.get(1..).unwrap_or_default().trim().to_string(),
+            CtrlKSearchType::Channels,
+        )
+    } else {
+        (trimmed.to_string(), CtrlKSearchType::Both)
+    }
+}
 
 pub fn filter_and_sort_indices(items: &[PaletteItem], raw_query: &str) -> Vec<usize> {
     if items.is_empty() {
@@ -44,6 +63,17 @@ pub fn filter_and_sort_indices(items: &[PaletteItem], raw_query: &str) -> Vec<us
         indices.retain(|&index| items[index].kind == PaletteItemKind::Channel);
     }
 
+    sort_indices(items, &mut indices, raw_query);
+    indices
+}
+
+pub fn sort_palette_indices(items: &[PaletteItem], raw_query: &str) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..items.len()).collect();
+    if raw_query.starts_with('@') {
+        indices.retain(|&index| items[index].kind == PaletteItemKind::Member);
+    } else if raw_query.starts_with('#') {
+        indices.retain(|&index| items[index].kind == PaletteItemKind::Channel);
+    }
     sort_indices(items, &mut indices, raw_query);
     indices
 }
@@ -175,6 +205,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_ctrlk_query_maps_prefixes() {
+        assert_eq!(
+            parse_ctrlk_query("@alice"),
+            ("alice".to_string(), CtrlKSearchType::Users)
+        );
+        assert_eq!(
+            parse_ctrlk_query("#general"),
+            ("general".to_string(), CtrlKSearchType::Channels)
+        );
+        assert_eq!(
+            parse_ctrlk_query("hello"),
+            ("hello".to_string(), CtrlKSearchType::Both)
+        );
+        assert_eq!(
+            parse_ctrlk_query("@"),
+            (String::new(), CtrlKSearchType::Users)
+        );
+    }
+
+    #[test]
     fn empty_query_returns_all_sorted_by_timestamp() {
         let items = vec![
             item(PaletteItemKind::Channel, "general", "general", "", "", 10),
@@ -263,6 +313,42 @@ mod tests {
         ];
         let indices = filter_and_sort_indices(&items, "dev");
         assert_eq!(indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn sort_palette_indices_at_prefix_keeps_members_only() {
+        let items = vec![
+            item(PaletteItemKind::Channel, "alice-ch", "alice-ch", "", "", 0),
+            item(
+                PaletteItemKind::Member,
+                "Alice",
+                "alice",
+                "Alice Display",
+                "alice",
+                0,
+            ),
+        ];
+        let indices = sort_palette_indices(&items, "@ali");
+        assert_eq!(indices, vec![1]);
+    }
+
+    #[test]
+    fn sort_palette_indices_keeps_all_items() {
+        let items = vec![
+            item(PaletteItemKind::Channel, "dev", "dev", "", "", 0),
+            item(
+                PaletteItemKind::Member,
+                "Alice",
+                "alice",
+                "Alice Display",
+                "alice",
+                0,
+            ),
+        ];
+        let indices = sort_palette_indices(&items, "ali");
+        assert_eq!(indices.len(), 2);
+        assert!(indices.contains(&0));
+        assert!(indices.contains(&1));
     }
 
     #[test]

@@ -72,7 +72,7 @@ pub fn api_error(locale: &str, code: u32) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::t;
+    use super::{data, t};
 
     const LOCALES: &[&str] = &[
         "en", "vi", "ru", "ukr", "es", "tt", "de", "it", "pt", "jpn", "pl", "kr", "swe", "blr",
@@ -157,6 +157,33 @@ mod tests {
     #[test]
     fn archived_threads_section_label() {
         assert_eq!(t("en", "channelTopbar.archivedThreads"), "Archived Threads");
+    }
+
+    #[test]
+    fn close_dm_confirm_resolves_in_every_locale() {
+        for locale in LOCALES {
+            for key in [
+                "dmMessage.closeDmConfirm.title",
+                "dmMessage.closeDmConfirm.content",
+                "dmMessage.closeDmConfirm.confirmText",
+                "dmMessage.closeDmConfirm.error",
+            ] {
+                // Ask the bundle, not `t`: `t` answers in English for any locale that is
+                // missing the key, so it can never report one as absent.
+                assert!(
+                    data(locale).contains_key(key),
+                    "locale {locale} is missing {key}"
+                );
+            }
+        }
+        assert_eq!(
+            t("en", "dmMessage.closeDmConfirm.title"),
+            "Close Direct Message"
+        );
+        assert_eq!(
+            t("vi", "dmMessage.closeDmConfirm.title"),
+            "Đóng cuộc trò chuyện"
+        );
     }
 
     #[test]

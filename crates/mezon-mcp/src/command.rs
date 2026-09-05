@@ -89,6 +89,17 @@ pub enum McpCommand {
     GetScrollState {
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
+    TourState {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    TourStart {
+        track: Option<String>,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    TourAdvance {
+        forward: bool,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
     SetPanel {
         kind: Option<String>,
         reply: oneshot::Sender<anyhow::Result<Value>>,
