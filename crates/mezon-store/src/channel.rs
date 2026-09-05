@@ -436,6 +436,12 @@ pub enum ChannelEvent {
     ArchivedByAdministrator { is_thread: bool },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CtrlKFocusChannel {
+    pub channel_id: ChannelId,
+    pub parent_id: Option<ChannelId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateCategoryError {
     InvalidName,
@@ -602,6 +608,7 @@ pub struct ChannelList {
     deleted_channel_parents: HashMap<ChannelId, ChannelId>,
     channel_detail_pending: HashSet<ChannelId>,
     channel_detail_failed: HashSet<ChannelId>,
+    ctrlk_focus: Option<CtrlKFocusChannel>,
     channel_details_for_settings: HashSet<ChannelId>,
     detached_channel_details: HashMap<(ClanId, ChannelId), Channel>,
     _previous_channels_persist: Task<()>,
@@ -778,6 +785,7 @@ impl ChannelList {
         self.deleted_channel_parents.clear();
         self.channel_detail_pending.clear();
         self.channel_detail_failed.clear();
+        self.ctrlk_focus = None;
         self.channel_details_for_settings.clear();
         self.detached_channel_details.clear();
         self.active_clan_id = None;
@@ -880,6 +888,7 @@ impl ChannelList {
             deleted_channel_parents: HashMap::new(),
             channel_detail_pending: HashSet::new(),
             channel_detail_failed: HashSet::new(),
+            ctrlk_focus: None,
             channel_details_for_settings: HashSet::new(),
             detached_channel_details: HashMap::new(),
             _previous_channels_persist: Task::ready(()),
@@ -3871,6 +3880,27 @@ impl ChannelList {
         }
         cx.emit(ChannelEvent::ActiveChannelChanged(self.active_channel_id));
         cx.notify();
+    }
+
+    pub fn set_ctrlk_focus_channel(
+        &mut self,
+        channel_id: ChannelId,
+        parent_id: Option<ChannelId>,
+        cx: &mut Context<Self>,
+    ) {
+        self.ctrlk_focus = Some(CtrlKFocusChannel {
+            channel_id,
+            parent_id,
+        });
+        cx.notify();
+    }
+
+    pub fn ctrlk_focus_channel(&self) -> Option<&CtrlKFocusChannel> {
+        self.ctrlk_focus.as_ref()
+    }
+
+    pub fn clear_ctrlk_focus_channel(&mut self) -> Option<CtrlKFocusChannel> {
+        self.ctrlk_focus.take()
     }
 
     pub fn channel(&self, clan_id: ClanId, channel_id: ChannelId) -> Option<&Channel> {

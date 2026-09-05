@@ -2124,11 +2124,11 @@ impl VoiceStore {
         cx.spawn(async move |this, cx| {
             let result = match action {
                 ModerationAction::Mute => {
-                    api.mute_participant_mezon_meet(&channel_id, &clan_id, &room_name, &identity)
+                    api.mute_participant_mezon_meet(&channel_id, &clan_id, &identity, &room_name)
                         .await
                 }
                 ModerationAction::Kick => {
-                    api.remove_participant_mezon_meet(&channel_id, &clan_id, &room_name, &identity)
+                    api.remove_participant_mezon_meet(&channel_id, &clan_id, &identity, &room_name)
                         .await
                 }
             };

@@ -503,6 +503,14 @@ impl AppApi {
             .await
     }
 
+    pub async fn search_ctrl_k(
+        &self,
+        text: &str,
+        search_type: i32,
+    ) -> Result<mezon_proto::api::SearchCtrlKResponse> {
+        self.transport.search_ctrl_k(text, search_type).await
+    }
+
     pub async fn check_duplicate_thread_name(
         &self,
         name: &str,
@@ -3011,11 +3019,11 @@ impl AppApi {
         &self,
         channel_id: &str,
         clan_id: &str,
-        room_name: &str,
         username: &str,
+        room_name: &str,
     ) -> Result<()> {
         self.transport
-            .remove_participant_mezon_meet(channel_id, clan_id, room_name, username)
+            .remove_participant_mezon_meet(channel_id, clan_id, username, room_name)
             .await
     }
 
@@ -3023,11 +3031,11 @@ impl AppApi {
         &self,
         channel_id: &str,
         clan_id: &str,
-        room_name: &str,
         username: &str,
+        room_name: &str,
     ) -> Result<()> {
         self.transport
-            .mute_participant_mezon_meet(channel_id, clan_id, room_name, username)
+            .mute_participant_mezon_meet(channel_id, clan_id, username, room_name)
             .await
     }
 

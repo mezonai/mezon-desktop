@@ -954,6 +954,7 @@ fn open_main_window(
     mezon_store::MessagesStore::init(api.clone(), cx);
     mezon_store::ThreadsStore::init(api.clone(), cx);
     mezon_store::MessageSearchStore::init(api.clone(), cx);
+    mezon_store::CtrlKSearchStore::init(api.clone(), cx);
     mezon_store::AuditLogStore::init(api.clone(), cx);
     mezon_store::InboxStore::init(api.clone(), cx);
     mezon_store::TopicsStore::init(api.clone(), cx);
