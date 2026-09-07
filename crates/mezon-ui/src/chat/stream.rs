@@ -47,9 +47,13 @@ pub fn render_stream_channel(
     let clan_id = channel.clan_id;
     let channel_label = channel.name.clone();
     let clan_name = channel.clan_name.clone();
-    let error_message = store.error_message().map(str::to_owned);
-    let output_device = output_device_id.clone();
     let session_here = store.is_session_channel(channel_id);
+    let error_message = if session_here {
+        store.error_message().map(str::to_owned)
+    } else {
+        None
+    };
+    let output_device = output_device_id.clone();
     let joined = session_here && (store.is_joined() || store.is_joining());
     let shell_bg = stream_channel_bg(theme, joined);
 

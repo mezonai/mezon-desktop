@@ -22,17 +22,34 @@ const STREAM_MEMBER_STATE_ACTIVE: i32 = 1;
 const STREAM_FETCH_LIMIT: i32 = 100;
 const JOIN_TIMEOUT: Duration = Duration::from_secs(30);
 const CONTROLS_HIDE_DELAY: Duration = Duration::from_secs(3);
+const JWT_SKEW_SECS: u64 = 60;
 
 fn stream_uses_jwt(session: &mezon_client::Session) -> bool {
     session.session_id.is_empty()
 }
 
-fn stream_jwt_expired(session: &mezon_client::Session) -> bool {
+fn stream_jwt_needs_refresh(session: &mezon_client::Session) -> bool {
     if !stream_uses_jwt(session) {
         return false;
     }
+    if session.token.is_empty() {
+        return true;
+    }
+    if session.expires_at == 0 {
+        return false;
+    }
     let now = mezon_client::server_now_secs();
-    session.token.is_empty() || session.expires_at == 0 || now >= session.expires_at
+    now + JWT_SKEW_SECS >= session.expires_at
+}
+
+fn jwt_token_usable(token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    match mezon_client::jwt_expires_at(token) {
+        None | Some(0) => true,
+        Some(expires_at) => mezon_client::server_now_secs() + JWT_SKEW_SECS < expires_at,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,7 +71,10 @@ pub enum StreamPhase {
         clan_id: ClanId,
         is_live: bool,
     },
-    Error(String),
+    Error {
+        channel_id: ChannelId,
+        message: String,
+    },
 }
 
 pub struct StreamStore {
@@ -176,10 +196,10 @@ impl StreamStore {
 
     pub fn session_channel_id(&self) -> Option<ChannelId> {
         match &self.phase {
-            StreamPhase::Joining { channel_id, .. } | StreamPhase::Joined { channel_id, .. } => {
-                Some(*channel_id)
-            }
-            _ => None,
+            StreamPhase::Joining { channel_id, .. }
+            | StreamPhase::Joined { channel_id, .. }
+            | StreamPhase::Error { channel_id, .. } => Some(*channel_id),
+            StreamPhase::Idle => None,
         }
     }
 
@@ -274,7 +294,7 @@ impl StreamStore {
         }
         self.last_viewed_stream_channel = viewed;
         if self.error_message.take().is_some() {
-            if matches!(self.phase, StreamPhase::Error(_)) {
+            if matches!(self.phase, StreamPhase::Error { .. }) {
                 self.phase = StreamPhase::Idle;
             }
             cx.notify();
@@ -509,19 +529,17 @@ impl StreamStore {
         output_device_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        self.disconnect_session();
+
         let AuthState::Authenticated(session) = auth else {
-            self.phase = StreamPhase::Error("Not authenticated".into());
-            self.error_message = Some("Not authenticated".into());
-            cx.notify();
+            self.set_stream_error(channel_id, "Not authenticated", cx);
             return;
         };
         if config.stream_ws_url.is_empty() {
-            self.phase = StreamPhase::Error("Stream server not configured".into());
-            self.error_message = Some("Stream server not configured".into());
-            cx.notify();
+            self.set_stream_error(channel_id, "Stream server not configured", cx);
             return;
         }
-        self.disconnect_session();
+
         self.session_channel_label = channel_label.to_string();
         self.session_clan_name = clan_name.to_string();
         self.phase = StreamPhase::Joining {
@@ -532,119 +550,126 @@ impl StreamStore {
         self.error_message = None;
         self.remote_video = false;
         self.playback_blocked = false;
-        let session_user_id = session.user_id.parse::<i64>().ok().map(UserId);
-        self.session_user_id = session_user_id;
+        self.session_user_id = session.user_id.parse::<i64>().ok().map(UserId);
         cx.notify();
 
-        let api = self.api.clone();
         let ws_base_url = config.stream_ws_url.clone();
-        let mut session = session.clone();
-        let volume = self.volume;
-        let muted = self.muted;
         let frame_store = self.frame_store.clone();
+        let username = session.username.clone();
+        let user_id = session.user_id.clone();
+        let cred_kind = if stream_uses_jwt(session) {
+            "jwt"
+        } else {
+            "sid"
+        };
 
-        self._session_task = Some(cx.spawn(async move |this, cx| {
-            let cred_kind = if session.session_id.is_empty() {
-                "jwt"
+        if !stream_jwt_needs_refresh(session) {
+            let token = if stream_uses_jwt(session) {
+                session.token.clone()
             } else {
-                "sid"
+                session.ws_credential().to_string()
             };
-            let mut refreshed = false;
-            if stream_jwt_expired(&session) {
-                tracing::info!(
-                    channel_id = channel_id.get(),
-                    jwt_valid_for = session
-                        .expires_at
-                        .saturating_sub(mezon_client::server_now_secs()),
-                    "stream join refreshing expired jwt credential"
-                );
-                match api.renew_fallback_token().await {
-                    Ok(renewed) => {
-                        if let Some(applied) =
-                            apply_stream_session_refresh(&renewed, &session.user_id, cx)
-                        {
-                            session = applied;
-                        } else {
-                            session.apply_refresh(
-                                &renewed.token,
-                                &renewed.refresh_token,
-                                "",
-                                &renewed.id_token,
-                            );
-                        }
-                        refreshed = true;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            channel_id = channel_id.get(),
-                            error = %e,
-                            "stream join jwt refresh failed"
-                        );
-                    }
-                }
-            }
-
-            if stream_jwt_expired(&session) {
-                let _ = this.update(cx, |this, cx| {
-                    if !matches!(
-                        this.phase,
-                        StreamPhase::Joining {
-                            channel_id: joining_channel,
-                            ..
-                        } if joining_channel == channel_id
-                    ) {
-                        return;
-                    }
-                    this.phase = StreamPhase::Error("Stream connection failed".into());
-                    this.error_message = Some("Stream connection failed".into());
-                    this.join_started = None;
-                    cx.notify();
-                });
-                return;
-            }
-
-            let token = session.ws_credential().to_string();
             tracing::info!(
                 channel_id = channel_id.get(),
                 clan_id = clan_id.get(),
                 cred_kind,
-                refreshed,
+                refreshed = false,
                 jwt_valid_for = session
                     .expires_at
                     .saturating_sub(mezon_client::server_now_secs()),
                 "stream store join requested"
             );
+            let events = self.create_stream_session(
+                clan_id,
+                channel_id,
+                ws_base_url,
+                username,
+                token,
+                user_id,
+                frame_store,
+                output_device_id,
+                cx,
+            );
+            self.spawn_stream_event_loop(clan_id, channel_id, events, cx);
+            return;
+        }
+
+        tracing::info!(
+            channel_id = channel_id.get(),
+            jwt_valid_for = session
+                .expires_at
+                .saturating_sub(mezon_client::server_now_secs()),
+            "stream join refreshing expired jwt credential"
+        );
+
+        let api = self.api.clone();
+        self._session_task = Some(cx.spawn(async move |this, cx| {
+            let (tx, rx) = flume::bounded(1);
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = tx.send_async(api.renew_fallback_token().await).await;
+                })
+                .detach();
+
+            let renew_result = match rx.recv_async().await {
+                Ok(result) => result,
+                Err(_) => return,
+            };
+
+            let token = match renew_result {
+                Ok(renewed) => {
+                    if !jwt_token_usable(&renewed.token) {
+                        tracing::warn!(
+                            channel_id = channel_id.get(),
+                            "stream join jwt refresh returned an unusable token"
+                        );
+                        let _ = this.update(cx, |this, cx| {
+                            if this.is_joining_channel(channel_id) {
+                                this.fail_stream("Stream credential refresh failed".into(), cx);
+                            }
+                        });
+                        return;
+                    }
+                    renewed.token
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        channel_id = channel_id.get(),
+                        error = %e,
+                        "stream join jwt refresh failed"
+                    );
+                    let _ = this.update(cx, |this, cx| {
+                        if this.is_joining_channel(channel_id) {
+                            this.fail_stream("Stream credential refresh failed".into(), cx);
+                        }
+                    });
+                    return;
+                }
+            };
+
+            tracing::info!(
+                channel_id = channel_id.get(),
+                clan_id = clan_id.get(),
+                cred_kind,
+                refreshed = true,
+                "stream store join requested"
+            );
 
             let started = this.update(cx, |this, cx| {
-                if !matches!(
-                    this.phase,
-                    StreamPhase::Joining {
-                        channel_id: joining_channel,
-                        ..
-                    } if joining_channel == channel_id
-                ) {
+                if !this.is_joining_channel(channel_id) {
                     return None;
                 }
-                let session_config = StreamSessionConfig {
+                Some(this.create_stream_session(
+                    clan_id,
+                    channel_id,
                     ws_base_url,
-                    username: session.username.clone(),
+                    username,
                     token,
-                    clan_id: clan_id.to_string(),
-                    channel_id: channel_id.to_string(),
-                    user_id: session.user_id.clone(),
-                    stream_id: channel_id.to_string(),
-                };
-                let stream_session = StreamSession::start(
-                    session_config,
+                    user_id,
                     frame_store,
                     output_device_id,
-                    volume,
-                    muted,
-                );
-                let events = stream_session.events().clone();
-                this.session = Some(stream_session);
-                cx.notify();
-                Some(events)
+                    cx,
+                ))
             });
             let Ok(Some(events)) = started else {
                 return;
@@ -662,15 +687,93 @@ impl StreamStore {
                 }
             }
         }));
+    }
 
+    fn is_joining_channel(&self, channel_id: ChannelId) -> bool {
+        matches!(
+            self.phase,
+            StreamPhase::Joining {
+                channel_id: joining_channel,
+                ..
+            } if joining_channel == channel_id
+        )
+    }
+
+    fn set_stream_error(
+        &mut self,
+        channel_id: ChannelId,
+        message: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let message = message.into();
+        self.phase = StreamPhase::Error {
+            channel_id,
+            message: message.clone(),
+        };
+        self.error_message = Some(message);
+        cx.notify();
+    }
+
+    fn create_stream_session(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        ws_base_url: String,
+        username: String,
+        token: String,
+        user_id: String,
+        frame_store: Arc<VideoFrameStore>,
+        output_device_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> flume::Receiver<StreamEvent> {
+        let volume = self.volume;
+        let muted = self.muted;
+        let session_config = StreamSessionConfig {
+            ws_base_url,
+            username,
+            token,
+            clan_id: clan_id.to_string(),
+            channel_id: channel_id.to_string(),
+            user_id,
+            stream_id: channel_id.to_string(),
+        };
+        let stream_session =
+            StreamSession::start(session_config, frame_store, output_device_id, volume, muted);
+        let events = stream_session.events().clone();
+        self.session = Some(stream_session);
+        self.arm_join_timeout(channel_id, cx);
+        cx.notify();
+        events
+    }
+
+    fn spawn_stream_event_loop(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        events: flume::Receiver<StreamEvent>,
+        cx: &mut Context<Self>,
+    ) {
+        self._session_task = Some(cx.spawn(async move |this, cx| {
+            while let Ok(event) = events.recv_async().await {
+                let stop = this
+                    .update(cx, |this, cx| {
+                        this.handle_stream_event(clan_id, channel_id, event, cx);
+                        !this.is_joined() && !this.is_joining()
+                    })
+                    .unwrap_or(true);
+                if stop {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn arm_join_timeout(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
         self._join_timeout = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(JOIN_TIMEOUT).await;
             this.update(cx, |this, cx| {
-                if this.is_joining() {
-                    this.disconnect_session();
-                    this.phase = StreamPhase::Error("Join timed out".into());
-                    this.error_message = Some("Join timed out".into());
-                    cx.notify();
+                if this.is_joining_channel(channel_id) {
+                    this.fail_stream("Join timed out".into(), cx);
                 }
             })
             .ok();
@@ -714,9 +817,18 @@ impl StreamStore {
     }
 
     fn fail_stream(&mut self, message: String, cx: &mut Context<Self>) {
+        let channel_id = self.session_channel_id();
         self.disconnect_session();
-        self.phase = StreamPhase::Error(message.clone());
-        self.error_message = Some(message);
+        if let Some(channel_id) = channel_id {
+            self.phase = StreamPhase::Error {
+                channel_id,
+                message: message.clone(),
+            };
+            self.error_message = Some(message);
+        } else {
+            self.phase = StreamPhase::Idle;
+            self.error_message = Some(message);
+        }
         cx.notify();
     }
 
@@ -858,48 +970,6 @@ impl StreamStore {
     }
 }
 
-fn apply_stream_session_refresh(
-    renewed: &mezon_client::transport::RenewedTokens,
-    expected_user_id: &str,
-    cx: &mut gpui::AsyncApp,
-) -> Option<mezon_client::Session> {
-    let applied = cx.update(|cx| {
-        let Some(login) = crate::login::LoginStore::try_global(cx) else {
-            return None;
-        };
-        let auth_state = login.read(cx).auth_state();
-        auth_state.update(cx, |state, cx| {
-            let session = match state {
-                AuthState::Authenticated(session) | AuthState::Connecting(session) => session,
-                _ => return None,
-            };
-            if session.user_id != expected_user_id {
-                return None;
-            }
-            session.apply_refresh(
-                &renewed.token,
-                &renewed.refresh_token,
-                "",
-                &renewed.id_token,
-            );
-            cx.notify();
-            Some(session.clone())
-        })
-    });
-    let Some(session) = applied else {
-        return None;
-    };
-    let persisted = session.clone();
-    cx.background_executor()
-        .spawn(async move {
-            if let Err(e) = crate::login::LoginStore::persist_session(&persisted) {
-                tracing::warn!("Failed to persist stream-refreshed session: {e}");
-            }
-        })
-        .detach();
-    Some(session)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -994,27 +1064,41 @@ mod tests {
             expires_at: now.saturating_sub(1),
             ..Default::default()
         };
-        assert!(!stream_jwt_expired(&with_sid));
+        assert!(!stream_jwt_needs_refresh(&with_sid));
 
         let fresh_jwt = mezon_client::Session {
             token: "jwt".into(),
-            expires_at: now + 36,
+            expires_at: now + JWT_SKEW_SECS + 30,
             ..Default::default()
         };
-        assert!(!stream_jwt_expired(&fresh_jwt));
+        assert!(!stream_jwt_needs_refresh(&fresh_jwt));
+
+        let inside_skew = mezon_client::Session {
+            token: "jwt".into(),
+            expires_at: now + JWT_SKEW_SECS / 2,
+            ..Default::default()
+        };
+        assert!(stream_jwt_needs_refresh(&inside_skew));
 
         let expired = mezon_client::Session {
             token: "jwt".into(),
             expires_at: now.saturating_sub(5),
             ..Default::default()
         };
-        assert!(stream_jwt_expired(&expired));
+        assert!(stream_jwt_needs_refresh(&expired));
 
         let missing_exp = mezon_client::Session {
             token: "jwt".into(),
             expires_at: 0,
             ..Default::default()
         };
-        assert!(stream_jwt_expired(&missing_exp));
+        assert!(!stream_jwt_needs_refresh(&missing_exp));
+
+        let empty_token = mezon_client::Session {
+            token: String::new(),
+            expires_at: now + 120,
+            ..Default::default()
+        };
+        assert!(stream_jwt_needs_refresh(&empty_token));
     }
 }
