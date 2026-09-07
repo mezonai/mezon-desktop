@@ -16,6 +16,7 @@ ignore = [
     "RUSTSEC-2026-0192", # ttf-parser unmaintained (vendored font stack)
     "RUSTSEC-2026-0194", # quick-xml quadratic attribute check (usvg/resvg)
     "RUSTSEC-2026-0195", # quick-xml namespace-declaration alloc DoS (usvg/resvg)
+"RUSTSEC-2026-0274", # rtrb ReadChunk::commit double-free (libwebrtc -> livekit)
 ]
 
 [licenses]

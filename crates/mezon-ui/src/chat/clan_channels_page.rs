@@ -3,19 +3,27 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Context, Entity, FontWeight, ListAlignment, ListOffset, ListState, MouseButton,
-    Render, Subscription, Window, deferred, div, img, list, prelude::*, px, size,
+    AnyElement, App, Context, Entity, FontWeight, ListAlignment, ListOffset, ListState,
+    MouseButton, MouseDownEvent, Pixels, Point, Render, Subscription, WeakEntity, Window, deferred,
+    div, img, list, prelude::*, px, size,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelSetting, ChannelSettingsStore, ChannelType, ClanId,
-    ClanMembersStore, PERMISSION_ADMINISTRATOR, PermissionStore, Settings, UserId,
+    BadgeService, ChannelId, ChannelList, ChannelSetting, ChannelSettingsStore, ChannelType,
+    ClanId, ClanList, ClanMembersStore, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
+    PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PermissionStore, Settings, UserId,
+    archive_allowed_by_server, archive_menu_hidden, channel_access_allowed,
+    delete_allowed_by_server, manage_allowed_by_server,
 };
 use ui::Tooltip;
 
+use crate::app::shell::Shell;
 use crate::chat::clan_management_page::management_page;
 use crate::chat::message::format_channel_setting_relative_time_from_seconds;
 use crate::components::compositions::channel_row::channel_type_icon;
-use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, InputState};
+use crate::components::primitives::{
+    Avatar, ContextMenu, Icon, IconName, Input, InputEvent, InputState, PaginationButton,
+    context_menu_at, pagination_button, pagination_items,
+};
 use crate::theme::ActiveTheme;
 use crate::util::text_utils::normalize_diacritics;
 
@@ -47,6 +55,15 @@ pub struct ClanChannelsPage {
     rows_dirty: bool,
     visible_row_keys: Vec<VisibleRowKey>,
     list_state: ListState,
+    open_menu: Option<ChannelListMenuState>,
+    pending_edit_channel: Option<ChannelId>,
+}
+
+#[derive(Clone)]
+struct ChannelListMenuState {
+    row: ChannelSetting,
+    is_thread: bool,
+    position: Point<Pixels>,
 }
 
 #[derive(Clone)]
@@ -77,6 +94,27 @@ impl ClanChannelsPage {
             cx.notify();
         })
         .detach();
+        cx.observe(&ChannelList::global(cx), |this, _, cx| {
+            let Some(channel_id) = this.pending_edit_channel else {
+                return;
+            };
+            let channel_list = ChannelList::global(cx);
+            let channel_list = channel_list.read(cx);
+            if channel_list.channel(this.clan_id, channel_id).is_some() {
+                this.pending_edit_channel = None;
+                crate::router::navigate(
+                    cx,
+                    crate::router::Route::ChannelSettings {
+                        clan_id: this.clan_id,
+                        channel_id,
+                        tab: crate::chat::channel_settings::ChannelSettingsTab::Overview,
+                    },
+                );
+            } else if !channel_list.is_resolving_channel_detail(channel_id) {
+                this.pending_edit_channel = None;
+            }
+        })
+        .detach();
         cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
             if this.sort_field == Some(SortField::Creator) {
                 this.rows_dirty = true;
@@ -105,6 +143,8 @@ impl ClanChannelsPage {
             list_state: ListState::new(0, ListAlignment::Top, px(60.))
                 .smooth_line_scroll()
                 .suppress_hover_while_scrolling(),
+            open_menu: None,
+            pending_edit_channel: None,
         }
     }
 
@@ -112,12 +152,18 @@ impl ClanChannelsPage {
         if self.clan_id == clan_id {
             return;
         }
+        if !self.clan_id.is_zero() {
+            ChannelSettingsStore::global(cx)
+                .update(cx, |store, cx| store.reset_clan(self.clan_id, cx));
+        }
         self.clan_id = clan_id;
         self.reset_search(cx);
         self.expanded.clear();
         self.visible_row_keys.clear();
         self.rows_dirty = true;
         self.page_size_picker_open = false;
+        self.pending_edit_channel = None;
+        self.open_menu = None;
         ChannelSettingsStore::global(cx).update(cx, |store, cx| {
             store.ensure_loaded(clan_id, ChannelId(0), cx)
         });
@@ -134,17 +180,39 @@ impl ClanChannelsPage {
         self.page = 0;
         self.rows_dirty = true;
         self.page_size_picker_open = false;
+        self.open_menu = None;
         self.scroll_to_top();
         cx.notify();
     }
 
     pub fn deactivate(&mut self, cx: &mut Context<Self>) {
-        if self.clan_id.get() != 0 {
-            ChannelSettingsStore::global(cx)
-                .update(cx, |store, cx| store.reset_clan(self.clan_id, cx));
-            self.clan_id = ClanId(0);
-        }
+        self.expanded.clear();
+        self.visible_row_keys.clear();
+        self.pending_edit_channel = None;
         self.reset_search(cx);
+    }
+
+    fn open_channel_settings(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        let channel_list = ChannelList::global(cx);
+        if channel_list
+            .read(cx)
+            .channel(self.clan_id, channel_id)
+            .is_some()
+        {
+            crate::router::navigate(
+                cx,
+                crate::router::Route::ChannelSettings {
+                    clan_id: self.clan_id,
+                    channel_id,
+                    tab: crate::chat::channel_settings::ChannelSettingsTab::Overview,
+                },
+            );
+            return;
+        }
+        self.pending_edit_channel = Some(channel_id);
+        channel_list.update(cx, |channels, cx| {
+            channels.ensure_channel_for_settings(self.clan_id, channel_id, cx);
+        });
     }
 
     fn ensure_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -385,6 +453,8 @@ impl ClanChannelsPage {
     ) -> AnyElement {
         let expanded = self.expanded.contains(&row.id);
         let channel_id = row.id;
+        let menu_row = row.clone();
+        let page = cx.entity().downgrade();
         let channel_type = ChannelType::from_raw(row.channel_type.max(0) as u32);
         let can_expand = !is_thread && !matches!(channel_type, ChannelType::Voice);
         let relative = format_channel_setting_relative_time_from_seconds(
@@ -429,6 +499,19 @@ impl ClanChannelsPage {
                 element.border_b_1().border_color(cx.theme().border)
             })
             .hover(|style| style.bg(cx.theme().bg_hover))
+            .on_mouse_down(
+                MouseButton::Right,
+                move |event: &MouseDownEvent, _window, cx| {
+                    let _ = page.update(cx, |this, cx| {
+                        this.open_menu = Some(ChannelListMenuState {
+                            row: menu_row.clone(),
+                            is_thread,
+                            position: event.position,
+                        });
+                        cx.notify();
+                    });
+                },
+            )
             .child(
                 div()
                     .flex_basis(px(0.))
@@ -675,7 +758,14 @@ impl ClanChannelsPage {
         }
         let mut bar = div().flex().items_center().gap_2();
         bar = bar.child(
-            page_button("‹", self.page == 0, false, cx).on_click(cx.listener(|this, _, _, cx| {
+            pagination_button(
+                "clan-channels",
+                PaginationButton::Previous,
+                self.page == 0,
+                false,
+                cx.theme(),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
                 if this.page > 0 {
                     this.page -= 1;
                     this.scroll_to_top();
@@ -686,28 +776,38 @@ impl ClanChannelsPage {
         for page in pagination_items(self.page, pages) {
             if let Some(page) = page {
                 bar = bar.child(
-                    page_button(&(page + 1).to_string(), false, page == self.page, cx).on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.page = page;
-                            this.scroll_to_top();
-                            cx.notify();
-                        }),
-                    ),
+                    pagination_button(
+                        "clan-channels",
+                        PaginationButton::Page(page + 1),
+                        false,
+                        page == self.page,
+                        cx.theme(),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.page = page;
+                        this.scroll_to_top();
+                        cx.notify();
+                    })),
                 );
             } else {
                 bar = bar.child(div().px_2().child("…"));
             }
         }
         bar.child(
-            page_button("›", self.page + 1 >= pages, false, cx).on_click(cx.listener(
-                move |this, _, _, cx| {
-                    if this.page + 1 < pages {
-                        this.page += 1;
-                        this.scroll_to_top();
-                        cx.notify();
-                    }
-                },
-            )),
+            pagination_button(
+                "clan-channels",
+                PaginationButton::Next,
+                self.page + 1 >= pages,
+                false,
+                cx.theme(),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.page + 1 < pages {
+                    this.page += 1;
+                    this.scroll_to_top();
+                    cx.notify();
+                }
+            })),
         )
         .into_any_element()
     }
@@ -862,12 +962,193 @@ impl Render for ClanChannelsPage {
             )
             .child(footer)
             .into_any_element();
+        let page = cx.entity().downgrade();
+        let menu_overlay = self.open_menu.clone().map(|state| {
+            let position = state.position;
+            let menu = build_channel_list_menu(page, self.clan_id, state, locale.clone(), cx);
+            (position, menu)
+        });
         management_page(
             tr(&locale, "channelTopbar.pageTitle.channels"),
             body,
             cx.theme(),
         )
+        .when_some(menu_overlay, |page, (position, menu)| {
+            page.child(context_menu_at(position, menu))
+        })
     }
+}
+
+fn build_channel_list_menu(
+    page: WeakEntity<ClanChannelsPage>,
+    clan_id: ClanId,
+    state: ChannelListMenuState,
+    locale: String,
+    cx: &App,
+) -> ContextMenu {
+    let channel_id = state.row.id;
+    let channel_type = ChannelType::from_raw(state.row.channel_type.max(0) as u32);
+    let is_thread = state.is_thread;
+    let is_welcome = ClanList::global(cx).read(cx).welcome_channel_id(clan_id) == Some(channel_id);
+    let current_user_id =
+        BadgeService::try_global(cx).and_then(|badges| badges.read(cx).current_user_id(cx));
+    let is_creator = current_user_id == Some(state.row.creator_id);
+    let parent = if is_thread && !state.row.parent_id.is_zero() {
+        ChannelSettingsStore::try_global(cx).and_then(|store| {
+            store
+                .read(cx)
+                .row_by_id(clan_id, state.row.parent_id)
+                .cloned()
+        })
+    } else {
+        None
+    };
+    let can_access = channel_list_menu_access_allowed(&state.row, parent.as_ref(), current_user_id);
+    let permissions = PermissionStore::try_global(cx);
+    let has_permission = |permission| {
+        permissions
+            .as_ref()
+            .is_some_and(|permissions| permissions.read(cx).check(clan_id, None, permission, cx))
+    };
+    let has_owner = has_permission(PERMISSION_CLAN_OWNER);
+    let has_admin = has_permission(PERMISSION_ADMINISTRATOR);
+    let has_manage_clan = has_permission(PERMISSION_MANAGE_CLAN);
+    let has_manage_channel = has_permission(PERMISSION_MANAGE_CHANNEL);
+    let can_archive = can_access
+        && state.row.active != 0
+        && !archive_menu_hidden(channel_type, is_welcome)
+        && archive_allowed_by_server(
+            is_thread,
+            is_creator,
+            has_owner,
+            has_admin,
+            has_manage_clan,
+            has_manage_channel,
+        );
+    let can_edit = can_access
+        && manage_allowed_by_server(
+            is_creator,
+            has_owner,
+            has_admin,
+            has_manage_clan,
+            has_manage_channel,
+        );
+    let can_delete = can_access
+        && !is_welcome
+        && delete_allowed_by_server(
+            is_creator,
+            has_owner,
+            has_admin,
+            has_manage_clan,
+            has_manage_channel,
+        );
+    let dismiss = page.clone();
+    let mut menu = ContextMenu::new().on_dismiss(move |_window, cx| {
+        let _ = dismiss.update(cx, |this, cx| {
+            this.open_menu = None;
+            cx.notify();
+        });
+    });
+    if !has_channel_menu_actions(can_archive, can_edit, can_delete) {
+        return menu
+            .item(
+                tr(&locale, "common.permissionNotification.permissionDenied"),
+                |_window, _cx| {},
+            )
+            .disabled(true);
+    }
+    if can_archive {
+        let locale = locale.clone();
+        menu = menu.item(
+            tr(
+                &locale,
+                if is_thread {
+                    "channelMenu.menu.notification.archiveThread"
+                } else {
+                    "channelMenu.menu.notification.archiveChannel"
+                },
+            ),
+            move |window, cx| {
+                Shell::global(cx).update(cx, |shell, cx| {
+                    shell.confirm_archive_channel(
+                        clan_id, channel_id, is_thread, &locale, window, cx,
+                    )
+                });
+            },
+        );
+    }
+    if can_edit {
+        let label = tr(
+            &locale,
+            if is_thread {
+                "channelMenu.menu.manageThreadMenu.editThread"
+            } else {
+                "channelMenu.menu.organizationMenu.edit"
+            },
+        );
+        let edit_page = page.clone();
+        menu = menu.item(label, move |_window, cx| {
+            let _ = edit_page.update(cx, |this, cx| {
+                this.open_menu = None;
+                this.open_channel_settings(channel_id, cx);
+            });
+        });
+    }
+    if can_delete {
+        let locale_for_delete = locale.clone();
+        let label = tr(
+            &locale,
+            if is_thread {
+                "channelMenu.menu.manageThreadMenu.deleteThread"
+            } else {
+                "channelMenu.menu.organizationMenu.deleteChannel"
+            },
+        );
+        menu = menu.danger_item(label, move |window, cx| {
+            Shell::global(cx).update(cx, |shell, cx| {
+                if is_thread {
+                    shell.confirm_delete_thread(
+                        clan_id,
+                        channel_id,
+                        &locale_for_delete,
+                        window,
+                        cx,
+                    );
+                } else {
+                    shell.confirm_delete_channel(
+                        clan_id,
+                        channel_id,
+                        &locale_for_delete,
+                        window,
+                        cx,
+                    );
+                }
+            });
+        });
+    }
+    menu
+}
+
+fn channel_list_row_access_allowed(row: &ChannelSetting, current_user_id: Option<UserId>) -> bool {
+    channel_access_allowed(
+        row.private,
+        current_user_id == Some(row.creator_id),
+        current_user_id,
+        &row.user_ids,
+    )
+}
+
+fn channel_list_menu_access_allowed(
+    row: &ChannelSetting,
+    parent: Option<&ChannelSetting>,
+    current_user_id: Option<UserId>,
+) -> bool {
+    channel_list_row_access_allowed(row, current_user_id)
+        && parent.is_none_or(|parent| channel_list_row_access_allowed(parent, current_user_id))
+}
+
+fn has_channel_menu_actions(can_archive: bool, can_edit: bool, can_delete: bool) -> bool {
+    can_archive || can_edit || can_delete
 }
 
 fn tr(locale: &str, key: &'static str) -> String {
@@ -914,83 +1195,6 @@ fn changed_range<T: PartialEq>(old: &[T], new: &[T]) -> (Range<usize>, usize) {
     (prefix..old.len() - suffix, new.len() - prefix - suffix)
 }
 
-fn pagination_items(current: usize, pages: usize) -> Vec<Option<usize>> {
-    if pages <= 6 {
-        return (0..pages).map(Some).collect();
-    }
-    if current <= 2 {
-        let mut items = (0..5).map(Some).collect::<Vec<_>>();
-        items.push(None);
-        items.push(Some(pages - 1));
-        return items;
-    }
-    if current >= pages - 3 {
-        let mut items = vec![Some(0), None];
-        items.extend(((pages - 6)..pages).map(Some));
-        return items;
-    }
-    vec![
-        Some(0),
-        None,
-        Some(current - 1),
-        Some(current),
-        Some(current + 1),
-        None,
-        Some(pages - 1),
-    ]
-}
-
-fn page_button(
-    label: &str,
-    disabled: bool,
-    selected: bool,
-    cx: &Context<ClanChannelsPage>,
-) -> gpui::Stateful<gpui::Div> {
-    let is_arrow = label.parse::<usize>().is_err();
-    let is_left = label == "‹" || label == "previous";
-    div()
-        .id(format!("channel-page-{label}-{selected}-{disabled}"))
-        .w(px(40.))
-        .h(px(32.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(5.))
-        .border_1()
-        .border_color(if selected {
-            cx.theme().text_primary
-        } else {
-            cx.theme().border
-        })
-        .bg(if disabled {
-            cx.theme().brand
-        } else if selected {
-            cx.theme().tokens.bg_active_button
-        } else {
-            cx.theme().brand
-        })
-        .text_color(if is_arrow {
-            gpui::white()
-        } else {
-            gpui::Hsla::from(cx.theme().text_primary)
-        })
-        .when(disabled, |element| element.opacity(0.5))
-        .when(!disabled, |element| element.cursor_pointer())
-        .when(is_arrow, |element| {
-            element.child(
-                Icon::new(IconName::ArrowRight)
-                    .size(px(20.))
-                    .text_color(gpui::white())
-                    .when(is_left, |icon| {
-                        icon.with_transformation(gpui::Transformation::rotate(gpui::radians(
-                            std::f32::consts::PI,
-                        )))
-                    }),
-            )
-        })
-        .when(!is_arrow, |element| element.child(label.to_string()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1033,5 +1237,89 @@ mod tests {
     fn search_normalization_removes_diacritics() {
         assert_eq!(normalize_diacritics("Hiền"), "hien");
         assert_eq!(normalize_diacritics("Đà Nẵng"), "da nang");
+    }
+
+    #[test]
+    fn public_channels_are_accessible_without_membership() {
+        assert!(channel_access_allowed(false, false, Some(UserId(1)), &[]));
+    }
+
+    #[test]
+    fn private_channels_require_current_user_membership() {
+        let members = [UserId(2), UserId(3)];
+        assert!(channel_access_allowed(
+            true,
+            false,
+            Some(UserId(2)),
+            &members
+        ));
+        assert!(!channel_access_allowed(
+            true,
+            false,
+            Some(UserId(1)),
+            &members
+        ));
+        assert!(!channel_access_allowed(true, false, None, &members));
+    }
+
+    #[test]
+    fn private_channel_creator_is_accessible_before_membership_syncs() {
+        assert!(channel_access_allowed(true, true, Some(UserId(1)), &[]));
+    }
+
+    #[test]
+    fn public_thread_is_inaccessible_when_private_parent_is_inaccessible() {
+        let current_user_id = Some(UserId(1));
+        let thread = ChannelSetting {
+            id: ChannelId(11),
+            parent_id: ChannelId(10),
+            private: false,
+            ..Default::default()
+        };
+        let parent = ChannelSetting {
+            id: ChannelId(10),
+            creator_id: UserId(2),
+            private: true,
+            user_ids: vec![UserId(2)],
+            ..Default::default()
+        };
+
+        assert!(!channel_list_menu_access_allowed(
+            &thread,
+            Some(&parent),
+            current_user_id,
+        ));
+    }
+
+    #[test]
+    fn thread_requires_both_parent_and_own_access() {
+        let current_user_id = Some(UserId(1));
+        let parent = ChannelSetting {
+            id: ChannelId(10),
+            private: false,
+            ..Default::default()
+        };
+        let private_thread = ChannelSetting {
+            id: ChannelId(11),
+            parent_id: parent.id,
+            creator_id: UserId(2),
+            private: true,
+            user_ids: vec![UserId(2)],
+            ..Default::default()
+        };
+
+        assert!(!channel_list_menu_access_allowed(
+            &private_thread,
+            Some(&parent),
+            current_user_id,
+        ));
+    }
+
+    #[test]
+    fn detects_when_channel_context_menu_has_no_actions() {
+        assert!(!has_channel_menu_actions(false, false, false));
+        assert!(has_channel_menu_actions(true, false, false));
+        assert!(has_channel_menu_actions(false, true, false));
+        assert!(has_channel_menu_actions(false, false, true));
     }
 }

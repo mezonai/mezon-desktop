@@ -72,6 +72,7 @@ pub struct RowCtx<'a> {
     pub icon_cache: Entity<LruImageCache>,
     pub ogp_cache: Entity<LruImageCache>,
     pub social_cache: Entity<LruImageCache>,
+    pub sprite_cache: Entity<LruImageCache>,
     pub unread_boundary_id: Option<MessageId>,
     pub highlight_id: Option<MessageId>,
     pub reply_highlight_id: Option<MessageId>,
@@ -97,6 +98,9 @@ pub struct RowCtx<'a> {
     pub can_manage_thread: bool,
     /// `send-message` on the open channel, resolved once per render pass.
     pub can_send_message: bool,
+    /// The open conversation is a DM or group DM, where the clan permission
+    /// above never applies.
+    pub is_dm: bool,
     /// Message currently being edited inline, if any (shared across all rows).
     pub editing_id: Option<MessageId>,
     pub edit_input: Option<Entity<MentionInput>>,

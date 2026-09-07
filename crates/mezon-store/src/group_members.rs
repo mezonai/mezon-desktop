@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
-use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
+use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent, api_status_from_error};
 use mezon_proto::{api, realtime};
 
 use crate::KeyedCache;
@@ -13,6 +13,8 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 const MAX_CACHED_GROUPS: usize = 64;
 
 const GROUP_MEMBER_FETCH_LIMIT: i32 = 500;
+
+pub const MAX_GROUP_MEMBERS: usize = 20;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GroupMember {
@@ -36,6 +38,13 @@ impl GroupMember {
     pub fn avatar(&self) -> &str {
         &self.user.avatar_url
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AddGroupMembersError {
+    GroupFull,
+    Api(u32),
+    Other(String),
 }
 
 #[derive(Debug, Clone)]
@@ -76,27 +85,36 @@ impl GroupBucket {
         self.members.get(idx)
     }
 
-    fn upsert(&mut self, member: GroupMember) {
+    /// Returns whether the roster actually moved, so a redelivered event does not
+    /// claim a change.
+    fn upsert(&mut self, member: GroupMember) -> bool {
         if let Some(&idx) = self.by_id.get(&member.user.id) {
+            if self.members[idx] == member {
+                return false;
+            }
             self.members[idx] = member;
         } else {
             self.by_id.insert(member.user.id, self.members.len());
             self.members.push(member);
         }
+        true
     }
 
-    fn remove_ids(&mut self, user_ids: &[UserId]) {
+    fn remove_ids(&mut self, user_ids: &[UserId]) -> bool {
         let before = self.members.len();
         self.members.retain(|m| !user_ids.contains(&m.user.id));
-        if self.members.len() != before {
+        let removed = self.members.len() != before;
+        if removed {
             self.reindex();
         }
+        removed
     }
 }
 
 pub struct GroupMembersStore {
     cache: KeyedCache<ChannelId, GroupBucket>,
     loading: HashSet<ChannelId>,
+    mutations: HashMap<ChannelId, u64>,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
 }
@@ -125,6 +143,7 @@ impl GroupMembersStore {
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.cache.clear();
         self.loading.clear();
+        self.mutations.clear();
         cx.notify();
     }
 
@@ -134,6 +153,7 @@ impl GroupMembersStore {
         Self {
             cache: KeyedCache::new(Some(MAX_CACHED_GROUPS)),
             loading: HashSet::new(),
+            mutations: HashMap::new(),
             api,
             _conn_watch: conn_watch,
         }
@@ -179,6 +199,10 @@ impl GroupMembersStore {
         self.cache.mark_all_stale();
     }
 
+    pub fn is_loaded(&self, channel_id: ChannelId) -> bool {
+        self.cache.contains(&channel_id)
+    }
+
     pub fn members(&self, channel_id: ChannelId) -> &[GroupMember] {
         self.cache
             .get(&channel_id)
@@ -201,11 +225,48 @@ impl GroupMembersStore {
         self.fetch(channel_id, cx);
     }
 
+    pub fn add_members(
+        &mut self,
+        channel_id: ChannelId,
+        user_ids: Vec<UserId>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), AddGroupMembersError>> {
+        if user_ids.is_empty() {
+            return Task::ready(Ok(()));
+        }
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let ids: Vec<String> = user_ids.iter().map(|id| id.get().to_string()).collect();
+            if let Err(err) = api.add_channel_users(channel_id.get(), ids).await {
+                tracing::warn!("add_channel_users failed for group {channel_id}: {err}");
+                return Err(map_add_members_error(err));
+            }
+            let _ = this.update(cx, |this, cx| this.note_mutation(channel_id, cx));
+            Ok(())
+        })
+    }
+
+    pub fn remove_member(
+        &mut self,
+        channel_id: ChannelId,
+        user_id: UserId,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            api.remove_channel_users(channel_id.get(), vec![user_id.get().to_string()])
+                .await?;
+            let _ = this.update(cx, |this, cx| this.note_mutation(channel_id, cx));
+            Ok(())
+        })
+    }
+
     fn fetch(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
         if !self.loading.insert(channel_id) {
             return;
         }
         let api = self.api.clone();
+        let started_at = self.mutation_count(channel_id);
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_channel_users_uc(channel_id.get(), GROUP_MEMBER_FETCH_LIMIT)
@@ -214,6 +275,10 @@ impl GroupMembersStore {
                 this.loading.remove(&channel_id);
                 match result {
                     Ok(resp) => {
+                        if this.mutation_count(channel_id) != started_at {
+                            this.fetch(channel_id, cx);
+                            return;
+                        }
                         let members = group_members_from_proto(&resp);
                         this.cache
                             .insert(channel_id, GroupBucket::from_members(members), None);
@@ -227,6 +292,17 @@ impl GroupMembersStore {
             });
         })
         .detach();
+    }
+
+    fn mutation_count(&self, channel_id: ChannelId) -> u64 {
+        self.mutations.get(&channel_id).copied().unwrap_or(0)
+    }
+
+    fn note_mutation(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        let next = self.mutation_count(channel_id).wrapping_add(1);
+        self.mutations.insert(channel_id, next);
+        self.cache.mark_stale(&channel_id);
+        self.fetch(channel_id, cx);
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
@@ -249,6 +325,14 @@ impl GroupMembersStore {
             cx.emit(GroupMembersEvent::Changed { channel_id });
             cx.notify();
         }
+    }
+}
+
+fn map_add_members_error(err: anyhow::Error) -> AddGroupMembersError {
+    match api_status_from_error(&err) {
+        Some(status) if status.is_invalid_argument() => AddGroupMembersError::GroupFull,
+        Some(status) => AddGroupMembersError::Api(status.code),
+        None => AddGroupMembersError::Other(err.to_string()),
     }
 }
 
@@ -302,13 +386,14 @@ fn apply_add_members(
     let Some(bucket) = by_channel.get_mut(&channel_id) else {
         return false;
     };
+    let mut changed = false;
     for user in users {
         let Some(member) = group_member_from_redis(user) else {
             continue;
         };
-        bucket.upsert(member);
+        changed |= bucket.upsert(member);
     }
-    true
+    changed
 }
 
 fn apply_remove_members(
@@ -319,8 +404,7 @@ fn apply_remove_members(
     let Some(bucket) = by_channel.get_mut(&channel_id) else {
         return false;
     };
-    bucket.remove_ids(user_ids);
-    true
+    bucket.remove_ids(user_ids)
 }
 
 #[cfg(test)]
@@ -364,6 +448,27 @@ mod tests {
         assert_eq!(members[0].name(), "only-one");
         assert_eq!(members[1].name(), "");
         assert!(!members[0].online);
+    }
+
+    #[test]
+    fn add_error_maps_invalid_argument_to_a_full_group() {
+        let err = mezon_client::ApiStatusError { code: 3 }.into();
+        assert_eq!(map_add_members_error(err), AddGroupMembersError::GroupFull);
+    }
+
+    #[test]
+    fn add_error_keeps_other_api_codes() {
+        let err = mezon_client::ApiStatusError { code: 13 }.into();
+        assert_eq!(map_add_members_error(err), AddGroupMembersError::Api(13));
+    }
+
+    #[test]
+    fn add_error_falls_back_to_the_message() {
+        let err = anyhow::anyhow!("socket closed");
+        assert_eq!(
+            map_add_members_error(err),
+            AddGroupMembersError::Other("socket closed".to_string())
+        );
     }
 
     #[test]
@@ -446,6 +551,61 @@ mod tests {
         assert_eq!(ids, vec![UserId(1), UserId(3)]);
         assert!(bucket.get(UserId(2)).is_none());
         assert_index_consistent(bucket);
+    }
+
+    #[test]
+    fn removing_a_user_who_already_left_reports_no_change() {
+        let mut by_channel = cache_with(
+            ChannelId(1),
+            GroupBucket::from_members(group_members_from_proto(&proto_response(&[10, 11]))),
+        );
+
+        assert!(apply_remove_members(
+            &mut by_channel,
+            ChannelId(1),
+            &[UserId(10)]
+        ));
+        assert!(
+            !apply_remove_members(&mut by_channel, ChannelId(1), &[UserId(10)]),
+            "a no-op removal must not claim a change, or every stale event rebuilds the list"
+        );
+        assert!(!apply_remove_members(
+            &mut by_channel,
+            ChannelId(1),
+            &[UserId(99)]
+        ));
+    }
+
+    #[test]
+    fn re_adding_a_user_who_is_already_in_the_bucket_reports_no_change() {
+        let mut by_channel = cache_with(ChannelId(1), GroupBucket::default());
+        let users = vec![realtime::UserProfileRedis {
+            user_id: 7,
+            username: "bob".into(),
+            ..Default::default()
+        }];
+
+        assert!(apply_add_members(&mut by_channel, ChannelId(1), &users));
+        assert!(
+            !apply_add_members(&mut by_channel, ChannelId(1), &users),
+            "a redelivered add must not claim a change, or every stale event rebuilds the list"
+        );
+        assert!(
+            !apply_add_members(&mut by_channel, ChannelId(1), &[]),
+            "an add with no users is not a change"
+        );
+        assert!(
+            apply_add_members(
+                &mut by_channel,
+                ChannelId(1),
+                &[realtime::UserProfileRedis {
+                    user_id: 7,
+                    username: "bobby".into(),
+                    ..Default::default()
+                }]
+            ),
+            "a profile that actually moved is a change"
+        );
     }
 
     #[test]

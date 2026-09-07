@@ -187,26 +187,12 @@ impl EmojiStickerPicker {
             let finish = |this: &mut EmojiStickerPicker| {
                 this._pick_task = None;
             };
-            let paths = match rx.await {
-                Ok(Ok(Some(p))) => p,
-                Ok(Ok(None)) => {
-                    let _ = this.update(cx, |this, _| finish(this));
-                    return;
-                }
-                Ok(Err(err)) => {
-                    tracing::warn!("emoticon file picker failed: {err}");
-                    let message = mezon_i18n::t(&locale, "common.somethingWentWrong").to_string();
-                    let _ = this.update(cx, |this, cx| {
-                        finish(this);
-                        cx.notify();
-                    });
-                    show_error(cx, message);
-                    return;
-                }
-                Err(_) => {
-                    let _ = this.update(cx, |this, _| finish(this));
-                    return;
-                }
+            let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
+                let _ = this.update(cx, |this, cx| {
+                    finish(this);
+                    cx.notify();
+                });
+                return;
             };
             let Some(path) = paths.into_iter().next() else {
                 let _ = this.update(cx, |this, _| finish(this));

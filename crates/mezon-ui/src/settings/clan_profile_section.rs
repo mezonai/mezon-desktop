@@ -600,9 +600,13 @@ impl ClanProfileSection {
                                                             },
                                                         );
                                                         cx.spawn(async move |cx| {
-                                                            let paths = match rx.await {
-                                                                Ok(Ok(Some(p))) => p,
-                                                                _ => return,
+                                                            let Some(paths) =
+                                                                crate::util::file_dialog::resolve(
+                                                                    rx, cx,
+                                                                )
+                                                                .await
+                                                            else {
+                                                                return;
                                                             };
                                                             let path =
                                                                 match paths.into_iter().next() {

@@ -43,10 +43,15 @@ pub struct ApiStatusError {
 }
 
 impl ApiStatusError {
+    pub const INVALID_ARGUMENT: u32 = 3;
     pub const OUT_OF_RANGE: u32 = 11;
 
     pub fn is_out_of_range(self) -> bool {
         self.code == Self::OUT_OF_RANGE
+    }
+
+    pub fn is_invalid_argument(self) -> bool {
+        self.code == Self::INVALID_ARGUMENT
     }
 
     pub fn is_create_channel_limit_exceeded(self) -> bool {
@@ -799,6 +804,9 @@ pub struct ApiAccount {
     pub user_status: String,
     #[serde(default)]
     pub dob_seconds: u32,
+    /// When the account was created, in epoch seconds. Drives the "new here" onboarding prompt.
+    #[serde(default)]
+    pub create_time_seconds: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1755,21 +1763,8 @@ fn json_field_i64(value: &serde_json::Value, key: &str) -> i64 {
 }
 
 pub fn parse_notification_content(content: &[u8]) -> (i64, i64) {
-    if content.is_empty() {
-        return (0, 0);
-    }
-    if !matches!(content.first().copied(), Some(b'{') | Some(b'['))
-        && let Ok(fcm) = api::DirectFcmProto::decode(content)
-    {
-        return (fcm.message_id, i64::from(fcm.create_time_seconds));
-    }
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(content) else {
-        return (0, 0);
-    };
-    (
-        json_field_i64(&value, "message_id"),
-        json_field_i64(&value, "create_time_seconds"),
-    )
+    let (message_id, create_time, _) = crate::inbox::notification_ids_from_content(content);
+    (message_id, create_time)
 }
 
 pub fn is_mention_or_reply(
@@ -3578,6 +3573,7 @@ pub struct ApiMessage {
     pub references: Vec<ApiMessageRef>,
     pub reactions: Vec<ApiMessageReaction>,
     pub entity_mentions: Vec<ApiEntityMention>,
+    pub topic_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3981,6 +3977,7 @@ impl MezonTransport {
             status: user.status,
             user_status: user.user_status,
             dob_seconds: user.dob_seconds,
+            create_time_seconds: user.create_time_seconds,
         }
     }
 
@@ -4143,6 +4140,7 @@ impl MezonTransport {
             references,
             reactions,
             entity_mentions,
+            topic_id: message.topic_id,
         }
     }
 
@@ -4411,6 +4409,7 @@ impl MezonTransport {
             "DeletePinMessage" => 207,
             "MarkAsRead" => 208,
             "UploadBatchAttachmentFile" => 209,
+            "SearchCtrlK" => 210,
             _ => {
                 tracing::warn!("unknown API name: {api_name}");
                 return None;
@@ -5484,6 +5483,7 @@ impl MezonTransport {
             references: Vec::new(),
             reactions: Vec::new(),
             entity_mentions: Vec::new(),
+            topic_id,
         })
     }
 
@@ -6837,6 +6837,31 @@ impl MezonTransport {
         Ok(api::SearchMessageResponse::decode(response.as_slice())?)
     }
 
+    pub async fn search_ctrl_k(
+        &self,
+        text: &str,
+        search_type: i32,
+    ) -> Result<api::SearchCtrlKResponse> {
+        let text = text.trim();
+        if text.is_empty() {
+            anyhow::bail!("SearchCtrlK text must not be empty");
+        }
+        if text.len() > 255 {
+            anyhow::bail!("SearchCtrlK text exceeds 255 bytes");
+        }
+        let cid = self.generate_cid();
+        let body = api::SearchCtrlKRequest {
+            text: text.to_string(),
+            r#type: search_type,
+        }
+        .encode_to_vec();
+        let (code, response) = self.send_api_request(cid, "SearchCtrlK", body).await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        Ok(api::SearchCtrlKResponse::decode(response.as_slice())?)
+    }
+
     /// Search threads by label within a parent channel.
     pub async fn search_thread(
         &self,
@@ -7163,7 +7188,7 @@ impl MezonTransport {
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "AddChannelUsers", body).await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
         Ok(())
     }
@@ -7183,7 +7208,7 @@ impl MezonTransport {
             .send_api_request(cid, "RemoveChannelUsers", body)
             .await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
         Ok(())
     }
@@ -8322,7 +8347,7 @@ impl MezonTransport {
             .send_api_request(cid, "CreateMessage2Inbox", body)
             .await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
         Ok(())
     }
@@ -8472,14 +8497,9 @@ impl MezonTransport {
     }
 
     /// Delete event.
-    pub async fn delete_event(&self, event_id: i64, clan_id: i64) -> Result<()> {
+    pub async fn delete_event(&self, request: api::DeleteEventRequest) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::DeleteEventRequest {
-            event_id,
-            clan_id,
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, _) = self.send_api_request(cid, "DeleteEvent", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -8488,15 +8508,9 @@ impl MezonTransport {
     }
 
     /// Update event.
-    pub async fn update_event(&self, event_id: i64, clan_id: i64, title: &str) -> Result<()> {
+    pub async fn update_event(&self, request: api::UpdateEventRequest) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::UpdateEventRequest {
-            event_id,
-            clan_id,
-            title: title.to_string(),
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, _) = self.send_api_request(cid, "UpdateEvent", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -9155,15 +9169,15 @@ impl MezonTransport {
         &self,
         channel_id: i64,
         clan_id: i64,
-        room_name: &str,
         username: &str,
+        room_name: &str,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::MeetParticipantRequest {
+            username: username.to_string(),
+            room_name: room_name.to_string(),
             channel_id,
             clan_id,
-            room_name: room_name.to_string(),
-            username: username.to_string(),
         }
         .encode_to_vec();
         let (code, _) = self
@@ -9175,20 +9189,19 @@ impl MezonTransport {
         Ok(())
     }
 
-    /// Mute participant Mezon meet.
     pub async fn mute_participant_mezon_meet(
         &self,
         channel_id: i64,
         clan_id: i64,
-        room_name: &str,
         username: &str,
+        room_name: &str,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::MeetParticipantRequest {
+            username: username.to_string(),
+            room_name: room_name.to_string(),
             channel_id,
             clan_id,
-            room_name: room_name.to_string(),
-            username: username.to_string(),
         }
         .encode_to_vec();
         let (code, _) = self

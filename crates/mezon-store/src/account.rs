@@ -26,6 +26,8 @@ pub struct UserAccount {
     pub status: String,
     pub user_status: String,
     pub dob_seconds: u32,
+    /// Epoch seconds the account was created. Zero when the server did not send one.
+    pub create_time_seconds: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -953,6 +955,8 @@ struct PersistedAccount {
     user_status: String,
     #[serde(default)]
     dob_seconds: u32,
+    #[serde(default)]
+    create_time_seconds: u32,
 }
 
 impl PersistedAccount {
@@ -966,6 +970,7 @@ impl PersistedAccount {
             status: account.status.clone(),
             user_status: account.user_status.clone(),
             dob_seconds: account.dob_seconds,
+            create_time_seconds: account.create_time_seconds,
         }
     }
 
@@ -983,6 +988,7 @@ impl PersistedAccount {
             status: self.status,
             user_status: self.user_status,
             dob_seconds: self.dob_seconds,
+            create_time_seconds: self.create_time_seconds,
         }
     }
 }
@@ -1045,6 +1051,7 @@ fn user_account_from_api(acct: ApiAccount) -> UserAccount {
         status: acct.status,
         user_status: acct.user_status,
         dob_seconds: acct.dob_seconds,
+        create_time_seconds: acct.create_time_seconds,
     }
 }
 
@@ -1173,6 +1180,7 @@ mod tests {
             status: String::new(),
             user_status: String::new(),
             dob_seconds: 0,
+            create_time_seconds: 0,
         };
         let json = serde_json::to_string(&PersistedAccount::from_account(&account)).unwrap();
         let restored = serde_json::from_str::<PersistedAccount>(&json)
@@ -1246,6 +1254,7 @@ mod tests {
             status: String::new(),
             user_status: String::new(),
             dob_seconds: 946_684_800,
+            create_time_seconds: 0,
         });
         assert_eq!(acct.dob_seconds, 946_684_800);
         let restored = PersistedAccount::from_account(&acct).into_account();
@@ -1267,6 +1276,7 @@ mod tests {
             status: String::new(),
             user_status: String::new(),
             dob_seconds: 0,
+            create_time_seconds: 0,
         });
         assert_eq!(acct.user_id, 1);
         assert_eq!(acct.display_name, "alice");

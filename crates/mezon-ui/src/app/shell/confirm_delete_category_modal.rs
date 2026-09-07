@@ -41,10 +41,11 @@ impl ConfirmDeleteCategoryModal {
                 return;
             };
             let result = task.await;
+            let owner = this.entity_id();
 
             cx.update(|cx| {
                 Shell::global(cx).update(cx, |shell, cx| match &result {
-                    Ok(()) => shell.close_modal(cx),
+                    Ok(()) => shell.close_modal_if_current(owner, cx),
                     Err(err) => {
                         tracing::error!("delete_category failed for {category_id}: {err}");
                         shell.error(

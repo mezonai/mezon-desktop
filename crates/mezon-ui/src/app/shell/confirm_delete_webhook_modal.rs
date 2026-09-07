@@ -48,6 +48,7 @@ pub(super) struct ConfirmDeleteWebhookModal {
 impl Render for ConfirmDeleteWebhookModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let owner = cx.entity().entity_id();
         let target = self.target.clone();
         let locale = self.locale.clone();
 
@@ -121,7 +122,7 @@ impl Render for ConfirmDeleteWebhookModal {
                                                     .replace("{{name}}", &name),
                                                     cx,
                                                 );
-                                                shell.close_modal(cx);
+                                                shell.close_modal_if_current(owner, cx);
                                             });
                                         });
                                     }

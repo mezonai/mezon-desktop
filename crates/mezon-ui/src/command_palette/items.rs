@@ -6,8 +6,9 @@ use gpui::{
     AnyElement, App, Context, Entity, FontWeight, Pixels, SharedString, div, img, prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore, DirectChannel,
-    DirectKind, DirectMessageStore, User, UserId, UsersByUserStore,
+    ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore, CtrlKChannel,
+    CtrlKSearchState, CtrlKUser, DirectChannel, DirectKind, DirectMessageStore, User, UserId,
+    UsersByUserStore,
 };
 
 use crate::SHOW_UNREAD_BADGE_COUNT;
@@ -324,6 +325,223 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
 
     items.sort_by(cmp_items);
     items
+}
+
+const DM_GROUP_CHANNEL_TYPE: i32 = 2;
+const DM_PEER_CHANNEL_TYPE: i32 = 3;
+
+pub fn build_palette_items_from_ctrlk(state: &CtrlKSearchState, cx: &App) -> Vec<PaletteItem> {
+    let mut items = Vec::new();
+    let dm_store = DirectMessageStore::global(cx);
+    let channel_list = ChannelList::global(cx);
+    let clan_list = ClanList::global(cx);
+    let channels = channel_list.read(cx);
+    let clans = clan_list.read(cx);
+    let members_store = ClanMembersStore::try_global(cx);
+    let active_clan_id = clan_list.read(cx).active_clan_id;
+
+    for channel in &state.channels {
+        if channel.clan_id.is_zero()
+            || channel.channel_type == DM_GROUP_CHANNEL_TYPE
+            || channel.channel_type == DM_PEER_CHANNEL_TYPE
+        {
+            if let Some(item) =
+                ctrlk_channel_as_direct(channel, channels, dm_store.read(cx).channels(), cx)
+            {
+                items.push(item);
+            }
+            continue;
+        }
+        items.push(ctrlk_channel_as_clan_channel(channel, channels, clans));
+    }
+
+    for user in &state.users {
+        if let Some(item) = ctrlk_user_as_member(user, active_clan_id, members_store.as_ref(), cx) {
+            items.push(item);
+        }
+    }
+
+    items
+}
+
+fn ctrlk_channel_as_direct(
+    channel: &CtrlKChannel,
+    channel_list: &ChannelList,
+    dms: &[DirectChannel],
+    cx: &App,
+) -> Option<PaletteItem> {
+    let kind = match channel.channel_type {
+        DM_GROUP_CHANNEL_TYPE => DirectKind::Group,
+        DM_PEER_CHANNEL_TYPE => DirectKind::Dm,
+        _ if channel.clan_id.is_zero() => DirectKind::Dm,
+        _ => return None,
+    };
+    let existing = dms.iter().find(|dm| dm.id == channel.channel_id);
+    if kind == DirectKind::Dm && existing.is_none() {
+        return None;
+    }
+    let (unread_count, last_sent_timestamp, last_seen_timestamp) = channel_list
+        .user_channel(channel.channel_id)
+        .map(|ch| channel_list.palette_channel_unread(ch))
+        .unwrap_or((0, 0, 0));
+    let label = existing
+        .map(|dm| dm.label.clone())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| channel.label.clone());
+    let avatar_raw = existing
+        .filter(|dm| !dm.avatar.is_empty())
+        .map(|dm| dm.avatar.clone())
+        .unwrap_or_else(|| channel.avatar.clone());
+    let avatar = avatar_url(cx, &avatar_raw);
+    let subtext = existing
+        .and_then(|dm| {
+            if dm.kind == DirectKind::Dm && !dm.peer_username.is_empty() {
+                Some(SharedString::from(dm.peer_username.clone()))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+    let peer_user_id = existing.and_then(|dm| dm.peer_user_id);
+    let filter_name = normalize_search_string(subtext.as_ref());
+    Some(PaletteItem {
+        kind: PaletteItemKind::Direct,
+        label: SharedString::from(label.clone()),
+        subtext,
+        avatar,
+        avatar_raw: SharedString::from(avatar_raw),
+        unread_count,
+        last_sent_timestamp,
+        last_seen_timestamp,
+        channel_id: Some(channel.channel_id),
+        clan_id: None,
+        user_id: peer_user_id,
+        channel_type: None,
+        private: false,
+        dm_kind: Some(kind),
+        dm_channel_type: Some(kind.channel_type()),
+        filter_prioritize: normalize_search_string(&label),
+        filter_name,
+        filter_display: String::new(),
+        filter_blob: normalize_search_string(&label),
+        voice_busy: false,
+    })
+}
+
+fn ctrlk_channel_as_clan_channel(
+    channel: &CtrlKChannel,
+    channel_list: &ChannelList,
+    clans: &ClanList,
+) -> PaletteItem {
+    let channel_type = ChannelType::from_raw(channel.channel_type as u32);
+    let stored = channel_list.channel(channel.clan_id, channel.channel_id);
+    let name = stored
+        .map(|ch| ch.name.clone())
+        .unwrap_or_else(|| channel.label.clone());
+    let subtext = stored
+        .map(|ch| palette_channel_subtext(ch, channel_list, clans))
+        .unwrap_or_else(|| {
+            clans
+                .clan(channel.clan_id)
+                .map(|clan| clan.name.clone())
+                .unwrap_or_default()
+                .to_uppercase()
+        });
+    let (unread_count, last_sent_timestamp, last_seen_timestamp) = stored
+        .map(|ch| channel_list.palette_channel_unread(ch))
+        .unwrap_or((0, 0, 0));
+    let private = stored.map(|ch| ch.private).unwrap_or(channel.private);
+    let voice_busy = channel_voice_busy(
+        channel_list,
+        channel.clan_id,
+        channel.channel_id,
+        channel_type,
+    );
+    PaletteItem {
+        kind: PaletteItemKind::Channel,
+        label: SharedString::from(name.clone()),
+        subtext: SharedString::from(subtext),
+        avatar: SharedString::default(),
+        avatar_raw: SharedString::default(),
+        unread_count,
+        last_sent_timestamp,
+        last_seen_timestamp,
+        channel_id: Some(channel.channel_id),
+        clan_id: Some(channel.clan_id),
+        user_id: None,
+        channel_type: Some(channel_type),
+        private,
+        dm_kind: None,
+        dm_channel_type: None,
+        filter_prioritize: normalize_search_string(&name),
+        filter_name: normalize_search_string(&name),
+        filter_display: String::new(),
+        filter_blob: normalize_search_string(&name),
+        voice_busy,
+    }
+}
+
+fn ctrlk_user_as_member(
+    user: &CtrlKUser,
+    active_clan_id: Option<ClanId>,
+    members_store: Option<&Entity<ClanMembersStore>>,
+    cx: &App,
+) -> Option<PaletteItem> {
+    let domain_user = User {
+        id: user.id,
+        username: user.username.clone(),
+        display_name: user.display_name.clone(),
+        avatar_url: user.avatar_url.clone(),
+        about_me: String::new(),
+        create_time_seconds: 0,
+        join_time_seconds: 0,
+    };
+    let prioritize = member_label(&domain_user, active_clan_id, members_store, cx);
+    let username = user.username.clone();
+    let display_name = user.display_name.clone();
+    let label = if display_name.is_empty() {
+        username.clone()
+    } else {
+        display_name.clone()
+    };
+    let subtext = if username.is_empty() {
+        SharedString::default()
+    } else {
+        SharedString::from(username.clone())
+    };
+    let search_blob = [
+        username.as_str(),
+        display_name.as_str(),
+        prioritize.as_str(),
+    ]
+    .into_iter()
+    .chain(user.nicknames.iter().map(String::as_str))
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join(".");
+    let avatar_raw = SharedString::from(user.avatar_url.clone());
+    Some(PaletteItem {
+        kind: PaletteItemKind::Member,
+        label: SharedString::from(label.clone()),
+        subtext,
+        avatar: avatar_url(cx, &user.avatar_url),
+        avatar_raw,
+        unread_count: 0,
+        last_sent_timestamp: 0,
+        last_seen_timestamp: 0,
+        channel_id: None,
+        clan_id: None,
+        user_id: Some(user.id),
+        channel_type: None,
+        private: false,
+        dm_kind: None,
+        dm_channel_type: None,
+        filter_prioritize: normalize_search_string(&prioritize),
+        filter_name: normalize_search_string(&username),
+        filter_display: normalize_search_string(&display_name),
+        filter_blob: normalize_search_string(&search_blob),
+        voice_busy: false,
+    })
 }
 
 fn member_label(

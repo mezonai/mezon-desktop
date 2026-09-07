@@ -2231,7 +2231,7 @@ fn hashtag_chip_for(
     }
     if parsed_channel.is_some() {
         return HashtagChip {
-            label: SharedString::new_static(mezon_i18n::t(locale, "message.noAccess")),
+            label: SharedString::new_static(mezon_i18n::t(locale, "message.privateChannel")),
             icon: IconName::LockedPrivate,
             italic: false,
             channel_id: None,
@@ -3038,10 +3038,10 @@ mod hashtag_label_tests {
     }
 
     #[test]
-    fn inaccessible_channel_shows_no_access() {
+    fn inaccessible_channel_shows_private_channel() {
         let chip = chip("#secret", Some(999), None);
 
-        assert_eq!(chip.label, "No Access");
+        assert_eq!(chip.label, "private-channel");
         assert!(!chip.italic);
         assert_eq!(chip.icon.path(), IconName::LockedPrivate.path());
     }

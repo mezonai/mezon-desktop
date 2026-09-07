@@ -1794,9 +1794,9 @@ impl ThemeTokens {
                     a: 0.25,
                 },
                 bg_active_friend_list: Rgba {
-                    r: 0.073035,
-                    g: 0.0044147,
-                    b: 0.0044147,
+                    r: 0.10912,
+                    g: 0.04016,
+                    b: 0.05712,
                     a: 1.0,
                 },
                 bg_active_member_channel: Rgba {
@@ -1962,9 +1962,9 @@ impl ThemeTokens {
                     a: 1.0,
                 },
                 bg_modal_theme_search: Rgba {
-                    r: 0.070008,
-                    g: 0.0039517,
-                    b: 0.0039517,
+                    r: 0.0682,
+                    g: 0.0251,
+                    b: 0.0357,
                     a: 1.0,
                 },
                 bg_option_active: Rgba {
@@ -1992,9 +1992,9 @@ impl ThemeTokens {
                     a: 1.0,
                 },
                 bg_primary: Rgba {
-                    r: 0.087642,
-                    g: 0.0052976,
-                    b: 0.0052976,
+                    r: 0.1023,
+                    g: 0.03765,
+                    b: 0.05355,
                     a: 1.0,
                 },
                 bg_scroll_bar: Rgba {
@@ -2004,9 +2004,9 @@ impl ThemeTokens {
                     a: 1.0,
                 },
                 bg_secondary: Rgba {
-                    r: 0.070008,
-                    g: 0.0039517,
-                    b: 0.0039517,
+                    r: 0.15345,
+                    g: 0.056475,
+                    b: 0.080325,
                     a: 1.0,
                 },
                 bg_secondary_button_hover: Rgba {
@@ -2016,9 +2016,9 @@ impl ThemeTokens {
                     a: 0.3,
                 },
                 bg_surface: Rgba {
-                    r: 0.13412,
-                    g: 0.037837,
-                    b: 0.037837,
+                    r: 0.202,
+                    g: 0.06284,
+                    b: 0.09748,
                     a: 1.0,
                 },
                 bg_tertiary: Rgba {
@@ -2046,9 +2046,9 @@ impl ThemeTokens {
                     a: 1.0,
                 },
                 bg_theme_direct_message: Rgba {
-                    r: 0.10225,
-                    g: 0.0061805,
-                    b: 0.0061805,
+                    r: 0.11935,
+                    g: 0.043925,
+                    b: 0.062475,
                     a: 1.0,
                 },
                 bg_theme_input_primary: Rgba {
@@ -2354,9 +2354,9 @@ impl ThemeTokens {
                     a: 0.25,
                 },
                 bg_active_friend_list: Rgba {
-                    r: 0.040392,
-                    g: 0.03098,
-                    b: 0.098039,
+                    r: 0.0561,
+                    g: 0.0714,
+                    b: 0.1632,
                     a: 1.0,
                 },
                 bg_active_member_channel: Rgba {
@@ -2522,9 +2522,9 @@ impl ThemeTokens {
                     a: 1.0,
                 },
                 bg_modal_theme_search: Rgba {
-                    r: 0.040392,
-                    g: 0.03098,
-                    b: 0.098039,
+                    r: 0.033,
+                    g: 0.042,
+                    b: 0.096,
                     a: 1.0,
                 },
                 bg_option_active: Rgba {
@@ -2552,9 +2552,9 @@ impl ThemeTokens {
                     a: 1.0,
                 },
                 bg_primary: Rgba {
-                    r: 0.060588,
-                    g: 0.046471,
-                    b: 0.14706,
+                    r: 0.0495,
+                    g: 0.063,
+                    b: 0.144,
                     a: 1.0,
                 },
                 bg_scroll_bar: Rgba {
@@ -2564,9 +2564,9 @@ impl ThemeTokens {
                     a: 1.0,
                 },
                 bg_secondary: Rgba {
-                    r: 0.040392,
-                    g: 0.03098,
-                    b: 0.098039,
+                    r: 0.0858,
+                    g: 0.1092,
+                    b: 0.2496,
                     a: 1.0,
                 },
                 bg_secondary_button_hover: Rgba {
@@ -2576,9 +2576,9 @@ impl ThemeTokens {
                     a: 0.3,
                 },
                 bg_surface: Rgba {
-                    r: 0.1098,
-                    g: 0.083824,
-                    b: 0.22725,
+                    r: 0.098274,
+                    g: 0.138055,
+                    b: 0.286855,
                     a: 1.0,
                 },
                 bg_tertiary: Rgba {
@@ -2606,9 +2606,9 @@ impl ThemeTokens {
                     a: 1.0,
                 },
                 bg_theme_direct_message: Rgba {
-                    r: 0.071569,
-                    g: 0.051961,
-                    b: 0.20049,
+                    r: 0.04125,
+                    g: 0.0525,
+                    b: 0.12,
                     a: 1.0,
                 },
                 bg_theme_input_primary: Rgba {

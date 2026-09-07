@@ -436,6 +436,28 @@ mod tests {
         });
     }
 
+    /// `check` is level-based, and mezon-api seeds manage-channel below manage-clan
+    /// (`migrate/sql/20260408173801_initial_insert.sql`), so holding manage-clan already grants
+    /// manage-channel. Anything that ORs the two slugs together is testing nothing.
+    #[gpui::test]
+    fn manage_clan_level_already_covers_manage_channel(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = init_stores(AuthState::NotAuthenticated, cx);
+            store.update(cx, |store, cx| {
+                store.catalog.insert(PERMISSION_MANAGE_CHANNEL.into(), 2);
+                store.catalog.insert(PERMISSION_MANAGE_CLAN.into(), 3);
+
+                store.max_level_by_clan.insert(TEST_CLAN, 3);
+                assert!(store.check(TEST_CLAN, None, PERMISSION_MANAGE_CLAN, cx));
+                assert!(store.check(TEST_CLAN, None, PERMISSION_MANAGE_CHANNEL, cx));
+
+                store.max_level_by_clan.insert(TEST_CLAN, 1);
+                assert!(!store.check(TEST_CLAN, None, PERMISSION_MANAGE_CLAN, cx));
+                assert!(!store.check(TEST_CLAN, None, PERMISSION_MANAGE_CHANNEL, cx));
+            });
+        });
+    }
+
     #[gpui::test]
     fn overridden_slug_without_channel_is_denied_for_clan_owner(cx: &mut TestAppContext) {
         cx.update(|cx| {

@@ -6,6 +6,7 @@ pub mod app_api;
 pub mod attachment_download;
 pub mod auth;
 pub mod channel_app_launch;
+pub mod endpoint_health;
 pub mod gotify;
 pub mod image_disk_cache;
 pub mod inbox;
@@ -29,24 +30,27 @@ pub use app_api::{
     UploadThumbnail, UrlAttachment, sanitize_upload_filename,
 };
 pub use attachment_download::{
-    clean_download_url, download_url_to_downloads, resolve_download_filename, sanitize_filename,
-    write_bytes_to_downloads,
+    clean_download_url, download_url_to_downloads, reserve_path_in, resolve_download_filename,
+    sanitize_filename, unique_path_in, write_bytes_to_downloads,
 };
-pub use auth::MezonClient;
 pub use auth::QrLoginId;
 pub use auth::SessionProbe;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
+pub use auth::{HealthyEndpointStatusError, MezonClient};
 pub use channel_app_launch::{ChannelAppLaunchParams, build_channel_app_url, encode_url_param};
+pub use endpoint_health::{EndpointHealth, RealtimeEndpoint};
 pub use gotify::{GotifyExtras, GotifyNotification, StreamEnd};
 pub use inbox::{
     DIRECTION_AROUND_TIMESTAMP, DIRECTION_BEFORE_TIMESTAMP, INBOX_MESSAGE_MARK_CODE,
-    INBOX_PAGE_LIMIT, InboxCategory, InboxMentionSpan, InboxMessagePreview, InboxNotification,
-    MarkedInboxMessageInput, TopicDiscussion, TopicReplyPreview, attachment_link_is_image,
-    attachment_link_is_video, display_text_from_message_content, inbox_notification_from_api,
+    INBOX_PAGE_LIMIT, INBOX_USER_MENTIONED_CODE, INBOX_USER_REPLIED_CODE, InboxCategory,
+    InboxMentionSpan, InboxMessagePreview, InboxNotification, MarkedInboxMessageInput,
+    TopicDiscussion, TopicReplyPreview, attachment_link_is_image, attachment_link_is_video,
+    display_text_from_message_content, effective_notification_topic_id,
+    inbox_notification_from_api, inbox_notification_from_channel_mention,
     inbox_notification_from_marked_message, inbox_notification_from_marked_message_local,
     inbox_notifications_from_list, is_pending_inbox_notification_id, message_content_is_attachment,
-    pending_inbox_notification_id, topic_discussion_from_api, topic_reply_preview,
-    topics_from_list,
+    notification_ids_from_content, pending_inbox_notification_id, topic_discussion_from_api,
+    topic_reply_preview, topics_from_list,
 };
 pub use network_monitor::NetworkMonitor;
 pub use network_probe::{
@@ -66,7 +70,7 @@ pub use search_message::{
     should_show_search_dropdown, username_filter,
 };
 pub use server_clock::{now_secs as server_now_secs, observe_http_date};
-pub use session::{Session, jwt_expires_at};
+pub use session::{HealthyEndpointReason, HealthyEndpointSession, Session, jwt_expires_at};
 pub use transport::MezonTransport;
 pub use transport::RealtimeEvent;
 pub use transport::{

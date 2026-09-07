@@ -21,6 +21,24 @@ pub fn render_media_image(
         .with_fallback(move || image_placeholder(bg, muted, width, height))
 }
 
+pub fn render_media_image_rounded_top(
+    bg: Rgba,
+    muted: Rgba,
+    url: SharedString,
+    width: Pixels,
+    height: Pixels,
+    radius: Pixels,
+) -> impl IntoElement {
+    img(url)
+        .w(width)
+        .h(height)
+        .rounded_t(radius)
+        .object_fit(ObjectFit::Cover)
+        .bg(Hsla::from(bg))
+        .with_loading(move || image_placeholder_rounded_top(bg, muted, width, height, radius))
+        .with_fallback(move || image_placeholder_rounded_top(bg, muted, width, height, radius))
+}
+
 pub fn render_media_image_cover(
     bg: Rgba,
     muted: Rgba,
@@ -69,6 +87,29 @@ pub fn image_placeholder(bg: Rgba, muted: Rgba, width: Pixels, height: Pixels) -
         .justify_center()
         .w(width)
         .h(height)
+        .bg(bg)
+        .child(
+            Icon::new(IconName::ImageThumbnail)
+                .size(px(28.))
+                .text_color(muted),
+        )
+        .into_any()
+}
+
+fn image_placeholder_rounded_top(
+    bg: Rgba,
+    muted: Rgba,
+    width: Pixels,
+    height: Pixels,
+    radius: Pixels,
+) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(width)
+        .h(height)
+        .rounded_t(radius)
         .bg(bg)
         .child(
             Icon::new(IconName::ImageThumbnail)

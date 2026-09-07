@@ -59,6 +59,7 @@ impl ConfirmDeleteThreadModal {
                 return;
             };
             let result = task.await;
+            let owner = this.entity_id();
 
             cx.update(|cx| {
                 Shell::global(cx).update(cx, |shell, cx| match &result {
@@ -67,7 +68,7 @@ impl ConfirmDeleteThreadModal {
                             mezon_i18n::t(&locale, "channelMenu.toastDeleteThread").to_string(),
                             cx,
                         );
-                        shell.close_modal(cx);
+                        shell.close_modal_if_current(owner, cx);
                     }
                     Err(err) => {
                         tracing::error!("delete_channel failed for {channel_id}: {err}");

@@ -30,10 +30,16 @@ fn backend_ready() -> bool {
     if mezon_pdf::is_supported() {
         return true;
     }
-    eprintln!(
-        "skipping: {}",
-        mezon_pdf::unavailable_reason().unwrap_or_else(|| "pdf backend unavailable".to_string())
+    let reason =
+        mezon_pdf::unavailable_reason().unwrap_or_else(|| "pdf backend unavailable".to_string());
+    // A contributor without poppler should see a skip, not two failures in a crate they
+    // did not touch. CI rents a runner *for* the platform backend, so there the missing
+    // backend is the result being reported - skipping would pass without testing anything.
+    assert!(
+        std::env::var_os("MEZON_PDF_REQUIRE_BACKEND").is_none(),
+        "MEZON_PDF_REQUIRE_BACKEND is set but the backend is unavailable: {reason}"
     );
+    eprintln!("skipping: {reason}");
     false
 }
 

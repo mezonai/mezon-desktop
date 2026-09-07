@@ -21,9 +21,10 @@ use mezon_client::transport::{
     mention_content_tokens,
 };
 use mezon_client::{
-    AppApi, AttachmentUploadOutcome, ConnectionStatus, InboxCategory, InboxMentionSpan,
-    MarkedInboxMessageInput, MezonTransport, PresignedAttachment, RealtimeEvent, UploadFile,
-    UploadThumbnail, UrlAttachment, inbox_notification_from_marked_message_local,
+    ApiStatusError, AppApi, AttachmentUploadOutcome, ConnectionStatus, InboxCategory,
+    InboxMentionSpan, MarkedInboxMessageInput, MezonTransport, PresignedAttachment, RealtimeEvent,
+    UploadFile, UploadThumbnail, UrlAttachment, api_status_from_error,
+    inbox_notification_from_marked_message_local,
 };
 
 use crate::AppConfig;
@@ -54,6 +55,7 @@ use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::roles::RolesStore;
 use crate::threads::ThreadsStore;
+use crate::topic_badges::TopicBadgeStore;
 use crate::topics::TopicsStore;
 use crate::wallet::{SendTokenRequest, WalletEvent, WalletStore};
 
@@ -65,6 +67,7 @@ const DIRECTION_AFTER: i32 = 1;
 /// `Direction_Mode.AROUND_TIMESTAMP` — fetch a window centered on a message
 /// (used by jump-to-message when the target is not loaded).
 const DIRECTION_AROUND: i32 = 2;
+
 const CHANNEL_TYPE_CHANNEL: i32 = 1;
 const CHANNEL_TYPE_THREAD: i32 = 7;
 use crate::message::STICKER_FILETYPE;
@@ -146,6 +149,7 @@ pub enum MessagesEvent {
     /// AROUND fetch (which emits `Reset` first) just brought it in.
     JumpTo {
         message_id: MessageId,
+        request_id: Option<u64>,
     },
     RemovedAt {
         index: usize,
@@ -178,7 +182,7 @@ pub enum MessagesEvent {
 
 /// The message currently being replied to (composer state), mirroring React's
 /// reply reference draft in `references.slice`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplyDraft {
     pub message_ref_id: MessageId,
     pub sender_id: UserId,
@@ -293,17 +297,36 @@ struct MessageList {
     items: Vec<Message>,
     index: HashMap<MessageId, usize>,
     temp_ids: Vec<MessageId>,
+    /// The bucket these rows belong to (see `Message::channel_id`). Every row that
+    /// enters the list is stamped with it, so a row carries the other half of its
+    /// identity wherever it is cloned to — the topic panel builds one list out of
+    /// two buckets and a bare `MessageId` cannot tell them apart.
+    channel_id: ChannelId,
 }
 
 impl MessageList {
-    fn from_messages(items: Vec<Message>) -> Self {
+    fn from_messages(channel_id: ChannelId, mut items: Vec<Message>) -> Self {
+        for msg in &mut items {
+            msg.channel_id = channel_id;
+        }
         let mut list = Self {
             items,
             index: HashMap::new(),
             temp_ids: Vec::new(),
+            channel_id,
         };
         list.reindex();
         list
+    }
+
+    fn stamp(&self, msg: &mut Message) {
+        msg.channel_id = self.channel_id;
+    }
+
+    fn stamp_all(&self, msgs: &mut [Message]) {
+        for msg in msgs {
+            msg.channel_id = self.channel_id;
+        }
     }
 
     fn reindex(&mut self) {
@@ -372,12 +395,14 @@ impl MessageList {
         })
     }
 
-    fn replace(&mut self, items: Vec<Message>) {
+    fn replace(&mut self, mut items: Vec<Message>) {
+        self.stamp_all(&mut items);
         self.items = items;
         self.reindex();
     }
 
-    fn push_sorted(&mut self, msg: Message) {
+    fn push_sorted(&mut self, mut msg: Message) {
+        self.stamp(&mut msg);
         self.items.push(msg);
         sort_messages(&mut self.items);
         trim_messages(&mut self.items);
@@ -385,7 +410,8 @@ impl MessageList {
         self.reindex();
     }
 
-    fn push_grouped(&mut self, msg: Message) {
+    fn push_grouped(&mut self, mut msg: Message) {
+        self.stamp(&mut msg);
         let in_order = self
             .items
             .last()
@@ -441,7 +467,8 @@ impl MessageList {
         self.items[idx].show_forwarded_label = show_forwarded_label;
     }
 
-    fn replace_at(&mut self, idx: usize, msg: Message) {
+    fn replace_at(&mut self, idx: usize, mut msg: Message) {
+        self.stamp(&mut msg);
         let old_id = self.items[idx].id;
         let new_id = msg.id;
         self.items[idx] = msg;
@@ -501,7 +528,8 @@ impl MessageList {
                  two rows are sharing one id"
             );
         }
-        let merged = merge_sparse_sender(&existing, incoming);
+        let mut merged = merge_sparse_sender(&existing, incoming);
+        self.stamp(&mut merged);
         if let Some(slot) = self.get_mut_by_id(id) {
             *slot = merged;
         }
@@ -509,7 +537,8 @@ impl MessageList {
         true
     }
 
-    fn replace_resort(&mut self, idx: usize, msg: Message) {
+    fn replace_resort(&mut self, idx: usize, mut msg: Message) {
+        self.stamp(&mut msg);
         self.items[idx] = msg;
         sort_messages(&mut self.items);
         trim_messages(&mut self.items);
@@ -518,6 +547,7 @@ impl MessageList {
     }
 
     fn prepend_older(&mut self, mut older: Vec<Message>) -> usize {
+        self.stamp_all(&mut older);
         older.append(&mut self.items);
         sort_messages(&mut older);
         let dropped_bottom = trim_messages_back(&mut older);
@@ -528,6 +558,7 @@ impl MessageList {
     }
 
     fn append_newer(&mut self, mut newer: Vec<Message>) -> usize {
+        self.stamp_all(&mut newer);
         self.items.append(&mut newer);
         sort_messages(&mut self.items);
         let dropped = trim_messages(&mut self.items);
@@ -549,6 +580,8 @@ struct ChannelMessages {
     messages: MessageList,
     /// More history exists above (older). Mirrors React `hasMoreTop`.
     has_more: bool,
+    /// Newer messages may exist below an AROUND window whose tip is unknown.
+    gap_bottom: bool,
 }
 
 const POLL_RESULT_ANIMATION_WINDOW: Duration = Duration::from_millis(1200);
@@ -574,7 +607,10 @@ pub struct MessagesStore {
     /// realtime replies to a non-active topic bucket still notify the panel.
     active_topic_id: Option<ChannelId>,
     active_topic_parent: Option<ChannelId>,
-    pending_jump: Option<(ChannelId, MessageId)>,
+    pending_jump: Option<(ChannelId, MessageId, Option<u64>)>,
+    pending_topic_jump: Option<MessageId>,
+    next_jump_request_id: u64,
+    _pending_topic_jump_timer: Option<Task<()>>,
     is_public: bool,
     is_dm: bool,
     mode: i32,
@@ -593,8 +629,7 @@ pub struct MessagesStore {
     fetch_generation: u64,
     latest_fetch: HashMap<ChannelId, u64>,
     reset_generation: u64,
-    /// Active reply target for the composer, if any.
-    reply_target: Option<ReplyDraft>,
+    reply_targets: KeyedCache<ChannelId, ReplyDraft>,
     /// Message currently being edited inline in its row (self-only; one at a time).
     editing: Option<MessageId>,
     joined_channels: HashSet<ChannelId>,
@@ -604,7 +639,7 @@ pub struct MessagesStore {
     api: Arc<AppApi>,
     _channel_sub: Subscription,
     _conn_watch: Task<()>,
-    pending_last_seen: Option<PendingLastSeen>,
+    pending_last_seen: HashMap<ChannelId, PendingLastSeen>,
     _last_seen_timer: Option<Task<()>>,
     last_seen_fingerprint: HashMap<ChannelId, String>,
     queued_last_seen: Vec<PendingLastSeen>,
@@ -962,6 +997,7 @@ impl MessagesStore {
         self.active_clan_id = None;
         self.active_topic_id = None;
         self.active_topic_parent = None;
+        self.pending_topic_jump = None;
         self.is_public = true;
         self.is_dm = false;
         self.mode = STREAM_MODE_CHANNEL;
@@ -977,11 +1013,11 @@ impl MessagesStore {
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
         self.latest_fetch.clear();
         self.reset_generation = self.reset_generation.wrapping_add(1);
-        self.reply_target = None;
+        self.reply_targets.clear();
         self.editing = None;
         self.joined_channels.clear();
         self.pending_self_adds.clear();
-        self.pending_last_seen = None;
+        self.pending_last_seen.clear();
         self.last_seen_fingerprint.clear();
         self.queued_last_seen.clear();
         self.poll_ui.clear();
@@ -1033,6 +1069,9 @@ impl MessagesStore {
             active_topic_id: None,
             active_topic_parent: None,
             pending_jump: None,
+            pending_topic_jump: None,
+            next_jump_request_id: 1,
+            _pending_topic_jump_timer: None,
             is_public: true,
             is_dm: false,
             mode: STREAM_MODE_CHANNEL,
@@ -1048,7 +1087,7 @@ impl MessagesStore {
             fetch_generation: 0,
             latest_fetch: HashMap::new(),
             reset_generation: 0,
-            reply_target: None,
+            reply_targets: KeyedCache::new(Some(crate::compose::MAX_DRAFT_CHANNELS)),
             editing: None,
             joined_channels: HashSet::new(),
             pending_self_adds: HashMap::new(),
@@ -1057,7 +1096,7 @@ impl MessagesStore {
             api,
             _channel_sub: channel_sub,
             _conn_watch: conn_watch,
-            pending_last_seen: None,
+            pending_last_seen: HashMap::new(),
             _last_seen_timer: None,
             last_seen_fingerprint: HashMap::new(),
             queued_last_seen: Vec::new(),
@@ -1384,10 +1423,11 @@ impl MessagesStore {
             return;
         }
         let live_badge = self.channel_badge_count(channel_id, clan_id, cx);
-        let badge_count = match &self.pending_last_seen {
-            Some(p) if p.channel_id == channel_id => p.badge_count.max(live_badge),
-            _ => live_badge,
-        };
+        let badge_count = self
+            .pending_last_seen
+            .get(&channel_id)
+            .map(|p| p.badge_count.max(live_badge))
+            .unwrap_or(live_badge);
         tracing::debug!(
             target: "badge_flow",
             clan = clan_id.get(),
@@ -1409,8 +1449,57 @@ impl MessagesStore {
         } else {
             self.set_last_read_message(channel_id, message_id);
         }
-        self.pending_last_seen = Some(pending);
-        self.arm_last_seen_debounce(cx);
+        self.set_pending_last_seen(pending, cx);
+    }
+
+    pub fn note_topic_viewport_seen(
+        &mut self,
+        topic_id: ChannelId,
+        message_id: MessageId,
+        create_time: i64,
+        app_focused: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !app_focused || message_id.is_optimistic() || topic_id.is_zero() {
+            return;
+        }
+        let Some(clan_id) = self.active_clan_id else {
+            return;
+        };
+        let topic_key = topic_id.get().to_string();
+        let live_badge = TopicBadgeStore::try_global(cx)
+            .map(|store| store.read(cx).topic_badge_count(&topic_key))
+            .unwrap_or(0);
+        if let Some(store) = TopicBadgeStore::try_global(cx) {
+            store.update(cx, |store, cx| {
+                store.clear_topic(&topic_key, cx);
+            });
+        }
+        ChannelList::global(cx).update(cx, |cl, cx| {
+            cl.apply_topic_read(topic_id, cx);
+        });
+        if !should_write_last_seen(
+            self.known_last_seen_id(topic_id, cx),
+            self.last_message_by_channel.get(&topic_id).copied(),
+            message_id,
+        ) {
+            return;
+        }
+        let badge_count = self
+            .pending_last_seen
+            .get(&topic_id)
+            .map(|p| p.badge_count.max(live_badge))
+            .unwrap_or(live_badge);
+        let pending = PendingLastSeen {
+            clan_id,
+            channel_id: topic_id,
+            message_id,
+            create_time,
+            mode: self.mode,
+            badge_count,
+        };
+        self.set_last_read_message(topic_id, message_id);
+        self.set_pending_last_seen(pending, cx);
     }
 
     fn known_last_seen_id(&self, channel_id: ChannelId, cx: &App) -> Option<MessageId> {
@@ -1478,8 +1567,7 @@ impl MessagesStore {
             "empty channel opened — clearing its unread state"
         );
         self.apply_local_last_seen(&pending, cx);
-        self.pending_last_seen = Some(pending);
-        self.arm_last_seen_debounce(cx);
+        self.set_pending_last_seen(pending, cx);
     }
 
     fn channel_is_unread(&self, channel_id: ChannelId, clan_id: ClanId, cx: &App) -> bool {
@@ -1499,7 +1587,7 @@ impl MessagesStore {
     }
 
     fn arm_last_seen_debounce(&mut self, cx: &mut Context<Self>) {
-        if self.pending_last_seen.is_none() {
+        if self.pending_last_seen.is_empty() {
             return;
         }
         self._last_seen_timer = Some(cx.spawn(async move |this, cx| {
@@ -1509,12 +1597,30 @@ impl MessagesStore {
         }));
     }
 
-    fn flush_pending_last_seen(&mut self, cx: &mut Context<Self>) {
-        let Some(pending) = self.pending_last_seen.take() else {
+    fn set_pending_last_seen(&mut self, pending: PendingLastSeen, cx: &mut Context<Self>) {
+        if self
+            .pending_last_seen
+            .get(&pending.channel_id)
+            .is_some_and(|existing| {
+                existing.message_id == pending.message_id
+                    && existing.badge_count == pending.badge_count
+                    && existing.create_time == pending.create_time
+                    && existing.mode == pending.mode
+                    && existing.clan_id == pending.clan_id
+            })
+        {
             return;
-        };
+        }
+        self.pending_last_seen.insert(pending.channel_id, pending);
+        self.arm_last_seen_debounce(cx);
+    }
+
+    fn flush_pending_last_seen(&mut self, cx: &mut Context<Self>) {
+        let pending = std::mem::take(&mut self.pending_last_seen);
         self._last_seen_timer = None;
-        self.send_last_seen(pending, cx);
+        for pending in pending.into_values() {
+            self.send_last_seen(pending, cx);
+        }
     }
 
     fn flush_queued_last_seen(&mut self, cx: &mut Context<Self>) {
@@ -2006,14 +2112,32 @@ impl MessagesStore {
         true
     }
 
-    /// Jump to a message (cf. React `jumpToMessage`, used by reply previews).
-    /// If the target is already in the buffer, emit [`MessagesEvent::JumpTo`] so
-    /// the UI scrolls to it. Otherwise fetch a window centered on it
-    /// (`AROUND_TIMESTAMP`), replace the buffer, and emit `Reset` then `JumpTo`.
     pub fn request_jump(
         &mut self,
         channel_id: ChannelId,
         message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        self.request_jump_with_id(channel_id, message_id, None, cx);
+    }
+
+    pub fn request_inbox_origin_jump(
+        &mut self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        let request_id = self.next_jump_request_id;
+        self.next_jump_request_id = self.next_jump_request_id.wrapping_add(1).max(1);
+        self.request_jump_with_id(channel_id, message_id, Some(request_id), cx);
+        request_id
+    }
+
+    fn request_jump_with_id(
+        &mut self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        request_id: Option<u64>,
         cx: &mut Context<Self>,
     ) {
         if message_id.is_optimistic() {
@@ -2023,7 +2147,7 @@ impl MessagesStore {
             );
             return;
         }
-        self.pending_jump = Some((channel_id, message_id));
+        self.pending_jump = Some((channel_id, message_id, request_id));
         self.try_consume_pending_jump(cx);
     }
 
@@ -2033,17 +2157,22 @@ impl MessagesStore {
     }
 
     fn try_consume_pending_jump(&mut self, cx: &mut Context<Self>) {
-        let Some((channel_id, message_id)) = self.pending_jump else {
+        let Some((channel_id, message_id, request_id)) = self.pending_jump else {
             return;
         };
         if self.active_channel_id != Some(channel_id) || self.loading || self.loading_more {
             return;
         }
         self.pending_jump = None;
-        self.jump_to_message(message_id, cx);
+        self.jump_to_message(message_id, request_id, cx);
     }
 
-    pub fn jump_to_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+    pub fn jump_to_message(
+        &mut self,
+        message_id: MessageId,
+        request_id: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(channel_id) = self.active_channel_id else {
             return;
         };
@@ -2052,15 +2181,18 @@ impl MessagesStore {
             .get(&channel_id)
             .is_some_and(|c| c.messages.contains_id(message_id))
         {
-            cx.emit(MessagesEvent::JumpTo { message_id });
+            cx.emit(MessagesEvent::JumpTo {
+                message_id,
+                request_id,
+            });
             return;
         }
         if self.loading_more || self.loading {
-            self.pending_jump = Some((channel_id, message_id));
+            self.pending_jump = Some((channel_id, message_id, request_id));
             return;
         }
         let Some(clan_id) = self.active_clan_id else {
-            self.pending_jump = Some((channel_id, message_id));
+            self.pending_jump = Some((channel_id, message_id, request_id));
             return;
         };
         let anchor = message_id.get();
@@ -2136,7 +2268,10 @@ impl MessagesStore {
                 if this.active_channel_id == Some(channel_id) {
                     let count = this.messages().len();
                     cx.emit(MessagesEvent::Reset { count });
-                    cx.emit(MessagesEvent::JumpTo { message_id });
+                    cx.emit(MessagesEvent::JumpTo {
+                        message_id,
+                        request_id,
+                    });
                 }
                 this.try_consume_pending_jump(cx);
                 cx.notify();
@@ -2147,12 +2282,17 @@ impl MessagesStore {
 
     /// Current composer reply target (React reply reference draft).
     pub fn reply_target(&self) -> Option<&ReplyDraft> {
-        self.reply_target.as_ref()
+        self.active_channel_id
+            .and_then(|channel_id| self.reply_targets.get(&channel_id))
     }
 
     /// Set the composer reply target (from a "Reply" action on a message).
     pub fn set_reply(&mut self, draft: ReplyDraft, cx: &mut Context<Self>) {
-        self.reply_target = Some(draft);
+        let Some(channel_id) = self.active_channel_id else {
+            return;
+        };
+        self.reply_targets
+            .insert(channel_id, draft, Some(&channel_id));
         cx.emit(MessagesEvent::ReplyTargetChanged);
         cx.notify();
     }
@@ -2183,10 +2323,15 @@ impl MessagesStore {
 
     /// Clear the composer reply target.
     pub fn clear_reply(&mut self, cx: &mut Context<Self>) {
-        if self.reply_target.take().is_some() {
+        if self.take_reply_target().is_some() {
             cx.emit(MessagesEvent::ReplyTargetChanged);
             cx.notify();
         }
+    }
+
+    fn take_reply_target(&mut self) -> Option<ReplyDraft> {
+        self.active_channel_id
+            .and_then(|channel_id| self.reply_targets.remove(&channel_id))
     }
 
     /// Message currently being edited inline in its row, if any.
@@ -2583,6 +2728,7 @@ impl MessagesStore {
                     uid,
                     uname,
                     payload.anonymous,
+                    payload.reply,
                     cx,
                 );
                 return;
@@ -3058,6 +3204,75 @@ impl MessagesStore {
         .detach();
     }
 
+    fn inbox_source_message(&self, message_id: MessageId, cx: &App) -> Option<Message> {
+        let storage_id = self.reaction_storage_channel(message_id);
+        if let Some(msg) = self
+            .cache
+            .get(&storage_id)
+            .and_then(|channel| channel.messages.get_by_id(message_id).cloned())
+        {
+            return Some(msg);
+        }
+        if let Some(parent) = self.active_channel_id
+            && parent != storage_id
+            && let Some(msg) = self
+                .cache
+                .get(&parent)
+                .and_then(|channel| channel.messages.get_by_id(message_id).cloned())
+        {
+            return Some(msg);
+        }
+        TopicsStore::try_global(cx).and_then(|topics| {
+            topics
+                .read(cx)
+                .origin_message()
+                .filter(|msg| msg.id == message_id)
+                .cloned()
+        })
+    }
+
+    async fn save_message_2_inbox(
+        api: &Arc<AppApi>,
+        request: mezon_proto::api::Message2InboxRequest,
+    ) -> bool {
+        let Err(error) = api.create_message_2_inbox(request.clone()).await else {
+            return true;
+        };
+        let refused_avatar =
+            api_status_from_error(&error).is_some_and(ApiStatusError::is_invalid_argument);
+        let Some(retry) = refused_avatar
+            .then(|| Self::message_2_inbox_without_avatar(&request))
+            .flatten()
+        else {
+            tracing::error!("add_to_inbox create_message_2_inbox failed: {error}");
+            return false;
+        };
+        match api.create_message_2_inbox(retry).await {
+            Ok(()) => {
+                tracing::warn!(
+                    "add_to_inbox: CreateMessage2Inbox returned InvalidArgument (server ValidateImageURLSecure on avatar); saved without avatar"
+                );
+                true
+            }
+            Err(retry_error) => {
+                tracing::error!("add_to_inbox create_message_2_inbox retry failed: {retry_error}");
+                false
+            }
+        }
+    }
+
+    fn message_2_inbox_without_avatar(
+        request: &mezon_proto::api::Message2InboxRequest,
+    ) -> Option<mezon_proto::api::Message2InboxRequest> {
+        if request.avatar.is_empty() {
+            return None;
+        }
+        Some(mezon_proto::api::Message2InboxRequest {
+            avatar: String::new(),
+            ..request.clone()
+        })
+    }
+
     pub fn add_to_inbox(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
         let Some(channel_id) = self.active_channel_id else {
             return;
@@ -3065,11 +3280,30 @@ impl MessagesStore {
         let storage_id = self.reaction_storage_channel(message_id);
         let clan_id = self.active_clan_id.map_or(0, |c| c.get());
         let channel_type = self.mode;
-        let Some(channel) = self.cache.get(&storage_id) else {
+        let Some(msg) = self.inbox_source_message(message_id, cx) else {
+            tracing::warn!(
+                message_id = message_id.get(),
+                storage_id = storage_id.get(),
+                channel_id = channel_id.get(),
+                "add_to_inbox: message not in cache"
+            );
             return;
         };
-        let Some(msg) = channel.messages.get_by_id(message_id).cloned() else {
-            return;
+        let topic_id = if msg.code == MessageCode::Topic {
+            0
+        } else {
+            msg.topic_id
+                .map(|topic| topic.get())
+                .filter(|id| *id != 0)
+                .or_else(|| {
+                    self.active_topic_id
+                        .filter(|topic| *topic == storage_id)
+                        .map(|topic| topic.get())
+                })
+                .or_else(|| {
+                    (storage_id != channel_id && storage_id.get() != 0).then_some(storage_id.get())
+                })
+                .unwrap_or(0)
         };
         let content_json = msg
             .raw_content
@@ -3136,7 +3370,10 @@ impl MessagesStore {
         let avatar = msg.avatar_url.to_string();
         let sender_id = msg.sender_id.parse().unwrap_or(0);
         let display_name = msg.sender_name.to_string();
-        let create_time_seconds = u32::try_from(msg.create_time.max(0)).unwrap_or(0);
+        let create_time_seconds = u32::try_from(msg.create_time.max(0))
+            .ok()
+            .filter(|ts| *ts > 0)
+            .unwrap_or_else(|| u32::try_from(unix_now_seconds().max(0)).unwrap_or(0));
         let mention_spans: Vec<InboxMentionSpan> = msg
             .mention_targets
             .iter()
@@ -3166,7 +3403,7 @@ impl MessagesStore {
             has_more_attachment,
             mention_spans,
             channel_type,
-            topic_id: msg.topic_id.map(|topic| topic.get()),
+            topic_id: (topic_id != 0).then_some(topic_id),
         };
         let request = mezon_proto::api::Message2InboxRequest {
             message_id: message_id.get(),
@@ -3176,46 +3413,52 @@ impl MessagesStore {
             content: content_json,
             mentions,
             attachments,
+            topic_id,
             ..Default::default()
         };
+        tracing::info!(
+            message_id = message_id.get(),
+            channel_id = channel_id.get(),
+            storage_id = storage_id.get(),
+            topic_id,
+            "add_to_inbox"
+        );
         let api = self.api.clone();
-        cx.spawn(
-            async move |_this, cx| match api.create_message_2_inbox(request).await {
-                Ok(()) => {
-                    let notification = inbox_notification_from_marked_message_local(&marked);
-                    cx.update(|cx| {
-                        InboxStore::global(cx).update(cx, |store, cx| {
-                            store.prepend_local(
-                                GLOBAL_INBOX_BUCKET_CLAN_ID,
-                                InboxCategory::Messages,
-                                notification,
-                                cx,
-                            );
-                        });
-                    });
-                }
-                Err(e) => {
-                    tracing::error!("add_to_inbox create_message_2_inbox failed: {e}");
-                }
-            },
-        )
+        cx.spawn(async move |_this, cx| {
+            let saved = Self::save_message_2_inbox(&api, request).await;
+            if !saved {
+                return;
+            }
+            let notification = inbox_notification_from_marked_message_local(&marked);
+            cx.update(|cx| {
+                InboxStore::global(cx).update(cx, |store, cx| {
+                    store.prepend_local(
+                        GLOBAL_INBOX_BUCKET_CLAN_ID,
+                        InboxCategory::Messages,
+                        notification,
+                        cx,
+                    );
+                });
+            });
+        })
         .detach();
     }
 
+    /// Report a message for abuse. The caller gets the round trip back: a report that the server
+    /// refused must not read as one it took.
     pub fn report_message(
         &self,
         message_id: MessageId,
         abuse_type: String,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Task<anyhow::Result<()>> {
         let api = self.api.clone();
         let message_num = message_id.get();
-        cx.spawn(async move |_this, _cx| {
-            if let Err(e) = api.report_message_abuse(message_num, &abuse_type).await {
-                tracing::error!("report_message report_message_abuse failed: {e}");
-            }
+        cx.background_spawn(async move {
+            api.report_message_abuse(message_num, &abuse_type)
+                .await
+                .inspect_err(|e| tracing::error!("report_message report_message_abuse failed: {e}"))
         })
-        .detach();
     }
 
     /// Messages held in an arbitrary bucket (used by the discussion topic panel,
@@ -3248,8 +3491,33 @@ impl MessagesStore {
         }
         self.active_topic_id = next;
         self.active_topic_parent = None;
+        self.pending_topic_jump = None;
         self.sync_anonymous_mode(cx);
         cx.notify();
+    }
+
+    pub fn pending_topic_jump(&self) -> Option<MessageId> {
+        self.pending_topic_jump
+    }
+
+    pub fn queue_topic_jump(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        self.pending_topic_jump = Some(message_id);
+        self._pending_topic_jump_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(20))
+                .await;
+            let _ = this.update(cx, |this, _| {
+                if this.pending_topic_jump == Some(message_id) {
+                    this.pending_topic_jump = None;
+                }
+                this._pending_topic_jump_timer = None;
+            });
+        }));
+    }
+
+    pub fn clear_pending_topic_jump(&mut self) {
+        self.pending_topic_jump = None;
+        self._pending_topic_jump_timer = None;
     }
 
     fn drop_topic_bucket(&mut self, topic_id: ChannelId) {
@@ -3277,10 +3545,11 @@ impl MessagesStore {
         let Some(channel) = self.cache.get(&topic_key) else {
             return false;
         };
-        has_more_bottom_for(
-            self.last_message_by_channel.get(&topic_key).copied(),
-            &channel.messages,
-        )
+        channel.gap_bottom
+            || has_more_bottom_for(
+                self.last_message_by_channel.get(&topic_key).copied(),
+                &channel.messages,
+            )
     }
 
     /// Load a discussion topic's replies into their own bucket (keyed by topic id).
@@ -3329,11 +3598,120 @@ impl MessagesStore {
                     cx.notify();
                     return;
                 }
-                this.set_channel(topic_key, parsed);
-                if let Some(channel) = this.cache.get_mut(&topic_key) {
-                    channel.has_more = fetched >= TOPIC_FULL_PAGE_LEN;
-                }
+                this.replace_channel(topic_key, parsed, fetched >= TOPIC_FULL_PAGE_LEN);
                 cx.emit(MessagesEvent::TopicUpdated { topic_id });
+                if let Some(jump_id) = this.pending_topic_jump {
+                    if this.bucket_contains(topic_key, jump_id) {
+                        this.emit_topic_jump(jump_id, cx);
+                    } else {
+                        this.request_topic_jump(topic_id, jump_id, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn emit_topic_jump(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        self.queue_topic_jump(message_id, cx);
+        cx.emit(MessagesEvent::JumpTo {
+            message_id,
+            request_id: None,
+        });
+    }
+
+    pub fn request_topic_jump(
+        &mut self,
+        topic_id: i64,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        if message_id.is_optimistic() {
+            return;
+        }
+        let topic_key = ChannelId(topic_id);
+        if self
+            .cache
+            .get(&topic_key)
+            .is_some_and(|channel| channel.messages.contains_id(message_id))
+        {
+            if let Some(parent) = self.active_topic_parent.or(self.active_channel_id) {
+                self.active_topic_parent = Some(parent);
+            }
+            self.emit_topic_jump(message_id, cx);
+            return;
+        }
+        let Some(clan_id) = self.active_clan_id else {
+            return;
+        };
+        let Some(parent_channel_id) = self.active_topic_parent.or(self.active_channel_id) else {
+            return;
+        };
+        self.active_topic_parent = Some(parent_channel_id);
+        self.topic_loading = true;
+        cx.notify();
+        let api = self.api.clone();
+        let cfg = AppConfig::try_global(cx).cloned();
+        let viewer_id = viewer_user_id(cx);
+        let anchor = message_id.get();
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .list_topic_messages(
+                    clan_id.get(),
+                    parent_channel_id.get(),
+                    topic_id,
+                    anchor,
+                    DIRECTION_AROUND,
+                    MESSAGE_PAGE_LIMIT,
+                )
+                .await;
+            let msgs = match result {
+                Ok(page) => page.messages,
+                Err(e) => {
+                    tracing::error!(
+                        "request_topic_jump AROUND fetch failed for topic {topic_id}: {e}"
+                    );
+                    let _ = this.update(cx, |this, cx| {
+                        this.topic_loading = false;
+                        this.clear_pending_topic_jump();
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let parsed = prepare_messages(msgs, cfg.as_ref(), viewer_id);
+            let _ = this.update(cx, |this, cx| {
+                this.topic_loading = false;
+                if this.active_topic_id != Some(topic_key) {
+                    cx.notify();
+                    return;
+                }
+                let mut window = parsed;
+                sort_messages(&mut window);
+                if window.len() > MAX_MESSAGES_PER_CHANNEL {
+                    let target = window.iter().position(|m| m.id == message_id).unwrap_or(0);
+                    let half = MAX_MESSAGES_PER_CHANNEL / 2;
+                    let start = target
+                        .saturating_sub(half)
+                        .min(window.len() - MAX_MESSAGES_PER_CHANNEL);
+                    window = window[start..start + MAX_MESSAGES_PER_CHANNEL].to_vec();
+                }
+                let found = window.iter().any(|m| m.id == message_id);
+                if !found {
+                    tracing::warn!(
+                        message_id = anchor,
+                        "request_topic_jump: target not in AROUND window"
+                    );
+                    this.clear_pending_topic_jump();
+                    cx.notify();
+                    return;
+                }
+                recompute_message_grouping(&mut window);
+                let has_more = has_more_from_oldest(&window);
+                this.replace_channel_ex(topic_key, window, has_more, false, true);
+                cx.emit(MessagesEvent::TopicUpdated { topic_id });
+                this.emit_topic_jump(message_id, cx);
                 cx.notify();
             });
         })
@@ -3486,7 +3864,7 @@ impl MessagesStore {
             return false;
         };
         let expected_tail = self.last_message_by_channel.get(&topic_key).copied();
-        if !has_more_bottom_for(expected_tail, &channel.messages) {
+        if !channel.gap_bottom && !has_more_bottom_for(expected_tail, &channel.messages) {
             return false;
         }
         let Some(newest_id) = channel
@@ -3557,6 +3935,8 @@ impl MessagesStore {
                             if dropped > 0 {
                                 channel.has_more = true;
                             }
+                        } else {
+                            channel.gap_bottom = false;
                         }
                         appended
                     }
@@ -3570,6 +3950,9 @@ impl MessagesStore {
                     )
                 {
                     this.last_message_by_channel.insert(topic_key, tail);
+                    if let Some(channel) = this.cache.get_mut(&topic_key) {
+                        channel.gap_bottom = false;
+                    }
                 }
                 tracing::debug!(
                     topic_id = topic_key.get(),
@@ -3600,6 +3983,7 @@ impl MessagesStore {
         api_msg: mezon_client::transport::ApiMessage,
         anonymous: bool,
         local_sources: Vec<(String, Option<std::path::PathBuf>)>,
+        is_new_topic: bool,
         cx: &mut Context<Self>,
     ) -> TopicAppend {
         let topic_key = ChannelId(topic_id);
@@ -3644,7 +4028,11 @@ impl MessagesStore {
                 channel.messages.push_grouped(msg);
             }
         } else {
-            self.set_channel(topic_key, vec![msg]);
+            let has_more = has_more_from_oldest(std::slice::from_ref(&msg));
+            self.replace_channel(topic_key, vec![msg], has_more);
+        }
+        if is_new_topic && let Some(channel) = self.cache.get_mut(&topic_key) {
+            channel.has_more = false;
         }
         self.set_last_message(topic_key, message_id);
         let should_count_reply = topic_id != 0
@@ -4299,6 +4687,7 @@ impl MessagesStore {
             references: Vec::new(),
             reactions: Vec::new(),
             entity_mentions: Vec::new(),
+            topic_id: 0,
         };
         let cfg = AppConfig::try_global(cx);
         let viewer_id = viewer_user_id(cx);
@@ -4383,7 +4772,7 @@ impl MessagesStore {
         };
         let is_public = self.is_public;
         let mode = self.mode;
-        let reply = self.reply_target.take();
+        let reply = self.take_reply_target();
         if reply.is_some() {
             cx.emit(MessagesEvent::ReplyTargetChanged);
         }
@@ -4514,9 +4903,14 @@ impl MessagesStore {
         let is_public = self.is_public;
         let mode = self.mode;
         let has_attachments = !attachments.is_empty();
+        if let Some(onboarding) = crate::onboarding::OnboardingStore::try_global(cx) {
+            onboarding.update(cx, |store, cx| {
+                store.note_message_sent(clan_id, channel_id, cx);
+            });
+        }
         let reply = match reply_override {
             Some(draft) => Some(draft),
-            None => self.reply_target.take(),
+            None => self.take_reply_target(),
         };
         if reply.is_some() {
             cx.emit(MessagesEvent::ReplyTargetChanged);
@@ -4905,6 +5299,31 @@ impl MessagesStore {
             sender_id,
             sender_name,
             self.is_anonymous_mode(),
+            None,
+            cx,
+        );
+    }
+
+    pub fn send_sticker_reply(
+        &mut self,
+        url: String,
+        filename: String,
+        sender_id: String,
+        sender_name: String,
+        reply_to: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        let reply = self.reply_draft_for(reply_to);
+        self.send_url_attachment(
+            url,
+            filename,
+            STICKER_FILETYPE.to_string(),
+            0,
+            0,
+            sender_id,
+            sender_name,
+            self.is_anonymous_mode(),
+            reply,
             cx,
         );
     }
@@ -4927,6 +5346,7 @@ impl MessagesStore {
             sender_id,
             sender_name,
             self.is_anonymous_mode(),
+            None,
             cx,
         );
     }
@@ -4948,6 +5368,7 @@ impl MessagesStore {
             sender_id,
             sender_name,
             self.is_anonymous_mode(),
+            None,
             cx,
         );
     }
@@ -4962,6 +5383,7 @@ impl MessagesStore {
         sender_id: String,
         sender_name: String,
         anonymous: bool,
+        reply_override: Option<ReplyDraft>,
         cx: &mut Context<Self>,
     ) {
         if url.is_empty() {
@@ -4975,6 +5397,17 @@ impl MessagesStore {
         };
         let is_public = self.is_public;
         let mode = self.mode;
+        let reply = match reply_override {
+            Some(draft) => Some(draft),
+            None => self.take_reply_target(),
+        };
+        if reply.is_some() {
+            cx.emit(MessagesEvent::ReplyTargetChanged);
+        }
+        let reply_clan_id = (!self.is_dm)
+            .then_some(self.active_clan_id)
+            .flatten()
+            .filter(|clan_id| !clan_id.is_zero());
         self.clear_last_read_message(channel_id);
         let grouping_sender_id = if anonymous {
             AppConfig::try_global(cx)
@@ -4999,7 +5432,7 @@ impl MessagesStore {
                 content_tokens: OutgoingContent::default(),
                 attachments: Vec::new(),
                 ogp: None,
-                reply: None,
+                reply: reply.clone(),
                 anonymous,
                 message_code: 0,
                 url_attachment: Some(UrlAttachment {
@@ -5028,12 +5461,58 @@ impl MessagesStore {
 
         let (display_name, avatar_url, avatar_proxied) =
             outgoing_sender_profile(&sender_id, &sender_name, clan_id, cx);
+        let (reply_reference, reply_ref) = match &reply {
+            Some(draft) => {
+                let (clan_nick, display_name, username, avatar) = reference_sender_fields(
+                    draft.sender_id,
+                    (
+                        "",
+                        &draft.sender_name,
+                        &draft.sender_name,
+                        &draft.sender_avatar,
+                    ),
+                    reply_clan_id,
+                    cx,
+                );
+                (
+                    Some(MessageReference {
+                        message_ref_id: draft.message_ref_id,
+                        sender_id: draft.sender_id,
+                        sender_name: name_for_prioritize(&clan_nick, &display_name, &username),
+                        sender_clan_nick: clan_nick.clone(),
+                        sender_display_name: display_name.clone(),
+                        sender_username: username.clone(),
+                        sender_avatar: avatar.clone(),
+                        content_preview: crate::message::reply_preview_line(&draft.content_preview)
+                            .into(),
+                        content: draft.content_preview.clone(),
+                        has_attachment: draft.has_attachment,
+                        has_embed: draft.has_embed,
+                        is_poll: draft.is_poll,
+                    }),
+                    Some(OutgoingReply {
+                        message_ref_id: draft.message_ref_id.get(),
+                        content: draft.content_preview.clone(),
+                        has_attachment: draft.has_attachment,
+                        message_sender_id: draft.sender_id.get(),
+                        message_sender_username: username,
+                        message_sender_avatar: avatar,
+                        message_sender_clan_nick: clan_nick,
+                        message_sender_display_name: display_name,
+                    }),
+                )
+            }
+            None => (None, None),
+        };
         let mut optimistic =
             Message::new(temp_id, String::new(), sender_id, display_name, create_time)
                 .with_sort_id(sort_id)
                 .with_avatar(avatar_url)
                 .with_avatar_proxied(avatar_proxied)
                 .with_attachments(vec![optimistic_attachment]);
+        if let Some(reference) = reply_reference {
+            optimistic = optimistic.with_references(vec![reference]);
+        }
         if anonymous {
             let _ = anonymize_sender(&mut optimistic, AppConfig::try_global(cx));
         }
@@ -5041,12 +5520,11 @@ impl MessagesStore {
         if let Some(old_len) = appended {
             self.emit_appended(old_len, cx);
         }
-
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             ensure_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx).await;
             let result = api
-                .send_message_with_attachment_urls(
+                .send_message_with_attachment_urls_reply(
                     clan_id.get(),
                     channel_id.get(),
                     is_public,
@@ -5058,6 +5536,7 @@ impl MessagesStore {
                         width,
                         height,
                     }],
+                    reply_ref,
                     OutgoingMessageFlags {
                         anonymous_message: anonymous,
                         message_code: 0,
@@ -5124,13 +5603,14 @@ impl MessagesStore {
         self.pending_self_adds.clear();
         self.prune_message_ui_state();
         let Some(channel_id) = channel_id else {
+            let had_reply_target = self.reply_target().is_some();
             self.flush_pending_last_seen(cx);
             self.active_channel_id = None;
             self.active_clan_id = None;
             self.is_dm = false;
             self.loading = false;
             self.loading_more = false;
-            if self.reply_target.take().is_some() {
+            if had_reply_target {
                 cx.emit(MessagesEvent::ReplyTargetChanged);
             }
             self.sync_anonymous_mode(cx);
@@ -5249,8 +5729,9 @@ impl MessagesStore {
         mode: i32,
         cx: &mut Context<Self>,
     ) {
+        let previous_reply_target = self.reply_target().cloned();
         self.flush_pending_last_seen(cx);
-        if self.pending_jump.is_some_and(|(pc, _)| pc != channel_id) {
+        if self.pending_jump.is_some_and(|(pc, _, _)| pc != channel_id) {
             self.pending_jump = None;
         }
         self.active_channel_id = Some(channel_id);
@@ -5262,7 +5743,8 @@ impl MessagesStore {
         self.pending_below_by_channel.clear();
         self.loading_more = false;
         self.sync_anonymous_mode(cx);
-        if self.reply_target.take().is_some() {
+        self.reply_targets.touch(&channel_id);
+        if self.reply_target() != previous_reply_target.as_ref() {
             cx.emit(MessagesEvent::ReplyTargetChanged);
         }
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
@@ -5683,12 +6165,14 @@ impl MessagesStore {
         cx: &mut Context<Self>,
     ) {
         if self
-            .reply_target
-            .as_ref()
+            .reply_targets
+            .get(&storage_id)
             .is_some_and(|draft| draft.message_ref_id == message_id)
         {
-            self.reply_target = None;
-            cx.emit(MessagesEvent::ReplyTargetChanged);
+            self.reply_targets.remove(&storage_id);
+            if self.active_channel_id == Some(storage_id) {
+                cx.emit(MessagesEvent::ReplyTargetChanged);
+            }
         }
         self.retreat_last_message(storage_id, message_id);
 
@@ -6748,20 +7232,42 @@ impl MessagesStore {
     }
 
     fn set_channel(&mut self, channel_id: ChannelId, messages: Vec<Message>) {
-        let active = self.active_channel_id;
         let has_more = has_more_from_oldest(&messages);
-        if let Some(newest) = messages.last()
+        self.replace_channel(channel_id, messages, has_more);
+    }
+
+    fn replace_channel(&mut self, channel_id: ChannelId, messages: Vec<Message>, has_more: bool) {
+        self.replace_channel_ex(channel_id, messages, has_more, true, false);
+    }
+
+    fn replace_channel_ex(
+        &mut self,
+        channel_id: ChannelId,
+        messages: Vec<Message>,
+        has_more: bool,
+        touch_last: bool,
+        gap_bottom: bool,
+    ) {
+        let protect: Vec<ChannelId> = [self.active_topic_id, self.active_channel_id]
+            .into_iter()
+            .flatten()
+            .filter(|id| *id != channel_id)
+            .collect();
+        let protect_refs: Vec<&ChannelId> = protect.iter().collect();
+        if touch_last
+            && let Some(newest) = messages.last()
             && !self.last_message_by_channel.contains_key(&channel_id)
         {
             self.set_last_message(channel_id, newest.id);
         }
-        self.cache.insert(
+        self.cache.insert_protecting(
             channel_id,
             ChannelMessages {
-                messages: MessageList::from_messages(messages),
+                messages: MessageList::from_messages(channel_id, messages),
                 has_more,
+                gap_bottom,
             },
-            active.as_ref(),
+            &protect_refs,
         );
     }
 }
@@ -7754,6 +8260,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
         .as_deref()
         .and_then(|s| s.parse::<i64>().ok())
         .filter(|&id| id != 0)
+        .or_else(|| (m.topic_id != 0).then_some(m.topic_id))
         .map(ChannelId);
     let topic_creator_id = m
         .content_tokens
@@ -8391,7 +8898,7 @@ fn parse_embed_input(value: Option<&serde_json::Value>) -> Option<EmbedInput> {
             if options.is_empty() {
                 return None;
             }
-            Some(EmbedInput::Radio(EmbedRadio {
+            let mut radio = EmbedRadio {
                 id: id.into(),
                 options: options
                     .into_iter()
@@ -8404,8 +8911,12 @@ fn parse_embed_input(value: Option<&serde_json::Value>) -> Option<EmbedInput> {
                         disabled: option.disabled,
                     })
                     .collect(),
-                max_options: Some(wrapper.max_options.filter(|max| *max > 0).unwrap_or(1)),
-            }))
+                max_options: wrapper.max_options.filter(|max| *max > 0),
+            };
+            if radio.max_options.is_none() && radio.allows_multiple() {
+                radio.max_options = Some(i32::try_from(radio.options.len()).unwrap_or(i32::MAX));
+            }
+            Some(EmbedInput::Radio(radio))
         }
         Some(EMBED_COMPONENT_TYPE_ANIMATION) => {
             let component: ApiAnimationComponent =
@@ -9151,6 +9662,45 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_new_topic_reply_does_not_claim_older_history(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let clan = ClanId(1);
+            let parent = ChannelId(10);
+            let topic = ChannelId(77);
+
+            store.update(cx, |store, cx| {
+                store.activate(clan, parent, true, false, 1, 2, cx);
+                store.set_active_topic(Some(topic.get()), cx);
+                store.append_topic_message(
+                    topic.get(),
+                    api_page(&[5]).messages.into_iter().next().unwrap(),
+                    false,
+                    Vec::new(),
+                    true,
+                    cx,
+                );
+                assert!(
+                    !store.topic_has_more_top(),
+                    "the first reply of a new topic has no older history"
+                );
+                assert!(
+                    !store.load_more_topic(cx),
+                    "a new topic must not page older replies"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
     fn a_topic_pages_newer_replies_once_its_tail_was_trimmed(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let api = Arc::new(mezon_client::AppApi::new(
@@ -9261,6 +9811,65 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn reply_targets_are_restored_per_conversation(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let dm = ChannelId(11);
+            let clan_channel = ChannelId(22);
+            let dm_message = MessageId(1);
+            let clan_message = MessageId(2);
+
+            store.update(cx, |store, cx| {
+                store.set_channel(dm, vec![Message::new(dm_message, "dm", "5", "Bob", 100)]);
+                store.set_channel(
+                    clan_channel,
+                    vec![Message::new(clan_message, "clan", "6", "Eve", 200)],
+                );
+
+                store.activate(ClanId(0), dm, false, true, 3, 4, cx);
+                store.set_reply_to(dm_message, cx);
+                assert_eq!(
+                    store.reply_target().map(|draft| draft.message_ref_id),
+                    Some(dm_message)
+                );
+
+                store.close(cx);
+                store.activate(ClanId(1), clan_channel, true, false, 1, 2, cx);
+                assert!(store.reply_target().is_none());
+                store.set_reply_to(clan_message, cx);
+
+                store.close(cx);
+                store.activate(ClanId(0), dm, false, true, 3, 4, cx);
+                assert_eq!(
+                    store.reply_target().map(|draft| draft.message_ref_id),
+                    Some(dm_message)
+                );
+
+                store.activate(ClanId(1), clan_channel, true, false, 1, 2, cx);
+                assert_eq!(
+                    store.reply_target().map(|draft| draft.message_ref_id),
+                    Some(clan_message)
+                );
+                store.clear_reply(cx);
+
+                store.activate(ClanId(0), dm, false, true, 3, 4, cx);
+                assert_eq!(
+                    store.reply_target().map(|draft| draft.message_ref_id),
+                    Some(dm_message)
+                );
+            });
+        });
+    }
+
     fn api_page(ids: &[i64]) -> mezon_client::transport::ListChannelMessagesResult {
         mezon_client::transport::ListChannelMessagesResult {
             messages: ids
@@ -9284,6 +9893,7 @@ mod tests {
                     references: vec![],
                     reactions: vec![],
                     entity_mentions: vec![],
+                    topic_id: 0,
                 })
                 .collect(),
             last_seen_message_id: 0,
@@ -9836,6 +10446,11 @@ mod tests {
                 options: vec![radio_option("a", "a"), radio_option("b", "b")],
                 max_options: Some(1),
             };
+            let bounded_multi = EmbedRadio {
+                id: "implicit-picks".into(),
+                options: vec![radio_option("a", "a"), radio_option("b", "b")],
+                max_options: Some(2),
+            };
 
             store.update(cx, |store, cx| {
                 pick(store, &single, "y", cx);
@@ -9856,6 +10471,14 @@ mod tests {
                         .message_select_selection(message_id, "picks")
                         .is_empty(),
                     "picking the same option again clears it"
+                );
+
+                pick(store, &bounded_multi, "a", cx);
+                pick(store, &bounded_multi, "b", cx);
+                assert_eq!(
+                    store.message_select_selection(message_id, "implicit-picks"),
+                    ["a", "b"],
+                    "an inferred multi-choice radio accepts each available option"
                 );
             });
         });
@@ -10202,11 +10825,7 @@ mod tests {
             panic!("expected a radio");
         };
         assert!(radio.allows_multiple());
-        assert_eq!(
-            radio.max_options,
-            Some(1),
-            "React defaults a missing max_options to 1"
-        );
+        assert_eq!(radio.max_options, Some(2));
     }
 
     #[test]
@@ -10768,6 +11387,25 @@ mod tests {
     }
 
     #[test]
+    fn an_inbox_request_refused_for_its_avatar_is_retried_without_one() {
+        let request = mezon_proto::api::Message2InboxRequest {
+            message_id: 42,
+            channel_id: 7,
+            clan_id: 1,
+            avatar: "https://cdn.example/avatar.png".into(),
+            content: r#"{"t":"hi"}"#.into(),
+            topic_id: 88,
+            ..Default::default()
+        };
+        let retry = MessagesStore::message_2_inbox_without_avatar(&request).expect("retry request");
+        assert!(retry.avatar.is_empty());
+        assert_eq!(retry.message_id, 42);
+        assert_eq!(retry.topic_id, 88);
+        assert_eq!(retry.content, request.content);
+        assert!(MessagesStore::message_2_inbox_without_avatar(&retry).is_none());
+    }
+
+    #[test]
     fn message_from_api_maps_fields() {
         let m = message_from_api(
             ApiMessage {
@@ -10789,6 +11427,7 @@ mod tests {
                 references: vec![],
                 reactions: vec![],
                 entity_mentions: vec![],
+                topic_id: 0,
             },
             None,
             None,
@@ -10800,6 +11439,36 @@ mod tests {
         assert_eq!(m.sender_name, "Alice");
         assert_eq!(m.avatar_url, "av.png");
         assert_eq!(m.avatar_proxied, "av.png");
+    }
+
+    #[test]
+    fn message_from_api_uses_proto_topic_id_when_content_has_no_tp() {
+        let m = message_from_api(
+            ApiMessage {
+                message_id: 1,
+                content: "hi".into(),
+                content_raw: String::new(),
+                content_tokens: mezon_client::transport::ApiMessageContent {
+                    t: "hi".into(),
+                    ..Default::default()
+                },
+                code: 0,
+                sender_id: 1,
+                sender_name: "Alice".into(),
+                avatar: String::new(),
+                create_time: 100,
+                update_time: 0,
+                hide_editted: false,
+                attachments: vec![],
+                references: vec![],
+                reactions: vec![],
+                entity_mentions: vec![],
+                topic_id: 99,
+            },
+            None,
+            None,
+        );
+        assert_eq!(m.topic_id, Some(ChannelId(99)));
     }
 
     #[test]
@@ -10831,6 +11500,7 @@ mod tests {
                 references: vec![],
                 reactions: vec![],
                 entity_mentions: vec![],
+                topic_id: 0,
             },
             None,
             None,
@@ -10876,6 +11546,7 @@ mod tests {
             references: vec![],
             reactions: vec![],
             entity_mentions: vec![],
+            topic_id: 0,
         };
 
         let pending = message_from_api(msg(Some(vec![])), Some(&cfg), None);
@@ -11031,6 +11702,7 @@ mod tests {
             references,
             reactions: vec![],
             entity_mentions: vec![],
+            topic_id: 0,
         }
     }
 
@@ -11237,8 +11909,10 @@ mod tests {
     #[test]
     fn optimistic_create_time_increments_within_same_sender_burst() {
         let now = 1_700_000_000i64;
-        let mut list =
-            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "42", "Me", now - 5)]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(MessageId(1), "a", "42", "Me", now - 5)],
+        );
         assert_eq!(optimistic_create_time_at(&list, "42", now), now + 1);
         list.push_grouped(Message::new(
             MessageId::next_optimistic(),
@@ -11253,13 +11927,10 @@ mod tests {
     #[test]
     fn optimistic_create_time_resets_after_combine_window() {
         let now = 1_700_000_000i64;
-        let list = MessageList::from_messages(vec![Message::new(
-            MessageId(1),
-            "a",
-            "42",
-            "Me",
-            now - 700,
-        )]);
+        let list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(MessageId(1), "a", "42", "Me", now - 700)],
+        );
         assert_eq!(optimistic_create_time_at(&list, "42", now), now);
     }
 
@@ -11282,10 +11953,13 @@ mod tests {
 
     #[test]
     fn push_message_grouped_appends_in_order() {
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(1), "a", "u1", "U1", 100),
-            Message::new(MessageId(2), "b", "u1", "U1", 110),
-        ]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(1), "a", "u1", "U1", 100),
+                Message::new(MessageId(2), "b", "u1", "U1", 110),
+            ],
+        );
         list.push_grouped(Message::new(MessageId(3), "c", "u1", "U1", 120));
         assert_eq!(list.len(), 3);
         assert_eq!(list.as_slice()[2].id, MessageId(3));
@@ -11295,10 +11969,13 @@ mod tests {
 
     #[test]
     fn push_message_grouped_resorts_when_out_of_order() {
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(1), "a", "u1", "U1", 100),
-            Message::new(MessageId(3), "c", "u1", "U1", 120),
-        ]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(1), "a", "u1", "U1", 100),
+                Message::new(MessageId(3), "c", "u1", "U1", 120),
+            ],
+        );
         list.push_grouped(Message::new(MessageId(2), "b", "u1", "U1", 110));
         let ids: Vec<MessageId> = list.as_slice().iter().map(|m| m.id).collect();
         assert_eq!(ids, [MessageId(1), MessageId(2), MessageId(3)]);
@@ -11307,8 +11984,10 @@ mod tests {
 
     #[test]
     fn push_message_grouped_breaks_group_for_different_sender() {
-        let mut list =
-            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U1", 100)]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(MessageId(1), "a", "u1", "U1", 100)],
+        );
         list.push_grouped(Message::new(MessageId(2), "b", "u2", "U2", 105));
         assert!(!list.as_slice()[1].combined_with_prev);
         assert_list_consistent(&list);
@@ -11316,8 +11995,10 @@ mod tests {
 
     #[test]
     fn push_message_grouped_sets_forwarded_label_on_first_realtime_forward() {
-        let mut list =
-            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U1", 100)]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(MessageId(1), "a", "u1", "U1", 100)],
+        );
         list.push_grouped(Message::new(MessageId(2), "fwd", "u1", "U1", 110).with_forwarded(true));
         assert!(list.as_slice()[1].is_forwarded);
         assert!(list.as_slice()[1].show_forwarded_label);
@@ -11326,8 +12007,10 @@ mod tests {
 
     #[test]
     fn push_message_grouped_hides_forwarded_label_for_same_sender_burst() {
-        let mut list =
-            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U1", 100)]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(MessageId(1), "a", "u1", "U1", 100)],
+        );
         list.push_grouped(
             Message::new(MessageId(2), "fwd-a", "u1", "U1", 110).with_forwarded(true),
         );
@@ -11347,7 +12030,7 @@ mod tests {
 
     #[test]
     fn optimistic_sort_id_lands_in_the_server_snowflake_space() {
-        let list = MessageList::from_messages(Vec::new());
+        let list = MessageList::from_messages(ChannelId(1), Vec::new());
         let sort_id = optimistic_sort_id_at(&list, SEND_NOW_MS, 7);
         assert_eq!(sort_id >> SNOWFLAKE_TIME_SHIFT, SEND_NOW_MS);
         assert_eq!(sort_id & SNOWFLAKE_SEQUENCE_MASK, 7);
@@ -11357,7 +12040,10 @@ mod tests {
     #[test]
     fn optimistic_sort_id_stays_above_a_tail_minted_ahead_of_the_local_clock() {
         let ahead = server_id_at(SEND_NOW_MS + 5_000);
-        let list = MessageList::from_messages(vec![Message::new(ahead, "a", "u1", "U1", 100)]);
+        let list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(ahead, "a", "u1", "U1", 100)],
+        );
         assert_eq!(
             optimistic_sort_id_at(&list, SEND_NOW_MS, 0),
             ahead.get() + 1
@@ -11366,13 +12052,16 @@ mod tests {
 
     #[test]
     fn failed_optimistic_row_keeps_its_slot_when_a_later_message_arrives() {
-        let mut list = MessageList::from_messages(vec![Message::new(
-            server_id_at(SEND_NOW_MS - 1_000),
-            "a",
-            "u1",
-            "U1",
-            100,
-        )]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(
+                server_id_at(SEND_NOW_MS - 1_000),
+                "a",
+                "u1",
+                "U1",
+                100,
+            )],
+        );
         let sort_id = optimistic_sort_id_at(&list, SEND_NOW_MS, 0);
         let mut failed =
             Message::new(MessageId::next_optimistic(), "b", "u2", "U2", 110).with_sort_id(sort_id);
@@ -11392,13 +12081,16 @@ mod tests {
 
     #[test]
     fn acking_a_temp_that_is_no_longer_the_tail_restores_id_order() {
-        let mut list = MessageList::from_messages(vec![Message::new(
-            server_id_at(SEND_NOW_MS - 1_000),
-            "old",
-            "u1",
-            "U1",
-            100,
-        )]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(
+                server_id_at(SEND_NOW_MS - 1_000),
+                "old",
+                "u1",
+                "U1",
+                100,
+            )],
+        );
         let temp_id = MessageId::next_optimistic();
         list.push_grouped(
             Message::new(temp_id, "mine", "me", "Me", 110).with_sort_id(optimistic_sort_id_at(
@@ -11431,13 +12123,16 @@ mod tests {
 
     #[test]
     fn acking_a_temp_at_the_tail_does_not_resort() {
-        let mut list = MessageList::from_messages(vec![Message::new(
-            server_id_at(SEND_NOW_MS - 1_000),
-            "old",
-            "u1",
-            "U1",
-            100,
-        )]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(
+                server_id_at(SEND_NOW_MS - 1_000),
+                "old",
+                "u1",
+                "U1",
+                100,
+            )],
+        );
         let temp_id = MessageId::next_optimistic();
         list.push_grouped(
             Message::new(temp_id, "mine", "me", "Me", 110).with_sort_id(optimistic_sort_id_at(
@@ -11472,9 +12167,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_row_is_stamped_with_the_bucket_it_is_put_into() {
+        // A message id is only unique inside one bucket, so the bucket is the
+        // other half of a row's identity and has to survive being cloned out.
+        let topic = ChannelId(77);
+        let mut list =
+            MessageList::from_messages(topic, vec![Message::new(MessageId(1), "a", "u", "U", 1)]);
+        assert_eq!(list.as_slice()[0].channel_id, topic);
+
+        list.push_grouped(Message::new(MessageId(2), "b", "u", "U", 2));
+        list.prepend_older(vec![Message::new(MessageId(0), "z", "u", "U", 0)]);
+        list.append_newer(vec![Message::new(MessageId(3), "c", "u", "U", 3)]);
+
+        assert!(
+            list.as_slice().iter().all(|m| m.channel_id == topic),
+            "every path that puts a row into the list must stamp it"
+        );
+    }
+
     fn channel_msgs(msgs: Vec<Message>) -> ChannelMessages {
         ChannelMessages {
-            messages: MessageList::from_messages(msgs),
+            messages: MessageList::from_messages(ChannelId(1), msgs),
+            gap_bottom: false,
             has_more: false,
         }
     }
@@ -11576,10 +12291,13 @@ mod tests {
     #[test]
     fn temp_match_reconciles_optimistic_row_in_place() {
         let temp1 = MessageId::next_optimistic();
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(100), "earlier", "u1", "U", 100),
-            Message::new(temp1, "hello world", "u9", "Me", 200),
-        ]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(100), "earlier", "u1", "U", 100),
+                Message::new(temp1, "hello world", "u9", "Me", 200),
+            ],
+        );
         assert_eq!(list.temp_match_position("u9", "hello world"), Some(1));
         assert_eq!(list.temp_match_position("u9", "other"), None);
         let idx = list.temp_match_position("u9", "hello world").unwrap();
@@ -11601,8 +12319,10 @@ mod tests {
             "optimistic text must be stripped like the server-stored text"
         );
         let temp = MessageId::next_optimistic();
-        let list =
-            MessageList::from_messages(vec![Message::new(temp, optimistic_text, "u9", "Me", 200)]);
+        let list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(temp, optimistic_text, "u9", "Me", 200)],
+        );
         assert_eq!(
             list.temp_match_position("u9", "bold"),
             Some(0),
@@ -11612,10 +12332,13 @@ mod tests {
 
     #[test]
     fn server_echo_merge_preserves_message_grouping() {
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(100), "first", "u9", "Me", 200),
-            Message::new(MessageId(101), "second", "u9", "Me", 201),
-        ]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(100), "first", "u9", "Me", 200),
+                Message::new(MessageId(101), "second", "u9", "Me", 201),
+            ],
+        );
         let echo = Message::new(MessageId(101), "second", "0", "", 201);
         assert!(list.merge_existing(MessageId(101), echo));
         assert!(
@@ -11627,10 +12350,13 @@ mod tests {
 
     #[test]
     fn append_update_remove_keep_index_and_order() {
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(10), "a", "u1", "U", 100),
-            Message::new(MessageId(20), "b", "u1", "U", 110),
-        ]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(10), "a", "u1", "U", 100),
+                Message::new(MessageId(20), "b", "u1", "U", 110),
+            ],
+        );
         list.push_grouped(Message::new(MessageId(30), "c", "u1", "U", 120));
         assert_eq!(list.position(MessageId(30)), Some(2));
         list.get_mut_by_id(MessageId(20)).unwrap().content = "edited".into();
@@ -11644,10 +12370,13 @@ mod tests {
 
     #[test]
     fn prepend_older_and_append_newer_preserve_order_and_index() {
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(50), "e", "u1", "U", 150),
-            Message::new(MessageId(60), "f", "u1", "U", 160),
-        ]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(50), "e", "u1", "U", 150),
+                Message::new(MessageId(60), "f", "u1", "U", 160),
+            ],
+        );
         let dropped = list.prepend_older(vec![
             Message::new(MessageId(30), "c", "u1", "U", 130),
             Message::new(MessageId(40), "d", "u1", "U", 140),
@@ -11677,8 +12406,10 @@ mod tests {
 
     #[test]
     fn window_replace_rebuilds_index() {
-        let mut list =
-            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U", 100)]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(MessageId(1), "a", "u1", "U", 100)],
+        );
         list.replace(vec![
             Message::new(MessageId(8), "h", "u1", "U", 180),
             Message::new(MessageId(9), "i", "u1", "U", 190),
@@ -11692,6 +12423,7 @@ mod tests {
     #[test]
     fn append_at_cap_evicts_front_and_reindexes() {
         let mut list = MessageList::from_messages(
+            ChannelId(1),
             (0..MAX_MESSAGES_PER_CHANNEL)
                 .map(|i| Message::new(MessageId(i as i64), "m", "u", "U", i as i64))
                 .collect(),
@@ -11721,7 +12453,7 @@ mod tests {
             (1..MAX_MESSAGES_PER_CHANNEL)
                 .map(|i| Message::new(MessageId(i as i64), "m", "u", "U", i as i64)),
         );
-        let mut list = MessageList::from_messages(items);
+        let mut list = MessageList::from_messages(ChannelId(1), items);
         assert_eq!(list.len(), MAX_MESSAGES_PER_CHANNEL);
         assert_eq!(list.temp_ids, vec![temp_old]);
 
@@ -11744,26 +12476,34 @@ mod tests {
 
     #[test]
     fn has_more_bottom_false_when_tail_in_buffer() {
-        let list = MessageList::from_messages(vec![
-            Message::new(MessageId(1), "a", "u1", "U", 100),
-            Message::new(MessageId(99), "z", "u1", "U", 200),
-        ]);
+        let list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(1), "a", "u1", "U", 100),
+                Message::new(MessageId(99), "z", "u1", "U", 200),
+            ],
+        );
         assert!(!has_more_bottom_for(Some(MessageId(99)), &list));
     }
 
     #[test]
     fn has_more_bottom_true_when_tail_not_in_buffer() {
-        let list = MessageList::from_messages(vec![
-            Message::new(MessageId(1), "a", "u1", "U", 100),
-            Message::new(MessageId(50), "m", "u1", "U", 150),
-        ]);
+        let list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(1), "a", "u1", "U", 100),
+                Message::new(MessageId(50), "m", "u1", "U", 150),
+            ],
+        );
         assert!(has_more_bottom_for(Some(MessageId(99)), &list));
     }
 
     #[test]
     fn has_more_bottom_false_without_tail_or_empty_buffer() {
-        let list =
-            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U", 100)]);
+        let list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(MessageId(1), "a", "u1", "U", 100)],
+        );
         assert!(!has_more_bottom_for(None, &list));
         assert!(!has_more_bottom_for(
             Some(MessageId(1)),
@@ -11773,10 +12513,13 @@ mod tests {
 
     #[test]
     fn an_empty_newer_page_pins_the_tail_to_the_loaded_newest() {
-        let list = MessageList::from_messages(vec![
-            Message::new(MessageId(1), "a", "u1", "U", 100),
-            Message::new(MessageId(50), "m", "u1", "U", 150),
-        ]);
+        let list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(1), "a", "u1", "U", 100),
+                Message::new(MessageId(50), "m", "u1", "U", 150),
+            ],
+        );
         assert!(has_more_bottom_for(Some(MessageId(99)), &list));
 
         let reconciled = reconciled_tail_after_empty_page(
@@ -11816,10 +12559,13 @@ mod tests {
 
     #[test]
     fn tail_keyed_by_storage_bucket_avoids_parent_poison() {
-        let parent_buffer = MessageList::from_messages(vec![
-            Message::new(MessageId(100), "a", "u1", "U", 1),
-            Message::new(MessageId(200), "b", "u1", "U", 2),
-        ]);
+        let parent_buffer = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(100), "a", "u1", "U", 1),
+                Message::new(MessageId(200), "b", "u1", "U", 2),
+            ],
+        );
 
         let topic_msg = mezon_proto::api::ChannelMessage {
             channel_id: 10,
@@ -12078,7 +12824,7 @@ mod tests {
         let failed_id = failed.id;
         let pending_id = pending.id;
 
-        let list = MessageList::from_messages(vec![failed, pending]);
+        let list = MessageList::from_messages(ChannelId(1), vec![failed, pending]);
         let idx = list
             .temp_match_position("42", "hello")
             .expect("a non-failed temp should match");
@@ -12088,18 +12834,21 @@ mod tests {
 
     #[test]
     fn patch_reply_previews_after_delete_marks_reference() {
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(1), "reply", "u1", "U", 100).with_references(vec![
-                MessageReference {
-                    message_ref_id: MessageId(42),
-                    sender_id: UserId(1),
-                    sender_name: "x".into(),
-                    content: "orig".into(),
-                    content_preview: "orig".into(),
-                    ..Default::default()
-                },
-            ]),
-        ]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(1), "reply", "u1", "U", 100).with_references(vec![
+                    MessageReference {
+                        message_ref_id: MessageId(42),
+                        sender_id: UserId(1),
+                        sender_name: "x".into(),
+                        content: "orig".into(),
+                        content_preview: "orig".into(),
+                        ..Default::default()
+                    },
+                ]),
+            ],
+        );
         patch_reply_previews_after_delete(&mut list, MessageId(42));
         assert_eq!(
             list.as_slice()[0].references[0].content,
@@ -12676,6 +13425,42 @@ mod tests {
     }
 
     #[gpui::test]
+    fn new_topic_reply_marks_top_without_disabling_existing_topic_history(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            let new_topic_id = 77;
+            let existing_topic_id = 88;
+            store.update(cx, |store, cx| {
+                store.set_active_topic(Some(new_topic_id), cx);
+                store.append_topic_message(
+                    new_topic_id,
+                    plain_api_message(0, Vec::new()),
+                    false,
+                    Vec::new(),
+                    true,
+                    cx,
+                );
+
+                assert!(!store.topic_has_more_top());
+
+                store.set_active_topic(Some(existing_topic_id), cx);
+                store.append_topic_message(
+                    existing_topic_id,
+                    plain_api_message(0, Vec::new()),
+                    false,
+                    Vec::new(),
+                    false,
+                    cx,
+                );
+
+                assert!(store.topic_has_more_top());
+            });
+        });
+    }
+
+    #[gpui::test]
     fn resend_keeps_a_failed_row_it_cannot_replay(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let store = test_store(cx);
@@ -12724,6 +13509,52 @@ mod tests {
                 assert_eq!(
                     payload.url_attachment.as_ref().map(|a| a.url.as_str()),
                     Some("https://cdn.example/sticker.webp")
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_url_attachment_reply_keeps_its_reference(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let channel = ChannelId(7);
+                let target = MessageId(42);
+                store.set_channel(
+                    channel,
+                    vec![Message::new(target, "hello", "6", "Eve", 100)],
+                );
+                store.active_channel_id = Some(channel);
+                store.active_clan_id = Some(ClanId(1));
+                store.set_reply_to(target, cx);
+
+                store.send_sticker(
+                    "https://cdn.example/sticker.webp".to_string(),
+                    "sticker.webp".to_string(),
+                    "5".to_string(),
+                    "Bob".to_string(),
+                    cx,
+                );
+
+                assert!(store.reply_target().is_none());
+                let payload = store
+                    .pending_send_payloads
+                    .values()
+                    .next()
+                    .expect("sticker reply records a payload to retry with");
+                assert_eq!(
+                    payload.reply.as_ref().map(|reply| reply.message_ref_id),
+                    Some(target)
+                );
+                assert_eq!(
+                    store
+                        .cache
+                        .get(&channel)
+                        .and_then(|messages| messages.messages.last())
+                        .and_then(|message| message.references.first())
+                        .map(|reference| reference.message_ref_id),
+                    Some(target)
                 );
             });
         });
@@ -12787,8 +13618,10 @@ mod tests {
 
     #[test]
     fn has_more_bottom_ignores_an_optimistic_tail_id() {
-        let list =
-            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U", 100)]);
+        let list = MessageList::from_messages(
+            ChannelId(1),
+            vec![Message::new(MessageId(1), "a", "u1", "U", 100)],
+        );
         assert!(
             !has_more_bottom_for(Some(MessageId::next_optimistic()), &list),
             "an un-acked optimistic row is not evidence of unloaded server history"
@@ -12797,11 +13630,14 @@ mod tests {
 
     #[test]
     fn removing_a_reply_in_the_middle_keeps_the_index_and_order() {
-        let mut list = MessageList::from_messages(vec![
-            Message::new(MessageId(1), "first", "u1", "U1", 100),
-            Message::new(MessageId(2), "second", "u2", "U2", 200),
-            Message::new(MessageId(3), "third", "u3", "U3", 300),
-        ]);
+        let mut list = MessageList::from_messages(
+            ChannelId(1),
+            vec![
+                Message::new(MessageId(1), "first", "u1", "U1", 100),
+                Message::new(MessageId(2), "second", "u2", "U2", 200),
+                Message::new(MessageId(3), "third", "u3", "U3", 300),
+            ],
+        );
 
         assert_eq!(list.remove_id(MessageId(2)), Some(1));
         assert_list_consistent(&list);

@@ -5409,19 +5409,34 @@ impl Window {
         self.platform_window.hide();
     }
 
+    /// mezon vendor edit: cancel in-progress IME composition at the platform
+    /// level (Linux DBus Reset / zwp_text_input disable-enable) so a picker or
+    /// field switch can drop an uncommitted preedit while App is already borrowed.
+    pub fn reset_ime(&self) {
+        self.platform_window.reset_ime();
+    }
+
     /// Toggle full screen status on the current window at the platform level.
     pub fn toggle_fullscreen(&self) {
         self.platform_window.toggle_fullscreen();
     }
 
     /// Updates the IME panel position suggestions for languages like japanese, chinese.
+    ///
+    /// mezon vendor edit: read surrounding while App is already borrowed (avoids
+    /// AsyncApp reentrancy on Linux IME sync), pass a one-shot hint into
+    /// `update_ime_position`, then always retract so blur / mid-composition /
+    /// DeleteSurrounding never see a stale snapshot.
     pub fn invalidate_character_coordinates(&self) {
         self.on_next_frame(|window, cx| {
             if let Some(mut input_handler) = window.platform_window.take_input_handler() {
                 let bounds = input_handler.selected_bounds(window, cx);
+                let surrounding = input_handler.surrounding_text_in(window, cx);
                 window.platform_window.set_input_handler(input_handler);
                 if let Some(bounds) = bounds {
+                    window.platform_window.set_ime_surrounding_hint(surrounding);
                     window.platform_window.update_ime_position(bounds);
+                    window.platform_window.set_ime_surrounding_hint(None);
                 }
             }
         });

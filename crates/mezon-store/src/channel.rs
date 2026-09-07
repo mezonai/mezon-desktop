@@ -20,6 +20,7 @@ use mezon_client::{
 
 use crate::KeyedCache;
 use crate::badge::BadgeService;
+use crate::channel_settings::ChannelSettingsStore;
 use crate::clan::{ClanEvent, ClanList};
 use crate::compose::ComposeStore;
 use crate::event_targets_user;
@@ -134,6 +135,9 @@ pub struct ArchivedChannelDesc {
     pub channel_id: i64,
     pub channel_label: String,
     pub channel_private: bool,
+    pub category_id: i64,
+    pub creator_id: i64,
+    pub age_restricted: bool,
     pub last_active_timestamp: Option<i64>,
 }
 
@@ -236,6 +240,27 @@ pub fn delete_allowed_by_server(
     is_creator || has_owner || has_administrator || has_manage_clan || has_manage_channel
 }
 
+/// Mirrors `UpdateChannelDesc` in mezon-api: the channel creator is let through before any
+/// permission is read, everyone else needs at least the manage-channel level.
+pub fn manage_allowed_by_server(
+    is_creator: bool,
+    has_owner: bool,
+    has_administrator: bool,
+    has_manage_clan: bool,
+    has_manage_channel: bool,
+) -> bool {
+    is_creator || has_owner || has_administrator || has_manage_clan || has_manage_channel
+}
+
+pub fn channel_access_allowed(
+    private: bool,
+    is_creator: bool,
+    current_user_id: Option<UserId>,
+    user_ids: &[UserId],
+) -> bool {
+    !private || is_creator || current_user_id.is_some_and(|user_id| user_ids.contains(&user_id))
+}
+
 pub fn can_archive_channel(clan_id: ClanId, channel_id: ChannelId, cx: &App) -> bool {
     ChannelList::global(cx)
         .read(cx)
@@ -248,23 +273,49 @@ pub fn can_delete_channel(clan_id: ClanId, channel_id: ChannelId, cx: &App) -> b
         .can_delete_channel_for(clan_id, channel_id, cx)
 }
 
+pub fn can_manage_channel(clan_id: ClanId, channel_id: ChannelId, cx: &App) -> bool {
+    ChannelList::global(cx)
+        .read(cx)
+        .can_manage_channel_for(clan_id, channel_id, cx)
+}
+
 fn archive_permission_for(
     channel_list: &ChannelList,
     clan_id: ClanId,
     channel_id: ChannelId,
     cx: &App,
 ) -> bool {
-    let Some(channel) = channel_list.channel(clan_id, channel_id) else {
-        return false;
-    };
-    let is_welcome = ClanList::global(cx).read(cx).welcome_channel_id(clan_id) == Some(channel_id);
-    if archive_menu_hidden(channel.channel_type, is_welcome) {
+    let fallback = ChannelSettingsStore::try_global(cx)
+        .and_then(|store| store.read(cx).row_by_id(clan_id, channel_id).cloned());
+    let channel = channel_list.channel(clan_id, channel_id);
+    if channel.is_none() && fallback.is_none() {
         return false;
     }
-    let is_thread = channel.parent_id.is_some();
-    let is_creator = BadgeService::try_global(cx)
-        .and_then(|badges| badges.read(cx).current_user_id(cx))
-        .is_some_and(|me| me == channel.creator_id);
+    let is_welcome = ClanList::global(cx).read(cx).welcome_channel_id(clan_id) == Some(channel_id);
+    let channel_type = channel
+        .map(|channel| channel.channel_type)
+        .unwrap_or_else(|| {
+            ChannelType::from_raw(fallback.as_ref().unwrap().channel_type.max(0) as u32)
+        });
+    if archive_menu_hidden(channel_type, is_welcome) {
+        return false;
+    }
+    let is_thread = channel
+        .map(|channel| channel.parent_id.is_some())
+        .unwrap_or_else(|| !fallback.as_ref().unwrap().parent_id.is_zero());
+    let creator_id = channel
+        .map(|channel| channel.creator_id)
+        .unwrap_or_else(|| fallback.as_ref().unwrap().creator_id);
+    let current_user_id =
+        BadgeService::try_global(cx).and_then(|badges| badges.read(cx).current_user_id(cx));
+    let is_creator = current_user_id == Some(creator_id);
+    let can_access = fallback
+        .as_ref()
+        .map(|row| channel_access_allowed(row.private, is_creator, current_user_id, &row.user_ids))
+        .unwrap_or(channel.is_some());
+    if !can_access {
+        return false;
+    }
     let Some(permissions) = PermissionStore::try_global(cx) else {
         return is_creator;
     };
@@ -288,17 +339,65 @@ fn delete_permission_for(
     if ClanList::global(cx).read(cx).welcome_channel_id(clan_id) == Some(channel_id) {
         return false;
     }
-    let Some(channel) = channel_list.channel(clan_id, channel_id) else {
+    let channel = channel_list.channel(clan_id, channel_id);
+    let fallback = ChannelSettingsStore::try_global(cx)
+        .and_then(|store| store.read(cx).row_by_id(clan_id, channel_id).cloned());
+    let creator_id = channel
+        .map(|channel| channel.creator_id)
+        .or_else(|| fallback.as_ref().map(|row| row.creator_id));
+    let Some(creator_id) = creator_id else {
         return false;
     };
-    let is_creator = BadgeService::try_global(cx)
-        .and_then(|badges| badges.read(cx).current_user_id(cx))
-        .is_some_and(|me| me == channel.creator_id);
+    let current_user_id =
+        BadgeService::try_global(cx).and_then(|badges| badges.read(cx).current_user_id(cx));
+    let is_creator = current_user_id == Some(creator_id);
+    let can_access = fallback
+        .as_ref()
+        .map(|row| channel_access_allowed(row.private, is_creator, current_user_id, &row.user_ids))
+        .unwrap_or(channel.is_some());
+    if !can_access {
+        return false;
+    }
     let Some(permissions) = PermissionStore::try_global(cx) else {
         return is_creator;
     };
     let permissions = permissions.read(cx);
     delete_allowed_by_server(
+        is_creator,
+        permissions.check(clan_id, None, PERMISSION_CLAN_OWNER, cx),
+        permissions.check(clan_id, None, PERMISSION_ADMINISTRATOR, cx),
+        permissions.check(clan_id, None, PERMISSION_MANAGE_CLAN, cx),
+        permissions.check(clan_id, None, PERMISSION_MANAGE_CHANNEL, cx),
+    )
+}
+
+fn manage_permission_for(
+    channel_list: &ChannelList,
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    cx: &App,
+) -> bool {
+    let channel = channel_list.channel(clan_id, channel_id);
+    let fallback = ChannelSettingsStore::try_global(cx)
+        .and_then(|store| store.read(cx).row_by_id(clan_id, channel_id).cloned());
+    let creator_id = channel
+        .map(|channel| channel.creator_id)
+        .or_else(|| fallback.as_ref().map(|row| row.creator_id));
+    let current_user_id =
+        BadgeService::try_global(cx).and_then(|badges| badges.read(cx).current_user_id(cx));
+    let is_creator = creator_id.is_some_and(|creator_id| current_user_id == Some(creator_id));
+    let can_access = fallback
+        .as_ref()
+        .map(|row| channel_access_allowed(row.private, is_creator, current_user_id, &row.user_ids))
+        .unwrap_or(channel.is_some());
+    if !can_access {
+        return false;
+    }
+    let Some(permissions) = PermissionStore::try_global(cx) else {
+        return is_creator;
+    };
+    let permissions = permissions.read(cx);
+    manage_allowed_by_server(
         is_creator,
         permissions.check(clan_id, None, PERMISSION_CLAN_OWNER, cx),
         permissions.check(clan_id, None, PERMISSION_ADMINISTRATOR, cx),
@@ -335,6 +434,12 @@ pub enum ChannelEvent {
     ClanChannelsLoaded(ClanId),
     UserChannelsLoaded,
     ArchivedByAdministrator { is_thread: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CtrlKFocusChannel {
+    pub channel_id: ChannelId,
+    pub parent_id: Option<ChannelId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -483,6 +588,7 @@ pub struct ChannelList {
     in_voice: HashMap<UserId, InVoiceInfo>,
     user_channels_loaded: bool,
     loading: HashMap<ClanId, Shared<Task<()>>>,
+    pending_clan_refresh: HashSet<ClanId>,
     active_clan_id: Option<ClanId>,
     pub active_channel_id: Option<ChannelId>,
     remembered_channels: HashMap<ClanId, ChannelId>,
@@ -502,6 +608,9 @@ pub struct ChannelList {
     deleted_channel_parents: HashMap<ChannelId, ChannelId>,
     channel_detail_pending: HashSet<ChannelId>,
     channel_detail_failed: HashSet<ChannelId>,
+    ctrlk_focus: Option<CtrlKFocusChannel>,
+    channel_details_for_settings: HashSet<ChannelId>,
+    detached_channel_details: HashMap<(ClanId, ChannelId), Channel>,
     _previous_channels_persist: Task<()>,
     _clan_sub: Subscription,
     _conn_watch: Task<()>,
@@ -601,6 +710,10 @@ impl ChannelList {
         delete_permission_for(self, clan_id, channel_id, cx)
     }
 
+    pub fn can_manage_channel_for(&self, clan_id: ClanId, channel_id: ChannelId, cx: &App) -> bool {
+        manage_permission_for(self, clan_id, channel_id, cx)
+    }
+
     pub fn fetch_channel_app_url(
         &self,
         app_id: i64,
@@ -656,6 +769,7 @@ impl ChannelList {
         self.in_voice.clear();
         self.user_channels_loaded = false;
         self.loading.clear();
+        self.pending_clan_refresh.clear();
         self.show_empty_categories.clear();
         self.remembered_channels.clear();
         self.previous_channels.clear();
@@ -671,6 +785,9 @@ impl ChannelList {
         self.deleted_channel_parents.clear();
         self.channel_detail_pending.clear();
         self.channel_detail_failed.clear();
+        self.ctrlk_focus = None;
+        self.channel_details_for_settings.clear();
+        self.detached_channel_details.clear();
         self.active_clan_id = None;
         if self.active_channel_id.take().is_some() {
             cx.emit(ChannelEvent::ActiveChannelChanged(None));
@@ -751,6 +868,7 @@ impl ChannelList {
             in_voice: HashMap::new(),
             user_channels_loaded: false,
             loading: HashMap::new(),
+            pending_clan_refresh: HashSet::new(),
             active_clan_id: None,
             active_channel_id: None,
             remembered_channels: HashMap::new(),
@@ -770,6 +888,9 @@ impl ChannelList {
             deleted_channel_parents: HashMap::new(),
             channel_detail_pending: HashSet::new(),
             channel_detail_failed: HashSet::new(),
+            ctrlk_focus: None,
+            channel_details_for_settings: HashSet::new(),
+            detached_channel_details: HashMap::new(),
             _previous_channels_persist: Task::ready(()),
             _clan_sub: clan_sub,
             _conn_watch: conn_watch,
@@ -828,7 +949,10 @@ impl ChannelList {
         self.joined_clans.remove(&clan_id);
         self.joining_clans.remove(&clan_id);
         self.loading.remove(&clan_id);
+        self.pending_clan_refresh.remove(&clan_id);
         self.show_empty_categories.remove(&clan_id);
+        self.detached_channel_details
+            .retain(|(detail_clan_id, _), _| *detail_clan_id != clan_id);
         self.remembered_channels.remove(&clan_id);
         if self.previous_channels.remove(&clan_id).is_some() {
             self.persist_previous_channels(cx);
@@ -1202,6 +1326,10 @@ impl ChannelList {
         }
         self.want_extras.insert(clan_id);
         self.extras_loaded.remove(&clan_id);
+        if self.loading.contains_key(&clan_id) {
+            self.pending_clan_refresh.insert(clan_id);
+            return;
+        }
         self.fetch_clan(clan_id, cx);
     }
 
@@ -1223,6 +1351,9 @@ impl ChannelList {
                     channel_id: d.channel_id,
                     channel_label: d.channel_label,
                     channel_private: d.channel_private != 0,
+                    category_id: d.category_id,
+                    creator_id: d.creator_id,
+                    age_restricted: d.age_restricted != 0,
                     last_active_timestamp: d
                         .last_sent_message
                         .filter(|m| m.timestamp_seconds > 0)
@@ -1240,10 +1371,32 @@ impl ChannelList {
     ) -> Task<Result<(), String>> {
         let api = self.api.clone();
         let clan_id_raw = clan_id.get();
-        cx.spawn(async move |_, _| {
-            api.restore_archived_channel(clan_id_raw, channel_id)
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .restore_archived_channel(clan_id_raw, channel_id)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string());
+            if result.is_ok() {
+                let channel_id = ChannelId(channel_id);
+                let _ = this.update(cx, |this, cx| {
+                    this.archived_channel_ids.remove(&channel_id);
+                    this.archived_channel_parents.remove(&channel_id);
+                    if let Some(children) = this.archived_cascade_children.remove(&channel_id) {
+                        for child_id in children {
+                            this.archived_channel_ids.remove(&child_id);
+                        }
+                    }
+                    this.channel_detail_failed.remove(&channel_id);
+                    this.refresh_clan(clan_id, cx);
+                    this.ensure_channel_in_clan(clan_id, channel_id, cx);
+                    if let Some(settings) = ChannelSettingsStore::try_global(cx) {
+                        settings.update(cx, |settings, cx| {
+                            settings.refresh_rows(clan_id, ChannelId(0), cx)
+                        });
+                    }
+                });
+            }
+            result
         })
     }
 
@@ -1265,6 +1418,14 @@ impl ChannelList {
                     let parent_id = this
                         .channel(clan_id, channel_id)
                         .and_then(|ch| ch.parent_id)
+                        .or_else(|| {
+                            ChannelSettingsStore::try_global(cx).and_then(|store| {
+                                store
+                                    .read(cx)
+                                    .row_by_id(clan_id, channel_id)
+                                    .map(|row| row.parent_id)
+                            })
+                        })
                         .unwrap_or(ChannelId(0));
                     Ok((parent_id, this.api.clone()))
                 })
@@ -1315,6 +1476,14 @@ impl ChannelList {
                     let parent_id = this
                         .channel(clan_id, channel_id)
                         .and_then(|ch| ch.parent_id)
+                        .or_else(|| {
+                            ChannelSettingsStore::try_global(cx).and_then(|store| {
+                                store
+                                    .read(cx)
+                                    .row_by_id(clan_id, channel_id)
+                                    .map(|row| row.parent_id)
+                            })
+                        })
                         .unwrap_or(ChannelId(0));
                     Ok((parent_id, this.api.clone()))
                 })
@@ -1435,6 +1604,9 @@ impl ChannelList {
                             }
                             this.apply_clan_structure(clan_id, categories, favorite_ids, cx);
                             this.loading.remove(&clan_id);
+                            if this.pending_clan_refresh.remove(&clan_id) {
+                                this.refresh_clan(clan_id, cx);
+                            }
                         });
                     }
                     Err(e) => {
@@ -1446,6 +1618,9 @@ impl ChannelList {
                                 return;
                             }
                             this.loading.remove(&clan_id);
+                            if this.pending_clan_refresh.remove(&clan_id) {
+                                this.refresh_clan(clan_id, cx);
+                            }
                             cx.notify();
                         });
                     }
@@ -1524,6 +1699,35 @@ impl ChannelList {
         self.deleted_channel_ids.contains(&channel_id)
     }
 
+    pub fn reconcile_active_channels(
+        &mut self,
+        clan_id: ClanId,
+        channel_ids: &[ChannelId],
+        cx: &mut Context<Self>,
+    ) {
+        let restored = channel_ids
+            .iter()
+            .copied()
+            .filter(|channel_id| self.archived_channel_ids.remove(channel_id))
+            .collect::<Vec<_>>();
+        if restored.is_empty() {
+            return;
+        }
+        for channel_id in &restored {
+            self.archived_channel_parents.remove(channel_id);
+            if let Some(children) = self.archived_cascade_children.remove(channel_id) {
+                for child_id in children {
+                    self.archived_channel_ids.remove(&child_id);
+                }
+            }
+            self.channel_detail_failed.remove(channel_id);
+        }
+        self.refresh_clan(clan_id, cx);
+        for channel_id in restored {
+            self.ensure_channel_in_clan(clan_id, channel_id, cx);
+        }
+    }
+
     pub fn deleted_channel_parent(&self, channel_id: ChannelId) -> Option<ChannelId> {
         self.deleted_channel_parents.get(&channel_id).copied()
     }
@@ -1586,6 +1790,7 @@ impl ChannelList {
                 match desc {
                     Some(desc) => this.apply_channel_detail(clan_id, desc, cx),
                     None => {
+                        this.channel_details_for_settings.remove(&channel_id);
                         this.channel_detail_failed.insert(channel_id);
                         cx.notify();
                     }
@@ -1596,6 +1801,24 @@ impl ChannelList {
         true
     }
 
+    /// Loads a complete channel description for the settings UI without forcing a hidden
+    /// thread into the sidebar's clan structure.
+    pub fn ensure_channel_for_settings(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.channel(clan_id, channel_id).is_some() {
+            return true;
+        }
+        if self.is_locally_archived(channel_id) || self.is_locally_deleted(channel_id) {
+            return false;
+        }
+        self.channel_details_for_settings.insert(channel_id);
+        self.ensure_channel_in_clan(clan_id, channel_id, cx)
+    }
+
     fn apply_channel_detail(
         &mut self,
         clan_id: ClanId,
@@ -1604,15 +1827,23 @@ impl ChannelList {
     ) {
         let channel_id = ChannelId(desc.channel_id);
         if self.is_locally_archived(channel_id) || self.is_locally_deleted(channel_id) {
+            self.channel_details_for_settings.remove(&channel_id);
             return;
         }
         let badge = desc.badge_count.max(0) as u32;
         let mut channel = channel_from_desc(desc, badge, Vec::new(), false);
+        channel.clan_id = clan_id;
         if !channel.visible_in_sidebar() {
+            if self.channel_details_for_settings.remove(&channel_id) {
+                self.detached_channel_details
+                    .insert((clan_id, channel_id), channel);
+                cx.notify();
+                return;
+            }
             self.channel_detail_failed.insert(channel_id);
             return;
         }
-        channel.clan_id = clan_id;
+        self.channel_details_for_settings.remove(&channel_id);
         let Some(categories) = self.cache.get_mut(&clan_id) else {
             return;
         };
@@ -2871,17 +3102,30 @@ impl ChannelList {
                 .map_err(|e| UpdateChannelOverviewError::Other(e.to_string()))?;
 
             this.update(cx, |this, cx| {
-                if let Some(categories) = this.cache.get_mut(&clan_id)
+                let changed_in_structure = if let Some(categories) = this.cache.get_mut(&clan_id)
                     && update_channel(
                         categories,
                         channel_id,
-                        Some(validated),
-                        Some(topic),
+                        Some(validated.clone()),
+                        Some(topic.clone()),
                         Some(age_restricted),
                         channel.private,
-                    )
-                {
+                    ) {
                     this.invalidate_channel_index(clan_id);
+                    true
+                } else {
+                    false
+                };
+                let changed_detached = this
+                    .detached_channel_details
+                    .get_mut(&(clan_id, channel_id))
+                    .is_some_and(|detail| {
+                        detail.name = validated;
+                        detail.topic = topic;
+                        detail.age_restricted = age_restricted;
+                        true
+                    });
+                if changed_in_structure || changed_detached {
                     cx.notify();
                 }
             })
@@ -3638,9 +3882,32 @@ impl ChannelList {
         cx.notify();
     }
 
+    pub fn set_ctrlk_focus_channel(
+        &mut self,
+        channel_id: ChannelId,
+        parent_id: Option<ChannelId>,
+        cx: &mut Context<Self>,
+    ) {
+        self.ctrlk_focus = Some(CtrlKFocusChannel {
+            channel_id,
+            parent_id,
+        });
+        cx.notify();
+    }
+
+    pub fn ctrlk_focus_channel(&self) -> Option<&CtrlKFocusChannel> {
+        self.ctrlk_focus.as_ref()
+    }
+
+    pub fn clear_ctrlk_focus_channel(&mut self) -> Option<CtrlKFocusChannel> {
+        self.ctrlk_focus.take()
+    }
+
     pub fn channel(&self, clan_id: ClanId, channel_id: ChannelId) -> Option<&Channel> {
-        let (cat_idx, ch_idx) = self.channel_location(clan_id, channel_id)?;
-        self.cache.get(&clan_id)?.get(cat_idx)?.channels.get(ch_idx)
+        if let Some((cat_idx, ch_idx)) = self.channel_location(clan_id, channel_id) {
+            return self.cache.get(&clan_id)?.get(cat_idx)?.channels.get(ch_idx);
+        }
+        self.detached_channel_details.get(&(clan_id, channel_id))
     }
 
     pub fn find_channel_in_active_clan(&self, channel_id: ChannelId) -> Option<&Channel> {
@@ -3856,6 +4123,11 @@ impl ChannelList {
         parent_id: ChannelId,
         cx: &mut Context<Self>,
     ) {
+        if let Some(store) = ChannelSettingsStore::try_global(cx) {
+            store.update(cx, |store, cx| {
+                store.remove_channel_locally(clan_id, channel_id, cx)
+            });
+        }
         self.deleted_channel_ids.insert(channel_id);
         if !parent_id.is_zero() {
             self.deleted_channel_parents.insert(channel_id, parent_id);
@@ -3929,6 +4201,11 @@ impl ChannelList {
         parent_id: ChannelId,
         cx: &mut Context<Self>,
     ) {
+        if let Some(store) = ChannelSettingsStore::try_global(cx) {
+            store.update(cx, |store, cx| {
+                store.remove_channel_locally(clan_id, channel_id, cx)
+            });
+        }
         let leaving_badge = self
             .channel(clan_id, channel_id)
             .map(|ch| ch.badge_count)
@@ -4249,12 +4526,16 @@ impl ChannelList {
     }
 
     fn channel_mut(&mut self, clan_id: ClanId, channel_id: ChannelId) -> Option<&mut Channel> {
-        let (cat_idx, ch_idx) = self.channel_location(clan_id, channel_id)?;
-        self.cache
-            .get_mut(&clan_id)?
-            .get_mut(cat_idx)?
-            .channels
-            .get_mut(ch_idx)
+        if let Some((cat_idx, ch_idx)) = self.channel_location(clan_id, channel_id) {
+            return self
+                .cache
+                .get_mut(&clan_id)?
+                .get_mut(cat_idx)?
+                .channels
+                .get_mut(ch_idx);
+        }
+        self.detached_channel_details
+            .get_mut(&(clan_id, channel_id))
     }
 
     pub fn clan_id_for_channel(&self, channel_id: ChannelId) -> Option<ClanId> {
@@ -5741,7 +6022,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|cx| {
-            let channels = init_authenticated_channel_list(cx);
+            let channels = init_channel_list_with_threads(cx);
             channels.update(cx, |channels, cx| {
                 channels.apply_clan_structure(
                     ClanId(1),
@@ -10137,6 +10418,34 @@ mod tests {
     }
 
     #[test]
+    fn manage_allowed_accepts_creator_without_any_permission() {
+        assert!(manage_allowed_by_server(true, false, false, false, false));
+        assert!(manage_allowed_by_server(false, false, false, false, true));
+        assert!(manage_allowed_by_server(false, false, false, true, false));
+        assert!(manage_allowed_by_server(false, true, false, false, false));
+        assert!(!manage_allowed_by_server(false, false, false, false, false));
+    }
+
+    #[test]
+    fn private_channel_access_accepts_creator_or_member_only() {
+        let members = [UserId(2)];
+        assert!(channel_access_allowed(true, true, Some(UserId(1)), &[]));
+        assert!(channel_access_allowed(
+            true,
+            false,
+            Some(UserId(2)),
+            &members
+        ));
+        assert!(!channel_access_allowed(
+            true,
+            false,
+            Some(UserId(1)),
+            &members
+        ));
+        assert!(channel_access_allowed(false, false, None, &[]));
+    }
+
+    #[test]
     fn archive_allowed_thread_needs_manage_channel_not_creator_only() {
         assert!(archive_allowed_by_server(
             true, false, false, false, true, true
@@ -10454,6 +10763,56 @@ mod tests {
                 );
                 assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
                 assert!(channels.channel_detail_failed.contains(&ChannelId(9)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn settings_can_load_hidden_thread_without_adding_it_to_sidebar(cx: &mut gpui::TestAppContext) {
+        use mezon_client::transport::ApiChannelDesc;
+
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.channel_details_for_settings.insert(ChannelId(9));
+                channels.apply_channel_detail(
+                    ClanId(1),
+                    ApiChannelDesc {
+                        channel_id: 9,
+                        channel_label: "hidden thread".into(),
+                        channel_type: CHANNEL_TYPE_THREAD,
+                        clan_id: 1,
+                        category_name: String::new(),
+                        category_id: 0,
+                        channel_private: 0,
+                        count_mess_unread: 0,
+                        member_count: 0,
+                        parent_id: 1,
+                        is_mute: false,
+                        last_seen_message_id: 0,
+                        last_seen_timestamp: 0,
+                        last_sent_message_id: 0,
+                        last_sent_timestamp: 0,
+                        badge_count: 0,
+                        active: CHANNEL_ACTIVE_ARCHIVED,
+                        creator_id: 0,
+                        clan_name: String::new(),
+                        channel_avatar: String::new(),
+                        topic: "thread topic".into(),
+                        age_restricted: 0,
+                        e2ee: 0,
+                        app_id: 0,
+                    },
+                    cx,
+                );
+
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+                let thread = channels
+                    .channel(ClanId(1), ChannelId(9))
+                    .expect("settings detail");
+                assert_eq!(thread.name, "hidden thread");
+                assert_eq!(thread.topic, "thread topic");
             });
         });
     }

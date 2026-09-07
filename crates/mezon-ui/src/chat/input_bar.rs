@@ -282,7 +282,7 @@ impl InputBar {
                     .when(!replying, |d| d.rounded_lg())
                     .border_1()
                     .border_color(theme.tokens.border_primary)
-                    .bg(theme.surfaces.surface)
+                    .bg(theme.surfaces.surface.fill())
                     .shadow_md()
                     .child(div().flex_1().child(self.mention_input.clone()))
                     .when(anonymous, |composer| {

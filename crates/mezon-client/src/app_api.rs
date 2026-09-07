@@ -503,6 +503,14 @@ impl AppApi {
             .await
     }
 
+    pub async fn search_ctrl_k(
+        &self,
+        text: &str,
+        search_type: i32,
+    ) -> Result<mezon_proto::api::SearchCtrlKResponse> {
+        self.transport.search_ctrl_k(text, search_type).await
+    }
+
     pub async fn check_duplicate_thread_name(
         &self,
         name: &str,
@@ -1374,6 +1382,22 @@ impl AppApi {
         self.transport.create_event(request).await
     }
 
+    pub async fn update_event(&self, request: mezon_proto::api::UpdateEventRequest) -> Result<()> {
+        self.transport.update_event(request).await
+    }
+
+    pub async fn delete_event(&self, request: mezon_proto::api::DeleteEventRequest) -> Result<()> {
+        self.transport.delete_event(request).await
+    }
+
+    pub async fn add_user_event(&self, clan_id: i64, event_id: i64) -> Result<()> {
+        self.transport.add_user_event(clan_id, event_id).await
+    }
+
+    pub async fn delete_user_event(&self, clan_id: i64, event_id: i64) -> Result<()> {
+        self.transport.delete_user_event(clan_id, event_id).await
+    }
+
     pub async fn emoji_recent_list(&self) -> Result<Vec<mezon_proto::api::EmojiRecent>> {
         let resp = self.transport.emoji_recent_list().await?;
         Ok(resp.emoji_recents)
@@ -1759,6 +1783,11 @@ impl AppApi {
     /// Delete, cancel, or reject a friend relationship by ids and/or usernames.
     pub async fn delete_friends(&self, ids: Vec<i64>, usernames: Vec<String>) -> Result<()> {
         self.transport.delete_friends(ids, usernames).await
+    }
+
+    /// Whether the signed-in user is banned from a channel, and for how much longer.
+    pub async fn is_banned(&self, channel_id: i64) -> Result<mezon_proto::api::IsBannedResponse> {
+        self.transport.is_banned(channel_id).await
     }
 
     /// Block users by id.
@@ -2322,6 +2351,29 @@ impl AppApi {
         attachments: Vec<UrlAttachment>,
         flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
+        self.send_message_with_attachment_urls_reply(
+            clan_id,
+            channel_id,
+            is_public,
+            mode,
+            attachments,
+            None,
+            flags,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_message_with_attachment_urls_reply(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        is_public: bool,
+        mode: i32,
+        attachments: Vec<UrlAttachment>,
+        reply: Option<crate::transport::OutgoingReply>,
+        flags: crate::transport::OutgoingMessageFlags,
+    ) -> Result<ApiMessage> {
         let proto: Vec<mezon_proto::api::MessageAttachment> = attachments
             .iter()
             .map(|a| mezon_proto::api::MessageAttachment {
@@ -2357,7 +2409,7 @@ impl AppApi {
                 is_public,
                 mode,
                 proto,
-                None,
+                reply,
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
@@ -2967,11 +3019,11 @@ impl AppApi {
         &self,
         channel_id: &str,
         clan_id: &str,
-        room_name: &str,
         username: &str,
+        room_name: &str,
     ) -> Result<()> {
         self.transport
-            .remove_participant_mezon_meet(channel_id, clan_id, room_name, username)
+            .remove_participant_mezon_meet(channel_id, clan_id, username, room_name)
             .await
     }
 
@@ -2979,11 +3031,11 @@ impl AppApi {
         &self,
         channel_id: &str,
         clan_id: &str,
-        room_name: &str,
         username: &str,
+        room_name: &str,
     ) -> Result<()> {
         self.transport
-            .mute_participant_mezon_meet(channel_id, clan_id, room_name, username)
+            .mute_participant_mezon_meet(channel_id, clan_id, username, room_name)
             .await
     }
 
@@ -3037,6 +3089,10 @@ impl AppApi {
 
     pub async fn leave_thread(&self, clan_id: i64, channel_id: i64) -> Result<()> {
         self.transport.leave_thread(clan_id, channel_id).await
+    }
+
+    pub async fn close_dm_by_channel_id(&self, channel_id: i64) -> Result<()> {
+        self.transport.close_dm_by_channel_id(channel_id).await
     }
 
     pub async fn list_loged_device(&self) -> Result<Vec<mezon_proto::api::LogedDevice>> {

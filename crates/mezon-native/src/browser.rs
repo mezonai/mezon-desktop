@@ -92,6 +92,10 @@ fn chromium_desktop_stem(xdg_settings_output: &str) -> Option<&str> {
 /// reachable shape.
 pub fn open_url_app_window(url: &str) -> anyhow::Result<()> {
     crate::ensure_http_url(url)?;
+    if app_sandbox_strips_launch_arguments() {
+        tracing::info!("app sandbox drops browser switches, opening a browser tab instead");
+        return crate::open_url(url);
+    }
     match default_chromium_browser() {
         Some(browser) => launch_app_window(&browser, url).or_else(|error| {
             tracing::warn!("app-window launch failed, falling back to a browser tab: {error:#}");
@@ -99,6 +103,10 @@ pub fn open_url_app_window(url: &str) -> anyhow::Result<()> {
         }),
         None => crate::open_url(url),
     }
+}
+
+fn app_sandbox_strips_launch_arguments() -> bool {
+    cfg!(target_os = "macos") && std::env::var_os("APP_SANDBOX_CONTAINER_ID").is_some()
 }
 
 fn silenced(command: &mut std::process::Command) -> &mut std::process::Command {

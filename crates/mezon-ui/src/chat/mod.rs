@@ -1,3 +1,4 @@
+pub mod add_members_to_group_modal;
 pub mod age_restricted;
 pub mod area;
 pub use mezon_canvas::{CanvasPopoverPanel, CanvasView, canvas_popover_on_open};

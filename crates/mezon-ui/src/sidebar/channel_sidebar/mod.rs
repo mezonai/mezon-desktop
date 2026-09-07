@@ -9,8 +9,8 @@ use gpui::{
 };
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
-    EventsStore, FAVOR_CATE_ID, PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN, PermissionStore,
-    Settings, StreamMember, StreamStore, VoiceMember,
+    EventsStore, FAVOR_CATE_ID, OnboardingStore, PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN,
+    PermissionStore, Settings, StreamMember, StreamStore, VoiceMember,
 };
 
 use crate::channel_app::launch_channel_app_from_store;
@@ -125,6 +125,8 @@ pub struct ChannelSidebar {
     _permissions_observe: Subscription,
     _channel_permissions_observe: Subscription,
     _notification_setting_observe: Subscription,
+    pending_ctrlk_scroll: bool,
+    _onboarding_observe: Subscription,
 }
 
 struct ActiveChannelSidebar(gpui::WeakEntity<ChannelSidebar>);
@@ -318,6 +320,7 @@ impl ChannelSidebar {
             }
         });
         let permissions_observe = cx.observe(&PermissionStore::global(cx), |_, _, cx| cx.notify());
+        let onboarding_observe = cx.observe(&OnboardingStore::global(cx), |_, _, cx| cx.notify());
         let channel_permissions_observe = cx.subscribe(
             &mezon_store::ChannelPermissionsStore::global(cx),
             |this, _, event: &mezon_store::ChannelPermissionsEvent, cx| {
@@ -377,6 +380,8 @@ impl ChannelSidebar {
             _permissions_observe: permissions_observe,
             _channel_permissions_observe: channel_permissions_observe,
             _notification_setting_observe: notification_setting_observe,
+            pending_ctrlk_scroll: false,
+            _onboarding_observe: onboarding_observe,
         };
         cx.set_global(ActiveChannelSidebar(cx.entity().downgrade()));
         this.rebuild_items(cx);
@@ -387,8 +392,24 @@ impl ChannelSidebar {
         let locale = self.settings.read(cx).language.clone();
         self.last_locale = locale.clone();
         self.last_clan_inputs = clan_inputs_fingerprint(self.clan_list.read(cx));
-        if let Some(clan_id) = self.clan_list.read(cx).active_clan_id {
+        let active_clan = {
+            let clans = self.clan_list.read(cx);
+            clans
+                .active_clan()
+                .map(|clan| (clan.id, clan.is_onboarding))
+        };
+        if let Some((clan_id, _)) = active_clan {
             EventsStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
+        }
+        if let Some((clan_id, true)) = active_clan {
+            let onboarding = OnboardingStore::global(cx);
+            let unloaded = {
+                let store = onboarding.read(cx);
+                !store.load_attempted(clan_id) || !store.steps_loaded(clan_id)
+            };
+            if unloaded {
+                onboarding.update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
+            }
         }
         let clans = self.clan_list.read(cx);
         let channels = self.channel_list.read(cx);
@@ -655,19 +676,64 @@ impl ChannelSidebar {
         }
 
         let skeleton_changed = self.advance_skeleton(cold_loading, new_clan_id, cx);
-        items_changed || name_changed || clan_changed || skeleton_changed
+        let changed = items_changed || name_changed || clan_changed || skeleton_changed;
+        if self.channel_list.read(cx).ctrlk_focus_channel().is_some() {
+            self.pending_ctrlk_scroll = true;
+        }
+        changed
+    }
+
+    fn channel_row_index(&self, channel_id: ChannelId, exclude_favorites: bool) -> Option<usize> {
+        let id_str = channel_id.to_string();
+        self.items.iter().position(|item| {
+            matches!(
+                item,
+                SidebarItem::Channel { id, is_favorite, .. }
+                    if id.as_str() == id_str && (!exclude_favorites || !is_favorite)
+            )
+        })
+    }
+
+    fn scroll_to_channel_row(
+        &mut self,
+        channel_id: ChannelId,
+        exclude_favorites: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(ix) = self.channel_row_index(channel_id, exclude_favorites) else {
+            return false;
+        };
+        self.list_state.scroll_to_center_item(ix);
+        cx.notify();
+        true
+    }
+
+    fn try_scroll_ctrlk_focus(&mut self, cx: &mut Context<Self>) {
+        let focus = self.channel_list.read(cx).ctrlk_focus_channel().copied();
+        let Some(focus) = focus else {
+            self.pending_ctrlk_scroll = false;
+            return;
+        };
+        let Some(ix) = self.channel_row_index(focus.channel_id, true) else {
+            self.pending_ctrlk_scroll = true;
+            return;
+        };
+        self.list_state.scroll_to_center_item(ix);
+        if self.list_state.bounds_for_item(ix).is_some() {
+            self.channel_list.update(cx, |store, _| {
+                store.clear_ctrlk_focus_channel();
+            });
+            self.pending_ctrlk_scroll = false;
+            cx.notify();
+        } else {
+            self.pending_ctrlk_scroll = true;
+            cx.notify();
+        }
     }
 
     fn reveal_original_channel(&mut self, channel_id: &str, cx: &mut Context<Self>) {
-        let target = self.items.iter().position(|item| {
-            matches!(
-                item,
-                SidebarItem::Channel { id, is_favorite: false, .. } if id.as_str() == channel_id
-            )
-        });
-        if let Some(ix) = target {
-            self.list_state.scroll_to_center_item(ix);
-            cx.notify();
+        if let Ok(id) = channel_id.parse::<i64>() {
+            let _ = self.scroll_to_channel_row(ChannelId(id), true, cx);
         }
     }
 
@@ -766,6 +832,15 @@ impl ChannelSidebar {
 
     fn open_channel_menu(&mut self, menu: OpenMenu, cx: &mut Context<Self>) {
         self.clear_overlays();
+        // Permissions load in the deferred tier of clan load, so a menu opened right after a clan
+        // switch would gate every manage item off. The load is a no-op once the clan is known and
+        // the sidebar observes the store, so the menu fills in when it lands.
+        let clan_id = menu.clan_id;
+        if let Some(permissions) = PermissionStore::try_global(cx) {
+            permissions.update(cx, |permissions, cx| {
+                permissions.load_clan_permissions(clan_id, cx);
+            });
+        }
         self.open_menu = Some(menu);
         cx.notify();
     }
@@ -827,6 +902,9 @@ impl ChannelSidebar {
 impl Render for ChannelSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("ChannelSidebar");
+        if self.pending_ctrlk_scroll {
+            self.try_scroll_ctrlk_focus(cx);
+        }
         let theme = cx.theme();
         let items = self.items.clone();
         let channel_list_handle = self.channel_list_handle.clone();
@@ -969,11 +1047,12 @@ impl Render for ChannelSidebar {
 
         div()
             .relative()
+            .children(crate::tour::probe(crate::tour::TourAnchor::ChannelList))
             .flex()
             .flex_col()
             .w_full()
             .h_full()
-            .bg(theme.bg_secondary)
+            .bg(theme.surfaces.direct_message.ramp())
             .child({
                 let sidebar = sidebar.clone();
                 let sidebar_for_menu = sidebar_for_clan_menu.clone();
@@ -982,6 +1061,7 @@ impl Render for ChannelSidebar {
                 let has_clan = self.active_clan_id.is_some();
                 div()
                     .relative()
+                    .children(crate::tour::probe(crate::tour::TourAnchor::ClanHeader))
                     .w_full()
                     .h(px(50.))
                     .border_b_1()
@@ -1407,8 +1487,99 @@ fn sidebar_skeleton_layer(theme: &Theme, cx: &App) -> gpui::Div {
     div()
         .absolute()
         .inset_0()
-        .bg(theme.bg_secondary)
+        .bg(theme.surfaces.direct_message.ramp())
         .child(render_skeleton(cx))
+}
+
+/// The "Get Started" progress card React shows above the Clan Guide row while a member still
+/// has missions left — `missionDone of missionSum` plus a bar that fills as they tick off.
+fn onboarding_get_started(
+    clan_id: ClanId,
+    theme: &crate::theme::Theme,
+    locale: &str,
+    cx: &App,
+) -> AnyElement {
+    let store = OnboardingStore::global(cx);
+    let store = store.read(cx);
+    let done = store.mission_progress(clan_id);
+    let total = store.mission_total(clan_id);
+    // A bar that reads as empty still has to read as a bar, so an untouched clan keeps a sliver.
+    let fill = if total == 0 {
+        0.03
+    } else {
+        (done as f32 / total as f32).clamp(0.03, 1.)
+    };
+    div()
+        .id("clan-onboarding-get-started")
+        .flex()
+        .flex_col()
+        .w_full()
+        .px_2()
+        .pt_1()
+        .pb_2()
+        .gap_2()
+        .border_b_1()
+        .border_color(theme.border)
+        .cursor_pointer()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .w_full()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(theme.text_primary)
+                        .child(mezon_i18n::t(locale, "channelList.onboarding.getStarted")),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_px()
+                        .text_size(px(12.))
+                        .text_color(theme.text_primary)
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .child(done.to_string()),
+                        )
+                        .child(div().child(mezon_i18n::t(locale, "channelList.onboarding.of")))
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .child(total.to_string()),
+                        )
+                        .child(
+                            Icon::new(IconName::ArrowRight)
+                                .size(px(12.))
+                                .text_color(theme.text_secondary),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .w_full()
+                .h(px(4.))
+                .rounded(px(8.))
+                .overflow_hidden()
+                .bg(theme.bg_hover)
+                .child(
+                    div()
+                        .w(relative(fill))
+                        .h_full()
+                        .rounded(px(8.))
+                        .bg(gpui::rgb(0x16a34a)),
+                ),
+        )
+        .on_click(move |_, _, cx| {
+            crate::router::navigate(cx, crate::router::Route::ClanGuide { clan_id });
+        })
+        .into_any_element()
 }
 
 fn nav_row(
@@ -1496,6 +1667,7 @@ fn clan_inputs_fingerprint(clans: &ClanList) -> (Option<ClanId>, u64) {
     let mut hash = FNV_OFFSET;
     if let Some(clan) = clans.active_clan() {
         hash = fold(hash, clan.name.as_bytes());
+        hash = fold(hash, &[u8::from(clan.is_onboarding)]);
     }
     if let Some(banner) = clans.active_clan_banner() {
         hash = fold(hash, banner.as_bytes());
@@ -1550,6 +1722,7 @@ fn render_banner_and_events(
             .is_some_and(|clan| clan.is_onboarding)
     });
     let guide_row = div()
+        .group("clan-guide-nav")
         .flex()
         .flex_row()
         .items_center()
@@ -1569,7 +1742,11 @@ fn render_banner_and_events(
         .child(
             gpui::img(IconName::GuideIcon.path())
                 .size(px(20.))
-                .flex_none(),
+                .flex_none()
+                .when(!guide_active, |icon| {
+                    icon.opacity(0.65)
+                        .group_hover("clan-guide-nav", |style| style.opacity(1.))
+                }),
         )
         .child(
             div()
@@ -1585,6 +1762,8 @@ fn render_banner_and_events(
         });
     let members_row = nav_row(IconName::MemberList, "Members", theme, members_active)
         .id("clan-members-nav")
+        .relative()
+        .children(crate::tour::probe(crate::tour::TourAnchor::ClanMembersRow))
         .on_click(move |_, _, cx| {
             if let Some(clan_id) = members_clan_id {
                 crate::router::navigate(cx, crate::router::Route::ClanMembers { clan_id });
@@ -1651,12 +1830,20 @@ fn render_banner_and_events(
             crate::router::navigate(cx, crate::router::Route::ClanChannels { clan_id });
         }
     });
+    let onboarding_card = members_clan_id
+        .filter(|clan_id| {
+            OnboardingStore::global(cx)
+                .read(cx)
+                .show_progress(*clan_id, clan_has_onboarding)
+        })
+        .map(|clan_id| onboarding_get_started(clan_id, theme, locale, cx));
     let nav_col = div()
         .flex()
         .flex_col()
         .w_full()
         .p_2()
         .gap_1()
+        .children(onboarding_card)
         .when(clan_has_onboarding, |element| element.child(guide_row))
         .child(events_row)
         .child(members_row)
@@ -1862,6 +2049,8 @@ fn render_sidebar_item(
                     el.child(
                         div()
                             .id(SharedString::from(format!("cat-add-{elem_id}")))
+                            .relative()
+                            .children(crate::tour::probe(crate::tour::TourAnchor::CreateChannel))
                             .flex()
                             .items_center()
                             .justify_center()

@@ -933,9 +933,10 @@ impl ProfilePage {
                                             ),
                                         });
                                         cx.spawn(async move |_this, cx| {
-                                            let paths = match rx.await {
-                                                Ok(Ok(Some(paths))) => paths,
-                                                _ => return,
+                                            let Some(paths) =
+                                                crate::util::file_dialog::resolve(rx, cx).await
+                                            else {
+                                                return;
                                             };
                                             let Some(path) = paths.into_iter().next() else {
                                                 return;
@@ -1120,9 +1121,10 @@ impl ProfilePage {
                                             ),
                                         });
                                         cx.spawn(async move |_this, cx| {
-                                            let paths = match rx.await {
-                                                Ok(Ok(Some(paths))) => paths,
-                                                _ => return,
+                                            let Some(paths) =
+                                                crate::util::file_dialog::resolve(rx, cx).await
+                                            else {
+                                                return;
                                             };
                                             let Some(path) = paths.into_iter().next() else {
                                                 return;

@@ -1,9 +1,11 @@
-use gpui::{AnyElement, ElementId, Pixels, SharedString, div, prelude::*, px};
-use mezon_store::{DirectKind, DmAvatarPresence};
+use gpui::{AnyElement, App, ElementId, Pixels, SharedString, Window, div, prelude::*, px};
+use mezon_store::{ChannelId, DirectKind, DmAvatarPresence};
 
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::router::{Route, navigate};
 use crate::theme::Theme;
+
+pub type CloseHandler = fn(ChannelId, &mut Window, &mut App);
 
 pub const DM_ROW_HEIGHT: f32 = 42.;
 
@@ -24,6 +26,7 @@ pub struct DmRow {
     suppress_hover: bool,
     in_voice_label: Option<SharedString>,
     image_cache: Option<gpui::Entity<crate::image_cache::LruImageCache>>,
+    on_close: Option<(ChannelId, CloseHandler)>,
 }
 
 impl DmRow {
@@ -63,6 +66,7 @@ impl DmRow {
             suppress_hover: false,
             in_voice_label: None,
             image_cache: None,
+            on_close: None,
         }
     }
 
@@ -106,6 +110,11 @@ impl DmRow {
         self
     }
 
+    pub fn on_close(mut self, channel_id: ChannelId, handler: CloseHandler) -> Self {
+        self.on_close = Some((channel_id, handler));
+        self
+    }
+
     pub fn render(self, theme: &Theme) -> impl IntoElement {
         let nav_id = self.id.to_string();
         let channel_type = self.kind.channel_type();
@@ -121,7 +130,10 @@ impl DmRow {
 
         let avatar_slot = self.render_avatar(theme);
         let suppress_hover = self.suppress_hover;
+        let on_close = self.on_close;
 
+        // Always mounted: dropping it while the list scrolls would take its 20px box and the
+        // row's gap out of the flex line, reflowing every label on each wheel tick.
         let close_btn = div()
             .id(self.close_id.clone())
             .flex()
@@ -136,7 +148,17 @@ impl DmRow {
                 this.group_hover(self.group_name.clone(), |this| this.opacity(1.))
                     .hover(move |this| this.text_color(gpui::rgb(0xef4444)))
             })
-            .on_click(|_, _window, cx| cx.stop_propagation())
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                // While hover is suppressed the × is invisible; swallow the click as before
+                // rather than closing a conversation the user cannot see they are aiming at.
+                if suppress_hover {
+                    return;
+                }
+                if let Some((channel_id, handler)) = on_close {
+                    handler(channel_id, window, cx);
+                }
+            })
             .child("×");
 
         div()

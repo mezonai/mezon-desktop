@@ -166,6 +166,38 @@ Parameters: none.",
         write: false,
     },
     ToolSpec {
+        name: "tour_state",
+        description: "\
+Report the guided tour's current step.
+
+Always returns an object. `active` is false when no tour is running. While a tour runs it
+also carries `resolving` (true for the frame after start, before the first step resolves),
+`track`, `index`, `position`, `total`, `title_key`, `anchor`, `has_hole` and `hole`
+([x, y, w, h] in window points, null for a centered step). `has_hole` is false when the
+step's anchor was not recorded on screen this run and it fell back to a centered card.
+
+Parameters: none.",
+        write: false,
+    },
+    ToolSpec {
+        name: "tour_start",
+        description: "\
+Start a guided tour track.
+
+Parameters:
+- track (optional): track id. Omitted starts the track matching the current route.",
+        write: true,
+    },
+    ToolSpec {
+        name: "tour_advance",
+        description: "\
+Move the running guided tour one step.
+
+Parameters:
+- forward (optional, default true): false steps back.",
+        write: true,
+    },
+    ToolSpec {
         name: "get_scroll_state",
         description: "\
 Report what the open channel's message list currently holds.
@@ -302,7 +334,8 @@ Parameters: none.",
 Return the member-list context menu that is currently open, if any.
 
 Includes the target user, the resolved permission/relationship flags that decide which rows show
-(is_friend, is_blocked, is_banned, show_ban, show_kick, show_remove_from_thread), and the item list
+(is_friend, is_blocked, is_banned, show_ban, show_kick, show_remove_from_thread,
+show_remove_from_group), and the item list
 with the index to pass to member_menu_pick.
 
 Parameters: none.",
@@ -333,14 +366,14 @@ Parameters: none.",
         name: "member_menu_pick",
         description: "\
 Run one row of the open member context menu (Profile, Message, Add Friend, Unblock, Remove Friend,
-Ban, Unban, Kick, Remove from thread).
+Ban, Unban, Kick, Remove from thread, Remove from group).
 
 Call member_menu_open first and pick the index from its item list. Rows of kind \"submenu\" or
 \"danger_submenu\" (Ban) additionally need value — one of the option values returned for that row
 (seconds; 0 means until the ban is lifted).
 
-Destructive: Kick, Ban and Remove-from-thread hit the server immediately; Remove Friend and Kick
-open a confirmation modal instead.
+Destructive: Ban and Remove-from-thread hit the server immediately; Remove Friend, Kick and
+Remove-from-group open a confirmation modal instead.
 
 Parameters:
 - index (required): item index from member_menu_open/member_menu_state.

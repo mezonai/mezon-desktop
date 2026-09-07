@@ -467,7 +467,7 @@ impl ClanGuidePage {
                 .into_any_element();
         }
         let clan_id = self.clan_id;
-        let done = store.mission_done(clan_id);
+        let done = store.mission_progress(clan_id);
         let channels = ChannelList::global(cx);
         let channels = channels.read(cx);
         for (index, mission) in missions.iter().enumerate() {
@@ -673,7 +673,7 @@ fn guide_card(
         })
 }
 
-fn mission_summary(locale: &str, task_type: i32) -> &'static str {
+pub(crate) fn mission_summary(locale: &str, task_type: i32) -> &'static str {
     let key = match task_type {
         MISSION_VISIT => "guide.missionTitles.visit",
         MISSION_DO_SOMETHING => "guide.missionTitles.doSomething",
@@ -682,7 +682,7 @@ fn mission_summary(locale: &str, task_type: i32) -> &'static str {
     mezon_i18n::t(locale, key)
 }
 
-fn start_mission(
+pub(crate) fn start_mission(
     clan_id: ClanId,
     channel_id: ChannelId,
     task_type: i32,

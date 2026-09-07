@@ -718,6 +718,14 @@ pub struct TokenTransaction {
 #[derive(Debug, Clone)]
 pub struct Message {
     pub id: MessageId,
+    /// The bucket this row lives in: a topic's id for a topic reply, the
+    /// channel's id otherwise — mirroring mezon-react's
+    /// `channelMessages[topicId || channelId]` entity state. A message id is only
+    /// unique *inside* one bucket, because the server mints it from a per-channel
+    /// sequence with no channel component (`(seq << shift) | node | year`), so
+    /// this is the other half of a row's identity. `MessageList` stamps it when
+    /// the row enters a bucket; it is `ChannelId(0)` until then.
+    pub channel_id: ChannelId,
     pub sort_id: i64,
     pub row_anchor_id: MessageId,
     pub content: String,
@@ -1649,6 +1657,7 @@ impl Message {
         let rich_layout = build_rich_layout(&spans);
         Self {
             id,
+            channel_id: ChannelId(0),
             sort_id: id.get(),
             row_anchor_id: id,
             content,

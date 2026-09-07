@@ -1,7 +1,7 @@
 mod create_milestone_modal;
 mod event_detail_view;
 mod events_view;
-mod media_image;
+pub(crate) mod media_image;
 mod media_image_modal;
 mod panel;
 mod timeline_view;

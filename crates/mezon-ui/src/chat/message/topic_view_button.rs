@@ -1,9 +1,11 @@
 use super::context::RowCtx;
 use super::parts::resolve_message_display_name;
 use super::time::format_relative_time_from_seconds;
-use crate::components::primitives::{Icon, IconName, avatar_color, name_initials};
+use crate::components::primitives::{
+    Icon, IconName, avatar_color, mention_count_badge, name_initials,
+};
 use gpui::{AnyElement, App, ObjectFit, SharedString, div, img, prelude::*, px, rgb};
-use mezon_store::{ClanMembersStore, Message, TopicsStore};
+use mezon_store::{ClanMembersStore, Message, TopicBadgeStore, TopicsStore};
 
 const AVATAR_SIZE: f32 = 28.0;
 const AVATAR_ROUNDING: f32 = 6.0;
@@ -48,6 +50,13 @@ pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
     let time_label = last_reply_timestamp
         .map(|timestamp| format_relative_time_from_seconds(timestamp, ctx.locale, ctx.now))
         .filter(|label| !label.is_empty());
+    let topic_badge_count = msg
+        .topic_id
+        .and_then(|topic_id| {
+            TopicBadgeStore::try_global(ctx.app)
+                .map(|store| store.read(ctx.app).topic_badge_count(&topic_id.to_string()))
+        })
+        .unwrap_or(0);
 
     let meta = div()
         .flex()
@@ -65,6 +74,9 @@ pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
                     .text_color(theme.tokens.text_theme_primary)
                     .child(label),
             )
+        })
+        .when(topic_badge_count > 0, |d| {
+            d.child(mention_count_badge(topic_badge_count))
         });
 
     let left = div()

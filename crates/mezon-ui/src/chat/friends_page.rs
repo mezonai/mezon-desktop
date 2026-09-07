@@ -29,6 +29,15 @@ const ROW_HEIGHT: f32 = 64.;
 const ACTIVITY_WIDTH: f32 = 416.;
 const AVATAR_SIZE: f32 = 32.;
 const MAX_USERNAME_LEN: usize = 40;
+/// Horizontal padding of the search bar (`px_3`).
+const SEARCH_BAR_PADDING_X: f32 = 12.;
+/// Distance from the search bar's right edge to the clear button's right edge.
+const SEARCH_CLEAR_INSET: f32 = 48.;
+const SEARCH_CLEAR_WIDTH: f32 = 32.;
+/// The clear button is painted over the input and wins the hit test, so the text
+/// region has to stop before it or clicks meant for the caret wipe the query.
+const SEARCH_INPUT_PADDING_RIGHT: f32 =
+    SEARCH_CLEAR_INSET + SEARCH_CLEAR_WIDTH - SEARCH_BAR_PADDING_X;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FriendsTab {
@@ -596,7 +605,7 @@ fn build_activity_rows(
             group.len()
         ))));
         for (a, f) in group {
-            let description = activity_row_subtitle(a, locale);
+            let description = activity_row_subtitle(a);
             rows.push(ActivityRow::Item {
                 label: SharedString::from(f.label().to_string()),
                 description: SharedString::from(description),
@@ -608,21 +617,11 @@ fn build_activity_rows(
     rows
 }
 
-fn activity_row_subtitle(activity: &UserActivity, locale: &str) -> String {
+fn activity_row_subtitle(activity: &UserActivity) -> String {
     if !activity.activity_description.is_empty() {
-        return activity.activity_description.clone();
-    }
-    let kind_key = match activity.activity_type {
-        ACTIVITY_TYPE_WORK => "friendsPage.activity.codingStatus",
-        ACTIVITY_TYPE_LIVE => "friendsPage.activity.musicStatus",
-        ACTIVITY_TYPE_PLAY => "friendsPage.activity.gamingStatus",
-        _ => return activity.activity_name.clone(),
-    };
-    let kind_label = mezon_i18n::t(locale, kind_key);
-    if activity.activity_name.is_empty() {
-        kind_label.to_string()
+        activity.activity_description.clone()
     } else {
-        format!("{kind_label} · {}", activity.activity_name)
+        activity.activity_name.clone()
     }
 }
 
@@ -693,6 +692,8 @@ impl Render for FriendsPage {
         let locale = self.settings.read(cx).language.clone();
 
         div()
+            .relative()
+            .children(crate::tour::probe(crate::tour::TourAnchor::FriendsPage))
             .flex()
             .flex_col()
             .flex_1()
@@ -783,6 +784,8 @@ impl FriendsPage {
 
         let add_button = div()
             .id("friend-add")
+            .relative()
+            .children(crate::tour::probe(crate::tour::TourAnchor::AddFriendButton))
             .px_2()
             .py(px(6.))
             .rounded_lg()
@@ -873,12 +876,12 @@ impl FriendsPage {
             .bg(theme.surfaces.primary)
             .flex()
             .items_center()
-            .px_3();
+            .px(px(SEARCH_BAR_PADDING_X));
         if let Some(search) = self.search.as_ref() {
             search_field = search_field.child(
                 Input::new(search)
                     .w_full()
-                    .pr(px(48.))
+                    .pr(px(SEARCH_INPUT_PADDING_RIGHT))
                     .text_size(px(16.))
                     .text_color(theme.tokens.text_theme_primary),
             );
@@ -889,9 +892,13 @@ impl FriendsPage {
                     div()
                         .id("friend-search-clear")
                         .absolute()
-                        .top(px(10.))
-                        .right(px(48.))
-                        .px_2()
+                        .top_0()
+                        .bottom_0()
+                        .right(px(SEARCH_CLEAR_INSET))
+                        .w(px(SEARCH_CLEAR_WIDTH))
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .text_size(px(25.))
                         .text_color(theme.tokens.text_theme_primary)
                         .cursor_pointer()
@@ -906,11 +913,18 @@ impl FriendsPage {
                 )
             })
             .child(
-                div().absolute().top(px(12.)).right(px(20.)).child(
-                    Icon::new(IconName::Search)
-                        .size_4()
-                        .text_color(theme.tokens.text_theme_primary),
-                ),
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right(px(20.))
+                    .flex()
+                    .items_center()
+                    .child(
+                        Icon::new(IconName::Search)
+                            .size_4()
+                            .text_color(theme.tokens.text_theme_primary),
+                    ),
             );
 
         div()
@@ -1417,13 +1431,15 @@ fn render_activity_row(
                                 .truncate()
                                 .child(label.clone()),
                         )
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(desc_color)
-                                .truncate()
-                                .child(description.clone()),
-                        ),
+                        .when(!description.is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(desc_color)
+                                    .truncate()
+                                    .child(description.clone()),
+                            )
+                        }),
                 )
                 .into_any_element()
         }
@@ -1603,4 +1619,43 @@ fn circle_button(
         .occlude()
         .hover(|s| s.bg(theme.tokens.bg_secondary_button_hover))
         .child(glyph)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn activity(kind: i32, name: &str, description: &str) -> UserActivity {
+        UserActivity {
+            user_id: UserId(1),
+            activity_type: kind,
+            activity_name: name.to_string(),
+            activity_description: description.to_string(),
+        }
+    }
+
+    #[test]
+    fn subtitle_prefers_description_over_name() {
+        let a = activity(ACTIVITY_TYPE_WORK, "Code", "Editing friends_page.rs");
+        assert_eq!(activity_row_subtitle(&a), "Editing friends_page.rs");
+    }
+
+    #[test]
+    fn subtitle_falls_back_to_name_without_a_kind_prefix() {
+        for kind in [
+            ACTIVITY_TYPE_WORK,
+            ACTIVITY_TYPE_LIVE,
+            ACTIVITY_TYPE_PLAY,
+            99,
+        ] {
+            let a = activity(kind, "Code", "");
+            assert_eq!(activity_row_subtitle(&a), "Code");
+        }
+    }
+
+    #[test]
+    fn subtitle_is_empty_when_the_activity_carries_no_text() {
+        let a = activity(ACTIVITY_TYPE_WORK, "", "");
+        assert!(activity_row_subtitle(&a).is_empty());
+    }
 }

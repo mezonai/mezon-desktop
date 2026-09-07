@@ -1,5 +1,6 @@
 pub mod blink_manager;
 mod button;
+pub mod clipboard;
 mod icon;
 pub mod input;
 mod sizing;
