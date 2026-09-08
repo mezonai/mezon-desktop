@@ -1,0 +1,27 @@
+[package]
+name = "webrtc-sys-build"
+version = "0.3.18"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+description = "Build utilities for webrtc-sys, vendored from livekit/rust-sdks"
+repository = "https://github.com/livekit/rust-sdks"
+
+[lib]
+name = "webrtc_sys_build"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+fs2 = "0.4"
+regex.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "blocking"] }
+scratch = "1.0"
+semver = "1.0"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+
+[lints.rust]
+warnings = "allow"
+
+[lints.clippy]
+all = "allow"
