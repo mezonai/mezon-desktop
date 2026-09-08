@@ -82,47 +82,6 @@ fn stabilize_one(section: &[String], previous: &[Vec<String>]) -> Option<Vec<Str
     Some(out)
 }
 
-pub fn patch_answer_for_sfu(sdp: &str, is_audience: bool) -> String {
-    if !is_audience {
-        return sdp.to_owned();
-    }
-
-    let split = split_sections(sdp);
-    let mut changed = false;
-    let mut rebuilt: Vec<Vec<String>> = Vec::with_capacity(split.media.len());
-
-    for mut section in split.media {
-        let is_video = section.first().is_some_and(|l| l.starts_with("m=video"));
-        let is_camera_uplink = section_mid(&section).as_deref() == Some(MID_CAMERA);
-        if is_video && is_camera_uplink {
-            for line in section.iter_mut() {
-                if line == "a=inactive" {
-                    *line = "a=sendonly".to_owned();
-                    changed = true;
-                }
-            }
-        }
-        rebuilt.push(section);
-    }
-
-    if !changed {
-        return sdp.to_owned();
-    }
-
-    let mut out = String::with_capacity(sdp.len());
-    for line in split.session {
-        out.push_str(&line);
-        out.push_str("\r\n");
-    }
-    for section in rebuilt {
-        for line in section {
-            out.push_str(&line);
-            out.push_str("\r\n");
-        }
-    }
-    out
-}
-
 pub fn force_uplink_sendonly(answer_sdp: &str, offer_sdp: &str) -> String {
     const DIRECTIONS: [&str; 4] = ["a=sendrecv", "a=sendonly", "a=recvonly", "a=inactive"];
 
@@ -516,54 +475,6 @@ mod tests {
             a=rtcp-mux\r\n\
             a=inactive\r\n";
         assert_eq!(stabilize_inactive_video_sections(offer, Some(PREV)), offer);
-    }
-
-    #[test]
-    fn a_speaker_answer_is_never_patched() {
-        let answer = "v=0\r\nm=video 9 RTP/SAVPF 96\r\na=mid:1\r\na=inactive\r\n";
-        assert_eq!(patch_answer_for_sfu(answer, false), answer);
-    }
-
-    #[test]
-    fn an_audience_camera_uplink_is_reopened_as_sendonly() {
-        let answer = "v=0\r\n\
-            m=audio 9 RTP/SAVPF 111\r\n\
-            a=mid:0\r\n\
-            a=inactive\r\n\
-            m=video 9 RTP/SAVPF 96\r\n\
-            a=mid:1\r\n\
-            a=inactive\r\n";
-        let got = patch_answer_for_sfu(answer, true);
-        assert!(got.contains("a=mid:1\r\na=sendonly\r\n"));
-        assert!(got.contains("a=mid:0\r\na=inactive\r\n"), "audio uplink untouched");
-    }
-
-    #[test]
-    fn only_the_camera_uplink_is_reopened_not_remote_video() {
-        let answer = "v=0\r\n\
-            m=video 9 RTP/SAVPF 96\r\n\
-            a=mid:1\r\n\
-            a=inactive\r\n\
-            m=video 9 RTP/SAVPF 96\r\n\
-            a=mid:4\r\n\
-            a=inactive\r\n";
-        let got = patch_answer_for_sfu(answer, true);
-        assert!(got.contains("a=mid:1\r\na=sendonly\r\n"));
-        assert!(got.contains("a=mid:4\r\na=inactive\r\n"));
-    }
-
-    #[test]
-    fn an_audience_answer_without_an_inactive_camera_is_unchanged() {
-        let answer = "v=0\r\nm=video 9 RTP/SAVPF 96\r\na=mid:1\r\na=sendonly\r\n";
-        assert_eq!(patch_answer_for_sfu(answer, true), answer);
-    }
-
-    #[test]
-    fn bare_newline_input_is_normalised_to_crlf_when_patched() {
-        let answer = "v=0\nm=video 9 RTP/SAVPF 96\na=mid:1\na=inactive\n";
-        let got = patch_answer_for_sfu(answer, true);
-        assert!(got.contains("a=sendonly\r\n"));
-        assert!(!got.contains("a=inactive"));
     }
 
     #[test]

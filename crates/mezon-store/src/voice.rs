@@ -103,7 +103,8 @@ const DEFAULT_NOISE_SUPPRESSION_LEVEL: u8 = 20;
 pub const MAX_SOUND_BYTES: u64 = 1024 * 1024;
 pub const SOUND_ALLOWED_EXTENSIONS: &[&str] = &["mp3", "wav", "mpeg"];
 const KICK_SUPPRESS_TIMEOUT: Duration = Duration::from_secs(5);
-const RECONNECT_STALL_TIMEOUT: Duration = Duration::from_secs(15);
+// Let the engine finish its ICE and DTLS deadlines before replacing it.
+const RECONNECT_STALL_TIMEOUT: Duration = Duration::from_secs(40);
 const RECONNECT_RETRY_DELAY: Duration = Duration::from_secs(5);
 static RAISE_HAND_SOUND: &[u8] = include_bytes!("../assets/audio/raising-hand.mp3");
 static JOIN_VOICE_SOUND: &[u8] = include_bytes!("../assets/audio/joincallsound.mp3");
@@ -2712,6 +2713,13 @@ impl VoiceStore {
             snapshot.camera_enabled,
             snapshot.screen_share,
         );
+        if self.is_audience()
+            && self.ptt_held
+            && !mezon_voice::microphone_denied()
+            && let Some(session) = &self.session
+        {
+            session.set_push_to_talk(true);
+        }
         if self.reconnect_still_pending(generation) {
             self.schedule_reconnect_recovery(generation, RECONNECT_STALL_TIMEOUT, cx);
         }
@@ -2783,6 +2791,7 @@ impl VoiceStore {
             }
             VoiceEvent::Reconnecting => {
                 self.call_status = VoiceCallStatus::Reconnecting;
+                self.awaiting_room_snapshot = true;
                 self.arm_reconnect_watchdog(RECONNECT_STALL_TIMEOUT, cx);
             }
             VoiceEvent::Reconnected => {

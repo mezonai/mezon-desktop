@@ -1,5 +1,6 @@
 
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -46,15 +47,22 @@ const SCREEN_BITRATE_LIMITS: sdp::BitrateLimits = sdp::BitrateLimits {
     max_kbps: 2_500,
 };
 const MEDIA_STATS_INTERVAL: Duration = Duration::from_secs(5);
-const MAX_DISCONNECTED_TICKS: u32 = 3;
+const TRANSPORT_DISCONNECTED_GRACE: Duration = Duration::from_secs(4);
+const NET_PATH_POLL: Duration = Duration::from_secs(1);
+const LINK_DOWN_TICKS: u32 = 2;
+const HEALTHY_SESSION: Duration = Duration::from_secs(30);
+const ROUTE_PROBE_TARGETS: [&str; 2] = ["203.0.113.9:9", "[2001:db8::9]:9"];
 const MEDIA_CONNECT_DEADLINE: Duration = Duration::from_secs(15);
-const DTLS_CONNECT_DEADLINE: Duration = Duration::from_secs(4);
+// Allow DTLS retransmissions to finish after ICE succeeds. Four seconds can
+// cut off a valid handshake and restart the entire room negotiation.
+const DTLS_CONNECT_DEADLINE: Duration = Duration::from_secs(15);
 const CONNECT_POLL: Duration = Duration::from_millis(250);
 const RENEGOTIATION_SETTLE: Duration = Duration::from_millis(50);
 const RECONNECT_DELAY_FAST: Duration = Duration::from_millis(400);
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const RECONNECT_FAST_ATTEMPTS: u32 = 2;
 const MAX_RECONNECT_ATTEMPTS: u32 = 40;
+const RECONNECTING_HEARTBEAT_TICKS: u32 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SfuRole {
@@ -409,6 +417,57 @@ fn set_audio_encoding_active(pc: Option<&PeerConnection>, active: bool) {
     }
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct LocalRoutes(Vec<IpAddr>);
+
+impl LocalRoutes {
+    fn probe() -> Self {
+        let mut addresses: Vec<IpAddr> = ROUTE_PROBE_TARGETS
+            .into_iter()
+            .filter_map(route_source_address)
+            .map(stable_prefix)
+            .collect();
+        addresses.sort();
+        addresses.dedup();
+        Self(addresses)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn describe(&self) -> String {
+        if self.0.is_empty() {
+            return "-".to_owned();
+        }
+        self.0
+            .iter()
+            .map(IpAddr::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+fn stable_prefix(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+        IpAddr::V6(v6) => {
+            let mut octets = v6.octets();
+            octets[8..].fill(0);
+            IpAddr::V6(Ipv6Addr::from(octets))
+        }
+    }
+}
+
+fn route_source_address(target: &str) -> Option<IpAddr> {
+    let target: SocketAddr = target.parse().ok()?;
+    let bind = if target.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+    let socket = UdpSocket::bind(bind).ok()?;
+    socket.connect(target).ok()?;
+    let address = socket.local_addr().ok()?.ip();
+    (!address.is_unspecified()).then_some(address)
+}
+
 async fn engine_main(
     mut config: SfuConfig,
     factory: PeerConnectionFactory,
@@ -418,10 +477,22 @@ async fn engine_main(
     let mut local = LocalTracks::new();
     let mut attempts: u32 = 0;
     let mut ever_joined = false;
+    let mut retiring = RetiredPeerConnection(None);
 
     loop {
         let (joined, reason, stale_token) =
-            match run_session(&config, &factory, &mut local, &cmd_rx, evt_tx, ever_joined).await {
+            match run_session(
+                &config,
+                &factory,
+                &mut local,
+                &cmd_rx,
+                evt_tx,
+                ever_joined,
+                &mut attempts,
+                &mut retiring.0,
+            )
+            .await
+            {
                 SessionOutcome::Closed => {
                     let _ = evt_tx.send(SfuEvent::Disconnected {
                         reason: "left".into(),
@@ -455,6 +526,19 @@ async fn engine_main(
             let _ = evt_tx.send(SfuEvent::Disconnected { reason });
             return Ok(());
         }
+        let _ = evt_tx.send(SfuEvent::Reconnecting);
+        if LocalRoutes::probe().is_empty() {
+            tracing::warn!("sfu link dropped ({reason}); parking until the machine has a route again");
+            match wait_for_local_route(&cmd_rx, &mut local, config.role, evt_tx).await {
+                OfflineWait::Closed => {
+                    let _ = evt_tx.send(SfuEvent::Disconnected {
+                        reason: "left".into(),
+                    });
+                    return Ok(());
+                }
+                OfflineWait::Online => continue,
+            }
+        }
         attempts += 1;
         if attempts > MAX_RECONNECT_ATTEMPTS {
             let _ = evt_tx.send(SfuEvent::Disconnected {
@@ -463,10 +547,72 @@ async fn engine_main(
             return Ok(());
         }
         tracing::warn!("sfu link dropped ({reason}); retry {attempts}");
-        let _ = evt_tx.send(SfuEvent::Reconnecting);
         let backoff = if attempts <= RECONNECT_FAST_ATTEMPTS { RECONNECT_DELAY_FAST } else { RECONNECT_DELAY };
         tokio::time::sleep(backoff).await;
     }
+}
+
+enum OfflineWait {
+    Online,
+    Closed,
+}
+
+async fn wait_for_local_route(
+    cmd_rx: &flume::Receiver<EngineCommand>,
+    local: &mut LocalTracks,
+    role: SfuRole,
+    evt_tx: &flume::Sender<SfuEvent>,
+) -> OfflineWait {
+    let mut timer = tokio::time::interval(NET_PATH_POLL);
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut quiet_ticks: u32 = 0;
+    loop {
+        tokio::select! {
+            command = cmd_rx.recv_async() => {
+                match command {
+                    Ok(EngineCommand::Close) | Err(_) => return OfflineWait::Closed,
+                    Ok(other) => apply_offline_command(other, local, role, evt_tx),
+                }
+            }
+            _ = timer.tick() => {
+                if !LocalRoutes::probe().is_empty() {
+                    tracing::info!("machine has a route again; resuming the sfu session");
+                    return OfflineWait::Online;
+                }
+                quiet_ticks = quiet_ticks.saturating_add(1);
+                if quiet_ticks >= RECONNECTING_HEARTBEAT_TICKS {
+                    quiet_ticks = 0;
+                    let _ = evt_tx.send(SfuEvent::Reconnecting);
+                }
+            }
+        }
+    }
+}
+
+fn apply_offline_command(
+    command: EngineCommand,
+    local: &mut LocalTracks,
+    role: SfuRole,
+    evt_tx: &flume::Sender<SfuEvent>,
+) {
+    match command {
+        EngineCommand::SetLocalAudio(track) => local.audio = track,
+        EngineCommand::SetLocalCamera(track) => local.camera = track,
+        EngineCommand::SetLocalScreen(screen) => local.screen = screen,
+        EngineCommand::SetMute(muted) => local.muted = muted,
+        EngineCommand::SetScreenAudio(active) => local.screen_audio = active,
+        EngineCommand::PushToTalk(active) => {
+            local.ptt_requested = active;
+            if !active {
+                local.ptt_active = false;
+                let _ = evt_tx.send(SfuEvent::PttActive(false));
+            }
+        }
+        EngineCommand::SetCameraActive(_)
+        | EngineCommand::SetScreenActive(_)
+        | EngineCommand::Close => {}
+    }
+    local.apply_audio_gate(None, role);
 }
 
 async fn refresh_session_token(config: &mut SfuConfig) -> bool {
@@ -491,23 +637,9 @@ enum SessionOutcome {
     DroppedStaleToken { joined: bool, reason: String },
 }
 
-struct SessionPeerConnection(Option<PeerConnection>);
+struct RetiredPeerConnection(Option<PeerConnection>);
 
-impl std::ops::Deref for SessionPeerConnection {
-    type Target = Option<PeerConnection>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for SessionPeerConnection {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl Drop for SessionPeerConnection {
+impl Drop for RetiredPeerConnection {
     fn drop(&mut self) {
         if let Some(pc) = self.0.take() {
             pc.close();
@@ -515,6 +647,7 @@ impl Drop for SessionPeerConnection {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_session(
     config: &SfuConfig,
     factory: &PeerConnectionFactory,
@@ -522,6 +655,52 @@ async fn run_session(
     cmd_rx: &flume::Receiver<EngineCommand>,
     evt_tx: &flume::Sender<SfuEvent>,
     resuming: bool,
+    attempts: &mut u32,
+    retiring: &mut Option<PeerConnection>,
+) -> SessionOutcome {
+    let mut pc: Option<PeerConnection> = None;
+    let outcome = session_loop(
+        config, factory, local, cmd_rx, evt_tx, resuming, attempts, &mut pc, retiring,
+    )
+    .await;
+    let retryable = matches!(
+        outcome,
+        SessionOutcome::Dropped { .. } | SessionOutcome::DroppedStaleToken { .. }
+    );
+    match pc {
+        Some(pc) if retryable => {
+            if let Some(previous) = retiring.take() {
+                previous.close();
+            }
+            *retiring = Some(pc);
+        }
+        Some(pc) => {
+            if let Some(previous) = retiring.take() {
+                previous.close();
+            }
+            pc.close();
+        }
+        None if retryable => {}
+        None => {
+            if let Some(previous) = retiring.take() {
+                previous.close();
+            }
+        }
+    }
+    outcome
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn session_loop(
+    config: &SfuConfig,
+    factory: &PeerConnectionFactory,
+    local: &mut LocalTracks,
+    cmd_rx: &flume::Receiver<EngineCommand>,
+    evt_tx: &flume::Sender<SfuEvent>,
+    resuming: bool,
+    attempts: &mut u32,
+    pc: &mut Option<PeerConnection>,
+    retiring: &mut Option<PeerConnection>,
 ) -> SessionOutcome {
     let url = build_ws_url(&config.ws_url, &config.token);
     let ws = match connect_async(url.as_str()).await {
@@ -550,22 +729,43 @@ async fn run_session(
     }
 
     let mut membership = Membership::default();
-    let mut disconnected_ticks: u32 = 0;
     let (transport_state_tx, transport_state_rx) = flume::unbounded::<PeerConnectionState>();
     let (ice_state_tx, ice_state_rx) = flume::unbounded::<IceConnectionState>();
     let mut stats_timer = tokio::time::interval(MEDIA_STATS_INTERVAL);
     stats_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut pc = SessionPeerConnection(None);
     let mut pending_offer: Option<(u64, String)> = None;
     let mut media_wait_started: Option<Instant> = None;
     let mut ice_up_since: Option<Instant> = None;
     let mut transport_connected = false;
+    let mut disconnected_since: Option<Instant> = None;
+    let mut media_up_since: Option<Instant> = None;
+    let mut budget_reset = false;
     let mut connect_timer = tokio::time::interval(CONNECT_POLL);
     connect_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut routes = LocalRoutes::probe();
+    let mut route_candidate: Option<LocalRoutes> = None;
+    let mut offline_ticks: u32 = 0;
+    let mut link_down = false;
+    let mut net_path_timer = tokio::time::interval(NET_PATH_POLL);
+    net_path_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut announced_state = false;
+    let mut announced_connection = false;
+    let mut joined_room = config.room.clone();
     let mut joined = false;
 
     loop {
+        // `joined` on the wire only accepts the request. Room membership is
+        // confirmed by the snapshot, and media needs its own ICE/DTLS handshake.
+        if joined && transport_connected && !announced_connection {
+            announced_connection = true;
+            if resuming {
+                let _ = evt_tx.send(SfuEvent::Reconnected);
+            } else {
+                let _ = evt_tx.send(SfuEvent::Connected {
+                    room: joined_room.clone(),
+                });
+            }
+        }
         tokio::select! {
             biased;
             incoming = ws_rx.next() => {
@@ -616,6 +816,7 @@ async fn run_session(
                     ServerMessage::Pong => {}
                     ServerMessage::Joined { room, ice_servers } => {
                         tracing::info!(%room, ice_servers = ice_servers.len(), "sfu accepted join");
+                        joined_room = room;
                         match create_peer_connection(factory, &ice_servers, &config.fallback_ice_servers) {
                             Ok(created) => {
                                 let state_tx = transport_state_tx.clone();
@@ -643,11 +844,6 @@ async fn run_session(
                                 media_wait_started = Some(Instant::now());
                                 ice_up_since = None;
                                 transport_connected = false;
-                                if resuming {
-                                    let _ = evt_tx.send(SfuEvent::Reconnected);
-                                } else {
-                                    let _ = evt_tx.send(SfuEvent::Connected { room });
-                                }
                             }
                             Err(e) => {
                                 return SessionOutcome::Fatal(format!("peer connection setup failed: {e:#}"));
@@ -690,6 +886,8 @@ async fn run_session(
                     }
                     ServerMessage::PushToTalkChanged { active } => {
                         tracing::info!(active, "sfu push-to-talk grant changed");
+                        // A grant for an earlier press may arrive after release.
+                        let active = active && local.ptt_requested;
                         local.ptt_active = active;
                         local.apply_audio_gate(pc.as_ref(), config.role);
                         let _ = evt_tx.send(SfuEvent::PttActive(active));
@@ -751,17 +949,17 @@ async fn run_session(
                     EngineCommand::SetMute(muted) => {
                         local.muted = muted;
                         local.apply_audio_gate(pc.as_ref(), config.role);
-                        if send(&mut ws_tx, &ClientMessage::Mute { is_mute: muted }).await.is_err() {
+                        if joined && send(&mut ws_tx, &ClientMessage::Mute { is_mute: muted }).await.is_err() {
                             return SessionOutcome::Dropped { joined, reason: "mute send failed".into() };
                         }
                     }
                     EngineCommand::SetCameraActive(active) => {
-                        if send(&mut ws_tx, &ClientMessage::Camera { active }).await.is_err() {
+                        if joined && send(&mut ws_tx, &ClientMessage::Camera { active }).await.is_err() {
                             return SessionOutcome::Dropped { joined, reason: "camera send failed".into() };
                         }
                     }
                     EngineCommand::SetScreenActive(active) => {
-                        if send(&mut ws_tx, &ClientMessage::ShareScreen { active }).await.is_err() {
+                        if joined && send(&mut ws_tx, &ClientMessage::ShareScreen { active }).await.is_err() {
                             return SessionOutcome::Dropped { joined, reason: "share_screen send failed".into() };
                         }
                     }
@@ -771,6 +969,16 @@ async fn run_session(
                     }
                     EngineCommand::PushToTalk(active) => {
                         local.ptt_requested = active;
+                        if !active {
+                            local.ptt_active = false;
+                            local.apply_audio_gate(pc.as_ref(), config.role);
+                            let _ = evt_tx.send(SfuEvent::PttActive(false));
+                        }
+                        // Keep the latest held state during join/reconnect. The
+                        // first room snapshot replays it once a server session exists.
+                        if !joined {
+                            continue;
+                        }
                         let ordered: [ClientMessage; 2] = if active {
                             [ClientMessage::Mute { is_mute: false }, ClientMessage::PushToTalk { active: true }]
                         } else {
@@ -795,6 +1003,13 @@ async fn run_session(
                     Ok(PeerConnectionState::Connected) => {
                         transport_connected = true;
                         media_wait_started = None;
+                        disconnected_since = None;
+                        media_up_since.get_or_insert_with(Instant::now);
+                    }
+                    Ok(PeerConnectionState::Disconnected) => {
+                        transport_connected = false;
+                        media_wait_started.get_or_insert_with(Instant::now);
+                        disconnected_since.get_or_insert_with(Instant::now);
                     }
                     Ok(_) => {
                         if transport_connected {
@@ -823,6 +1038,26 @@ async fn run_session(
                 }
             }
             _ = connect_timer.tick() => {
+                if let Some(since) = disconnected_since {
+                    let waited = since.elapsed();
+                    if waited >= TRANSPORT_DISCONNECTED_GRACE {
+                        tracing::warn!(
+                            waited_ms = waited.as_millis(),
+                            "sfu transport stayed disconnected; restarting the session"
+                        );
+                        return SessionOutcome::Dropped {
+                            joined,
+                            reason: "peer connection stayed disconnected".into(),
+                        };
+                    }
+                }
+                if !budget_reset
+                    && transport_connected
+                    && media_up_since.is_some_and(|since| since.elapsed() >= HEALTHY_SESSION)
+                {
+                    budget_reset = true;
+                    *attempts = 0;
+                }
                 if pc.is_some() && !transport_connected {
                     let waited = media_wait_started
                         .get_or_insert_with(Instant::now)
@@ -840,6 +1075,9 @@ async fn run_session(
                             waited_ms = waited.as_millis(),
                             "sfu media transport stalled; dropping the session to reconnect"
                         );
+                        if let Some(pc) = pc.as_ref() {
+                            log_media_stats(pc).await;
+                        }
                         return SessionOutcome::Dropped { joined, reason: reason.into() };
                     }
                 }
@@ -854,21 +1092,51 @@ async fn run_session(
                             };
                         }
                         PeerConnectionState::Disconnected => {
-                            disconnected_ticks += 1;
-                            tracing::warn!(
-                                ticks = disconnected_ticks,
-                                "sfu transport disconnected; waiting for ICE to recover"
-                            );
-                            if disconnected_ticks >= MAX_DISCONNECTED_TICKS {
-                                return SessionOutcome::Dropped {
-                                    joined,
-                                    reason: "peer connection stayed disconnected".into(),
-                                };
-                            }
+                            disconnected_since.get_or_insert_with(Instant::now);
                         }
-                        _ => disconnected_ticks = 0,
+                        PeerConnectionState::Connected => disconnected_since = None,
+                        _ => {}
                     }
                     log_media_stats(&peer_connection).await;
+                }
+            }
+            _ = net_path_timer.tick() => {
+                let current = LocalRoutes::probe();
+                if current.is_empty() {
+                    route_candidate = None;
+                    offline_ticks = offline_ticks.saturating_add(1);
+                    link_down |= offline_ticks >= LINK_DOWN_TICKS;
+                } else if !joined || routes.is_empty() {
+                    routes = current;
+                    route_candidate = None;
+                    offline_ticks = 0;
+                    link_down = false;
+                } else if link_down {
+                    tracing::warn!(
+                        routes = %current.describe(),
+                        offline_ticks,
+                        "local network link came back; restarting the sfu session"
+                    );
+                    return SessionOutcome::Dropped {
+                        joined,
+                        reason: "local network link flapped".into(),
+                    };
+                } else if current == routes {
+                    route_candidate = None;
+                    offline_ticks = 0;
+                } else if route_candidate.as_ref() == Some(&current) {
+                    tracing::warn!(
+                        was = %routes.describe(),
+                        now = %current.describe(),
+                        "local network path changed; restarting the sfu session"
+                    );
+                    return SessionOutcome::Dropped {
+                        joined,
+                        reason: "local network path changed".into(),
+                    };
+                } else {
+                    route_candidate = Some(current);
+                    offline_ticks = 0;
                 }
             }
             () = std::future::ready(()), if pending_offer.is_some() => {
@@ -892,9 +1160,19 @@ async fn run_session(
                     Ok(()) => {
                         tracing::debug!(generation, "sfu answer sent");
                         sync_remote_media(&peer_connection, &mut membership, evt_tx);
+                        if !membership.live_tracks.is_empty()
+                            && let Some(previous) = retiring.take()
+                        {
+                            previous.close();
+                        }
                         let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
                     }
-                    Err(e) => tracing::error!("sfu negotiation failed: {e:#}"),
+                    Err(e) => {
+                        return SessionOutcome::Dropped {
+                            joined,
+                            reason: format!("sfu negotiation failed: {e:#}"),
+                        };
+                    }
                 }
                 tokio::time::sleep(RENEGOTIATION_SETTLE).await;
             }
@@ -1067,6 +1345,17 @@ async fn log_media_stats(pc: &PeerConnection) {
                 out.outbound.frames_per_second,
                 out.outbound.frames_encoded,
             )),
+            RtcStats::InboundRtp(inb) if inb.stream.kind == "audio" => lines.push(format!(
+                "in mid={} audio {} pkts={} disc={} played={:.1}s conceal={} depth={:.0}ms lvl={:.3}",
+                inb.inbound.mid,
+                codec_of(&inb.stream.codec_id),
+                inb.received.packets_received,
+                inb.inbound.packets_discarded,
+                inb.inbound.total_samples_duration,
+                inb.inbound.concealed_samples,
+                jitter_depth_ms(&inb.inbound),
+                inb.inbound.audio_level,
+            )),
             RtcStats::InboundRtp(inb) => lines.push(format!(
                 "in mid={} {} {} pkts={} {}x{} dec={} key={} pli={} nack={} disc={}",
                 inb.inbound.mid,
@@ -1135,6 +1424,13 @@ async fn log_media_stats(pc: &PeerConnection) {
         pairs.sort();
         tracing::info!(pairs = %pairs.join(" | "), "sfu ice pairs");
     }
+}
+
+fn jitter_depth_ms(inbound: &libwebrtc::stats::dictionaries::InboundRtpStreamStats) -> f64 {
+    if inbound.jitter_buffer_emitted_count == 0 {
+        return 0.0;
+    }
+    inbound.jitter_buffer_delay / inbound.jitter_buffer_emitted_count as f64 * 1000.0
 }
 
 fn describe_candidate(candidate: &libwebrtc::stats::dictionaries::IceCandidateStats) -> String {
@@ -1249,7 +1545,9 @@ async fn negotiate(
     send(
         ws_tx,
         &ClientMessage::Answer {
-            sdp: sdp::patch_answer_for_sfu(&local_sdp, role.is_audience()),
+            // Send exactly the description installed in libwebrtc. In
+            // particular an audience camera offered inactive must stay inactive.
+            sdp: local_sdp,
             offer_generation: generation,
         },
     )
@@ -1295,7 +1593,12 @@ fn tune_uplinks(pc: &PeerConnection, local: &LocalTracks) {
         let sender = transceiver.sender();
         let mut parameters = sender.parameters();
         if parameters.encodings.is_empty() {
-            tracing::warn!("mid {mid} has no encoding to carry the publish limits");
+            if matches!(
+                transceiver.direction(),
+                RtpTransceiverDirection::SendOnly | RtpTransceiverDirection::SendRecv
+            ) {
+                tracing::warn!("mid {mid} has no encoding to carry the publish limits");
+            }
             continue;
         }
         for encoding in parameters.encodings.iter_mut() {
@@ -1462,6 +1765,155 @@ fn sync_remote_media(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn reconnect_controls_wait_for_membership(held: bool) {
+        use serde_json::json;
+        use tokio::time::timeout;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = SfuConfig {
+            ws_url: format!("ws://{}/ws", listener.local_addr().unwrap()),
+            token: "test-token".into(),
+            room: "test-room".into(),
+            role: SfuRole::Audience,
+            fallback_ice_servers: Vec::new(),
+            refresh_token: None,
+        };
+        let (cmd_tx, cmd_rx) = flume::unbounded();
+        let (evt_tx, evt_rx) = flume::unbounded();
+        if !held {
+            // These commands can accumulate while the previous link is down.
+            cmd_tx.send(EngineCommand::SetMute(true)).unwrap();
+            cmd_tx.send(EngineCommand::SetCameraActive(false)).unwrap();
+            cmd_tx.send(EngineCommand::SetScreenActive(false)).unwrap();
+            cmd_tx.send(EngineCommand::PushToTalk(true)).unwrap();
+            cmd_tx.send(EngineCommand::PushToTalk(false)).unwrap();
+        }
+        let session = tokio::spawn(async move {
+            let mut local = LocalTracks::new();
+            local.ptt_requested = true;
+            let factory = PeerConnectionFactory::default();
+            run_session(&config, &factory, &mut local, &cmd_rx, &evt_tx, true).await
+        });
+
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut server = tokio_tungstenite::accept_async(socket).await.unwrap();
+        let join = server.next().await.unwrap().unwrap().into_text().unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&join).unwrap()["type"],
+            "join"
+        );
+        if !held {
+            assert!(matches!(
+                evt_rx.recv_async().await.unwrap(),
+                SfuEvent::PttActive(false)
+            ));
+        }
+        server
+            .send(Message::Text(
+                json!({
+                    "type": "joined", "room": "test-room", "iceServers": []
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        server
+            .send(Message::Text(json!({ "type": "ping" }).to_string().into()))
+            .await
+            .unwrap();
+        let pong = server.next().await.unwrap().unwrap().into_text().unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&pong).unwrap(),
+            json!({ "type": "pong" }),
+            "no room control may be sent before membership is confirmed"
+        );
+        assert!(
+            evt_rx.is_empty(),
+            "a joined acknowledgement must not report media reconnected"
+        );
+
+        server
+            .send(Message::Text(
+                json!({
+                    "type": "room_snapshot", "members": []
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let mut expected = vec![json!({ "type": "mute", "is_mute": !held })];
+        if held {
+            expected.push(json!({ "type": "push_to_talk", "active": true }));
+        }
+        expected.push(json!({ "type": "visibility", "visible": true }));
+        for wanted in expected {
+            let frame = server.next().await.unwrap().unwrap().into_text().unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&frame).unwrap(),
+                wanted
+            );
+        }
+        assert!(matches!(
+            evt_rx.recv_async().await.unwrap(),
+            SfuEvent::Peers(_)
+        ));
+        if !held {
+            server
+                .send(Message::Text(
+                    json!({
+                        "type": "push_to_talk_changed", "active": true
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    evt_rx.recv_async().await.unwrap(),
+                    SfuEvent::PttActive(false)
+                ),
+                "a delayed grant must not reopen the mic after the button was released"
+            );
+        }
+        cmd_tx.send(EngineCommand::Close).unwrap();
+        assert!(matches!(
+            timeout(Duration::from_secs(2), session)
+                .await
+                .unwrap()
+                .unwrap(),
+            SessionOutcome::Closed
+        ));
+        assert!(
+            !evt_rx
+                .try_iter()
+                .any(|event| matches!(event, SfuEvent::Connected { .. } | SfuEvent::Reconnected)),
+            "room membership without a media transport must not report success"
+        );
+    }
+
+    #[tokio::test]
+    async fn releasing_ptt_during_reconnect_does_not_send_controls_before_join() {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            reconnect_controls_wait_for_membership(false),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn holding_ptt_across_reconnect_replays_it_after_the_snapshot() {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            reconnect_controls_wait_for_membership(true),
+        )
+        .await
+        .unwrap();
+    }
 
     fn member(peer_id: u32, user_id: &str, mids: [u32; 3]) -> SnapshotMember {
         SnapshotMember {

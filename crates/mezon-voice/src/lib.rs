@@ -552,7 +552,9 @@ async fn session_main(
                         if let (Some(mixer), Some(out_fmt)) = (&audio_mixer, out_fmt) {
                             if let Some(handle) = audio_tracks.remove(&key) {
                                 handle.abort();
+                                let _ = handle.await;
                             }
+                            mixer.remove(key);
                             let handle =
                                 spawn_playback(track, key, mixer.clone(), out_fmt, speaking.clone());
                             audio_tracks.insert(key, handle);
@@ -590,6 +592,21 @@ async fn session_main(
                         emit!();
                     }
                     SfuEvent::Reconnecting => {
+                        // A new PeerConnection reuses MID-derived keys. Retire
+                        // its predecessors before attaching readers to those keys.
+                        for (key, handle) in audio_tracks.drain() {
+                            handle.abort();
+                            let _ = handle.await;
+                            if let Some(mixer) = &audio_mixer {
+                                mixer.remove(key);
+                            }
+                            speaking.forget(key);
+                        }
+                        remote_audio.clear();
+                        for (key, handle) in video_tracks.drain() {
+                            handle.stop();
+                            frame_store.remove(key);
+                        }
                         let _ = evt_tx.send(VoiceEvent::Reconnecting);
                     }
                     SfuEvent::Reconnected => {
