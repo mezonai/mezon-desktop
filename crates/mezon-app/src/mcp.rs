@@ -10,6 +10,13 @@ use mezon_store::{AuthState, LoginStore, Settings};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+#[derive(Debug, Clone, Copy)]
+pub struct McpLaunch {
+    pub enabled: bool,
+    pub read_only: bool,
+    pub port: u16,
+}
+
 pub struct McpRuntime {
     controller: Arc<McpController>,
     _control_server: Option<ControlServer>,
@@ -23,16 +30,20 @@ impl McpRuntime {
     pub fn start(
         api: Arc<AppApi>,
         mcp_cmd_tx: futures::channel::mpsc::UnboundedSender<McpCommand>,
+        launch: McpLaunch,
     ) -> anyhow::Result<Self> {
         let controller = Arc::new(McpController::new());
+        controller.set_preferred_port(launch.port);
         let controller_for_handler = controller.clone();
         let runtime_handle = mezon_client::transport_runtime::handle();
         let runtime_for_handler = runtime_handle.clone();
+        let ui_tx_for_handler = mcp_cmd_tx.clone();
 
         let handler: ControlHandler = Arc::new(move |request| {
             let controller = controller_for_handler.clone();
+            let ui_tx = ui_tx_for_handler.clone();
             let request_id = request.id;
-            match runtime_for_handler.block_on(handle_control_request(controller, request)) {
+            match runtime_for_handler.block_on(handle_control_request(controller, ui_tx, request)) {
                 Ok(response) => response,
                 Err(error) => ControlResponse::err(request_id, error.to_string()),
             }
@@ -53,6 +64,13 @@ impl McpRuntime {
             controller_for_backend
                 .set_backend(api_for_backend, ui_tx_for_backend)
                 .await;
+            if !launch.enabled {
+                return;
+            }
+            match controller_for_backend.start(launch.read_only, None).await {
+                Ok(result) => tracing::info!("MCP server listening at {}", result.url),
+                Err(error) => tracing::warn!("Failed to start the MCP server on launch: {error}"),
+            }
         });
 
         Ok(Self {
@@ -190,7 +208,16 @@ impl McpRuntime {
                         let result = cx.update(|cx| set_setting(cx, &settings, &key, value));
                         let _ = reply.send(result);
                     }
-                    McpCommand::SetCliEnabled { enabled, reply } => {
+                    McpCommand::SetMcpEnabled { enabled } => {
+                        cx.update(|cx| {
+                            settings.update(cx, |settings, cx| {
+                                settings.mcp_enabled = enabled;
+                                cx.notify();
+                            });
+                            mezon_store::schedule_settings_save(&settings, cx);
+                        });
+                    }
+                McpCommand::SetCliEnabled { enabled, reply } => {
                         let result = cx.update(|_| set_cli_enabled(enabled));
                         let _ = reply.send(result);
                     }
@@ -206,6 +233,26 @@ impl McpRuntime {
                     }
                     McpCommand::LeaveVoice { reply } => {
                         let result = cx.update(mezon_ui::app::capture::leave_voice);
+                        let _ = reply.send(result);
+                    }
+                    #[cfg(debug_assertions)]
+                    McpCommand::SimulateParticipants {
+                        count,
+                        screenshare,
+                        focus,
+                        fullscreen,
+                        member_strip,
+                        reply,
+                    } => {
+                        let options = mezon_store::SimulatedCall {
+                            screenshare,
+                            focus,
+                            fullscreen,
+                            member_strip,
+                        };
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::simulate_participants(count, options, cx)
+                        });
                         let _ = reply.send(result);
                     }
                     McpCommand::GetRecordingState { reply } => {
@@ -674,12 +721,17 @@ impl McpRuntime {
 
 async fn handle_control_request(
     controller: Arc<McpController>,
+    ui_tx: futures::channel::mpsc::UnboundedSender<McpCommand>,
     request: ControlRequest,
 ) -> anyhow::Result<ControlResponse> {
     match request.method.as_str() {
         "mcp.start" => {
             let params: McpStartParams = serde_json::from_value(request.params)?;
+            if let Some(port) = params.port {
+                controller.set_preferred_port(port);
+            }
             let result = controller.start(params.read_only, params.port).await?;
+            let _ = ui_tx.unbounded_send(McpCommand::SetMcpEnabled { enabled: true });
             Ok(ControlResponse::ok(
                 request.id,
                 serde_json::to_value(result)?,
@@ -694,7 +746,11 @@ async fn handle_control_request(
         }
         "mcp.stop" => {
             controller.stop().await?;
-            Ok(ControlResponse::ok(request.id, Value::Null))
+            let _ = ui_tx.unbounded_send(McpCommand::SetMcpEnabled { enabled: false });
+            Ok(ControlResponse::ok(
+                request.id,
+                serde_json::to_value(controller.status().await)?,
+            ))
         }
         "tool.call" => {
             let params: ToolCallParams = serde_json::from_value(request.params)?;

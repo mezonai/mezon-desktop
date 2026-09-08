@@ -945,7 +945,7 @@ impl FriendsPage {
     }
 
     fn render_list(&self, theme: &Theme, locale: &str, cx: &mut Context<Self>) -> impl IntoElement {
-        let container = div().flex().flex_1().min_h_0().px_8().pb_4();
+        let container = div().flex().flex_1().min_h_0().px_8().pb_4().w_full();
 
         if self.rows.is_empty() {
             let has_text = self.search_has_text(cx);
@@ -966,11 +966,7 @@ impl FriendsPage {
                             .justify_center()
                             .text_center()
                             .mb(px(120.))
-                            .child(
-                                div()
-                                    .max_w_full()
-                                    .child(mezon_i18n::t(locale, key).to_string()),
-                            ),
+                            .child(mezon_i18n::t(locale, key).to_string()),
                     ),
             );
         }

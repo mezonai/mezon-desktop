@@ -16,6 +16,7 @@ use rmcp::transport::{
 use serde_json::Value;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -29,11 +30,13 @@ struct ControllerInner {
 
 pub struct McpController {
     inner: Arc<Mutex<ControllerInner>>,
+    preferred_port: AtomicU16,
 }
 
 impl McpController {
     pub fn new() -> Self {
         Self {
+            preferred_port: AtomicU16::new(0),
             inner: Arc::new(Mutex::new(ControllerInner {
                 api: None,
                 ui_tx: None,
@@ -46,6 +49,10 @@ impl McpController {
 
     pub async fn status(&self) -> McpStatus {
         self.inner.lock().await.status.clone()
+    }
+
+    pub fn set_preferred_port(&self, port: u16) {
+        self.preferred_port.store(port, Ordering::Relaxed);
     }
 
     pub async fn set_backend(
@@ -75,9 +82,9 @@ impl McpController {
         let backend = McpBackend::new(api, ui_tx, read_only);
 
         let cancel = CancellationToken::new();
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port.unwrap_or(0)))
-            .await
-            .context("Binding MCP HTTP listener")?;
+        let requested = port.unwrap_or_else(|| self.preferred_port.load(Ordering::Relaxed));
+        let requested = (requested != 0).then_some(requested);
+        let listener = bind_listener(requested).await?;
         let bound_port = listener
             .local_addr()
             .context("Reading MCP listener address")?
@@ -155,6 +162,18 @@ impl McpController {
     }
 }
 
+async fn bind_listener(port: Option<u16>) -> anyhow::Result<tokio::net::TcpListener> {
+    if let Some(port) = port {
+        match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+            Ok(listener) => return Ok(listener),
+            Err(e) => tracing::warn!("MCP port {port} is unavailable ({e}); using a free port"),
+        }
+    }
+    tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .context("Binding MCP HTTP listener")
+}
+
 async fn enforce_local_origin(
     headers: HeaderMap,
     request: Request<axum::body::Body>,
@@ -188,5 +207,35 @@ fn origin_allowed(headers: &HeaderMap) -> bool {
 impl Default for McpController {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bind_listener;
+
+    #[tokio::test]
+    async fn a_named_port_is_honoured_so_the_url_does_not_move() {
+        for attempt in 1..=5 {
+            let listener = bind_listener(Some(0)).await.expect("bind any port");
+            let port = listener.local_addr().expect("addr").port();
+            drop(listener);
+
+            let listener = bind_listener(Some(port)).await.expect("bind named port");
+            let bound = listener.local_addr().expect("addr").port();
+            if bound == port {
+                return;
+            }
+            assert!(attempt < 5, "port {port} was taken on every attempt");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_taken_port_falls_back_instead_of_leaving_the_app_without_a_server() {
+        let held = bind_listener(Some(0)).await.expect("bind any port");
+        let taken = held.local_addr().expect("addr").port();
+
+        let listener = bind_listener(Some(taken)).await.expect("fall back");
+        assert_ne!(listener.local_addr().expect("addr").port(), taken);
     }
 }

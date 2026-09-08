@@ -171,8 +171,10 @@ pub type CliInstallVisibleFn = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type CliInstallStateFn = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type CliInstallToggleFn = Arc<dyn Fn() -> anyhow::Result<bool> + Send + Sync>;
 pub type McpStatusFn = Arc<dyn Fn() -> McpServerStatus + Send + Sync>;
-pub type McpStartFn = Arc<dyn Fn(bool) -> anyhow::Result<McpServerStatus> + Send + Sync>;
+pub type McpStartFn =
+    Arc<dyn Fn(bool, Option<u16>) -> anyhow::Result<McpServerStatus> + Send + Sync>;
 pub type McpStopFn = Arc<dyn Fn() -> anyhow::Result<McpServerStatus> + Send + Sync>;
+pub type McpSetPortFn = Arc<dyn Fn(u16) + Send + Sync>;
 /// Returns whether the OS permits desktop notifications (false only when explicitly denied).
 pub type NotificationPermitFn = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type CurrentLocationFn = Arc<dyn Fn() -> anyhow::Result<(f64, f64)> + Send + Sync>;
@@ -189,6 +191,7 @@ pub struct McpServerHooks {
     pub status: McpStatusFn,
     pub start: McpStartFn,
     pub stop: McpStopFn,
+    pub set_port: McpSetPortFn,
 }
 
 pub struct CliInstallHooks {
@@ -372,6 +375,10 @@ impl PlatformStore {
         self.mcp_server
             .as_ref()
             .map(|hooks| Arc::clone(&hooks.start))
+    }
+
+    pub fn mcp_server_set_port_fn(&self) -> Option<McpSetPortFn> {
+        self.mcp_server.as_ref().map(|hooks| hooks.set_port.clone())
     }
 
     pub fn mcp_server_stop_fn(&self) -> Option<McpStopFn> {

@@ -64,6 +64,9 @@ pub enum McpCommand {
         value: Value,
         reply: oneshot::Sender<anyhow::Result<()>>,
     },
+    SetMcpEnabled {
+        enabled: bool,
+    },
     SetCliEnabled {
         enabled: bool,
         reply: oneshot::Sender<anyhow::Result<bool>>,
@@ -74,6 +77,15 @@ pub enum McpCommand {
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
     LeaveVoice {
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    #[cfg(debug_assertions)]
+    SimulateParticipants {
+        count: usize,
+        screenshare: bool,
+        focus: bool,
+        fullscreen: bool,
+        member_strip: bool,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
     GetRecordingState {

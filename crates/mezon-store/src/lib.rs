@@ -210,8 +210,8 @@ pub use permissions::{
 pub use pinned::{PinnedEvent, PinnedMessage, PinnedMessagesStore};
 pub use platform::{
     CliInstallHooks, CliInstallStateFn, CliInstallToggleFn, CliInstallVisibleFn,
-    DesktopNotification, DownloadEvent, McpServerHooks, McpServerStatus, McpStartFn, McpStatusFn,
-    McpStopFn, NotifyFn, OpenUrlFn, PlatformStore, copy_image_url_to_clipboard,
+    DesktopNotification, DownloadEvent, McpServerHooks, McpServerStatus, McpSetPortFn, McpStartFn,
+    McpStatusFn, McpStopFn, NotifyFn, OpenUrlFn, PlatformStore, copy_image_url_to_clipboard,
     download_url_with_dialog,
 };
 pub use presence::*;
@@ -240,6 +240,8 @@ pub use user_profile::{
     resolve_user_profile,
 };
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
+#[cfg(debug_assertions)]
+pub use voice::SimulatedCall;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use voice::record_wayland_session;
 pub use voice::{
@@ -369,6 +371,8 @@ pub fn schedule_settings_save(settings: &gpui::Entity<Settings>, cx: &mut gpui::
     cx.default_global::<SettingsSaver>().task = Some(task);
 }
 
+pub const DEFAULT_MCP_PORT: u16 = 3179;
+
 /// Persistent application settings — written to ~/.config/mezon/settings.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -419,6 +423,9 @@ pub struct Settings {
     #[serde(default)]
     pub mcp_read_only: bool,
     #[serde(default)]
+    pub mcp_enabled: bool,
+    pub mcp_port: u16,
+    #[serde(default)]
     pub age_restricted_confirmed: Vec<ChannelId>,
     #[serde(default)]
     pub tour_seen_version: u32,
@@ -450,6 +457,8 @@ impl Default for Settings {
             last_clan_id: None,
             last_channel_id: None,
             mcp_read_only: false,
+            mcp_enabled: false,
+            mcp_port: DEFAULT_MCP_PORT,
             age_restricted_confirmed: Vec::new(),
             tour_seen_version: 0,
             tour_done_tracks: Vec::new(),
@@ -664,6 +673,14 @@ mod settings_tests {
         assert_eq!(settings.tour_seen_version, 0);
         assert!(settings.tour_done_tracks.is_empty());
         assert_eq!(settings.language, "vi");
+    }
+
+    #[test]
+    fn a_settings_file_written_before_mcp_had_a_port_gets_the_fixed_default() {
+        let legacy = r#"{"language":"vi","mcp_read_only":false}"#;
+        let settings: Settings = serde_json::from_str(legacy).expect("legacy settings parse");
+        assert_eq!(settings.mcp_port, super::DEFAULT_MCP_PORT);
+        assert!(!settings.mcp_enabled);
     }
 
     #[test]

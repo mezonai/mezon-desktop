@@ -16,6 +16,10 @@ pub fn presence_badge_color(presence: DmAvatarPresence) -> Option<Rgba> {
     }
 }
 
+pub fn avatar_status_color(presence: UserPresence) -> Option<Rgba> {
+    presence_badge_color(presence.into())
+}
+
 /// The presence dot drawn over a DM avatar: a filled circle for online/dnd and
 /// the crescent glyph for idle, nothing when the peer reads as offline. Expects
 /// a `relative()` parent sized to the avatar; `surface` is the background the
@@ -76,18 +80,41 @@ pub fn status_icon(presence: UserPresence) -> IconName {
     }
 }
 
-pub fn status_color(presence: UserPresence, theme: &Theme) -> Rgba {
+pub fn status_glyph(
+    presence: UserPresence,
+    size: Pixels,
+    color: impl Into<gpui::Hsla>,
+) -> AnyElement {
+    let color = color.into();
+    let icon = Icon::new(status_icon(presence)).size(size);
     match presence {
-        UserPresence::Online => theme.status_online,
-        UserPresence::Idle => theme.status_idle,
-        UserPresence::Dnd => theme.status_dnd,
-        UserPresence::Invisible => theme.status_offline,
+        UserPresence::Idle => icon
+            .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                -std::f32::consts::FRAC_PI_2,
+            )))
+            .text_color(color)
+            .into_any_element(),
+        _ => icon.text_color(color).into_any_element(),
     }
 }
 
-pub fn status_icon_and_color(status: &str, theme: &Theme) -> (IconName, Rgba) {
-    let presence = UserPresence::from_status(status);
-    (status_icon(presence), status_color(presence, theme))
+pub fn avatar_status_mark(
+    presence: UserPresence,
+    size: Pixels,
+    color: impl Into<gpui::Hsla>,
+) -> AnyElement {
+    let color = color.into();
+    match presence {
+        UserPresence::Idle => status_glyph(UserPresence::Idle, size, color),
+        UserPresence::Online | UserPresence::Dnd => {
+            div().size(size).rounded_full().bg(color).into_any_element()
+        }
+        UserPresence::Invisible => div().size(size).into_any_element(),
+    }
+}
+
+pub fn status_color(presence: UserPresence, theme: &Theme) -> Rgba {
+    presence_badge_color(presence.into()).unwrap_or(theme.status_offline)
 }
 
 pub fn status_label_key(presence: UserPresence) -> &'static str {
