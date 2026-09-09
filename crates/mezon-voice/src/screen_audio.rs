@@ -512,8 +512,10 @@ mod wasapi {
                     let _ = init_tx.try_send(Err(format!("screen audio COM init failed: {com}")));
                     return;
                 }
+                tracing::info!("screen audio step: com initialized");
                 capture_loop(wake, &thread_stop, &sample_tx, &init_tx);
                 unsafe { CoUninitialize() };
+                tracing::info!("screen audio step: thread finished");
             })
             .map_err(|e| format!("screen audio thread: {e}"))?;
 
@@ -558,25 +560,36 @@ mod wasapi {
                 return;
             }
         };
+        let max_frames = unsafe { client.GetBufferSize() }.unwrap_or(0);
+        tracing::info!(max_frames, "screen audio step: buffer sized");
         if let Err(e) = unsafe { client.Start() } {
             let _ = init_tx.try_send(Err(format!("screen audio start failed: {e}")));
             return;
         }
+        tracing::info!("screen audio step: client started");
         let _ = init_tx.try_send(Ok(()));
 
         let channels = SCREEN_AUDIO_CHANNELS as usize;
+        let mut logged_first = false;
         while !stop.load(Ordering::Relaxed) {
             if unsafe { WaitForSingleObject(wake.raw(), WAIT_SLICE_MS) } != WAIT_OBJECT_0 {
                 continue;
             }
-            drain_packets(&capture, channels, tx);
+            drain_packets(&capture, channels, max_frames, &mut logged_first, tx);
         }
+        tracing::info!("screen audio step: capture loop left");
         unsafe {
             let _ = client.Stop();
         }
     }
 
-    fn drain_packets(capture: &IAudioCaptureClient, channels: usize, tx: &flume::Sender<Vec<i16>>) {
+    fn drain_packets(
+        capture: &IAudioCaptureClient,
+        channels: usize,
+        max_frames: u32,
+        logged_first: &mut bool,
+        tx: &flume::Sender<Vec<i16>>,
+    ) {
         loop {
             let pending = unsafe { capture.GetNextPacketSize() }.unwrap_or(0);
             if pending == 0 {
@@ -588,8 +601,20 @@ mod wasapi {
             if unsafe { capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None) }.is_err() {
                 return;
             }
+            if !*logged_first {
+                *logged_first = true;
+                tracing::info!(pending, frames, flags, "screen audio step: first packet");
+            }
             let silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0;
-            if frames > 0 && !silent && !data.is_null() {
+            let oversized = max_frames > 0 && frames > max_frames;
+            if oversized {
+                tracing::error!(
+                    frames,
+                    max_frames,
+                    "screen audio packet exceeds the client buffer; dropping it"
+                );
+            }
+            if frames > 0 && !silent && !oversized && !data.is_null() {
                 let samples = unsafe {
                     std::slice::from_raw_parts(data.cast::<i16>(), frames as usize * channels)
                 };
@@ -631,6 +656,7 @@ mod wasapi {
         let (done_tx, done_rx) = flume::bounded::<()>(1);
         let handler: IActivateAudioInterfaceCompletionHandler =
             ActivationDone { tx: done_tx }.into();
+        tracing::info!(pid = std::process::id(), "screen audio step: activating");
         let operation = unsafe {
             ActivateAudioInterfaceAsync(
                 VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
@@ -640,9 +666,11 @@ mod wasapi {
             )
         }
         .map_err(|e| format!("process loopback activation failed: {e}"))?;
+        tracing::info!("screen audio step: activation requested");
         done_rx
             .recv_timeout(ACTIVATION_TIMEOUT)
             .map_err(|_| "process loopback activation timed out".to_string())?;
+        tracing::info!("screen audio step: activation completed");
 
         let mut result = HRESULT(0);
         let mut activated: Option<IUnknown> = None;
@@ -655,6 +683,7 @@ mod wasapi {
             .ok_or_else(|| "process loopback returned no audio client".to_string())?
             .cast()
             .map_err(|e| format!("process loopback client: {e}"))?;
+        tracing::info!("screen audio step: audio client obtained");
 
         let block_align = SCREEN_AUDIO_CHANNELS * BYTES_PER_SAMPLE;
         let format = WAVEFORMATEX {
@@ -677,10 +706,16 @@ mod wasapi {
             )
         }
         .map_err(|e| format!("process loopback init failed: {e}"))?;
+        tracing::info!(
+            rate = SCREEN_AUDIO_SAMPLE_RATE,
+            channels = SCREEN_AUDIO_CHANNELS,
+            "screen audio step: client initialized"
+        );
         unsafe { client.SetEventHandle(wake) }
             .map_err(|e| format!("process loopback event: {e}"))?;
         let capture: IAudioCaptureClient = unsafe { client.GetService() }
             .map_err(|e| format!("process loopback capture client: {e}"))?;
+        tracing::info!("screen audio step: capture client obtained");
         Ok((client, capture))
     }
 }
