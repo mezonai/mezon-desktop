@@ -452,6 +452,17 @@ mod selection_copy_tests {
     fn clipboard_selection_preserves_real_whitespace() {
         assert_eq!(clipboard_selection_slice(" a "), Some(" a ".to_string()));
     }
+
+    /// The character that reserves room for a channel icon while the message is being
+    /// shaped is not the one selection indexes, precisely so that stripping the marker
+    /// out of copied text cannot eat a per mille someone typed on purpose.
+    #[test]
+    fn clipboard_selection_keeps_a_typed_per_mille() {
+        assert_eq!(
+            clipboard_selection_slice("lãi 5\u{2030} một tháng"),
+            Some("lãi 5\u{2030} một tháng".to_string())
+        );
+    }
 }
 
 const FAB_SIZE: f32 = 32.;

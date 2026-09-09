@@ -50,7 +50,22 @@ const EMOJI_JUMBO_SIZE: f32 = 48.;
 fn emoji_source_px(size: Pixels) -> u32 {
     (f32::from(size) * 2.0).round().max(1.0) as u32
 }
+/// Stands in for an inline channel icon in the string selection and copy work off.
+/// Braille blank is never typed, so stripping it out of a copied slice cannot eat a
+/// character someone meant to send.
 pub(crate) const INLINE_ICON_PLACEHOLDER: char = '\u{2800}';
+/// Reserves the box the icon is painted into, in the string that actually gets shaped.
+/// It has to be about one em wide, and nothing else about it is observable: the run is
+/// faded out. Braille blank cannot do this job — no bundled font carries it, so its
+/// advance came from whatever the platform fell back to (Apple Symbols, 0.684em on
+/// macOS), which drew the icon at 11px instead of 16 and moved with the OS. Per mille is
+/// the one glyph gg sans defines near an em (1.004em at Normal), and the run pins the
+/// weight because the glyph widens with it.
+///
+/// The two strings are indexed against each other, so this must stay the same number of
+/// UTF-8 bytes as [`INLINE_ICON_PLACEHOLDER`] — `placeholders_agree_on_utf8_length` holds
+/// that line.
+pub(crate) const INLINE_ICON_RESERVE: char = '\u{2030}';
 pub(crate) const ATTACHMENT_PLACEHOLDER: char = '\u{fffc}';
 const RICH_TEXT_PLAN_LIMIT: usize = 512;
 const SELECTABLE_LAYOUT_PLAN_LIMIT: usize = 128;
@@ -2261,13 +2276,18 @@ fn hashtag_display_label(display: &str) -> SharedString {
 }
 
 fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> Option<AnyElement> {
-    let all_supported = msg.spans.iter().all(|span| {
-        matches!(
-            span,
-            MessageSpan::Text(_) | MessageSpan::Mention { .. } | MessageSpan::Hashtag { .. }
-        )
-    });
-    if !all_supported {
+    // This path exists only to paint channel icons over a single shaped string, and it used
+    // to find that out at the end — after copying the whole body into a String and filling
+    // three vectors, which every chipless message then threw away. Ask the spans first.
+    let mut has_icon = false;
+    for span in &msg.spans {
+        match span {
+            MessageSpan::Hashtag { .. } => has_icon = true,
+            MessageSpan::Text(_) | MessageSpan::Mention { .. } => {}
+            _ => return None,
+        }
+    }
+    if !has_icon {
         return None;
     }
 
@@ -2299,6 +2319,8 @@ fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> 
                     range: start..end,
                     color: Some(if is_role { role_color } else { mention_color }),
                     background: Some(if is_role { role_bg } else { mention_bg }),
+                    font_weight: None,
+                    fade_out: None,
                 });
                 if is_role {
                     continue;
@@ -2343,24 +2365,23 @@ fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> 
             } => {
                 let chip = hashtag_chip(display, channel_id.as_deref(), ctx.locale, ctx.app);
                 let icon_index = text.len();
-                text.push(INLINE_ICON_PLACEHOLDER);
+                text.push(INLINE_ICON_RESERVE);
                 let label_index = text.len();
                 text.push_str(&chip.label);
                 let end = text.len();
                 runs.push(StyledRun {
                     range: icon_index..label_index,
-                    color: Some(Hsla {
-                        h: 0.,
-                        s: 0.,
-                        l: 0.,
-                        a: 0.,
-                    }),
+                    color: None,
                     background: Some(mention_bg),
+                    font_weight: Some(gpui::FontWeight::NORMAL),
+                    fade_out: Some(1.),
                 });
                 runs.push(StyledRun {
                     range: label_index..end,
                     color: Some(mention_color),
                     background: Some(mention_bg),
+                    font_weight: None,
+                    fade_out: None,
                 });
                 icons.push(IconOverlay {
                     byte_index: icon_index,
@@ -2846,13 +2867,31 @@ fn split_unbreakable(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        RichRunPalette, RichTextRenderPlan, SelectableSectionCursor, parse_channel_id,
-        rich_highlights_with_link_hover, rich_run_highlight,
-        rich_run_highlight_with_link_underline, rich_text_plan_matches,
+        INLINE_ICON_PLACEHOLDER, INLINE_ICON_RESERVE, RichRunPalette, RichTextRenderPlan,
+        SelectableSectionCursor, parse_channel_id, rich_highlights_with_link_hover,
+        rich_run_highlight, rich_run_highlight_with_link_underline, rich_text_plan_matches,
         selectable_message_layout_identity, selectable_text_chunks,
     };
     use gpui::{Hsla, SharedString};
     use mezon_store::{ChannelId, Message, MessageId, MessageSpan, RichRunKind, build_rich_layout};
+
+    /// The shaped string and the string selection indexes into carry different characters
+    /// where a channel icon goes, and every offset is shared between them. Same byte width
+    /// or a selection that crosses a chip lands on the wrong character.
+    #[test]
+    fn placeholders_agree_on_utf8_length() {
+        assert_eq!(
+            INLINE_ICON_PLACEHOLDER.len_utf8(),
+            INLINE_ICON_RESERVE.len_utf8()
+        );
+    }
+
+    /// The reserve is only ever shaped, never read back, so it may be a character someone
+    /// could type. The placeholder is stripped out of copied text wholesale, so it must not.
+    #[test]
+    fn only_the_reserve_may_be_a_typeable_character() {
+        assert!(('\u{2800}'..='\u{28ff}').contains(&INLINE_ICON_PLACEHOLDER));
+    }
 
     #[test]
     fn parse_channel_id_rejects_zero() {

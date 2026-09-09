@@ -900,8 +900,14 @@ impl ChatArea {
 
         // A ban replaces the composer outright, the way the web client does — the moderator list
         // only says *who* is banned, so the countdown has to come from `IsBanned`.
+        //
+        // A denied send wins over it: the server answers `IsBanned` with `EXISTS ucns:<user>:<channel>`,
+        // and that key is also what revoking send-message on a channel writes — without a TTL — so
+        // every member of a bot-only channel reads back as banned (KOMU #checkin: is_banned=1,
+        // ttl=-1, send-message active=0). Trust the permission over the ban when they disagree.
         let ban_notice = if !is_dm
             && !media_channel_view
+            && !send_denied
             && let Some(channel_id) = channel_id
         {
             let store = BannedUsersStore::global(cx);
@@ -972,9 +978,7 @@ impl ChatArea {
                     },
                 ))
                 .when_some(ban_notice, |col, notice| col.child(notice))
-                .when(!banned && send_denied, |col| {
-                    col.child(no_permission_notice)
-                })
+                .when(send_denied, |col| col.child(no_permission_notice))
                 .when(!banned && !send_denied, |col| {
                     col.children(onboarding_mission)
                         .when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
