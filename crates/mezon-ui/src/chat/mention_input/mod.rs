@@ -520,6 +520,20 @@ fn content_payload_utf8_len(text: &str) -> usize {
         .unwrap_or(text.len() + CONVERT_PREFIX_LEN)
 }
 
+fn should_convert_paste_to_file(current_input: &str, pasted: &str) -> bool {
+    current_input.trim().is_empty() && json_string_utf16_len(pasted) > CONVERT_TO_FILE_THRESHOLD
+}
+
+fn write_text_as_pending_attachment(text: &str) -> Option<PendingAttachment> {
+    let filename = format!("{}.txt", chrono::Utc::now().timestamp_millis());
+    let path = std::env::temp_dir().join(&filename);
+    if let Err(err) = std::fs::write(&path, text.as_bytes()) {
+        tracing::warn!("failed to write converted text attachment: {err}");
+        return None;
+    }
+    build_pending(path)
+}
+
 fn needs_png_transcode(format: ImageFormat) -> bool {
     matches!(
         format,
@@ -825,24 +839,27 @@ impl MentionInput {
         } else {
             raw.trim_end().to_string()
         };
-        if self.overflow_to_file
+        let (text, content, ogp) = if self.overflow_to_file
             && !text.is_empty()
             && content_payload_utf8_len(&text) > CONVERT_TO_FILE_THRESHOLD
         {
-            self.convert_text_to_file(text, window, cx);
-            self.committed.clear();
-            self.reset_popup();
-            self.close_popup(window, cx);
+            let pending = write_text_as_pending_attachment(&text)?;
+            if let Err(limit) = validate_batch(
+                self.pending_attachments.len(),
+                std::slice::from_ref(&pending),
+            ) {
+                Self::show_upload_limit(limit, window, cx);
+                return None;
+            }
+            self.pending_attachments.push(pending);
             self.clear_ogp_preview(cx);
-            self.input.update(cx, |input, cx| {
-                input.set_mention_spans(Vec::new(), cx);
-                input.clear_after_send(swallow.clone(), window, cx);
-            });
-            return None;
-        }
-        let content = outgoing_content_from_committed(&raw, &self.committed);
+            (String::new(), OutgoingContent::default(), None)
+        } else {
+            let content = outgoing_content_from_committed(&raw, &self.committed);
+            let ogp = self.take_outgoing_ogp();
+            (text, content, ogp)
+        };
         let attachments = outgoing_attachments(&std::mem::take(&mut self.pending_attachments));
-        let ogp = self.take_outgoing_ogp();
         self.committed.clear();
         self.reset_popup();
         self.close_popup(window, cx);
@@ -1051,21 +1068,17 @@ impl MentionInput {
             return;
         }
         if self.overflow_to_file {
-            if json_string_utf16_len(&text) > CONVERT_TO_FILE_THRESHOLD {
-                self.convert_text_to_file(text, window, cx);
-                return;
-            }
             let current = self.input.read(cx).value().to_string();
-            let combined = format!("{current}{text}");
-            if json_string_utf16_len(&combined) > CONVERT_TO_FILE_THRESHOLD {
-                self.committed.clear();
-                self.reset_popup();
-                self.input.update(cx, |input, cx| {
-                    input.set_mention_spans(Vec::new(), cx);
-                    input.set_value("", window, cx);
-                });
-                self.convert_text_to_file(combined, window, cx);
-                cx.notify();
+            if should_convert_paste_to_file(&current, &text) {
+                if !current.is_empty() {
+                    self.committed.clear();
+                    self.reset_popup();
+                    self.input.update(cx, |input, cx| {
+                        input.set_mention_spans(Vec::new(), cx);
+                        input.set_value("", window, cx);
+                    });
+                }
+                self.convert_text_to_file(text, window, cx);
                 return;
             }
         }
@@ -1074,17 +1087,9 @@ impl MentionInput {
     }
 
     fn convert_text_to_file(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
-        let filename = format!("{}.txt", chrono::Utc::now().timestamp_millis());
         cx.spawn_in(window, async move |this, cx| {
             let pending = cx
-                .background_spawn(async move {
-                    let path = std::env::temp_dir().join(&filename);
-                    if let Err(err) = std::fs::write(&path, text.as_bytes()) {
-                        tracing::warn!("failed to write converted text attachment: {err}");
-                        return None;
-                    }
-                    build_pending(path)
-                })
+                .background_spawn(async move { write_text_as_pending_attachment(&text) })
                 .await;
             if let Some(pending) = pending {
                 this.update_in(cx, |this, window, cx| {
@@ -3082,7 +3087,7 @@ impl Render for MentionInput {
 mod convert_tests {
     use super::{
         CONVERT_PREFIX_LEN, CONVERT_TO_FILE_THRESHOLD, content_payload_utf8_len,
-        json_string_utf16_len,
+        json_string_utf16_len, should_convert_paste_to_file, write_text_as_pending_attachment,
     };
 
     #[test]
@@ -3112,6 +3117,25 @@ mod convert_tests {
         assert!(content_payload_utf8_len(&text) <= CONVERT_TO_FILE_THRESHOLD);
         let over = "a".repeat(CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN + 1);
         assert!(content_payload_utf8_len(&over) > CONVERT_TO_FILE_THRESHOLD);
+    }
+
+    #[test]
+    fn paste_converts_only_when_input_empty_and_chunk_over_threshold() {
+        let over = "a".repeat(CONVERT_TO_FILE_THRESHOLD);
+        assert!(should_convert_paste_to_file("", &over));
+        assert!(should_convert_paste_to_file("   ", &over));
+        assert!(!should_convert_paste_to_file("draft", &over));
+        assert!(!should_convert_paste_to_file("", "short"));
+    }
+
+    #[test]
+    fn write_text_pending_attachment_is_plain_txt() {
+        let pending =
+            write_text_as_pending_attachment("hello long text").expect("temp txt attachment");
+        assert!(pending.filename.ends_with(".txt"));
+        assert_eq!(pending.filetype, "text/plain");
+        assert!(!pending.is_image);
+        let _ = std::fs::remove_file(&pending.path);
     }
 }
 
