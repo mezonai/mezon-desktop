@@ -34,8 +34,8 @@ const CAMERA_MAX_FRAMERATE: f64 = 30.0;
 const SCREEN_MAX_BITRATE: u64 = 3_500_000;
 const SCREEN_MAX_FRAMERATE: f64 = 15.0;
 const SCREEN_SCALABILITY_MODE: &str = "L1T1";
-const SCREEN_CODEC: &str = "vp8";
-const SCREEN_MAX_ENCODE_WIDTH: f64 = 1280.0;
+const SCREEN_CODEC: &str = "vp9";
+const SCREEN_MAX_ENCODE_WIDTH: f64 = 1920.0;
 const CAMERA_BITRATE_LIMITS: sdp::BitrateLimits = sdp::BitrateLimits {
     min_kbps: 250,
     start_kbps: 500,

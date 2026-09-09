@@ -175,7 +175,7 @@ pub fn start_screen(
                 // 1080p, not 720p: shared text is the whole point of a screen
                 // share, and 1280 wide leaves it soft however generous the
                 // bitrate is. This is the width the web client captures at.
-                output_resolution: Resolution::_720p,
+                output_resolution: Resolution::_1080p,
                 portal_source_types,
                 use_portal,
                 ..Default::default()
