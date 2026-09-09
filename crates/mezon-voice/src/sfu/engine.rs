@@ -1722,8 +1722,11 @@ fn sync_remote_media(
         };
 
         let key = remote_frame_key(&mid);
+        let negotiated = transceiver
+            .current_direction()
+            .unwrap_or_else(|| transceiver.direction());
         let idle = matches!(
-            transceiver.direction(),
+            negotiated,
             RtpTransceiverDirection::Inactive | RtpTransceiverDirection::Stopped
         );
         let live = transceiver
