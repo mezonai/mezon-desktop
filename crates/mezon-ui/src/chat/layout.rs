@@ -955,8 +955,11 @@ impl ChatLayout {
         self.message_search_input = Some(input);
     }
 
-    pub(crate) fn toggle_member_list(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_member_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dm = self.is_dm_route(cx);
+        if dm && !self.show_member_list {
+            self.chat_area.ensure_dm_profile_panel(window, cx);
+        }
         self.show_member_list = !self.show_member_list;
         if dm {
             self.ui_state.show_member_list_dm = self.show_member_list;
@@ -2853,11 +2856,8 @@ impl ChatLayout {
                         true,
                         in_voice,
                         Some(dm.id),
-                        is_group,
-                        is_group
-                            && self.show_member_list
-                            && !show_results_panel
-                            && !side_panel_open,
+                        true,
+                        self.show_member_list && !show_results_panel && !side_panel_open,
                         false,
                         false,
                         false,

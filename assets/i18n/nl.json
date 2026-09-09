@@ -4595,6 +4595,7 @@
   "userProfile.labels.anonymous": "Anoniem",
   "userProfile.labels.editProfile": "Profiel bewerken",
   "userProfile.labels.memberSince": "Lid sinds",
+  "userProfile.labels.conversationSince": "Gesprek sinds",
   "userProfile.labels.nope": "Geen!",
   "userProfile.labels.note": "NOTITIE",
   "userProfile.labels.removeRole": "Rol verwijderen",

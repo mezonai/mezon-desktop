@@ -25,6 +25,7 @@ use crate::chat::{CanvasPopoverPanel, canvas_popover_on_open};
 use crate::components::compositions::channel_row::{ChannelIcon, render_channel_icon};
 use crate::components::primitives::{Avatar, Divider, Icon, IconName, InputState};
 use crate::components::{Button, ButtonVariant, ButtonVariants, Sizable, Size};
+use crate::sidebar::create_message_group_modal::CreateMessageGroupModal;
 use crate::theme::{ActiveTheme, Theme};
 
 type ToggleHandler = Arc<dyn Fn(&mut Window, &mut App)>;
@@ -273,11 +274,14 @@ impl ChannelHeader {
             if dm_one_to_one && !dm_one_to_one_blocked {
                 items.push(("hdr-call", IconName::IconPhoneDM));
                 items.push(("hdr-video-call", IconName::IconMeetDM));
-            }
-            if !dm_one_to_one_blocked {
+                items.push(("hdr-pin", IconName::PinRight));
+                items.push(("hdr-members", IconName::IconUserProfileDM));
+            } else if !dm_one_to_one_blocked {
                 items.push(("hdr-members", IconName::MemberList));
+                items.push(("hdr-pin", IconName::PinRight));
+            } else {
+                items.push(("hdr-pin", IconName::PinRight));
             }
-            items.push(("hdr-pin", IconName::PinRight));
             items
         } else {
             channel_only_actions.to_vec()
@@ -322,10 +326,17 @@ impl ChannelHeader {
         } else {
             None
         };
-        let add_members_button = dm_header
-            .as_ref()
-            .filter(|info| info.is_group)
-            .map(|info| Self::render_add_members_button(info, icon_color, bg_hover));
+        let add_members_button = dm_header.as_ref().and_then(|info| {
+            if info.blocked_by_me {
+                None
+            } else if info.is_group {
+                Some(Self::render_add_members_button(info, icon_color, bg_hover))
+            } else {
+                Some(Self::render_create_group_button(
+                    info, icon_color, bg_hover, cx,
+                ))
+            }
+        });
         let mut buttons = Self::build_action_buttons(
             actions,
             theme,
@@ -352,7 +363,12 @@ impl ChannelHeader {
             cx,
         );
         if let Some(button) = add_members_button {
-            buttons.insert(0, button);
+            let index = if dm_one_to_one {
+                buttons.len().saturating_sub(1)
+            } else {
+                0
+            };
+            buttons.insert(index, button);
         }
 
         div()
@@ -590,6 +606,51 @@ impl ChannelHeader {
             )
             .on_click(move |_, window, cx| {
                 AddMembersToGroupModal::open(channel_id, locale.to_string(), window, cx);
+            })
+            .into_any_element()
+    }
+
+    fn render_create_group_button(
+        info: &DmHeaderInfo,
+        icon_color: gpui::Rgba,
+        bg_hover: gpui::Rgba,
+        cx: &App,
+    ) -> AnyElement {
+        let Some(peer_id) = DirectMessageStore::try_global(cx).and_then(|store| {
+            store
+                .read(cx)
+                .find(info.channel_id)
+                .and_then(|dm| dm.peer_user_id)
+        }) else {
+            return div().into_any_element();
+        };
+        let locale = info.locale.clone();
+        let tooltip = info.add_members_tooltip.clone();
+        let handle = PopoverMenuHandle::<CreateMessageGroupModal>::default();
+        let is_open = handle.is_deployed();
+        let menu_handle = handle.clone();
+        PopoverMenu::new("hdr-add-friends-to-dm")
+            .with_handle(handle)
+            .anchor(Anchor::TopRight)
+            .attach(Anchor::BottomRight)
+            .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
+            .menu(move |window, cx| {
+                Some(cx.new(|cx| {
+                    CreateMessageGroupModal::new_for_dm(
+                        locale.to_string(),
+                        peer_id,
+                        menu_handle.clone(),
+                        window,
+                        cx,
+                    )
+                }))
+            })
+            .trigger(AddFriendsPopoverTrigger {
+                open: is_open,
+                icon_color,
+                bg_hover,
+                tooltip,
+                on_click: None,
             })
             .into_any_element()
     }
@@ -1408,8 +1469,8 @@ impl Render for ChatHeader {
             None
         };
 
-        let members_toggle = Arc::new(move |_window: &mut Window, cx: &mut App| {
-            let _ = layout_weak.update(cx, |this, cx| this.toggle_member_list(cx));
+        let members_toggle = Arc::new(move |window: &mut Window, cx: &mut App| {
+            let _ = layout_weak.update(cx, |this, cx| this.toggle_member_list(window, cx));
         });
         let layout_weak_timeline = self.layout.clone();
         let timeline_toggle = Arc::new(move |_window: &mut Window, cx: &mut App| {
@@ -1556,6 +1617,57 @@ fn render_stream_chat_sidebar_header(
                     });
                 }),
         )
+}
+
+#[derive(IntoElement)]
+struct AddFriendsPopoverTrigger {
+    open: bool,
+    icon_color: gpui::Rgba,
+    bg_hover: gpui::Rgba,
+    tooltip: SharedString,
+    on_click: Option<ClickHandler>,
+}
+
+impl Toggleable for AddFriendsPopoverTrigger {
+    fn toggle_state(mut self, selected: bool) -> Self {
+        self.open = selected;
+        self
+    }
+}
+
+impl Clickable for AddFriendsPopoverTrigger {
+    fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+
+    fn cursor_style(self, _cursor_style: CursorStyle) -> Self {
+        self
+    }
+}
+
+impl RenderOnce for AddFriendsPopoverTrigger {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let bg_hover = self.bg_hover;
+        div()
+            .id("hdr-add-members")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(32.))
+            .h(px(32.))
+            .rounded_md()
+            .cursor_pointer()
+            .when(self.open, |el| el.bg(bg_hover))
+            .hover(move |s| s.bg(bg_hover))
+            .tooltip(Tooltip::text(self.tooltip))
+            .child(
+                Icon::new(IconName::IconAddFriendDM)
+                    .size(px(20.))
+                    .text_color(self.icon_color),
+            )
+            .when_some(self.on_click, |el, handler| el.on_click(handler))
+    }
 }
 
 #[derive(IntoElement)]

@@ -4838,6 +4838,7 @@
   "userProfile.labels.anonymous": "Анонимный",
   "userProfile.labels.editProfile": "Редактировать профиль",
   "userProfile.labels.memberSince": "Член с",
+  "userProfile.labels.conversationSince": "Общение с",
   "userProfile.labels.nope": "Нет!",
   "userProfile.labels.note": "Заметка",
   "userProfile.labels.removeRole": "Удалить роль",

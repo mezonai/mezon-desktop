@@ -104,7 +104,7 @@ impl UserProfileView {
             avatar_url: account.avatar_url.clone().unwrap_or_default(),
             about_me: account.about_me.clone().unwrap_or_default(),
             role_ids: Vec::new(),
-            create_time_seconds: 0,
+            create_time_seconds: account.create_time_seconds,
             join_time_seconds: 0,
             online,
         }
@@ -213,24 +213,81 @@ fn resolve_direct(
             .member(channel_id, user_id)
             .map(|member| UserProfileView::from_group_member(member, online)),
         DirectKind::Dm => {
-            if let Some(view) = UsersByUserStore::global(cx)
+            let dm_create_time = DirectMessageStore::global(cx)
+                .read(cx)
+                .find(channel_id)
+                .map(|dm| dm.create_time_seconds)
+                .unwrap_or(0);
+            let mut cached = UsersByUserStore::global(cx)
                 .read(cx)
                 .user(user_id)
-                .map(|user| UserProfileView::from_user(user, online))
+                .map(|user| UserProfileView::from_user(user, online));
+            if let Some(member) = ClanMembersStore::global(cx).read(cx).cached_member(user_id) {
+                let clan_view = UserProfileView::from_clan_member(member, online);
+                if let Some(view) = cached.as_mut() {
+                    merge_missing_profile_fields(view, &clan_view);
+                } else {
+                    cached = Some(clan_view);
+                }
+            }
+            if dm_create_time > 0
+                && let Some(view) = cached.as_mut()
             {
-                return Some(view);
+                view.create_time_seconds = dm_create_time;
             }
             if is_current_user(user_id, cx)
                 && let Some(account) = AccountStore::global(cx).read(cx).account.as_ref()
             {
-                return Some(UserProfileView::from_account(user_id, account, online));
+                let mut view = cached
+                    .unwrap_or_else(|| UserProfileView::from_account(user_id, account, online));
+                if !account.display_name.is_empty() {
+                    view.display_name = account.display_name.clone();
+                }
+                if !account.username.is_empty() {
+                    view.username = account.username.clone();
+                }
+                if let Some(avatar) = account.avatar_url.as_ref().filter(|url| !url.is_empty()) {
+                    view.avatar_url = avatar.clone();
+                }
+                if let Some(about_me) = account.about_me.as_ref() {
+                    view.about_me = about_me.clone();
+                }
+                if dm_create_time > 0 {
+                    view.create_time_seconds = dm_create_time;
+                }
+                return Some(view);
+            }
+            if cached.is_some() {
+                return cached;
             }
             let store = DirectMessageStore::global(cx);
             let dm = store.read(cx).find(channel_id)?;
-            (dm.peer_user_id == Some(user_id))
-                .then(|| UserProfileView::from_direct_peer(dm, online))
+            (dm.peer_user_id == Some(user_id)).then(|| {
+                let mut view = UserProfileView::from_direct_peer(dm, online);
+                view.create_time_seconds = dm_create_time;
+                view
+            })
         }
     }
+}
+
+fn merge_missing_profile_fields(target: &mut UserProfileView, fallback: &UserProfileView) {
+    if target.display_name.is_empty() {
+        target.display_name.clone_from(&fallback.display_name);
+    }
+    if target.username.is_empty() {
+        target.username.clone_from(&fallback.username);
+    }
+    if target.avatar_url.is_empty() {
+        target.avatar_url.clone_from(&fallback.avatar_url);
+    }
+    if target.about_me.is_empty() {
+        target.about_me.clone_from(&fallback.about_me);
+    }
+    if target.create_time_seconds == 0 {
+        target.create_time_seconds = fallback.create_time_seconds;
+    }
+    target.online |= fallback.online;
 }
 
 fn is_current_user(user_id: UserId, cx: &App) -> bool {
@@ -308,13 +365,14 @@ mod tests {
             status: String::new(),
             user_status: String::new(),
             dob_seconds: 0,
-            create_time_seconds: 0,
+            create_time_seconds: 1_700_000_000,
         };
         let view = UserProfileView::from_account(UserId(1), &account, true);
         assert_eq!(view.display_name, "Hello Me");
         assert_eq!(view.username, "me");
         assert_eq!(view.avatar_url, "me.png");
         assert_eq!(view.about_me, "about");
+        assert_eq!(view.create_time_seconds, 1_700_000_000);
         assert!(view.online);
     }
 
@@ -333,6 +391,7 @@ mod tests {
             unread_count: 0,
             last_sent_timestamp: 0,
             last_seen_timestamp: 0,
+            create_time_seconds: 0,
         };
         let view = UserProfileView::from_direct_peer(&channel, false);
         assert_eq!(view.user_id, UserId(5));

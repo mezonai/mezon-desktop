@@ -4595,6 +4595,7 @@
   "userProfile.labels.anonymous": "Анонімний",
   "userProfile.labels.editProfile": "Редагувати профіль",
   "userProfile.labels.memberSince": "Учасник з",
+  "userProfile.labels.conversationSince": "Спілкування з",
   "userProfile.labels.nope": "Немає!",
   "userProfile.labels.note": "ПРИМІТКА",
   "userProfile.labels.removeRole": "Видалити роль",

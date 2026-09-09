@@ -7,8 +7,8 @@ use gpui::{
 use mezon_store::{
     BadgeService, ChannelList, ClanId, ClanMembersStore, DirectMessageBody, DirectMessageStore,
     FriendState, FriendStore, PERMISSION_CLAN_OWNER, PERMISSION_MANAGE_CLAN, PermissionStore,
-    PresenceStore, ProfileContext, RoleId, RolesStore, Settings, UserId, current_user_status,
-    resolve_user_profile,
+    PresenceStore, ProfileContext, RoleId, RolesStore, Settings, UserId, UsersByUserStore,
+    current_user_status, resolve_user_profile,
 };
 use ui::{Clickable, PopoverMenu, Toggleable};
 
@@ -65,11 +65,13 @@ pub struct UserProfilePopover {
     show_all_roles: bool,
     friend_menu_open: bool,
     sending_message: bool,
+    embedded: bool,
     _roles_sub: Option<gpui::Subscription>,
     _clan_members_sub: gpui::Subscription,
     _permissions_sub: Option<gpui::Subscription>,
     _friend_sub: gpui::Subscription,
     _presence_sub: gpui::Subscription,
+    _users_sub: gpui::Subscription,
     _channel_sub: Option<gpui::Subscription>,
     _input_sub: gpui::Subscription,
     _role_search_sub: gpui::Subscription,
@@ -81,6 +83,45 @@ impl UserProfilePopover {
         context: ProfileContext,
         settings: gpui::Entity<Settings>,
         avatar_image_cache: gpui::Entity<LruImageCache>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::build(
+            user_id,
+            context,
+            settings,
+            avatar_image_cache,
+            false,
+            window,
+            cx,
+        )
+    }
+
+    pub fn new_embedded(
+        user_id: UserId,
+        context: ProfileContext,
+        settings: gpui::Entity<Settings>,
+        avatar_image_cache: gpui::Entity<LruImageCache>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::build(
+            user_id,
+            context,
+            settings,
+            avatar_image_cache,
+            true,
+            window,
+            cx,
+        )
+    }
+
+    fn build(
+        user_id: UserId,
+        context: ProfileContext,
+        settings: gpui::Entity<Settings>,
+        avatar_image_cache: gpui::Entity<LruImageCache>,
+        embedded: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -138,6 +179,9 @@ impl UserProfilePopover {
         });
         let friend_sub = cx.observe(&FriendStore::global(cx), |_, _, cx| cx.notify());
         let presence_sub = cx.observe(&PresenceStore::global(cx), |_, _, cx| cx.notify());
+        let users = UsersByUserStore::global(cx);
+        users.update(cx, |store, cx| store.ensure_loaded(cx));
+        let users_sub = cx.observe(&users, |_, _, cx| cx.notify());
         let channel_sub = matches!(context, ProfileContext::Clan(_))
             .then(|| cx.observe(&ChannelList::global(cx), |_, _, cx| cx.notify()));
 
@@ -155,11 +199,13 @@ impl UserProfilePopover {
             show_all_roles: false,
             friend_menu_open: false,
             sending_message: false,
+            embedded,
             _roles_sub: roles_sub,
             _clan_members_sub: clan_members_sub,
             _permissions_sub: permissions_sub,
             _friend_sub: friend_sub,
             _presence_sub: presence_sub,
+            _users_sub: users_sub,
             _channel_sub: channel_sub,
             _input_sub: input_sub,
             _role_search_sub: role_search_sub,
@@ -628,24 +674,29 @@ impl Render for UserProfilePopover {
             input.set_placeholder(message_placeholder, cx);
         });
 
-        let (display_name, username, avatar_raw, about_me, join_time, online) = match &profile {
-            Some(p) => (
-                SharedString::from(p.display_name.as_str()),
-                SharedString::from(p.username.as_str()),
-                p.avatar_url.clone(),
-                SharedString::from(p.about_me.as_str()),
-                p.join_time_seconds,
-                p.online,
-            ),
-            None => (
-                SharedString::default(),
-                SharedString::default(),
-                String::new(),
-                SharedString::default(),
-                0u32,
-                false,
-            ),
-        };
+        let (display_name, username, avatar_raw, about_me, member_since_time, online) =
+            match &profile {
+                Some(p) => (
+                    SharedString::from(p.display_name.as_str()),
+                    SharedString::from(p.username.as_str()),
+                    p.avatar_url.clone(),
+                    SharedString::from(p.about_me.as_str()),
+                    if matches!(self.context, ProfileContext::Direct(_)) {
+                        p.create_time_seconds
+                    } else {
+                        p.join_time_seconds
+                    },
+                    p.online,
+                ),
+                None => (
+                    SharedString::default(),
+                    SharedString::default(),
+                    String::new(),
+                    SharedString::default(),
+                    0u32,
+                    false,
+                ),
+            };
 
         let own_status = current_user_status(cx)
             .filter(|(id, _)| *id == self.user_id)
@@ -659,7 +710,7 @@ impl Render for UserProfilePopover {
                 .to_string(),
         };
 
-        let member_since = format_member_since(join_time);
+        let member_since = format_member_since(member_since_time);
         let status_presence = match &own_status {
             Some(status) => status.presence,
             None if online => mezon_store::UserPresence::Online,
@@ -703,8 +754,7 @@ impl Render for UserProfilePopover {
             friend_info.is_some_and(|f| f.state == FriendState::Blocked && Some(f.source_id) == me);
         let is_blocked = friend_state == Some(FriendState::Blocked);
         let show_share_contact = !is_self && is_friend && !did_i_block;
-        let show_message_input =
-            !username.is_empty() && !is_blocked && !is_self && !self.sending_message;
+        let show_message_input = !username.is_empty() && !is_blocked && !self.sending_message;
 
         let voice_info = (!is_dm && !is_self)
             .then(|| {
@@ -734,9 +784,18 @@ impl Render for UserProfilePopover {
             .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
                 cx.emit(DismissEvent);
             }))
-            .on_mouse_down_out(cx.listener(|_, _: &MouseDownEvent, _window, cx| {
-                cx.emit(DismissEvent);
-            }))
+            .when(!self.embedded, |el| {
+                el.on_mouse_down_out(cx.listener(|_, _: &MouseDownEvent, _window, cx| {
+                    cx.emit(DismissEvent);
+                }))
+            })
+            .when(self.embedded, |el| {
+                el.w_full()
+                    .h_full()
+                    .rounded_none()
+                    .overflow_hidden()
+                    .bg(theme.surfaces.direct_message.ramp())
+            })
             .child(
                 div()
                     .h(px(BANNER_HEIGHT))
@@ -800,7 +859,7 @@ impl Render for UserProfilePopover {
                                 locale.as_ref(),
                             ))
                         })
-                        .when(!is_dm && !about_me.is_empty(), |d| {
+                        .when(!about_me.is_empty(), |d| {
                             d.child(section_divider(theme.tokens.theme_border_input))
                                 .child(section_label(
                                     mezon_i18n::t(&locale, "userProfile.labels.aboutMe"),
@@ -814,10 +873,17 @@ impl Render for UserProfilePopover {
                                         .child(about_me.clone()),
                                 )
                         })
-                        .when(!is_dm && join_time > 0, |d| {
+                        .when(member_since_time > 0, |d| {
                             d.child(section_divider(theme.tokens.theme_border_input))
                                 .child(section_label(
-                                    mezon_i18n::t(&locale, "userProfile.labels.memberSince"),
+                                    mezon_i18n::t(
+                                        &locale,
+                                        if is_dm {
+                                            "userProfile.labels.conversationSince"
+                                        } else {
+                                            "userProfile.labels.memberSince"
+                                        },
+                                    ),
                                     theme.tokens.text_theme_primary,
                                 ))
                                 .child(

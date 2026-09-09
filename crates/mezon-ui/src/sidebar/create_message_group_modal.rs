@@ -6,12 +6,14 @@ use crate::components::primitives::{Input, InputEvent, InputState};
 use crate::router::{Route, navigate};
 use crate::theme::ActiveTheme;
 use gpui::{
-    App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, SharedString,
-    Subscription, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+    App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
+    FontWeight, MouseDownEvent, SharedString, Subscription, UniformListScrollHandle, Window, div,
+    prelude::*, px, uniform_list,
 };
 use mezon_store::{
     DirectMessageStore, FriendEvent, FriendState, FriendStore, MAX_GROUP_MEMBERS, UserId,
 };
+use ui::PopoverMenuHandle;
 
 pub struct CreateMessageGroupModal {
     focus_handle: FocusHandle,
@@ -20,6 +22,8 @@ pub struct CreateMessageGroupModal {
     all_rows: Vec<FriendPickRow>,
     visible: Vec<usize>,
     selected: Vec<UserId>,
+    required_user: Option<UserId>,
+    popover_handle: Option<PopoverMenuHandle<Self>>,
     creating: bool,
     scroll: UniformListScrollHandle,
     _input_sub: Subscription,
@@ -32,8 +36,36 @@ impl Focusable for CreateMessageGroupModal {
     }
 }
 
+impl EventEmitter<DismissEvent> for CreateMessageGroupModal {}
+
 impl CreateMessageGroupModal {
     pub fn new(locale: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::build(locale, None, None, window, cx)
+    }
+
+    pub fn new_for_dm(
+        locale: String,
+        required_user: UserId,
+        popover_handle: PopoverMenuHandle<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::build(
+            locale,
+            Some(required_user),
+            Some(popover_handle),
+            window,
+            cx,
+        )
+    }
+
+    fn build(
+        locale: String,
+        required_user: Option<UserId>,
+        popover_handle: Option<PopoverMenuHandle<Self>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         FriendStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
 
         let placeholder = mezon_i18n::t(
@@ -73,7 +105,9 @@ impl CreateMessageGroupModal {
             search_input,
             all_rows: Vec::new(),
             visible: Vec::new(),
-            selected: Vec::new(),
+            selected: required_user.into_iter().collect(),
+            required_user,
+            popover_handle,
             creating: false,
             scroll: UniformListScrollHandle::new(),
             _input_sub: input_sub,
@@ -90,6 +124,7 @@ impl CreateMessageGroupModal {
             .friends()
             .iter()
             .filter(|friend| friend.state != FriendState::Blocked)
+            .filter(|friend| Some(friend.id) != self.required_user)
             .map(|friend| FriendPickRow::from_friend(friend, cx))
             .collect();
         self.refilter(cx);
@@ -119,6 +154,9 @@ impl CreateMessageGroupModal {
     }
 
     fn toggle(&mut self, user_id: UserId, cx: &mut Context<Self>) {
+        if self.required_user == Some(user_id) {
+            return;
+        }
         if let Some(pos) = self.selected.iter().position(|id| *id == user_id) {
             self.selected.remove(pos);
         } else {
@@ -169,6 +207,7 @@ impl CreateMessageGroupModal {
         }
 
         let modal_id = cx.entity_id();
+        let popover_handle = self.popover_handle.clone();
         self.creating = true;
         cx.notify();
 
@@ -199,7 +238,12 @@ impl CreateMessageGroupModal {
                             message_type: channel_type.to_string(),
                         },
                     );
-                    Shell::global(cx).update(cx, |shell, cx| shell.close_modal_view(modal_id, cx));
+                    if let Some(handle) = popover_handle {
+                        handle.hide(cx);
+                    } else {
+                        Shell::global(cx)
+                            .update(cx, |shell, cx| shell.close_modal_view(modal_id, cx));
+                    }
                 });
             }
             Err(err) => {
@@ -213,8 +257,12 @@ impl CreateMessageGroupModal {
         .detach();
     }
 
-    fn close(cx: &mut App) {
-        Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+    fn close(&self, cx: &mut Context<Self>) {
+        if self.popover_handle.is_some() {
+            cx.emit(DismissEvent);
+        } else {
+            Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+        }
     }
 }
 
@@ -234,7 +282,8 @@ impl Render for CreateMessageGroupModal {
         )
         .replace("{{count}}", &self.remaining_can_add().to_string());
         let create_label = self.create_label();
-        let enabled = !self.creating && !self.selected.is_empty();
+        let minimum = usize::from(self.required_user.is_some());
+        let enabled = !self.creating && self.selected.len() > minimum;
 
         const LIST_HEIGHT: f32 = 190.;
 
@@ -316,7 +365,12 @@ impl Render for CreateMessageGroupModal {
             .track_focus(&self.focus_handle)
             .key_context("menu")
             .occlude()
-            .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| Self::close(cx)))
+            .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| this.close(cx)))
+            .when(self.popover_handle.is_some(), |el| {
+                el.on_mouse_down_out(
+                    cx.listener(|this, _: &MouseDownEvent, _window, cx| this.close(cx)),
+                )
+            })
             .w(px(440.))
             .max_w(px(440.))
             .flex()

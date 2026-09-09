@@ -4598,6 +4598,7 @@
   "userProfile.labels.anonymous": "匿名",
   "userProfile.labels.editProfile": "プロフィールを編集",
   "userProfile.labels.memberSince": "メンバー desde",
+  "userProfile.labels.conversationSince": "会話開始日",
   "userProfile.labels.nope": "なし!",
   "userProfile.labels.note": "メモ",
   "userProfile.labels.removeRole": "ロールを削除",

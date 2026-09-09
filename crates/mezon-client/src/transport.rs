@@ -962,6 +962,7 @@ pub struct ApiDirectChannel {
     pub count_mess_unread: i32,
     pub last_sent_timestamp: i64,
     pub last_seen_timestamp: i64,
+    pub create_time_seconds: u32,
     #[serde(default)]
     pub creator_id: i64,
 }
@@ -4102,6 +4103,7 @@ impl MezonTransport {
             count_mess_unread: channel.count_mess_unread,
             last_sent_timestamp,
             last_seen_timestamp,
+            create_time_seconds: channel.create_time_seconds,
             creator_id: channel.creator_id,
         }
     }

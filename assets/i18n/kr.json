@@ -4596,6 +4596,7 @@
   "userProfile.labels.anonymous": "익명",
   "userProfile.labels.editProfile": "프로필 수정",
   "userProfile.labels.memberSince": "참여",
+  "userProfile.labels.conversationSince": "대화 시작일",
   "userProfile.labels.nope": "없어요!",
   "userProfile.labels.note": "메모",
   "userProfile.labels.removeRole": "역할 제거",

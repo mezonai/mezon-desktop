@@ -4596,6 +4596,7 @@
   "userProfile.labels.anonymous": "Anonym",
   "userProfile.labels.editProfile": "Redigera profil",
   "userProfile.labels.memberSince": "Medlem från",
+  "userProfile.labels.conversationSince": "Konversation sedan",
   "userProfile.labels.nope": "Inte finns!",
   "userProfile.labels.note": "NOTERA",
   "userProfile.labels.removeRole": "Ta bort roll",
