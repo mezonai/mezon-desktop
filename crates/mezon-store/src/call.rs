@@ -85,6 +85,18 @@ enum EndReason {
     Busy,
 }
 
+impl EndReason {
+    fn label(self) -> &'static str {
+        match self {
+            Self::LocalHangup => "local hangup",
+            Self::RemoteQuit => "remote quit",
+            Self::Timeout => "timeout",
+            Self::Failed => "failed",
+            Self::Busy => "busy",
+        }
+    }
+}
+
 #[derive(Default)]
 struct CallTones {
     dial: Option<AudioPlayer>,
@@ -123,6 +135,7 @@ pub struct CallStore {
     incoming_offer: Option<String>,
     engine: Option<CallEngine>,
     frame_store: Option<Arc<VideoFrameStore>>,
+    started_at: Option<Instant>,
     connected_at: Option<Instant>,
     self_id: i64,
     self_name: String,
@@ -175,6 +188,7 @@ impl CallStore {
             incoming_offer: None,
             engine: None,
             frame_store: None,
+            started_at: None,
             connected_at: None,
             self_id: 0,
             self_name: String::new(),
@@ -419,6 +433,11 @@ impl CallStore {
             tracing::warn!("cannot start call: no account");
             return;
         };
+        tracing::info!(
+            "call: start outgoing peer={} channel={} video={video}",
+            peer.user_id,
+            peer.channel_id
+        );
         self.generation += 1;
         self.self_id = self_id;
         self.self_name = self_name;
@@ -435,6 +454,7 @@ impl CallStore {
             cam_on: video,
         };
         self.remote = MediaFlags::default();
+        self.started_at = Some(Instant::now());
         self.connected_at = None;
         self.phase = CallPhase::Outgoing;
 
@@ -709,9 +729,18 @@ impl CallStore {
                 cx.notify();
             }
             EngineEvent::Disconnected => {
+                tracing::info!(
+                    "call: ice disconnected -> {}s grace",
+                    ICE_DISCONNECT_GRACE.as_secs()
+                );
                 self.start_ice_grace(cx);
             }
-            EngineEvent::Failed | EngineEvent::Closed => {
+            EngineEvent::Failed => {
+                tracing::info!("call: engine reported failure -> ending");
+                self.end_call(EndReason::Failed, cx);
+            }
+            EngineEvent::Closed => {
+                tracing::info!("call: engine reported close -> ending");
                 self.end_call(EndReason::Failed, cx);
             }
             EngineEvent::MicUnavailable => {
@@ -745,6 +774,14 @@ impl CallStore {
         };
         let caller_id = fwd.caller_id;
         let channel_id = fwd.channel_id;
+        if fwd.data_type != WEBRTC_ICE_CANDIDATE {
+            tracing::info!(
+                "call: signaling in type={} from={caller_id} channel={channel_id} phase={:?} peer={:?}",
+                fwd.data_type,
+                self.phase,
+                self.peer.as_ref().map(|p| p.user_id)
+            );
+        }
         let from_peer = self.peer.as_ref().map(|p| p.user_id) == Some(caller_id);
         if matches!(self.phase, CallPhase::Incoming)
             && from_peer
@@ -766,8 +803,28 @@ impl CallStore {
                 self.on_remote_end(caller_id, EndReason::RemoteQuit, cx);
             }
             WEBRTC_CLEAR_CALL => self.on_remote_end(caller_id, EndReason::RemoteQuit, cx),
-            WEBRTC_SDP_TIMEOUT => self.on_remote_end(caller_id, EndReason::Timeout, cx),
-            WEBRTC_SDP_JOINED_OTHER_CALL => self.on_remote_end(caller_id, EndReason::Busy, cx),
+            WEBRTC_SDP_TIMEOUT => {
+                if let Some(started) = self.started_at
+                    && started.elapsed() < NO_ANSWER_TIMEOUT
+                {
+                    tracing::info!(
+                        "call: remote TIMEOUT {}ms after start -> ignored (belongs to an earlier call)",
+                        started.elapsed().as_millis()
+                    );
+                } else {
+                    self.on_remote_end(caller_id, EndReason::Timeout, cx);
+                }
+            }
+            WEBRTC_SDP_JOINED_OTHER_CALL => {
+                if self.is_caller {
+                    tracing::info!(
+                        "call: a peer session reported busy while {:?} -> ignored (other sessions may still ring)",
+                        self.phase
+                    );
+                } else {
+                    self.on_remote_end(caller_id, EndReason::Busy, cx);
+                }
+            }
             WEBRTC_SDP_STATUS_REMOTE_MEDIA => self.on_remote_status(caller_id, &fwd.json_data, cx),
             _ => {}
         }
@@ -867,6 +924,7 @@ impl CallStore {
             mic_on: true,
             cam_on: false,
         };
+        self.started_at = Some(Instant::now());
         self.connected_at = None;
         self.phase = CallPhase::Incoming;
         self.play_tone(ToneSlot::Ring, RINGING_SOUND, true, cx);
@@ -946,8 +1004,18 @@ impl CallStore {
 
     fn on_remote_end(&mut self, caller_id: i64, reason: EndReason, cx: &mut Context<Self>) {
         if self.peer.as_ref().map(|p| p.user_id) != Some(caller_id) {
+            tracing::info!(
+                "call: {} signal from {caller_id} ignored (active peer {:?})",
+                reason.label(),
+                self.peer.as_ref().map(|p| p.user_id)
+            );
             return;
         }
+        tracing::info!(
+            "call: peer ended the call ({}) phase={:?}",
+            reason.label(),
+            self.phase
+        );
         self.terminate(reason, false, cx);
     }
 
@@ -983,6 +1051,13 @@ impl CallStore {
         if matches!(self.phase, CallPhase::Idle) {
             return;
         }
+        tracing::info!(
+            "call: terminate reason={} notify_peer={notify_peer} phase={:?} is_caller={} connected={}",
+            reason.label(),
+            self.phase,
+            self.is_caller,
+            self.connected_at.is_some()
+        );
         if notify_peer {
             self.send_to_peer(WEBRTC_SDP_QUIT, String::new(), cx);
         }
@@ -1016,6 +1091,7 @@ impl CallStore {
         self.pending_local_ice.clear();
         self.engine = None;
         self.frame_store = None;
+        self.started_at = None;
         self.connected_at = None;
         self.call_message_id = None;
         self.call_create_time = 0;
@@ -1048,6 +1124,10 @@ impl CallStore {
                         CallPhase::Outgoing | CallPhase::Connecting | CallPhase::Incoming
                     )
                 {
+                    tracing::info!(
+                        "call: no answer after {}s -> ending",
+                        NO_ANSWER_TIMEOUT.as_secs()
+                    );
                     this.end_call(EndReason::Timeout, cx);
                 }
             });
@@ -1067,6 +1147,7 @@ impl CallStore {
             cx.background_executor().timer(ICE_DISCONNECT_GRACE).await;
             let _ = this.update(cx, |this, cx| {
                 if this.generation == generation && this._ice_grace_task.is_some() {
+                    tracing::info!("call: ice grace expired -> ending");
                     this.end_call(EndReason::Failed, cx);
                 }
             });
@@ -1092,9 +1173,12 @@ impl CallStore {
                 if this.generation != generation {
                     return;
                 }
-                if let Ok(message) = result {
-                    this.call_message_id = Some(message.message_id);
-                    this.call_create_time = to_seconds_u32(message.create_time);
+                match result {
+                    Ok(message) => {
+                        this.call_message_id = Some(message.message_id);
+                        this.call_create_time = to_seconds_u32(message.create_time);
+                    }
+                    Err(e) => tracing::warn!("call: start-call log failed: {e:#}"),
                 }
             });
         })
@@ -1193,7 +1277,7 @@ impl CallStore {
         let caller_id = self.self_id;
         cx.background_executor()
             .spawn(async move {
-                let _ = api
+                if let Err(e) = api
                     .forward_webrtc_signaling(
                         receiver_id,
                         data_type,
@@ -1201,7 +1285,12 @@ impl CallStore {
                         channel_id,
                         caller_id,
                     )
-                    .await;
+                    .await
+                {
+                    tracing::warn!(
+                        "call: signaling send failed type={data_type} to={receiver_id}: {e:#}"
+                    );
+                }
             })
             .detach();
     }
@@ -1224,9 +1313,12 @@ impl CallStore {
         let caller_id = self.self_id;
         cx.background_executor()
             .spawn(async move {
-                let _ = api
+                if let Err(e) = api
                     .make_call_push(peer.user_id, body, peer.channel_id, caller_id)
-                    .await;
+                    .await
+                {
+                    tracing::warn!("call: offer push failed to {}: {e:#}", peer.user_id);
+                }
             })
             .detach();
     }
@@ -1260,9 +1352,12 @@ impl CallStore {
         let channel_id = peer.channel_id;
         cx.background_executor()
             .spawn(async move {
-                let _ = api
+                if let Err(e) = api
                     .make_call_push(peer.user_id, body, channel_id, original_caller)
-                    .await;
+                    .await
+                {
+                    tracing::warn!("call: cancel push failed to {}: {e:#}", peer.user_id);
+                }
             })
             .detach();
     }

@@ -4646,6 +4646,24 @@ impl MessagesStore {
         self.notify_message_row(message_id, cx);
     }
 
+    /// Forget one field's value — used when a message edit redefines that field
+    /// (new placeholder/default), so the fresh default wins over what the
+    /// previous step left behind.
+    pub fn forget_embed_value(&mut self, message_id: MessageId, field_id: &str) {
+        if let Some(form) = self.embed_form.get_mut(&message_id) {
+            form.remove(field_id);
+            if form.is_empty() {
+                self.embed_form.remove(&message_id);
+            }
+        }
+        if let Some(selects) = self.select_ui.get_mut(&message_id) {
+            selects.remove(field_id);
+            if selects.is_empty() {
+                self.select_ui.remove(&message_id);
+            }
+        }
+    }
+
     fn embed_form_payload(
         &self,
         message_id: MessageId,
@@ -10777,6 +10795,72 @@ mod tests {
                         "picks": ["rust", "gpui"]
                     }),
                     "single-choice select/radio submit as strings, multi-choice as arrays"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_wizard_submit_carries_the_answers_of_the_earlier_steps(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let clan = ClanId(1);
+            let channel = ChannelId(10);
+            let message_id = MessageId(42);
+            // Last step of a bot wizard: the message renders `q3`, while `q1`/`q2`
+            // are what the user answered in the steps this edit replaced.
+            let content = serde_json::json!({
+                "t": "",
+                "embed": [{
+                    "title": "Wizard",
+                    "fields": [
+                        { "name": "Contact", "value": "", "inputs": {
+                            "type": 3, "id": "q3",
+                            "component": { "placeholder": "email" } } }
+                    ]
+                }]
+            });
+            let api_content: mezon_client::transport::ApiMessageContent =
+                serde_json::from_value(content).expect("content parses");
+            let embeds = build_embeds(&api_content, None);
+            let mut message = Message::new(message_id, "", "7", "wizard", 100);
+            message.embeds = embeds;
+
+            store.update(cx, |store, cx| {
+                store.activate(clan, channel, true, false, 1, 2, cx);
+                store.set_channel(channel, vec![message]);
+
+                store.set_embed_form_value(message_id, "q1".into(), "title".into());
+                store.set_embed_form_value(message_id, "q2".into(), "detail".into());
+                store.set_embed_form_value(message_id, "q3".into(), "me@example.com".into());
+
+                let form = serde_json::Value::Object(store.embed_form_payload(message_id));
+                assert_eq!(
+                    form,
+                    serde_json::json!({
+                        "q1": "title",
+                        "q2": "detail",
+                        "q3": "me@example.com"
+                    }),
+                    "one message is one form: a wizard submit keeps every step's answer"
+                );
+
+                // A field the edit redefined is the one exception — its value must
+                // not survive, or the next step opens holding the previous text.
+                store.forget_embed_value(message_id, "q1");
+                assert_eq!(store.embed_form_value(message_id, "q1"), None);
+                assert_eq!(
+                    store.embed_form_value(message_id, "q2"),
+                    Some(&SharedString::from("detail")),
+                    "the other steps' answers stay untouched"
                 );
             });
         });
