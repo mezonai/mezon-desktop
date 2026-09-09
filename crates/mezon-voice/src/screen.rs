@@ -28,23 +28,7 @@ use crate::video::i420_to_bgra_into;
 use crate::video::nv12_full_to_i420;
 use crate::video::{VideoFrameStore, local_screen_key};
 
-/// The rate a screen share captures at, well under the encoder's 10fps cap.
-///
-/// A single number where the browser clients pass a range: scap takes one rate,
-/// so this is the `ideal` and `SCREEN_MAX_FRAMERATE` plays the part of `max`.
-///
-/// Capturing faster does not deliver fresher frames here: every captured frame
-/// pays for a full scalar NV12-to-I420 pass on this thread — a few megabytes at
-/// 1080p — and anything past the encoder's cap is converted only to be thrown
-/// away. Once this thread saturates, the backlog is felt as lag by everyone
-/// watching.
 const CAPTURE_FPS: u32 = 5;
-/// The local preview is a tile on this machine's own screen, so it does not
-/// need every captured frame. Converting I420 to BGRA at full capture size is
-/// the heaviest thing left on the capture thread — 8 MB a frame at 1080p — and
-/// starving that thread backs frames up before they ever reach the encoder,
-/// which is felt as lag by everyone watching. 10fps is plenty for watching
-/// one's own screen.
 #[cfg(target_os = "macos")]
 const PREVIEW_MIN_INTERVAL: Duration = Duration::from_millis(100);
 #[cfg(not(target_os = "macos"))]
@@ -191,7 +175,7 @@ pub fn start_screen(
                 // 1080p, not 720p: shared text is the whole point of a screen
                 // share, and 1280 wide leaves it soft however generous the
                 // bitrate is. This is the width the web client captures at.
-                output_resolution: Resolution::_1080p,
+                output_resolution: Resolution::_720p,
                 portal_source_types,
                 use_portal,
                 ..Default::default()

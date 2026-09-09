@@ -31,11 +31,11 @@ use super::sdp;
 
 const CAMERA_MAX_BITRATE: u64 = 1_000_000;
 const CAMERA_MAX_FRAMERATE: f64 = 30.0;
-const SCREEN_MAX_BITRATE: u64 = 2_500_000;
-const SCREEN_MAX_FRAMERATE: f64 = 10.0;
+const SCREEN_MAX_BITRATE: u64 = 3_500_000;
+const SCREEN_MAX_FRAMERATE: f64 = 15.0;
 const SCREEN_SCALABILITY_MODE: &str = "L1T1";
 const SCREEN_CODEC: &str = "vp8";
-const SCREEN_MAX_ENCODE_WIDTH: f64 = 1920.0;
+const SCREEN_MAX_ENCODE_WIDTH: f64 = 1280.0;
 const CAMERA_BITRATE_LIMITS: sdp::BitrateLimits = sdp::BitrateLimits {
     min_kbps: 250,
     start_kbps: 500,
@@ -44,7 +44,7 @@ const CAMERA_BITRATE_LIMITS: sdp::BitrateLimits = sdp::BitrateLimits {
 const SCREEN_BITRATE_LIMITS: sdp::BitrateLimits = sdp::BitrateLimits {
     min_kbps: 400,
     start_kbps: 1_000,
-    max_kbps: 2_500,
+    max_kbps: 3_500,
 };
 const MEDIA_STATS_INTERVAL: Duration = Duration::from_secs(5);
 const TRANSPORT_DISCONNECTED_GRACE: Duration = Duration::from_secs(4);
