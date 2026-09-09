@@ -9,9 +9,9 @@ use gpui::{
     prelude::*, px, relative, rems, rgb, rgba, size,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanId, Embed, LinkKind, Message, MessageCode, MessageId,
-    MessageSpan, PlatformStore, ProfileContext, RichClick, RichLayout, RichRunKind, RichToken,
-    UserId, is_here_user_id,
+    AppConfig, ChannelId, ChannelList, ChannelType, ClanId, Embed, LinkKind, Message, MessageCode,
+    MessageId, MessageSpan, PlatformStore, ProfileContext, RichClick, RichLayout, RichRunKind,
+    RichToken, UserId, is_here_user_id,
 };
 
 use ui::Clickable;
@@ -1927,6 +1927,17 @@ fn render_social_poster(poster: SocialPoster, cache: Entity<LruImageCache>) -> A
         .into_any_element()
 }
 
+/// A YouTube card opens on the web client's own `/embed/youtube` player page — the
+/// point of the card is the video, not the site around it. Every other social link
+/// (and any URL we cannot read an id out of) opens as it always did.
+fn social_card_launch_url(url: &str, cx: &gpui::App) -> String {
+    AppConfig::try_global(cx)
+        .and_then(|config| {
+            mezon_client::social::build_youtube_embed_route_url(&config.domain_url, url)
+        })
+        .unwrap_or_else(|| url.to_string())
+}
+
 fn render_social_link_card(
     kind: LinkKind,
     selection: &SharedSelection,
@@ -1973,7 +1984,7 @@ fn render_social_link_card(
                 .cursor_pointer()
                 .on_click(move |_, _, cx| {
                     if !selection.borrow().has_selection() {
-                        PlatformStore::open_app_window(resolved.to_string(), cx);
+                        PlatformStore::open_app_window(social_card_launch_url(&resolved, cx), cx);
                     }
                 })
                 .child(
@@ -3058,5 +3069,34 @@ mod hashtag_label_tests {
             chip("#g", Some(2), resolved(Some("g"))).channel_id,
             Some(ChannelId(2))
         );
+    }
+}
+
+#[cfg(test)]
+mod social_card_tests {
+    use super::social_card_launch_url;
+
+    /// The card's whole job: a YouTube link goes to our player page, everything else
+    /// keeps opening what the reader actually clicked.
+    #[gpui::test]
+    fn a_youtube_card_opens_the_configured_embed_route(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            mezon_store::AppConfig::init_global(
+                std::sync::Arc::new(mezon_store::AppConfig {
+                    domain_url: "http://127.0.0.1:4207".into(),
+                    ..Default::default()
+                }),
+                cx,
+            );
+
+            assert_eq!(
+                social_card_launch_url("https://www.youtube.com/watch?v=jNQXAC9IVRw&t=1m30s", cx),
+                "http://127.0.0.1:4207/embed/youtube?v=jNQXAC9IVRw&t=90"
+            );
+            assert_eq!(
+                social_card_launch_url("https://www.tiktok.com/@user/video/123", cx),
+                "https://www.tiktok.com/@user/video/123"
+            );
+        });
     }
 }

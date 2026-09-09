@@ -56,6 +56,7 @@ pub mod roles;
 pub mod sprite_atlas;
 pub mod sticker;
 pub mod stream;
+pub mod text_utils;
 pub mod threads;
 pub mod topic_badges;
 pub mod topics;
