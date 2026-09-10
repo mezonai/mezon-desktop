@@ -576,7 +576,7 @@ impl VoiceStore {
             mic_permission_denied: false,
             camera_enabled: false,
             screen_share_enabled: false,
-            noise_suppression_enabled: false,
+            noise_suppression_enabled: true,
             noise_suppression_level: DEFAULT_NOISE_SUPPRESSION_LEVEL,
             focused_tile: None,
             auto_focused_screen: None,
@@ -3781,7 +3781,7 @@ impl VoiceStore {
         self.mic_permission_denied = false;
         self.camera_enabled = false;
         self.screen_share_enabled = false;
-        self.noise_suppression_enabled = false;
+        self.noise_suppression_enabled = true;
         self.noise_suppression_level = DEFAULT_NOISE_SUPPRESSION_LEVEL;
         self.focused_tile = None;
         self.auto_focused_screen = None;
