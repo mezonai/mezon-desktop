@@ -1697,6 +1697,9 @@ impl Render for ChatLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("ChatLayout");
         self.chat_area.ensure_input(window, cx);
+        if self.show_member_list && self.is_dm_route(cx) {
+            self.chat_area.ensure_dm_profile_panel(window, cx);
+        }
         self.chat_area.bind_window(window, cx);
         self.sync_composer_on_channel_switch(window, cx);
         self.maybe_prefetch_voice_token(cx);

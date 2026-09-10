@@ -462,7 +462,6 @@ impl ChatArea {
     }
 
     pub fn bind_window(&mut self, window: &mut Window, cx: &mut Context<crate::ChatLayout>) {
-        self.ensure_dm_profile_panel(window, cx);
         self.timeline
             .update(cx, |timeline, cx| timeline.bind_window(window, cx));
         if let Some(panel) = self.media_channel_panel.clone() {

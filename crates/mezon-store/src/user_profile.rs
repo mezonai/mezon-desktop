@@ -20,6 +20,7 @@ pub struct UserProfileView {
     pub about_me: String,
     pub role_ids: Vec<RoleId>,
     pub create_time_seconds: u32,
+    pub conversation_create_time_seconds: u32,
     pub join_time_seconds: u32,
     pub online: bool,
 }
@@ -40,6 +41,7 @@ impl UserProfileView {
             about_me: member.user.about_me.clone(),
             role_ids: member.role_ids.clone(),
             create_time_seconds: member.user.create_time_seconds,
+            conversation_create_time_seconds: 0,
             join_time_seconds: member.user.join_time_seconds,
             online,
         }
@@ -54,6 +56,7 @@ impl UserProfileView {
             about_me: member.user.about_me.clone(),
             role_ids: Vec::new(),
             create_time_seconds: member.user.create_time_seconds,
+            conversation_create_time_seconds: 0,
             join_time_seconds: member.user.join_time_seconds,
             online: online || member.online,
         }
@@ -73,6 +76,7 @@ impl UserProfileView {
             about_me: user.about_me.clone(),
             role_ids: Vec::new(),
             create_time_seconds: user.create_time_seconds,
+            conversation_create_time_seconds: 0,
             join_time_seconds: user.join_time_seconds,
             online,
         }
@@ -87,6 +91,7 @@ impl UserProfileView {
             about_me: String::new(),
             role_ids: Vec::new(),
             create_time_seconds: 0,
+            conversation_create_time_seconds: channel.create_time_seconds,
             join_time_seconds: 0,
             online: online || channel.online,
         }
@@ -105,6 +110,7 @@ impl UserProfileView {
             about_me: account.about_me.clone().unwrap_or_default(),
             role_ids: Vec::new(),
             create_time_seconds: account.create_time_seconds,
+            conversation_create_time_seconds: 0,
             join_time_seconds: 0,
             online,
         }
@@ -203,37 +209,27 @@ fn resolve_direct(
     online: bool,
     cx: &App,
 ) -> Option<UserProfileView> {
-    let kind = DirectMessageStore::global(cx)
-        .read(cx)
-        .find(channel_id)
-        .map(|dm| dm.kind)?;
+    let direct_store = DirectMessageStore::global(cx);
+    let direct_store = direct_store.read(cx);
+    let dm = direct_store.find(channel_id)?;
+    let kind = dm.kind;
+    let conversation_create_time_seconds = dm.create_time_seconds;
     match kind {
         DirectKind::Group => GroupMembersStore::global(cx)
             .read(cx)
             .member(channel_id, user_id)
-            .map(|member| UserProfileView::from_group_member(member, online)),
+            .map(|member| {
+                let mut view = UserProfileView::from_group_member(member, online);
+                view.conversation_create_time_seconds = conversation_create_time_seconds;
+                view
+            }),
         DirectKind::Dm => {
-            let dm_create_time = DirectMessageStore::global(cx)
-                .read(cx)
-                .find(channel_id)
-                .map(|dm| dm.create_time_seconds)
-                .unwrap_or(0);
             let mut cached = UsersByUserStore::global(cx)
                 .read(cx)
                 .user(user_id)
                 .map(|user| UserProfileView::from_user(user, online));
-            if let Some(member) = ClanMembersStore::global(cx).read(cx).cached_member(user_id) {
-                let clan_view = UserProfileView::from_clan_member(member, online);
-                if let Some(view) = cached.as_mut() {
-                    merge_missing_profile_fields(view, &clan_view);
-                } else {
-                    cached = Some(clan_view);
-                }
-            }
-            if dm_create_time > 0
-                && let Some(view) = cached.as_mut()
-            {
-                view.create_time_seconds = dm_create_time;
+            if let Some(view) = cached.as_mut() {
+                view.conversation_create_time_seconds = conversation_create_time_seconds;
             }
             if is_current_user(user_id, cx)
                 && let Some(account) = AccountStore::global(cx).read(cx).account.as_ref()
@@ -252,42 +248,19 @@ fn resolve_direct(
                 if let Some(about_me) = account.about_me.as_ref() {
                     view.about_me = about_me.clone();
                 }
-                if dm_create_time > 0 {
-                    view.create_time_seconds = dm_create_time;
-                }
+                view.conversation_create_time_seconds = conversation_create_time_seconds;
                 return Some(view);
             }
             if cached.is_some() {
                 return cached;
             }
-            let store = DirectMessageStore::global(cx);
-            let dm = store.read(cx).find(channel_id)?;
             (dm.peer_user_id == Some(user_id)).then(|| {
                 let mut view = UserProfileView::from_direct_peer(dm, online);
-                view.create_time_seconds = dm_create_time;
+                view.conversation_create_time_seconds = conversation_create_time_seconds;
                 view
             })
         }
     }
-}
-
-fn merge_missing_profile_fields(target: &mut UserProfileView, fallback: &UserProfileView) {
-    if target.display_name.is_empty() {
-        target.display_name.clone_from(&fallback.display_name);
-    }
-    if target.username.is_empty() {
-        target.username.clone_from(&fallback.username);
-    }
-    if target.avatar_url.is_empty() {
-        target.avatar_url.clone_from(&fallback.avatar_url);
-    }
-    if target.about_me.is_empty() {
-        target.about_me.clone_from(&fallback.about_me);
-    }
-    if target.create_time_seconds == 0 {
-        target.create_time_seconds = fallback.create_time_seconds;
-    }
-    target.online |= fallback.online;
 }
 
 fn is_current_user(user_id: UserId, cx: &App) -> bool {
@@ -391,13 +364,15 @@ mod tests {
             unread_count: 0,
             last_sent_timestamp: 0,
             last_seen_timestamp: 0,
-            create_time_seconds: 0,
+            create_time_seconds: 1_777_574_400,
         };
         let view = UserProfileView::from_direct_peer(&channel, false);
         assert_eq!(view.user_id, UserId(5));
         assert_eq!(view.display_name, "Alice");
         assert_eq!(view.username, "alice");
         assert_eq!(view.avatar_url, "alice.png");
+        assert_eq!(view.create_time_seconds, 0);
+        assert_eq!(view.conversation_create_time_seconds, 1_777_574_400);
         assert!(view.online);
     }
 }

@@ -23,6 +23,7 @@ pub struct CreateMessageGroupModal {
     visible: Vec<usize>,
     selected: Vec<UserId>,
     required_user: Option<UserId>,
+    required_member: Option<(UserId, String, String, String)>,
     popover_handle: Option<PopoverMenuHandle<Self>>,
     creating: bool,
     scroll: UniformListScrollHandle,
@@ -40,19 +41,33 @@ impl EventEmitter<DismissEvent> for CreateMessageGroupModal {}
 
 impl CreateMessageGroupModal {
     pub fn new(locale: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::build(locale, None, None, window, cx)
+        Self::build(locale, None, None, None, window, cx)
     }
 
     pub fn new_for_dm(
         locale: String,
+        channel_id: mezon_store::ChannelId,
         required_user: UserId,
         popover_handle: PopoverMenuHandle<Self>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let required_member = DirectMessageStore::try_global(cx).and_then(|store| {
+            let store = store.read(cx);
+            let dm = store.find(channel_id)?;
+            (dm.peer_user_id == Some(required_user)).then(|| {
+                (
+                    required_user,
+                    dm.label.clone(),
+                    dm.avatar.clone(),
+                    dm.peer_username.clone(),
+                )
+            })
+        });
         Self::build(
             locale,
             Some(required_user),
+            required_member,
             Some(popover_handle),
             window,
             cx,
@@ -62,6 +77,7 @@ impl CreateMessageGroupModal {
     fn build(
         locale: String,
         required_user: Option<UserId>,
+        required_member: Option<(UserId, String, String, String)>,
         popover_handle: Option<PopoverMenuHandle<Self>>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -107,6 +123,7 @@ impl CreateMessageGroupModal {
             visible: Vec::new(),
             selected: required_user.into_iter().collect(),
             required_user,
+            required_member,
             popover_handle,
             creating: false,
             scroll: UniformListScrollHandle::new(),
@@ -141,12 +158,13 @@ impl CreateMessageGroupModal {
             .collect();
     }
 
-    fn number_can_add(&self) -> usize {
-        (MAX_GROUP_MEMBERS - 1).min(self.all_rows.len())
-    }
-
     fn remaining_can_add(&self) -> usize {
-        self.number_can_add().saturating_sub(self.selected.len())
+        let unselected_rows = self
+            .all_rows
+            .iter()
+            .filter(|row| !self.selected.contains(&row.user_id))
+            .count();
+        remaining_group_capacity(self.selected.len(), unselected_rows)
     }
 
     fn is_selected(&self, user_id: UserId) -> bool {
@@ -193,6 +211,12 @@ impl CreateMessageGroupModal {
         let friends = friend_store.read(cx);
         let mut members: Vec<(UserId, String, String, String)> = Vec::new();
         for id in &self.selected {
+            if self.required_user == Some(*id)
+                && let Some(required_member) = self.required_member.clone()
+            {
+                members.push(required_member);
+                continue;
+            }
             if let Some(friend) = friends.friend(*id) {
                 members.push((
                     *id,
@@ -263,6 +287,28 @@ impl CreateMessageGroupModal {
         } else {
             Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
         }
+    }
+}
+
+fn remaining_group_capacity(selected_count: usize, unselected_count: usize) -> usize {
+    MAX_GROUP_MEMBERS
+        .saturating_sub(1 + selected_count)
+        .min(unselected_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remaining_group_capacity;
+    use mezon_store::MAX_GROUP_MEMBERS;
+
+    #[test]
+    fn required_dm_peer_does_not_reduce_available_friend_count_twice() {
+        assert_eq!(remaining_group_capacity(1, 5), 5);
+    }
+
+    #[test]
+    fn remaining_count_respects_group_member_limit() {
+        assert_eq!(remaining_group_capacity(MAX_GROUP_MEMBERS - 2, 5), 1);
     }
 }
 

@@ -682,7 +682,7 @@ impl Render for UserProfilePopover {
                     p.avatar_url.clone(),
                     SharedString::from(p.about_me.as_str()),
                     if matches!(self.context, ProfileContext::Direct(_)) {
-                        p.create_time_seconds
+                        p.conversation_create_time_seconds
                     } else {
                         p.join_time_seconds
                     },
@@ -754,7 +754,10 @@ impl Render for UserProfilePopover {
             friend_info.is_some_and(|f| f.state == FriendState::Blocked && Some(f.source_id) == me);
         let is_blocked = friend_state == Some(FriendState::Blocked);
         let show_share_contact = !is_self && is_friend && !did_i_block;
-        let show_message_input = !username.is_empty() && !is_blocked && !self.sending_message;
+        let show_message_input = !username.is_empty()
+            && !is_blocked
+            && !self.sending_message
+            && (!is_self || self.embedded);
 
         let voice_info = (!is_dm && !is_self)
             .then(|| {

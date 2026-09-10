@@ -60,6 +60,7 @@ pub struct ChannelHeader {
     icon: Option<ChannelIcon>,
     dm: bool,
     dm_header: Option<DmHeaderInfo>,
+    create_group_handle: Option<PopoverMenuHandle<CreateMessageGroupModal>>,
     muted: bool,
     in_voice: Option<(SharedString, InVoiceInfo)>,
     members_action: bool,
@@ -92,6 +93,7 @@ impl ChannelHeader {
             icon: None,
             dm: false,
             dm_header: None,
+            create_group_handle: None,
             muted: false,
             in_voice: None,
             members_action: true,
@@ -125,6 +127,14 @@ impl ChannelHeader {
 
     pub fn dm_header(mut self, info: Option<DmHeaderInfo>) -> Self {
         self.dm_header = info;
+        self
+    }
+
+    pub fn create_group_popover(
+        mut self,
+        handle: PopoverMenuHandle<CreateMessageGroupModal>,
+    ) -> Self {
+        self.create_group_handle = Some(handle);
         self
     }
 
@@ -275,8 +285,10 @@ impl ChannelHeader {
                 items.push(("hdr-call", IconName::IconPhoneDM));
                 items.push(("hdr-video-call", IconName::IconMeetDM));
                 items.push(("hdr-pin", IconName::PinRight));
+                items.push(("hdr-add-members", IconName::IconAddFriendDM));
                 items.push(("hdr-members", IconName::IconUserProfileDM));
             } else if !dm_one_to_one_blocked {
+                items.push(("hdr-add-members", IconName::IconAddFriendDM));
                 items.push(("hdr-members", IconName::MemberList));
                 items.push(("hdr-pin", IconName::PinRight));
             } else {
@@ -291,6 +303,7 @@ impl ChannelHeader {
             icon,
             dm,
             dm_header,
+            create_group_handle,
             muted: _,
             in_voice,
             members_action,
@@ -333,12 +346,17 @@ impl ChannelHeader {
                 Some(Self::render_add_members_button(info, icon_color, bg_hover))
             } else {
                 Some(Self::render_create_group_button(
-                    info, icon_color, bg_hover, cx,
+                    info,
+                    icon_color,
+                    bg_hover,
+                    create_group_handle.clone(),
+                    cx,
                 ))
             }
         });
-        let mut buttons = Self::build_action_buttons(
+        let buttons = Self::build_action_buttons(
             actions,
+            add_members_button,
             theme,
             icon_color,
             icon_active,
@@ -362,15 +380,6 @@ impl ChannelHeader {
             notification_trigger,
             cx,
         );
-        if let Some(button) = add_members_button {
-            let index = if dm_one_to_one {
-                buttons.len().saturating_sub(1)
-            } else {
-                0
-            };
-            buttons.insert(index, button);
-        }
-
         div()
             .flex()
             .flex_row()
@@ -554,6 +563,7 @@ impl ChannelHeader {
             icon: None,
             dm: false,
             dm_header: None,
+            create_group_handle: None,
             in_voice: None,
             members_action: false,
             members_active: false,
@@ -614,6 +624,7 @@ impl ChannelHeader {
         info: &DmHeaderInfo,
         icon_color: gpui::Rgba,
         bg_hover: gpui::Rgba,
+        handle: Option<PopoverMenuHandle<CreateMessageGroupModal>>,
         cx: &App,
     ) -> AnyElement {
         let Some(peer_id) = DirectMessageStore::try_global(cx).and_then(|store| {
@@ -624,9 +635,12 @@ impl ChannelHeader {
         }) else {
             return div().into_any_element();
         };
+        let channel_id = info.channel_id;
         let locale = info.locale.clone();
         let tooltip = info.add_members_tooltip.clone();
-        let handle = PopoverMenuHandle::<CreateMessageGroupModal>::default();
+        let Some(handle) = handle else {
+            return div().into_any_element();
+        };
         let is_open = handle.is_deployed();
         let menu_handle = handle.clone();
         PopoverMenu::new("hdr-add-friends-to-dm")
@@ -638,6 +652,7 @@ impl ChannelHeader {
                 Some(cx.new(|cx| {
                     CreateMessageGroupModal::new_for_dm(
                         locale.to_string(),
+                        channel_id,
                         peer_id,
                         menu_handle.clone(),
                         window,
@@ -657,6 +672,7 @@ impl ChannelHeader {
 
     fn build_action_buttons(
         actions: Vec<(&'static str, IconName)>,
+        add_members_button: Option<AnyElement>,
         theme: &Theme,
         icon_color: gpui::Rgba,
         icon_active: gpui::Rgba,
@@ -687,6 +703,7 @@ impl ChannelHeader {
             icon: None,
             dm: false,
             dm_header: None,
+            create_group_handle: None,
             in_voice: None,
             members_action,
             members_active,
@@ -711,6 +728,7 @@ impl ChannelHeader {
         };
         header.action_buttons(
             actions,
+            add_members_button,
             theme,
             icon_color,
             icon_active,
@@ -723,6 +741,7 @@ impl ChannelHeader {
     fn action_buttons(
         self,
         actions: Vec<(&'static str, IconName)>,
+        mut add_members_button: Option<AnyElement>,
         theme: &Theme,
         icon_color: gpui::Rgba,
         icon_active: gpui::Rgba,
@@ -748,6 +767,12 @@ impl ChannelHeader {
         let mut notification_trigger = self.notification_trigger;
         let mut buttons: Vec<AnyElement> = Vec::new();
         for (id, icon) in actions {
+            if id == "hdr-add-members" {
+                if let Some(button) = add_members_button.take() {
+                    buttons.push(button);
+                }
+                continue;
+            }
             if id == "hdr-call" || id == "hdr-video-call" {
                 let video = id == "hdr-video-call";
                 let tooltip = if video {
@@ -1037,6 +1062,7 @@ pub struct ChatHeader {
     /// Cached so the header does not re-derive it (and re-allocate the proxied
     /// avatar url and member-count string) on every repaint.
     dm_header: Option<DmHeaderInfo>,
+    create_group_handle: PopoverMenuHandle<CreateMessageGroupModal>,
     in_voice: Option<InVoiceInfo>,
     members_action: bool,
     members_active: bool,
@@ -1132,6 +1158,7 @@ impl ChatHeader {
             icon: None,
             dm: false,
             dm_header: None,
+            create_group_handle: PopoverMenuHandle::default(),
             in_voice: None,
             members_action: true,
             members_active: false,
@@ -1486,6 +1513,7 @@ impl Render for ChatHeader {
             .icon(self.icon)
             .dm(self.dm)
             .dm_header(dm_header)
+            .create_group_popover(self.create_group_handle.clone())
             .members_action(self.members_action)
             .members_active(self.members_active)
             .gallery_trigger(gallery_trigger)
@@ -1651,6 +1679,7 @@ impl RenderOnce for AddFriendsPopoverTrigger {
         let bg_hover = self.bg_hover;
         div()
             .id("hdr-add-members")
+            .occlude()
             .flex()
             .items_center()
             .justify_center()
