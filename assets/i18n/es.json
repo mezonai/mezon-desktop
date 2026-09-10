@@ -4634,6 +4634,7 @@
   "userProfile.labels.anonymous": "Anónimo",
   "userProfile.labels.editProfile": "Editar perfil",
   "userProfile.labels.memberSince": "Miembro desde",
+  "userProfile.labels.conversationSince": "Conversación desde",
   "userProfile.labels.nope": "¡Nada!",
   "userProfile.labels.note": "NOTA",
   "userProfile.labels.removeRole": "Eliminar rol",

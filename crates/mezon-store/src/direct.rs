@@ -58,6 +58,7 @@ pub struct DirectChannel {
     pub unread_count: u32,
     pub last_sent_timestamp: i64,
     pub last_seen_timestamp: i64,
+    pub create_time_seconds: u32,
 }
 
 impl DirectChannel {
@@ -1282,6 +1283,7 @@ fn direct_from_channel_desc(desc: &mezon_proto::api::ChannelDescription) -> ApiD
         count_mess_unread: desc.count_mess_unread,
         last_sent_timestamp,
         last_seen_timestamp,
+        create_time_seconds: desc.create_time_seconds,
         creator_id: desc.creator_id,
     }
 }
@@ -1324,6 +1326,7 @@ fn direct_from_created(
         unread_count: desc.count_mess_unread.max(0) as u32,
         last_sent_timestamp: desc.last_sent_timestamp,
         last_seen_timestamp: desc.last_seen_timestamp,
+        create_time_seconds: 0,
     }
 }
 
@@ -1358,6 +1361,7 @@ fn direct_group_from_created(
         unread_count: desc.count_mess_unread.max(0) as u32,
         last_sent_timestamp: desc.last_sent_timestamp,
         last_seen_timestamp: desc.last_seen_timestamp,
+        create_time_seconds: 0,
     }
 }
 
@@ -1497,6 +1501,7 @@ fn direct_from_message(
         unread_count: u32::from(increment_unread),
         last_sent_timestamp: ts,
         last_seen_timestamp: if from_me { ts } else { ts.saturating_sub(1) },
+        create_time_seconds: 0,
     }
 }
 
@@ -1542,6 +1547,7 @@ fn direct_from_api(c: ApiDirectChannel) -> DirectChannel {
         unread_count: c.count_mess_unread.max(0) as u32,
         last_sent_timestamp: c.last_sent_timestamp,
         last_seen_timestamp: c.last_seen_timestamp,
+        create_time_seconds: c.create_time_seconds,
     }
 }
 
@@ -1604,6 +1610,7 @@ mod tests {
             count_mess_unread: 0,
             last_sent_timestamp: 0,
             last_seen_timestamp: 0,
+            create_time_seconds: 0,
             creator_id: 0,
         }
     }
@@ -1619,6 +1626,13 @@ mod tests {
     fn direct_from_api_zero_creator_is_none() {
         let api = api_dm(1, "Group", 2);
         assert_eq!(direct_from_api(api).creator_id, None);
+    }
+
+    #[test]
+    fn direct_from_api_keeps_conversation_creation_time() {
+        let mut api = api_dm(1, "DM", 3);
+        api.create_time_seconds = 1_777_574_400;
+        assert_eq!(direct_from_api(api).create_time_seconds, 1_777_574_400);
     }
 
     fn incoming_dm_message() -> mezon_proto::api::ChannelMessage {
@@ -1671,6 +1685,7 @@ mod tests {
             unread_count: 0,
             last_sent_timestamp: 100,
             last_seen_timestamp: 0,
+            create_time_seconds: 0,
         };
         let users = vec![
             mezon_proto::realtime::UserProfileRedis {
@@ -1741,6 +1756,7 @@ mod tests {
             unread_count: 0,
             last_sent_timestamp: 0,
             last_seen_timestamp: 0,
+            create_time_seconds: 0,
         }
     }
 
@@ -1759,6 +1775,7 @@ mod tests {
             unread_count: 0,
             last_sent_timestamp: 100,
             last_seen_timestamp: 0,
+            create_time_seconds: 0,
         };
         let users = vec![
             mezon_proto::realtime::UserProfileRedis {
@@ -1997,6 +2014,7 @@ mod tests {
             unread_count: 1,
             last_sent_timestamp: 500,
             last_seen_timestamp: 400,
+            create_time_seconds: 0,
         }];
         let badges = HashMap::from([(
             ChannelId(1),
@@ -2026,6 +2044,7 @@ mod tests {
             unread_count: 1,
             last_sent_timestamp: 500,
             last_seen_timestamp: 400,
+            create_time_seconds: 0,
         }];
         let badges = HashMap::from([(
             ChannelId(1),
@@ -2078,6 +2097,7 @@ mod tests {
                 unread_count: 0,
                 last_sent_timestamp: 100,
                 last_seen_timestamp: 0,
+                create_time_seconds: 0,
             },
             DirectChannel {
                 id: ChannelId(2),
@@ -2092,6 +2112,7 @@ mod tests {
                 unread_count: 0,
                 last_sent_timestamp: 200,
                 last_seen_timestamp: 0,
+                create_time_seconds: 0,
             },
         ];
         sort_by_recent(&mut chans);
@@ -2449,6 +2470,7 @@ mod tests {
             unread_count: 0,
             last_sent_timestamp: ts,
             last_seen_timestamp: ts,
+            create_time_seconds: 0,
         }
     }
 

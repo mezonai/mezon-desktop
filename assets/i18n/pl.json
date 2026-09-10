@@ -4595,6 +4595,7 @@
   "userProfile.labels.anonymous": "Anonimowy",
   "userProfile.labels.editProfile": "Edytuj profil",
   "userProfile.labels.memberSince": "Członek od",
+  "userProfile.labels.conversationSince": "Rozmowa od",
   "userProfile.labels.nope": "Nic nie ma!",
   "userProfile.labels.note": "NOTATKA",
   "userProfile.labels.removeRole": "Usuń rolę",

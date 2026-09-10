@@ -4608,6 +4608,7 @@
   "userProfile.labels.anonymous": "Аноним",
   "userProfile.labels.editProfile": "Профильне үзгәртү",
   "userProfile.labels.memberSince": "Шуннан әгъза",
+  "userProfile.labels.conversationSince": "Сөйләшү башланган",
   "userProfile.labels.nope": "Opeк!",
   "userProfile.labels.note": "Искәрмә",
   "userProfile.labels.removeRole": "Рольне бетерегез",
