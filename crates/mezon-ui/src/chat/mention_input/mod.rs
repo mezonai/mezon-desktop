@@ -30,8 +30,7 @@ use std::time::Duration;
 
 pub use attachments::build_pending;
 use attachments::{
-    AttachmentLimit, MAX_FILE_ATTACHMENTS, MAX_FILE_SIZE, PendingAttachment, mime_from_extension,
-    validate_batch,
+    AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, mime_from_extension, validate_batch,
 };
 use recorder::{ActiveRecording, MIN_RECORDING_MILLIS, RecordTask, encode_recording};
 
@@ -844,23 +843,17 @@ impl MentionInput {
             && !text.is_empty()
             && content_payload_utf8_len(&text) > CONVERT_TO_FILE_THRESHOLD
         {
-            if self.pending_attachments.len() + 1 > MAX_FILE_ATTACHMENTS {
-                Self::show_upload_limit(AttachmentLimit::Count, window, cx);
-                return None;
-            }
-            if text.len() as u64 > MAX_FILE_SIZE {
-                Self::show_upload_limit(AttachmentLimit::Size(MAX_FILE_SIZE), window, cx);
-                return None;
-            }
             let Some(pending) = write_text_as_pending_attachment(&text) else {
                 Shell::global(cx).update(cx, |shell, cx| {
                     shell.toast(ToastKind::Error, "Failed to convert message to file", cx)
                 });
                 return None;
             };
+            let path = pending.path.clone();
             let before = self.pending_attachments.len();
             self.add_pending(vec![pending], window, cx);
             if self.pending_attachments.len() == before {
+                let _ = std::fs::remove_file(&path);
                 return None;
             }
             self.clear_ogp_preview(cx);
