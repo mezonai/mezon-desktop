@@ -71,6 +71,9 @@ pub struct StreamStore {
     session_clan_name: String,
     session_user_id: Option<UserId>,
     join_started: Option<Instant>,
+    /// Bumped on every `join_stream`; the async credential fetch checks it before starting the
+    /// session so a leave-and-rejoin cannot resurrect the previous attempt.
+    join_generation: u64,
     _fetch_task: Option<Task<()>>,
     _session_task: Option<Task<()>>,
     _join_timeout: Option<Task<()>>,
@@ -123,6 +126,7 @@ impl StreamStore {
             session_clan_name: String::new(),
             session_user_id: None,
             join_started: None,
+            join_generation: 0,
             _fetch_task: None,
             _session_task: None,
             _join_timeout: None,
@@ -525,27 +529,59 @@ impl StreamStore {
         let session_config = StreamSessionConfig {
             ws_base_url: config.stream_ws_url.clone(),
             username: session.username.clone(),
-            token: session.ws_credential().to_string(),
+            // Filled in below: the stream server takes the JWT, never `ws_credential()`.
+            token: String::new(),
             clan_id: clan_id.to_string(),
             channel_id: channel_id.to_string(),
             user_id: session.user_id.clone(),
             stream_id: channel_id.to_string(),
         };
-        let frame_store = self.frame_store.clone();
-        let session_user_id = session.user_id.parse::<i64>().ok().map(UserId);
-        self.session_user_id = session_user_id;
-
-        let stream_session = StreamSession::start(
-            session_config,
-            frame_store,
-            output_device_id,
-            self.volume,
-            self.muted,
-        );
-        let events = stream_session.events().clone();
-        self.session = Some(stream_session);
+        self.session_user_id = session.user_id.parse::<i64>().ok().map(UserId);
+        self.join_generation += 1;
+        let generation = self.join_generation;
+        let api = self.api.clone();
+        let held_token = session.token.clone();
+        let held_token_is_live = !session.is_expired();
 
         self._session_task = Some(cx.spawn(async move |this, cx| {
+            // The stream server (`stn`) authenticates the `?token=` query with the JWT only. The
+            // socket's `session_id` is a one-shot handshake credential the gateway keeps for 60s
+            // (`SessionTTL` in mezon-gw) and it is what `ws_credential()` prefers, so handing it
+            // over answers a bare HTTP 200 and the upgrade fails. The JWT is renewed lazily, so
+            // go through the fallback's single-flight refresh: it hands back the current token
+            // when it is still valid and mints a new one otherwise, which the connection store's
+            // token watch then adopts into `AuthState`.
+            let token = match api.renew_fallback_token().await {
+                Ok(renewed) => renewed.token,
+                Err(err) if held_token_is_live => {
+                    tracing::warn!(
+                        "stream: SessionRefresh failed ({err:#}) — joining with the session's current JWT"
+                    );
+                    held_token
+                }
+                Err(err) => {
+                    tracing::warn!("stream: no live JWT for the stream server ({err:#})");
+                    this.update(cx, |this, cx| {
+                        if this.join_generation == generation && this.is_joining() {
+                            this.fail_stream("Stream connection failed".into(), cx);
+                        }
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            let Ok(Some(events)) = this.update(cx, |this, _| {
+                this.start_session(
+                    generation,
+                    StreamSessionConfig {
+                        token,
+                        ..session_config
+                    },
+                    output_device_id,
+                )
+            }) else {
+                return;
+            };
             while let Ok(event) = events.recv_async().await {
                 let stop = this
                     .update(cx, |this, cx| {
@@ -571,6 +607,29 @@ impl StreamStore {
             })
             .ok();
         }));
+    }
+
+    /// Open the stream session once the credential is in hand. Returns `None` when the join it
+    /// belongs to was superseded (left, or re-joined) while the credential was being fetched.
+    fn start_session(
+        &mut self,
+        generation: u64,
+        session_config: StreamSessionConfig,
+        output_device_id: Option<String>,
+    ) -> Option<flume::Receiver<StreamEvent>> {
+        if self.join_generation != generation || !self.is_joining() || self.session.is_some() {
+            return None;
+        }
+        let stream_session = StreamSession::start(
+            session_config,
+            self.frame_store.clone(),
+            output_device_id,
+            self.volume,
+            self.muted,
+        );
+        let events = stream_session.events().clone();
+        self.session = Some(stream_session);
+        Some(events)
     }
 
     pub fn leave_stream(&mut self, cx: &mut Context<Self>) {
