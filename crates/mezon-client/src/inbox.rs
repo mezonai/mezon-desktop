@@ -814,6 +814,15 @@ impl InboxNotification {
             .filter(|ts| *ts > 0)
             .unwrap_or(self.create_time_seconds)
     }
+
+    pub fn contains_here_mention(&self) -> bool {
+        self.message.as_ref().is_some_and(|message| {
+            message
+                .mention_spans
+                .iter()
+                .any(|span| crate::transport::is_here_user_id(&span.user_id))
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1089,6 +1098,34 @@ mod tests {
             inbox_category_from_notification(&n),
             Some(InboxCategory::Mentions)
         );
+    }
+
+    #[test]
+    fn inbox_notification_detects_here_mention_span() {
+        let mut message = InboxMessagePreview::empty_content("@here".into());
+        message.mention_spans.push(InboxMentionSpan {
+            start: 0,
+            end: 5,
+            user_id: crate::transport::MENTION_HERE_USER_ID.into(),
+            role_id: String::new(),
+            is_role: false,
+        });
+        let notification = InboxNotification {
+            id: "1".into(),
+            category: InboxCategory::Mentions,
+            subject: String::new(),
+            sender_id: String::new(),
+            clan_id: "1".into(),
+            channel_id: "1".into(),
+            topic_id: None,
+            channel_type: 1,
+            avatar_url: String::new(),
+            create_time_seconds: 1,
+            code: INBOX_USER_MENTIONED_CODE,
+            message: Some(message),
+        };
+
+        assert!(notification.contains_here_mention());
     }
 
     #[test]

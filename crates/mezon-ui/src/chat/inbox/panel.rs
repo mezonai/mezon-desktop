@@ -1115,7 +1115,16 @@ pub fn clan_has_inbox_badge(clan_id: &str, cx: &App) -> bool {
     let Ok(clan) = clan_id.parse::<ClanId>() else {
         return false;
     };
-    ClanList::try_global(cx)
+    let badge_count = ClanList::try_global(cx)
         .and_then(|list| list.read(cx).clan(clan).map(|c| c.badge_count > 0))
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if !badge_count {
+        return false;
+    }
+    let total = ClanList::try_global(cx)
+        .and_then(|list| list.read(cx).clan(clan).map(|c| c.badge_count))
+        .unwrap_or(0);
+    InboxStore::global(cx)
+        .read(cx)
+        .has_visible_inbox_badge(clan_id, total)
 }

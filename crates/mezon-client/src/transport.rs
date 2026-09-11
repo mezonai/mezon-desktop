@@ -1819,6 +1819,39 @@ pub fn is_mention_or_reply(
         .any(|reference| reference.message_sender_id == user_id)
 }
 
+pub fn is_inbox_mention_or_reply(
+    content: &str,
+    references: &[u8],
+    mention_bytes: &[u8],
+    user_id: i64,
+    role_ids: &[i64],
+) -> bool {
+    if parse_message_mentions(mention_bytes).iter().any(|mention| {
+        (mention.user_id != 0 && mention.user_id == user_id)
+            || (mention.role_id != 0 && role_ids.contains(&mention.role_id))
+    }) {
+        return true;
+    }
+    if let Ok(parsed) = serde_json::from_str::<ApiMessageContent>(content)
+        && parsed.mentions.iter().any(|token| {
+            token
+                .user_id
+                .as_deref()
+                .is_some_and(|id| !is_here_user_id(id) && id.parse::<i64>() == Ok(user_id))
+                || token
+                    .role_id
+                    .as_deref()
+                    .and_then(|id| id.parse::<i64>().ok())
+                    .is_some_and(|id| role_ids.contains(&id))
+        })
+    {
+        return true;
+    }
+    parse_message_references(references)
+        .iter()
+        .any(|reference| reference.message_sender_id == user_id)
+}
+
 fn mention_targets_user(token: &ContentToken, user_id: i64, role_ids: &[i64]) -> bool {
     if let Some(uid) = token.user_id.as_deref()
         && (is_here_user_id(uid) || uid.parse::<i64>().is_ok_and(|id| id == user_id))
@@ -11019,6 +11052,21 @@ mod tests {
         .encode_to_vec();
         let content = build_message_content_json("@here", &[], &[], &[], &[]);
         assert!(is_mention_or_reply(&content, &[], &bytes, 7, &[]));
+        assert!(!is_inbox_mention_or_reply(&content, &[], &bytes, 7, &[]));
+    }
+
+    #[test]
+    fn inbox_mention_or_reply_keeps_replies() {
+        let refs = api::MessageRefList {
+            refs: vec![api::MessageRef {
+                message_sender_id: 42,
+                ..Default::default()
+            }],
+        }
+        .encode_to_vec();
+        let content = build_message_content_json("reply", &[], &[], &[], &[]);
+
+        assert!(is_inbox_mention_or_reply(&content, &refs, &[], 42, &[]));
     }
 
     #[test]

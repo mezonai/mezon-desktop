@@ -115,6 +115,19 @@ fn is_clan_message_seen(cx: &App, m: &ChannelMessage, from_me: bool) -> bool {
     active == badge_id || active == parent_id
 }
 
+fn mention_check_policy(
+    is_new_message: bool,
+    seen: bool,
+    already_seen: bool,
+    removed_by_other: bool,
+) -> (bool, bool) {
+    let needs_badge_mention_check = (is_new_message && !seen && !already_seen) || removed_by_other;
+
+    let needs_inbox_mention_check = is_new_message;
+
+    (needs_badge_mention_check, needs_inbox_mention_check)
+}
+
 fn is_viewing_channel(cx: &App, channel_id: ChannelId) -> bool {
     if cx.active_window().is_none() {
         return false;
@@ -279,6 +292,35 @@ impl BadgeService {
         )
     }
 
+    fn is_inbox_mention(
+        &self,
+        content: &str,
+        references: &[u8],
+        mention_bytes: &[u8],
+        user_id: i64,
+        clan_id: ClanId,
+        cx: &App,
+    ) -> bool {
+        let store = ClanMembersStore::global(cx);
+        let store = store.read(cx);
+        let role_ids: Vec<i64> = store
+            .self_role_ids(clan_id)
+            .map(<[i64]>::to_vec)
+            .or_else(|| {
+                store
+                    .member(clan_id, UserId(user_id))
+                    .map(|member| member.role_ids.iter().map(|role| role.get()).collect())
+            })
+            .unwrap_or_default();
+        mezon_client::transport::is_inbox_mention_or_reply(
+            content,
+            references,
+            mention_bytes,
+            user_id,
+            &role_ids,
+        )
+    }
+
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         match event {
             RealtimeEvent::ChannelMessage(m) => {
@@ -351,12 +393,25 @@ impl BadgeService {
                             | MessageCode::Indicator
                             | MessageCode::Welcome
                     );
-                    let needs_mention_check =
-                        (is_new_message && !seen && !already_seen) || removed_by_other;
+                    let (needs_mention_check, needs_inbox_mention_check) =
+                        mention_check_policy(is_new_message, seen, already_seen, removed_by_other);
                     let mentions_me = needs_mention_check
                         && user_id
                             .map(|uid| {
                                 self.is_mention(
+                                    &m.content,
+                                    &m.references,
+                                    &m.mentions,
+                                    uid,
+                                    clan_id,
+                                    cx,
+                                )
+                            })
+                            .unwrap_or(false);
+                    let inbox_mentions_me = needs_inbox_mention_check
+                        && user_id
+                            .map(|uid| {
+                                self.is_inbox_mention(
                                     &m.content,
                                     &m.references,
                                     &m.mentions,
@@ -383,6 +438,7 @@ impl BadgeService {
                         seen,
                         already_seen,
                         mentions_me,
+                        inbox_mentions_me,
                         badge_mention,
                         topic = m.topic_id,
                         skip = skip_unread_activity,
@@ -425,12 +481,25 @@ impl BadgeService {
                     }
                     if !from_me
                         && is_new_message
-                        && mentions_me
+                        && inbox_mentions_me
                         && !skip_unread_activity
                         && !skip_inbox_mention_code(m.code)
                     {
                         InboxStore::global(cx).update(cx, |inbox, cx| {
                             inbox.note_mention(inbox_notification_from_channel_mention(m), cx);
+                        });
+                    } else if !from_me
+                        && is_new_message
+                        && mentions_me
+                        && !inbox_mentions_me
+                        && !skip_unread_activity
+                    {
+                        InboxStore::global(cx).update(cx, |inbox, cx| {
+                            inbox.note_filtered_here_badge(
+                                &m.clan_id.to_string(),
+                                &m.message_id.to_string(),
+                                cx,
+                            );
                         });
                     }
                     if removed_by_other && mentions_me {
@@ -694,5 +763,13 @@ mod tests {
         assert_eq!(seen.len(), order.len());
         assert!(!seen.contains(&(ChannelId(1), MessageId(1))));
         assert!(seen.contains(&(ChannelId(1), MessageId(MAX_BADGE_DEDUP as i64 + 1))));
+    }
+
+    #[test]
+    fn inbox_mention_check_is_not_suppressed_for_a_seen_channel_message() {
+        let (needs_badge_check, needs_inbox_check) = mention_check_policy(true, true, true, false);
+
+        assert!(!needs_badge_check);
+        assert!(needs_inbox_check);
     }
 }

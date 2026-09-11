@@ -62,6 +62,7 @@ pub struct InboxStore {
     active_clan_id: Option<String>,
     active_channel_id: Option<String>,
     topic_by_message: HashMap<String, String>,
+    filtered_here_badges: HashMap<String, HashSet<String>>,
     api: Arc<AppApi>,
     reset_generation: u64,
     _conn_watch: Task<()>,
@@ -90,6 +91,7 @@ impl InboxStore {
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.buckets.clear();
         self.topic_by_message.clear();
+        self.filtered_here_badges.clear();
         self.active_clan_id = None;
         self.active_channel_id = None;
         self.reset_generation = self.reset_generation.wrapping_add(1);
@@ -105,6 +107,7 @@ impl InboxStore {
             active_clan_id: None,
             active_channel_id: None,
             topic_by_message: HashMap::new(),
+            filtered_here_badges: HashMap::new(),
             api,
             reset_generation: 0,
             _conn_watch: conn_watch,
@@ -116,6 +119,11 @@ impl InboxStore {
         RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
             dispatch.on(RealtimeKind::Notifications, &entity, |this, event, cx| {
                 this.handle_event(event, cx);
+            });
+            dispatch.on(RealtimeKind::MarkAsRead, &entity, |this, event, cx| {
+                if let RealtimeEvent::MarkAsRead(event) = event {
+                    this.clear_filtered_here_badges(&event.clan_id.to_string(), cx);
+                }
             });
             dispatch.on_lagged(&entity, |this, cx| this.refresh_active(cx));
         });
@@ -273,6 +281,18 @@ impl InboxStore {
         notification: InboxNotification,
         cx: &mut Context<Self>,
     ) -> bool {
+        if category == InboxCategory::Mentions && notification.contains_here_mention() {
+            tracing::debug!(
+                target: "inbox_mentions",
+                notification_id = %notification.id,
+                "skip @here notification from Mentions inbox"
+            );
+            let key = notification
+                .effective_message_id()
+                .unwrap_or_else(|| notification.id.clone());
+            self.note_filtered_here_badge(&notification.clan_id, &key, cx);
+            return false;
+        }
         self.remember_topic_id(&notification);
         let bucket = self.bucket_mut(category);
         let incoming_message_id = notification.effective_message_id();
@@ -433,15 +453,46 @@ impl InboxStore {
 
     fn sort_items(items: &mut [InboxNotification]) {
         items.sort_by(|a, b| {
-            match (
-                is_pending_inbox_notification_id(&a.id),
-                is_pending_inbox_notification_id(&b.id),
-            ) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => b.create_time_seconds.cmp(&a.create_time_seconds),
-            }
+            b.message_timestamp()
+                .cmp(&a.message_timestamp())
+                .then_with(|| {
+                    is_pending_inbox_notification_id(&b.id)
+                        .cmp(&is_pending_inbox_notification_id(&a.id))
+                })
+                .then_with(|| b.create_time_seconds.cmp(&a.create_time_seconds))
+                .then_with(|| b.id.cmp(&a.id))
         });
+    }
+
+    pub fn note_filtered_here_badge(
+        &mut self,
+        clan_id: &str,
+        message_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let inserted = self
+            .filtered_here_badges
+            .entry(clan_id.to_string())
+            .or_default()
+            .insert(message_id.to_string());
+        if inserted {
+            cx.notify();
+        }
+    }
+
+    pub fn has_visible_inbox_badge(&self, clan_id: &str, total_badges: u32) -> bool {
+        total_badges
+            > self
+                .filtered_here_badges
+                .get(clan_id)
+                .map(HashSet::len)
+                .unwrap_or(0) as u32
+    }
+
+    fn clear_filtered_here_badges(&mut self, clan_id: &str, cx: &mut Context<Self>) {
+        if self.filtered_here_badges.remove(clan_id).is_some() {
+            cx.notify();
+        }
     }
 
     fn apply_fetch_result(
@@ -461,7 +512,11 @@ impl InboxStore {
                 bucket.loading = false;
                 match result {
                     Ok(mut items) => {
-                        bucket.has_more = items.len() >= INBOX_PAGE_LIMIT as usize;
+                        let page_has_more = items.len() >= INBOX_PAGE_LIMIT as usize;
+                        if category == InboxCategory::Mentions {
+                            items.retain(|item| !item.contains_here_mention());
+                        }
+                        bucket.has_more = page_has_more;
                         let touched = Self::apply_remembered_topic_ids(&mut items, &remembered);
                         if is_first_page {
                             let local = std::mem::take(&mut bucket.items);
@@ -576,9 +631,7 @@ impl InboxStore {
             return;
         }
         bucket.items.push(item);
-        bucket
-            .items
-            .sort_by_key(|n| std::cmp::Reverse(n.create_time_seconds));
+        Self::sort_items(&mut bucket.items);
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
@@ -677,6 +730,7 @@ mod tests {
             active_clan_id: Some("1".into()),
             active_channel_id: Some("7".into()),
             topic_by_message: HashMap::new(),
+            filtered_here_badges: HashMap::new(),
             api: Arc::new(AppApi::new(
                 Arc::new(mezon_client::TransportClient::new(String::new())),
                 String::new(),
@@ -695,6 +749,7 @@ mod tests {
             active_clan_id: Some("1".into()),
             active_channel_id: Some("7".into()),
             topic_by_message: HashMap::new(),
+            filtered_here_badges: HashMap::new(),
             api: Arc::new(AppApi::new(
                 Arc::new(mezon_client::TransportClient::new(String::new())),
                 String::new(),
@@ -739,7 +794,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_inbox_items_sort_ahead_of_older_server_items() {
+    fn pending_inbox_items_follow_displayed_message_time() {
         let mut items = vec![
             InboxNotification {
                 id: "10".into(),
@@ -753,7 +808,21 @@ mod tests {
             },
         ];
         InboxStore::sort_items(&mut items);
-        assert_eq!(items[0].id, "pending-42");
+        assert_eq!(items[0].id, "10");
+        assert_eq!(items[1].id, "pending-42");
+    }
+
+    #[test]
+    fn server_items_sort_by_the_timestamp_shown_in_the_inbox() {
+        let mut older_message = notification_with_message("10", "10", 100);
+        older_message.create_time_seconds = 300;
+        let mut newer_message = notification_with_message("20", "20", 200);
+        newer_message.create_time_seconds = 150;
+        let mut items = vec![older_message, newer_message];
+
+        InboxStore::sort_items(&mut items);
+
+        assert_eq!(items[0].id, "20");
         assert_eq!(items[1].id, "10");
     }
 
