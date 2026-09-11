@@ -2,10 +2,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use livekit::track::LocalVideoTrack;
-use livekit::webrtc::video_frame::{I420Buffer, VideoFrame, VideoRotation};
-use livekit::webrtc::video_source::native::NativeVideoSource;
-use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
+use libwebrtc::video_frame::{I420Buffer, VideoFrame, VideoRotation};
+use libwebrtc::video_source::native::NativeVideoSource;
+use libwebrtc::video_source::VideoResolution;
 use parking_lot::{Condvar, Mutex};
 use scap::capturer::{Capturer, Options, Resolution};
 use scap::frame::FrameType;
@@ -29,7 +28,9 @@ use crate::video::i420_to_bgra_into;
 use crate::video::nv12_full_to_i420;
 use crate::video::{VideoFrameStore, local_screen_key};
 
-const CAPTURE_FPS: u32 = 30;
+const CAPTURE_FPS: u32 = 5;
+#[cfg(target_os = "macos")]
+const PREVIEW_MIN_INTERVAL: Duration = Duration::from_millis(100);
 #[cfg(not(target_os = "macos"))]
 const PREVIEW_MAX_WIDTH: u32 = 1280;
 #[cfg(not(target_os = "macos"))]
@@ -115,7 +116,7 @@ pub fn start_screen(
     pick: PickedScreen,
 ) -> (
     ScreenStopper,
-    flume::Receiver<Result<LocalVideoTrack, String>>,
+    flume::Receiver<Result<(NativeVideoSource, u32, u32), String>>,
 ) {
     let stop = Arc::new(AtomicBool::new(false));
     let (track_tx, track_rx) = flume::bounded(1);
@@ -171,7 +172,10 @@ pub fn start_screen(
                 output_type: FrameType::YUVFrameFullRange,
                 #[cfg(not(target_os = "macos"))]
                 output_type: FrameType::BGRAFrame,
-                output_resolution: Resolution::_720p,
+                // 1080p, not 720p: shared text is the whole point of a screen
+                // share, and 1280 wide leaves it soft however generous the
+                // bitrate is. This is the width the web client captures at.
+                output_resolution: Resolution::_1080p,
                 portal_source_types,
                 use_portal,
                 ..Default::default()
@@ -294,6 +298,8 @@ pub fn start_screen(
 
             let key = local_screen_key(&identity);
             let started = Instant::now();
+            #[cfg(target_os = "macos")]
+            let mut last_preview: Option<Instant> = None;
             let mut source: Option<NativeVideoSource> = None;
             let mut src_w = 0u32;
             let mut src_h = 0u32;
@@ -352,12 +358,8 @@ pub fn start_screen(
                         },
                         true,
                     );
-                    let track = LocalVideoTrack::create_video_track(
-                        "screen",
-                        RtcVideoSource::Native(new_source.clone()),
-                    );
-                    source = Some(new_source);
-                    if track_tx.send(Ok(track)).is_err() {
+                    source = Some(new_source.clone());
+                    if track_tx.send(Ok((new_source, src_w, src_h))).is_err() {
                         return;
                     }
                     sent_track = true;
@@ -424,7 +426,8 @@ pub fn start_screen(
                 }
 
                 #[cfg(target_os = "macos")]
-                {
+                if last_preview.is_none_or(|at: Instant| at.elapsed() >= PREVIEW_MIN_INTERVAL) {
+                    last_preview = Some(Instant::now());
                     let i420 = &frame.buffer;
                     let (sy, su, sv) = i420.strides();
                     let (y, u, v) = i420.data();

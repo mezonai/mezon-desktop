@@ -27,6 +27,7 @@ jobs:
       NX_CHAT_APP_BLACKBOARD_URL: https://blackboard.mezon.ai
       NX_CHAT_APP_INTERACTIVE_URL: https://interactive.mezon.ai
       NX_CHAT_APP_MEET_WS_URL: wss://meet.mezon.ai
+      NX_CHAT_APP_SFU_WS_URL: wss://sfu.mezon.vn/ws
       NX_CHAT_APP_NOTIFICATION_WS_URL: wss://gotify.mezon.ai
       NX_CHAT_APP_OAUTH2_AUTHORIZE_URL: https://oauth2.mezon.ai/oauth2/auth
       NX_CHAT_APP_OAUTH2_CLIENT_ID: f049f29e-12a9-464c-938f-0a2f60c3210b
@@ -79,10 +80,10 @@ jobs:
             name: Linux
             artifact_name: mezon-linux-x86_64
             container: ubuntu:22.04
-          # Temporarily disabled: only build Linux artifacts.
-          # - os: windows-latest
-          #   name: Windows
-          #   artifact_name: mezon-windows-x86_64
+          - os: windows-latest
+            name: Windows
+            artifact_name: mezon-windows-x86_64
+          # Temporarily disabled: macOS artifacts.
           # - os: macos-latest
           #   name: macOS
           #   artifact_name: mezon-macos-aarch64

@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -21,6 +22,7 @@ const VIDEO_STALL: Duration = Duration::from_millis(750);
 const WORKER_IDLE_POLL: Duration = Duration::from_millis(5);
 const MIN_FREE_BYTES: u64 = 512 * 1024 * 1024;
 const SINK_LOCK_WAIT: Duration = Duration::from_millis(20);
+const SCRATCH_DIR: &str = "mezon-record";
 
 pub struct RecorderConfig {
     pub path: PathBuf,
@@ -130,6 +132,7 @@ impl VideoTap {
 
 pub struct Recorder {
     path: PathBuf,
+    part: PathBuf,
     shared: Arc<Shared>,
     tx: flume::Sender<AudioChunk>,
     worker: Option<JoinHandle<()>>,
@@ -145,8 +148,20 @@ impl Recorder {
             return Err(RecordError::DiskSpace);
         }
 
-        let part = part_path(&config.path);
-        let sink = platform::create_sink(&part, config.video)?;
+        let beside = part_path(&config.path);
+        let (part, sink) = match platform::create_sink(&beside, config.video) {
+            Err(RecordError::Create) => {
+                let scratch = scratch_path(&config.path)?;
+                tracing::warn!(
+                    "could not open the recording file at {}; staging it at {} instead",
+                    beside.display(),
+                    scratch.display()
+                );
+                let sink = platform::create_sink(&scratch, config.video)?;
+                (scratch, sink)
+            }
+            other => (beside, other?),
+        };
         let shared = Arc::new(Shared {
             sink: Mutex::new(Some(sink)),
             audio_frames: AtomicU64::new(0),
@@ -168,6 +183,7 @@ impl Recorder {
         let fps = config.video.map(|video| video.fps.max(1)).unwrap_or(30);
         Ok(Self {
             path: config.path,
+            part,
             shared,
             tx,
             worker: Some(worker),
@@ -226,15 +242,11 @@ impl Recorder {
         };
         let failed = self.shared.failed.load(Ordering::Relaxed);
         sink.finish()?;
-        let part = part_path(&self.path);
+        let part = self.part.clone();
 
         if failed {
             tracing::warn!("the call recorder gave up mid-call; keeping what it managed to encode");
         }
-        // A muxer that finalized nothing but a container header still leaves a
-        // file behind, and Media Foundation even reports success for one. Keep
-        // that partial under its own name and report the failure rather than
-        // handing the user an mp4 that opens in no player.
         if !container::is_playable(&part) {
             tracing::error!(
                 "the call recording carries no usable media; the partial file stays at {}",
@@ -337,6 +349,15 @@ fn audio_worker(shared: Arc<Shared>, rx: flume::Receiver<AudioChunk>) {
             std::thread::sleep(WORKER_IDLE_POLL);
         }
     }
+}
+
+fn scratch_path(target: &Path) -> Result<PathBuf, RecordError> {
+    let dir = std::env::temp_dir().join(SCRATCH_DIR);
+    std::fs::create_dir_all(&dir).map_err(|_| RecordError::Create)?;
+    let name = target.file_name().unwrap_or_else(|| OsStr::new("call"));
+    let scratch = part_path(&dir.join(name));
+    let _ = std::fs::remove_file(&scratch);
+    Ok(scratch)
 }
 
 pub fn part_path(path: &Path) -> PathBuf {

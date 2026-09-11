@@ -1,0 +1,34 @@
+[package]
+name = "libwebrtc"
+version = "0.3.44"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+description = "Safe bindings to libwebrtc, vendored from livekit/rust-sdks and trimmed to the modules this workspace uses"
+repository = "https://github.com/livekit/rust-sdks"
+
+[lib]
+name = "libwebrtc"
+path = "src/lib.rs"
+
+[dependencies]
+cxx = "1.0"
+futures.workspace = true
+lazy_static = "1.4"
+log.workspace = true
+parking_lot.workspace = true
+rtrb = "0.3.3"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+webrtc-sys = { path = "../webrtc-sys" }
+
+[dev-dependencies]
+env_logger = "0.11"
+
+[lints.rust]
+warnings = "allow"
+
+[lints.clippy]
+all = "allow"

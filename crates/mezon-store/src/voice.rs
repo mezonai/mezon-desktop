@@ -14,15 +14,18 @@ use gpui::{
 };
 use mezon_audio::{AudioPlayer, DecodedPcm};
 use mezon_client::{AppApi, ChannelAppLaunchParams, RealtimeEvent, build_channel_app_url};
-use mezon_voice::{IceServerConfig, VoiceEvent, VoiceSession};
+use mezon_voice::{
+    IceServerConfig, TokenRefresher, VoiceConnectOptions, VoiceEvent, VoiceSession,
+};
 use parking_lot::Mutex;
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use mezon_voice::record_wayland_session;
 pub use mezon_voice::{
     CameraDeviceInfo, NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareListError,
-    ScreenShareOption, ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceParticipant,
-    capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
+    ScreenShareOption, ScreenSharePreview, SfuRole, VideoFrameData, VideoFrameStore,
+    VoiceParticipant, capture_screen_share_preview, list_screen_share_options,
+    peek_screen_share_options,
     system_screen_share_pick,
 };
 
@@ -100,7 +103,8 @@ const DEFAULT_NOISE_SUPPRESSION_LEVEL: u8 = 20;
 pub const MAX_SOUND_BYTES: u64 = 1024 * 1024;
 pub const SOUND_ALLOWED_EXTENSIONS: &[&str] = &["mp3", "wav", "mpeg"];
 const KICK_SUPPRESS_TIMEOUT: Duration = Duration::from_secs(5);
-const RECONNECT_STALL_TIMEOUT: Duration = Duration::from_secs(15);
+// Let the engine finish its ICE and DTLS deadlines before replacing it.
+const RECONNECT_STALL_TIMEOUT: Duration = Duration::from_secs(40);
 const RECONNECT_RETRY_DELAY: Duration = Duration::from_secs(5);
 static RAISE_HAND_SOUND: &[u8] = include_bytes!("../assets/audio/raising-hand.mp3");
 static JOIN_VOICE_SOUND: &[u8] = include_bytes!("../assets/audio/joincallsound.mp3");
@@ -230,6 +234,7 @@ pub struct VoiceStore {
     give_flower_player: Option<AudioPlayer>,
     give_flower_sound_loading: bool,
     join_sound_baseline_set: bool,
+    awaiting_room_snapshot: bool,
     last_reaction_send: Option<Instant>,
     last_flower_send: Option<Instant>,
     last_flower_effect_at: Option<Instant>,
@@ -255,6 +260,14 @@ pub struct VoiceStore {
     pending_texture_replaces: Mutex<Vec<Arc<RenderImage>>>,
     pending_texture_work: AtomicBool,
     cached_meet_token: Option<CachedMeetToken>,
+    role: SfuRole,
+    ptt_active: bool,
+    /// Whether the button or the space bar is currently held. Distinct from
+    /// `ptt_active`, which only turns on once the SFU grants the turn.
+    ptt_held: bool,
+    /// Role the pre-join split button will use, and whether its picker is open.
+    pending_join_role: SfuRole,
+    join_role_menu_open: bool,
     meet_token_prefetching: Option<String>,
     last_screen_share: Option<(PickedScreen, bool)>,
     link_copied: bool,
@@ -341,6 +354,8 @@ pub enum RecordingToast {
 pub enum VoiceStoreEvent {
     RecordingFinished(RecordingToast),
     RecordingVideoUnavailable,
+    /// A moderator removed the local user from the voice channel.
+    RemovedFromChannel,
 }
 
 impl EventEmitter<VoiceStoreEvent> for VoiceStore {}
@@ -354,8 +369,9 @@ impl VoiceStore {
         if !resolved.is_empty() {
             return resolved;
         }
-        // LiveKit hands back the identity as the name, and a raw user id in the
-        // recording reads as noise — leave the pill off instead.
+        // The SFU never sends display names, so this only fires for a peer the
+        // clan member list could not resolve. A raw user id reads as noise in a
+        // recording — leave the pill off instead.
         if participant.name.chars().all(|c| c.is_ascii_digit()) {
             return String::new();
         }
@@ -560,7 +576,7 @@ impl VoiceStore {
             mic_permission_denied: false,
             camera_enabled: false,
             screen_share_enabled: false,
-            noise_suppression_enabled: false,
+            noise_suppression_enabled: true,
             noise_suppression_level: DEFAULT_NOISE_SUPPRESSION_LEVEL,
             focused_tile: None,
             auto_focused_screen: None,
@@ -585,6 +601,7 @@ impl VoiceStore {
             give_flower_player: None,
             give_flower_sound_loading: false,
             join_sound_baseline_set: false,
+            awaiting_room_snapshot: false,
             last_reaction_send: None,
             last_flower_send: None,
             last_flower_effect_at: None,
@@ -610,6 +627,11 @@ impl VoiceStore {
             pending_texture_replaces: Mutex::new(Vec::new()),
             pending_texture_work: AtomicBool::new(false),
             cached_meet_token: None,
+            role: SfuRole::Speaker,
+            ptt_active: false,
+            ptt_held: false,
+            pending_join_role: SfuRole::Speaker,
+            join_role_menu_open: false,
             meet_token_prefetching: None,
             last_screen_share: None,
             link_copied: false,
@@ -2231,16 +2253,15 @@ impl VoiceStore {
         }
         let channel_id = channel_id.to_string();
         let clan_id = clan_id.to_string();
-        let room_name = self.room_name.clone();
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let result = match action {
                 ModerationAction::Mute => {
-                    api.mute_participant_mezon_meet(&channel_id, &clan_id, &identity, &room_name)
+                    api.mute_participant_mezon_meet(&channel_id, &clan_id, &identity)
                         .await
                 }
                 ModerationAction::Kick => {
-                    api.remove_participant_mezon_meet(&channel_id, &clan_id, &identity, &room_name)
+                    api.remove_participant_mezon_meet(&channel_id, &clan_id, &identity)
                         .await
                 }
             };
@@ -2285,6 +2306,7 @@ impl VoiceStore {
         channel_id: String,
         clan_id: String,
         channel_label: String,
+        role: SfuRole,
         input_device_id: Option<String>,
         output_device_id: Option<String>,
         camera_device_id: Option<String>,
@@ -2297,12 +2319,16 @@ impl VoiceStore {
 
         self.teardown(Some(window), cx);
         self.channel_label = channel_label;
+        self.role = role;
+        self.ptt_held = false;
+        self.pending_join_role = role;
+        self.join_role_menu_open = false;
 
-        let ws_url = AppConfig::global(cx).meet_ws_url.clone();
+        let ws_url = AppConfig::global(cx).sfu_ws_url.clone();
         if ws_url.is_empty() {
             self.connection = VoiceConnection::Failed {
                 channel_id,
-                message: "meet server URL is not configured".into(),
+                message: "SFU server URL is not configured".into(),
             };
             cx.notify();
             return;
@@ -2389,15 +2415,43 @@ impl VoiceStore {
         let session_generation = self.session_generation;
         self._events_task = None;
         self.session = None;
+        self.awaiting_room_snapshot = true;
         let ice_servers = Self::ice_servers(cx);
-        let session = VoiceSession::connect(
-            ws_url,
+        let local_user_id = AccountStore::try_global(cx)
+            .and_then(|account| {
+                account
+                    .read(cx)
+                    .account
+                    .as_ref()
+                    .map(|me| me.user_id.to_string())
+            })
+            .unwrap_or_default();
+        let refresh_api = self.api.clone();
+        let refresh_channel = channel_id.clone();
+        let session = VoiceSession::connect(VoiceConnectOptions {
+            url: ws_url,
             token,
+            room: channel_id.clone(),
+            role: self.role,
+            local_user_id,
             input_device_id,
             output_device_id,
             camera_device_id,
             ice_servers,
-        );
+            refresh_token: Some(TokenRefresher::new(move || {
+                let api = refresh_api.clone();
+                let channel_id = refresh_channel.clone();
+                async move {
+                    match api.generate_meet_token(&channel_id, "").await {
+                        Ok(token) => Some(token),
+                        Err(e) => {
+                            tracing::warn!("voice token refresh failed: {e:#}");
+                            None
+                        }
+                    }
+                }
+            })),
+        });
         let events = session.events();
         self.frame_store = Some(session.frame_store());
         self.session = Some(session);
@@ -2497,7 +2551,7 @@ impl VoiceStore {
 
     fn reconnect_snapshot(&self, cx: &App) -> Option<VoiceReconnectSnapshot> {
         let (channel_id, clan_id) = self.active_connection_ids()?;
-        let ws_url = AppConfig::global(cx).meet_ws_url.clone();
+        let ws_url = AppConfig::global(cx).sfu_ws_url.clone();
         if ws_url.is_empty() {
             return None;
         }
@@ -2572,7 +2626,7 @@ impl VoiceStore {
                 match token {
                     Ok(token) => {
                         tracing::info!(
-                            "voice reconnect watchdog rebuilding LiveKit session for channel {}",
+                            "voice reconnect watchdog rebuilding SFU session for channel {}",
                             snapshot.channel_id
                         );
                         this.cached_meet_token = Some(CachedMeetToken {
@@ -2580,7 +2634,7 @@ impl VoiceStore {
                             token: token.clone(),
                             fetched_at: Instant::now(),
                         });
-                        this.restart_livekit_session(generation, snapshot, token, cx);
+                        this.restart_sfu_session(generation, snapshot, token, cx);
                     }
                     Err(e) => {
                         tracing::warn!("voice reconnect token refresh failed: {e:#}");
@@ -2592,6 +2646,12 @@ impl VoiceStore {
     }
 
     fn clear_session_handles(&mut self, mut window: Option<&mut Window>, cx: &mut Context<Self>) {
+        tracing::info!(
+            status = ?self.call_status,
+            generation = self.session_generation,
+            had_session = self.session.is_some(),
+            "voice session handles cleared"
+        );
         self.flush_recording(cx);
         self.recording = RecordingState::Idle;
         self.recording_elapsed = Duration::ZERO;
@@ -2619,7 +2679,7 @@ impl VoiceStore {
         self.flush_texture_drops(window, cx);
     }
 
-    fn restart_livekit_session(
+    fn restart_sfu_session(
         &mut self,
         generation: u64,
         snapshot: VoiceReconnectSnapshot,
@@ -2653,6 +2713,13 @@ impl VoiceStore {
             snapshot.camera_enabled,
             snapshot.screen_share,
         );
+        if self.is_audience()
+            && self.ptt_held
+            && !mezon_voice::microphone_denied()
+            && let Some(session) = &self.session
+        {
+            session.set_push_to_talk(true);
+        }
         if self.reconnect_still_pending(generation) {
             self.schedule_reconnect_recovery(generation, RECONNECT_STALL_TIMEOUT, cx);
         }
@@ -2724,6 +2791,7 @@ impl VoiceStore {
             }
             VoiceEvent::Reconnecting => {
                 self.call_status = VoiceCallStatus::Reconnecting;
+                self.awaiting_room_snapshot = true;
                 self.arm_reconnect_watchdog(RECONNECT_STALL_TIMEOUT, cx);
             }
             VoiceEvent::Reconnected => {
@@ -2739,6 +2807,19 @@ impl VoiceStore {
                 if matches!(self.call_status, VoiceCallStatus::WeakNetwork) {
                     self.call_status = VoiceCallStatus::Stable;
                 }
+            }
+            VoiceEvent::RemovedFromChannel { reason } => {
+                // Tear down without the reconnect watchdog: coming back would
+                // put the user straight into a channel they were removed from.
+                tracing::info!("removed from voice channel: {reason}");
+                self.call_status = VoiceCallStatus::Stable;
+                self.teardown(None, cx);
+                cx.emit(VoiceStoreEvent::RemovedFromChannel);
+            }
+            VoiceEvent::PushToTalkActive(active) => {
+                self.mic_enabled = active;
+                self.ptt_active = active;
+                cx.notify();
             }
             VoiceEvent::DeviceResetToDefault { input } => {
                 let kind = if input {
@@ -2763,7 +2844,12 @@ impl VoiceStore {
                 if self.participants == list {
                     return;
                 }
-                let remote_joined = self.join_sound_baseline_set
+                let settling = self.awaiting_room_snapshot;
+                if settling {
+                    self.awaiting_room_snapshot = !list.iter().any(|p| !p.is_local);
+                }
+                let remote_joined = !settling
+                    && self.join_sound_baseline_set
                     && list.iter().any(|p| {
                         !p.is_local
                             && !p.is_agent
@@ -2834,7 +2920,74 @@ impl VoiceStore {
     }
 
     pub fn toggle_mic(&mut self, cx: &mut Context<Self>) {
+        if self.is_audience() {
+            return;
+        }
         self.set_mic_enabled(!self.mic_enabled, cx);
+    }
+
+    pub fn role(&self) -> SfuRole {
+        self.role
+    }
+
+    pub fn pending_join_role(&self) -> SfuRole {
+        self.pending_join_role
+    }
+
+    pub fn join_role_menu_open(&self) -> bool {
+        self.join_role_menu_open
+    }
+
+    pub fn set_pending_join_role(&mut self, role: SfuRole, cx: &mut Context<Self>) {
+        self.pending_join_role = role;
+        self.join_role_menu_open = false;
+        cx.notify();
+    }
+
+    pub fn toggle_join_role_menu(&mut self, cx: &mut Context<Self>) {
+        self.join_role_menu_open = !self.join_role_menu_open;
+        cx.notify();
+    }
+
+    pub fn close_join_role_menu(&mut self, cx: &mut Context<Self>) {
+        if self.join_role_menu_open {
+            self.join_role_menu_open = false;
+            cx.notify();
+        }
+    }
+
+    pub fn is_audience(&self) -> bool {
+        self.role.is_audience()
+    }
+
+    /// True once the SFU has actually granted the turn, not merely while the
+    /// button is held.
+    pub fn push_to_talk_active(&self) -> bool {
+        self.ptt_active
+    }
+
+    pub fn set_push_to_talk(&mut self, active: bool, cx: &mut Context<Self>) {
+        // Key auto-repeat and the redundant mouse-release handlers both re-send
+        // the state they are already in; collapsing them here keeps the SFU from
+        // seeing a stream of no-op mute toggles.
+        if !self.is_audience() || self.ptt_held == active {
+            return;
+        }
+        if active && mezon_voice::microphone_denied() {
+            self.mic_permission_denied = true;
+            cx.notify();
+            return;
+        }
+        self.mic_permission_denied = false;
+        self.ptt_held = active;
+        if let Some(session) = &self.session {
+            session.set_push_to_talk(active);
+        }
+        if !active {
+            self.ptt_active = false;
+            self.mic_enabled = false;
+        }
+        cx.notify();
     }
 
     pub fn set_mic_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -3360,6 +3513,7 @@ impl VoiceStore {
                     name,
                     is_local: false,
                     is_agent: false,
+                    is_audience: false,
                     speaking: index == 0,
                     muted: index % 3 == 2,
                     camera: None,
@@ -3627,7 +3781,7 @@ impl VoiceStore {
         self.mic_permission_denied = false;
         self.camera_enabled = false;
         self.screen_share_enabled = false;
-        self.noise_suppression_enabled = false;
+        self.noise_suppression_enabled = true;
         self.noise_suppression_level = DEFAULT_NOISE_SUPPRESSION_LEVEL;
         self.focused_tile = None;
         self.auto_focused_screen = None;
@@ -3991,6 +4145,7 @@ mod tests {
             name: identity.to_string(),
             is_local: false,
             is_agent: false,
+            is_audience: false,
             speaking: false,
             muted: false,
             camera: None,

@@ -26,8 +26,8 @@ use libwebrtc::video_source::native::NativeVideoSource;
 use libwebrtc::video_stream::native::NativeVideoStream;
 use libwebrtc::video_track::RtcVideoTrack;
 use mezon_voice::{
-    AudioFormat, AudioIo, CameraController, IceServerConfig, PlaybackMixer, RecordTaps,
-    VideoFrameStore, i420_to_bgra_into, local_camera_key, start_camera_into,
+    AudioFormat, AudioIo, CameraController, IceServerConfig, MicResampler, PlaybackMixer,
+    RecordTaps, VideoFrameStore, i420_to_bgra_into, local_camera_key, start_camera_into,
 };
 use parking_lot::Mutex;
 
@@ -614,7 +614,7 @@ async fn mic_capture(
     input_fmt: InputFmt,
     mic_enabled: Arc<AtomicBool>,
 ) {
-    let mut resampler = MicResampler::new();
+    let mut resampler = MicResampler::new(CALL_AUDIO_RATE);
     let mut out: Vec<i16> = Vec::new();
     let mut meter = LevelMeter::new("mic level");
     while let Ok(samples) = mic_rx.recv_async().await {
@@ -641,97 +641,6 @@ async fn mic_capture(
             tracing::warn!("mic capture_frame failed: {e}");
         }
     }
-}
-
-struct MicResampler {
-    in_rate: u32,
-    step: f64,
-    out_pos: f64,
-    consumed: u64,
-    prev: f32,
-    have_prev: bool,
-    started: bool,
-}
-
-impl MicResampler {
-    fn new() -> Self {
-        Self {
-            in_rate: 0,
-            step: 1.0,
-            out_pos: 0.0,
-            consumed: 0,
-            prev: 0.0,
-            have_prev: false,
-            started: false,
-        }
-    }
-
-    fn reset(&mut self, in_rate: u32) {
-        self.in_rate = in_rate;
-        self.step = in_rate as f64 / CALL_AUDIO_RATE as f64;
-        self.out_pos = 0.0;
-        self.consumed = 0;
-        self.prev = 0.0;
-        self.have_prev = false;
-        self.started = false;
-    }
-
-    fn process(&mut self, samples: &[i16], in_rate: u32, in_channels: u32, out: &mut Vec<i16>) {
-        if in_rate != self.in_rate {
-            self.reset(in_rate);
-        }
-        let channels = in_channels.max(1) as usize;
-        let mono: Vec<f32> = if channels == 1 {
-            samples.iter().map(|&s| s as f32).collect()
-        } else {
-            samples
-                .chunks_exact(channels)
-                .map(|c| c.iter().map(|&s| s as f32).sum::<f32>() / channels as f32)
-                .collect()
-        };
-        let Some(&last) = mono.last() else {
-            return;
-        };
-        if (self.step - 1.0).abs() < f64::EPSILON {
-            out.extend(mono.iter().map(|&v| clamp_i16(v)));
-            self.prev = last;
-            self.have_prev = true;
-            self.consumed += mono.len() as u64;
-            return;
-        }
-        if !self.started {
-            self.out_pos = self.consumed as f64;
-            self.started = true;
-        }
-        let base = self.consumed;
-        let n = mono.len() as u64;
-        let last_abs = (base + n - 1) as f64;
-        while self.out_pos < last_abs {
-            let left = self.out_pos.floor();
-            let frac = (self.out_pos - left) as f32;
-            let li = left as i64;
-            let sl = self.sample_at(li, base, &mono);
-            let sr = self.sample_at(li + 1, base, &mono);
-            out.push(clamp_i16(sl + (sr - sl) * frac));
-            self.out_pos += self.step;
-        }
-        self.prev = last;
-        self.have_prev = true;
-        self.consumed += n;
-    }
-
-    fn sample_at(&self, abs: i64, base: u64, mono: &[f32]) -> f32 {
-        if abs < base as i64 {
-            if self.have_prev { self.prev } else { mono[0] }
-        } else {
-            let idx = (abs - base as i64) as usize;
-            mono.get(idx).copied().unwrap_or(self.prev)
-        }
-    }
-}
-
-fn clamp_i16(v: f32) -> i16 {
-    v.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
 }
 
 fn set_camera(
