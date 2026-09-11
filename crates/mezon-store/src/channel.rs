@@ -30,6 +30,7 @@ use crate::permissions::{
     PERMISSION_MANAGE_CLAN, PermissionStore,
 };
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+use crate::text_utils::normalize_diacritics;
 use crate::threads::CHANNEL_TYPE_THREAD;
 
 pub const FAVOR_CATE_ID: &str = "favorCate";
@@ -2875,6 +2876,34 @@ impl ChannelList {
         })
     }
 
+    /// Move one category to another slot and persist the whole order.
+    ///
+    /// Both positions index the clan's categories in the order they are stored, with
+    /// Favourites left out — it is pinned to the top and never moves. The order is sent for
+    /// every category, not just the moved one: the server stores a per-user order and reads
+    /// it back with `COALESCE(order_category, 0)`, so leaving a category unset would let it
+    /// tie with the others and land wherever the database felt like.
+    pub fn move_category(
+        &mut self,
+        clan_id: ClanId,
+        from: usize,
+        to: usize,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let mut ids: Vec<i64> = self
+            .categories_for_clan(clan_id)
+            .iter()
+            .filter(|category| category.id != FAVOR_CATE_ID)
+            .filter_map(|category| category.id.parse::<i64>().ok())
+            .collect();
+        if from == to || from >= ids.len() || to >= ids.len() {
+            return Task::ready(Ok(()));
+        }
+        let moved = ids.remove(from);
+        ids.insert(to, moved);
+        self.update_categories_order(clan_id, &ids, cx)
+    }
+
     pub fn create_category(
         &mut self,
         clan_id: ClanId,
@@ -3434,6 +3463,8 @@ impl ChannelList {
                 let id = ChannelId(e.channel_id);
                 let label = (!e.channel_label.is_empty()).then_some(e.channel_label.clone());
                 let topic = (!e.topic.is_empty()).then_some(e.topic.clone());
+                let carries_full_channel_state = e.channel_type != 0;
+                let age_restricted = carries_full_channel_state.then_some(e.age_restricted);
                 let mut changed = false;
                 for cats in self.cache.values_mut() {
                     if update_channel(
@@ -3441,7 +3472,7 @@ impl ChannelList {
                         id,
                         label.clone(),
                         topic.clone(),
-                        None,
+                        age_restricted,
                         e.channel_private,
                     ) {
                         changed = true;
@@ -4039,6 +4070,12 @@ impl ChannelList {
         );
     }
 
+    fn resort_thread_block_for(&mut self, clan_id: ClanId, channel_id: ChannelId) {
+        if let Some(categories) = self.cache.get_mut(&clan_id) {
+            resort_thread_block(categories, channel_id);
+        }
+    }
+
     pub fn ensure_thread_with_parent_active(
         &mut self,
         thread_id: ChannelId,
@@ -4050,7 +4087,10 @@ impl ChannelList {
         private: Option<bool>,
         cx: &mut Context<Self>,
     ) {
+        let mut already_present = false;
+        let mut renamed = false;
         if let Some(existing) = self.channel_mut(clan_id, thread_id) {
+            already_present = true;
             let mut changed = sync_thread_active_status(existing, active, active_confirmed);
             if let Some(private) = private
                 && existing.private != private
@@ -4059,11 +4099,17 @@ impl ChannelList {
                 changed = true;
             }
             if !label.is_empty() && existing.name != label {
-                existing.name = label;
+                existing.name = label.clone();
+                renamed = true;
                 changed = true;
             }
             if changed {
                 cx.notify();
+            }
+        }
+        if already_present {
+            if renamed {
+                self.resort_thread_block_for(clan_id, thread_id);
             }
             return;
         }
@@ -4237,6 +4283,7 @@ impl ChannelList {
             }
         }
 
+        self.resort_thread_block_for(clan_id, channel_id);
         self.reactivating.remove(&channel_id);
         self.archived_channel_ids.remove(&channel_id);
         self.archived_channel_parents.remove(&channel_id);
@@ -4649,6 +4696,7 @@ impl ChannelList {
                     ch.category_id = Some(e.category_id.to_string());
                 }
             }
+            self.resort_thread_block_for(clan_id, channel_id);
         } else if let Some(ch) = self.channel_mut(clan_id, channel_id) {
             ch.active = CHANNEL_ACTIVE_JOINED;
             if !label.is_empty() {
@@ -5089,6 +5137,47 @@ fn assemble_with_favorites(mut categories: Vec<Category>, clan_id: ClanId) -> Ve
     categories
 }
 
+/// Sort key for a thread row in the sidebar: accent-folded, lower-cased label,
+/// tie-broken by id so equal labels keep a stable order.
+fn thread_sort_key(ch: &Channel) -> (String, ChannelId) {
+    (normalize_diacritics(&ch.name), ch.id)
+}
+
+/// Half-open range of the contiguous rows belonging to `parent_id`'s thread block.
+fn thread_block_bounds(channels: &[Channel], parent_id: ChannelId) -> Option<(usize, usize)> {
+    let start = channels
+        .iter()
+        .position(|ch| ch.parent_id == Some(parent_id))?;
+    let mut end = start;
+    while end < channels.len() && channels[end].parent_id == Some(parent_id) {
+        end += 1;
+    }
+    Some((start, end))
+}
+
+/// Re-sorts the thread block `channel_id` belongs to. Labels are mutated in place
+/// on rename, which would otherwise leave the block unsorted until the next clan
+/// refetch and mislead the binary search in `insert_channel`.
+fn resort_thread_block(categories: &mut [Category], channel_id: ChannelId) {
+    let Some(parent_id) = categories
+        .iter()
+        .filter(|c| c.id != FAVOR_CATE_ID)
+        .flat_map(|c| c.channels.iter())
+        .find(|ch| ch.id == channel_id)
+        .and_then(|ch| ch.parent_id)
+    else {
+        return;
+    };
+    for cat in categories.iter_mut() {
+        if cat.id == FAVOR_CATE_ID {
+            continue;
+        }
+        if let Some((start, end)) = thread_block_bounds(&cat.channels, parent_id) {
+            cat.channels[start..end].sort_by_cached_key(thread_sort_key);
+        }
+    }
+}
+
 fn flatten_parents_with_threads(
     mut parents: Vec<Channel>,
     thread_groups: &mut HashMap<ChannelId, Vec<Channel>>,
@@ -5098,7 +5187,8 @@ fn flatten_parents_with_threads(
     for parent in parents {
         let threads = thread_groups.remove(&parent.id);
         ordered.push(parent);
-        if let Some(ts) = threads {
+        if let Some(mut ts) = threads {
+            ts.sort_by_cached_key(thread_sort_key);
             ordered.extend(ts);
         }
     }
@@ -5219,17 +5309,13 @@ fn insert_channel(categories: &mut Vec<Category>, mut channel: Channel) -> bool 
             .iter_mut()
             .find(|c| c.id != FAVOR_CATE_ID && c.id == target_cat_id)
         {
-            let insert_pos = cat
-                .channels
-                .iter()
-                .position(|ch| ch.parent_id == Some(parent_id))
-                .map(|first_thread_pos| {
-                    let mut end = first_thread_pos;
-                    while end < cat.channels.len() && cat.channels[end].parent_id == Some(parent_id)
-                    {
-                        end += 1;
-                    }
-                    end
+            let key = thread_sort_key(&channel);
+            let insert_pos = thread_block_bounds(&cat.channels, parent_id)
+                .map(|(start, end)| {
+                    // The block is kept sorted, so binary-search the slot instead of
+                    // folding every label on the way past.
+                    start
+                        + cat.channels[start..end].partition_point(|ch| thread_sort_key(ch) <= key)
                 })
                 .or_else(|| {
                     cat.channels
@@ -5697,6 +5783,9 @@ fn update_channel(
                 found = true;
             }
         }
+    }
+    if found && label.is_some() {
+        resort_thread_block(categories, channel_id);
     }
     found
 }
@@ -6690,6 +6779,73 @@ mod tests {
     }
 
     #[test]
+    fn update_channel_resorts_the_thread_block_after_a_rename() {
+        let mut alpha = make_thread(15, 10, "cat1");
+        alpha.name = "alpha".into();
+        let mut mike = make_thread(16, 10, "cat1");
+        mike.name = "mike".into();
+        let mut zulu = make_thread(17, 10, "cat1");
+        zulu.name = "zulu".into();
+        let mut cats = vec![Category {
+            id: "cat1".into(),
+            clan_id: ClanId(1),
+            name: "General".into(),
+            order: 0,
+            channels: vec![
+                make_channel(10, "parent", "cat1"),
+                alpha,
+                mike,
+                zulu,
+                make_channel(50, "later", "cat1"),
+            ],
+        }];
+
+        assert!(update_channel(
+            &mut cats,
+            ChannelId(15),
+            Some("zzz".into()),
+            None,
+            None,
+            false,
+        ));
+
+        let names: Vec<&str> = cats[0].channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["parent", "mike", "zulu", "zzz", "later"]);
+    }
+
+    #[test]
+    fn insert_channel_still_lands_correctly_after_a_rename() {
+        let mut alpha = make_thread(15, 10, "cat1");
+        alpha.name = "alpha".into();
+        let mut zulu = make_thread(17, 10, "cat1");
+        zulu.name = "zulu".into();
+        let mut cats = vec![Category {
+            id: "cat1".into(),
+            clan_id: ClanId(1),
+            name: "General".into(),
+            order: 0,
+            channels: vec![make_channel(10, "parent", "cat1"), alpha, zulu],
+        }];
+
+        // "alpha" -> "yankee" moves it behind nothing yet, but the block must stay sorted
+        assert!(update_channel(
+            &mut cats,
+            ChannelId(15),
+            Some("yankee".into()),
+            None,
+            None,
+            false,
+        ));
+
+        let mut mike = make_thread(99, 10, "cat1");
+        mike.name = "mike".into();
+        assert!(insert_channel(&mut cats, mike));
+
+        let names: Vec<&str> = cats[0].channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["parent", "mike", "yankee", "zulu"]);
+    }
+
+    #[test]
     fn update_channel_patches_topic_and_age_restricted() {
         let mut c = categories();
         assert!(update_channel(
@@ -6728,6 +6884,112 @@ mod tests {
             c[0].channels[0].age_restricted, 1,
             "an update that says nothing about the age gate must not clear it"
         );
+    }
+
+    fn channel_updated_event(channel_id: i64, age_restricted: i32) -> RealtimeEvent {
+        RealtimeEvent::ChannelUpdated(mezon_proto::realtime::ChannelUpdatedEvent {
+            clan_id: 1,
+            channel_id,
+            channel_label: "normal".into(),
+            channel_type: 1,
+            age_restricted,
+            status: 1,
+            ..Default::default()
+        })
+    }
+
+    fn voice_creation_channel_updated_event(channel_id: i64) -> RealtimeEvent {
+        RealtimeEvent::ChannelUpdated(mezon_proto::realtime::ChannelUpdatedEvent {
+            clan_id: 1,
+            channel_id,
+            channel_label: "normal".into(),
+            status: 1,
+            ..Default::default()
+        })
+    }
+
+    fn age_restricted_of(channels: &ChannelList, channel_id: i64) -> i32 {
+        channels
+            .channel(ClanId(1), ChannelId(channel_id))
+            .expect("channel in clan")
+            .age_restricted
+    }
+
+    #[gpui::test]
+    fn a_remote_age_restricted_change_reaches_the_channel(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                assert_eq!(age_restricted_of(channels, 1), 0);
+
+                channels.handle_event(&channel_updated_event(1, 1), cx);
+                assert_eq!(
+                    age_restricted_of(channels, 1),
+                    1,
+                    "an admin turning the flag on elsewhere must reach the age gate now, \
+                     not only after the next full fetch"
+                );
+
+                channels.handle_event(&channel_updated_event(1, 0), cx);
+                assert_eq!(age_restricted_of(channels, 1), 0, "and turning it back off");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_partial_channel_update_leaves_the_age_restricted_flag_alone(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.handle_event(&channel_updated_event(1, 1), cx);
+
+                channels.handle_event(&voice_creation_channel_updated_event(1), cx);
+                assert_eq!(
+                    age_restricted_of(channels, 1),
+                    1,
+                    "an event with no channel type carries no flag, so its zero means \
+                     absent, not off"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_remote_rename_still_carries_topic_privacy_and_the_age_gate(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.handle_event(&channel_updated_event(1, 1), cx);
+
+                channels.handle_event(
+                    &RealtimeEvent::ChannelUpdated(mezon_proto::realtime::ChannelUpdatedEvent {
+                        clan_id: 1,
+                        channel_id: 1,
+                        channel_label: "renamed".into(),
+                        channel_type: 1,
+                        topic: "new topic".into(),
+                        channel_private: true,
+                        age_restricted: 1,
+                        status: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+
+                let channel = channels
+                    .channel(ClanId(1), ChannelId(1))
+                    .expect("channel in clan");
+                assert_eq!(channel.name, "renamed");
+                assert_eq!(channel.topic, "new topic");
+                assert!(channel.private);
+                assert_eq!(channel.age_restricted, 1);
+            });
+        });
     }
 
     #[test]
@@ -6940,11 +7202,11 @@ mod tests {
         let cats = build_categories(api_cats, &mut channels);
         assert_eq!(cats.len(), 1);
         let ids: Vec<i64> = cats[0].channels.iter().map(|c| c.id.get()).collect();
-        assert_eq!(ids, vec![10, 15, 12, 20, 25]);
+        assert_eq!(ids, vec![10, 12, 15, 20, 25]);
     }
 
     #[test]
-    fn build_categories_keeps_server_order_within_a_thread_group() {
+    fn build_categories_sorts_threads_alphabetically_within_a_group() {
         let api_cats = vec![ApiCategoryDesc {
             category_id: 1,
             category_name: "General".into(),
@@ -6960,7 +7222,54 @@ mod tests {
         let mut channels = vec![make_channel(10, "parent", "1"), zulu, alpha, mike];
         let cats = build_categories(api_cats, &mut channels);
         let names: Vec<&str> = cats[0].channels.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["parent", "zulu", "alpha", "mike"]);
+        assert_eq!(names, vec!["parent", "alpha", "mike", "zulu"]);
+    }
+
+    #[test]
+    fn build_categories_thread_sort_is_case_and_accent_insensitive() {
+        let api_cats = vec![ApiCategoryDesc {
+            category_id: 1,
+            category_name: "General".into(),
+            clan_id: 1,
+            category_order: 0,
+        }];
+        let mut da_nang = make_thread(11, 10, "1");
+        da_nang.name = "Đà Nẵng".into();
+        let mut zebra = make_thread(12, 10, "1");
+        zebra.name = "zebra".into();
+        let mut echo = make_thread(13, 10, "1");
+        echo.name = "Echo".into();
+        let mut channels = vec![make_channel(10, "parent", "1"), zebra, echo, da_nang];
+        let cats = build_categories(api_cats, &mut channels);
+        let names: Vec<&str> = cats[0].channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["parent", "Đà Nẵng", "Echo", "zebra"]);
+    }
+
+    #[test]
+    fn insert_channel_places_thread_at_alphabetical_position() {
+        let mut alpha = make_thread(15, 10, "cat1");
+        alpha.name = "alpha".into();
+        let mut zulu = make_thread(40, 10, "cat1");
+        zulu.name = "zulu".into();
+        let mut cats = vec![Category {
+            id: "cat1".into(),
+            clan_id: ClanId(1),
+            name: "General".into(),
+            order: 0,
+            channels: vec![
+                make_channel(10, "parent", "cat1"),
+                alpha,
+                zulu,
+                make_channel(50, "later", "cat1"),
+            ],
+        }];
+
+        let mut mike = make_thread(99, 10, "cat1");
+        mike.name = "mike".into();
+        assert!(insert_channel(&mut cats, mike));
+
+        let names: Vec<&str> = cats[0].channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["parent", "alpha", "mike", "zulu", "later"]);
     }
 
     #[test]
@@ -10960,6 +11269,97 @@ mod tests {
                 channels.user_channels.insert(ChannelId(42), dm);
                 channels.user_channels_order.push(ChannelId(42));
                 assert!(channels.should_persist_compose_draft(ChannelId(42)));
+            });
+        });
+    }
+
+    fn structure_with_three_named_threads() -> Vec<Category> {
+        let api_cats = vec![ApiCategoryDesc {
+            category_id: 1,
+            category_name: "General".into(),
+            clan_id: 1,
+            category_order: 0,
+        }];
+        let mut channels = vec![{
+            let mut ch = make_channel(1, "parent", "1");
+            ch.clan_id = ClanId(1);
+            ch
+        }];
+        for (id, name) in [(7, "alpha"), (8, "mike"), (9, "zulu")] {
+            let mut ch = make_channel(id, name, "1");
+            ch.clan_id = ClanId(1);
+            ch.parent_id = Some(ChannelId(1));
+            ch.channel_type = ChannelType::Thread;
+            channels.push(ch);
+        }
+        build_categories(api_cats, &mut channels)
+    }
+
+    fn thread_names_in_clan(channels: &ChannelList, clan_id: ClanId) -> Vec<String> {
+        channels
+            .categories_for_clan(clan_id)
+            .iter()
+            .filter(|c| c.id != FAVOR_CATE_ID)
+            .flat_map(|c| c.channels.iter())
+            .map(|ch| ch.name.clone())
+            .collect()
+    }
+
+    #[gpui::test]
+    fn ensure_thread_with_parent_active_resorts_after_a_rename(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_three_named_threads(),
+                    None,
+                    cx,
+                );
+                assert_eq!(
+                    thread_names_in_clan(channels, ClanId(1)),
+                    vec!["parent", "alpha", "mike", "zulu"]
+                );
+
+                // "alpha" (id 7) is renamed to a label that belongs at the end
+                channels.ensure_thread_with_parent_active(
+                    ChannelId(7),
+                    ChannelId(1),
+                    ClanId(1),
+                    "zzz".into(),
+                    CHANNEL_ACTIVE_JOINED,
+                    true,
+                    None,
+                    cx,
+                );
+
+                assert_eq!(
+                    thread_names_in_clan(channels, ClanId(1)),
+                    vec!["parent", "mike", "zulu", "zzz"]
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn apply_thread_reactivated_resorts_after_a_rename(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_three_named_threads(),
+                    None,
+                    cx,
+                );
+
+                // "zulu" (id 9) comes back with a label that belongs first
+                channels.apply_thread_reactivated(ClanId(1), ChannelId(9), Some("aaa".into()), cx);
+
+                assert_eq!(
+                    thread_names_in_clan(channels, ClanId(1)),
+                    vec!["parent", "aaa", "alpha", "mike"]
+                );
             });
         });
     }

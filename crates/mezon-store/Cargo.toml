@@ -35,6 +35,7 @@ url.workspace = true
 tokio.workspace = true
 prost.workspace = true
 regex.workspace = true
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

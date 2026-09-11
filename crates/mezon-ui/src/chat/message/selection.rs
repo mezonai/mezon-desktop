@@ -561,6 +561,22 @@ mod tests {
         assert_eq!(out[2].1.color, color(0.1).color);
     }
 
+    /// The character reserving space for an inline channel icon is hidden with `fade_out`,
+    /// and selecting a chip must not bring it back.
+    #[test]
+    fn merge_keeps_a_faded_out_run_invisible() {
+        let hidden = HighlightStyle {
+            fade_out: Some(1.),
+            ..color(0.1)
+        };
+        let base = vec![(0..3, hidden), (3..10, color(0.1))];
+        let out = merge_selection_background(&base, 0..10, bg());
+        assert_eq!(out[0].0, 0..3);
+        assert_eq!(out[0].1.fade_out, Some(1.));
+        assert_eq!(out[0].1.background_color, Some(bg()));
+        assert_eq!(out[1].1.fade_out, None);
+    }
+
     #[test]
     fn merge_covers_selection_past_last_highlight() {
         let base = vec![(0..2, color(0.1))];

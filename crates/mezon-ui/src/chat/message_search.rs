@@ -36,7 +36,12 @@ use crate::router::{Route, Router, navigate};
 use crate::theme::{ActiveTheme, Theme};
 
 pub const MESSAGE_SEARCH_PANEL_WIDTH: f32 = 420.;
-pub const SEARCH_BAR_WIDTH_COLLAPSED: f32 = 160.;
+// Derived, not chosen: the channel header packs `| inbox search` flush to the right edge,
+// so this width is what lands the divider exactly on the member list's left border —
+// MEMBER_LIST_WIDTH (245) less the header's 16px right padding, the 4px gap before the
+// search bar, the 32px inbox button, and the divider's own 8px gap and 1px rule.
+pub const SEARCH_BAR_WIDTH_COLLAPSED: f32 =
+    crate::chat::member_list::MEMBER_LIST_WIDTH - 16. - 4. - 32. - 8. - 1.;
 pub const SEARCH_BAR_WIDTH_EXPANDED: f32 = 320.;
 pub const SEARCH_OPTIONS_WIDTH: f32 = 400.;
 

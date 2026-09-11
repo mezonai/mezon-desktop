@@ -6052,6 +6052,7 @@ dependencies = [
  "smallvec",
  "tokio",
  "tracing",
+ "unicode-normalization",
  "url",
 ]
 
