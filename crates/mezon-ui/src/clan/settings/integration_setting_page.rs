@@ -17,9 +17,9 @@ use crate::theme::{ActiveTheme, Theme};
 
 const WEBHOOK_NAMES: [&str; 3] = ["Captain hook", "Spidey bot", "Komu Knight"];
 const WEBHOOK_AVATAR_PATHS: [&str; 3] = [
-    "/1787707828677382144/1791037204600983552/1787691797724532700/211_0mezon_logo_white.png",
-    "/1787707828677382144/1791037204600983552/1787691797724532700/211_1mezon_logo_black.png",
-    "/0/1833395573034586112/1787375123666309000/955_0mezon_logo.png",
+    "/images/webhook-avatar-1.png",
+    "/images/webhook-avatar-2.png",
+    "/images/webhook-avatar-3.png",
 ];
 
 const CLAN_SETTINGS_TITLE_AREA_PX: f32 = 112.0;

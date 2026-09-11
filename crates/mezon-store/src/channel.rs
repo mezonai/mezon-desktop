@@ -30,6 +30,7 @@ use crate::permissions::{
     PERMISSION_MANAGE_CLAN, PermissionStore,
 };
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+use crate::text_utils::normalize_diacritics;
 use crate::threads::CHANNEL_TYPE_THREAD;
 
 pub const FAVOR_CATE_ID: &str = "favorCate";
@@ -575,6 +576,11 @@ pub struct ChannelList {
     badge_seeded: HashSet<ClanId>,
     joined_clans: HashSet<ClanId>,
     joining_clans: HashMap<ClanId, Shared<Task<()>>>,
+    /// Set the moment the socket drops, cleared by the `resync` that follows.
+    /// It records that the joins above already belong to the new session, so the
+    /// reconnect does not bump the generation a second time and cancel the join
+    /// another store started in the meantime.
+    forgot_socket_session: bool,
     /// Bumped by `resync` only. Every fetch that owns an in-flight guard captures
     /// it and abandons its bookkeeping when it no longer matches, so a reconnect
     /// can drop those guards and re-issue without a task from the dead socket
@@ -859,6 +865,7 @@ impl ChannelList {
             badge_seeded: HashSet::new(),
             joined_clans: HashSet::new(),
             joining_clans: HashMap::new(),
+            forgot_socket_session: false,
             socket_generation: 0,
             forgotten_clans: HashSet::new(),
             user_channels: HashMap::new(),
@@ -1258,8 +1265,17 @@ impl ChannelList {
                     if this.update(cx, |this, cx| this.resync(cx)).is_err() {
                         break;
                     }
-                } else if !connected {
+                } else if !connected && was_connected {
+                    // Only the falling edge. The status flaps once per failed
+                    // reconnect attempt — measured 4 to 12 times in a single
+                    // outage — and the session is lost once, not once per try.
                     was_connected = false;
+                    if this
+                        .update(cx, |this, _| this.forget_socket_session())
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
             }
         })
@@ -2860,6 +2876,34 @@ impl ChannelList {
         })
     }
 
+    /// Move one category to another slot and persist the whole order.
+    ///
+    /// Both positions index the clan's categories in the order they are stored, with
+    /// Favourites left out — it is pinned to the top and never moves. The order is sent for
+    /// every category, not just the moved one: the server stores a per-user order and reads
+    /// it back with `COALESCE(order_category, 0)`, so leaving a category unset would let it
+    /// tie with the others and land wherever the database felt like.
+    pub fn move_category(
+        &mut self,
+        clan_id: ClanId,
+        from: usize,
+        to: usize,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let mut ids: Vec<i64> = self
+            .categories_for_clan(clan_id)
+            .iter()
+            .filter(|category| category.id != FAVOR_CATE_ID)
+            .filter_map(|category| category.id.parse::<i64>().ok())
+            .collect();
+        if from == to || from >= ids.len() || to >= ids.len() {
+            return Task::ready(Ok(()));
+        }
+        let moved = ids.remove(from);
+        ids.insert(to, moved);
+        self.update_categories_order(clan_id, &ids, cx)
+    }
+
     pub fn create_category(
         &mut self,
         clan_id: ClanId,
@@ -3419,6 +3463,8 @@ impl ChannelList {
                 let id = ChannelId(e.channel_id);
                 let label = (!e.channel_label.is_empty()).then_some(e.channel_label.clone());
                 let topic = (!e.topic.is_empty()).then_some(e.topic.clone());
+                let carries_full_channel_state = e.channel_type != 0;
+                let age_restricted = carries_full_channel_state.then_some(e.age_restricted);
                 let mut changed = false;
                 for cats in self.cache.values_mut() {
                     if update_channel(
@@ -3426,7 +3472,7 @@ impl ChannelList {
                         id,
                         label.clone(),
                         topic.clone(),
-                        None,
+                        age_restricted,
                         e.channel_private,
                     ) {
                         changed = true;
@@ -3661,14 +3707,46 @@ impl ChannelList {
         }
     }
 
-    fn resync(&mut self, cx: &mut Context<Self>) {
-        tracing::info!("ChannelList resync — invalidating channel cache");
+    /// Forget the joins that died with the socket, the moment it goes down.
+    ///
+    /// This is what keeps `clan_join` ahead of `channel_join`. This store and
+    /// `MessagesStore` resync off the same status watch in an order nobody
+    /// controls, and when `MessagesStore` won that race it asked
+    /// `ensure_clan_joined` a question answered by the *previous* session's
+    /// `joined_clans` — "already joined" — and sent `channel_join` straight
+    /// away. On a public channel the server folds that join into the clan
+    /// stream, so the `clan_join` arriving behind it is a no-op and every
+    /// private channel and thread goes without push for the rest of the
+    /// session. Measured 08/09/2026 on three reconnects out of four before
+    /// this ran at the drop.
+    ///
+    /// Only the joins and the generation move this early. The cache and the
+    /// fetch guards stay behind in `resync`: marking them stale here would have
+    /// `load_for_clan` firing requests into an outage that cannot answer them.
+    fn forget_socket_session(&mut self) {
         // Everything issued on the socket that just died is abandoned: the
         // adapter drops its pending waiters, so those tasks resolve as failures
         // whose only remaining effect would be to clear the guard belonging to
         // their replacement. Bumping the generation makes them no-ops, which is
-        // what lets the guards below be cleared safely.
+        // what lets `resync` clear those guards safely.
         self.socket_generation = self.socket_generation.wrapping_add(1);
+        // A reconnect is a new gateway session: every `clan_join` we sent is gone
+        // with the old one, so the clans have to be re-subscribed from scratch.
+        self.joined_clans.clear();
+        self.joining_clans.clear();
+        self.forgot_socket_session = true;
+    }
+
+    fn resync(&mut self, cx: &mut Context<Self>) {
+        tracing::info!("ChannelList resync — invalidating channel cache");
+        // Normally the drop already did this. A `lagged` resync arrives on a live
+        // socket and has no drop behind it, and an outage short enough that the
+        // status watch only ever reports the reconnect leaves nothing behind
+        // either; both still need the old session's joins gone.
+        if !self.forgot_socket_session {
+            self.forget_socket_session();
+        }
+        self.forgot_socket_session = false;
         self.cache.mark_all_stale();
         self.invalidate_channel_index_all();
         self.badge_seeded.clear();
@@ -3676,10 +3754,6 @@ impl ChannelList {
         self.extras_loaded.clear();
         self.extras_loading.clear();
         self.loading.clear();
-        // A reconnect is a new gateway session: every `clan_join` we sent is gone
-        // with the old one, so the clans have to be re-subscribed from scratch.
-        self.joined_clans.clear();
-        self.joining_clans.clear();
         self.user_channels_generation = self.user_channels_generation.wrapping_add(1);
         self.user_channels_loading = false;
         self.fetch_user_channels(cx);
@@ -3920,7 +3994,14 @@ impl ChannelList {
         label: String,
         cx: &mut Context<Self>,
     ) -> Option<ClanId> {
-        self.ensure_thread_channel_with_active(thread_id, label, CHANNEL_ACTIVE_JOINED, false, cx)
+        self.ensure_thread_channel_with_active(
+            thread_id,
+            label,
+            CHANNEL_ACTIVE_JOINED,
+            false,
+            None,
+            cx,
+        )
     }
 
     pub fn ensure_thread_channel_with_active(
@@ -3929,19 +4010,34 @@ impl ChannelList {
         label: String,
         active: i32,
         active_confirmed: bool,
+        private: Option<bool>,
         cx: &mut Context<Self>,
     ) -> Option<ClanId> {
         if let Some(clan_id) = self.active_clan_id
             && let Some(existing) = self.channel_mut(clan_id, thread_id)
         {
-            if sync_thread_active_status(existing, active, active_confirmed) {
+            let mut changed = sync_thread_active_status(existing, active, active_confirmed);
+            if let Some(private) = private
+                && existing.private != private
+            {
+                existing.private = private;
+                changed = true;
+            }
+            if changed {
                 cx.notify();
             }
             return Some(clan_id);
         }
         let clan_id = self.active_clan_id?;
         let parent_id = self.active_channel_id?;
-        let channel = thread_channel_from_context(thread_id, label, clan_id, parent_id, active);
+        let channel = thread_channel_from_context(
+            thread_id,
+            label,
+            clan_id,
+            parent_id,
+            active,
+            private.unwrap_or(false),
+        );
         let inserted = if let Some(categories) = self.cache.get_mut(&clan_id) {
             insert_channel(categories, channel)
         } else {
@@ -3969,8 +4065,15 @@ impl ChannelList {
             label,
             CHANNEL_ACTIVE_JOINED,
             false,
+            None,
             cx,
         );
+    }
+
+    fn resort_thread_block_for(&mut self, clan_id: ClanId, channel_id: ChannelId) {
+        if let Some(categories) = self.cache.get_mut(&clan_id) {
+            resort_thread_block(categories, channel_id);
+        }
     }
 
     pub fn ensure_thread_with_parent_active(
@@ -3981,21 +4084,43 @@ impl ChannelList {
         label: String,
         active: i32,
         active_confirmed: bool,
+        private: Option<bool>,
         cx: &mut Context<Self>,
     ) {
+        let mut already_present = false;
+        let mut renamed = false;
         if let Some(existing) = self.channel_mut(clan_id, thread_id) {
-            if sync_thread_active_status(existing, active, active_confirmed) {
-                if !label.is_empty() {
-                    existing.name = label;
-                }
+            already_present = true;
+            let mut changed = sync_thread_active_status(existing, active, active_confirmed);
+            if let Some(private) = private
+                && existing.private != private
+            {
+                existing.private = private;
+                changed = true;
+            }
+            if !label.is_empty() && existing.name != label {
+                existing.name = label.clone();
+                renamed = true;
+                changed = true;
+            }
+            if changed {
                 cx.notify();
-            } else if !label.is_empty() && existing.name != label {
-                existing.name = label;
-                cx.notify();
+            }
+        }
+        if already_present {
+            if renamed {
+                self.resort_thread_block_for(clan_id, thread_id);
             }
             return;
         }
-        let channel = thread_channel_from_context(thread_id, label, clan_id, parent_id, active);
+        let channel = thread_channel_from_context(
+            thread_id,
+            label,
+            clan_id,
+            parent_id,
+            active,
+            private.unwrap_or(false),
+        );
         let inserted = if let Some(categories) = self.cache.get_mut(&clan_id) {
             insert_channel(categories, channel)
         } else {
@@ -4014,9 +4139,31 @@ impl ChannelList {
         mode: i32,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(state) = self.reactivate_state_for_send(channel_id, clan_id, mode, cx) else {
+        let state = self.reactivate_state_for_send(channel_id, clan_id, mode, cx);
+        self.begin_reactivate_with_state(channel_id, clan_id, state, cx)
+    }
+
+    pub fn begin_public_pre_send_reactivate(
+        &mut self,
+        channel_id: ChannelId,
+        clan_id: ClanId,
+        mode: i32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let state = self.reactivate_state_for_send(channel_id, clan_id, mode, cx);
+        if !(state.should_reactivate && state.is_public) {
             return false;
-        };
+        }
+        self.begin_reactivate_with_state(channel_id, clan_id, state, cx)
+    }
+
+    fn begin_reactivate_with_state(
+        &mut self,
+        channel_id: ChannelId,
+        clan_id: ClanId,
+        state: ThreadReactivateState,
+        _cx: &mut Context<Self>,
+    ) -> bool {
         if !state.should_reactivate {
             return false;
         }
@@ -4026,6 +4173,58 @@ impl ChannelList {
             let _ = sync_thread_active_status(existing, CHANNEL_ACTIVE_ARCHIVED, true);
         }
         self.reactivating.insert(channel_id)
+    }
+
+    pub fn complete_reactivate(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        result: Result<(), anyhow::Error>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(()) => self.apply_thread_reactivated(clan_id, channel_id, None, cx),
+            Err(e) => {
+                self.finish_reactivating(channel_id);
+                tracing::error!("active_archived_thread failed: {e}");
+            }
+        }
+    }
+
+    pub fn note_own_send_confirmed(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        ts: i64,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ch) = self.channel_mut(clan_id, channel_id) else {
+            return;
+        };
+        let mut changed = false;
+        if ts > ch.last_sent_timestamp {
+            ch.last_sent_timestamp = ts;
+            if !message_id.is_zero() {
+                ch.last_sent_message_id = message_id;
+            }
+            changed = true;
+        }
+        if ts > ch.last_seen_timestamp {
+            ch.last_seen_timestamp = ts;
+            if !message_id.is_zero() {
+                ch.last_seen_message_id = message_id;
+            }
+            changed = true;
+        }
+        if ch.last_seen_timestamp < ch.last_sent_timestamp {
+            ch.last_seen_timestamp = ch.last_sent_timestamp;
+            ch.last_seen_message_id = ch.last_sent_message_id;
+            changed = true;
+        }
+        if changed {
+            cx.notify();
+        }
     }
 
     pub fn apply_thread_reactivated(
@@ -4044,20 +4243,39 @@ impl ChannelList {
             .map(|ch| ch.name.clone())
             .unwrap_or_default();
         let name = label.filter(|s| !s.is_empty()).unwrap_or(existing_label);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or_default();
 
         if let Some(ch) = self.channel_mut(clan_id, channel_id) {
             ch.active = CHANNEL_ACTIVE_JOINED;
+            if now > ch.last_sent_timestamp {
+                ch.last_sent_timestamp = now;
+            }
+            if ch.last_seen_timestamp < ch.last_sent_timestamp {
+                ch.last_seen_timestamp = ch.last_sent_timestamp;
+                ch.last_seen_message_id = ch.last_sent_message_id;
+            }
             if !name.is_empty() {
                 ch.name = name;
             }
         } else if let Some(parent_id) = parent_id {
-            let channel = thread_channel_from_context(
+            let private = crate::threads::ThreadsStore::global(cx)
+                .read(cx)
+                .thread_channel_private(&channel_id.to_string())
+                .map(|p| p != 0)
+                .unwrap_or(false);
+            let mut channel = thread_channel_from_context(
                 channel_id,
                 name,
                 clan_id,
                 parent_id,
                 CHANNEL_ACTIVE_JOINED,
+                private,
             );
+            channel.last_sent_timestamp = now;
+            channel.last_seen_timestamp = now;
             if let Some(cats) = self.cache.get_mut(&clan_id)
                 && insert_channel(cats, channel)
             {
@@ -4065,6 +4283,7 @@ impl ChannelList {
             }
         }
 
+        self.resort_thread_block_for(clan_id, channel_id);
         self.reactivating.remove(&channel_id);
         self.archived_channel_ids.remove(&channel_id);
         self.archived_channel_parents.remove(&channel_id);
@@ -4465,6 +4684,7 @@ impl ChannelList {
                 label.clone(),
                 CHANNEL_ACTIVE_JOINED,
                 true,
+                Some(e.channel_private),
                 cx,
             );
             if let Some(ch) = self.channel_mut(clan_id, channel_id) {
@@ -4476,6 +4696,7 @@ impl ChannelList {
                     ch.category_id = Some(e.category_id.to_string());
                 }
             }
+            self.resort_thread_block_for(clan_id, channel_id);
         } else if let Some(ch) = self.channel_mut(clan_id, channel_id) {
             ch.active = CHANNEL_ACTIVE_JOINED;
             if !label.is_empty() {
@@ -4714,8 +4935,8 @@ impl ChannelList {
     }
 }
 
-fn should_reactivate_thread_after_send(mode: i32, channel: &Channel, archived: bool) -> bool {
-    mode == STREAM_MODE_THREAD && channel.is_thread() && archived
+fn should_reactivate_thread_after_send(mode: i32, is_thread: bool, archived: bool) -> bool {
+    mode == STREAM_MODE_THREAD && is_thread && archived
 }
 
 fn thread_needs_reactivate(channel: &Channel) -> bool {
@@ -4763,6 +4984,7 @@ fn sync_thread_active_status(existing: &mut Channel, active: i32, confirmed: boo
 struct ThreadReactivateState {
     should_reactivate: bool,
     sync_cached_archived: bool,
+    is_public: bool,
 }
 
 impl ChannelList {
@@ -4772,17 +4994,41 @@ impl ChannelList {
         clan_id: ClanId,
         mode: i32,
         cx: &App,
-    ) -> Option<ThreadReactivateState> {
-        let channel = self.channel(clan_id, channel_id)?.clone();
-        let threads_archived = crate::threads::ThreadsStore::global(cx)
-            .read(cx)
-            .thread_active(&channel_id.to_string())
-            == Some(CHANNEL_ACTIVE_ARCHIVED);
-        let archived = threads_archived || thread_needs_reactivate(&channel);
-        Some(ThreadReactivateState {
-            should_reactivate: should_reactivate_thread_after_send(mode, &channel, archived),
-            sync_cached_archived: threads_archived && !channel.is_archived(),
-        })
+    ) -> ThreadReactivateState {
+        if mode != STREAM_MODE_THREAD {
+            return ThreadReactivateState {
+                should_reactivate: false,
+                sync_cached_archived: false,
+                is_public: false,
+            };
+        }
+
+        let channel_key = channel_id.to_string();
+        let threads = crate::threads::ThreadsStore::global(cx).read(cx);
+        let threads_archived = threads.thread_active(&channel_key) == Some(CHANNEL_ACTIVE_ARCHIVED);
+        let locally_archived = self.is_locally_archived(channel_id);
+        let channel = self.channel(clan_id, channel_id);
+        let is_public = threads
+            .thread_channel_private(&channel_key)
+            .map(|private| private == 0)
+            .or_else(|| channel.map(|ch| !ch.private))
+            .unwrap_or(false);
+
+        let (is_thread, channel_archived, sync_cached_archived) = match channel {
+            Some(ch) => (
+                ch.is_thread(),
+                thread_needs_reactivate(ch),
+                threads_archived && !ch.is_archived(),
+            ),
+            None => (true, false, false),
+        };
+
+        let archived = threads_archived || locally_archived || channel_archived;
+        ThreadReactivateState {
+            should_reactivate: should_reactivate_thread_after_send(mode, is_thread, archived),
+            sync_cached_archived,
+            is_public,
+        }
     }
 }
 
@@ -4792,12 +5038,13 @@ fn thread_channel_from_context(
     clan_id: ClanId,
     parent_id: ChannelId,
     active: i32,
+    private: bool,
 ) -> Channel {
     Channel {
         id: thread_id,
         name: label,
         channel_type: ChannelType::Thread,
-        private: false,
+        private,
         clan_id,
         clan_name: String::new(),
         category_name: String::new(),
@@ -4890,6 +5137,47 @@ fn assemble_with_favorites(mut categories: Vec<Category>, clan_id: ClanId) -> Ve
     categories
 }
 
+/// Sort key for a thread row in the sidebar: accent-folded, lower-cased label,
+/// tie-broken by id so equal labels keep a stable order.
+fn thread_sort_key(ch: &Channel) -> (String, ChannelId) {
+    (normalize_diacritics(&ch.name), ch.id)
+}
+
+/// Half-open range of the contiguous rows belonging to `parent_id`'s thread block.
+fn thread_block_bounds(channels: &[Channel], parent_id: ChannelId) -> Option<(usize, usize)> {
+    let start = channels
+        .iter()
+        .position(|ch| ch.parent_id == Some(parent_id))?;
+    let mut end = start;
+    while end < channels.len() && channels[end].parent_id == Some(parent_id) {
+        end += 1;
+    }
+    Some((start, end))
+}
+
+/// Re-sorts the thread block `channel_id` belongs to. Labels are mutated in place
+/// on rename, which would otherwise leave the block unsorted until the next clan
+/// refetch and mislead the binary search in `insert_channel`.
+fn resort_thread_block(categories: &mut [Category], channel_id: ChannelId) {
+    let Some(parent_id) = categories
+        .iter()
+        .filter(|c| c.id != FAVOR_CATE_ID)
+        .flat_map(|c| c.channels.iter())
+        .find(|ch| ch.id == channel_id)
+        .and_then(|ch| ch.parent_id)
+    else {
+        return;
+    };
+    for cat in categories.iter_mut() {
+        if cat.id == FAVOR_CATE_ID {
+            continue;
+        }
+        if let Some((start, end)) = thread_block_bounds(&cat.channels, parent_id) {
+            cat.channels[start..end].sort_by_cached_key(thread_sort_key);
+        }
+    }
+}
+
 fn flatten_parents_with_threads(
     mut parents: Vec<Channel>,
     thread_groups: &mut HashMap<ChannelId, Vec<Channel>>,
@@ -4899,7 +5187,8 @@ fn flatten_parents_with_threads(
     for parent in parents {
         let threads = thread_groups.remove(&parent.id);
         ordered.push(parent);
-        if let Some(ts) = threads {
+        if let Some(mut ts) = threads {
+            ts.sort_by_cached_key(thread_sort_key);
             ordered.extend(ts);
         }
     }
@@ -5020,17 +5309,13 @@ fn insert_channel(categories: &mut Vec<Category>, mut channel: Channel) -> bool 
             .iter_mut()
             .find(|c| c.id != FAVOR_CATE_ID && c.id == target_cat_id)
         {
-            let insert_pos = cat
-                .channels
-                .iter()
-                .position(|ch| ch.parent_id == Some(parent_id))
-                .map(|first_thread_pos| {
-                    let mut end = first_thread_pos;
-                    while end < cat.channels.len() && cat.channels[end].parent_id == Some(parent_id)
-                    {
-                        end += 1;
-                    }
-                    end
+            let key = thread_sort_key(&channel);
+            let insert_pos = thread_block_bounds(&cat.channels, parent_id)
+                .map(|(start, end)| {
+                    // The block is kept sorted, so binary-search the slot instead of
+                    // folding every label on the way past.
+                    start
+                        + cat.channels[start..end].partition_point(|ch| thread_sort_key(ch) <= key)
                 })
                 .or_else(|| {
                     cat.channels
@@ -5498,6 +5783,9 @@ fn update_channel(
                 found = true;
             }
         }
+    }
+    if found && label.is_some() {
+        resort_thread_block(categories, channel_id);
     }
     found
 }
@@ -6326,6 +6614,7 @@ mod tests {
             ClanId(1),
             ChannelId(10),
             CHANNEL_ACTIVE_JOINED,
+            false,
         );
         assert_eq!(thread.id, ChannelId(500));
         assert_eq!(thread.channel_type, ChannelType::Thread);
@@ -6344,6 +6633,7 @@ mod tests {
             ClanId(1),
             ChannelId(10),
             CHANNEL_ACTIVE_JOINED,
+            false,
         );
         assert!(insert_channel(&mut cats, thread));
         let ids: Vec<ChannelId> = cats[0].channels.iter().map(|c| c.id).collect();
@@ -6489,6 +6779,73 @@ mod tests {
     }
 
     #[test]
+    fn update_channel_resorts_the_thread_block_after_a_rename() {
+        let mut alpha = make_thread(15, 10, "cat1");
+        alpha.name = "alpha".into();
+        let mut mike = make_thread(16, 10, "cat1");
+        mike.name = "mike".into();
+        let mut zulu = make_thread(17, 10, "cat1");
+        zulu.name = "zulu".into();
+        let mut cats = vec![Category {
+            id: "cat1".into(),
+            clan_id: ClanId(1),
+            name: "General".into(),
+            order: 0,
+            channels: vec![
+                make_channel(10, "parent", "cat1"),
+                alpha,
+                mike,
+                zulu,
+                make_channel(50, "later", "cat1"),
+            ],
+        }];
+
+        assert!(update_channel(
+            &mut cats,
+            ChannelId(15),
+            Some("zzz".into()),
+            None,
+            None,
+            false,
+        ));
+
+        let names: Vec<&str> = cats[0].channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["parent", "mike", "zulu", "zzz", "later"]);
+    }
+
+    #[test]
+    fn insert_channel_still_lands_correctly_after_a_rename() {
+        let mut alpha = make_thread(15, 10, "cat1");
+        alpha.name = "alpha".into();
+        let mut zulu = make_thread(17, 10, "cat1");
+        zulu.name = "zulu".into();
+        let mut cats = vec![Category {
+            id: "cat1".into(),
+            clan_id: ClanId(1),
+            name: "General".into(),
+            order: 0,
+            channels: vec![make_channel(10, "parent", "cat1"), alpha, zulu],
+        }];
+
+        // "alpha" -> "yankee" moves it behind nothing yet, but the block must stay sorted
+        assert!(update_channel(
+            &mut cats,
+            ChannelId(15),
+            Some("yankee".into()),
+            None,
+            None,
+            false,
+        ));
+
+        let mut mike = make_thread(99, 10, "cat1");
+        mike.name = "mike".into();
+        assert!(insert_channel(&mut cats, mike));
+
+        let names: Vec<&str> = cats[0].channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["parent", "mike", "yankee", "zulu"]);
+    }
+
+    #[test]
     fn update_channel_patches_topic_and_age_restricted() {
         let mut c = categories();
         assert!(update_channel(
@@ -6527,6 +6884,112 @@ mod tests {
             c[0].channels[0].age_restricted, 1,
             "an update that says nothing about the age gate must not clear it"
         );
+    }
+
+    fn channel_updated_event(channel_id: i64, age_restricted: i32) -> RealtimeEvent {
+        RealtimeEvent::ChannelUpdated(mezon_proto::realtime::ChannelUpdatedEvent {
+            clan_id: 1,
+            channel_id,
+            channel_label: "normal".into(),
+            channel_type: 1,
+            age_restricted,
+            status: 1,
+            ..Default::default()
+        })
+    }
+
+    fn voice_creation_channel_updated_event(channel_id: i64) -> RealtimeEvent {
+        RealtimeEvent::ChannelUpdated(mezon_proto::realtime::ChannelUpdatedEvent {
+            clan_id: 1,
+            channel_id,
+            channel_label: "normal".into(),
+            status: 1,
+            ..Default::default()
+        })
+    }
+
+    fn age_restricted_of(channels: &ChannelList, channel_id: i64) -> i32 {
+        channels
+            .channel(ClanId(1), ChannelId(channel_id))
+            .expect("channel in clan")
+            .age_restricted
+    }
+
+    #[gpui::test]
+    fn a_remote_age_restricted_change_reaches_the_channel(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                assert_eq!(age_restricted_of(channels, 1), 0);
+
+                channels.handle_event(&channel_updated_event(1, 1), cx);
+                assert_eq!(
+                    age_restricted_of(channels, 1),
+                    1,
+                    "an admin turning the flag on elsewhere must reach the age gate now, \
+                     not only after the next full fetch"
+                );
+
+                channels.handle_event(&channel_updated_event(1, 0), cx);
+                assert_eq!(age_restricted_of(channels, 1), 0, "and turning it back off");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_partial_channel_update_leaves_the_age_restricted_flag_alone(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.handle_event(&channel_updated_event(1, 1), cx);
+
+                channels.handle_event(&voice_creation_channel_updated_event(1), cx);
+                assert_eq!(
+                    age_restricted_of(channels, 1),
+                    1,
+                    "an event with no channel type carries no flag, so its zero means \
+                     absent, not off"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_remote_rename_still_carries_topic_privacy_and_the_age_gate(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.handle_event(&channel_updated_event(1, 1), cx);
+
+                channels.handle_event(
+                    &RealtimeEvent::ChannelUpdated(mezon_proto::realtime::ChannelUpdatedEvent {
+                        clan_id: 1,
+                        channel_id: 1,
+                        channel_label: "renamed".into(),
+                        channel_type: 1,
+                        topic: "new topic".into(),
+                        channel_private: true,
+                        age_restricted: 1,
+                        status: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+
+                let channel = channels
+                    .channel(ClanId(1), ChannelId(1))
+                    .expect("channel in clan");
+                assert_eq!(channel.name, "renamed");
+                assert_eq!(channel.topic, "new topic");
+                assert!(channel.private);
+                assert_eq!(channel.age_restricted, 1);
+            });
+        });
     }
 
     #[test]
@@ -6739,11 +7202,11 @@ mod tests {
         let cats = build_categories(api_cats, &mut channels);
         assert_eq!(cats.len(), 1);
         let ids: Vec<i64> = cats[0].channels.iter().map(|c| c.id.get()).collect();
-        assert_eq!(ids, vec![10, 15, 12, 20, 25]);
+        assert_eq!(ids, vec![10, 12, 15, 20, 25]);
     }
 
     #[test]
-    fn build_categories_keeps_server_order_within_a_thread_group() {
+    fn build_categories_sorts_threads_alphabetically_within_a_group() {
         let api_cats = vec![ApiCategoryDesc {
             category_id: 1,
             category_name: "General".into(),
@@ -6759,7 +7222,54 @@ mod tests {
         let mut channels = vec![make_channel(10, "parent", "1"), zulu, alpha, mike];
         let cats = build_categories(api_cats, &mut channels);
         let names: Vec<&str> = cats[0].channels.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["parent", "zulu", "alpha", "mike"]);
+        assert_eq!(names, vec!["parent", "alpha", "mike", "zulu"]);
+    }
+
+    #[test]
+    fn build_categories_thread_sort_is_case_and_accent_insensitive() {
+        let api_cats = vec![ApiCategoryDesc {
+            category_id: 1,
+            category_name: "General".into(),
+            clan_id: 1,
+            category_order: 0,
+        }];
+        let mut da_nang = make_thread(11, 10, "1");
+        da_nang.name = "Đà Nẵng".into();
+        let mut zebra = make_thread(12, 10, "1");
+        zebra.name = "zebra".into();
+        let mut echo = make_thread(13, 10, "1");
+        echo.name = "Echo".into();
+        let mut channels = vec![make_channel(10, "parent", "1"), zebra, echo, da_nang];
+        let cats = build_categories(api_cats, &mut channels);
+        let names: Vec<&str> = cats[0].channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["parent", "Đà Nẵng", "Echo", "zebra"]);
+    }
+
+    #[test]
+    fn insert_channel_places_thread_at_alphabetical_position() {
+        let mut alpha = make_thread(15, 10, "cat1");
+        alpha.name = "alpha".into();
+        let mut zulu = make_thread(40, 10, "cat1");
+        zulu.name = "zulu".into();
+        let mut cats = vec![Category {
+            id: "cat1".into(),
+            clan_id: ClanId(1),
+            name: "General".into(),
+            order: 0,
+            channels: vec![
+                make_channel(10, "parent", "cat1"),
+                alpha,
+                zulu,
+                make_channel(50, "later", "cat1"),
+            ],
+        }];
+
+        let mut mike = make_thread(99, 10, "cat1");
+        mike.name = "mike".into();
+        assert!(insert_channel(&mut cats, mike));
+
+        let names: Vec<&str> = cats[0].channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["parent", "alpha", "mike", "zulu", "later"]);
     }
 
     #[test]
@@ -8851,6 +9361,57 @@ mod tests {
         });
     }
 
+    /// The ordering guarantee `MessagesStore::spawn_join` leans on. Both stores resync off the
+    /// same status watch in an order nobody controls, so the dead session's `joined_clans` has to
+    /// be gone before either of them runs — otherwise the one that wins asks "is the clan joined?",
+    /// is told yes by state belonging to a socket that no longer exists, and sends `channel_join`
+    /// with no `clan_join` ahead of it.
+    #[gpui::test]
+    fn losing_the_socket_clears_the_clan_joins_before_anything_resyncs(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_two_channels(),
+                    favor_ids(&[]),
+                    cx,
+                );
+                channels.joined_clans.insert(ClanId(1));
+                let before = channels.socket_generation;
+
+                channels.forget_socket_session();
+                assert!(
+                    channels.joined_clans.is_empty() && channels.joining_clans.is_empty(),
+                    "the joins died with the socket and must not answer for the new one"
+                );
+                assert!(
+                    channels.cache.is_fresh(&ClanId(1), crate::CACHE_TTL),
+                    "the cache must survive the outage — marking it stale here would have \
+                     `load_for_clan` firing requests the outage cannot answer"
+                );
+                assert_ne!(
+                    channels.socket_generation, before,
+                    "tasks from the dead socket have to become no-ops at the drop"
+                );
+
+                // And the reconnect must not invalidate a second time: a join started between the
+                // drop and here carries the generation set above, and bumping it again would make
+                // that join a no-op and leave `channel_join` unordered all over again.
+                let joining = channels.ensure_clan_joined(ClanId(1), cx);
+                let after_loss = channels.socket_generation;
+                channels.resync(cx);
+                assert_eq!(
+                    channels.socket_generation, after_loss,
+                    "the drop already opened the new session"
+                );
+                drop(joining);
+            });
+        });
+    }
+
     #[gpui::test]
     fn resync_re_issues_the_fetches_a_dead_socket_left_in_flight(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
@@ -10179,26 +10740,25 @@ mod tests {
         thread.channel_type = ChannelType::Thread;
         thread.active = CHANNEL_ACTIVE_ARCHIVED;
         assert!(should_reactivate_thread_after_send(
-            6,
-            &thread,
+            STREAM_MODE_THREAD,
+            thread.is_thread(),
             thread_needs_reactivate(&thread)
         ));
         assert!(!should_reactivate_thread_after_send(
             2,
-            &thread,
+            thread.is_thread(),
             thread_needs_reactivate(&thread)
         ));
         thread.active = CHANNEL_ACTIVE_JOINED;
         assert!(!should_reactivate_thread_after_send(
-            6,
-            &thread,
+            STREAM_MODE_THREAD,
+            thread.is_thread(),
             thread_needs_reactivate(&thread)
         ));
-        assert!(should_reactivate_thread_after_send(6, &thread, true));
         let parent = make_channel(10, "parent", "cat1");
         assert!(!should_reactivate_thread_after_send(
-            6,
-            &parent,
+            STREAM_MODE_THREAD,
+            parent.is_thread(),
             thread_needs_reactivate(&parent)
         ));
     }
@@ -10216,8 +10776,8 @@ mod tests {
             - 1;
         assert!(thread_needs_reactivate(&thread));
         assert!(should_reactivate_thread_after_send(
-            6,
-            &thread,
+            STREAM_MODE_THREAD,
+            thread.is_thread(),
             thread_needs_reactivate(&thread)
         ));
     }
@@ -10325,7 +10885,7 @@ mod tests {
         assert!(!thread.is_archived());
         assert!(!should_reactivate_thread_after_send(
             6,
-            &thread,
+            true,
             thread_needs_reactivate(&thread)
         ));
 
@@ -10337,11 +10897,15 @@ mod tests {
         assert!(thread.is_archived());
         assert!(!thread.visible_in_sidebar());
         assert!(should_reactivate_thread_after_send(
-            6,
-            &thread,
+            STREAM_MODE_THREAD,
+            true,
             thread_needs_reactivate(&thread)
         ));
-        assert!(should_reactivate_thread_after_send(6, &thread, true));
+        assert!(should_reactivate_thread_after_send(
+            STREAM_MODE_THREAD,
+            thread.is_thread(),
+            true
+        ));
     }
 
     #[test]
@@ -10353,6 +10917,7 @@ mod tests {
             ClanId(1),
             ChannelId(10),
             CHANNEL_ACTIVE_ARCHIVED,
+            false,
         );
         assert!(insert_channel(&mut cats, archived));
         let archived_row = cats[0]
@@ -10382,6 +10947,7 @@ mod tests {
             ClanId(1),
             ChannelId(10),
             CHANNEL_ACTIVE_JOINED,
+            false,
         );
         assert!(insert_channel(&mut cats, thread));
         assert!(remove_channel(&mut cats, ChannelId(500)));
@@ -10707,6 +11273,97 @@ mod tests {
         });
     }
 
+    fn structure_with_three_named_threads() -> Vec<Category> {
+        let api_cats = vec![ApiCategoryDesc {
+            category_id: 1,
+            category_name: "General".into(),
+            clan_id: 1,
+            category_order: 0,
+        }];
+        let mut channels = vec![{
+            let mut ch = make_channel(1, "parent", "1");
+            ch.clan_id = ClanId(1);
+            ch
+        }];
+        for (id, name) in [(7, "alpha"), (8, "mike"), (9, "zulu")] {
+            let mut ch = make_channel(id, name, "1");
+            ch.clan_id = ClanId(1);
+            ch.parent_id = Some(ChannelId(1));
+            ch.channel_type = ChannelType::Thread;
+            channels.push(ch);
+        }
+        build_categories(api_cats, &mut channels)
+    }
+
+    fn thread_names_in_clan(channels: &ChannelList, clan_id: ClanId) -> Vec<String> {
+        channels
+            .categories_for_clan(clan_id)
+            .iter()
+            .filter(|c| c.id != FAVOR_CATE_ID)
+            .flat_map(|c| c.channels.iter())
+            .map(|ch| ch.name.clone())
+            .collect()
+    }
+
+    #[gpui::test]
+    fn ensure_thread_with_parent_active_resorts_after_a_rename(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_three_named_threads(),
+                    None,
+                    cx,
+                );
+                assert_eq!(
+                    thread_names_in_clan(channels, ClanId(1)),
+                    vec!["parent", "alpha", "mike", "zulu"]
+                );
+
+                // "alpha" (id 7) is renamed to a label that belongs at the end
+                channels.ensure_thread_with_parent_active(
+                    ChannelId(7),
+                    ChannelId(1),
+                    ClanId(1),
+                    "zzz".into(),
+                    CHANNEL_ACTIVE_JOINED,
+                    true,
+                    None,
+                    cx,
+                );
+
+                assert_eq!(
+                    thread_names_in_clan(channels, ClanId(1)),
+                    vec!["parent", "mike", "zulu", "zzz"]
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn apply_thread_reactivated_resorts_after_a_rename(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_three_named_threads(),
+                    None,
+                    cx,
+                );
+
+                // "zulu" (id 9) comes back with a label that belongs first
+                channels.apply_thread_reactivated(ClanId(1), ChannelId(9), Some("aaa".into()), cx);
+
+                assert_eq!(
+                    thread_names_in_clan(channels, ClanId(1)),
+                    vec!["parent", "aaa", "alpha", "mike"]
+                );
+            });
+        });
+    }
+
     #[gpui::test]
     fn apply_thread_reactivated_clears_local_archive_tombstone(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
@@ -10718,6 +11375,227 @@ mod tests {
                 channels.apply_thread_reactivated(ClanId(1), ChannelId(9), None, cx);
                 assert!(!channels.is_locally_archived(ChannelId(9)));
                 assert!(channels.channel_in_clan(ClanId(1), ChannelId(9)));
+            });
+        });
+    }
+
+    fn seed_archived_thread_summary(channel_private: i32) -> crate::threads::ThreadSummary {
+        crate::threads::ThreadSummary {
+            channel_id: "9".into(),
+            channel_label: "thread".into(),
+            clan_id: "1".into(),
+            parent_id: "1".into(),
+            channel_private,
+            active: crate::threads::THREAD_STATUS_ARCHIVED,
+            creator_id: String::new(),
+            last_message_content: String::new(),
+            last_message_preview: String::new(),
+            last_message_sender_id: String::new(),
+            last_message_sender_name: String::new(),
+            last_message_sender_avatar: String::new(),
+            last_sent_timestamp: 0,
+            member_count: 0,
+        }
+    }
+
+    #[gpui::test]
+    fn public_pre_send_survives_threads_store_clear_after_navigate(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            crate::threads::ThreadsStore::global(cx).update(cx, |store, cx| {
+                store.seed_threads_for_test("1", vec![seed_archived_thread_summary(0)], cx);
+            });
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
+                channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+                let private = crate::threads::ThreadsStore::global(cx)
+                    .read(cx)
+                    .thread_channel_private("9")
+                    .map(|p| p != 0);
+                assert_eq!(private, Some(false));
+                channels.ensure_thread_with_parent_active(
+                    ChannelId(9),
+                    ChannelId(1),
+                    ClanId(1),
+                    "thread".into(),
+                    CHANNEL_ACTIVE_ARCHIVED,
+                    true,
+                    private,
+                    cx,
+                );
+                channels.select_channel(ChannelId(9), cx);
+            });
+            crate::threads::ThreadsStore::global(cx).update(cx, |store, cx| {
+                store.simulate_active_channel_changed_for_test(Some(ChannelId(9)), cx);
+            });
+            assert!(
+                crate::threads::ThreadsStore::global(cx)
+                    .read(cx)
+                    .thread_channel_private("9")
+                    .is_none(),
+                "active channel change must clear ThreadsStore privacy"
+            );
+            channels.update(cx, |channels, cx| {
+                let ch = channels
+                    .channel(ClanId(1), ChannelId(9))
+                    .expect("seeded before ThreadsStore clear");
+                assert!(!ch.private);
+                assert!(ch.is_archived());
+                assert!(channels.begin_public_pre_send_reactivate(
+                    ChannelId(9),
+                    ClanId(1),
+                    STREAM_MODE_THREAD,
+                    cx
+                ));
+                channels.finish_reactivating(ChannelId(9));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn private_thread_skips_public_pre_send_even_when_cache_says_public(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            crate::threads::ThreadsStore::global(cx).update(cx, |store, cx| {
+                store.seed_threads_for_test("1", vec![seed_archived_thread_summary(1)], cx);
+            });
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
+                if let Some(ch) = channels.channel_mut(ClanId(1), ChannelId(9)) {
+                    ch.private = false;
+                    ch.active = CHANNEL_ACTIVE_ARCHIVED;
+                }
+                let private = crate::threads::ThreadsStore::global(cx)
+                    .read(cx)
+                    .thread_channel_private("9")
+                    .map(|p| p != 0);
+                assert_eq!(private, Some(true));
+                channels.ensure_thread_with_parent_active(
+                    ChannelId(9),
+                    ChannelId(1),
+                    ClanId(1),
+                    "thread".into(),
+                    CHANNEL_ACTIVE_ARCHIVED,
+                    true,
+                    private,
+                    cx,
+                );
+                channels.select_channel(ChannelId(9), cx);
+            });
+            crate::threads::ThreadsStore::global(cx).update(cx, |store, cx| {
+                store.simulate_active_channel_changed_for_test(Some(ChannelId(9)), cx);
+            });
+            assert!(
+                crate::threads::ThreadsStore::global(cx)
+                    .read(cx)
+                    .thread_channel_private("9")
+                    .is_none()
+            );
+            channels.update(cx, |channels, cx| {
+                assert!(
+                    channels
+                        .channel(ClanId(1), ChannelId(9))
+                        .expect("thread")
+                        .private
+                );
+                assert!(!channels.begin_public_pre_send_reactivate(
+                    ChannelId(9),
+                    ClanId(1),
+                    STREAM_MODE_THREAD,
+                    cx
+                ));
+                assert!(channels.begin_reactivate_for_send(
+                    ChannelId(9),
+                    ClanId(1),
+                    STREAM_MODE_THREAD,
+                    cx
+                ));
+                channels.finish_reactivating(ChannelId(9));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn locally_archived_none_cache_still_reactivates_after_send(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
+                channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
+                assert!(channels.is_locally_archived(ChannelId(9)));
+                assert!(channels.begin_reactivate_for_send(
+                    ChannelId(9),
+                    ClanId(1),
+                    STREAM_MODE_THREAD,
+                    cx
+                ));
+                channels.finish_reactivating(ChannelId(9));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn note_own_send_clears_stale_so_second_reactivate_skips(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
+                if let Some(ch) = channels.channel_mut(ClanId(1), ChannelId(9)) {
+                    ch.active = CHANNEL_ACTIVE_JOINED;
+                    ch.last_sent_timestamp = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("unix time")
+                        .as_secs() as i64
+                        - THREAD_ARCHIVE_DURATION_SECONDS
+                        - 1;
+                }
+                assert!(channels.begin_reactivate_for_send(
+                    ChannelId(9),
+                    ClanId(1),
+                    STREAM_MODE_THREAD,
+                    cx
+                ));
+                channels.finish_reactivating(ChannelId(9));
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("unix time")
+                    .as_secs() as i64;
+                channels.note_own_send_confirmed(ClanId(1), ChannelId(9), now, MessageId(99), cx);
+                let ch = channels
+                    .channel(ClanId(1), ChannelId(9))
+                    .expect("thread after own send");
+                assert!(!ch.is_unread());
+                assert_eq!(ch.last_seen_timestamp, now);
+                assert_eq!(ch.last_seen_message_id, MessageId(99));
+                assert!(!channels.begin_reactivate_for_send(
+                    ChannelId(9),
+                    ClanId(1),
+                    STREAM_MODE_THREAD,
+                    cx
+                ));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn apply_thread_reactivated_bumps_stale_last_sent(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
+                if let Some(ch) = channels.channel_mut(ClanId(1), ChannelId(9)) {
+                    ch.active = CHANNEL_ACTIVE_ARCHIVED;
+                    ch.last_sent_timestamp = 1;
+                }
+                channels.apply_thread_reactivated(ClanId(1), ChannelId(9), None, cx);
+                let ch = channels
+                    .channel(ClanId(1), ChannelId(9))
+                    .expect("thread restored");
+                assert_eq!(ch.active, CHANNEL_ACTIVE_JOINED);
+                assert!(!thread_is_stale(ch));
             });
         });
     }

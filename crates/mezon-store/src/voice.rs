@@ -261,7 +261,10 @@ pub struct VoiceStore {
     recording: RecordingState,
     recording_elapsed: Duration,
     recording_stalled: bool,
-    recording_avatars: HashMap<String, Option<Arc<mezon_voice::compose::AvatarImage>>>,
+    member_strip_visible: bool,
+    recording_avatars: HashMap<String, RecordingAvatar>,
+    #[cfg(debug_assertions)]
+    simulated_participants: Vec<VoiceParticipant>,
     _recording_tick: Option<Task<()>>,
     _recording_start: Option<Task<()>>,
     _events_task: Option<Task<()>>,
@@ -360,6 +363,76 @@ impl VoiceStore {
     }
 }
 
+#[cfg(debug_assertions)]
+const SIMULATED_SCREEN_KEY: u64 = u64::MAX - 1;
+
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy)]
+pub struct SimulatedCall {
+    pub screenshare: bool,
+    pub focus: bool,
+    pub fullscreen: bool,
+    pub member_strip: bool,
+}
+
+#[cfg(debug_assertions)]
+impl Default for SimulatedCall {
+    fn default() -> Self {
+        Self {
+            screenshare: false,
+            focus: false,
+            fullscreen: false,
+            member_strip: true,
+        }
+    }
+}
+
+const RECORDING_AVATAR_PX: u32 = 256;
+
+const RECORDING_AVATAR_MAX_ATTEMPTS: u8 = 3;
+
+const RECORDING_AVATAR_WARMUP: Duration = Duration::from_millis(1_500);
+
+const RECORDING_AVATAR_WARMUP_STEP: Duration = Duration::from_millis(50);
+
+#[derive(Default)]
+struct RecordingAvatar {
+    url: String,
+    image: Option<Arc<mezon_voice::compose::AvatarImage>>,
+    loading: bool,
+    attempts: u8,
+}
+
+impl RecordingAvatar {
+    fn claim(&mut self, url: &str) -> bool {
+        if self.url != url {
+            *self = Self {
+                url: url.to_string(),
+                ..Self::default()
+            };
+        }
+        if self.loading || self.image.is_some() || self.attempts >= RECORDING_AVATAR_MAX_ATTEMPTS {
+            return false;
+        }
+        self.loading = true;
+        true
+    }
+
+    fn settle(&mut self, url: &str, image: Option<Arc<mezon_voice::compose::AvatarImage>>) {
+        if self.url != url {
+            return;
+        }
+        self.loading = false;
+        match image {
+            Some(image) => {
+                self.image = Some(image);
+                self.attempts = 0;
+            }
+            None => self.attempts += 1,
+        }
+    }
+}
+
 async fn load_avatar(url: &str) -> Option<Arc<mezon_voice::compose::AvatarImage>> {
     let (bytes, _) = mezon_client::transport_runtime::fetch_bytes(url)
         .await
@@ -368,7 +441,7 @@ async fn load_avatar(url: &str) -> Option<Arc<mezon_voice::compose::AvatarImage>
     let decoded = image::load_from_memory(&bytes)
         .map_err(|error| tracing::warn!("could not decode a recording avatar: {error}"))
         .ok()?
-        .thumbnail(256, 256)
+        .thumbnail(RECORDING_AVATAR_PX, RECORDING_AVATAR_PX)
         .to_rgba8();
     let (width, height) = decoded.dimensions();
     let mut bgra = decoded.into_raw();
@@ -382,11 +455,30 @@ async fn load_avatar(url: &str) -> Option<Arc<mezon_voice::compose::AvatarImage>
     }))
 }
 
+fn solo_tile_for(
+    fullscreen_screen: Option<u64>,
+    member_strip_visible: bool,
+    focused_tile: Option<&str>,
+    participants: &[VoiceParticipant],
+) -> Option<String> {
+    if let Some(key) = fullscreen_screen {
+        return participants
+            .iter()
+            .find(|p| p.screenshare == Some(key))
+            .map(|p| screen_tile_id(&p.identity));
+    }
+    if !member_strip_visible {
+        return focused_tile.map(str::to_string);
+    }
+    None
+}
+
 fn initial_of(name: &str) -> String {
     name.chars()
         .next()
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_default()
+        .and_then(|c| c.to_uppercase().next())
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "?".to_string())
 }
 
 pub fn screen_tile_id(identity: &str) -> String {
@@ -524,7 +616,10 @@ impl VoiceStore {
             recording: RecordingState::Idle,
             recording_elapsed: Duration::ZERO,
             recording_stalled: false,
+            member_strip_visible: true,
             recording_avatars: HashMap::new(),
+            #[cfg(debug_assertions)]
+            simulated_participants: Vec::new(),
             _recording_tick: None,
             _recording_start: None,
             _events_task: None,
@@ -810,6 +905,23 @@ impl VoiceStore {
 
     pub fn focused_tile(&self) -> Option<&str> {
         self.focused_tile.as_deref()
+    }
+
+    pub fn member_strip_visible(&self) -> bool {
+        self.member_strip_visible
+    }
+
+    pub fn set_member_strip_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.member_strip_visible == visible {
+            return;
+        }
+        self.member_strip_visible = visible;
+        self.publish_recording_scene(cx);
+        cx.notify();
+    }
+
+    pub fn toggle_member_strip(&mut self, cx: &mut Context<Self>) {
+        self.set_member_strip_visible(!self.member_strip_visible, cx);
     }
 
     pub fn link_copied(&self) -> bool {
@@ -2647,6 +2759,7 @@ impl VoiceStore {
                     });
                     list.retain(|p| !self.pending_removals.contains_key(&p.identity));
                 }
+                self.apply_simulated_participants(&mut list);
                 if self.participants == list {
                     return;
                 }
@@ -2982,6 +3095,33 @@ impl VoiceStore {
         cx.notify();
 
         self._recording_start = Some(cx.spawn(async move |this, cx| {
+            let deadline = Instant::now() + RECORDING_AVATAR_WARMUP;
+            while Instant::now() < deadline {
+                let loading = this
+                    .update(cx, |this, _| this.recording_avatars_loading())
+                    .unwrap_or(false);
+                if !loading {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(RECORDING_AVATAR_WARMUP_STEP)
+                    .await;
+            }
+            let still_starting = this
+                .update(cx, |this, cx| {
+                    if this.session_generation != generation
+                        || this.recording != RecordingState::Starting
+                    {
+                        return false;
+                    }
+                    this.publish_recording_scene(cx);
+                    true
+                })
+                .unwrap_or(false);
+            if !still_starting {
+                return;
+            }
+
             let started = cx
                 .background_executor()
                 .spawn(async move { starter.start(path, scene) })
@@ -3142,6 +3282,117 @@ impl VoiceStore {
         .detach();
     }
 
+    fn recording_avatars_loading(&self) -> bool {
+        self.recording_avatars.values().any(|entry| entry.loading)
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn apply_simulated_participants(&self, _list: &mut Vec<VoiceParticipant>) {}
+
+    #[cfg(debug_assertions)]
+    fn apply_simulated_participants(&self, list: &mut Vec<VoiceParticipant>) {
+        for fake in &self.simulated_participants {
+            if !list.iter().any(|p| p.identity == fake.identity) {
+                list.push(fake.clone());
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn simulate_participants(&mut self, count: usize, cx: &mut Context<Self>) -> usize {
+        self.simulate_call(count, &SimulatedCall::default(), cx)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn simulate_call(
+        &mut self,
+        count: usize,
+        options: &SimulatedCall,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let previous: Vec<String> = self
+            .simulated_participants
+            .iter()
+            .map(|p| p.identity.clone())
+            .collect();
+        self.simulated_participants.clear();
+
+        if count > 0 {
+            let taken: HashSet<String> = self
+                .participants
+                .iter()
+                .filter(|p| !previous.contains(&p.identity))
+                .map(|p| p.identity.clone())
+                .collect();
+            let clan_id = self
+                .connection
+                .connected_channel()
+                .and_then(|(_, clan)| clan.parse::<i64>().ok());
+            let mut pool: Vec<(String, String)> = Vec::new();
+            if let Some(clan_id) = clan_id
+                && let Some(store) = ClanMembersStore::try_global(cx)
+            {
+                for member in store.read(cx).members(ClanId(clan_id)) {
+                    let identity = member.id().0.to_string();
+                    if taken.contains(&identity) {
+                        continue;
+                    }
+                    pool.push((identity, member.name().to_string()));
+                    if pool.len() == count {
+                        break;
+                    }
+                }
+            }
+            for index in pool.len()..count {
+                pool.push((
+                    format!("9000000000000000{index:03}"),
+                    format!("test.user{index}"),
+                ));
+            }
+
+            self.simulated_participants = pool
+                .into_iter()
+                .enumerate()
+                .map(|(index, (identity, name))| VoiceParticipant {
+                    screenshare: (index == 0 && options.screenshare)
+                        .then_some(SIMULATED_SCREEN_KEY),
+                    identity,
+                    name,
+                    is_local: false,
+                    is_agent: false,
+                    speaking: index == 0,
+                    muted: index % 3 == 2,
+                    camera: None,
+                    quality: NetworkQuality::Excellent,
+                })
+                .collect();
+        }
+
+        let mut list = self.participants.clone();
+        list.retain(|p| !previous.contains(&p.identity));
+        self.apply_simulated_participants(&mut list);
+        self.track_visual_ranks(&list);
+        self.participants = list;
+
+        let screen_owner = self
+            .simulated_participants
+            .first()
+            .filter(|_| options.screenshare)
+            .map(|p| p.identity.clone());
+        self.focused_tile = match (&screen_owner, options.focus) {
+            (Some(identity), true) => Some(screen_tile_id(identity)),
+            _ => None,
+        };
+        self.fullscreen_screen =
+            (options.fullscreen && screen_owner.is_some()).then_some(SIMULATED_SCREEN_KEY);
+        self.member_strip_visible = options.member_strip;
+
+        self.fetch_missing_avatars(cx);
+        self.publish_recording_scene(cx);
+        cx.notify();
+        self.simulated_participants.len()
+    }
+
     fn fetch_missing_avatars(&mut self, cx: &mut Context<Self>) {
         let Some((_, clan)) = self.connection.connected_channel() else {
             return;
@@ -3149,35 +3400,72 @@ impl VoiceStore {
         let Ok(clan_id) = clan.parse::<i64>() else {
             return;
         };
-        let wanted: Vec<(String, String)> = self
-            .participants
-            .iter()
-            .filter(|p| !self.recording_avatars.contains_key(&p.identity))
-            .filter_map(|p| {
-                let uid = p.identity.parse::<i64>().ok()?;
-                let url = ClanMembersStore::try_global(cx).and_then(|store| {
-                    store
-                        .read(cx)
-                        .member(ClanId(clan_id), UserId(uid))
-                        .map(|m| m.avatar().to_string())
-                })?;
-                (!url.is_empty()).then_some((p.identity.clone(), url))
-            })
-            .collect();
+        let members = ClanMembersStore::try_global(cx);
+        let mut wanted: Vec<(String, String)> = Vec::new();
+        for participant in &self.participants {
+            let Ok(uid) = participant.identity.parse::<i64>() else {
+                continue;
+            };
+            let Some(source) = members.as_ref().and_then(|store| {
+                store
+                    .read(cx)
+                    .member(ClanId(clan_id), UserId(uid))
+                    .map(|m| m.avatar().to_string())
+            }) else {
+                continue;
+            };
+            if source.is_empty() {
+                continue;
+            }
+            let url = AppConfig::try_global(cx)
+                .map(|cfg| {
+                    cfg.imgproxy_url(&source, RECORDING_AVATAR_PX, RECORDING_AVATAR_PX, "fit")
+                })
+                .unwrap_or(source);
+            if self
+                .recording_avatars
+                .entry(participant.identity.clone())
+                .or_default()
+                .claim(&url)
+            {
+                wanted.push((participant.identity.clone(), url));
+            }
+        }
 
         for (identity, url) in wanted {
-            self.recording_avatars.insert(identity.clone(), None);
             cx.spawn(async move |this, cx| {
+                let fetch_url = url.clone();
                 let decoded = cx
                     .background_executor()
-                    .spawn(async move { load_avatar(&url).await })
+                    .spawn(async move { load_avatar(&fetch_url).await })
                     .await;
-                let _ = this.update(cx, |this, _| {
-                    this.recording_avatars.insert(identity, decoded);
+                let _ = this.update(cx, |this, cx| {
+                    let Some(entry) = this.recording_avatars.get_mut(&identity) else {
+                        return;
+                    };
+                    entry.settle(&url, decoded);
+                    this.publish_recording_scene(cx);
                 });
             })
             .detach();
         }
+    }
+
+    fn solo_recording_tile(&self) -> Option<String> {
+        solo_tile_for(
+            self.fullscreen_screen,
+            self.member_strip_visible,
+            self.focused_tile.as_deref(),
+            &self.participants,
+        )
+    }
+
+    fn fullscreen_recording_tile(&self) -> Option<String> {
+        let key = self.fullscreen_screen?;
+        self.participants
+            .iter()
+            .find(|p| p.screenshare == Some(key))
+            .map(|p| screen_tile_id(&p.identity))
     }
 
     fn publish_recording_scene(&self, cx: &App) {
@@ -3185,37 +3473,55 @@ impl VoiceStore {
             return;
         };
         let focused = self.focused_tile();
+        let solo = self.solo_recording_tile();
+        let fullscreen = self.fullscreen_recording_tile();
         let mut tiles = Vec::new();
         for participant in &self.participants {
             let label = self.display_name_for(participant, cx);
             let avatar = self
                 .recording_avatars
                 .get(&participant.identity)
-                .cloned()
-                .flatten();
+                .and_then(|entry| entry.image.clone());
             if let Some(key) = participant.screenshare {
                 let id = screen_tile_id(&participant.identity);
-                tiles.push(mezon_voice::compose::SceneTile {
-                    focused: focused == Some(id.as_str()),
-                    key: id,
-                    label: label.clone(),
-                    initial: initial_of(&label),
-                    avatar: avatar.clone(),
-                    frame_key: Some(key),
-                    is_screen_share: true,
-                    speaking: false,
-                });
+                let solo_tile = solo.as_deref() == Some(id.as_str());
+                if solo.is_none() || solo_tile {
+                    let is_fullscreen = fullscreen.as_deref() == Some(id.as_str());
+                    let label = if is_fullscreen {
+                        String::new()
+                    } else {
+                        label.clone()
+                    };
+                    tiles.push(mezon_voice::compose::SceneTile {
+                        focused: solo_tile || focused == Some(id.as_str()),
+                        fullscreen: is_fullscreen,
+                        key: id,
+                        initial: initial_of(&label),
+                        label,
+                        avatar: avatar.clone(),
+                        frame_key: Some(key),
+                        is_screen_share: true,
+                        speaking: false,
+                        muted: participant.muted,
+                    });
+                }
             }
             let id = camera_tile_id(&participant.identity);
+            let solo_tile = solo.as_deref() == Some(id.as_str());
+            if solo.is_some() && !solo_tile {
+                continue;
+            }
             tiles.push(mezon_voice::compose::SceneTile {
-                focused: focused == Some(id.as_str()),
+                focused: solo_tile || focused == Some(id.as_str()),
+                fullscreen: false,
                 key: id,
-                label: label.clone(),
                 initial: initial_of(&label),
-                avatar: avatar.clone(),
+                label,
+                avatar,
                 frame_key: participant.camera,
                 is_screen_share: false,
                 speaking: participant.speaking,
+                muted: participant.muted,
             });
         }
         session.record_scene().set(tiles);
@@ -3312,6 +3618,7 @@ impl VoiceStore {
         self.cancel_reconnect_watchdog();
         self.close_pip(cx);
         self.fullscreen_screen = None;
+        self.member_strip_visible = true;
         self.clear_session_handles(window, cx);
         self.connection = VoiceConnection::Idle;
         self.call_status = VoiceCallStatus::Stable;
@@ -3434,12 +3741,132 @@ mod tests {
 
     use super::parse_raise_token;
     use super::{
-        INTERACTIVE_LAUNCH_DEDUP_TTL, MAX_SOUND_BYTES, is_duplicate_interactive_launch,
-        redact_interactive_app_url, validate_sound_file,
+        INTERACTIVE_LAUNCH_DEDUP_TTL, MAX_SOUND_BYTES, RECORDING_AVATAR_MAX_ATTEMPTS,
+        RecordingAvatar, is_duplicate_interactive_launch, redact_interactive_app_url,
+        solo_tile_for, validate_sound_file,
     };
     use crate::{VoiceInteractiveApp, VoiceInteractiveEventType};
     use gpui::RenderImage;
     use parking_lot::Mutex;
+
+    #[test]
+    fn an_open_member_strip_records_everyone() {
+        let people = [
+            voice_participant("1", Some(7)),
+            voice_participant("2", None),
+        ];
+        assert_eq!(
+            solo_tile_for(None, true, Some(&screen_tile_id("1")), &people),
+            None
+        );
+    }
+
+    #[test]
+    fn a_closed_member_strip_records_only_the_focused_tile() {
+        let people = [
+            voice_participant("1", Some(7)),
+            voice_participant("2", None),
+        ];
+        assert_eq!(
+            solo_tile_for(None, false, Some(&screen_tile_id("1")), &people),
+            Some(screen_tile_id("1"))
+        );
+        assert_eq!(
+            solo_tile_for(None, false, Some(&camera_tile_id("2")), &people),
+            Some(camera_tile_id("2"))
+        );
+    }
+
+    #[test]
+    fn a_closed_strip_with_nothing_focused_still_records_the_grid() {
+        let people = [voice_participant("1", None)];
+        assert_eq!(solo_tile_for(None, false, None, &people), None);
+    }
+
+    #[test]
+    fn a_fullscreen_share_records_only_that_share() {
+        let people = [
+            voice_participant("1", Some(7)),
+            voice_participant("2", None),
+        ];
+        assert_eq!(
+            solo_tile_for(Some(7), true, Some(&camera_tile_id("2")), &people),
+            Some(screen_tile_id("1"))
+        );
+    }
+
+    #[test]
+    fn a_fullscreen_key_whose_sharer_left_records_nothing_extra() {
+        let people = [voice_participant("2", None)];
+        assert_eq!(solo_tile_for(Some(7), true, None, &people), None);
+    }
+
+    fn avatar_pixel() -> Arc<mezon_voice::compose::AvatarImage> {
+        Arc::new(mezon_voice::compose::AvatarImage {
+            width: 1,
+            height: 1,
+            bgra: vec![0, 0, 0, 255],
+        })
+    }
+
+    #[test]
+    fn a_loaded_avatar_is_not_fetched_again() {
+        let mut slot = RecordingAvatar::default();
+        assert!(slot.claim("https://cdn/a.png"));
+        slot.settle("https://cdn/a.png", Some(avatar_pixel()));
+        assert!(!slot.claim("https://cdn/a.png"));
+    }
+
+    #[test]
+    fn a_changed_avatar_drops_the_picture_it_replaces() {
+        let mut slot = RecordingAvatar::default();
+        assert!(slot.claim("https://cdn/old.png"));
+        slot.settle("https://cdn/old.png", Some(avatar_pixel()));
+
+        assert!(slot.claim("https://cdn/new.png"));
+        assert!(
+            slot.image.is_none(),
+            "the recording must not keep drawing the old avatar"
+        );
+    }
+
+    #[test]
+    fn a_fetch_that_lands_after_the_avatar_changed_is_ignored() {
+        let mut slot = RecordingAvatar::default();
+        assert!(slot.claim("https://cdn/old.png"));
+        assert!(slot.claim("https://cdn/new.png"));
+
+        slot.settle("https://cdn/old.png", Some(avatar_pixel()));
+        assert!(slot.image.is_none());
+        assert!(slot.loading, "the newer fetch is still in flight");
+    }
+
+    #[test]
+    fn a_failed_fetch_retries_a_bounded_number_of_times() {
+        let mut slot = RecordingAvatar::default();
+        for _ in 0..RECORDING_AVATAR_MAX_ATTEMPTS {
+            assert!(slot.claim("https://cdn/a.png"));
+            slot.settle("https://cdn/a.png", None);
+        }
+        assert!(
+            !slot.claim("https://cdn/a.png"),
+            "a URL that keeps failing must stop hitting the CDN every tick"
+        );
+        assert!(
+            slot.claim("https://cdn/b.png"),
+            "a new URL starts over from a clean slot"
+        );
+    }
+
+    #[test]
+    fn a_recovered_fetch_clears_the_failure_count() {
+        let mut slot = RecordingAvatar::default();
+        assert!(slot.claim("https://cdn/a.png"));
+        slot.settle("https://cdn/a.png", None);
+        assert!(slot.claim("https://cdn/a.png"));
+        slot.settle("https://cdn/a.png", Some(avatar_pixel()));
+        assert_eq!(slot.attempts, 0);
+    }
 
     #[test]
     fn interactive_app_type_maps_only_app_events() {

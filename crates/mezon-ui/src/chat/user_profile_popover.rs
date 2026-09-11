@@ -665,7 +665,6 @@ impl Render for UserProfilePopover {
             None if online => mezon_store::UserPresence::Online,
             None => mezon_store::UserPresence::Invisible,
         };
-        let status_icon = crate::util::user_status::status_icon(status_presence);
 
         let avatar_proxied = if avatar_raw.is_empty() {
             SharedString::default()
@@ -758,8 +757,12 @@ impl Render for UserProfilePopover {
             )
             .child(render_avatar_row(
                 avatar,
-                status_icon,
-                crate::util::user_status::status_color(status_presence, theme),
+                status_presence.is_visible().then_some((
+                    status_presence,
+                    crate::util::user_status::avatar_status_color(status_presence).unwrap_or_else(
+                        || crate::util::user_status::status_color(status_presence, theme),
+                    ),
+                )),
                 custom_status,
                 theme,
             ))
@@ -1316,8 +1319,7 @@ fn render_voice_button(
 
 fn render_avatar_row(
     avatar: Avatar,
-    status_icon: IconName,
-    status_color: gpui::Rgba,
+    status: Option<(mezon_store::UserPresence, gpui::Rgba)>,
     custom_status: String,
     theme: &Theme,
 ) -> AnyElement {
@@ -1339,13 +1341,15 @@ fn render_avatar_row(
                         .rounded_full()
                         .child(avatar),
                 )
-                .child(
-                    div().absolute().bottom(px(4.)).right(px(8.)).child(
-                        Icon::new(status_icon)
-                            .size(px(16.))
-                            .text_color(status_color),
-                    ),
-                ),
+                .when_some(status, |el, (presence, status_color)| {
+                    el.child(div().absolute().bottom(px(4.)).right(px(8.)).child(
+                        crate::util::user_status::avatar_status_mark(
+                            presence,
+                            px(16.),
+                            status_color,
+                        ),
+                    ))
+                }),
         )
         .when(!custom_status.is_empty(), |row| {
             row.child(

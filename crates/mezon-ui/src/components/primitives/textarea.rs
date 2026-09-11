@@ -257,6 +257,47 @@ impl TextArea {
         self.content.as_ref()
     }
 
+    pub fn set_placeholder_text(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.placeholder = placeholder.into();
+        cx.notify();
+    }
+
+    pub fn set_single_line(&mut self, single_line: bool, cx: &mut Context<Self>) {
+        self.single_line = single_line;
+        if single_line {
+            self.max_visible_lines = 1;
+        }
+        cx.notify();
+    }
+
+    pub fn set_numeric(&mut self, numeric: bool, cx: &mut Context<Self>) {
+        self.numeric = numeric;
+        cx.notify();
+    }
+
+    pub fn set_min_height(&mut self, height: Pixels, cx: &mut Context<Self>) {
+        self.min_height = height;
+        cx.notify();
+    }
+
+    /// Replace the content the way a fresh field would start, *without* emitting
+    /// `Change`. For an owner that re-points an existing field at a new question
+    /// (a bot wizard stepping through one message) and writes the new value into
+    /// its own store itself — reusing the entity instead of dropping it keeps the
+    /// element mounted, so the row does not blink through a placeholder frame.
+    pub fn reset_content(&mut self, value: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.set_content(value);
+        let end = self.content.len();
+        self.selected_range = end..end;
+        self.marked_range = None;
+        self.clear_history();
+        cx.notify();
+    }
+
     pub fn set_value(&mut self, value: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.set_content(value);
         let end = self.content.len();

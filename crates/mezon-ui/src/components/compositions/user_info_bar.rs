@@ -6,8 +6,10 @@ use gpui::{
 use crate::components::compositions::footer_profile_popup::FooterProfilePopup;
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::theme::ActiveTheme;
-use crate::util::user_status::{status_color, status_label_key};
-use mezon_store::{AccountStore, AuthState, Settings, UserPresence, current_user_status};
+use crate::util::user_status::{presence_badge_element, status_label_key};
+use mezon_store::{
+    AccountStore, AuthState, DmAvatarPresence, Settings, UserPresence, current_user_status,
+};
 
 fn on_settings_click() -> impl Fn(&ClickEvent, &mut Window, &mut App) {
     move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
@@ -132,7 +134,7 @@ impl UserInfoBar {
 impl Render for UserInfoBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let status_dot_color = status_color(self.status, theme);
+        let presence_badge = DmAvatarPresence::from(self.status);
         let subtitle: SharedString = if self.user_status.is_empty() {
             let locale = self
                 .settings
@@ -217,15 +219,14 @@ impl Render for UserInfoBar {
                                 this.toggle_profile_popup(window, cx);
                             }))
                             .child(
-                                div().relative().child(avatar).child(
-                                    div()
-                                        .absolute()
-                                        .bottom_0()
-                                        .right_0()
-                                        .size_2()
-                                        .rounded_full()
-                                        .bg(status_dot_color),
-                                ),
+                                div()
+                                    .relative()
+                                    .child(avatar)
+                                    .children(presence_badge_element(
+                                        presence_badge,
+                                        theme.tokens.bg_surface,
+                                        theme,
+                                    )),
                             )
                             .child(
                                 div()

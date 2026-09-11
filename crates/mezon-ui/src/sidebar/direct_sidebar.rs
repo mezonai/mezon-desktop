@@ -6,9 +6,10 @@ use gpui::{
     UniformListScrollHandle, WeakEntity, Window, div, img, prelude::*, px, size, uniform_list,
 };
 use mezon_store::{
-    ChannelEvent, ChannelId, ChannelList, ClanId, DirectChannel, DirectKind, DirectMessageStore,
-    DmAvatarPresence, FriendState, FriendStore, NotificationSettingStore, PresenceEvent,
-    PresenceStore, Settings, UserId,
+    AccountEvent, AccountStore, ChannelEvent, ChannelId, ChannelList, ClanId, DirectChannel,
+    DirectKind, DirectMessageStore, DmAvatarPresence, FriendState, FriendStore,
+    NotificationSettingStore, PresenceEvent, PresenceStore, Settings, UserId, UserPresence,
+    current_user_presence,
 };
 
 use super::channel_sidebar::menu::{MUTE_DURATIONS, apply_mute, mute_label, submenu_options};
@@ -136,12 +137,16 @@ fn dm_in_voice(ch: &DirectChannel, channels: &ChannelList) -> bool {
             .is_some_and(|user_id| channels.in_voice_status(user_id).is_some())
 }
 
-fn dm_presence_badge(ch: &DirectChannel, presence: &PresenceStore) -> DmAvatarPresence {
+fn dm_presence_badge(
+    ch: &DirectChannel,
+    presence: &PresenceStore,
+    own: Option<(UserId, UserPresence)>,
+) -> DmAvatarPresence {
     if ch.kind != DirectKind::Dm {
         return DmAvatarPresence::None;
     }
     ch.peer_user_id
-        .map(|user_id| presence.dm_avatar_presence(user_id, ch.online))
+        .map(|user_id| presence.dm_avatar_presence(user_id, ch.online, own))
         .unwrap_or(DmAvatarPresence::None)
 }
 
@@ -156,6 +161,7 @@ fn dm_items_fingerprint(store: &DirectMessageStore, cx: &App) -> u64 {
     let channel_list = ChannelList::global(cx);
     let channels = channel_list.read(cx);
     let presence = PresenceStore::global(cx).read(cx);
+    let own_presence = current_user_presence(cx);
     let notifications = NotificationSettingStore::try_global(cx);
     let notifications = notifications.as_ref().map(|store| store.read(cx));
     store.channels().iter().fold(FNV_OFFSET, |h, ch| {
@@ -165,7 +171,7 @@ fn dm_items_fingerprint(store: &DirectMessageStore, cx: &App) -> u64 {
             &[
                 ch.kind as u8,
                 u8::from(ch.is_unread()),
-                dm_presence_badge(ch, presence) as u8,
+                dm_presence_badge(ch, presence, own_presence) as u8,
                 u8::from(dm_in_voice(ch, channels)),
                 u8::from(notifications.is_some_and(|store| store.is_time_muted(ch.id))),
                 u8::from(store.is_pinned(ch.id)),
@@ -266,6 +272,7 @@ fn build_dm_items(
     let channel_list = ChannelList::global(cx);
     let channels = channel_list.read(cx);
     let presence = PresenceStore::global(cx).read(cx);
+    let own_presence = current_user_presence(cx);
     let notifications = NotificationSettingStore::try_global(cx);
     let notifications = notifications.as_ref().map(|store| store.read(cx));
     let all = store.channels();
@@ -279,7 +286,7 @@ fn build_dm_items(
         .map(|ch| {
             let pinned = store.is_pinned(ch.id);
             let unread = ch.is_unread();
-            let presence_badge = dm_presence_badge(ch, presence);
+            let presence_badge = dm_presence_badge(ch, presence, own_presence);
             let in_voice = dm_in_voice(ch, channels);
             let muted = notifications.is_some_and(|store| store.is_time_muted(ch.id));
             let cached = caches.entry(ch, cx);
@@ -596,6 +603,15 @@ impl DirectSidebar {
         .detach();
         cx.subscribe(&PresenceStore::global(cx), |this, _, event, cx| {
             if matches!(event, PresenceEvent::StatusChanged) {
+                this.refresh_dm_items(cx);
+            }
+        })
+        .detach();
+        cx.subscribe(&AccountStore::global(cx), |this, _, event, cx| {
+            if matches!(
+                event,
+                AccountEvent::StatusUpdated | AccountEvent::AccountLoaded
+            ) {
                 this.refresh_dm_items(cx);
             }
         })

@@ -45,6 +45,9 @@ enum HeaderKind {
     Members,
 }
 
+/// Width of the member list rail, its 1px left border included. The channel header
+/// derives the collapsed search bar from this so its divider sits on that border.
+pub const MEMBER_LIST_WIDTH: f32 = 245.;
 const MEMBER_SKELETON_DELAY_MS: u64 = 400;
 const MEMBER_SKELETON_ROWS: usize = 10;
 
@@ -1306,7 +1309,7 @@ impl Render for MemberListPanel {
             .children(crate::tour::probe(crate::tour::TourAnchor::MemberList))
             .flex()
             .flex_col()
-            .w(px(245.))
+            .w(px(MEMBER_LIST_WIDTH))
             .h_full()
             .flex_shrink_0()
             .border_l_1()

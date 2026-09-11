@@ -12,7 +12,7 @@ use crate::chat::message::{CustomStatusModal, SendTokenModal, TransactionHistory
 use crate::components::compositions::CustomStatusBubble;
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::theme::ActiveTheme;
-use crate::util::user_status::{status_color, status_icon, status_label_key};
+use crate::util::user_status::{status_color, status_glyph, status_label_key};
 
 use mezon_store::TOKEN_DECIMAL_FACTOR as DECIMAL_FACTOR;
 const CURRENCY_SYMBOL: &str = "đồng";
@@ -61,6 +61,7 @@ pub struct FooterProfilePopup {
     display_name: SharedString,
     username: SharedString,
     avatar: SharedString,
+    avatar_raw: SharedString,
     balance: SharedString,
     status: UserPresence,
     user_status: String,
@@ -120,8 +121,12 @@ impl FooterProfilePopup {
         let balance = WalletStore::try_global(cx)
             .and_then(|w| w.read(cx).balance().map(format_balance))
             .unwrap_or_else(|| "0".to_string());
-        let account_sub = AccountStore::try_global(cx)
-            .map(|store| cx.observe(&store, |this, _, cx| this.sync_status(cx)));
+        let account_sub = AccountStore::try_global(cx).map(|store| {
+            cx.observe(&store, |this, _, cx| {
+                this.sync_status(cx);
+                this.sync_avatar(cx);
+            })
+        });
 
         Self {
             focus_handle: cx.focus_handle(),
@@ -130,6 +135,7 @@ impl FooterProfilePopup {
             display_name: SharedString::from(display_name),
             username: SharedString::from(username),
             avatar,
+            avatar_raw: SharedString::from(avatar_raw),
             balance: SharedString::from(balance),
             status: own.presence,
             user_status: own.custom_status,
@@ -140,6 +146,29 @@ impl FooterProfilePopup {
             _copy_user_id_reset: None,
             _account_sub: account_sub,
         }
+    }
+
+    fn sync_avatar(&mut self, cx: &mut Context<Self>) {
+        let raw = AccountStore::try_global(cx)
+            .and_then(|a| {
+                a.read(cx)
+                    .account
+                    .as_ref()
+                    .and_then(|a| a.avatar_url.clone())
+            })
+            .unwrap_or_default();
+        let proxied = if raw.is_empty() {
+            SharedString::default()
+        } else {
+            SharedString::from(crate::util::imgproxy::avatar_url(cx, &raw))
+        };
+        let raw = SharedString::from(raw);
+        if self.avatar == proxied && self.avatar_raw == raw {
+            return;
+        }
+        self.avatar = proxied;
+        self.avatar_raw = raw;
+        cx.notify();
     }
 
     fn sync_status(&mut self, cx: &mut Context<Self>) {
@@ -279,23 +308,51 @@ impl Render for FooterProfilePopup {
                 .h(px(90.))
                 .rounded_full()
                 .bg(bg_card_surface)
-                .child(
-                    Avatar::new()
+                .child({
+                    let mut avatar = Avatar::new()
                         .name(self.display_name.clone())
-                        .src(self.avatar.clone())
-                        .size_px(px(78.)),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .bottom(px(4.))
-                        .right(px(6.))
-                        .size(px(18.))
-                        .rounded_full()
-                        .border_2()
-                        .border_color(bg_card)
-                        .bg(current_status_color),
-                ),
+                        .size_px(px(78.));
+                    if !self.avatar.is_empty() {
+                        avatar = avatar.src(self.avatar.clone());
+                        if !self.avatar_raw.is_empty() && self.avatar_raw != self.avatar {
+                            avatar = avatar.fallback_src(self.avatar_raw.clone());
+                        }
+                    } else if !self.avatar_raw.is_empty() {
+                        avatar = avatar.src(self.avatar_raw.clone());
+                    }
+                    avatar
+                })
+                .children(match self.status {
+                    UserPresence::Idle => Some(
+                        div()
+                            .absolute()
+                            .bottom(px(4.))
+                            .right(px(6.))
+                            .size(px(20.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(bg_card)
+                            .child(status_glyph(
+                                UserPresence::Idle,
+                                px(14.),
+                                current_status_color,
+                            )),
+                    ),
+                    UserPresence::Online | UserPresence::Dnd => Some(
+                        div()
+                            .absolute()
+                            .bottom(px(4.))
+                            .right(px(6.))
+                            .size(px(20.))
+                            .rounded_full()
+                            .border_2()
+                            .border_color(bg_card)
+                            .bg(current_status_color),
+                    ),
+                    UserPresence::Invisible => None,
+                }),
         );
 
         let custom_status_overlay = div()
@@ -454,11 +511,7 @@ impl Render for FooterProfilePopup {
                         .flex_row()
                         .items_center()
                         .gap_3()
-                        .child(
-                            Icon::new(status_icon(self.status))
-                                .size(px(16.))
-                                .text_color(current_status_color),
-                        )
+                        .child(status_glyph(self.status, px(16.), current_status_color))
                         .child(
                             div()
                                 .text_sm()
@@ -524,11 +577,7 @@ impl Render for FooterProfilePopup {
                             .flex_row()
                             .items_center()
                             .gap_3()
-                            .child(
-                                Icon::new(status_icon(value))
-                                    .size(px(16.))
-                                    .text_color(color),
-                            )
+                            .child(status_glyph(value, px(16.), color))
                             .child(div().text_sm().child(tk(status_label_key(value)))),
                     );
                 if has_duration {

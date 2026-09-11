@@ -63,7 +63,6 @@ pub struct ChatLayout {
     voice_grid_page: usize,
     voice_grid_wheel_accum: f32,
     voice_grid_size: Size<Pixels>,
-    voice_show_members: bool,
     voice_show_chat: bool,
     voice_session_key: Option<String>,
     voice_visual: crate::chat::voice::VoiceVisualState,
@@ -528,7 +527,6 @@ impl ChatLayout {
             voice_grid_page: 0,
             voice_grid_wheel_accum: 0.,
             voice_grid_size: Size::default(),
-            voice_show_members: true,
             voice_show_chat: false,
             voice_session_key: None,
             voice_visual: Default::default(),
@@ -2133,10 +2131,9 @@ impl ChatLayout {
         self.dismiss_threads_popover(cx);
         let label = label.to_string();
         let parent = parent_id.parse::<ChannelId>().ok();
-        let (active, active_confirmed) = match ThreadsStore::global(cx)
-            .read(cx)
-            .thread_active(&channel_id.to_string())
-        {
+        let channel_key = channel_id.to_string();
+        let threads = ThreadsStore::global(cx).read(cx);
+        let (active, active_confirmed) = match threads.thread_active(&channel_key) {
             Some(status) => (
                 if status == THREAD_STATUS_ARCHIVED {
                     CHANNEL_ACTIVE_ARCHIVED
@@ -2147,6 +2144,7 @@ impl ChatLayout {
             ),
             None => (CHANNEL_ACTIVE_JOINED, false),
         };
+        let private = threads.thread_channel_private(&channel_key).map(|p| p != 0);
         self.channel_list.update(cx, |list, cx| {
             if let Some(parent) = parent {
                 list.ensure_thread_with_parent_active(
@@ -2156,6 +2154,7 @@ impl ChatLayout {
                     label.clone(),
                     active,
                     active_confirmed,
+                    private,
                     cx,
                 );
             } else {
@@ -2164,6 +2163,7 @@ impl ChatLayout {
                     label.clone(),
                     active,
                     active_confirmed,
+                    private,
                     cx,
                 );
             }
@@ -2449,7 +2449,6 @@ impl ChatLayout {
         };
         if self.voice_session_key != key {
             self.voice_session_key = key;
-            self.voice_show_members = true;
             self.voice_show_chat = false;
             self.voice_grid_page = 0;
             self.voice_grid_wheel_accum = 0.;
@@ -2461,7 +2460,9 @@ impl ChatLayout {
     }
 
     pub(crate) fn toggle_voice_member_strip(&mut self, cx: &mut Context<Self>) {
-        self.voice_show_members = !self.voice_show_members;
+        self.voice_store
+            .clone()
+            .update(cx, |store, cx| store.toggle_member_strip(cx));
         cx.notify();
     }
 
@@ -3019,7 +3020,7 @@ impl ChatLayout {
                     self.voice_strip_width,
                     self.voice_grid_page,
                     self.voice_grid_size,
-                    self.voice_show_members,
+                    self.voice_store.read(cx).member_strip_visible(),
                     show_chat,
                     self.inbox_handle.clone(),
                     &mut self.voice_visual,

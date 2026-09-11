@@ -4,6 +4,7 @@ use anyhow::Result;
 use futures::AsyncReadExt as _;
 use http_client::{AsyncBody, HttpClient, HttpRequestExt as _, RedirectPolicy, http};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use url::Url;
 
 use crate::transport_runtime::{http_client, runtime};
 
@@ -50,6 +51,70 @@ pub fn youtube_poster_fallback(poster_url: &str) -> Option<String> {
         .position(|candidate| *candidate == quality)?;
     let next = YOUTUBE_POSTER_QUALITIES.get(current + 1)?;
     Some(format!("{YOUTUBE_POSTER_BASE}{video_id}/{next}"))
+}
+
+/// `?t=90`, `?t=1m30s` and `?start=90` all mean "start 90 seconds in".
+fn youtube_start_seconds(link: &str) -> u64 {
+    let Ok(url) = Url::parse(link) else {
+        return 0;
+    };
+    let Some((_, raw)) = url
+        .query_pairs()
+        .find(|(key, _)| key == "t" || key == "start")
+    else {
+        return 0;
+    };
+    if let Ok(seconds) = raw.parse::<u64>() {
+        return seconds;
+    }
+    let mut total = 0u64;
+    let mut digits = 0u64;
+    let mut seen_digit = false;
+    for c in raw.chars() {
+        match c {
+            '0'..='9' => {
+                digits = digits
+                    .saturating_mul(10)
+                    .saturating_add((c as u64) - ('0' as u64));
+                seen_digit = true;
+            }
+            'h' | 'H' => {
+                total += digits * 3600;
+                digits = 0;
+            }
+            'm' | 'M' => {
+                total += digits * 60;
+                digits = 0;
+            }
+            's' | 'S' => {
+                total += digits;
+                digits = 0;
+            }
+            _ => return 0,
+        }
+    }
+    if seen_digit { total } else { 0 }
+}
+
+/// Public (no-login) web route that iframes a single YouTube video.
+pub const YOUTUBE_EMBED_ROUTE: &str = "/embed/youtube";
+
+/// A YouTube link opens on the web client's own player page instead of on the
+/// whole youtube.com site — what the reader clicked is the video, not the site
+/// around it.
+///
+/// Returns `None` for every other link, so callers fall back to the link itself.
+pub fn build_youtube_embed_route_url(domain_url: &str, link: &str) -> Option<String> {
+    let video_id = youtube_video_id(link)?;
+    let base = domain_url.trim_end_matches('/');
+    let start = youtube_start_seconds(link);
+    if start > 0 {
+        Some(format!(
+            "{base}{YOUTUBE_EMBED_ROUTE}?v={video_id}&t={start}"
+        ))
+    } else {
+        Some(format!("{base}{YOUTUBE_EMBED_ROUTE}?v={video_id}"))
+    }
 }
 
 pub fn is_youtube_shorts(url: &str) -> bool {
@@ -243,5 +308,42 @@ mod tests {
         );
         assert_eq!(tiktok_poster_from_oembed(br#"{"type":"video"}"#), None);
         assert_eq!(tiktok_poster_from_oembed(b"not json"), None);
+    }
+
+    #[test]
+    fn a_youtube_link_points_at_the_public_embed_route() {
+        assert_eq!(
+            build_youtube_embed_route_url(
+                "https://mezon.ai/",
+                "https://www.youtube.com/watch?v=lHW3fsJQ1sg"
+            )
+            .as_deref(),
+            Some("https://mezon.ai/embed/youtube?v=lHW3fsJQ1sg")
+        );
+    }
+
+    #[test]
+    fn carries_the_start_offset_over_to_the_embed_route() {
+        assert_eq!(
+            build_youtube_embed_route_url("https://mezon.ai", "https://youtu.be/lHW3fsJQ1sg?t=90")
+                .as_deref(),
+            Some("https://mezon.ai/embed/youtube?v=lHW3fsJQ1sg&t=90")
+        );
+        assert_eq!(
+            build_youtube_embed_route_url(
+                "https://mezon.ai",
+                "https://youtu.be/lHW3fsJQ1sg?t=1h2m3s"
+            )
+            .as_deref(),
+            Some("https://mezon.ai/embed/youtube?v=lHW3fsJQ1sg&t=3723")
+        );
+    }
+
+    #[test]
+    fn leaves_every_other_link_alone() {
+        assert_eq!(
+            build_youtube_embed_route_url("https://mezon.ai", "https://www.tiktok.com/@u/video/1"),
+            None
+        );
     }
 }

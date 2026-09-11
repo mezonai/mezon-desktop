@@ -3,9 +3,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, Context, Entity, ListState, MouseButton,
-    MouseDownEvent, SharedString, Subscription, Task, WeakEntity, Window, div, ease_in_out, list,
-    prelude::*, px, relative,
+    Animation, AnimationExt as _, AnyElement, App, Context, DragMoveEvent, Entity, ListState,
+    MouseButton, MouseDownEvent, MouseUpEvent, Pixels, SharedString, Subscription, Task,
+    WeakEntity, Window, div, ease_in_out, list, prelude::*, px, relative,
 };
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
@@ -26,7 +26,15 @@ use crate::components::compositions::channel_row_element::{
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, context_menu_at};
 use crate::theme::{ActiveTheme, Theme};
 
+/// How close to an edge the pointer has to come before the list starts moving under it,
+/// and how far it travels per tick at the far and near end of that zone.
+const AUTOSCROLL_ZONE: f32 = 64.;
+const AUTOSCROLL_MIN_STEP: f32 = 3.;
+const AUTOSCROLL_MAX_STEP: f32 = 18.;
+const AUTOSCROLL_TICK_MS: u64 = 16;
+
 mod app_list_popover;
+mod category_drag;
 mod items;
 pub(crate) mod menu;
 mod skeleton;
@@ -106,6 +114,17 @@ pub struct ChannelSidebar {
     channel_list_handle: Entity<ChannelList>,
     open_menu: Option<OpenMenu>,
     category_menu: Option<CategoryMenu>,
+    /// Set while a category is being dragged, and only for as long as the button is down.
+    dragging_category: bool,
+    /// The clan whose categories are being drawn collapsed for sorting. Outlives the drag on
+    /// purpose: dropping one category usually means moving another, and springing the channels
+    /// back between the two would push the next drop target off screen again. Holding the clan
+    /// rather than a flag means switching clans leaves it behind, which is what someone who
+    /// jumped elsewhere with the keyboard expects. Only changes how the list is drawn.
+    sort_collapsed: Option<ClanId>,
+    /// How far to move the list each frame while the pointer sits in an edge zone.
+    autoscroll_step: Option<Pixels>,
+    _autoscroll: Option<Task<()>>,
     pub(super) clan_menu_open: bool,
     app_list_open: bool,
     app_list_apps: Vec<AppChannelSlot>,
@@ -361,6 +380,10 @@ impl ChannelSidebar {
             channel_list_handle,
             open_menu: None,
             category_menu: None,
+            dragging_category: false,
+            sort_collapsed: None,
+            autoscroll_step: None,
+            _autoscroll: None,
             clan_menu_open: false,
             app_list_open: false,
             app_list_apps: Vec::new(),
@@ -386,6 +409,107 @@ impl ChannelSidebar {
         cx.set_global(ActiveChannelSidebar(cx.entity().downgrade()));
         this.rebuild_items(cx);
         this
+    }
+
+    fn begin_category_drag(&mut self, cx: &mut Context<Self>) {
+        self.dragging_category = true;
+        if self.sort_collapsed == self.active_clan_id {
+            return;
+        }
+        self.sort_collapsed = self.active_clan_id;
+        self.rebuild_items(cx);
+        cx.notify();
+    }
+
+    /// The button came up. The collapsed drawing stays — [`clear_sort_collapse`] undoes that,
+    /// once the pointer has left and there is plainly no more sorting going on.
+    fn end_category_drag(&mut self, cx: &mut Context<Self>) {
+        if !self.dragging_category {
+            return;
+        }
+        self.dragging_category = false;
+        self.stop_autoscroll();
+        cx.notify();
+    }
+
+    fn clear_sort_collapse(&mut self, cx: &mut Context<Self>) {
+        if self.sort_collapsed.is_none() || self.dragging_category {
+            return;
+        }
+        self.sort_collapsed = None;
+        self.rebuild_items(cx);
+        cx.notify();
+    }
+
+    fn stop_autoscroll(&mut self) {
+        self.autoscroll_step = None;
+        self._autoscroll = None;
+    }
+
+    /// Move the list while the pointer rests near an edge, so a category can be dragged past
+    /// what the viewport happens to be showing. Drag-move events stop arriving the moment the
+    /// pointer stops, which is exactly when someone holding at the edge wants it to keep
+    /// going, so the scrolling runs off a timer and reads the speed this leaves behind.
+    fn drag_autoscroll(
+        &mut self,
+        event: &DragMoveEvent<category_drag::CategoryReorderDrag>,
+        cx: &mut Context<Self>,
+    ) {
+        let bounds = event.bounds;
+        let y = event.event.position.y;
+        let from_top = y - bounds.top();
+        let from_bottom = bounds.bottom() - y;
+        let zone = px(AUTOSCROLL_ZONE);
+        let ramp = |gap: Pixels| {
+            let closeness = 1.0 - (f32::from(gap) / AUTOSCROLL_ZONE).clamp(0.0, 1.0);
+            px(AUTOSCROLL_MIN_STEP + (AUTOSCROLL_MAX_STEP - AUTOSCROLL_MIN_STEP) * closeness)
+        };
+        // `scroll_by` counts from the top of the content, so down the list is positive.
+        let step = if from_top < zone {
+            -ramp(from_top)
+        } else if from_bottom < zone {
+            ramp(from_bottom)
+        } else {
+            self.stop_autoscroll();
+            return;
+        };
+
+        let was_idle = self.autoscroll_step.is_none();
+        self.autoscroll_step = Some(step);
+        if !was_idle {
+            return;
+        }
+        self._autoscroll = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(AUTOSCROLL_TICK_MS))
+                    .await;
+                let keep_going = this.update(cx, |this, cx| {
+                    let Some(step) = this.autoscroll_step.filter(|_| this.dragging_category) else {
+                        return false;
+                    };
+                    let before = this.list_state.logical_scroll_top();
+                    this.list_state.scroll_by(step);
+                    let after = this.list_state.logical_scroll_top();
+                    if before.item_ix == after.item_ix
+                        && before.offset_in_item == after.offset_in_item
+                    {
+                        // Already against the end of the list. Nothing moved, so nothing needs
+                        // repainting; stand down and let the next drag-move start it again.
+                        this.autoscroll_step = None;
+                        return false;
+                    }
+                    // The repaint gpui already does each frame for the drag preview does not
+                    // pick this up — without the notify the offset moves and the list stays
+                    // where it was.
+                    cx.notify();
+                    true
+                });
+                if !matches!(keep_going, Ok(true)) {
+                    break;
+                }
+            }
+        }));
     }
 
     fn rebuild_items(&mut self, cx: &mut Context<Self>) -> bool {
@@ -460,8 +584,20 @@ impl ChannelSidebar {
                 !self.loaded_clans.contains(clan_id)
             } else {
                 self.loaded_clans.insert(*clan_id);
+                let mut sortable_categories = 0usize;
                 for category in categories {
                     let is_favorites = category.id == FAVOR_CATE_ID;
+                    // Advance before the visibility check: an empty category the sidebar hides
+                    // still occupies a slot in the order the store persists. The id has to
+                    // parse for the same reason — `ChannelList::move_category` counts exactly
+                    // the categories it can send to the server, and an index that means one
+                    // category here and another there moves the wrong one.
+                    let sortable = !is_favorites && category.id.parse::<i64>().is_ok();
+                    let sort_index = sortable.then(|| {
+                        let index = sortable_categories;
+                        sortable_categories += 1;
+                        index
+                    });
                     let hide_category = if is_favorites {
                         !category.channels.iter().any(|ch| ch.visible_in_sidebar())
                     } else {
@@ -470,7 +606,11 @@ impl ChannelSidebar {
                     if hide_category {
                         continue;
                     }
-                    let collapsed = channels.is_category_collapsed(*clan_id, &category.id);
+                    // Collapse the whole list while a category is in flight: every drop
+                    // target then fits on screen instead of being pushed off by expanded
+                    // channels. Drawing only — nobody's saved collapsed state is touched.
+                    let collapsed = self.sort_collapsed == Some(*clan_id)
+                        || channels.is_category_collapsed(*clan_id, &category.id);
                     let name = if is_favorites {
                         mezon_i18n::t(&locale, "channelList.favoriteChannel").to_string()
                     } else {
@@ -482,6 +622,7 @@ impl ChannelSidebar {
                         name_upper: name.to_uppercase(),
                         name,
                         collapsed,
+                        sort_index,
                     });
                     if !collapsed {
                         let ch_slice: Vec<_> = category
@@ -1046,6 +1187,7 @@ impl Render for ChannelSidebar {
         });
 
         div()
+            .id("channel-sidebar")
             .relative()
             .children(crate::tour::probe(crate::tour::TourAnchor::ChannelList))
             .flex()
@@ -1053,6 +1195,28 @@ impl Render for ChannelSidebar {
             .w_full()
             .h_full()
             .bg(theme.surfaces.direct_message.ramp())
+            .when(self.dragging_category, |root| {
+                // A drag ends on a row, on empty space, or outside the sidebar entirely, and
+                // only the release is common to all three, so that is what ends it — through
+                // whichever of the two arrives.
+                let on_row = cx.listener(|this: &mut Self, _: &MouseUpEvent, _, cx| {
+                    this.end_category_drag(cx);
+                });
+                let outside = cx.listener(|this: &mut Self, _: &MouseUpEvent, _, cx| {
+                    this.end_category_drag(cx);
+                });
+                root.on_mouse_up(MouseButton::Left, on_row)
+                    .on_mouse_up_out(MouseButton::Left, outside)
+            })
+            .when(self.sort_collapsed.is_some(), |root| {
+                // Sorting is plainly over once the pointer has left the sidebar, so that is
+                // when the channels come back.
+                root.on_hover(cx.listener(|this: &mut Self, hovered: &bool, _, cx| {
+                    if !*hovered {
+                        this.clear_sort_collapse(cx);
+                    }
+                }))
+            })
             .child({
                 let sidebar = sidebar.clone();
                 let sidebar_for_menu = sidebar_for_clan_menu.clone();
@@ -1157,6 +1321,11 @@ impl Render for ChannelSidebar {
                     .flex_1()
                     .min_h_0()
                     .relative()
+                    .on_drag_move(cx.listener(
+                        |this, event: &DragMoveEvent<category_drag::CategoryReorderDrag>, _, cx| {
+                            this.drag_autoscroll(event, cx);
+                        },
+                    ))
                     .child(list_element)
                     .children(skeleton_overlay)
                     .children(mention_button)
@@ -1995,6 +2164,7 @@ fn render_sidebar_item(
             name,
             name_upper,
             collapsed,
+            sort_index,
         } => {
             let category_id = id.clone();
             let category_name = name_upper.clone();
@@ -2088,11 +2258,93 @@ fn render_sidebar_item(
                             ),
                     )
                 })
-                .on_click(on_category_click(
-                    channel_list_handle.clone(),
-                    clan_id_for_toggle,
-                    category_id.clone(),
-                ))
+                .on_click({
+                    // While the list is drawn collapsed for sorting, a plain click has to put
+                    // it back first — otherwise it toggles a state nobody can see and the
+                    // change only surfaces later, when the pointer leaves.
+                    let toggle = on_category_click(
+                        channel_list_handle.clone(),
+                        clan_id_for_toggle,
+                        category_id.clone(),
+                    );
+                    let sidebar = sidebar.clone();
+                    move |event: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+                        if let Some(view) = sidebar.upgrade() {
+                            view.update(cx, |this, cx| this.clear_sort_collapse(cx));
+                        }
+                        toggle(event, window, cx);
+                    }
+                })
+                .when_some(*sort_index, |header, index| {
+                    // Reordering categories is per-user data on the server, so every member
+                    // may do it — there is no permission to check here.
+                    let drag_name = SharedString::from(name.clone());
+                    let channel_list = channel_list_handle.clone();
+                    let sidebar_for_drag = sidebar.clone();
+                    let sidebar_for_drop = sidebar.clone();
+                    header
+                        .on_drag(
+                            category_drag::CategoryReorderDrag {
+                                index,
+                                name: drag_name,
+                            },
+                            move |drag, _, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(view) = sidebar_for_drag.upgrade() {
+                                    view.update(cx, |this, cx| this.begin_category_drag(cx));
+                                }
+                                let name = drag.name.clone();
+                                cx.new(|_| category_drag::CategoryDragPreview { name })
+                            },
+                        )
+                        .drag_over::<category_drag::CategoryReorderDrag>(
+                            move |style, drag, _, _| {
+                                if drag.index == index {
+                                    style
+                                } else if drag.index > index {
+                                    style.border_t_2().border_color(gpui::rgb(
+                                        category_drag::DRAG_INDICATOR_COLOR,
+                                    ))
+                                } else {
+                                    style.border_b_2().border_color(gpui::rgb(
+                                        category_drag::DRAG_INDICATOR_COLOR,
+                                    ))
+                                }
+                            },
+                        )
+                        .on_drop({
+                            let drop_category_id = category_id.clone();
+                            move |drag: &category_drag::CategoryReorderDrag, _, cx| {
+                                if let Some(view) = sidebar_for_drop.upgrade() {
+                                    view.update(cx, |this, cx| this.end_category_drag(cx));
+                                }
+                                let from = drag.index;
+                                if from == index {
+                                    // Two pixels of movement is all it takes for gpui to call
+                                    // a press a drag, so a click with an unsteady hand arrives
+                                    // here instead of at `on_click` — and swallowing it would
+                                    // mean categories that sometimes refuse to collapse. A
+                                    // category dropped on itself is that click. The clan rail
+                                    // reads its own no-op drop the same way.
+                                    if let Some(view) = sidebar_for_drop.upgrade() {
+                                        view.update(cx, |this, cx| this.clear_sort_collapse(cx));
+                                    }
+                                    channel_list.update(cx, |list, cx| {
+                                        list.toggle_category(
+                                            clan_id_for_toggle,
+                                            &drop_category_id,
+                                            cx,
+                                        );
+                                    });
+                                    return;
+                                }
+                                channel_list.update(cx, |list, cx| {
+                                    list.move_category(clan_id_for_toggle, from, index, cx)
+                                        .detach();
+                                });
+                            }
+                        })
+                })
                 .on_mouse_down(MouseButton::Right, {
                     let sidebar = sidebar.clone();
                     let category_id = category_id.clone();
@@ -2524,6 +2776,7 @@ mod tests {
             name_upper: id.to_uppercase(),
             id: id.to_string(),
             collapsed: false,
+            sort_index: Some(0),
         }
     }
 
