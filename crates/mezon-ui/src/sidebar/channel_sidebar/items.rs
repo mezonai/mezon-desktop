@@ -43,6 +43,9 @@ pub(super) enum SidebarItem {
         name_upper: String,
         id: String,
         collapsed: bool,
+        /// Position among the categories a user may reorder, in draw order. `None` for
+        /// Favourites, which is pinned to the top and cannot be dragged or dropped onto.
+        sort_index: Option<usize>,
     },
     Channel {
         elem_id: SharedString,

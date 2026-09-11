@@ -2876,6 +2876,34 @@ impl ChannelList {
         })
     }
 
+    /// Move one category to another slot and persist the whole order.
+    ///
+    /// Both positions index the clan's categories in the order they are stored, with
+    /// Favourites left out — it is pinned to the top and never moves. The order is sent for
+    /// every category, not just the moved one: the server stores a per-user order and reads
+    /// it back with `COALESCE(order_category, 0)`, so leaving a category unset would let it
+    /// tie with the others and land wherever the database felt like.
+    pub fn move_category(
+        &mut self,
+        clan_id: ClanId,
+        from: usize,
+        to: usize,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let mut ids: Vec<i64> = self
+            .categories_for_clan(clan_id)
+            .iter()
+            .filter(|category| category.id != FAVOR_CATE_ID)
+            .filter_map(|category| category.id.parse::<i64>().ok())
+            .collect();
+        if from == to || from >= ids.len() || to >= ids.len() {
+            return Task::ready(Ok(()));
+        }
+        let moved = ids.remove(from);
+        ids.insert(to, moved);
+        self.update_categories_order(clan_id, &ids, cx)
+    }
+
     pub fn create_category(
         &mut self,
         clan_id: ClanId,
