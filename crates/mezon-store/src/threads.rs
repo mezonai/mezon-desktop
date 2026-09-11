@@ -401,18 +401,31 @@ impl ThreadsStore {
         cx.notify();
     }
 
+    #[cfg(test)]
+    pub(crate) fn simulate_active_channel_changed_for_test(
+        &mut self,
+        channel_id: Option<ChannelId>,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_active_channel_changed(channel_id, cx);
+    }
+
     pub fn thread_active(&self, channel_id: &str) -> Option<i32> {
+        self.find_thread(channel_id).map(|t| t.active)
+    }
+
+    pub fn thread_channel_private(&self, channel_id: &str) -> Option<i32> {
+        self.find_thread(channel_id).map(|t| t.channel_private)
+    }
+
+    fn find_thread(&self, channel_id: &str) -> Option<&ThreadSummary> {
         self.threads
             .iter()
             .find(|t| t.channel_id == channel_id)
-            .map(|t| t.active)
             .or_else(|| {
-                self.search_results.as_ref().and_then(|results| {
-                    results
-                        .iter()
-                        .find(|t| t.channel_id == channel_id)
-                        .map(|t| t.active)
-                })
+                self.search_results
+                    .as_ref()
+                    .and_then(|results| results.iter().find(|t| t.channel_id == channel_id))
             })
     }
 

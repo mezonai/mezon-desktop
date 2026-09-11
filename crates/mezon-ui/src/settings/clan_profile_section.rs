@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crate::components::compositions::CustomStatusBubble;
 use crate::components::primitives::{
-    Avatar, Button as GpuiButton, ButtonVariants, Dropdown, DropdownTriggerStyle, Icon, Input,
+    Avatar, Button as GpuiButton, ButtonVariants, Dropdown, DropdownTriggerStyle, Input,
     InputEvent, InputState, Label, h_flex, v_flex,
 };
 use gpui::{
@@ -12,7 +12,6 @@ use gpui::{
 use mezon_store::{AccountEvent, AccountStore, ClanList, Settings};
 
 use super::edit_avatar::EditAvatar;
-use super::profile_page::profile_status;
 use crate::app::shell::Shell;
 use crate::theme::{ActiveTheme, Theme};
 use crate::{image_cache::LruImageCache, util::avatar_color::spawn_banner_color_task};
@@ -394,9 +393,13 @@ impl Render for ClanProfileSection {
             .as_ref()
             .map_or("".into(), |s| s.nick_name.clone());
 
-        let avatar_url = self.profile.as_ref().and_then(|s| s.avatar_url.clone());
-        let avatar_display = avatar_url
+        let avatar_raw = self
+            .profile
+            .as_ref()
+            .and_then(|s| s.avatar_url.clone())
             .or_else(|| self.user_avatar_url.clone())
+            .filter(|url| !url.is_empty());
+        let avatar_display = avatar_raw
             .as_ref()
             .map(|url| SharedString::from(crate::util::imgproxy::profile_url(cx, url.as_ref())));
 
@@ -428,6 +431,7 @@ impl Render for ClanProfileSection {
             &locale,
             &nick_name,
             avatar_display,
+            avatar_raw,
             &self.display_name,
             &self.username,
             &self.status,
@@ -692,6 +696,7 @@ impl ClanProfileSection {
         locale: &str,
         nick_name: &SharedString,
         avatar_url: Option<SharedString>,
+        avatar_raw: Option<SharedString>,
         display_name: &SharedString,
         username: &SharedString,
         status: &SharedString,
@@ -704,7 +709,10 @@ impl ClanProfileSection {
         } else {
             nick_name.clone()
         };
-        let (status_icon, status_color) = profile_status(status, theme);
+        let status_presence = mezon_store::UserPresence::from_status(status);
+        let show_avatar_status = status_presence.is_visible();
+        let status_color = crate::util::user_status::avatar_status_color(status_presence)
+            .unwrap_or_else(|| crate::util::user_status::status_color(status_presence, theme));
         let banner_color = banner_color
             .map(gpui::Hsla::from)
             .unwrap_or(theme.tokens.bg_secondary.into());
@@ -778,27 +786,37 @@ impl ClanProfileSection {
                             .rounded_full()
                             .bg(theme.bg_secondary)
                             .p(px(6.))
-                            .child(
-                                Avatar::new()
-                                    .when_some(avatar_url, |av, url| av.src(url))
+                            .child({
+                                let mut avatar = Avatar::new()
                                     .name(display_label)
                                     .size_px(px(80.))
-                                    .image_cache(avatar_image_cache),
-                            )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .right(px(5.))
-                                    .bottom(px(5.))
-                                    .p(px(2.))
-                                    .rounded_full()
-                                    .bg(theme.bg_secondary)
-                                    .child(
-                                        Icon::new(status_icon)
-                                            .size(px(15.))
-                                            .text_color(status_color),
-                                    ),
-                            )
+                                    .image_cache(avatar_image_cache);
+                                if let Some(url) = avatar_url {
+                                    avatar = avatar.src(url.clone());
+                                    if let Some(raw) = avatar_raw
+                                        && raw != url
+                                    {
+                                        avatar = avatar.fallback_src(raw);
+                                    }
+                                }
+                                avatar
+                            })
+                            .when(show_avatar_status, |avatar| {
+                                avatar.child(
+                                    div()
+                                        .absolute()
+                                        .right(px(5.))
+                                        .bottom(px(5.))
+                                        .p(px(2.))
+                                        .rounded_full()
+                                        .bg(theme.bg_secondary)
+                                        .child(crate::util::user_status::avatar_status_mark(
+                                            status_presence,
+                                            px(15.),
+                                            status_color,
+                                        )),
+                                )
+                            })
                             .when(!custom_status.is_empty(), |avatar| {
                                 avatar.child(
                                     div()

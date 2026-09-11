@@ -564,7 +564,12 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     let (url_tx, mut url_rx) = futures::channel::mpsc::unbounded::<String>();
     let (mcp_cmd_tx, mcp_cmd_rx) = futures::channel::mpsc::unbounded::<mezon_mcp::McpCommand>();
 
-    let mcp_runtime = match mcp::McpRuntime::start(api.clone(), mcp_cmd_tx) {
+    let mcp_launch = mcp::McpLaunch {
+        enabled: settings.mcp_enabled,
+        read_only: settings.mcp_read_only,
+        port: settings.mcp_port,
+    };
+    let mcp_runtime = match mcp::McpRuntime::start(api.clone(), mcp_cmd_tx, mcp_launch) {
         Ok(runtime) => Some((runtime, mcp_cmd_rx)),
         Err(error) => {
             tracing::warn!("MCP control server disabled: {error}");
@@ -1156,8 +1161,11 @@ fn register_mcp_server_hooks(cx: &mut App, controller: Arc<mezon_mcp::McpControl
             start: Arc::new({
                 let controller = controller.clone();
                 let runtime = runtime.clone();
-                move |read_only| {
-                    runtime.block_on(controller.start(read_only, None))?;
+                move |read_only, port| {
+                    if let Some(port) = port {
+                        controller.set_preferred_port(port);
+                    }
+                    runtime.block_on(controller.start(read_only, port))?;
                     Ok(mcp_status_snapshot(&runtime, &controller))
                 }
             }),
@@ -1168,6 +1176,10 @@ fn register_mcp_server_hooks(cx: &mut App, controller: Arc<mezon_mcp::McpControl
                     runtime.block_on(controller.stop())?;
                     Ok(mcp_status_snapshot(&runtime, &controller))
                 }
+            }),
+            set_port: Arc::new({
+                let controller = controller.clone();
+                move |port| controller.set_preferred_port(port)
             }),
         },
         cx,

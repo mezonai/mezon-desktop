@@ -220,15 +220,45 @@ fn render_embed_text_input(
         Some(state) => container
             .child(TextAreaField::new(state))
             .into_any_element(),
+        // The entity is created by the deferred reconcile, so the first frame
+        // after a message edit paints this stand-in. Give it the geometry AND
+        // the text a real `TextArea` would show, or the swap on the next frame
+        // reads as a flash.
         None => container
             .child(
                 div()
                     .h(px(height))
                     .w_full()
+                    .flex()
+                    // A `TextArea` lays its first line out at the top with py(8),
+                    // so only a one-line box centres; a textarea must not shift
+                    // its text on the swap either.
+                    .when(input.multiline, |el| el.items_start().py(px(8.)))
+                    .when(!input.multiline, |el| el.items_center())
+                    .px_3()
                     .rounded(px(4.))
-                    .bg(ctx.theme.tokens.bg_markdown_code),
+                    .bg(ctx.theme.tokens.bg_markdown_code)
+                    .text_size(px(14.))
+                    .when(input.default_value.is_empty(), |el| {
+                        el.text_color(ctx.theme.tokens.text_theme_primary)
+                            .opacity(0.5)
+                            .child(placeholder_with_required_mark(input))
+                    })
+                    .when(!input.default_value.is_empty(), |el| {
+                        el.text_color(ctx.theme.tokens.text_theme_message)
+                            .child(input.default_value.clone())
+                    }),
             )
             .into_any_element(),
+    }
+}
+
+/// The placeholder a `TextArea` built from this field would render, `*` included.
+fn placeholder_with_required_mark(input: &EmbedTextInput) -> SharedString {
+    if input.required {
+        SharedString::from(format!("{}*", input.placeholder))
+    } else {
+        input.placeholder.clone()
     }
 }
 

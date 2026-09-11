@@ -965,7 +965,13 @@ fn dm_peer_presence(dm: &mezon_store::DirectChannel, cx: &App) -> DmAvatarPresen
     dm.peer_user_id
         .filter(|_| dm.kind != DirectKind::Group)
         .zip(mezon_store::PresenceStore::try_global(cx))
-        .map(|(user_id, presence)| presence.read(cx).dm_avatar_presence(user_id, dm.online))
+        .map(|(user_id, presence)| {
+            presence.read(cx).dm_avatar_presence(
+                user_id,
+                dm.online,
+                mezon_store::current_user_presence(cx),
+            )
+        })
         .unwrap_or(DmAvatarPresence::None)
 }
 
@@ -1005,6 +1011,7 @@ pub struct ChatHeader {
     _friend_subscribe: Subscription,
     _group_members_observe: Subscription,
     _presence_subscribe: Subscription,
+    _account_subscribe: Subscription,
 }
 
 impl ChatHeader {
@@ -1066,6 +1073,18 @@ impl ChatHeader {
                 }
             },
         );
+        let _account_subscribe = cx.subscribe(
+            &mezon_store::AccountStore::global(cx),
+            |this, _, event, cx| {
+                if matches!(
+                    event,
+                    mezon_store::AccountEvent::StatusUpdated
+                        | mezon_store::AccountEvent::AccountLoaded
+                ) {
+                    this.refresh_dm_presence(cx);
+                }
+            },
+        );
         Self {
             name: SharedString::default(),
             icon: None,
@@ -1100,6 +1119,7 @@ impl ChatHeader {
             _friend_subscribe,
             _group_members_observe,
             _presence_subscribe,
+            _account_subscribe,
         }
     }
 

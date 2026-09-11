@@ -327,6 +327,7 @@ impl Render for AccountPage {
             SharedString::from(mezon_i18n::t(&locale, "setting.account.setPhone"))
         };
 
+        let avatar_raw = account.avatar_url.clone().unwrap_or_default();
         let avatar_url = SharedString::from(Self::avatar_source(account.avatar_url.as_deref(), cx));
         let qr_account = account.clone();
         let qr_origin = AppConfig::global(cx).domain_url.clone();
@@ -581,15 +582,22 @@ impl Render for AccountPage {
                             .rounded_full()
                             .bg(theme.bg_primary)
                             .p(px(AVATAR_RING))
-                            .child(
-                                Avatar::new()
-                                    .when(!avatar_url.is_empty(), |avatar| {
-                                        avatar.src(avatar_url.clone())
-                                    })
+                            .child({
+                                let mut avatar = Avatar::new()
                                     .name(display_name)
                                     .size_px(px(AVATAR_SIZE))
-                                    .image_cache(self.avatar_image_cache.clone()),
-                            ),
+                                    .image_cache(self.avatar_image_cache.clone());
+                                if !avatar_url.is_empty() {
+                                    avatar = avatar.src(avatar_url.clone());
+                                    if !avatar_raw.is_empty() && avatar_raw.as_str() != avatar_url.as_ref()
+                                    {
+                                        avatar = avatar.fallback_src(SharedString::from(avatar_raw));
+                                    }
+                                } else if !avatar_raw.is_empty() {
+                                    avatar = avatar.src(SharedString::from(avatar_raw));
+                                }
+                                avatar
+                            }),
                     ),
             )
             .into_any_element()

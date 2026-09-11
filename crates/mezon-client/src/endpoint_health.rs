@@ -262,4 +262,31 @@ mod tests {
             "sock.example.com:4433"
         );
     }
+
+    fn node(id: i32, host: &str, port: u16) -> RealtimeEndpoint {
+        RealtimeEndpoint {
+            id,
+            host: host.into(),
+            port,
+        }
+    }
+
+    /// This predicate decides whether a healthy-endpoint answer reconnects at once or waits out
+    /// the reconnect backoff. Reading it wrong is expensive both ways: a false "moved" spends a
+    /// handshake the backoff had already paid for, and proto-server admits one per second per
+    /// (IP, user); a false "same" leaves the client on a node the gateway wanted it off.
+    #[test]
+    fn a_node_is_the_same_node_by_where_it_is_not_by_which_id_it_was_given() {
+        assert!(node(1, "sock.mezon.ai", 443).is_same_node(&node(1, "sock.mezon.ai", 443)));
+        // The gateway re-issues ids freely; the same address is still the same node.
+        assert!(node(1, "sock.mezon.ai", 443).is_same_node(&node(7, "sock.mezon.ai", 443)));
+        assert!(node(0, "sock.mezon.ai", 443).is_same_node(&node(9, "sock.mezon.ai", 443)));
+    }
+
+    #[test]
+    fn a_different_host_or_port_is_a_move() {
+        assert!(!node(1, "sock.mezon.ai", 443).is_same_node(&node(1, "sock2.mezon.ai", 443)));
+        assert!(!node(1, "sock.mezon.ai", 443).is_same_node(&node(1, "sock.mezon.ai", 7349)));
+        assert!(!node(1, "127.0.0.1", 4433).is_same_node(&node(1, "127.0.0.1", 4999)));
+    }
 }

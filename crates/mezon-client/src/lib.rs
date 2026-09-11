@@ -12,7 +12,6 @@ pub mod image_disk_cache;
 pub mod inbox;
 pub mod keychain;
 pub mod network_monitor;
-pub mod network_probe;
 pub mod notification_setting;
 pub mod ogp;
 pub mod search_message;
@@ -53,9 +52,6 @@ pub use inbox::{
     topic_reply_preview, topics_from_list,
 };
 pub use network_monitor::NetworkMonitor;
-pub use network_probe::{
-    RECONNECT_NETWORK_PROBE_TIMEOUT, favicon_probe_url, probe_network_reachability,
-};
 pub use notification_setting::ChannelNotificationSetting;
 pub use notification_setting::NotificationOverride;
 pub use ogp::{OgpResult, fetch_invite_preview, fetch_ogp};
@@ -77,9 +73,9 @@ pub use transport::{
     ApiCanvas, ApiCanvasDetail, ApiCategoryDesc, ApiChannelApp, ApiChannelAttachment,
     ApiChannelDesc, ApiFriend, ApiPinMessage, ApiStatusError, ApiThreadDesc, ApiVoiceChannelUser,
     CANVAS_LIST_LIMIT, CANVAS_STATUS_CREATED, CANVAS_STATUS_UPDATE, FACEBOOK_LINK_MARKDOWN_KIND,
-    HttpFallbackSession, LINK_MARKDOWN_KIND, RegistrationPasswordError, TIKTOK_LINK_MARKDOWN_KIND,
-    UpdateChannelDescParams, YOUTUBE_LINK_MARKDOWN_KIND, api_status_from_error,
-    is_channel_limit_api_error, is_link_markdown_kind, link_markdown_kind,
+    HttpFallbackSession, LINK_MARKDOWN_KIND, RegistrationPasswordError, SessionRefreshRejected,
+    TIKTOK_LINK_MARKDOWN_KIND, UpdateChannelDescParams, YOUTUBE_LINK_MARKDOWN_KIND,
+    api_status_from_error, is_channel_limit_api_error, is_link_markdown_kind, link_markdown_kind,
     parse_search_attachment_field, parse_search_mentions_field,
 };
 pub use transport_adapter::TransportAdapter;

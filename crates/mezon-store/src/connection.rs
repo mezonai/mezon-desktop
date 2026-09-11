@@ -14,8 +14,7 @@ use gpui::{
 use mezon_client::{
     AppApi, ConnectionStatus, DEFAULT_WS_HOST, EndpointHealth, HealthyEndpointReason,
     HealthyEndpointSession, HealthyEndpointStatusError, HttpFallbackSession, MezonClient,
-    NetworkMonitor, RECONNECT_NETWORK_PROBE_TIMEOUT, RealtimeEndpoint, RealtimeEvent, Session,
-    TransportClient, favicon_probe_url, keychain, probe_network_reachability,
+    NetworkMonitor, RealtimeEndpoint, RealtimeEvent, Session, TransportClient, keychain,
 };
 use parking_lot::Mutex;
 
@@ -27,8 +26,17 @@ const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1
 const CONNECT_CONFIRM_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const RECONNECT_BACKOFF_CAP_SECS: u64 = 60;
-const NETWORK_PROBE_RETRY_MIN_SECS: u64 = 1;
-const NETWORK_PROBE_RETRY_CAP_SECS: u64 = 15;
+/// How long to leave `SessionRefresh` alone after the server throttled it, and the ceiling that
+/// pacing doubles to. The reconnect ladder retries far faster than this (1s doubling to 60s), and a
+/// JWT-only session asks for a fresh token on every rung, so without a separate cooldown one
+/// throttled client keeps calling ~6 times a minute — and every client does it at once, which is
+/// what holds the shared limiter bucket shut. Pacing from a minute up to five keeps a stale JWT
+/// recoverable without feeding the storm.
+/// Rotate the refresh token once it is this close to expiring. Prod issues it for thirty days, so
+/// a week of runway leaves many launches in which to catch it while costing nothing in between.
+const REFRESH_TOKEN_ROTATE_WITHIN_SECS: u64 = 7 * 24 * 60 * 60;
+const SESSION_REFRESH_THROTTLED_SECS: u64 = 60;
+const SESSION_REFRESH_THROTTLED_CAP_SECS: u64 = 300;
 const HEALTHY_ENDPOINT_RETRY_SECS: u64 = 5;
 const HEALTHY_ENDPOINT_SETTLED_SECS: u64 = 60;
 const HEALTHY_ENDPOINT_RETRY_CAP_SECS: u64 = 60;
@@ -70,6 +78,8 @@ enum ConnectOutcome {
 enum RefreshVerdict {
     Renewed,
     Transient,
+    /// The server answered 429/503: it is asking for fewer calls, not reporting a dead session.
+    Throttled,
 }
 
 #[derive(Clone)]
@@ -172,7 +182,15 @@ impl ConnectionStore {
             move |_, _, _| wake.notify_one()
         });
 
-        let network = NetworkMonitor::new();
+        // The OS signal drives the "no internet" toast and nothing else. Reconnect reads the
+        // connect outcome instead: an `Unreachable` is the network answering, and a refusal means
+        // we reached something. Keeping it out of that decision is deliberate — twice today a
+        // misread flag would otherwise have parked the app.
+        let network = NetworkMonitor::for_host(
+            &AppConfig::try_global(cx)
+                .map(|cfg| cfg.api_host.clone())
+                .unwrap_or_default(),
+        );
         let online = network.is_online();
         let online_watch = {
             let wake = wake.clone();
@@ -213,9 +231,6 @@ impl ConnectionStore {
         let wake_handle = wake.clone();
         let connection_generation_handle = connection_generation.clone();
 
-        let probe_url = AppConfig::try_global(cx)
-            .map(|cfg| favicon_probe_url(&cfg.redirect_uri))
-            .unwrap_or_else(|| favicon_probe_url(""));
         let tcp_default_port = AppConfig::try_global(cx).and_then(|cfg| cfg.tcp_port);
         let configured_api_base = AppConfig::try_global(cx).map(configured_api_base_url);
         let auth_client = crate::login::LoginStore::global(cx).read(cx).client();
@@ -235,7 +250,6 @@ impl ConnectionStore {
             let mut retry_backoff_secs = 1u64;
             let mut consecutive_failures = 0u32;
             let mut connect_ack_rx = connect_ack_rx;
-            let mut network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
             let mut refreshed_this_run = false;
             let mut gateway_refusals = 0u32;
             let mut jwt_refusals = 0u32;
@@ -248,6 +262,7 @@ impl ConnectionStore {
             let mut pending_endpoint_refresh: Option<EndpointRefreshRequest> = None;
             let mut last_endpoint_refresh_at: Option<Instant> = None;
             let mut healthy_endpoint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+            let mut refresh_pacer = RefreshPacer::new();
 
             loop {
                 let (session, is_connecting) = cx.update(|cx| match auth_state.read(cx).clone() {
@@ -279,7 +294,6 @@ impl ConnectionStore {
                     }
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
-                    network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
                     gateway_refusals = 0;
                     jwt_refusals = 0;
                     probed_this_outage = false;
@@ -324,7 +338,9 @@ impl ConnectionStore {
                         request.endpoint.id,
                         request.reason as i32
                     );
-                    if healthy_endpoint_credential(&session).is_none() {
+                    if healthy_endpoint_credential(&session).is_none()
+                        && refresh_pacer.may_refresh(Instant::now())
+                    {
                         let (renewed, verdict) = refresh_jwt_within(
                             &exec,
                             &api,
@@ -335,6 +351,7 @@ impl ConnectionStore {
                         )
                         .await;
                         session = renewed;
+                        refresh_pacer.record(verdict, Instant::now());
                         if verdict == RefreshVerdict::Renewed {
                             refreshed_this_run = true;
                         }
@@ -359,6 +376,7 @@ impl ConnectionStore {
                     if response.as_ref().is_err_and(healthy_endpoint_auth_rejected) {
                         if credential == HealthyEndpointCredential::SessionId
                             && !jwt_is_fresh(&session)
+                            && refresh_pacer.may_refresh(Instant::now())
                         {
                             let (renewed, verdict) = refresh_jwt_within(
                                 &exec,
@@ -370,6 +388,7 @@ impl ConnectionStore {
                             )
                             .await;
                             session = renewed;
+                            refresh_pacer.record(verdict, Instant::now());
                             if verdict == RefreshVerdict::Renewed {
                                 refreshed_this_run = true;
                             }
@@ -433,6 +452,17 @@ impl ConnectionStore {
                                         request.endpoint.label()
                                     );
                                 }
+                                // The gateway kept us where we were, so nothing about the next
+                                // attempt has changed. Looping straight back would spend a connect
+                                // the backoff had already paid for — measured at 47ms after the
+                                // one that just failed. proto-server admits one handshake per
+                                // second per (IP, user), so that free retry is not merely wasted:
+                                // it is refused, and a refusal arrives as a silent drop that counts
+                                // against the session.
+                                // A confirmed handshake resets the ladder to 1s, so this costs a
+                                // connected client a second and saves it a handshake it would
+                                // otherwise spend 3ms after the last one.
+                                backoff_wait(&exec, &wake, retry_backoff_secs).await;
                                 continue;
                             }
                             tracing::info!(
@@ -460,6 +490,11 @@ impl ConnectionStore {
                             pending_endpoint_refresh = Some(request);
                             healthy_endpoint_retry_secs =
                                 next_healthy_endpoint_retry_secs(healthy_endpoint_retry_secs);
+                            // Same reasoning as the "stayed put" path above: the ask told us
+                            // nothing, so the next connect deserves the backoff the last failure
+                            // earned rather than a free immediate retry. This is the branch prod
+                            // takes today, where the route answers 404.
+                            backoff_wait(&exec, &wake, retry_backoff_secs).await;
                         }
                     }
                 }
@@ -491,43 +526,6 @@ impl ConnectionStore {
                     continue;
                 }
 
-                let mut network_confirmed = false;
-                if requires_network_probe(consecutive_failures) {
-                    // Probe the deployment this session actually belongs to; the baked config can
-                    // point somewhere else entirely.
-                    let target = session
-                        .api_url
-                        .as_deref()
-                        .filter(|url| !url.is_empty())
-                        .map(favicon_probe_url)
-                        .unwrap_or_else(|| probe_url.clone());
-                    let reachable =
-                        probe_network_reachability(&target, RECONNECT_NETWORK_PROBE_TIMEOUT).await;
-                    let _ = this.update(cx, |store, cx| {
-                        if store.online != reachable {
-                            store.online = reachable;
-                            cx.notify();
-                        }
-                    });
-                    if !reachable {
-                        if network_retry_secs == NETWORK_PROBE_RETRY_MIN_SECS {
-                            tracing::warn!(
-                                "Network unreachable ({target} did not answer) — pausing reconnect until it is back"
-                            );
-                        }
-                        promote_connecting_to_authenticated(&auth_state, cx);
-                        backoff_wait(&exec, &wake, network_retry_secs).await;
-                        network_retry_secs = next_network_retry_secs(network_retry_secs);
-                        continue;
-                    }
-                    network_confirmed = true;
-                    if network_retry_secs != NETWORK_PROBE_RETRY_MIN_SECS {
-                        tracing::info!("Network reachable again — resuming reconnect");
-                        network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
-                    }
-
-                }
-
                 // Two credentials authenticate the same session. SID handshake failures (including
                 // silent drops — proto-server often drops the 401 before it reaches the wire) first
                 // try GetHealthyEndpoint to mint a fresh SID. JWT socket is only the fallback when
@@ -554,14 +552,17 @@ impl ConnectionStore {
                 );
                 if (needs_sid_recovery || should_lead_with_jwt(&session, gateway_refusals))
                     && !jwt_is_fresh(&session)
+                    && refresh_pacer.may_refresh(Instant::now())
                 {
                     let (renewed, verdict) =
                         refresh_jwt_for_fallback(&api, &auth_state, session.clone(), cx).await;
                     session = renewed;
+                    refresh_pacer.record(verdict, Instant::now());
                     if verdict == RefreshVerdict::Renewed {
                         refreshed_this_run = true;
                     }
                 }
+                let refresh_due_in = refresh_pacer.hold_left(Instant::now());
                 if needs_sid_recovery && remint_due_in.is_zero() {
                     if jwt_is_fresh(&session) {
                         last_remint_attempt_at = Some(Instant::now());
@@ -650,6 +651,21 @@ impl ConnectionStore {
                 }
 
                 let use_jwt = should_lead_with_jwt(&session, gateway_refusals);
+
+                // Nothing left to hand the gateway: the JWT it would take is expired and the
+                // refresh that would replace it is in its throttle cooldown. Handshaking anyway
+                // buys a certain 401 and spends a slot on the gateway's own per-user handshake
+                // limiter, so wait for the cooldown instead. It is bounded, so this delays a
+                // reconnect rather than blocking one.
+                if use_jwt && !jwt_is_fresh(&session) && !refresh_due_in.is_zero() {
+                    tracing::info!(
+                        "Holding the reconnect for {}s — the JWT is stale and SessionRefresh is throttled",
+                        refresh_due_in.as_secs()
+                    );
+                    promote_connecting_to_authenticated(&auth_state, cx);
+                    backoff_wait(&exec, &wake, refresh_due_in.as_secs().max(1)).await;
+                    continue;
+                }
 
                 // Probe only with a token the server would still accept. A JWT we failed to renew
                 // (a 503 from SessionRefresh is enough) answers 403 because it is expired, not
@@ -848,6 +864,10 @@ impl ConnectionStore {
                     remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
                     remint_unsupported = false;
                     pending_endpoint_refresh = None;
+                    // A throttle belongs to the outage it happened in. Carrying its pacing past a
+                    // confirmed handshake would make the next unrelated outage start out slower
+                    // than it should, for no reason the server ever asked for.
+                    refresh_pacer.release();
                     if endpoint_refresh_retry_in(
                         last_endpoint_refresh_at,
                         HEALTHY_ENDPOINT_SETTLED_SECS,
@@ -858,7 +878,6 @@ impl ConnectionStore {
                         last_endpoint_refresh_at = None;
                         healthy_endpoint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
                     }
-                    network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
                     api.set_status(ConnectionStatus::Connected);
                     tracing::info!("Connection confirmed — handshake accepted");
                     #[cfg(debug_assertions)]
@@ -911,16 +930,19 @@ impl ConnectionStore {
                             .detach();
                         }
                     }
-                    if !refreshed_this_run {
+                    // Arm the HTTP fallback from whatever we hold; it has to be live whether or not
+                    // the rotation below runs, or `ListChannelMessages` has nothing to fall back to.
+                    if !refreshed_this_run && refresh_token_needs_rotation(&session, now_secs()) {
                         refreshed_this_run = true;
                         let (renewed, _) =
                             refresh_jwt_for_fallback(&api, &auth_state, session.clone(), cx).await;
-                        api.set_http_fallback(http_fallback_session(
-                            &renewed,
-                            configured_api_base.as_deref(),
-                            &api_server_key,
-                        ));
+                        session = renewed;
                     }
+                    api.set_http_fallback(http_fallback_session(
+                        &session,
+                        configured_api_base.as_deref(),
+                        &api_server_key,
+                    ));
 
                     // The DM-space join (`clan_join{clan_id: 0}`) is owned by
                     // `DirectMessageStore`: the gateway derives the DM and group
@@ -963,13 +985,11 @@ impl ConnectionStore {
                         ConnectOutcome::ExplicitReject | ConnectOutcome::SilentDrop,
                         true,
                     ) => {
-                        if network_confirmed {
-                            jwt_refusals += 1;
-                        } else {
-                            tracing::info!(
-                                "JWT handshake failed without a confirmed network — not counting it against the session"
-                            );
-                        }
+                        // A refusal means we reached something that answered, so it counts.
+                        // Logout stays behind `SessionProbe::Rejected` from an authenticated call,
+                        // which a dead network answers `Inconclusive` and a captive portal answers
+                        // `Alive` — neither can end a session on its own.
+                        jwt_refusals += 1;
                         false
                     }
                     (ConnectOutcome::Unreachable | ConnectOutcome::Confirmed, _) => false,
@@ -1272,8 +1292,21 @@ async fn refresh_jwt_for_fallback(
     let renewed = match api.renew_fallback_token().await {
         Ok(renewed) => renewed,
         Err(e) => {
+            // A throttle is the server rationing this route, not a verdict on the session. It has
+            // to pace the *next* call rather than ride the reconnect ladder, which retries far
+            // sooner than the limiter refills.
+            let throttled = e
+                .downcast_ref::<mezon_client::SessionRefreshRejected>()
+                .is_some_and(|rejected| rejected.is_throttled());
             tracing::warn!("SessionRefresh failed ({e}) — keeping the current session");
-            return (session, RefreshVerdict::Transient);
+            return (
+                session,
+                if throttled {
+                    RefreshVerdict::Throttled
+                } else {
+                    RefreshVerdict::Transient
+                },
+            );
         }
     };
 
@@ -1541,10 +1574,6 @@ fn http_fallback_session(
     })
 }
 
-fn requires_network_probe(consecutive_failures: u32) -> bool {
-    consecutive_failures >= 1
-}
-
 fn reached_failure_limit(consecutive_failures: u32) -> bool {
     consecutive_failures >= MAX_CONSECUTIVE_FAILURES
 }
@@ -1553,8 +1582,84 @@ fn next_backoff_secs(current: u64) -> u64 {
     current.saturating_mul(2).min(RECONNECT_BACKOFF_CAP_SECS)
 }
 
-fn next_network_retry_secs(current: u64) -> u64 {
-    current.saturating_mul(2).min(NETWORK_PROBE_RETRY_CAP_SECS)
+/// Whether the refresh token is close enough to expiry to be worth spending a `SessionRefresh` on.
+///
+/// The launch-time rotation exists so a client that never needs the JWT still keeps its refresh
+/// token alive. It used to run on every launch, on the belief that the token lives a week — prod
+/// sets `refresh_token_expiry_sec: 2592000`, thirty days, so that was four times more often than
+/// the token ever needed. A connected client with a working `session_id` therefore spent an HTTP
+/// call on every launch to renew something with weeks left on it, and every launch of every client
+/// landed on the one route that authenticates with a shared key.
+///
+/// An unreadable token rotates: better one needless call than a session that quietly expires.
+fn refresh_token_needs_rotation(session: &Session, now: u64) -> bool {
+    mezon_client::jwt_expires_at(&session.refresh_token)
+        .is_none_or(|exp| exp.saturating_sub(now) < REFRESH_TOKEN_ROTATE_WITHIN_SECS)
+}
+
+/// Pacing shared by every path that can spend a `SessionRefresh`.
+///
+/// The paths do not otherwise resemble each other — the reconnect ladder, the gateway ask that
+/// needs a credential to make, and the retry after the gateway refuses one — but they all land on
+/// the same route, and that route is throttled for everyone at once. Pacing has to be shared or it
+/// is not pacing: with the bookkeeping living only in the reconnect ladder, a session holding a
+/// valid `session_id` over a dead socket spent five refreshes in 150s of 503 through the gateway
+/// path while the ladder sat quietly on its cooldown.
+#[derive(Debug)]
+struct RefreshPacer {
+    hold_until: Option<Instant>,
+    retry_secs: u64,
+}
+
+impl RefreshPacer {
+    fn new() -> Self {
+        Self {
+            hold_until: None,
+            retry_secs: SESSION_REFRESH_THROTTLED_SECS,
+        }
+    }
+
+    fn hold_left(&self, now: Instant) -> Duration {
+        refresh_hold_in(self.hold_until, now)
+    }
+
+    fn may_refresh(&self, now: Instant) -> bool {
+        self.hold_left(now).is_zero()
+    }
+
+    fn record(&mut self, verdict: RefreshVerdict, now: Instant) {
+        match verdict {
+            RefreshVerdict::Renewed => self.release(),
+            RefreshVerdict::Throttled => {
+                tracing::warn!(
+                    "SessionRefresh is being throttled — pacing the next one {}s out",
+                    self.retry_secs
+                );
+                self.hold_until = Some(now + Duration::from_secs(self.retry_secs));
+                self.retry_secs = next_refresh_retry_secs(self.retry_secs);
+            }
+            RefreshVerdict::Transient => {}
+        }
+    }
+
+    /// A confirmed handshake, or a token we actually got, ends the outage the throttle belonged to.
+    fn release(&mut self) {
+        self.hold_until = None;
+        self.retry_secs = SESSION_REFRESH_THROTTLED_SECS;
+    }
+}
+
+/// How long `SessionRefresh` stays parked, or zero once the cooldown has run out.
+fn refresh_hold_in(hold_until: Option<Instant>, now: Instant) -> Duration {
+    hold_until
+        .map(|until| until.saturating_duration_since(now))
+        .unwrap_or(Duration::ZERO)
+}
+
+fn next_refresh_retry_secs(current: u64) -> u64 {
+    current
+        .saturating_mul(2)
+        .min(SESSION_REFRESH_THROTTLED_CAP_SECS)
 }
 
 fn next_healthy_endpoint_retry_secs(current: u64) -> u64 {
@@ -1778,13 +1883,30 @@ mod tests {
         assert_eq!(fallback.server_key, "api-key");
     }
 
+    /// How long a client can stay down after the far side is healthy again. Nothing tells it the
+    /// server came back, so recovery costs at most one wait at the ladder's ceiling — measured at
+    /// 33s in a live run where the socket returned mid-wait. Bound the ceiling itself, jitter
+    /// included, because jitter is part of what actually elapses.
     #[test]
-    fn backoff_wait_caps_at_60_seconds() {
-        let mut secs = 1u64;
+    fn the_longest_a_reconnect_can_sit_out_is_bounded() {
+        let mut secs = 1;
         for _ in 0..10 {
-            secs = (secs * 2).min(60);
+            secs = next_backoff_secs(secs);
         }
-        assert_eq!(secs, 60);
+        assert_eq!(
+            secs, RECONNECT_BACKOFF_CAP_SECS,
+            "the ladder must settle at its cap"
+        );
+
+        let worst = backoff_delay(secs);
+        assert!(
+            worst >= Duration::from_secs(RECONNECT_BACKOFF_CAP_SECS),
+            "jitter must never shorten a wait below the rung it belongs to"
+        );
+        assert!(
+            worst <= Duration::from_secs(RECONNECT_BACKOFF_CAP_SECS * 5 / 4),
+            "worst-case recovery stretched to {worst:?}; jitter is meant to stay within a quarter"
+        );
     }
 
     #[test]
@@ -1797,20 +1919,294 @@ mod tests {
     }
 
     #[test]
-    fn first_attempt_connects_without_probe_then_probes_every_retry() {
-        assert!(!requires_network_probe(0));
-        assert!(requires_network_probe(1));
-        assert!(requires_network_probe(4));
+    fn session_refresh_throttle_paces_a_minute_up_to_five() {
+        assert_eq!(next_refresh_retry_secs(SESSION_REFRESH_THROTTLED_SECS), 120);
+        assert_eq!(next_refresh_retry_secs(120), 240);
+        assert_eq!(
+            next_refresh_retry_secs(240),
+            SESSION_REFRESH_THROTTLED_CAP_SECS
+        );
+        assert_eq!(
+            next_refresh_retry_secs(SESSION_REFRESH_THROTTLED_CAP_SECS),
+            SESSION_REFRESH_THROTTLED_CAP_SECS
+        );
+    }
+
+    /// The reconnect ladder tops out at 60s, so the cooldown has to outlast a full rung — otherwise
+    /// the ladder, not the cooldown, decides how often the limiter is asked.
+    #[test]
+    fn session_refresh_cooldown_outlasts_the_reconnect_ladder() {
+        const { assert!(SESSION_REFRESH_THROTTLED_SECS >= RECONNECT_BACKOFF_CAP_SECS) };
+    }
+
+    /// base64url without padding — what a JWT payload is encoded with. Hand-rolled because
+    /// `mezon-store` does not depend on a base64 crate and this is the only place that needs one.
+    fn base64url_no_pad(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let b = [
+                chunk[0],
+                chunk.get(1).copied().unwrap_or(0),
+                chunk.get(2).copied().unwrap_or(0),
+            ];
+            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            for i in 0..chunk.len() + 1 {
+                out.push(ALPHABET[((n >> (18 - 6 * i)) & 0x3f) as usize] as char);
+            }
+        }
+        out
+    }
+
+    fn session_with_refresh_token_expiring_at(exp: Option<u64>) -> Session {
+        let refresh_token = match exp {
+            Some(exp) => format!(
+                "header.{}.signature",
+                base64url_no_pad(format!(r#"{{"exp":{exp}}}"#).as_bytes())
+            ),
+            None => String::new(),
+        };
+        Session {
+            refresh_token,
+            ..Default::default()
+        }
+    }
+
+    /// The encoder above has to agree with the decoder the production path uses, or every test
+    /// below would pass against a token the client itself cannot read.
+    #[test]
+    fn the_test_token_is_one_the_client_can_actually_decode() {
+        let session = session_with_refresh_token_expiring_at(Some(1_700_000_000));
+        assert_eq!(
+            mezon_client::jwt_expires_at(&session.refresh_token),
+            Some(1_700_000_000)
+        );
+    }
+
+    /// The launch-time rotation is the one `SessionRefresh` a healthy, connected client still made.
+    /// With weeks left on the token there is nothing to renew, so it must not fire.
+    #[test]
+    fn a_refresh_token_with_weeks_left_is_not_rotated() {
+        let now = 1_700_000_000;
+        let month = 30 * 24 * 60 * 60;
+        assert!(!refresh_token_needs_rotation(
+            &session_with_refresh_token_expiring_at(Some(now + month)),
+            now
+        ));
+        assert!(!refresh_token_needs_rotation(
+            &session_with_refresh_token_expiring_at(Some(
+                now + REFRESH_TOKEN_ROTATE_WITHIN_SECS + 1
+            )),
+            now
+        ));
+    }
+
+    /// Inside the window it must fire, or the session expires and the user is asked to log in again.
+    #[test]
+    fn a_refresh_token_near_expiry_is_rotated() {
+        let now = 1_700_000_000;
+        assert!(refresh_token_needs_rotation(
+            &session_with_refresh_token_expiring_at(Some(
+                now + REFRESH_TOKEN_ROTATE_WITHIN_SECS - 1
+            )),
+            now
+        ));
+        assert!(refresh_token_needs_rotation(
+            &session_with_refresh_token_expiring_at(Some(now)),
+            now
+        ));
+        // Already expired, and clock skew past it, must not read as "plenty of time".
+        assert!(refresh_token_needs_rotation(
+            &session_with_refresh_token_expiring_at(Some(now - 1)),
+            now
+        ));
+    }
+
+    /// A token whose expiry cannot be read gets rotated: one needless call beats a session that
+    /// quietly dies.
+    #[test]
+    fn an_unreadable_refresh_token_is_rotated() {
+        let now = 1_700_000_000;
+        assert!(refresh_token_needs_rotation(
+            &session_with_refresh_token_expiring_at(None),
+            now
+        ));
+        let garbage = Session {
+            refresh_token: "not-a-jwt".into(),
+            ..Default::default()
+        };
+        assert!(refresh_token_needs_rotation(&garbage, now));
+    }
+
+    /// Walks the real `RefreshPacer` — the one every call site shares — rather than a copy of its
+    /// rules, so a change to production pacing shows up here instead of quietly diverging.
+    struct RefreshGate {
+        pacer: RefreshPacer,
+        calls: u32,
+    }
+
+    impl RefreshGate {
+        fn new() -> Self {
+            Self {
+                pacer: RefreshPacer::new(),
+                calls: 0,
+            }
+        }
+
+        /// Returns whether the request actually left the client.
+        fn wants_refresh(&mut self, now: Instant, verdict: RefreshVerdict) -> bool {
+            if !self.pacer.may_refresh(now) {
+                return false;
+            }
+            self.calls += 1;
+            self.pacer.record(verdict, now);
+            true
+        }
+
+        fn on_confirmed_handshake(&mut self) {
+            self.pacer.release();
+        }
+
+        fn retry_secs(&self) -> u64 {
+            self.pacer.retry_secs
+        }
     }
 
     #[test]
-    fn network_retry_backoff_doubles_up_to_its_own_cap() {
-        assert_eq!(next_network_retry_secs(NETWORK_PROBE_RETRY_MIN_SECS), 2);
-        assert_eq!(next_network_retry_secs(4), 8);
-        assert_eq!(next_network_retry_secs(8), NETWORK_PROBE_RETRY_CAP_SECS);
+    fn a_throttled_refresh_is_not_retried_before_its_cooldown() {
+        let t0 = Instant::now();
+        let mut gate = RefreshGate::new();
+        assert!(gate.wants_refresh(t0, RefreshVerdict::Throttled));
+        for offset in [1, 5, 30, SESSION_REFRESH_THROTTLED_SECS - 1] {
+            assert!(
+                !gate.wants_refresh(t0 + Duration::from_secs(offset), RefreshVerdict::Throttled),
+                "a refresh escaped the cooldown at +{offset}s"
+            );
+        }
+        assert!(gate.wants_refresh(
+            t0 + Duration::from_secs(SESSION_REFRESH_THROTTLED_SECS),
+            RefreshVerdict::Throttled
+        ));
+        assert_eq!(gate.calls, 2);
+    }
+
+    /// The incident this pacing exists for: 07/09/2026, `SessionRefresh` answered 503 for 14
+    /// minutes and one client spent 21 requests on it, peaking at 6 a minute. The ladder has to
+    /// bring that down by roughly four times without ever giving up on recovery.
+    #[test]
+    fn a_fourteen_minute_throttle_costs_a_handful_of_requests_not_a_storm() {
+        let t0 = Instant::now();
+        let mut gate = RefreshGate::new();
+        // The loop wakes far more often than the cooldown; every second is generous.
+        for second in 0..(14 * 60) {
+            gate.wants_refresh(t0 + Duration::from_secs(second), RefreshVerdict::Throttled);
+        }
+        assert!(
+            (1..=6).contains(&gate.calls),
+            "14 minutes of 503 spent {} requests; the outage that prompted this spent 21",
+            gate.calls
+        );
+    }
+
+    /// A throttle holds the reconnect too, so no handshake is attempted while it runs. That is what
+    /// keeps a backend throttle from walking the session towards the logout probe.
+    #[test]
+    fn a_throttled_refresh_never_walks_the_session_towards_logout() {
+        let t0 = Instant::now();
+        let mut gate = RefreshGate::new();
+        let mut sim = ReconnectSim::new();
+        for second in 0..600 {
+            let now = t0 + Duration::from_secs(second);
+            if gate.wants_refresh(now, RefreshVerdict::Throttled) {
+                // Only a refresh that actually happened lets a handshake follow, and a throttled
+                // one never returns a usable token, so the loop holds instead of handshaking.
+                continue;
+            }
+        }
+        assert_eq!(sim.jwt_refusals, 0);
+        assert_eq!(sim.logout_count, 0);
+        sim.record_api_probe(false);
         assert_eq!(
-            next_network_retry_secs(NETWORK_PROBE_RETRY_CAP_SECS),
-            NETWORK_PROBE_RETRY_CAP_SECS
+            sim.logout_count, 0,
+            "a backend throttle must never reach the logout probe"
+        );
+    }
+
+    /// Only a throttle paces. A transient failure (a dropped connection, a timeout) says nothing
+    /// about how often the server wants to be asked, so it must not slow recovery down.
+    #[test]
+    fn a_transient_refresh_failure_starts_no_cooldown() {
+        let t0 = Instant::now();
+        let mut gate = RefreshGate::new();
+        for second in 0..10 {
+            assert!(
+                gate.wants_refresh(t0 + Duration::from_secs(second), RefreshVerdict::Transient)
+            );
+        }
+        assert_eq!(gate.calls, 10);
+    }
+
+    #[test]
+    fn a_renewed_token_and_a_confirmed_handshake_both_clear_the_cooldown() {
+        let t0 = Instant::now();
+        let mut gate = RefreshGate::new();
+        gate.wants_refresh(t0, RefreshVerdict::Throttled);
+        assert!(!gate.wants_refresh(t0 + Duration::from_secs(1), RefreshVerdict::Throttled));
+        gate.on_confirmed_handshake();
+        assert!(
+            gate.wants_refresh(t0 + Duration::from_secs(2), RefreshVerdict::Renewed),
+            "a confirmed handshake must release the hold"
+        );
+        assert_eq!(
+            gate.retry_secs(),
+            SESSION_REFRESH_THROTTLED_SECS,
+            "the ladder must start over, not stay escalated into the next outage"
+        );
+    }
+
+    /// What one pass of the loop decided to do about reachability, so an outage can be walked as a
+    /// timeline. Mirrors the loop: latch when the answer first turns offline, clear on the edge
+    /// back, and stop believing an answer that never changes.
+
+    #[test]
+    fn refresh_hold_counts_down_then_releases() {
+        let now = Instant::now();
+        assert_eq!(refresh_hold_in(None, now), Duration::ZERO);
+        let until = now + Duration::from_secs(60);
+        assert_eq!(refresh_hold_in(Some(until), now), Duration::from_secs(60));
+        assert_eq!(
+            refresh_hold_in(Some(until), now + Duration::from_secs(59)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            refresh_hold_in(Some(until), now + Duration::from_secs(90)),
+            Duration::ZERO
+        );
+    }
+
+    /// Only the two statuses that mean "call me less" pace the refresh. A 401/403 is a verdict on
+    /// the credentials and a 500 is a real failure — pacing either would delay a recovery.
+    #[test]
+    fn only_429_and_503_count_as_a_refresh_throttle() {
+        use mezon_client::SessionRefreshRejected;
+        assert!(SessionRefreshRejected { status: 429 }.is_throttled());
+        assert!(SessionRefreshRejected { status: 503 }.is_throttled());
+        assert!(!SessionRefreshRejected { status: 401 }.is_throttled());
+        assert!(!SessionRefreshRejected { status: 403 }.is_throttled());
+        assert!(!SessionRefreshRejected { status: 500 }.is_throttled());
+    }
+
+    /// The status has to survive the trip through `anyhow`, which is how the reconnect loop reads
+    /// it back — a plain `bail!` string would classify every failure as transient.
+    #[test]
+    fn refresh_rejection_survives_anyhow_downcast() {
+        use mezon_client::SessionRefreshRejected;
+        let err: anyhow::Error = SessionRefreshRejected { status: 503 }.into();
+        assert_eq!(err.to_string(), "SessionRefresh failed with status 503");
+        assert!(
+            err.downcast_ref::<SessionRefreshRejected>()
+                .is_some_and(|r| r.is_throttled())
         );
     }
 
@@ -2203,10 +2599,6 @@ mod tests {
             };
         }
 
-        fn probe_required(&self) -> bool {
-            requires_network_probe(self.consecutive_failures)
-        }
-
         fn uses_jwt(&self) -> bool {
             self.sid_failures >= SSID_REFUSALS_BEFORE_JWT
         }
@@ -2348,19 +2740,6 @@ mod tests {
         assert_eq!(sim.sid_failures, 0);
         assert_eq!(sim.jwt_refusals, 0);
         assert!(!sim.uses_jwt());
-    }
-
-    #[test]
-    fn offline_skips_do_not_consume_attempts_or_log_out() {
-        let mut sim = ReconnectSim::new();
-        sim.record_unreachable();
-        assert!(sim.probe_required());
-
-        for _ in 0..50 {
-            assert!(sim.probe_required());
-            assert_eq!(sim.logout_count, 0);
-            assert_eq!(sim.consecutive_failures, 1);
-        }
     }
 
     #[test]

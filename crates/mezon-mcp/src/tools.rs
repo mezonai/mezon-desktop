@@ -373,6 +373,32 @@ impl McpBackend {
                 self.send_ui_result(|reply| McpCommand::StopRecording { reply })
                     .await
             }
+            #[cfg(debug_assertions)]
+            "simulate_participants" => {
+                self.require_write_mode("simulate_participants")?;
+                let count = parse_i64_field(&arguments, "count")?.clamp(0, 200) as usize;
+                let flag = |name: &str, default: bool| {
+                    arguments
+                        .get(name)
+                        .and_then(Value::as_bool)
+                        .unwrap_or(default)
+                };
+                let (screenshare, focus, fullscreen, member_strip) = (
+                    flag("screenshare", false),
+                    flag("focus", false),
+                    flag("fullscreen", false),
+                    flag("member_strip", true),
+                );
+                self.send_ui_result(|reply| McpCommand::SimulateParticipants {
+                    count,
+                    screenshare,
+                    focus,
+                    fullscreen,
+                    member_strip,
+                    reply,
+                })
+                .await
+            }
             "get_voice_status" => self.get_voice_status().await,
             "list_stickers" => self.list_stickers().await,
             "get_sticker" => self.get_sticker(&arguments).await,

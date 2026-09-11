@@ -250,17 +250,29 @@ pub fn resolve_message_display_name(msg: &Message, ctx: &RowCtx, cx: &App) -> Sh
         if let Some(cached) = ctx.row_memo.borrow().display_names.get(&key) {
             return cached.clone();
         }
-        let resolved = if let Some(clan_id) = clan_id {
-            ClanMembersStore::global(cx)
+        // A DM used to stop here and take whatever name the message arrived with. That is fine
+        // for an ordinary message, which mezon-api enriches with clan_nick and display_name on
+        // its way out, and wrong for an ephemeral one: mezon-proto-server answers
+        // EphemeralMessageSend by building the ChannelMessage itself and echoing it straight to
+        // the recipient, and the connection only carries `username` — so the row read
+        // `cuson108` where every other message from the same person said `Sony`. Ask the same
+        // ladder the avatar already walks: group member, DM peer, own account.
+        //
+        // The clan branch is left exactly as it was. The member store is the whole answer
+        // there, and routing it through `resolve_user_profile` would buy a presence lookup
+        // whose result this function throws away, on the path most messages take.
+        let resolved = match ctx.profile_context {
+            Some(ProfileContext::Clan(clan_id)) => ClanMembersStore::global(cx)
                 .read(cx)
                 .member(clan_id, user_id)
-                .map(|member| member.name())
-                .filter(|name| !name.is_empty())
-                .map(SharedString::from)
-                .unwrap_or_else(|| msg.sender_name.clone())
-        } else {
-            msg.sender_name.clone()
-        };
+                .map(|member| member.name().to_string()),
+            Some(context) => mezon_store::resolve_user_profile(user_id, context, cx)
+                .map(|profile| profile.display_name),
+            None => None,
+        }
+        .filter(|name| !name.is_empty())
+        .map(SharedString::from)
+        .unwrap_or_else(|| msg.sender_name.clone());
         let mut memo = ctx.row_memo.borrow_mut();
         if memo.display_names.len() >= ROW_MEMO_CAPACITY {
             memo.display_names.clear();

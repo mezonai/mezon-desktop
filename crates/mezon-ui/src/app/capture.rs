@@ -1326,6 +1326,25 @@ pub fn open_message_pdf_viewer(
     Ok(serde_json::json!({ "ok": true, "url": opened }))
 }
 
+#[cfg(debug_assertions)]
+pub fn simulate_participants(
+    count: usize,
+    options: mezon_store::SimulatedCall,
+    cx: &mut App,
+) -> anyhow::Result<serde_json::Value> {
+    let voice = mezon_store::VoiceStore::try_global(cx)
+        .ok_or_else(|| anyhow::anyhow!("the voice store is not available"))?;
+    let added = voice.update(cx, |store, cx| store.simulate_call(count, &options, cx));
+    Ok(serde_json::json!({
+        "ok": true,
+        "simulated": added,
+        "screenshare": options.screenshare,
+        "focus": options.focus,
+        "fullscreen": options.fullscreen,
+        "member_strip": options.member_strip,
+    }))
+}
+
 pub fn join_voice(channel_id: i64, clan_id: i64, cx: &mut App) -> anyhow::Result<Value> {
     let voice = mezon_store::VoiceStore::try_global(cx)
         .ok_or_else(|| anyhow::anyhow!("the voice store is not available"))?;
