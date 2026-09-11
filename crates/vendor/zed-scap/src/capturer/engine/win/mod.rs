@@ -6,11 +6,6 @@ use crate::{
 use std::cmp;
 use std::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use windows::Win32::Graphics::Direct3D11::{
-    D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
-};
-use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
 use windows_capture::{
     capture::{CaptureControl, Context, GraphicsCaptureApiHandler},
     frame::Frame as WCFrame,
@@ -58,36 +53,56 @@ impl GraphicsCaptureApiHandler for Capturer {
         _: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
         let color_format = frame.color_format();
-        let bytes_per_pixel = match color_format {
-            ColorFormat::Rgba16F => return Err(self.fail("Rgba16F is not yet supported".into())),
-            ColorFormat::Rgba8 | ColorFormat::Bgra8 => 4,
-        };
+        let (width, height, data) = match &self.crop {
+            Some(cropped_area) => {
+                let start_x = cropped_area.origin.x as u32;
+                let start_y = cropped_area.origin.y as u32;
+                let end_x = (cropped_area.origin.x + cropped_area.size.width) as u32;
+                let end_y = (cropped_area.origin.y + cropped_area.size.height) as u32;
 
-        let (width, height, data) =
-            match copy_frame_region(frame, self.crop.as_ref(), bytes_per_pixel) {
-                Ok(copied) => copied,
-                Err(e) => return Err(self.fail(format!("frame copy failed: {e}"))),
-            };
+                let mut cropped_buffer = frame
+                    .buffer_crop(start_x, start_y, end_x, end_y)
+                    .expect("Failed to crop buffer");
+
+                let raw_frame_buffer = match cropped_buffer.as_nopadding_buffer() {
+                    Ok(buffer) => buffer,
+                    Err(_) => return Err(("Failed to get raw buffer").into()),
+                };
+
+                (
+                    cropped_area.size.width as i32,
+                    cropped_area.size.height as i32,
+                    raw_frame_buffer.to_vec(),
+                )
+            }
+            None => {
+                let width = frame.width() as i32;
+                let height = frame.height() as i32;
+                let mut frame_buffer = frame.buffer().unwrap();
+                let raw_frame_buffer = frame_buffer.as_raw_buffer();
+                (width, height, raw_frame_buffer.to_vec())
+            }
+        };
 
         let display_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
+            .expect("Failed to get current time")
             .as_nanos() as u64;
 
-        let frame = if matches!(color_format, ColorFormat::Rgba8) {
-            Frame::RGBx(RGBxFrame {
+        let frame = match color_format {
+            ColorFormat::Rgba16F => return Err("Rgba16F is not yet supported".into()),
+            ColorFormat::Rgba8 => Frame::RGBx(RGBxFrame {
                 display_time,
                 width,
                 height,
                 data,
-            })
-        } else {
-            Frame::BGRA(BGRAFrame {
+            }),
+            ColorFormat::Bgra8 => Frame::BGRA(BGRAFrame {
                 display_time,
                 width,
                 height,
                 data,
-            })
+            }),
         };
 
         Ok(self.tx.send(Ok(frame))?)
@@ -95,111 +110,8 @@ impl GraphicsCaptureApiHandler for Capturer {
 
     fn on_closed(&mut self) -> Result<(), Self::Error> {
         log::debug!("Screen capture stream closed.");
-        let _ = self.tx.send(Err(anyhow::anyhow!("capture source closed")));
         Ok(())
     }
-}
-
-impl Capturer {
-    fn fail(&self, message: String) -> Box<dyn std::error::Error + Send + Sync> {
-        let _ = self.tx.send(Err(anyhow::anyhow!("{message}")));
-        message.into()
-    }
-}
-
-fn copy_frame_region(
-    frame: &WCFrame,
-    crop: Option<&Area>,
-    bytes_per_pixel: usize,
-) -> Result<(i32, i32, Vec<u8>), Box<dyn std::error::Error + Send + Sync>> {
-    let source = unsafe { frame.as_raw_texture() };
-    let mut source_desc = D3D11_TEXTURE2D_DESC::default();
-    unsafe { source.GetDesc(&mut source_desc) };
-
-    let region = clamp_to_frame(crop, source_desc.Width, source_desc.Height);
-    if region.right <= region.left || region.bottom <= region.top {
-        return Err("capture frame has no visible area".into());
-    }
-    let width = region.right - region.left;
-    let height = region.bottom - region.top;
-
-    let staging_desc = D3D11_TEXTURE2D_DESC {
-        Width: width,
-        Height: height,
-        MipLevels: 1,
-        ArraySize: 1,
-        Format: source_desc.Format,
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        Usage: D3D11_USAGE_STAGING,
-        BindFlags: 0,
-        CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-        MiscFlags: 0,
-    };
-
-    let device = unsafe { source.GetDevice() }?;
-    let context = unsafe { device.GetImmediateContext() }?;
-
-    let mut staging = None;
-    unsafe { device.CreateTexture2D(&staging_desc, None, Some(&mut staging)) }?;
-    let staging = staging.ok_or("staging texture was not created")?;
-
-    unsafe {
-        context.CopySubresourceRegion(&staging, 0, 0, 0, 0, source, 0, Some(&region));
-    }
-
-    let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-    unsafe { context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }?;
-
-    let row_bytes = width as usize * bytes_per_pixel;
-    let mut pixels = vec![0u8; row_bytes * height as usize];
-    if !mapped.pData.is_null() {
-        let row_pitch = mapped.RowPitch as usize;
-        let copied = row_bytes.min(row_pitch);
-        for (y, row) in pixels.chunks_exact_mut(row_bytes).enumerate() {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    mapped.pData.cast::<u8>().add(y * row_pitch),
-                    row.as_mut_ptr(),
-                    copied,
-                );
-            }
-        }
-    }
-
-    unsafe { context.Unmap(&staging, 0) };
-
-    Ok((width as i32, height as i32, pixels))
-}
-
-fn clamp_to_frame(crop: Option<&Area>, frame_width: u32, frame_height: u32) -> D3D11_BOX {
-    let (left, top, right, bottom) = match crop {
-        Some(crop) => (
-            clamp_axis(crop.origin.x, frame_width),
-            clamp_axis(crop.origin.y, frame_height),
-            clamp_axis(crop.origin.x + crop.size.width, frame_width),
-            clamp_axis(crop.origin.y + crop.size.height, frame_height),
-        ),
-        None => (0, 0, frame_width, frame_height),
-    };
-
-    D3D11_BOX {
-        left,
-        top,
-        front: 0,
-        right,
-        bottom,
-        back: 1,
-    }
-}
-
-fn clamp_axis(value: f64, limit: u32) -> u32 {
-    if !value.is_finite() || value <= 0.0 {
-        return 0;
-    }
-    (value as u32).min(limit)
 }
 
 impl WCStream {
@@ -278,7 +190,7 @@ pub fn create_capturer(options: &Options, tx: mpsc::Sender<anyhow::Result<Frame>
             color_format,
             FlagStruct {
                 tx,
-                crop: options.crop_area.as_ref().map(|_| get_crop_area(options)),
+                crop: Some(get_crop_area(options)),
             },
         )),
     };

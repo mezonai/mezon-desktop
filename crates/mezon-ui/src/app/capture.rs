@@ -1369,7 +1369,6 @@ pub fn join_voice(channel_id: i64, clan_id: i64, cx: &mut App) -> anyhow::Result
                     channel_id.to_string(),
                     clan_id.to_string(),
                     String::new(),
-                    mezon_store::SfuRole::Speaker,
                     input,
                     output,
                     camera,

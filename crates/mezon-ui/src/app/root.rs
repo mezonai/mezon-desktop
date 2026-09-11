@@ -50,7 +50,7 @@ pub struct RootView {
     first_join_prompted: bool,
 }
 
-fn surface_voice_toast(
+fn surface_recording_toast(
     root: &mut RootView,
     _voice: gpui::Entity<mezon_store::VoiceStore>,
     event: &mezon_store::VoiceStoreEvent,
@@ -58,16 +58,6 @@ fn surface_voice_toast(
 ) {
     let locale = root.cached_locale.clone();
     let toast = match event {
-        mezon_store::VoiceStoreEvent::RemovedFromChannel => {
-            crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
-                shell.toast(
-                    crate::components::primitives::ToastKind::Info,
-                    mezon_i18n::t(&locale, "channelVoice.removedFromChannel").to_string(),
-                    cx,
-                )
-            });
-            return;
-        }
         mezon_store::VoiceStoreEvent::RecordingVideoUnavailable => {
             crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
                 shell.toast(
@@ -137,7 +127,7 @@ impl RootView {
         let shell = Shell::init(cx);
 
         let recording_toasts = mezon_store::VoiceStore::try_global(cx)
-            .map(|voice| cx.subscribe(&voice, surface_voice_toast));
+            .map(|voice| cx.subscribe(&voice, surface_recording_toast));
 
         cx.observe(&settings, |this, settings, cx| {
             let (language, name) = {

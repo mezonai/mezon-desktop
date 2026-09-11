@@ -78,10 +78,6 @@ fn list_scap_options() -> Result<Vec<ScreenShareOption>, String> {
                 if window.title.trim().is_empty() {
                     continue;
                 }
-                #[cfg(target_os = "windows")]
-                if !windows_window_is_on_screen(window.raw_handle) {
-                    continue;
-                }
                 #[cfg(target_os = "linux")]
                 let id = xcb::Xid::resource_id(&window.raw_handle);
                 #[cfg(not(target_os = "linux"))]
@@ -104,26 +100,6 @@ fn list_scap_options() -> Result<Vec<ScreenShareOption>, String> {
         }
     }
     Ok(options)
-}
-
-#[cfg(target_os = "windows")]
-fn windows_window_is_on_screen(hwnd: windows::Win32::Foundation::HWND) -> bool {
-    use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
-    use windows::Win32::UI::WindowsAndMessaging::IsIconic;
-
-    if unsafe { IsIconic(hwnd) }.as_bool() {
-        return false;
-    }
-    let mut cloaked: u32 = 0;
-    let queried = unsafe {
-        DwmGetWindowAttribute(
-            hwnd,
-            DWMWA_CLOAKED,
-            std::ptr::from_mut(&mut cloaked).cast(),
-            std::mem::size_of::<u32>() as u32,
-        )
-    };
-    queried.is_err() || cloaked == 0
 }
 
 #[cfg(target_os = "macos")]
