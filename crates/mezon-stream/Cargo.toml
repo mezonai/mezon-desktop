@@ -9,7 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-livekit = { workspace = true }
+libwebrtc = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures = { workspace = true }
