@@ -13,8 +13,6 @@ rustflags = [
     "-C", "link-arg=-ObjC",
 ]
 
-# LiveKit's libwebrtc is built with a static CRT on Windows; without this,
-# MSVC linking fails with LNK2005/LNK1169 (multiply defined symbols).
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
 

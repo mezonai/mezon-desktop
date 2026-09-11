@@ -9,8 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-livekit = { workspace = true }
-livekit-protocol = { workspace = true }
+libwebrtc = { workspace = true }
 cpal = { workspace = true }
 tokio = { workspace = true }
 flume = { workspace = true }
@@ -18,6 +17,10 @@ parking_lot = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+percent-encoding = { workspace = true }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 
 scap = { workspace = true }
 nokhwa = { version = "0.10", default-features = false }
@@ -55,3 +58,4 @@ nokhwa = { version = "0.10", default-features = false, features = ["input-msmf"]
 mezon-native.workspace = true
 windows-capture = "2.0"
 windows = { workspace = true }
+windows-core.workspace = true

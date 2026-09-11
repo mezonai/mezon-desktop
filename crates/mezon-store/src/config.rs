@@ -38,6 +38,7 @@ pub struct AppConfig {
     pub tcp_port: Option<u16>,
     pub stream_ws_url: String,
     pub meet_ws_url: String,
+    pub sfu_ws_url: String,
     pub notification_ws_url: String,
     pub blackboard_url: String,
     pub quiz_url: String,
@@ -123,6 +124,7 @@ impl AppConfig {
             tcp_port: Some(7349),
             stream_ws_url: "wss://stn.nccsoft.vn".into(),
             meet_ws_url: "wss://meet.nccsoft.vn".into(),
+            sfu_ws_url: "wss://test-sfu.nccsoft.vn/ws".into(),
             notification_ws_url: "wss://gotify.mezon.ai".into(),
             blackboard_url: "https://blackboard.mezon.ai".into(),
             quiz_url: "https://quiz.mezon.ai".into(),
@@ -198,6 +200,7 @@ impl AppConfig {
                 &defaults.stream_ws_url,
             ),
             meet_ws_url: opt_str(baked_env::NX_CHAT_APP_MEET_WS_URL, &defaults.meet_ws_url),
+            sfu_ws_url: opt_str(baked_env::NX_CHAT_APP_SFU_WS_URL, &defaults.sfu_ws_url),
             notification_ws_url: opt_str(
                 baked_env::NX_CHAT_APP_NOTIFICATION_WS_URL,
                 &defaults.notification_ws_url,
