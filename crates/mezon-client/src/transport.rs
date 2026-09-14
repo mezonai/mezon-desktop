@@ -44,7 +44,12 @@ pub struct ApiStatusError {
 
 impl ApiStatusError {
     pub const INVALID_ARGUMENT: u32 = 3;
+    pub const NOT_FOUND: u32 = 5;
+    pub const PERMISSION_DENIED: u32 = 7;
+    pub const RESOURCE_EXHAUSTED: u32 = 8;
     pub const OUT_OF_RANGE: u32 = 11;
+    pub const INTERNAL: u32 = 13;
+    pub const UNAUTHENTICATED: u32 = 16;
 
     pub fn is_out_of_range(self) -> bool {
         self.code == Self::OUT_OF_RANGE
@@ -54,8 +59,24 @@ impl ApiStatusError {
         self.code == Self::INVALID_ARGUMENT
     }
 
+    pub fn is_permission_denied(self) -> bool {
+        self.code == Self::PERMISSION_DENIED
+    }
+
     pub fn is_create_channel_limit_exceeded(self) -> bool {
         self.is_out_of_range()
+    }
+}
+
+fn grpc_code_from_envelope_status(http_like_code: i32) -> u32 {
+    match http_like_code {
+        400 => ApiStatusError::INVALID_ARGUMENT,
+        401 => ApiStatusError::UNAUTHENTICATED,
+        403 => ApiStatusError::PERMISSION_DENIED,
+        404 => ApiStatusError::NOT_FOUND,
+        429 => ApiStatusError::RESOURCE_EXHAUSTED,
+        500 => ApiStatusError::INTERNAL,
+        _ => 2,
     }
 }
 
@@ -962,6 +983,7 @@ pub struct ApiDirectChannel {
     pub count_mess_unread: i32,
     pub last_sent_timestamp: i64,
     pub last_seen_timestamp: i64,
+    pub create_time_seconds: u32,
     #[serde(default)]
     pub creator_id: i64,
 }
@@ -3737,8 +3759,7 @@ impl MezonTransport {
         let (code, response) = self
             .send(cid, self.build_api_request(cid, api_name, body)?)
             .await?;
-        self.log_api_ok(api_name, cid, code, response.len(), args, started);
-        Ok((code, response))
+        self.complete_api_request(api_name, cid, code, response, args, started)
     }
 
     async fn send_api_request_with_timeout(
@@ -3754,6 +3775,32 @@ impl MezonTransport {
         let (code, response) = self
             .send_with_timeout(cid, self.build_api_request(cid, api_name, body)?, timeout)
             .await?;
+        self.complete_api_request(api_name, cid, code, response, args, started)
+    }
+
+    fn complete_api_request(
+        &self,
+        api_name: &str,
+        cid: u16,
+        code: u32,
+        response: Vec<u8>,
+        args: u32,
+        started: Instant,
+    ) -> Result<(u32, Vec<u8>)> {
+        if let Some(error) = realtime_error_from_body(&response) {
+            tracing::error!(
+                target: "socket",
+                "api_err: action={api_name} cid={cid} envelope_code={} {}",
+                error.code,
+                error.message.trim()
+            );
+            let grpc_code = grpc_code_from_envelope_status(error.code);
+            return Err(api_status_error(grpc_code)).context(format!(
+                "{api_name} failed: {} (code={})",
+                error.message.trim(),
+                error.code
+            ));
+        }
         self.log_api_ok(api_name, cid, code, response.len(), args, started);
         Ok((code, response))
     }
@@ -4014,9 +4061,7 @@ impl MezonTransport {
         match api::ChannelDescList::decode(response) {
             Ok(list) => Ok(list),
             Err(decode_err) => {
-                if let Ok(error) = realtime::Error::decode(response)
-                    && (error.code != 0 || !error.message.is_empty())
-                {
+                if let Some(error) = realtime_error_from_body(response) {
                     return Err(anyhow::anyhow!(
                         "API error: code={} {}",
                         error.code,
@@ -4102,6 +4147,7 @@ impl MezonTransport {
             count_mess_unread: channel.count_mess_unread,
             last_sent_timestamp,
             last_seen_timestamp,
+            create_time_seconds: channel.create_time_seconds,
             creator_id: channel.creator_id,
         }
     }
@@ -4687,9 +4733,7 @@ impl MezonTransport {
             .send_api_request_with_http_fallback(cid, api_name, body)
             .await?;
 
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
+        api_response_or_realtime_error(code, api_name)?;
 
         let page = api::ChannelMessageList::decode(response.as_slice())?;
         let last_seen_message_id = page.last_seen_message.as_ref().map(|h| h.id).unwrap_or(0);
@@ -4744,9 +4788,7 @@ impl MezonTransport {
             .send_api_request_with_http_fallback(cid, api_name, body)
             .await?;
 
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
+        api_response_or_realtime_error(code, api_name)?;
 
         let page = api::ChannelMessageList::decode(response.as_slice())?;
         let last_seen_message_id = page.last_seen_message.as_ref().map(|h| h.id).unwrap_or(0);
@@ -9254,22 +9296,16 @@ impl MezonTransport {
         let (code, response) = self
             .send_api_request(cid, "GenerateMeetToken", body)
             .await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        if let Some(token) = bare_jwt(&response) {
-            return Ok(api::GenerateMeetTokenResponse { token });
-        }
-        Ok(api::GenerateMeetTokenResponse::decode(response.as_slice())?)
+        let token = meet_token_from_raw_body(code, &response)?;
+        Ok(api::GenerateMeetTokenResponse { token })
     }
 
-    /// Remove participant Mezon meet.
     pub async fn remove_participant_mezon_meet(
         &self,
         channel_id: i64,
         clan_id: i64,
         user_id: i64,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let cid = self.generate_cid();
         let body = api::MeetParticipantRequest {
             user_id,
@@ -9277,13 +9313,14 @@ impl MezonTransport {
             clan_id,
         }
         .encode_to_vec();
-        let (code, _) = self
+        let (code, response) = self
             .send_api_request(cid, "RemoveParticipantMezonMeet", body)
             .await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(())
+        bare_jwt(&response)
+            .ok_or_else(|| anyhow::anyhow!("RemoveParticipantMezonMeet returned no SFU action token"))
     }
 
     pub async fn mute_participant_mezon_meet(
@@ -9291,7 +9328,7 @@ impl MezonTransport {
         channel_id: i64,
         clan_id: i64,
         user_id: i64,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let cid = self.generate_cid();
         let body = api::MeetParticipantRequest {
             user_id,
@@ -9299,13 +9336,14 @@ impl MezonTransport {
             clan_id,
         }
         .encode_to_vec();
-        let (code, _) = self
+        let (code, response) = self
             .send_api_request(cid, "MuteParticipantMezonMeet", body)
             .await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(())
+        bare_jwt(&response)
+            .ok_or_else(|| anyhow::anyhow!("MuteParticipantMezonMeet returned no SFU action token"))
     }
 
     /// Create room channel apps.
@@ -10028,6 +10066,49 @@ impl MezonTransport {
         }
         Ok(())
     }
+}
+
+fn realtime_error_from_body(body: &[u8]) -> Option<realtime::Error> {
+    let envelope = realtime::Envelope::decode(body).ok()?;
+    match envelope.message {
+        Some(realtime::envelope::Message::Error(error))
+            if error.code != 0 || !error.message.is_empty() =>
+        {
+            Some(error)
+        }
+        _ => None,
+    }
+}
+
+fn api_response_or_realtime_error(code: u32, api_name: &str) -> Result<()> {
+    if code != 0 {
+        tracing::error!(target: "socket", "{api_name} failed: code={code}");
+        return Err(api_status_error(code)).context(format!("{api_name} failed (code={code})"));
+    }
+    Ok(())
+}
+
+fn meet_token_from_raw_body(code: u32, body: &[u8]) -> Result<String> {
+    if code != 0 {
+        tracing::error!(target: "socket", "GenerateMeetToken failed: code={code}");
+        return Err(api_status_error(code))
+            .context(format!("GenerateMeetToken failed (code={code})"));
+    }
+    if body.is_empty() {
+        anyhow::bail!("GenerateMeetToken failed: empty body (code=0)");
+    }
+    if let Some(jwt) = bare_jwt(body) {
+        return Ok(jwt);
+    }
+    if let Ok(wrapped) = api::GenerateMeetTokenResponse::decode(body)
+        && !wrapped.token.is_empty()
+    {
+        return Ok(wrapped.token);
+    }
+    tracing::error!(target: "socket", "GenerateMeetToken failed: response is not a JWT (code=0)");
+    Err(anyhow::anyhow!(
+        "GenerateMeetToken failed: response is not a JWT (code=0)"
+    ))
 }
 
 fn bare_jwt(body: &[u8]) -> Option<String> {
@@ -11872,12 +11953,110 @@ mod tests {
     }
 
     #[test]
-    fn a_protobuf_body_is_left_for_the_real_decoder() {
+    fn a_protobuf_token_wrapper_is_unwrapped_as_a_fallback() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
         let encoded = api::GenerateMeetTokenResponse {
-            token: "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln".to_owned(),
+            token: jwt.to_owned(),
         }
         .encode_to_vec();
         assert_eq!(bare_jwt(&encoded), None);
+        assert_eq!(meet_token_from_raw_body(0, &encoded).unwrap(), jwt);
+    }
+
+    #[test]
+    fn a_varint_field_one_body_is_rejected_without_protobuf_decode() {
+        let err = meet_token_from_raw_body(0, &[0x08, 0x07]).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("response is not a JWT"));
+        assert!(!message.contains("failed to decode Protobuf"));
+        assert!(!message.contains("Varint"));
+    }
+
+    #[test]
+    fn meet_token_api_error_is_typed_and_carries_the_raw_code() {
+        let err = meet_token_from_raw_body(7, &[]).unwrap_err();
+        assert!(api_status_from_error(&err).is_some_and(ApiStatusError::is_permission_denied));
+        assert!(err.to_string().contains("code=7"));
+
+        let invalid = meet_token_from_raw_body(3, &[]).unwrap_err();
+        assert!(api_status_from_error(&invalid).is_some_and(|s| s.is_invalid_argument()));
+        assert!(invalid.to_string().contains("code=3"));
+    }
+
+    #[test]
+    fn meet_token_empty_success_body_is_rejected() {
+        let err = meet_token_from_raw_body(0, &[]).unwrap_err();
+        assert!(err.to_string().contains("empty body"));
+    }
+
+    #[test]
+    fn meet_token_raw_jwt_is_accepted() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
+        assert_eq!(meet_token_from_raw_body(0, jwt.as_bytes()).unwrap(), jwt);
+    }
+
+    #[test]
+    fn envelope_error_body_is_extracted_with_its_http_like_code() {
+        let body = realtime::Envelope {
+            cid: 100,
+            message: Some(realtime::envelope::Message::Error(realtime::Error {
+                code: 403,
+                message: "Permission denied.".into(),
+                context: Default::default(),
+            })),
+        }
+        .encode_to_vec();
+        let error = realtime_error_from_body(&body).expect("envelope carries an error");
+        assert_eq!(error.code, 403);
+        assert_eq!(error.message, "Permission denied.");
+        assert_eq!(grpc_code_from_envelope_status(error.code), 7);
+    }
+
+    #[test]
+    fn envelope_error_survives_a_cid_field_before_it_lobbyby_bytes() {
+        let mut body = vec![0x08, 0x64, 0x62, 0x17, 0x08, 0x93, 0x03, 0x12, 0x12];
+        body.extend_from_slice(b"Permission denied.");
+        assert_eq!(body.len(), 27);
+        let error = realtime_error_from_body(&body).expect("envelope carries an error");
+        assert_eq!(error.code, 403);
+        assert_eq!(error.message, "Permission denied.");
+    }
+
+    #[test]
+    fn complete_api_request_rejects_a_realtime_error_envelope_with_a_typed_status() {
+        let t = transport(true);
+        let mut body = vec![0x08, 0x64, 0x62, 0x17, 0x08, 0x93, 0x03, 0x12, 0x12];
+        body.extend_from_slice(b"Permission denied.");
+        let err = t
+            .complete_api_request("ListChannelMessages", 1, 0, body, 0, Instant::now())
+            .unwrap_err();
+        assert!(api_status_from_error(&err).is_some_and(ApiStatusError::is_permission_denied));
+        let message = err.to_string();
+        assert!(message.contains("ListChannelMessages failed: Permission denied"));
+        assert!(message.contains("code=403"));
+    }
+
+    #[test]
+    fn complete_api_request_passes_through_a_clean_success_body() {
+        let t = transport(true);
+        let (code, response) = t
+            .complete_api_request(
+                "ListChannelMessages",
+                1,
+                0,
+                b"ok".to_vec(),
+                0,
+                Instant::now(),
+            )
+            .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(response, b"ok");
+    }
+
+    #[test]
+    fn api_response_or_realtime_error_maps_a_nonzero_frame_code() {
+        let err = api_response_or_realtime_error(7, "ListTopicMessages").unwrap_err();
+        assert!(api_status_from_error(&err).is_some_and(ApiStatusError::is_permission_denied));
     }
 
     #[test]

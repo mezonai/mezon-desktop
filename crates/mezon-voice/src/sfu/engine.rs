@@ -4,6 +4,7 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
+use base64::Engine as _;
 use futures::{SinkExt as _, StreamExt as _};
 use libwebrtc::audio_track::RtcAudioTrack;
 use libwebrtc::media_stream_track::{MediaStreamTrack, RtcTrackState};
@@ -22,7 +23,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
-use crate::{IceServerConfig, TokenRefresher};
+use crate::{IceServerConfig, MEET_TOKEN_RETRY_LIMIT, TokenRefresher};
 use crate::video::track_frame_key;
 
 use super::messages::{ClientMessage, IceServerSpec, ServerMessage, SnapshotMember};
@@ -61,6 +62,9 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const RECONNECT_FAST_ATTEMPTS: u32 = 2;
 const MAX_RECONNECT_ATTEMPTS: u32 = 40;
 const RECONNECTING_HEARTBEAT_TICKS: u32 = 10;
+const OFFER_REISSUE_DEADLINE: Duration = Duration::from_secs(8);
+const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(60);
+const SELF_MUTE_CORRELATION: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SfuRole {
@@ -120,6 +124,7 @@ pub enum SfuEvent {
     Reconnected,
     Disconnected { reason: String },
     Removed { reason: String },
+    MutedByModerator,
     Error(String),
 }
 
@@ -132,6 +137,7 @@ enum EngineCommand {
     SetScreenActive(bool),
     SetScreenAudio(bool),
     PushToTalk(bool),
+    ParticipantAction(String),
     Close,
 }
 
@@ -187,6 +193,10 @@ impl SfuEngine {
 
     pub fn push_to_talk(&self, active: bool) {
         let _ = self.cmd_tx.send(EngineCommand::PushToTalk(active));
+    }
+
+    pub fn participant_action(&self, token: String) {
+        let _ = self.cmd_tx.send(EngineCommand::ParticipantAction(token));
     }
 
     pub fn close(&self) {
@@ -477,10 +487,16 @@ async fn engine_main(
 ) -> Result<()> {
     let mut local = LocalTracks::new();
     let mut attempts: u32 = 0;
+    let mut token_refreshes: u32 = 0;
     let mut ever_joined = false;
     let mut retiring = RetiredPeerConnection(None);
+    let mut first_session = true;
 
     loop {
+        if !first_session {
+            ensure_fresh_token(&mut config, &mut token_refreshes).await;
+        }
+        first_session = false;
         let (joined, reason, stale_token) =
             match run_session(
                 &config,
@@ -522,8 +538,14 @@ async fn engine_main(
         }
 
         ever_joined |= joined;
-        let refreshed = stale_token && refresh_session_token(&mut config).await;
-        if !ever_joined && !refreshed {
+        if joined {
+            token_refreshes = 0;
+        }
+        let refreshed =
+            stale_token && refresh_session_token(&mut config, &mut token_refreshes).await;
+        let token_retries_spent =
+            stale_token && !refreshed && token_refreshes >= MEET_TOKEN_RETRY_LIMIT;
+        if token_retries_spent || (!ever_joined && !refreshed) {
             let _ = evt_tx.send(SfuEvent::Disconnected { reason });
             return Ok(());
         }
@@ -611,15 +633,63 @@ fn apply_offline_command(
         }
         EngineCommand::SetCameraActive(_)
         | EngineCommand::SetScreenActive(_)
+        | EngineCommand::ParticipantAction(_)
         | EngineCommand::Close => {}
     }
     local.apply_audio_gate(None, role);
 }
 
-async fn refresh_session_token(config: &mut SfuConfig) -> bool {
+fn claim_token_refresh(refreshes: &mut u32) -> bool {
+    if *refreshes >= MEET_TOKEN_RETRY_LIMIT {
+        return false;
+    }
+    *refreshes += 1;
+    true
+}
+
+async fn ensure_fresh_token(config: &mut SfuConfig, refreshes: &mut u32) {
+    let Some(refresher) = config.refresh_token.clone() else {
+        return;
+    };
+    let remaining = token_seconds_left(&config.token);
+    if remaining.is_some_and(|left| left > TOKEN_EXPIRY_MARGIN.as_secs() as i64) {
+        return;
+    }
+    if !claim_token_refresh(refreshes) {
+        return;
+    }
+    match refresher.mint().await {
+        Some(fresh) if fresh != config.token => {
+            tracing::info!(?remaining, "sfu join token refreshed before reconnecting");
+            config.token = fresh;
+        }
+        _ => tracing::warn!(?remaining, "sfu join token refresh failed; reusing the current token"),
+    }
+}
+
+fn token_seconds_left(token: &str) -> Option<i64> {
+    let payload = token.split('.').nth(1)?.trim_end_matches('=');
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let exp = claims.get("exp")?.as_i64()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    Some(exp - now)
+}
+
+async fn refresh_session_token(config: &mut SfuConfig, refreshes: &mut u32) -> bool {
     let Some(refresher) = config.refresh_token.clone() else {
         return false;
     };
+    if !claim_token_refresh(refreshes) {
+        tracing::warn!(
+            refreshes = *refreshes,
+            "sfu join token rejected again; refresh limit reached"
+        );
+        return false;
+    }
     match refresher.mint().await {
         Some(fresh) if fresh != config.token => {
             tracing::info!("sfu join token refreshed after the server rejected it");
@@ -735,6 +805,8 @@ async fn session_loop(
     let mut stats_timer = tokio::time::interval(MEDIA_STATS_INTERVAL);
     stats_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pending_offer: Option<(u64, String)> = None;
+    let mut offer_reissue_deadline: Option<tokio::time::Instant> = None;
+    let mut forced_mute_deadline: Option<tokio::time::Instant> = None;
     let mut media_wait_started: Option<Instant> = None;
     let mut ice_up_since: Option<Instant> = None;
     let mut transport_connected = false;
@@ -853,6 +925,7 @@ async fn session_loop(
                         tracing::debug!(generation = offer_generation, bytes = sdp.len(), "sfu offer");
                         membership.absorb_msids(&sdp);
                         pending_offer = Some((offer_generation, sdp));
+                        offer_reissue_deadline = None;
                     }
                     ServerMessage::RoomSnapshot { self_peer_id, members } => {
                         tracing::info!(members = members.len(), "sfu room snapshot");
@@ -869,8 +942,23 @@ async fn session_loop(
                         }
                         let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
                     }
-                    ServerMessage::PeerJoined { peer } | ServerMessage::PeerUpdated { peer } => {
+                    ServerMessage::PeerJoined { peer } => {
                         if let Some(peer) = peer {
+                            membership.apply(peer);
+                            let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                        }
+                    }
+                    ServerMessage::PeerUpdated { peer } => {
+                        if let Some(peer) = peer {
+                            if joined
+                                && peer.is_mute
+                                && !local.muted
+                                && peer.peer_id == membership.self_peer_id
+                            {
+                                forced_mute_deadline.get_or_insert_with(|| {
+                                    tokio::time::Instant::now() + SELF_MUTE_CORRELATION
+                                });
+                            }
                             membership.apply(peer);
                             let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
                         }
@@ -891,8 +979,10 @@ async fn session_loop(
                         local.apply_audio_gate(pc.as_ref(), config.role);
                         let _ = evt_tx.send(SfuEvent::PttActive(active));
                     }
-                    ServerMessage::MuteChanged { .. }
-                    | ServerMessage::VisibilityChanged { .. }
+                    ServerMessage::MuteChanged { .. } => {
+                        forced_mute_deadline = None;
+                    }
+                    ServerMessage::VisibilityChanged { .. }
                     | ServerMessage::RoleChanged { .. }
                     | ServerMessage::Unknown => {}
                     ServerMessage::Error { message } => {
@@ -900,6 +990,30 @@ async fn session_loop(
                             local.ptt_active = false;
                             local.apply_audio_gate(pc.as_ref(), config.role);
                             let _ = evt_tx.send(SfuEvent::PttActive(false));
+                            continue;
+                        }
+                        if matches!(message.as_str(), "stale_offer_generation" | "future_offer_generation") {
+                            if pending_offer.is_some() {
+                                tracing::info!(%message, joined, "sfu rejected an older answer; answering the newer offer");
+                                continue;
+                            }
+                            tracing::info!(%message, joined, "sfu rejected the answer generation; waiting for the reissued offer");
+                            offer_reissue_deadline
+                                .get_or_insert_with(|| tokio::time::Instant::now() + OFFER_REISSUE_DEADLINE);
+                            continue;
+                        }
+                        if joined
+                            && matches!(
+                                message.as_str(),
+                                "invalid_token"
+                                    | "token_room_mismatch"
+                                    | "target_not_found"
+                                    | "invalid_participant_action"
+                                    | "unsupported_participant_action"
+                                    | "auth_not_configured"
+                            )
+                        {
+                            tracing::warn!(%message, "sfu rejected the participant action");
                             continue;
                         }
                         tracing::warn!(%message, joined, "sfu reported an error");
@@ -965,6 +1079,15 @@ async fn session_loop(
                     EngineCommand::SetScreenAudio(active) => {
                         local.screen_audio = active;
                         local.apply_audio_gate(pc.as_ref(), config.role);
+                    }
+                    EngineCommand::ParticipantAction(token) => {
+                        if !joined {
+                            tracing::warn!("sfu participant action dropped before the join completed");
+                            continue;
+                        }
+                        if send(&mut ws_tx, &ClientMessage::ParticipantAction { token }).await.is_err() {
+                            return SessionOutcome::Dropped { joined, reason: "participant_action send failed".into() };
+                        }
                     }
                     EngineCommand::PushToTalk(active) => {
                         local.ptt_requested = active;
@@ -1134,6 +1257,21 @@ async fn session_loop(
                 } else {
                     route_candidate = Some(current);
                     offline_ticks = 0;
+                }
+            }
+            () = tokio::time::sleep_until(offer_reissue_deadline.unwrap_or_else(tokio::time::Instant::now)), if offer_reissue_deadline.is_some() => {
+                return SessionOutcome::Dropped {
+                    joined,
+                    reason: "sfu never reissued the rejected offer".into(),
+                };
+            }
+            () = tokio::time::sleep_until(forced_mute_deadline.unwrap_or_else(tokio::time::Instant::now)), if forced_mute_deadline.is_some() => {
+                forced_mute_deadline = None;
+                if !local.muted {
+                    tracing::info!("sfu moderator muted this device");
+                    local.muted = true;
+                    local.apply_audio_gate(pc.as_ref(), config.role);
+                    let _ = evt_tx.send(SfuEvent::MutedByModerator);
                 }
             }
             () = std::future::ready(()), if pending_offer.is_some() => {
@@ -2257,5 +2395,86 @@ mod tests {
     #[test]
     fn a_normal_closure_is_still_retried() {
         assert_eq!(classify_close(Some(CloseCode::Normal)), CloseVerdict::Retry);
+    }
+
+    fn jwt_with_exp(exp: i64, padded: bool) -> String {
+        use base64::Engine as _;
+        let claims = serde_json::json!({ "exp": exp, "sub": 7 }).to_string();
+        let payload = if padded {
+            base64::engine::general_purpose::URL_SAFE.encode(&claims)
+        } else {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&claims)
+        };
+        format!("eyJhbGciOiJIUzI1NiJ9.{payload}.c2ln")
+    }
+
+    fn unix_now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    #[test]
+    fn a_token_reports_its_remaining_lifetime() {
+        let left = token_seconds_left(&jwt_with_exp(unix_now() + 3_600, false)).unwrap();
+        assert!((3_595..=3_600).contains(&left), "got {left}");
+        assert!(token_seconds_left(&jwt_with_exp(unix_now() - 10, false)).unwrap() < 0);
+    }
+
+    #[test]
+    fn a_padded_or_malformed_token_is_handled() {
+        assert!(token_seconds_left(&jwt_with_exp(unix_now() + 60, true)).is_some());
+        assert_eq!(token_seconds_left("not-a-jwt"), None);
+        assert_eq!(token_seconds_left("a.b.c"), None);
+        assert_eq!(token_seconds_left("a.e30.c"), None);
+    }
+
+    fn counting_refresher(mints_fresh_token: bool) -> (TokenRefresher, impl Fn() -> u32) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let minted = calls.clone();
+        let refresher = TokenRefresher::new(move || {
+            let call = minted.fetch_add(1, Ordering::SeqCst) + 1;
+            async move { mints_fresh_token.then(|| format!("fresh-token-{call}")) }
+        });
+        (refresher, move || calls.load(Ordering::SeqCst))
+    }
+
+    fn config_with_refresher(token: &str, refresher: TokenRefresher) -> SfuConfig {
+        SfuConfig {
+            ws_url: String::new(),
+            token: token.into(),
+            room: "test-room".into(),
+            role: SfuRole::Speaker,
+            fallback_ice_servers: Vec::new(),
+            refresh_token: Some(refresher),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rejected_token_is_refreshed_at_most_the_retry_limit() {
+        let (refresher, calls) = counting_refresher(true);
+        let mut config = config_with_refresher("rejected-token", refresher);
+        let mut refreshes = 0;
+        for _ in 0..MEET_TOKEN_RETRY_LIMIT {
+            assert!(refresh_session_token(&mut config, &mut refreshes).await);
+        }
+        assert!(!refresh_session_token(&mut config, &mut refreshes).await);
+        assert_eq!(calls(), MEET_TOKEN_RETRY_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn refreshing_before_a_reconnect_spends_the_same_retry_limit() {
+        let (refresher, calls) = counting_refresher(false);
+        let mut config = config_with_refresher("not-a-jwt", refresher);
+        let mut refreshes = 0;
+        for _ in 0..MEET_TOKEN_RETRY_LIMIT + 2 {
+            ensure_fresh_token(&mut config, &mut refreshes).await;
+        }
+        assert!(!refresh_session_token(&mut config, &mut refreshes).await);
+        assert_eq!(calls(), MEET_TOKEN_RETRY_LIMIT);
     }
 }

@@ -446,6 +446,7 @@ mod wasapi {
     const BUFFER_DURATION_100NS: i64 = 2_000_000;
     const WAIT_SLICE_MS: u32 = 100;
     const BYTES_PER_SAMPLE: u32 = 2;
+    const MAX_PACKET_FRAMES: u32 = SCREEN_AUDIO_SAMPLE_RATE;
 
     #[derive(Clone, Copy)]
     struct EventHandle(isize);
@@ -560,8 +561,7 @@ mod wasapi {
                 return;
             }
         };
-        let max_frames = unsafe { client.GetBufferSize() }.unwrap_or(0);
-        tracing::info!(max_frames, "screen audio step: buffer sized");
+        tracing::info!("screen audio step: loopback opened");
         if let Err(e) = unsafe { client.Start() } {
             let _ = init_tx.try_send(Err(format!("screen audio start failed: {e}")));
             return;
@@ -575,7 +575,7 @@ mod wasapi {
             if unsafe { WaitForSingleObject(wake.raw(), WAIT_SLICE_MS) } != WAIT_OBJECT_0 {
                 continue;
             }
-            drain_packets(&capture, channels, max_frames, &mut logged_first, tx);
+            drain_packets(&capture, channels, &mut logged_first, tx);
         }
         tracing::info!("screen audio step: capture loop left");
         unsafe {
@@ -586,7 +586,6 @@ mod wasapi {
     fn drain_packets(
         capture: &IAudioCaptureClient,
         channels: usize,
-        max_frames: u32,
         logged_first: &mut bool,
         tx: &flume::Sender<Vec<i16>>,
     ) {
@@ -606,12 +605,12 @@ mod wasapi {
                 tracing::info!(pending, frames, flags, "screen audio step: first packet");
             }
             let silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0;
-            let oversized = max_frames > 0 && frames > max_frames;
+            let oversized = frames > MAX_PACKET_FRAMES;
             if oversized {
                 tracing::error!(
                     frames,
-                    max_frames,
-                    "screen audio packet exceeds the client buffer; dropping it"
+                    limit = MAX_PACKET_FRAMES,
+                    "screen audio packet exceeds the packet limit; dropping it"
                 );
             }
             if frames > 0 && !silent && !oversized && !data.is_null() {

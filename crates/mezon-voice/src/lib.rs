@@ -89,6 +89,8 @@ pub struct IceServerConfig {
     pub credential: String,
 }
 
+pub const MEET_TOKEN_RETRY_LIMIT: u32 = 3;
+
 #[derive(Clone)]
 pub struct TokenRefresher(
     Arc<dyn Fn() -> futures::future::BoxFuture<'static, Option<String>> + Send + Sync>,
@@ -152,6 +154,7 @@ pub enum VoiceEvent {
     Participants(Vec<VoiceParticipant>),
     PushToTalkActive(bool),
     RemovedFromChannel { reason: String },
+    MutedByModerator,
     Error(String),
 }
 
@@ -161,10 +164,10 @@ enum Command {
     SetInputDevice(Option<String>),
     SetOutputDevice(Option<String>),
     SetCameraDevice(Option<String>),
-    SetNoiseSuppression(bool, u8),
     StartScreenShare(PickedScreen, bool),
     StopScreenShare,
     PushToTalk(bool),
+    ParticipantAction(String),
     Disconnect,
 }
 
@@ -319,12 +322,6 @@ impl VoiceSession {
         let _ = self.cmd_tx.send(Command::SetCameraDevice(device_id));
     }
 
-    pub fn set_noise_suppression(&self, enabled: bool, level: u8) {
-        let _ = self
-            .cmd_tx
-            .send(Command::SetNoiseSuppression(enabled, level));
-    }
-
     pub fn start_screen_share(&self, pick: PickedScreen, share_audio: bool) {
         let _ = self
             .cmd_tx
@@ -337,6 +334,10 @@ impl VoiceSession {
 
     pub fn set_push_to_talk(&self, active: bool) {
         let _ = self.cmd_tx.send(Command::PushToTalk(active));
+    }
+
+    pub fn participant_action(&self, token: String) {
+        let _ = self.cmd_tx.send(Command::ParticipantAction(token));
     }
 
     pub fn set_screen_full_res(&self, full_res: bool) {
@@ -590,6 +591,15 @@ async fn session_main(
                     SfuEvent::Removed { reason } => {
                         let _ = evt_tx.send(VoiceEvent::RemovedFromChannel { reason });
                     }
+                    SfuEvent::MutedByModerator => {
+                        mic_on = false;
+                        mic_enabled.store(false, Ordering::Relaxed);
+                        if let Some(io) = &audio_io {
+                            io.set_input_active(false);
+                        }
+                        emit!();
+                        let _ = evt_tx.send(VoiceEvent::MutedByModerator);
+                    }
                     SfuEvent::Error(message) => {
                         let _ = evt_tx.send(VoiceEvent::Error(message));
                     }
@@ -626,11 +636,6 @@ async fn session_main(
                                 io.set_input_active(false);
                             }
                             emit!();
-                        }
-                    }
-                    Ok(Command::SetNoiseSuppression(enabled, level)) => {
-                        if let Some(io) = &audio_io {
-                            io.set_noise_suppression(enabled, level);
                         }
                     }
                     Ok(Command::SetCameraEnabled(true)) => {
@@ -734,6 +739,7 @@ async fn session_main(
                             emit!();
                         }
                     }
+                    Ok(Command::ParticipantAction(token)) => engine.participant_action(token),
                     Ok(Command::Disconnect) | Err(_) => {
                         engine.close();
                         abort_task(&mut microphone_task).await;
@@ -1247,6 +1253,7 @@ fn spawn_video(
         .name("mezon-video-convert".into())
         .spawn(move || {
             let mut bgra: Vec<u8> = Vec::new();
+            let mut invalid_frames = 0u64;
             while let Some(buffer) = convert_slot.take_latest() {
                 let width = buffer.width();
                 let height = buffer.height();
@@ -1254,7 +1261,7 @@ fn spawn_video(
                 let (y, u, v) = buffer.data();
                 bgra.clear();
                 bgra.resize(width as usize * height as usize * 4, 0);
-                i420_to_bgra_into(
+                if !video::try_i420_to_bgra_into(
                     &mut bgra,
                     y,
                     u,
@@ -1264,7 +1271,14 @@ fn spawn_video(
                     sv as usize,
                     width as usize,
                     height as usize,
-                );
+                ) {
+                    invalid_frames += 1;
+                    if invalid_frames % 100 == 1 {
+                        tracing::warn!(key, invalid_frames, width, height, sy, su, sv,
+                            "dropping invalid decoded video frame");
+                    }
+                    continue;
+                }
                 if let Some(recycled) =
                     convert_store.publish(key, width, height, std::mem::take(&mut bgra))
                 {

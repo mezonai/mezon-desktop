@@ -1085,7 +1085,7 @@ impl TransportClient {
         channel_id: &str,
         clan_id: &str,
         user_id: &str,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let transport = self.inner.clone();
         let channel_id = channel_id
             .parse::<i64>()
@@ -1105,7 +1105,7 @@ impl TransportClient {
         channel_id: &str,
         clan_id: &str,
         user_id: &str,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let transport = self.inner.clone();
         let channel_id = channel_id
             .parse::<i64>()

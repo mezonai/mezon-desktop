@@ -282,6 +282,11 @@ impl ChatLayout {
                 let msg = mezon_i18n::t(&locale, key).to_string();
                 Shell::global(cx).update(cx, |shell, cx| shell.error(msg, cx));
             }
+            if voice.update(cx, |store, _| store.take_muted_by_moderator()) {
+                let locale = this.settings.read(cx).language.clone();
+                let msg = mezon_i18n::t(&locale, "channelVoice.mutedByModerator").to_string();
+                Shell::global(cx).update(cx, |shell, cx| shell.info(msg, cx));
+            }
             let mini_changed = this.voice_mini_display_changed(cx);
             this.sync_voice_frame_pump(cx);
             this.sync_stream_frame_pump(cx);
@@ -957,8 +962,11 @@ impl ChatLayout {
         self.message_search_input = Some(input);
     }
 
-    pub(crate) fn toggle_member_list(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_member_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dm = self.is_dm_route(cx);
+        if dm && !self.show_member_list {
+            self.chat_area.ensure_dm_profile_panel(window, cx);
+        }
         self.show_member_list = !self.show_member_list;
         if dm {
             self.ui_state.show_member_list_dm = self.show_member_list;
@@ -1696,6 +1704,9 @@ impl Render for ChatLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("ChatLayout");
         self.chat_area.ensure_input(window, cx);
+        if self.show_member_list && self.is_dm_route(cx) {
+            self.chat_area.ensure_dm_profile_panel(window, cx);
+        }
         self.chat_area.bind_window(window, cx);
         self.sync_composer_on_channel_switch(window, cx);
         self.maybe_prefetch_voice_token(cx);
@@ -2862,11 +2873,8 @@ impl ChatLayout {
                         true,
                         in_voice,
                         Some(dm.id),
-                        is_group,
-                        is_group
-                            && self.show_member_list
-                            && !show_results_panel
-                            && !side_panel_open,
+                        true,
+                        self.show_member_list && !show_results_panel && !side_panel_open,
                         false,
                         false,
                         false,

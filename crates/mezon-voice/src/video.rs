@@ -253,8 +253,19 @@ fn pack_to_i420(
     }
 }
 
+fn plane_fits(len: usize, stride: usize, row_bytes: usize, rows: usize) -> bool {
+    row_bytes > 0
+        && rows > 0
+        && stride >= row_bytes
+        && (rows - 1)
+            .checked_mul(stride)
+            .and_then(|offset| offset.checked_add(row_bytes))
+            .is_some_and(|required| required <= len)
+}
+
 #[allow(clippy::too_many_arguments)]
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(not(target_os = "macos"), test))]
+#[must_use]
 pub fn bgra_to_i420(
     bgra: &[u8],
     width: usize,
@@ -266,7 +277,20 @@ pub fn bgra_to_i420(
     stride_y: usize,
     stride_u: usize,
     stride_v: usize,
-) {
+) -> bool {
+    let Some(row_bytes) = width.checked_mul(4) else {
+        return false;
+    };
+    if [width, height, src_row_stride, stride_y, stride_u, stride_v]
+        .iter()
+        .any(|&value| value > u32::MAX as usize)
+        || !plane_fits(bgra.len(), src_row_stride, row_bytes, height)
+        || !plane_fits(y_plane.len(), stride_y, width, height)
+        || !plane_fits(u_plane.len(), stride_u, width.div_ceil(2), height.div_ceil(2))
+        || !plane_fits(v_plane.len(), stride_v, width.div_ceil(2), height.div_ceil(2))
+    {
+        return false;
+    }
     let mut planar = yuv::YuvPlanarImageMut {
         y_plane: yuv::BufferStoreMut::Borrowed(y_plane),
         y_stride: stride_y as u32,
@@ -277,14 +301,15 @@ pub fn bgra_to_i420(
         width: width as u32,
         height: height as u32,
     };
-    let _ = yuv::bgra_to_yuv420(
+    yuv::bgra_to_yuv420(
         &mut planar,
         bgra,
         src_row_stride as u32,
         yuv::YuvRange::Limited,
         yuv::YuvStandardMatrix::Bt601,
         yuv::YuvConversionMode::Balanced,
-    );
+    )
+    .is_ok()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -299,9 +324,36 @@ pub fn i420_to_bgra_into(
     width: usize,
     height: usize,
 ) {
-    let needed = width * height * 4;
-    if out.len() < needed {
-        return;
+    if !try_i420_to_bgra_into(
+        out, y_plane, u_plane, v_plane, stride_y, stride_u, stride_v, width, height,
+    ) {
+        out.fill(0);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_i420_to_bgra_into(
+    out: &mut [u8],
+    y_plane: &[u8],
+    u_plane: &[u8],
+    v_plane: &[u8],
+    stride_y: usize,
+    stride_u: usize,
+    stride_v: usize,
+    width: usize,
+    height: usize,
+) -> bool {
+    let Some(needed) = width.checked_mul(height).and_then(|size| size.checked_mul(4)) else {
+        return false;
+    };
+    if width > u32::MAX as usize / 4
+        || [height, stride_y, stride_u, stride_v].iter().any(|&value| value > u32::MAX as usize)
+        || out.len() < needed
+        || !plane_fits(y_plane.len(), stride_y, width, height)
+        || !plane_fits(u_plane.len(), stride_u, width.div_ceil(2), height.div_ceil(2))
+        || !plane_fits(v_plane.len(), stride_v, width.div_ceil(2), height.div_ceil(2))
+    {
+        return false;
     }
 
     let planar = yuv::YuvPlanarImage {
@@ -323,12 +375,13 @@ pub fn i420_to_bgra_into(
     )
     .is_ok()
     {
-        return;
+        return true;
     }
 
     i420_to_bgra_scalar(
         out, y_plane, u_plane, v_plane, stride_y, stride_u, stride_v, width, height,
     );
+    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -786,5 +839,84 @@ mod tests {
         assert_eq!(y, [16, 235, 126, 71]);
         assert_eq!(u, [16]);
         assert_eq!(v, [240]);
+    }
+}
+
+#[cfg(test)]
+mod frame_validation_tests {
+    use super::{bgra_to_i420, plane_fits, try_i420_to_bgra_into};
+
+    #[test]
+    fn plane_layout_rejects_short_rows_and_overflow() {
+        assert!(!plane_fits(16, 1, 2, 2));
+        assert!(!plane_fits(usize::MAX, usize::MAX, 2, 2));
+        assert!(!plane_fits(0, 0, 0, 0));
+        assert!(plane_fits(6, 4, 2, 2));
+    }
+
+    #[test]
+    fn truncated_chroma_is_rejected_before_rendering() {
+        let mut output = [77; 16];
+        assert!(!try_i420_to_bgra_into(
+            &mut output, &[16; 4], &[], &[128], 2, 1, 1, 2, 2,
+        ));
+        assert_eq!(output, [77; 16]);
+    }
+
+    #[test]
+    fn overlapping_i420_rows_are_rejected() {
+        let mut output = [77; 16];
+        assert!(!try_i420_to_bgra_into(
+            &mut output, &[16; 4], &[128], &[128], 1, 1, 1, 2, 2,
+        ));
+        assert_eq!(output, [77; 16]);
+    }
+
+    #[test]
+    fn invalid_dimensions_and_short_output_are_rejected() {
+        let mut output = [77; 15];
+        assert!(!try_i420_to_bgra_into(
+            &mut output, &[16; 4], &[128], &[128], 2, 1, 1, 2, 2,
+        ));
+        assert!(!try_i420_to_bgra_into(
+            &mut output, &[16; 4], &[128], &[128], 2, 1, 1, usize::MAX, 2,
+        ));
+        assert_eq!(output, [77; 15]);
+    }
+
+    #[test]
+    fn padded_i420_rows_render_without_reading_padding() {
+        let mut output = [77; 16];
+        assert!(try_i420_to_bgra_into(
+            &mut output, &[16, 16, 255, 255, 16, 16], &[128], &[128], 4, 1, 1, 2, 2,
+        ));
+        assert_eq!(output, [0, 0, 0, 255].repeat(4).as_slice());
+    }
+
+    #[test]
+    fn invalid_bgra_is_rejected_before_writing_planes() {
+        for (input, stride) in [(&[0u8; 15][..], 8), (&[0u8; 16][..], 4)] {
+            let mut y = [77; 4];
+            let mut u = [77];
+            let mut v = [77];
+            assert!(!bgra_to_i420(input, 2, 2, stride, &mut y, &mut u, &mut v, 2, 1, 1));
+            assert_eq!(y, [77; 4]);
+            assert_eq!(u, [77]);
+            assert_eq!(v, [77]);
+        }
+    }
+
+    #[test]
+    fn padded_bgra_rows_convert_without_using_padding_as_pixels() {
+        let mut input = [255; 24];
+        input[..8].fill(0);
+        input[12..20].fill(0);
+        let mut y = [77; 4];
+        let mut u = [77];
+        let mut v = [77];
+        assert!(bgra_to_i420(&input, 2, 2, 12, &mut y, &mut u, &mut v, 2, 1, 1));
+        assert_eq!(y, [16; 4]);
+        assert_eq!(u, [128]);
+        assert_eq!(v, [128]);
     }
 }

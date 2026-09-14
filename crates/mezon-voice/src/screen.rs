@@ -298,6 +298,8 @@ pub fn start_screen(
             let mut src_w = 0u32;
             let mut src_h = 0u32;
             let mut sent_track = false;
+            #[cfg(not(target_os = "macos"))]
+            let mut invalid_frames = 0u64;
             let mut display_buf = Vec::new();
             let first_frame_deadline = (!use_portal).then(|| Instant::now() + FIRST_FRAME_TIMEOUT);
 
@@ -315,11 +317,16 @@ pub fn start_screen(
                     None => (full_w, full_h),
                 };
                 #[cfg(not(target_os = "macos"))]
-                let (width, height, row_stride) = (
-                    captured.width as u32 & !1,
-                    captured.height as u32 & !1,
-                    captured.data.len() / captured.height.max(1) as usize,
-                );
+                let Some(row_stride) = bgra_row_stride(captured.width, captured.height, captured.data.len()) else {
+                    invalid_frames += 1;
+                    if invalid_frames % 100 == 1 {
+                        tracing::warn!(invalid_frames, width = captured.width, height = captured.height,
+                            bytes = captured.data.len(), "dropping invalid screen capture buffer");
+                    }
+                    continue;
+                };
+                #[cfg(not(target_os = "macos"))]
+                let (width, height) = (captured.width as u32 & !1, captured.height as u32 & !1);
                 if width < 2 || height < 2 {
                     continue;
                 }
@@ -400,7 +407,7 @@ pub fn start_screen(
                     }
                     #[cfg(not(target_os = "macos"))]
                     {
-                        bgra_to_i420(
+                        if !bgra_to_i420(
                             &captured.data,
                             src_w as usize,
                             src_h as usize,
@@ -411,7 +418,14 @@ pub fn start_screen(
                             sy as usize,
                             su as usize,
                             sv as usize,
-                        );
+                        ) {
+                            invalid_frames += 1;
+                            if invalid_frames % 100 == 1 {
+                                tracing::warn!(invalid_frames, width = src_w, height = src_h,
+                                    row_stride, "dropping screen frame after BGRA conversion failed");
+                            }
+                            continue;
+                        }
                     }
                 }
                 let frame = VideoFrame {
@@ -497,6 +511,17 @@ pub fn start_screen(
     }
 
     (ScreenStopper { stop }, track_rx)
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+fn bgra_row_stride(width: i32, height: i32, len: usize) -> Option<usize> {
+    let width = usize::try_from(width).ok().filter(|&width| width > 0)?;
+    let height = usize::try_from(height).ok().filter(|&height| height > 0)?;
+    if len % height != 0 {
+        return None;
+    }
+    let stride = len / height;
+    (stride >= width.checked_mul(4)? && stride % 4 == 0).then_some(stride)
 }
 
 #[cfg(any(not(target_os = "macos"), test))]
@@ -700,5 +725,24 @@ mod tests {
             data: vec![10, 20, 30, 40, 50, 60],
         }));
         assert_eq!(data, vec![30, 20, 10, 255, 60, 50, 40, 255]);
+    }
+}
+
+#[cfg(test)]
+mod frame_layout_tests {
+    use super::bgra_row_stride;
+
+    #[test]
+    fn accepts_packed_and_padded_rows() {
+        assert_eq!(bgra_row_stride(2, 2, 16), Some(8));
+        assert_eq!(bgra_row_stride(2, 2, 24), Some(12));
+    }
+
+    #[test]
+    fn rejects_invalid_dimensions_and_incomplete_rows() {
+        for (width, height, len) in [(0, 2, 16), (-2, 2, 16), (2, 0, 16), (2, -2, 16),
+            (2, 2, 15), (2, 2, 12), (2, 2, 18)] {
+            assert_eq!(bgra_row_stride(width, height, len), None);
+        }
     }
 }

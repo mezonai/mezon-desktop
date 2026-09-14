@@ -243,13 +243,6 @@ fn flush_reverse(
     }
 }
 
-fn mix_noise_suppression(dry: &mut [i16], wet: &[i16], level: u32) {
-    for (d, w) in dry.iter_mut().zip(wet) {
-        let dry_val = *d as i32;
-        *d = (dry_val + ((*w as i32 - dry_val) * level as i32) / 100) as i16;
-    }
-}
-
 fn process_reverse(apm: &mut AudioProcessingModule, mut chunk: ReverseChunk) {
     let _ = apm.process_reverse_stream(&mut chunk.data, chunk.rate, chunk.channels);
 }
@@ -265,29 +258,13 @@ fn drain_reverse(apm: &mut AudioProcessingModule, reverse_rx: &flume::Receiver<R
 
 fn process_capture(
     apm: &mut AudioProcessingModule,
-    ns: &mut AudioProcessingModule,
-    wet: &mut Vec<i16>,
     reverse_rx: &flume::Receiver<ReverseChunk>,
     mic_tx: &flume::Sender<Vec<i16>>,
-    ns_enabled: &AtomicBool,
-    ns_level: &AtomicU32,
     mut chunk: CaptureChunk,
 ) {
     drain_reverse(apm, reverse_rx);
     let _ = apm.set_stream_delay_ms(chunk.delay_ms);
     let _ = apm.process_stream(&mut chunk.data, chunk.rate, chunk.channels);
-    let level = ns_level.load(Ordering::Relaxed).min(100);
-    if ns_enabled.load(Ordering::Relaxed) && level > 0 {
-        wet.clear();
-        wet.extend_from_slice(&chunk.data);
-        if ns.process_stream(wet, chunk.rate, chunk.channels).is_ok() {
-            if level >= 100 {
-                chunk.data.copy_from_slice(wet);
-            } else {
-                mix_noise_suppression(&mut chunk.data, wet, level);
-            }
-        }
-    }
     let _ = mic_tx.try_send(chunk.data);
 }
 
@@ -295,30 +272,17 @@ fn run_apm(
     capture_rx: flume::Receiver<CaptureChunk>,
     reverse_rx: flume::Receiver<ReverseChunk>,
     mic_tx: flume::Sender<Vec<i16>>,
-    ns_enabled: Arc<AtomicBool>,
-    ns_level: Arc<AtomicU32>,
 ) {
     enum Event {
         Capture(CaptureChunk),
         Reverse(ReverseChunk),
         Stop,
     }
-    let mut apm = AudioProcessingModule::new(true, true, true, false);
-    let mut ns = AudioProcessingModule::new(false, false, false, true);
-    let mut wet: Vec<i16> = Vec::new();
+    let mut apm = AudioProcessingModule::new(true, true, true, true);
     loop {
         match capture_rx.try_recv() {
             Ok(chunk) => {
-                process_capture(
-                    &mut apm,
-                    &mut ns,
-                    &mut wet,
-                    &reverse_rx,
-                    &mic_tx,
-                    &ns_enabled,
-                    &ns_level,
-                    chunk,
-                );
+                process_capture(&mut apm, &reverse_rx, &mic_tx, chunk);
                 continue;
             }
             Err(flume::TryRecvError::Disconnected) => break,
@@ -337,16 +301,7 @@ fn run_apm(
                 process_reverse(&mut apm, chunk);
             }
             Event::Capture(chunk) => {
-                process_capture(
-                    &mut apm,
-                    &mut ns,
-                    &mut wet,
-                    &reverse_rx,
-                    &mic_tx,
-                    &ns_enabled,
-                    &ns_level,
-                    chunk,
-                );
+                process_capture(&mut apm, &reverse_rx, &mic_tx, chunk);
             }
             Event::Stop => break,
         }
@@ -453,8 +408,6 @@ pub struct AudioIo {
     pub output_format_rx: flume::Receiver<AudioFormat>,
     pub device_reset_rx: flume::Receiver<DeviceResetKind>,
     pub mixer: Arc<PlaybackMixer>,
-    ns_enabled: Arc<AtomicBool>,
-    ns_level: Arc<AtomicU32>,
 }
 
 impl AudioIo {
@@ -468,12 +421,6 @@ impl AudioIo {
 
     pub fn set_output_device(&self, device_id: Option<String>) {
         let _ = self.ctrl_tx.send(AudioCmd::SetOutputDevice(device_id));
-    }
-
-    pub fn set_noise_suppression(&self, enabled: bool, level: u8) {
-        self.ns_enabled.store(enabled, Ordering::Relaxed);
-        self.ns_level
-            .store(level.min(100) as u32, Ordering::Relaxed);
     }
 
     pub fn start(
@@ -492,16 +439,12 @@ impl AudioIo {
         let (device_reset_tx, device_reset_rx) = flume::unbounded::<DeviceResetKind>();
         let (audio_stopped_tx, audio_stopped_rx) = flume::bounded::<()>(1);
         let (apm_stopped_tx, apm_stopped_rx) = flume::bounded::<()>(1);
-        let ns_enabled = Arc::new(AtomicBool::new(false));
-        let ns_level = Arc::new(AtomicU32::new(20));
 
-        let ns_enabled_apm = ns_enabled.clone();
-        let ns_level_apm = ns_level.clone();
         std::thread::Builder::new()
             .name("mezon-voice-apm".into())
             .spawn(move || {
                 let _exit = WorkerExitSignal(apm_stopped_tx);
-                run_apm(capture_rx, reverse_rx, mic_tx, ns_enabled_apm, ns_level_apm);
+                run_apm(capture_rx, reverse_rx, mic_tx);
             })?;
 
         let mixer_for_thread = mixer.clone();
@@ -966,8 +909,6 @@ impl AudioIo {
             output_format_rx: out_change_rx,
             device_reset_rx,
             mixer,
-            ns_enabled,
-            ns_level,
         })
     }
 }

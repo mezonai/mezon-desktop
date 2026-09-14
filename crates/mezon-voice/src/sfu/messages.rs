@@ -28,6 +28,9 @@ pub enum ClientMessage {
     Visibility {
         visible: bool,
     },
+    ParticipantAction {
+        token: String,
+    },
     Pong,
 }
 

@@ -26,6 +26,7 @@ use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::{ChannelMessages, ChannelMessagesEvent};
 use crate::chat::message_search::{MESSAGE_SEARCH_PANEL_WIDTH, MessageSearchPanel};
 use crate::chat::pinned_popover::PinnedPopoverPanel;
+use crate::chat::user_profile_popover::UserProfilePopover;
 use crate::components::compositions::channel_row::ChannelIcon;
 use crate::components::primitives::{Icon, IconName, InputState};
 use crate::image_cache::LruImageCache;
@@ -37,6 +38,7 @@ pub struct ChatArea {
     pub(crate) mention_input: Option<Entity<MentionInput>>,
     input_bar: Option<Entity<InputBar>>,
     member_panel: Option<Entity<MemberListPanel>>,
+    dm_profile_panel: Option<(ChannelId, Entity<UserProfilePopover>)>,
     member_source: Option<MemberSource>,
     member_avatar_cache: Entity<LruImageCache>,
     settings: Entity<Settings>,
@@ -284,6 +286,7 @@ impl ChatArea {
             mention_input: None,
             input_bar: None,
             member_panel: None,
+            dm_profile_panel: None,
             member_source: None,
             member_avatar_cache,
             settings,
@@ -396,6 +399,50 @@ impl ChatArea {
     pub fn clear_member_panel(&mut self) {
         self.member_source = None;
         self.member_panel = None;
+        self.dm_profile_panel = None;
+    }
+
+    pub fn ensure_dm_profile_panel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<crate::ChatLayout>,
+    ) {
+        if !matches!(
+            Router::global(cx).read(cx).route(),
+            Route::DirectMessage { .. }
+        ) {
+            self.dm_profile_panel = None;
+            return;
+        }
+        let Some((channel_id, user_id)) = DirectMessageStore::try_global(cx).and_then(|store| {
+            let store = store.read(cx);
+            let channel_id = store.current()?.0;
+            let dm = store.find(channel_id)?;
+            (dm.kind == DirectKind::Dm).then_some((channel_id, dm.peer_user_id?))
+        }) else {
+            self.dm_profile_panel = None;
+            return;
+        };
+        if self
+            .dm_profile_panel
+            .as_ref()
+            .is_some_and(|(id, _)| *id == channel_id)
+        {
+            return;
+        }
+        let settings = self.settings.clone();
+        let avatar_cache = self.member_avatar_cache.clone();
+        let panel = cx.new(|cx| {
+            UserProfilePopover::new_embedded(
+                user_id,
+                mezon_store::ProfileContext::Direct(channel_id),
+                settings,
+                avatar_cache,
+                window,
+                cx,
+            )
+        });
+        self.dm_profile_panel = Some((channel_id, panel));
     }
 
     fn set_member_source(
@@ -999,6 +1046,13 @@ impl ChatArea {
 
         let has_search_panel = show_results_panel && message_search_panel.is_some();
         let member_visible = show_member_panel && !has_search_panel && !media_channel_view;
+        let dm_profile_panel = is_dm
+            .then(|| {
+                self.dm_profile_panel
+                    .as_ref()
+                    .map(|(_, panel)| panel.clone())
+            })
+            .flatten();
         let body = div()
             .flex()
             .flex_row()
@@ -1037,6 +1091,20 @@ impl ChatArea {
                                 .cached(StyleRefinement::default().w(px(245.)).h_full())
                                 .into_any_element()
                         }),
+                )
+            })
+            .when_some(dm_profile_panel, |row, panel| {
+                row.child(
+                    div()
+                        .h_full()
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .border_l_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().surfaces.direct_message.ramp())
+                        .when(member_visible, |slot| slot.w(px(320.)))
+                        .when(!member_visible, |slot| slot.w(px(0.)).invisible())
+                        .child(AnyView::from(panel)),
                 )
             });
 

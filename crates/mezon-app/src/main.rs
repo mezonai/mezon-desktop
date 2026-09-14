@@ -309,7 +309,6 @@ fn main() -> Result<()> {
 
     tracing::info!("Starting Mezon desktop app v{}", env!("CARGO_PKG_VERSION"));
 
-    // Check if a mezonapp:// deep link URL was passed as argv[1].
     let deep_link_url: Option<String> = std::env::args()
         .nth(1)
         .filter(|a| a.starts_with("mezonapp://"));
