@@ -36,6 +36,7 @@ install-team.sh
 profile.json.gz
 scripts/*
 !scripts/linux-deps
+!scripts/webrtc/
 !scripts/build-deb.sh
 !scripts/gen_theme_surfaces.py
 !scripts/make-update-feed.sh

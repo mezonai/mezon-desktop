@@ -1,17 +1,3 @@
-// Copyright 2025 LiveKit, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 use cxx::type_id;
 use cxx::ExternType;
 use std::any::Any;
@@ -19,7 +5,7 @@ use std::sync::Arc;
 
 use crate::impl_thread_safety;
 
-#[cxx::bridge(namespace = "livekit_ffi")]
+#[cxx::bridge(namespace = "mezon_ffi")]
 pub mod ffi {
 
     pub struct AudioSourceOptions {
@@ -29,14 +15,14 @@ pub mod ffi {
     }
 
     extern "C++" {
-        include!("livekit/media_stream_track.h");
+        include!("mezon_rtc/media_stream_track.h");
 
         type MediaStreamTrack = crate::media_stream_track::ffi::MediaStreamTrack;
         type CompleteCallback = crate::audio_track::CompleteCallback;
     }
 
     unsafe extern "C++" {
-        include!("livekit/audio_track.h");
+        include!("mezon_rtc/audio_track.h");
 
         type AudioTrack;
         type NativeAudioSink;
@@ -101,7 +87,7 @@ pub struct SourceContext(pub Box<dyn Any + Send>);
 pub struct CompleteCallback(pub extern "C" fn(ctx: *const SourceContext));
 
 unsafe impl ExternType for CompleteCallback {
-    type Id = type_id!("livekit_ffi::CompleteCallback");
+    type Id = type_id!("mezon_ffi::CompleteCallback");
     type Kind = cxx::kind::Trivial;
 }
 

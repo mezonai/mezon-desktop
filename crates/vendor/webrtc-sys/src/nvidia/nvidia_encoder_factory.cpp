@@ -117,7 +117,7 @@ bool SupportsAv1Encoding(NV_ENCODE_API_FUNCTION_LIST& fnList,
 
 NvencProbeResult ProbeNvencSupport() {
   NvencProbeResult result;
-  if (!livekit_ffi::CudaContext::IsAvailable()) {
+  if (!mezon_ffi::CudaContext::IsAvailable()) {
     RTC_LOG(LS_WARNING) << "CUDA is not available, NVENC disabled.";
     return result;
   }
@@ -283,7 +283,7 @@ std::unique_ptr<VideoEncoder> NvidiaVideoEncoderFactory::Create(
   for (const auto& supported_format : supported_formats_) {
     if (format.IsSameCodec(supported_format)) {
       if (!cu_context_) {
-        cu_context_ = livekit_ffi::CudaContext::GetInstance();
+        cu_context_ = mezon_ffi::CudaContext::GetInstance();
         if (!cu_context_->Initialize()) {
           RTC_LOG(LS_ERROR) << "Failed to initialize CUDA context.";
           return nullptr;

@@ -1,20 +1,4 @@
-/*
- * Copyright 2025 LiveKit, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-#include "livekit/android.h"
+#include "mezon_rtc/android.h"
 
 #include <atomic>
 #include <jni.h>
@@ -41,7 +25,7 @@ FILE *stdout = fdopen(STDOUT_FILENO, "w");
 #undef stderr
 FILE *stderr = fdopen(STDERR_FILENO, "w");
 
-namespace livekit_ffi {
+namespace mezon_ffi {
 
 // Track whether Android WebRTC has been initialized to prevent crashes on double-init.
 static std::atomic<bool> g_android_initialized{false};
@@ -49,25 +33,25 @@ static std::atomic<bool> g_android_initialized{false};
 void init_android(JavaVM* jvm) {
   // Idempotent - safe to call multiple times
   if (g_android_initialized.exchange(true)) {
-    RTC_LOG(LS_INFO) << "livekit_ffi::init_android() - already initialized, skipping";
+    RTC_LOG(LS_INFO) << "mezon_ffi::init_android() - already initialized, skipping";
     return;
   }
 
-  RTC_LOG(LS_INFO) << "livekit_ffi::init_android() called with jvm=" << (jvm ? "valid" : "null");
+  RTC_LOG(LS_INFO) << "mezon_ffi::init_android() called with jvm=" << (jvm ? "valid" : "null");
   if (!jvm) {
-    RTC_LOG(LS_ERROR) << "livekit_ffi::init_android() - JavaVM is null! Cannot initialize Android WebRTC.";
+    RTC_LOG(LS_ERROR) << "mezon_ffi::init_android() - JavaVM is null! Cannot initialize Android WebRTC.";
     g_android_initialized.store(false);
     return;
   }
   webrtc::InitAndroid(jvm);
-  RTC_LOG(LS_INFO) << "livekit_ffi::init_android() - webrtc::InitAndroid() completed";
+  RTC_LOG(LS_INFO) << "mezon_ffi::init_android() - webrtc::InitAndroid() completed";
 }
 
 bool init_android_context(JavaVM* jvm, uintptr_t context_ptr) {
-  RTC_LOG(LS_INFO) << "livekit_ffi::init_android_context() called";
+  RTC_LOG(LS_INFO) << "mezon_ffi::init_android_context() called";
 
   if (!jvm || !context_ptr) {
-    RTC_LOG(LS_ERROR) << "livekit_ffi::init_android_context() - jvm or context is null";
+    RTC_LOG(LS_ERROR) << "mezon_ffi::init_android_context() - jvm or context is null";
     return false;
   }
 
@@ -79,14 +63,13 @@ bool init_android_context(JavaVM* jvm, uintptr_t context_ptr) {
 
   JNIEnv* env = webrtc::AttachCurrentThreadIfNeeded();
   if (!env) {
-    RTC_LOG(LS_ERROR) << "livekit_ffi::init_android_context() - Failed to attach to JNI";
+    RTC_LOG(LS_ERROR) << "mezon_ffi::init_android_context() - Failed to attach to JNI";
     return false;
   }
 
-  // Find livekit.org.webrtc.ContextUtils class
-  jclass context_utils_class = env->FindClass("livekit/org/webrtc/ContextUtils");
+  jclass context_utils_class = env->FindClass("org/webrtc/ContextUtils");
   if (!context_utils_class) {
-    RTC_LOG(LS_ERROR) << "livekit_ffi::init_android_context() - Failed to find ContextUtils class";
+    RTC_LOG(LS_ERROR) << "mezon_ffi::init_android_context() - Failed to find ContextUtils class";
     env->ExceptionClear();
     return false;
   }
@@ -95,7 +78,7 @@ bool init_android_context(JavaVM* jvm, uintptr_t context_ptr) {
   jmethodID initialize_method = env->GetStaticMethodID(
       context_utils_class, "initialize", "(Landroid/content/Context;)V");
   if (!initialize_method) {
-    RTC_LOG(LS_ERROR) << "livekit_ffi::init_android_context() - Failed to find initialize method";
+    RTC_LOG(LS_ERROR) << "mezon_ffi::init_android_context() - Failed to find initialize method";
     env->ExceptionClear();
     env->DeleteLocalRef(context_utils_class);
     return false;
@@ -106,7 +89,7 @@ bool init_android_context(JavaVM* jvm, uintptr_t context_ptr) {
 
   // Check for exceptions
   if (env->ExceptionCheck()) {
-    RTC_LOG(LS_ERROR) << "livekit_ffi::init_android_context() - Exception during initialize";
+    RTC_LOG(LS_ERROR) << "mezon_ffi::init_android_context() - Exception during initialize";
     env->ExceptionDescribe();
     env->ExceptionClear();
     env->DeleteLocalRef(context_utils_class);
@@ -114,7 +97,7 @@ bool init_android_context(JavaVM* jvm, uintptr_t context_ptr) {
   }
 
   env->DeleteLocalRef(context_utils_class);
-  RTC_LOG(LS_INFO) << "livekit_ffi::init_android_context() - ContextUtils initialized successfully";
+  RTC_LOG(LS_INFO) << "mezon_ffi::init_android_context() - ContextUtils initialized successfully";
   return true;
 }
 
@@ -122,10 +105,10 @@ std::unique_ptr<webrtc::VideoEncoderFactory>
 CreateAndroidVideoEncoderFactory() {
   JNIEnv* env = webrtc::AttachCurrentThreadIfNeeded();
   webrtc::ScopedJavaLocalRef<jclass> factory_class =
-      webrtc::GetClass(env, "livekit/org/webrtc/DefaultVideoEncoderFactory");
+      webrtc::GetClass(env, "org/webrtc/DefaultVideoEncoderFactory");
 
   jmethodID ctor = env->GetMethodID(factory_class.obj(), "<init>",
-                                    "(Llivekit/org/webrtc/EglBase$Context;ZZ)V");
+                                    "(Lorg/webrtc/EglBase$Context;ZZ)V");
 
   jobject encoder_factory =
       env->NewObject(factory_class.obj(), ctor, nullptr, true, false);
@@ -138,13 +121,13 @@ CreateAndroidVideoDecoderFactory() {
   JNIEnv* env = webrtc::AttachCurrentThreadIfNeeded();
 
   webrtc::ScopedJavaLocalRef<jclass> factory_class =
-      webrtc::GetClass(env, "livekit/org/webrtc/WrappedVideoDecoderFactory");
+      webrtc::GetClass(env, "org/webrtc/WrappedVideoDecoderFactory");
 
   jmethodID ctor = env->GetMethodID(factory_class.obj(), "<init>",
-                                    "(Llivekit/org/webrtc/EglBase$Context;)V");
+                                    "(Lorg/webrtc/EglBase$Context;)V");
 
   jobject decoder_factory = env->NewObject(factory_class.obj(), ctor, nullptr);
   return webrtc::JavaToNativeVideoDecoderFactory(env, decoder_factory);
 }
 
-}  // namespace livekit_ffi
+}

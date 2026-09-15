@@ -1,17 +1,3 @@
-// Copyright 2025 LiveKit, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 pub use cxx::SharedPtr;
 
 use std::sync::Arc;
@@ -22,7 +8,7 @@ use crate::{
     rtp_transceiver::ffi::RtpTransceiver,
 };
 
-#[cxx::bridge(namespace = "livekit_ffi")]
+#[cxx::bridge(namespace = "mezon_ffi")]
 pub mod ffi {
     pub struct CandidatePair {
         local: SharedPtr<Candidate>,
@@ -37,19 +23,19 @@ pub mod ffi {
     }
 
     extern "C++" {
-        include!("livekit/rtp_parameters.h");
-        include!("livekit/rtc_error.h");
-        include!("livekit/helper.h");
-        include!("livekit/candidate.h");
-        include!("livekit/media_stream.h");
-        include!("livekit/rtp_transceiver.h");
-        include!("livekit/rtp_sender.h");
-        include!("livekit/rtp_receiver.h");
-        include!("livekit/data_channel.h");
-        include!("livekit/jsep.h");
-        include!("livekit/webrtc.h");
-        include!("livekit/peer_connection.h");
-        include!("livekit/audio_track.h");
+        include!("mezon_rtc/rtp_parameters.h");
+        include!("mezon_rtc/rtc_error.h");
+        include!("mezon_rtc/helper.h");
+        include!("mezon_rtc/candidate.h");
+        include!("mezon_rtc/media_stream.h");
+        include!("mezon_rtc/rtp_transceiver.h");
+        include!("mezon_rtc/rtp_sender.h");
+        include!("mezon_rtc/rtp_receiver.h");
+        include!("mezon_rtc/data_channel.h");
+        include!("mezon_rtc/jsep.h");
+        include!("mezon_rtc/webrtc.h");
+        include!("mezon_rtc/peer_connection.h");
+        include!("mezon_rtc/audio_track.h");
 
         type RtcConfiguration = crate::peer_connection::ffi::RtcConfiguration;
         type PeerConnectionState = crate::peer_connection::ffi::PeerConnectionState;
@@ -82,7 +68,7 @@ pub mod ffi {
     }
 
     unsafe extern "C++" {
-        include!("livekit/peer_connection_factory.h");
+        include!("mezon_rtc/peer_connection_factory.h");
 
         type PeerConnection = crate::peer_connection::ffi::PeerConnection;
         type PeerConnectionFactory;

@@ -36,7 +36,7 @@ class NvidiaVideoEncoderFactory : public VideoEncoderFactory {
   static bool IsAv1Supported();
 
   std::vector<SdpVideoFormat> supported_formats_;
-  livekit_ffi::CudaContext* cu_context_ = nullptr;
+  mezon_ffi::CudaContext* cu_context_ = nullptr;
 };
 
 }  // namespace webrtc

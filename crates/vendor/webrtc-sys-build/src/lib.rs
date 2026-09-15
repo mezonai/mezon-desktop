@@ -1,17 +1,3 @@
-// Copyright 2025 LiveKit, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 use std::path::PathBuf;
 use std::{
     collections::HashSet,
@@ -27,8 +13,8 @@ use fs2::FileExt;
 use regex::Regex;
 use reqwest::StatusCode;
 
-pub const SCRATH_PATH: &str = "livekit_webrtc";
-pub const WEBRTC_TAG: &str = "webrtc-51ef663";
+pub const SCRATH_PATH: &str = "mezon_webrtc";
+pub const WEBRTC_TAG: &str = "webrtc-m144-aaeeee8";
 pub const IGNORE_DEFINES: [&str; 2] = ["CR_CLANG_REVISION", "CR_XCODE_VERSION"];
 
 pub fn target_os() -> String {
@@ -61,37 +47,27 @@ pub fn target_arch() -> String {
     .to_owned()
 }
 
-/// The full name of the webrtc library
-/// e.g. mac-x64-release (Same name on GH releases)
 pub fn webrtc_triple() -> String {
     let profile = if use_debug() { "debug" } else { "release" };
     format!("{}-{}-{}", target_os(), target_arch(), profile)
 }
 
-/// Using debug builds of webrtc is still experimental for now
-/// On Windows, Rust doesn't link against libcmtd on debug, which is an issue
-/// Default to false (even on cargo debug)
 pub fn use_debug() -> bool {
-    let var = env::var("LK_DEBUG_WEBRTC");
+    let var = env::var("MEZON_DEBUG_WEBRTC");
     var.is_ok() && var.unwrap() == "true"
 }
 
-/// The location of the custom build is defined by the user
 pub fn custom_dir() -> Option<path::PathBuf> {
-    if let Ok(path) = env::var("LK_CUSTOM_WEBRTC") {
+    if let Ok(path) = env::var("MEZON_CUSTOM_WEBRTC") {
         return Some(path::PathBuf::from(path));
     }
     None
 }
 
-/// Location of the downloaded webrtc binaries
-/// The reason why we don't use OUT_DIR is because we sometimes need to share the same binaries
-/// across multiple crates without dependencies constraints
-/// This also has the benefit of not re-downloading the binaries for each crate
 pub fn prebuilt_dir() -> path::PathBuf {
     let target_dir = scratch::path(SCRATH_PATH);
     path::Path::new(&target_dir).join(format!(
-        "livekit/{}-{}/{}",
+        "{}-{}/{}",
         webrtc_triple(),
         WEBRTC_TAG,
         webrtc_triple()
@@ -100,13 +76,12 @@ pub fn prebuilt_dir() -> path::PathBuf {
 
 pub fn download_url() -> String {
     format!(
-        "https://github.com/livekit/rust-sdks/releases/download/{}/{}.zip",
+        "https://github.com/mezonai/mezon-desktop/releases/download/{}/{}.zip",
         WEBRTC_TAG,
         format!("webrtc-{}", webrtc_triple())
     )
 }
 
-/// Used location of libwebrtc depending on whether it's a custom build or not
 pub fn webrtc_dir() -> path::PathBuf {
     if let Some(path) = custom_dir() {
         return path;
@@ -116,11 +91,8 @@ pub fn webrtc_dir() -> path::PathBuf {
 }
 
 pub fn webrtc_defines() -> Vec<(String, Option<String>)> {
-    // read preprocessor definitions from webrtc.ninja
     let defines_re = Regex::new(r"-D(\w+)(?:=([^\s]+))?").unwrap();
     let mut files = vec![webrtc_dir().join("webrtc.ninja")];
-    // include desktop_capture.ninja to avoid ABI mismatch for DesktopCaptureOptions due to WEBRTC_USE_X11 missing
-    // libwebrtc does not implement desktop capture on Android
     if env::var("CARGO_CFG_TARGET_OS").unwrap() != "android" {
         files.push(webrtc_dir().join("desktop_capture.ninja"));
     }
@@ -162,28 +134,25 @@ pub fn configure_jni_symbols() -> Result<()> {
 
     let out_dir = path::PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    // Find JNI symbols
     let readelf_output = Command::new(toolchain_bin.join("llvm-readelf"))
         .arg("-Ws")
         .arg(webrtc_lib.join("libwebrtc.a"))
         .output()
         .expect("failed to run llvm-readelf");
 
-    let jni_regex = Regex::new(r"(Java_livekit_org_webrtc.*)").unwrap();
+    let jni_regex = Regex::new(r"(Java_org_webrtc.*)").unwrap();
     let content = String::from_utf8_lossy(&readelf_output.stdout);
     let jni_symbols: Vec<&str> =
         jni_regex.captures_iter(&content).map(|cap| cap.get(1).unwrap().as_str()).collect();
 
     if jni_symbols.is_empty() {
-        return Err(anyhow!("No JNI symbols found")); // Shouldn't happen
+        return Err(anyhow!("No JNI symbols found"));
     }
 
-    // Keep JNI symbols
     for symbol in &jni_symbols {
         println!("cargo:rustc-link-arg=-Wl,--undefined={}", symbol);
     }
 
-    // Version script
     let vs_path = out_dir.join("webrtc_jni.map");
     let mut vs_file = fs::File::create(&vs_path).context("Failed to create version script file")?;
 
@@ -198,7 +167,6 @@ pub fn configure_jni_symbols() -> Result<()> {
 
 pub fn download_webrtc() -> Result<()> {
     let dir = scratch::path(SCRATH_PATH);
-    // temporary fix to avoid github workflow issue
     fs::create_dir_all(&dir).context("Failed to create scratch_path")?;
     let flock = File::create(dir.join(".lock"))
         .context("Failed to create lock file for WebRTC download")?;
@@ -225,18 +193,14 @@ pub fn download_webrtc() -> Result<()> {
         .context("Failed to create temporary file for WebRTC download")?;
     resp.copy_to(&mut file).context("Failed to write WebRTC download to temporary file")?;
 
-    // Extract into a sibling temp dir, then atomically rename into place so concurrent
-    // observers see either no `webrtc_dir` or a fully-populated one — never the partially-
-    // extracted state that made `fs::copy(webrtc_dir/LICENSE.md, …)` in callers flaky.
     let tmp_extract = webrtc_dir.parent().unwrap().join(format!(".{}.tmp", webrtc_triple()));
-    let _ = fs::remove_dir_all(&tmp_extract); // clean up leftover from a crashed build
+    let _ = fs::remove_dir_all(&tmp_extract);
     fs::create_dir_all(&tmp_extract).context("Failed to create temp extraction dir")?;
 
     let mut archive = zip::ZipArchive::new(file).context("Failed to open WebRTC zip archive")?;
     archive.extract(&tmp_extract).context("Failed to extract WebRTC archive")?;
     drop(archive);
 
-    // The zip root is `{triple}/`, so extracted content sits at `tmp_extract/{triple}/`.
     fs::rename(tmp_extract.join(webrtc_triple()), &webrtc_dir)
         .context("Failed to move extracted WebRTC into place")?;
     let _ = fs::remove_dir_all(&tmp_extract);
@@ -253,22 +217,16 @@ fn ensure_owner_readable(root: &path::Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fn walk(p: &path::Path) -> Result<()> {
         let meta = fs::symlink_metadata(p)?;
-        // Don't try to chmod through symlinks — follow them only via the
-        // entries we walk into normally. set_permissions on a symlink may
-        // affect the target on some platforms; just skip.
         if meta.file_type().is_symlink() {
             return Ok(());
         }
         let mut perms = meta.permissions();
         let mut mode = perms.mode();
-        mode |= 0o600; // owner read+write
+        mode |= 0o600;
         if meta.is_dir() {
-            mode |= 0o100; // owner traverse
+            mode |= 0o100;
         }
         perms.set_mode(mode);
-        // Best-effort: if the file is on a read-only mount or owned by another
-        // user (shouldn't happen here), we just skip rather than failing the
-        // build over a permission tweak.
         let _ = fs::set_permissions(p, perms);
         if meta.is_dir() {
             for entry in fs::read_dir(p)? {
@@ -307,7 +265,6 @@ pub fn android_ndk_toolchain() -> Result<path::PathBuf> {
             return None;
         }
 
-        // Find the highest version
         let versions = fs::read_dir(ndk_dir.clone());
         if versions.is_err() {
             return None;

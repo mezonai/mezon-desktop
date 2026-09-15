@@ -1,20 +1,4 @@
-/*
- * Copyright 2025 LiveKit, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-#include "livekit/video_encoder_factory.h"
+#include "mezon_rtc/video_encoder_factory.h"
 
 #include <algorithm>
 #include <cctype>
@@ -27,9 +11,9 @@
 #include "api/video_codecs/sdp_video_format.h"
 #include "api/video_codecs/video_encoder.h"
 #include "api/video_codecs/video_encoder_factory_template.h"
-#include "livekit/objc_video_factory.h"
-#include "livekit/passthrough_video_encoder.h"
-#include "livekit/webrtc.h"
+#include "mezon_rtc/objc_video_factory.h"
+#include "mezon_rtc/passthrough_video_encoder.h"
+#include "mezon_rtc/webrtc.h"
 #include "media/base/media_constants.h"
 #include "media/engine/simulcast_encoder_adapter.h"
 #include "rtc_base/logging.h"
@@ -44,7 +28,7 @@
 #include "api/video_codecs/video_encoder_factory_template_libvpx_vp9_adapter.h"
 
 #ifdef WEBRTC_ANDROID
-#include "livekit/android.h"
+#include "mezon_rtc/android.h"
 #endif
 
 #if defined(USE_NVIDIA_VIDEO_CODEC)
@@ -59,12 +43,12 @@
 #include "jetson/jetson_encoder_factory.h"
 #endif
 
-namespace livekit_ffi {
+namespace mezon_ffi {
 
 namespace {
 
-constexpr char kBackendParameter[] = "x-livekit-video-encoder-backend";
-constexpr char kPreferredHwEncoderEnv[] = "LIVEKIT_PREFERRED_HW_ENCODER";
+constexpr char kBackendParameter[] = "x-mezon-video-encoder-backend";
+constexpr char kPreferredHwEncoderEnv[] = "MEZON_PREFERRED_HW_ENCODER";
 
 enum class PreferredHwEncoder {
   kNvenc,
@@ -90,7 +74,7 @@ PreferredHwEncoderConfig GetPreferredHwEncoderConfig() {
     return {PreferredHwEncoder::kVaapi, true};
   }
 
-  RTC_LOG(LS_WARNING) << "Ignoring invalid LIVEKIT_PREFERRED_HW_ENCODER=\""
+  RTC_LOG(LS_WARNING) << "Ignoring invalid MEZON_PREFERRED_HW_ENCODER=\""
                       << preferred_encoder
                       << "\"; expected \"nvenc\" or \"vaapi\".";
   return {};
@@ -243,14 +227,14 @@ void AddNvencFactory(
 
   if (preferred) {
     RTC_LOG(LS_WARNING)
-        << "LIVEKIT_PREFERRED_HW_ENCODER=nvenc requested, but NVENC "
+        << "MEZON_PREFERRED_HW_ENCODER=nvenc requested, but NVENC "
            "is unavailable; falling back to other encoders.";
   }
 #else
   (void)factories;
   if (preferred) {
     RTC_LOG(LS_WARNING)
-        << "LIVEKIT_PREFERRED_HW_ENCODER=nvenc requested, but NVENC support "
+        << "MEZON_PREFERRED_HW_ENCODER=nvenc requested, but NVENC support "
            "is not compiled in; falling back to other encoders.";
   }
 #endif
@@ -270,14 +254,14 @@ void AddVaapiFactory(
 
   if (preferred) {
     RTC_LOG(LS_WARNING)
-        << "LIVEKIT_PREFERRED_HW_ENCODER=vaapi requested, but VAAPI "
+        << "MEZON_PREFERRED_HW_ENCODER=vaapi requested, but VAAPI "
            "is unavailable; falling back to other encoders.";
   }
 #else
   (void)factories;
   if (preferred) {
     RTC_LOG(LS_WARNING)
-        << "LIVEKIT_PREFERRED_HW_ENCODER=vaapi requested, but VAAPI support "
+        << "MEZON_PREFERRED_HW_ENCODER=vaapi requested, but VAAPI support "
            "is not compiled in; falling back to other encoders.";
   }
 #endif
@@ -346,13 +330,13 @@ VideoEncoderFactory::InternalFactory::InternalFactory() {
   AddBackendFactory(
       factories_,
       VideoEncoderBackend::PreEncoded,
-      std::make_unique<livekit_ffi::PassthroughVideoEncoderFactory>());
+      std::make_unique<mezon_ffi::PassthroughVideoEncoderFactory>());
 
 #ifdef __APPLE__
   AddBackendFactory(
       factories_,
       VideoEncoderBackend::VideoToolbox,
-      livekit_ffi::CreateObjCVideoEncoderFactory());
+      mezon_ffi::CreateObjCVideoEncoderFactory());
 #endif
 
 #ifdef WEBRTC_ANDROID
@@ -617,4 +601,4 @@ std::unique_ptr<webrtc::VideoEncoder> VideoEncoderFactory::Create(
   return encoder;
 }
 
-}  // namespace livekit_ffi
+}

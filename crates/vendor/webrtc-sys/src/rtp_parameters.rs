@@ -1,20 +1,6 @@
-// Copyright 2025 LiveKit, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 pub const DEFAULT_BITRATE_PRIORITY: f64 = 1.0;
 
-#[cxx::bridge(namespace = "livekit_ffi")]
+#[cxx::bridge(namespace = "mezon_ffi")]
 pub mod ffi {
 
     // Used to replace std::map
@@ -103,7 +89,6 @@ pub mod ffi {
 
     #[derive(Debug)]
     pub struct RtpExtension {
-        // TODO(theomonnom): export available URI inside api/rtp_parameters.h
         pub uri: String,
         pub id: i32,
         pub encrypt: bool,
@@ -192,7 +177,7 @@ pub mod ffi {
     }
 
     extern "C++" {
-        include!("livekit/webrtc.h");
+        include!("mezon_rtc/webrtc.h");
 
         type Priority = crate::webrtc::ffi::Priority;
         type MediaType = crate::webrtc::ffi::MediaType;

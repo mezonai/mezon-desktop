@@ -1,34 +1,18 @@
-/*
- * Copyright 2025 LiveKit, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-#include "livekit/packet_trailer.h"
+#include "mezon_rtc/packet_trailer.h"
 
 #include <chrono>
 #include <cstring>
 #include <optional>
 
 #include "api/make_ref_counted.h"
-#include "livekit/packet_trailer_av1.h"
-#include "livekit/peer_connection_factory.h"
-#include "livekit/rtp_receiver.h"
-#include "livekit/rtp_sender.h"
+#include "mezon_rtc/packet_trailer_av1.h"
+#include "mezon_rtc/peer_connection_factory.h"
+#include "mezon_rtc/rtp_receiver.h"
+#include "mezon_rtc/rtp_sender.h"
 #include "rtc_base/logging.h"
 #include "webrtc-sys/src/packet_trailer.rs.h"
 
-namespace livekit_ffi {
+namespace mezon_ffi {
 
 namespace {
 
@@ -739,4 +723,4 @@ std::shared_ptr<PacketTrailerHandler> new_packet_trailer_receiver(
       peer_factory->rtc_runtime(), receiver->rtc_receiver());
 }
 
-}  // namespace livekit_ffi
+}

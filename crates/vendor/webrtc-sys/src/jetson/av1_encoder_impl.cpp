@@ -1,19 +1,3 @@
-/*
- * Copyright 2026 LiveKit, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
- 
  #include "av1_encoder_impl.h"
 
 #include <algorithm>
@@ -27,7 +11,7 @@
 #include "api/video_codecs/scalability_mode.h"
 #include "common_video/libyuv/include/webrtc_libyuv.h"
 #include "../av1_bitstream.h"
-#include "livekit/dmabuf_video_frame_buffer.h"
+#include "mezon_rtc/dmabuf_video_frame_buffer.h"
 #include "modules/video_coding/include/video_codec_interface.h"
 #include "modules/video_coding/include/video_error_codes.h"
 #include "modules/video_coding/utility/simulcast_rate_allocator.h"
@@ -53,7 +37,7 @@ void DumpAv1PacketIfRequested(const std::vector<uint8_t>& packet,
     return;
   }
 
-  const char* dump_path = std::getenv("LK_DUMP_AV1");
+  const char* dump_path = std::getenv("MEZON_DUMP_AV1");
   if (!dump_path || dump_path[0] == '\0') {
     return;
   }
@@ -65,7 +49,7 @@ void DumpAv1PacketIfRequested(const std::vector<uint8_t>& packet,
   }
   std::ofstream out(dump_path, std::ios::binary);
   if (!out.good()) {
-    std::fprintf(stderr, "[AV1] Failed to open LK_DUMP_AV1 path: %s\n",
+    std::fprintf(stderr, "[AV1] Failed to open MEZON_DUMP_AV1 path: %s\n",
                  dump_path);
     std::fflush(stderr);
     return;
@@ -84,7 +68,7 @@ void DumpAv1PacketIfRequested(const std::vector<uint8_t>& packet,
 
 JetsonAV1EncoderImpl::JetsonAV1EncoderImpl(const webrtc::Environment& env,
                                            const SdpVideoFormat& format)
-    : env_(env), encoder_(livekit::JetsonCodec::kAV1), format_(format) {}
+    : env_(env), encoder_(mezon_rtc::JetsonCodec::kAV1), format_(format) {}
 
 JetsonAV1EncoderImpl::~JetsonAV1EncoderImpl() {
   Release();
@@ -247,7 +231,7 @@ int32_t JetsonAV1EncoderImpl::Encode(
   std::vector<uint8_t> packet;
   bool is_keyframe = false;
 
-  auto* dmabuf = livekit::DmaBufVideoFrameBuffer::FromNative(
+  auto* dmabuf = mezon_rtc::DmaBufVideoFrameBuffer::FromNative(
       input_frame.video_frame_buffer().get());
   if (dmabuf) {
     if (!encoder_.EncodeDmaBuf(dmabuf->dmabuf_fd(), is_keyframe_needed,
@@ -283,7 +267,7 @@ int32_t JetsonAV1EncoderImpl::Encode(
     return WEBRTC_VIDEO_CODEC_NO_OUTPUT;
   }
 
-  livekit::av1::NormalizeForRtp(&packet);
+  mezon_rtc::av1::NormalizeForRtp(&packet);
   if (packet.empty()) {
     RTC_LOG(LS_ERROR) << "Jetson MMAPI AV1 packet contained no transferable "
                          "OBUs after RTP normalization; skipping.";
@@ -291,18 +275,18 @@ int32_t JetsonAV1EncoderImpl::Encode(
   }
 
   std::vector<uint8_t> sequence_header;
-  if (livekit::av1::ExtractSequenceHeaderObu(packet.data(), packet.size(),
+  if (mezon_rtc::av1::ExtractSequenceHeaderObu(packet.data(), packet.size(),
                                              &sequence_header)) {
     cached_sequence_header_obu_ = std::move(sequence_header);
   }
 
   const bool treat_as_keyframe = is_keyframe_needed || is_keyframe;
   if (treat_as_keyframe) {
-    livekit::av1::EnsureSequenceHeaderOnKeyframe(&packet,
+    mezon_rtc::av1::EnsureSequenceHeaderOnKeyframe(&packet,
                                                    cached_sequence_header_obu_);
   }
 
-  if (!livekit::av1::IsWebRtcParseable(packet.data(), packet.size())) {
+  if (!mezon_rtc::av1::IsWebRtcParseable(packet.data(), packet.size())) {
     RTC_LOG(LS_ERROR)
         << "Jetson MMAPI AV1 bitstream is not parseable by WebRTC; "
            "dropping frame (size=" << packet.size() << ").";
@@ -312,7 +296,7 @@ int32_t JetsonAV1EncoderImpl::Encode(
   DumpAv1PacketIfRequested(packet, treat_as_keyframe);
 
   if (treat_as_keyframe &&
-      livekit::av1::HasSequenceHeaderObu(packet.data(), packet.size())) {
+      mezon_rtc::av1::HasSequenceHeaderObu(packet.data(), packet.size())) {
     sent_decodable_keyframe_ = true;
     configuration_.key_frame_request = false;
   } else if (!sent_decodable_keyframe_) {

@@ -1,21 +1,5 @@
-/*
- * Copyright 2025 LiveKit, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-#include "livekit/rtp_sender.h"
-#include "livekit/jsep.h"
+#include "mezon_rtc/rtp_sender.h"
+#include "mezon_rtc/jsep.h"
 
 #include <memory>
 #include <optional>
@@ -26,11 +10,11 @@
 #include "rtc_base/logging.h"
 #include "webrtc-sys/src/rtp_sender.rs.h"
 
-namespace livekit_ffi {
+namespace mezon_ffi {
 
 namespace {
 
-constexpr char kBackendParameter[] = "x-livekit-video-encoder-backend";
+constexpr char kBackendParameter[] = "x-mezon-video-encoder-backend";
 
 const char* BackendName(VideoEncoderBackend backend) {
   switch (backend) {
@@ -223,4 +207,4 @@ void RtpSender::set_video_encoder_backend(VideoEncoderBackend backend) const {
       std::make_unique<FixedVideoEncoderSelector>(backend));
 }
 
-}  // namespace livekit_ffi
+}

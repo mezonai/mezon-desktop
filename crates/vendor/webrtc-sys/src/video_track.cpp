@@ -1,20 +1,4 @@
-/*
- * Copyright 2025 LiveKit, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-#include "livekit/video_track.h"
+#include "mezon_rtc/video_track.h"
 
 #include <algorithm>
 #include <chrono>
@@ -26,11 +10,11 @@
 #include "api/video/video_rotation.h"
 #include "audio/remix_resample.h"
 #include "common_audio/include/audio_util.h"
-#include "livekit/dmabuf_video_frame_buffer.h"
-#include "livekit/encoded_video_frame_buffer.h"
-#include "livekit/media_stream.h"
-#include "livekit/packet_trailer.h"
-#include "livekit/video_track.h"
+#include "mezon_rtc/dmabuf_video_frame_buffer.h"
+#include "mezon_rtc/encoded_video_frame_buffer.h"
+#include "mezon_rtc/media_stream.h"
+#include "mezon_rtc/packet_trailer.h"
+#include "mezon_rtc/video_track.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/ref_counted_object.h"
 #include "rtc_base/synchronization/mutex.h"
@@ -38,30 +22,30 @@
 #include "webrtc-sys/src/packet_trailer.rs.h"
 #include "webrtc-sys/src/video_track.rs.h"
 
-namespace livekit_ffi {
+namespace mezon_ffi {
 namespace {
 
-livekit::EncodedVideoCodec ToNativeEncodedCodec(EncodedVideoCodec codec) {
+mezon_rtc::EncodedVideoCodec ToNativeEncodedCodec(EncodedVideoCodec codec) {
   switch (codec) {
     case EncodedVideoCodec::H264:
-      return livekit::EncodedVideoCodec::kH264;
+      return mezon_rtc::EncodedVideoCodec::kH264;
     case EncodedVideoCodec::H265:
-      return livekit::EncodedVideoCodec::kH265;
+      return mezon_rtc::EncodedVideoCodec::kH265;
     case EncodedVideoCodec::VP8:
-      return livekit::EncodedVideoCodec::kVP8;
+      return mezon_rtc::EncodedVideoCodec::kVP8;
     case EncodedVideoCodec::VP9:
-      return livekit::EncodedVideoCodec::kVP9;
+      return mezon_rtc::EncodedVideoCodec::kVP9;
     case EncodedVideoCodec::AV1:
-      return livekit::EncodedVideoCodec::kAV1;
+      return mezon_rtc::EncodedVideoCodec::kAV1;
   }
 }
 
-livekit::EncodedFrameType ToNativeEncodedFrameType(EncodedFrameType frame_type) {
+mezon_rtc::EncodedFrameType ToNativeEncodedFrameType(EncodedFrameType frame_type) {
   switch (frame_type) {
     case EncodedFrameType::Key:
-      return livekit::EncodedFrameType::kKey;
+      return mezon_rtc::EncodedFrameType::kKey;
     case EncodedFrameType::Delta:
-      return livekit::EncodedFrameType::kDelta;
+      return mezon_rtc::EncodedFrameType::kDelta;
   }
 }
 
@@ -81,8 +65,7 @@ VideoTrack::~VideoTrack() {
 void VideoTrack::add_sink(const std::shared_ptr<NativeVideoSink>& sink) const {
   webrtc::MutexLock lock(&mutex_);
   track()->AddOrUpdateSink(sink.get(),
-                           webrtc::VideoSinkWants());  // TODO(theomonnom): Expose
-                                                    // VideoSinkWants to Rust?
+                           webrtc::VideoSinkWants());
   sinks_.push_back(sink);
 }
 
@@ -195,7 +178,7 @@ bool VideoTrackSource::InternalSource::on_captured_frame(
   // Pre-encoded access units bypass the adapter entirely: frame-rate and
   // resolution adaptation operate on raw frames, and dropping or scaling an
   // encoded delta frame would corrupt the bitstream for every receiver.
-  if (livekit::EncodedVideoFrameBuffer::FromNative(buffer.get())) {
+  if (mezon_rtc::EncodedVideoFrameBuffer::FromNative(buffer.get())) {
     if (packet_trailer_handler_) {
       packet_trailer_handler_->emit_publish_timing(
           VideoPublishTimingStage::EncoderUpload,
@@ -274,8 +257,8 @@ bool VideoTrackSource::capture_dmabuf_frame(int dmabuf_fd,
                                             int64_t timestamp_us,
                                             const FrameMetadata& frame_metadata) const {
   auto dmabuf_pixel_format =
-      static_cast<livekit::DmaBufPixelFormat>(pixel_format);
-  auto buffer = webrtc::make_ref_counted<livekit::DmaBufVideoFrameBuffer>(
+      static_cast<mezon_rtc::DmaBufPixelFormat>(pixel_format);
+  auto buffer = webrtc::make_ref_counted<mezon_rtc::DmaBufVideoFrameBuffer>(
       dmabuf_fd, width, height, dmabuf_pixel_format);
 
   int64_t ts = timestamp_us;
@@ -302,7 +285,7 @@ bool VideoTrackSource::capture_encoded_frame(
   // The single unavoidable copy on this path: the Rust payload only lives
   // for the duration of this call, while the EncodedImageBuffer is shared
   // (uncopied) with the pass-through encoder downstream.
-  auto buffer = webrtc::make_ref_counted<livekit::EncodedVideoFrameBuffer>(
+  auto buffer = webrtc::make_ref_counted<mezon_rtc::EncodedVideoFrameBuffer>(
       width, height, ToNativeEncodedCodec(encoded_frame.codec),
       ToNativeEncodedFrameType(encoded_frame.frame_type),
       webrtc::EncodedImageBuffer::Create(payload.data(), payload.size()),
@@ -344,4 +327,4 @@ std::shared_ptr<VideoTrackSource> new_video_track_source(
   return std::make_shared<VideoTrackSource>(resolution, is_screencast);
 }
 
-}  // namespace livekit_ffi
+}
