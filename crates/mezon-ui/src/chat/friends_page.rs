@@ -2,15 +2,17 @@ use std::collections::HashMap;
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, InteractiveElement, IntoElement, ParentElement,
-    Pixels, Point, SharedString, StatefulInteractiveElement, Styled, Subscription,
+    Pixels, Point, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription,
     UniformListScrollHandle, Window, div, img, prelude::*, px, relative, rgb, uniform_list,
 };
 use mezon_store::activity::{ACTIVITY_TYPE_LIVE, ACTIVITY_TYPE_PLAY, ACTIVITY_TYPE_WORK};
 use mezon_store::{
     ActivityEvent, ActivityStore, BadgeService, DirectMessageStore, DmAvatarPresence, Friend,
-    FriendEvent, FriendState, FriendStore, PresenceEvent, PresenceStore, Settings, UserActivity,
-    UserId, current_user_presence,
+    FriendEvent, FriendState, FriendStore, MemoEvent, MemoStore, PresenceEvent, PresenceStore,
+    Settings, UserActivity, UserId, current_user_presence,
 };
+
+use crate::chat::memos::render_memo_bar;
 
 use crate::app::shell::{FriendRemovalKind, Shell};
 use crate::app::window_controls::APP_HEADER_HEIGHT;
@@ -121,6 +123,7 @@ pub struct FriendsPage {
     list_header: SharedString,
     list_scroll: UniformListScrollHandle,
     activity_scroll: UniformListScrollHandle,
+    memo_scroll: ScrollHandle,
     avatar_cache: Entity<LruImageCache>,
     open_menu: Option<(UserId, Point<Pixels>)>,
     cached_locale: SharedString,
@@ -209,10 +212,35 @@ impl FriendsPage {
                 }
             },
         ));
+        subs.push(
+            cx.subscribe(&MemoStore::global(cx), |this, _, event, cx| match event {
+                MemoEvent::Changed => {
+                    if on_friends_route(cx) {
+                        cx.notify();
+                    }
+                }
+                MemoEvent::Created => {
+                    if on_friends_route(cx) {
+                        cx.notify();
+                    }
+                }
+                MemoEvent::CreateFailed => {
+                    this.toast(ToastKind::Error, "memos.toast.createFailed", cx);
+                }
+                MemoEvent::CreateCapExceeded => {
+                    this.toast(ToastKind::Error, "memos.toast.capExceeded", cx);
+                }
+                MemoEvent::DeleteFailed => {}
+                MemoEvent::ReplyFailed => {
+                    this.toast(ToastKind::Error, "memos.toast.replyFailed", cx);
+                }
+            }),
+        );
         subs.push(cx.observe(&Router::global(cx), |this, _, cx| {
             if on_friends_route(cx) {
                 FriendStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
                 ActivityStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
+                MemoStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
                 this.rebuild(cx);
             } else {
                 this.clear_transient_state(cx);
@@ -229,6 +257,7 @@ impl FriendsPage {
 
         FriendStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
         ActivityStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
+        MemoStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
 
         let initial_locale = settings.read(cx).language.clone();
         let mut this = Self {
@@ -244,6 +273,7 @@ impl FriendsPage {
             list_header: SharedString::default(),
             list_scroll: UniformListScrollHandle::new(),
             activity_scroll: UniformListScrollHandle::new(),
+            memo_scroll: ScrollHandle::new(),
             avatar_cache,
             open_menu: None,
             cached_locale: SharedString::from(initial_locale),
@@ -717,7 +747,7 @@ impl Render for FriendsPage {
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .child(self.render_main(&theme, &locale, cx))
+                    .child(self.render_main(&theme, &locale, window, cx))
                     .child(self.render_activity(&theme, cx)),
             )
             .when_some(self.open_menu, |el, (user_id, pos)| {
@@ -856,7 +886,13 @@ impl FriendsPage {
             )
     }
 
-    fn render_main(&self, theme: &Theme, locale: &str, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_main(
+        &self,
+        theme: &Theme,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let main = div()
             .flex()
             .flex_1()
@@ -868,6 +904,13 @@ impl FriendsPage {
             main.child(self.render_add_friend(theme, locale, cx))
         } else {
             main.child(self.render_search(theme, cx))
+                .child({
+                    let page = cx.weak_entity();
+                    let after_scroll = move |app: &mut App| {
+                        let _ = page.update(app, |_, cx| cx.notify());
+                    };
+                    render_memo_bar(&self.memo_scroll, locale, theme, window, after_scroll, cx)
+                })
                 .child(self.render_list(theme, locale, cx))
         }
     }

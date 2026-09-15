@@ -3049,6 +3049,53 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn create_memo(
+        &self,
+        image_url: &str,
+        caption: &str,
+    ) -> Result<mezon_proto::api::Memo> {
+        let transport = self.inner.clone();
+        let image_url = image_url.to_string();
+        let caption = caption.to_string();
+        runtime()
+            .spawn(async move { transport.create_memo(&image_url, &caption).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_memos(&self) -> Result<mezon_proto::api::ListMemosResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.list_memos().await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn delete_memo(&self, creator_id: i64, memo_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.delete_memo(creator_id, memo_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn mark_memo_seen(&self, creator_id: i64, memo_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.mark_memo_seen(creator_id, memo_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn reply_memo(&self, creator_id: i64, memo_id: i64, text: &str) -> Result<i64> {
+        let transport = self.inner.clone();
+        let text = text.to_string();
+        runtime()
+            .spawn(async move { transport.reply_memo(creator_id, memo_id, &text).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn create_activity(
         &self,
         request: mezon_proto::api::CreateActivityRequest,

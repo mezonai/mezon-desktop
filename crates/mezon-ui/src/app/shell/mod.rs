@@ -1328,6 +1328,33 @@ impl Shell {
         cx.notify();
     }
 
+    pub fn confirm_delete_memo(
+        &mut self,
+        creator_id: mezon_store::UserId,
+        memo_id: i64,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.confirm_destructive(
+            ConfirmDestructive {
+                id: "confirm-delete-memo",
+                title: mezon_i18n::t(locale, "memos.delete.title").into(),
+                description: mezon_i18n::t(locale, "memos.delete.confirm").into(),
+                cancel_label: mezon_i18n::t(locale, "common.cancel").into(),
+                confirm_label: mezon_i18n::t(locale, "common.delete").into(),
+                failed_message: mezon_i18n::t(locale, "memos.toast.deleteFailed").into(),
+                action: Rc::new(move |cx: &mut App| {
+                    mezon_store::MemoStore::global(cx)
+                        .update(cx, |store, cx| store.delete_memo(creator_id, memo_id, cx))
+                }),
+            },
+            window,
+            cx,
+            true,
+        );
+    }
+
     pub fn confirm_close_dm(
         &mut self,
         channel_id: mezon_store::ChannelId,
@@ -1350,6 +1377,7 @@ impl Shell {
             },
             window,
             cx,
+            false,
         );
     }
 
@@ -1358,6 +1386,7 @@ impl Shell {
         params: ConfirmDestructive,
         window: &mut Window,
         cx: &mut Context<Self>,
+        stack: bool,
     ) {
         let ConfirmDestructive {
             id,
@@ -1381,8 +1410,13 @@ impl Shell {
             running: false,
         });
         let focus_handle = view.read(cx).focus_handle.clone();
-        window.focus(&focus_handle, cx);
-        self.show_modal(view.into(), cx);
+        let modal = view.into();
+        if stack && self.modal.is_some() {
+            self.show_stacked_modal(modal, window, cx);
+        } else {
+            window.focus(&focus_handle, cx);
+            self.show_modal(modal, cx);
+        }
     }
 
     pub fn confirm_leave_dm_group(
@@ -1412,6 +1446,7 @@ impl Shell {
             },
             window,
             cx,
+            false,
         );
     }
 

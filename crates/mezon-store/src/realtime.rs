@@ -74,6 +74,8 @@ pub enum RealtimeKind {
     StickerDelete,
     CanvasEvent,
     ListActivity,
+    MemoCreated,
+    MemoDeleted,
     WebrtcSignaling,
     IncomingCallPush,
     Webhook,
@@ -154,6 +156,8 @@ impl RealtimeKind {
             RealtimeEvent::Unhandled(realtime::envelope::Message::ListActivity(_)) => {
                 Self::ListActivity
             }
+            RealtimeEvent::MemoCreated(_) => Self::MemoCreated,
+            RealtimeEvent::MemoDeleted(_) => Self::MemoDeleted,
             RealtimeEvent::WebrtcSignaling(_) => Self::WebrtcSignaling,
             RealtimeEvent::IncomingCallPush(_) => Self::IncomingCallPush,
             _ => return None,

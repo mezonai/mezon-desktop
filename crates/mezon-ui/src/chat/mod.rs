@@ -30,6 +30,7 @@ pub mod layout;
 pub mod media_channel;
 pub mod member_list;
 pub mod member_row_element;
+pub mod memos;
 pub mod mention_input;
 pub mod message;
 pub mod message_search;

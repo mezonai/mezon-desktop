@@ -1805,6 +1805,55 @@ impl AppApi {
         self.transport.list_activity().await
     }
 
+    pub async fn list_memos(&self) -> Result<mezon_proto::api::ListMemosResponse> {
+        self.transport.list_memos().await
+    }
+
+    pub async fn create_memo(
+        &self,
+        image_url: &str,
+        caption: &str,
+    ) -> Result<mezon_proto::api::Memo> {
+        self.transport.create_memo(image_url, caption).await
+    }
+
+    pub async fn delete_memo(&self, creator_id: i64, memo_id: i64) -> Result<()> {
+        self.transport.delete_memo(creator_id, memo_id).await
+    }
+
+    pub async fn mark_memo_seen(&self, creator_id: i64, memo_id: i64) -> Result<()> {
+        self.transport.mark_memo_seen(creator_id, memo_id).await
+    }
+
+    pub async fn reply_memo(&self, creator_id: i64, memo_id: i64, text: &str) -> Result<i64> {
+        self.transport.reply_memo(creator_id, memo_id, text).await
+    }
+
+    pub async fn upload_memo_image(&self, path: &Path) -> Result<String> {
+        let data = crate::transport_runtime::read_file(path.to_path_buf()).await?;
+        if data.len() > 10 * 1024 * 1024 {
+            anyhow::bail!("image exceeds the 10 MB memo limit");
+        }
+
+        let raw_filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("memo")
+            .to_string();
+        let filename = sanitize_upload_filename(&raw_filename);
+        let format =
+            image::guess_format(&data).map_err(|_| anyhow::anyhow!("unsupported image type"))?;
+        let filetype = match format {
+            image::ImageFormat::Jpeg => "image/jpeg",
+            image::ImageFormat::Png => "image/png",
+            _ => anyhow::bail!("unsupported image type; use JPEG or PNG"),
+        };
+        let size = clamp_i32(data.len());
+        let (width, height) = image_dimensions(&data);
+        self.upload_bytes(&filename, filetype, filetype, size, width, height, data)
+            .await
+    }
+
     /// Publish or clear the local user's rich-presence activity (React `createActivity`).
     pub async fn create_activity(
         &self,

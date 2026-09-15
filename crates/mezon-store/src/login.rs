@@ -170,6 +170,9 @@ impl LoginStore {
         if let Some(e) = crate::activity::ActivityStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }
+        if let Some(e) = crate::memo::MemoStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
         if let Some(e) = crate::messages::MessagesStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }

@@ -247,6 +247,8 @@ pub enum RealtimeEvent {
     WebrtcSignaling(realtime::WebrtcSignalingFwd),
     IncomingCallPush(realtime::IncomingCallPush),
     Webhook(api::Webhook),
+    MemoCreated(realtime::MemoCreatedEvent),
+    MemoDeleted(realtime::MemoDeletedEvent),
     Unhandled(realtime::envelope::Message),
 }
 
@@ -307,6 +309,8 @@ impl RealtimeEvent {
             Self::WebrtcSignaling(_) => "WebrtcSignaling",
             Self::IncomingCallPush(_) => "IncomingCallPush",
             Self::Webhook(_) => "Webhook",
+            Self::MemoCreated(_) => "MemoCreated",
+            Self::MemoDeleted(_) => "MemoDeleted",
             Self::Unhandled(_) => "Unhandled",
         }
     }
@@ -379,6 +383,8 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::WebrtcSignalingFwd(m) => Ok(Self::WebrtcSignaling(m)),
             realtime::envelope::Message::IncomingCallPush(m) => Ok(Self::IncomingCallPush(m)),
             realtime::envelope::Message::WebhookEvent(m) => Ok(Self::Webhook(m)),
+            realtime::envelope::Message::MemoCreatedEvent(m) => Ok(Self::MemoCreated(m)),
+            realtime::envelope::Message::MemoDeletedEvent(m) => Ok(Self::MemoDeleted(m)),
             other => Ok(Self::Unhandled(other)),
         }
     }
@@ -4485,6 +4491,11 @@ impl MezonTransport {
             "MarkAsRead" => 208,
             "UploadBatchAttachmentFile" => 209,
             "SearchCtrlK" => 210,
+            "CreateMemo" => 211,
+            "ListMemos" => 212,
+            "DeleteMemo" => 213,
+            "MarkMemoSeen" => 214,
+            "ReplyMemo" => 215,
             _ => {
                 tracing::warn!("unknown API name: {api_name}");
                 return None;
@@ -6894,6 +6905,78 @@ impl MezonTransport {
             return Err(api_status_error(code));
         }
         Ok(api::SearchCtrlKResponse::decode(response.as_slice())?)
+    }
+
+    pub async fn create_memo(&self, image_url: &str, caption: &str) -> Result<api::Memo> {
+        let cid = self.generate_cid();
+        let body = api::CreateMemoRequest {
+            image_url: image_url.to_string(),
+            caption: caption.to_string(),
+        }
+        .encode_to_vec();
+        let (code, response) = self.send_api_request(cid, "CreateMemo", body).await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        let decoded = api::CreateMemoResponse::decode(response.as_slice())?;
+        decoded
+            .memo
+            .ok_or_else(|| anyhow::anyhow!("CreateMemo response missing memo"))
+    }
+
+    pub async fn list_memos(&self) -> Result<api::ListMemosResponse> {
+        let cid = self.generate_cid();
+        let (code, response) = self.send_api_request(cid, "ListMemos", Vec::new()).await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        Ok(api::ListMemosResponse::decode(response.as_slice())?)
+    }
+
+    pub async fn delete_memo(&self, creator_id: i64, memo_id: i64) -> Result<()> {
+        let cid = self.generate_cid();
+        let body = api::DeleteMemoRequest {
+            creator_id,
+            memo_id,
+        }
+        .encode_to_vec();
+        let (code, response) = self.send_api_request(cid, "DeleteMemo", body).await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        let _ = api::NoParams::decode(response.as_slice())?;
+        Ok(())
+    }
+
+    pub async fn mark_memo_seen(&self, creator_id: i64, memo_id: i64) -> Result<()> {
+        let cid = self.generate_cid();
+        let body = api::MarkMemoSeenRequest {
+            creator_id,
+            memo_id,
+        }
+        .encode_to_vec();
+        let (code, response) = self.send_api_request(cid, "MarkMemoSeen", body).await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        let _ = api::NoParams::decode(response.as_slice())?;
+        Ok(())
+    }
+
+    pub async fn reply_memo(&self, creator_id: i64, memo_id: i64, text: &str) -> Result<i64> {
+        let cid = self.generate_cid();
+        let body = api::ReplyMemoRequest {
+            creator_id,
+            memo_id,
+            text: text.to_string(),
+        }
+        .encode_to_vec();
+        let (code, response) = self.send_api_request(cid, "ReplyMemo", body).await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        let decoded = api::ReplyMemoResponse::decode(response.as_slice())?;
+        Ok(decoded.dm_channel_id)
     }
 
     /// Search threads by label within a parent channel.
