@@ -242,6 +242,7 @@ pub struct VoiceStore {
     moderation_error: Option<VoiceModerationError>,
     muted_by_moderator: bool,
     agent_pending: bool,
+    agent_channels: HashSet<String>,
     participants: Vec<VoiceParticipant>,
     join_ranks: Vec<String>,
     speak_ranks: HashMap<String, u64>,
@@ -608,6 +609,7 @@ impl VoiceStore {
             moderation_error: None,
             muted_by_moderator: false,
             agent_pending: false,
+            agent_channels: HashSet::new(),
             participants: Vec::new(),
             join_ranks: Vec::new(),
             speak_ranks: HashMap::new(),
@@ -2235,17 +2237,20 @@ impl VoiceStore {
     }
 
     pub fn agent_active(&self) -> bool {
-        self.participants.iter().any(|p| p.is_agent)
+        self.connection
+            .connected_channel()
+            .is_some_and(|(channel_id, _)| self.agent_channels.contains(channel_id))
     }
 
     pub fn toggle_agent(&mut self, cx: &mut Context<Self>) {
         if self.agent_pending {
             return;
         }
-        let Some((channel_id, _clan_id)) = self.connection.connected_channel() else {
+        let Some((channel_key, _clan_id)) = self.connection.connected_channel() else {
             return;
         };
-        let Ok(channel_id) = channel_id.parse::<i64>() else {
+        let channel_key = channel_key.to_string();
+        let Ok(channel_id) = channel_key.parse::<i64>() else {
             return;
         };
         if self.room_name.is_empty() {
@@ -2266,8 +2271,16 @@ impl VoiceStore {
             }
             let _ = this.update(cx, |this, cx| {
                 this.agent_pending = false;
-                if result.is_err() {
-                    this.moderation_error = Some(VoiceModerationError::AgentFailed);
+                match result {
+                    Ok(()) if on_agent => {
+                        this.agent_channels.remove(&channel_key);
+                    }
+                    Ok(()) => {
+                        this.agent_channels.insert(channel_key);
+                    }
+                    Err(_) => {
+                        this.moderation_error = Some(VoiceModerationError::AgentFailed);
+                    }
                 }
                 cx.notify();
             });
