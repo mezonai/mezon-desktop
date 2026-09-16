@@ -24,7 +24,7 @@ Rust app using GPUI. Each stage is independently shippable.
 | 9 | Members sidebar + user profile popover | — |
 | 10 | Notifications panel | — |
 | 11 | App directory | — |
-| 12 | Voice channel (LiveKit audio) | — |
+| 12 | Voice channel (Mezon SFU audio) | — |
 | 13 | Video meeting + screen share | — |
 | 14 | AI generation + remaining pages | — |
 | 15 | Remove Electron, update CI/CD | — |
@@ -193,8 +193,8 @@ Upgrades the `MessageInputBar`:
 | 9 | Member list sidebar + user profile popover |
 | 10 | Notifications panel |
 | 11 | App directory |
-| 12 | Voice channels (LiveKit Rust SDK + cpal audio) |
-| 13 | Video meetings + screen share (LiveKit video + wgpu textures) |
+| 12 | Voice channels (Mezon SFU over libwebrtc + cpal audio) |
+| 13 | Video meetings + screen share (Mezon SFU video + wgpu textures) |
 | 14 | AI generation page + remaining minor pages |
 | 15 | Delete Electron app, update CI/CD |
 

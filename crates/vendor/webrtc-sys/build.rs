@@ -1,17 +1,3 @@
-// Copyright 2025 LiveKit, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 use std::path::Path;
 use std::path::PathBuf;
 use std::{env, path, process::Command};
@@ -25,8 +11,8 @@ fn main() {
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let is_desktop = target_os == "linux" || target_os == "windows" || target_os == "macos";
 
-    println!("cargo:rerun-if-env-changed=LK_DEBUG_WEBRTC");
-    println!("cargo:rerun-if-env-changed=LK_CUSTOM_WEBRTC");
+    println!("cargo:rerun-if-env-changed=MEZON_DEBUG_WEBRTC");
+    println!("cargo:rerun-if-env-changed=MEZON_CUSTOM_WEBRTC");
 
     let mut rust_files = vec![
         "src/peer_connection.rs",
@@ -119,7 +105,6 @@ fn main() {
         webrtc_include.join("third_party/abseil-cpp/"),
         webrtc_include.join("third_party/libyuv/include/"),
         webrtc_include.join("third_party/libc++/"),
-        // For mac & ios
         webrtc_include.join("sdk/objc"),
         webrtc_include.join("sdk/objc/base"),
     ]);
@@ -132,7 +117,6 @@ fn main() {
         builder.define(key.as_str(), value);
     }
 
-    // Link webrtc library
     println!("cargo:rustc-link-lib=static=webrtc");
     match target_os.as_str() {
         "windows" => {
@@ -152,22 +136,8 @@ fn main() {
             println!("cargo:rustc-link-lib=dylib=dwmapi");
             println!("cargo:rustc-link-lib=dylib=shcore");
 
-            //let path = env::current_dir().unwrap();
-            //println!("cargo:rustc-link-search=native={}/vaapi-windows/x64/lib", path.display());
-            //println!("cargo:rustc-link-lib=dylib=va");
-            //println!("cargo:rustc-link-lib=dylib=va_win32");
-
             builder
-                //.include("./vaapi-windows/DirectX-Headers-1.0/include")
-                //.include(path::PathBuf::from("./vaapi-windows/x64/include"))
-                //.file("vaapi-windows/DirectX-Headers-1.0/src/dxguids.cpp")
-                //.file("src/vaapi/vaapi_display_win32.cpp")
-                //.file("src/vaapi/vaapi_h264_encoder_wrapper.cpp")
-                //.file("src/vaapi/vaapi_encoder_factory.cpp")
-                //.file("src/vaapi/h264_encoder_impl.cpp")
                 .flag("/std:c++20")
-                //.flag("/wd4819")
-                //.flag("/wd4068")
                 .flag("/EHsc");
         }
         "linux" => {
@@ -176,10 +146,8 @@ fn main() {
             println!("cargo:rustc-link-lib=dylib=pthread");
             println!("cargo:rustc-link-lib=dylib=m");
 
-            // In order to avoid any ABI mismatches we use the sysroot's headers.
             add_gio_headers(&mut builder);
 
-            // Do not use pkg_config::probe_library, because we only require headers.
             for lib_name in ["glib-2.0", "gobject-2.0", "gio-2.0"] {
                 let lib = pkg_config::Config::new().cargo_metadata(false).probe(lib_name).unwrap();
                 for path in lib.include_paths {
@@ -200,8 +168,6 @@ fn main() {
 
             if x86 {
                 if let Some(libva_include) = pkg_config::get_variable("libva", "includedir").ok() {
-                    // Do not use pkg_config::probe_library because libva is dlopened
-                    // and pkg_config::probe_library would link it.
                     builder
                         .include(libva_include)
                         .file("src/vaapi/vaapi_display_drm.cpp")
@@ -278,7 +244,6 @@ fn main() {
                 });
                 let cuda_include_dir = cuda_home.join("include");
 
-                // libcuda and libnvcuvid are dlopened, so do not link them.
                 if cuda_include_dir.join("cuda.h").exists() {
                     builder
                         .include(cuda_include_dir)
@@ -381,8 +346,7 @@ fn main() {
         }
     }
 
-    // TODO(theomonnom) Only add this define when building tests
-    builder.define("LIVEKIT_TEST", None);
+    builder.define("MEZON_RTC_TEST", None);
     builder.warnings(false).compile("webrtcsys-cxx");
 
     for entry in glob::glob("./src/**/*.cpp").unwrap() {

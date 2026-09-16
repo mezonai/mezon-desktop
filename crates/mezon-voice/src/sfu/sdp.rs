@@ -1,7 +1,9 @@
-
 use super::mid::{self, MID_CAMERA, MID_SCREEN};
 
-pub fn stabilize_inactive_video_sections(offer_sdp: &str, current_remote_sdp: Option<&str>) -> String {
+pub fn stabilize_inactive_video_sections(
+    offer_sdp: &str,
+    current_remote_sdp: Option<&str>,
+) -> String {
     let Some(previous_sdp) = current_remote_sdp.filter(|s| !s.is_empty()) else {
         return offer_sdp.to_owned();
     };
@@ -426,7 +428,10 @@ mod tests {
         let rtpmap = got.find("a=rtpmap:96").expect("codec restored");
         let inactive = got.find("a=inactive").expect("direction kept");
         assert!(mux < rtpmap, "codecs must follow rtcp-mux");
-        assert!(rtpmap < inactive, "codecs must precede the trailing attributes");
+        assert!(
+            rtpmap < inactive,
+            "codecs must precede the trailing attributes"
+        );
     }
 
     #[test]
@@ -489,7 +494,10 @@ mod tests {
             m=video 9 RTP/SAVPF 96\r\n\
             a=mid:4\r\n\
             a=recvonly\r\n";
-        assert_eq!(direction_summary(sdp), "0a=sendonly 1v=sendonly 4v=recvonly");
+        assert_eq!(
+            direction_summary(sdp),
+            "0a=sendonly 1v=sendonly 4v=recvonly"
+        );
     }
 
     #[test]
@@ -687,7 +695,10 @@ mod tests {
             a=rtpmap:97 rtx/90000\r\n\
             a=fmtp:97 apt=96\r\n";
         let got = munge_uplink_bitrates(sdp, CAM, SCR);
-        assert!(got.contains("a=fmtp:97 apt=96\r\n"), "rtx fmtp must be untouched");
+        assert!(
+            got.contains("a=fmtp:97 apt=96\r\n"),
+            "rtx fmtp must be untouched"
+        );
         assert_eq!(got.matches("x-google-min-bitrate").count(), 1);
     }
 

@@ -1,19 +1,3 @@
-/*
- * Copyright 2026 LiveKit, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 #include "h264_encoder_impl.h"
 
 #include <algorithm>
@@ -32,7 +16,7 @@
 #include "api/video_codecs/scalability_mode.h"
 #include "common_video/h264/h264_common.h"
 #include "common_video/libyuv/include/webrtc_libyuv.h"
-#include "livekit/dmabuf_video_frame_buffer.h"
+#include "mezon_rtc/dmabuf_video_frame_buffer.h"
 #include "modules/video_coding/include/video_codec_interface.h"
 #include "modules/video_coding/include/video_error_codes.h"
 #include "modules/video_coding/svc/create_scalability_structure.h"
@@ -55,7 +39,7 @@ enum H264EncoderImplEvent {
 JetsonH264EncoderImpl::JetsonH264EncoderImpl(const webrtc::Environment& env,
                                              const SdpVideoFormat& format)
     : env_(env),
-      encoder_(livekit::JetsonCodec::kH264),
+      encoder_(mezon_rtc::JetsonCodec::kH264),
       packetization_mode_(
           H264EncoderSettings::Parse(format).packetization_mode),
       format_(format) {
@@ -225,7 +209,7 @@ int32_t JetsonH264EncoderImpl::Encode(
   bool is_keyframe = false;
 
   // Check for DmaBuf zero-copy path first.
-  auto* dmabuf = livekit::DmaBufVideoFrameBuffer::FromNative(
+  auto* dmabuf = mezon_rtc::DmaBufVideoFrameBuffer::FromNative(
       input_frame.video_frame_buffer().get());
   if (dmabuf) {
     if (!encoder_.EncodeDmaBuf(dmabuf->dmabuf_fd(), is_keyframe_needed,
@@ -276,19 +260,19 @@ int32_t JetsonH264EncoderImpl::ProcessEncodedFrame(
   static std::atomic<bool> dumped(false);
   static std::atomic<bool> logged_env(false);
   if (!dumped.load(std::memory_order_relaxed)) {
-    const char* dump_path = std::getenv("LK_DUMP_H264");
+    const char* dump_path = std::getenv("MEZON_DUMP_H264");
     if (!dump_path || dump_path[0] == '\0') {
       if (!logged_env.exchange(true)) {
         RTC_LOG(LS_INFO)
-            << "LK_DUMP_H264 not set; skipping H264 dump.";
+            << "MEZON_DUMP_H264 not set; skipping H264 dump.";
       }
     } else if (packet.empty()) {
       if (!logged_env.exchange(true)) {
         RTC_LOG(LS_WARNING)
-            << "LK_DUMP_H264 set to " << dump_path
+            << "MEZON_DUMP_H264 set to " << dump_path
             << " but encoded packet is empty.";
         std::fprintf(stderr,
-                     "LK_DUMP_H264 set to %s but packet is empty\n",
+                     "MEZON_DUMP_H264 set to %s but packet is empty\n",
                      dump_path);
         std::fflush(stderr);
       }
@@ -311,10 +295,10 @@ int32_t JetsonH264EncoderImpl::ProcessEncodedFrame(
         std::fflush(stderr);
         dumped.store(true, std::memory_order_relaxed);
       } else {
-        RTC_LOG(LS_WARNING) << "Failed to open LK_DUMP_H264 path: "
+        RTC_LOG(LS_WARNING) << "Failed to open MEZON_DUMP_H264 path: "
                             << dump_path;
         std::fprintf(stderr,
-                     "Failed to open LK_DUMP_H264 path: %s\n",
+                     "Failed to open MEZON_DUMP_H264 path: %s\n",
                      dump_path);
         std::fflush(stderr);
       }

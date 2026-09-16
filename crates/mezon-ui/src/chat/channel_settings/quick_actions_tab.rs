@@ -10,8 +10,8 @@ use ui::Tooltip;
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{
-    Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, TextArea, TextAreaEvent,
-    TextAreaField, h_flex, v_flex,
+    Button, ButtonVariants, FocusCycle, Icon, IconName, Input, InputEvent, InputState, TextArea,
+    TextAreaEvent, TextAreaField, h_flex, v_flex,
 };
 use crate::theme::{ActiveTheme, Theme};
 
@@ -782,6 +782,10 @@ impl Render for CreateFlashMessageModal {
             )
             .child(
                 v_flex()
+                    .focus_cycle([
+                        self.name_input.focus_handle(cx),
+                        self.content_input.focus_handle(cx),
+                    ])
                     .p(px(24.))
                     .gap_4()
                     .child(

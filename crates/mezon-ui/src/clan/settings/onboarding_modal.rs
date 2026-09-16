@@ -1,8 +1,9 @@
 use gpui::{
-    AnyElement, InteractiveElement, SharedString, StatefulInteractiveElement, div, prelude::*, px,
+    AnyElement, FocusHandle, InteractiveElement, SharedString, StatefulInteractiveElement, div,
+    prelude::*, px,
 };
 
-use crate::components::primitives::{Icon, IconName, h_flex, v_flex};
+use crate::components::primitives::{FocusCycle, Icon, IconName, h_flex, v_flex};
 use crate::theme::Theme;
 
 fn required_label(label: SharedString, theme: &Theme) -> AnyElement {
@@ -146,6 +147,7 @@ pub(super) fn setup_modal(
 pub(super) fn editor_modal(
     body: AnyElement,
     footer: AnyElement,
+    fields: Vec<FocusHandle>,
     theme: &Theme,
     on_close: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> AnyElement {
@@ -160,6 +162,7 @@ pub(super) fn editor_modal(
         .justify_center()
         .child(
             v_flex()
+                .focus_cycle(fields)
                 .w(px(550.0))
                 .max_h(px(700.0))
                 .rounded(px(8.0))

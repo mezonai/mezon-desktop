@@ -1,19 +1,3 @@
-/*
- * Copyright 2026 LiveKit, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 #include "jetson_encoder_factory.h"
 
 #include <iostream>
@@ -44,8 +28,8 @@ JetsonVideoEncoderFactory::JetsonVideoEncoderFactory() {
   // AV1 encoding is only available on Orin-class hardware; probe instead of
   // advertising unconditionally so older devices (e.g. Xavier) fall back to
   // the software libaom encoder.
-  if (livekit::JetsonMmapiEncoder::IsCodecSupported(
-          livekit::JetsonCodec::kAV1)) {
+  if (mezon_rtc::JetsonMmapiEncoder::IsCodecSupported(
+          mezon_rtc::JetsonCodec::kAV1)) {
     absl::InlinedVector<ScalabilityMode, kScalabilityModeCount>
         scalability_modes;
     scalability_modes.push_back(ScalabilityMode::kL1T1);
@@ -64,7 +48,7 @@ JetsonVideoEncoderFactory::JetsonVideoEncoderFactory() {
 JetsonVideoEncoderFactory::~JetsonVideoEncoderFactory() {}
 
 bool JetsonVideoEncoderFactory::IsSupported() {
-  if (!livekit::JetsonMmapiEncoder::IsSupported()) {
+  if (!mezon_rtc::JetsonMmapiEncoder::IsSupported()) {
     RTC_LOG(LS_WARNING) << "Jetson MMAPI encoder is not available.";
     std::cout << "Jetson MMAPI encoder is not available." << std::endl;
     return false;

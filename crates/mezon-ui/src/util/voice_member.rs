@@ -1,6 +1,6 @@
 use gpui::App;
 use mezon_store::{
-    AccountStore, BadgeService, ClanId, ClanMembersStore, StreamMember, UserId, UsersByUserStore,
+    AccountStore, AppConfig, BadgeService, ClanId, ClanMembersStore, StreamMember, UserId, UsersByUserStore,
     VoiceMember, user_profile::ProfileContext,
 };
 
@@ -10,12 +10,26 @@ pub(crate) struct ResolvedMemberDisplay {
     pub avatar_raw: String,
 }
 
+pub(crate) const VOICE_AGENT_AVATAR_URL: &str = "https://cdn.mezon.vn/0/0/1779484387973271600/1737423959329_undefined173740153013517374015248704886401586613166392.png";
+
+pub(crate) fn is_voice_agent(cx: &App, user_id: UserId) -> bool {
+    AppConfig::try_global(cx).is_some_and(|config| config.is_voice_agent(&user_id.to_string()))
+}
+
 pub(crate) fn resolve_display(
     cx: &App,
     clan_id: Option<ClanId>,
     m: &VoiceMember,
 ) -> ResolvedMemberDisplay {
-    resolve_user_display(cx, clan_id, m.user_id, &m.display_name, &m.avatar_url)
+    let resolved = resolve_user_display(cx, clan_id, m.user_id, &m.display_name, &m.avatar_url);
+    if is_voice_agent(cx, m.user_id) {
+        return ResolvedMemberDisplay {
+            name: resolved.name,
+            avatar_src: crate::util::imgproxy::avatar_url(cx, VOICE_AGENT_AVATAR_URL),
+            avatar_raw: VOICE_AGENT_AVATAR_URL.to_string(),
+        };
+    }
+    resolved
 }
 
 pub(crate) fn resolve_stream_display(

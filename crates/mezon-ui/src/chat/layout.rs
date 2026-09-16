@@ -2055,6 +2055,19 @@ impl ChatLayout {
             );
             return;
         }
+        if let Some(command) =
+            mention_input.update(cx, |mention_input, _| mention_input.take_flash_command())
+        {
+            crate::chat::ChatSending::send_to_bots(
+                command.bot_id,
+                content,
+                content_tokens,
+                attachments,
+                &self.auth_state,
+                cx,
+            );
+            return;
+        }
         crate::chat::ChatSending::send_text(
             content,
             content_tokens,
@@ -2292,8 +2305,21 @@ impl ChatLayout {
         if self.thread_name_input.is_none() {
             let locale = self.settings.read(cx).language.clone();
             let ph = mezon_i18n::t(&locale, "channelTopbar.createThread.placeholder.threadName");
-            self.thread_name_input =
-                Some(cx.new(|cx| InputState::new(window, cx).placeholder(ph).embedded(true)));
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder(ph).embedded(true));
+            let input_for_sub = input.clone();
+            cx.subscribe_in(&input, window, move |_, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let name = input_for_sub.read(cx).value();
+                    let invalid = !name.trim().is_empty()
+                        && mezon_store::validate_channel_name(name).is_err();
+                    ThreadsStore::global(cx).update(cx, |store, cx| {
+                        store.clear_name_error(cx);
+                        store.set_name_live_invalid(invalid, cx);
+                    });
+                }
+            })
+            .detach();
+            self.thread_name_input = Some(input);
         }
         if self.create_thread_message_input.is_none() {
             let locale = self.settings.read(cx).language.clone();
@@ -3111,28 +3137,6 @@ impl ChatLayout {
                             .on_mouse_down(gpui::MouseButton::Left, {
                                 let focus = self.voice_focus.clone();
                                 move |_, window, cx| window.focus(&focus, cx)
-                            })
-                            .on_key_down({
-                                let voice = self.voice_store.clone();
-                                move |event, _, cx| {
-                                    if event.keystroke.key.as_str() != "space" || event.is_held {
-                                        return;
-                                    }
-                                    voice.update(cx, |store, cx| {
-                                        store.set_push_to_talk(true, cx);
-                                    });
-                                }
-                            })
-                            .on_key_up({
-                                let voice = self.voice_store.clone();
-                                move |event, _, cx| {
-                                    if event.keystroke.key.as_str() != "space" {
-                                        return;
-                                    }
-                                    voice.update(cx, |store, cx| {
-                                        store.set_push_to_talk(false, cx);
-                                    });
-                                }
                             })
                             .child(voice_view)
                             .when_some(self.voice_emoji_picker.clone(), |el, picker| {

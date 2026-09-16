@@ -1,6 +1,7 @@
 pub mod blink_manager;
 mod button;
 pub mod clipboard;
+pub mod focus_cycle;
 mod icon;
 pub mod input;
 mod sizing;
@@ -10,6 +11,7 @@ pub mod text_actions;
 pub mod text_edit;
 
 pub use button::{Button, ButtonVariant, ButtonVariants};
+pub use focus_cycle::{FocusCycle, cycle_focus, init as init_focus_cycle};
 pub use icon::{Icon, IconName};
 pub use input::{Input, InputEvent, InputState};
 pub use sizing::{Sizable, Size};

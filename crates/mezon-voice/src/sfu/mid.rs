@@ -203,7 +203,10 @@ mod tests {
     fn the_peer_segment_is_optional_and_must_be_numeric() {
         assert_eq!(occupant_in_token("u8-p9").map(|o| o.peer_id), Some(9));
         assert_eq!(occupant_in_token("audio-u8-p9").map(|o| o.peer_id), Some(9));
-        assert_eq!(occupant_in_token("room-u1234-cam").map(|o| o.peer_id), Some(0));
+        assert_eq!(
+            occupant_in_token("room-u1234-cam").map(|o| o.peer_id),
+            Some(0)
+        );
         assert_eq!(occupant_in_token("u5-pxx").map(|o| o.peer_id), Some(0));
     }
 }

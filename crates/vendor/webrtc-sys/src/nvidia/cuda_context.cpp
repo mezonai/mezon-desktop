@@ -17,7 +17,7 @@ static const char CUDA_DYNAMIC_LIBRARY[] = "nvcuda.dll";
 static const char CUDA_DYNAMIC_LIBRARY[] = "libcuda.so.1";
 #endif
 
-namespace livekit_ffi {
+namespace mezon_ffi {
 
 #define __CUCTX_CUDA_CALL(call, ret)                        \
   CUresult err__ = call;                                    \
@@ -198,4 +198,4 @@ void CudaContext::Shutdown() {
   }
 }
 
-}  // namespace livekit_ffi
+}

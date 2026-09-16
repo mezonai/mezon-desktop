@@ -1,17 +1,3 @@
-// Copyright 2025 LiveKit, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 use cxx::SharedPtr;
 use tokio::sync::oneshot;
 use webrtc_sys::audio_track as sys_at;
@@ -147,13 +133,11 @@ impl NativeAudioSource {
             return Ok(());
         }
 
-        // Buffered path.
-        extern "C" fn lk_audio_source_complete(userdata: *const sys_at::SourceContext) {
+        extern "C" fn audio_source_complete(userdata: *const sys_at::SourceContext) {
             let tx = unsafe { Box::from_raw(userdata as *mut oneshot::Sender<()>) };
             let _ = tx.send(());
         }
 
-        // iterate over chunks of self._queue_size_samples
         for chunk in frame.data.chunks(self.queue_size_samples as usize) {
             let nb_frames = chunk.len() / self.num_channels as usize;
             let (tx, rx) = oneshot::channel::<()>();
@@ -161,14 +145,13 @@ impl NativeAudioSource {
             let ctx_ptr = Box::into_raw(ctx) as *const sys_at::SourceContext;
 
             unsafe {
-                // In the fast path, C++ never store / invoke on_complete / ctx.
                 if !self.sys_handle.capture_frame(
                     chunk,
                     self.sample_rate,
                     self.num_channels,
                     nb_frames,
                     ctx_ptr,
-                    sys_at::CompleteCallback(lk_audio_source_complete),
+                    sys_at::CompleteCallback(audio_source_complete),
                 ) {
                     return Err(RtcError {
                         error_type: RtcErrorType::InvalidState,

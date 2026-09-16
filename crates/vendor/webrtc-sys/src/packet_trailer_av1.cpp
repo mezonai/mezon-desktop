@@ -1,27 +1,11 @@
-/*
- * Copyright 2026 LiveKit, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-#include "livekit/packet_trailer_av1.h"
+#include "mezon_rtc/packet_trailer_av1.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
 #include <string>
 
-namespace livekit_ffi {
+namespace mezon_ffi {
 namespace av1 {
 
 namespace {
@@ -32,7 +16,7 @@ constexpr uint8_t kAv1ObuTypeMask = 0b0111'1000;
 constexpr uint8_t kAv1ObuTypeSequenceHeader = 1;
 constexpr uint8_t kAv1ObuTypeTemporalDelimiter = 2;
 constexpr uint8_t kAv1ObuTypeMetadata = 5;
-constexpr uint64_t kAv1MetadataTypeLiveKitPacketTrailer = 31;
+constexpr uint64_t kAv1MetadataTypePacketTrailer = 31;
 
 void WriteLeb128(uint64_t value, std::vector<uint8_t>& out) {
   while (value >= 0x80) {
@@ -64,7 +48,7 @@ bool ReadLeb128(webrtc::ArrayView<const uint8_t> data,
 std::vector<uint8_t> BuildMetadataObu(
     webrtc::ArrayView<const uint8_t> trailer) {
   std::vector<uint8_t> metadata_payload;
-  WriteLeb128(kAv1MetadataTypeLiveKitPacketTrailer, metadata_payload);
+  WriteLeb128(kAv1MetadataTypePacketTrailer, metadata_payload);
   metadata_payload.insert(metadata_payload.end(), trailer.begin(), trailer.end());
 
   std::vector<uint8_t> obu;
@@ -197,7 +181,7 @@ std::optional<PacketTrailerMetadata> ExtractTrailer(
       size_t metadata_pos = 0;
       uint64_t metadata_type = 0;
       if (ReadLeb128(metadata_payload, metadata_pos, metadata_type) &&
-          metadata_type == kAv1MetadataTypeLiveKitPacketTrailer &&
+          metadata_type == kAv1MetadataTypePacketTrailer &&
           metadata_pos <= metadata_payload.size()) {
         auto trailer_payload = metadata_payload.subview(
             metadata_pos, metadata_payload.size() - metadata_pos);
@@ -221,4 +205,4 @@ std::optional<PacketTrailerMetadata> ExtractTrailer(
 }
 
 }  // namespace av1
-}  // namespace livekit_ffi
+}

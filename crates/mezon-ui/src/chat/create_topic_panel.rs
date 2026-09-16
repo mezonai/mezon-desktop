@@ -32,7 +32,7 @@ impl TopicPanel {
         let locale = settings.read(cx).language.clone();
         let placeholder = mezon_i18n::t(&locale, "messageBox.placeholder").to_string();
         let mention_input =
-            cx.new(|cx| MentionInput::new(placeholder, settings.clone(), window, cx));
+            cx.new(|cx| MentionInput::new_for_topic(placeholder, settings.clone(), window, cx));
         let input_bar = cx.new(|cx| {
             InputBar::new(
                 mention_input.clone(),
@@ -131,8 +131,14 @@ impl TopicPanel {
         else {
             return;
         };
-        TopicsStore::global(cx).update(cx, |store, cx| {
-            store.submit_reply(content, content_tokens, attachments, cx);
+        let ephemeral_receiver = self
+            .mention_input
+            .update(cx, |input, cx| input.take_ephemeral_receiver(cx));
+        TopicsStore::global(cx).update(cx, |store, cx| match ephemeral_receiver {
+            Some(receiver_id) => {
+                store.submit_ephemeral_reply(receiver_id, content, content_tokens, attachments, cx)
+            }
+            None => store.submit_reply(content, content_tokens, attachments, cx),
         });
     }
 

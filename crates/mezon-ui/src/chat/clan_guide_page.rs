@@ -268,7 +268,7 @@ impl ClanGuidePage {
             .into_any_element()
     }
 
-    fn render_questions(&self, theme: &Theme, locale: &str, cx: &App) -> AnyElement {
+    fn render_questions(&self, theme: &Theme, locale: &str, cx: &App) -> Option<AnyElement> {
         let store = OnboardingStore::global(cx);
         let store = store.read(cx);
         let questions = store
@@ -279,47 +279,44 @@ impl ClanGuidePage {
             .gap_2()
             .child(section_title(mezon_i18n::t(locale, "guide.questions")));
         if questions.is_empty() {
-            return section
-                .child(empty_card(
-                    theme,
-                    mezon_i18n::t(locale, "guide.noQuestions"),
-                ))
-                .into_any_element();
+            return None;
         }
         let mut list = v_flex().gap_2().rounded(px(8.)).relative();
         for question in questions {
             list = list.child(self.render_question(question, theme, cx));
         }
         let fill = (store.answered_percent(self.clan_id) / 100.).clamp(0., 1.);
-        section
-            .child(
-                list.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left(px(-16.))
-                        .w(px(4.))
-                        .h_full()
-                        .child(
-                            div()
-                                .relative()
-                                .w(px(4.))
-                                .h_full()
-                                .rounded(px(16.))
-                                .overflow_hidden()
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .top_0()
-                                        .w(px(4.))
-                                        .h(relative(fill))
-                                        .rounded(px(16.))
-                                        .bg(rgb(PROGRESS_COLOR)),
-                                ),
-                        ),
-                ),
-            )
-            .into_any_element()
+        Some(
+            section
+                .child(
+                    list.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left(px(-16.))
+                            .w(px(4.))
+                            .h_full()
+                            .child(
+                                div()
+                                    .relative()
+                                    .w(px(4.))
+                                    .h_full()
+                                    .rounded(px(16.))
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .top_0()
+                                            .w(px(4.))
+                                            .h(relative(fill))
+                                            .rounded(px(16.))
+                                            .bg(rgb(PROGRESS_COLOR)),
+                                    ),
+                            ),
+                    ),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_question(&self, question: &OnboardingItem, theme: &Theme, cx: &App) -> AnyElement {
@@ -404,7 +401,7 @@ impl ClanGuidePage {
             .into_any_element()
     }
 
-    fn render_resources(&self, theme: &Theme, locale: &str, cx: &App) -> AnyElement {
+    fn render_resources(&self, theme: &Theme, locale: &str, cx: &App) -> Option<AnyElement> {
         let store = OnboardingStore::global(cx);
         let store = store.read(cx);
         let rules = store
@@ -415,9 +412,7 @@ impl ClanGuidePage {
             .gap_2()
             .child(section_title(mezon_i18n::t(locale, "guide.resources")));
         if rules.is_empty() {
-            return section
-                .child(empty_card(theme, mezon_i18n::t(locale, "guide.noRules")))
-                .into_any_element();
+            return None;
         }
         for rule in rules {
             let thumbnail = div()
@@ -448,10 +443,10 @@ impl ClanGuidePage {
                 Some(thumbnail),
             ));
         }
-        section.into_any_element()
+        Some(section.into_any_element())
     }
 
-    fn render_missions(&self, theme: &Theme, locale: &str, cx: &App) -> AnyElement {
+    fn render_missions(&self, theme: &Theme, locale: &str, cx: &App) -> Option<AnyElement> {
         let store = OnboardingStore::global(cx);
         let store = store.read(cx);
         let missions = store
@@ -462,9 +457,7 @@ impl ClanGuidePage {
             .gap_2()
             .child(section_title(mezon_i18n::t(locale, "guide.missions")));
         if missions.is_empty() {
-            return section
-                .child(empty_card(theme, mezon_i18n::t(locale, "guide.noMissions")))
-                .into_any_element();
+            return None;
         }
         let clan_id = self.clan_id;
         let done = store.mission_progress(clan_id);
@@ -520,7 +513,7 @@ impl ClanGuidePage {
                 }),
             );
         }
-        section.into_any_element()
+        Some(section.into_any_element())
     }
 
     fn render_load_failure(&self, theme: &Theme, locale: &str) -> AnyElement {
@@ -600,22 +593,6 @@ fn section_title(title: &'static str) -> AnyElement {
         .text_size(px(20.))
         .font_weight(FontWeight::BOLD)
         .child(title)
-        .into_any_element()
-}
-
-fn empty_card(theme: &Theme, message: &'static str) -> AnyElement {
-    h_flex()
-        .gap_2()
-        .h(px(80.))
-        .p_4()
-        .w_full()
-        .text_size(px(18.))
-        .items_center()
-        .font_weight(FontWeight::SEMIBOLD)
-        .justify_between()
-        .rounded(px(8.))
-        .bg(theme.tokens.bg_active_member_channel)
-        .child(message)
         .into_any_element()
 }
 
@@ -753,9 +730,18 @@ impl Render for ClanGuidePage {
                                 }
                                 ContentState::Loading => column,
                                 ContentState::Ready => column
-                                    .child(self.render_questions(theme, &locale, cx))
-                                    .child(self.render_resources(theme, &locale, cx))
-                                    .child(self.render_missions(theme, &locale, cx)),
+                                    .when_some(
+                                        self.render_questions(theme, &locale, cx),
+                                        |column, section| column.child(section),
+                                    )
+                                    .when_some(
+                                        self.render_resources(theme, &locale, cx),
+                                        |column, section| column.child(section),
+                                    )
+                                    .when_some(
+                                        self.render_missions(theme, &locale, cx),
+                                        |column, section| column.child(section),
+                                    ),
                             }
                         }))
                         .child(Self::render_about(theme, &locale)),

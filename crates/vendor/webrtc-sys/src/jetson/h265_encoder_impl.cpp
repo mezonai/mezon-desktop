@@ -1,19 +1,3 @@
-/*
- * Copyright 2026 LiveKit, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 #include "h265_encoder_impl.h"
 
 #include <algorithm>
@@ -25,7 +9,7 @@
 #include "api/video/video_codec_constants.h"
 #include "api/video_codecs/scalability_mode.h"
 #include "common_video/libyuv/include/webrtc_libyuv.h"
-#include "livekit/dmabuf_video_frame_buffer.h"
+#include "mezon_rtc/dmabuf_video_frame_buffer.h"
 #include "modules/video_coding/include/video_codec_interface.h"
 #include "modules/video_coding/include/video_error_codes.h"
 #include "modules/video_coding/svc/create_scalability_structure.h"
@@ -47,7 +31,7 @@ enum H265EncoderImplEvent {
 
 JetsonH265EncoderImpl::JetsonH265EncoderImpl(const webrtc::Environment& env,
                                              const SdpVideoFormat& format)
-    : env_(env), encoder_(livekit::JetsonCodec::kH265), format_(format) {}
+    : env_(env), encoder_(mezon_rtc::JetsonCodec::kH265), format_(format) {}
 
 JetsonH265EncoderImpl::~JetsonH265EncoderImpl() {
   Release();
@@ -188,7 +172,7 @@ int32_t JetsonH265EncoderImpl::Encode(
   bool is_keyframe = false;
 
   // Check for DmaBuf zero-copy path first.
-  auto* dmabuf = livekit::DmaBufVideoFrameBuffer::FromNative(
+  auto* dmabuf = mezon_rtc::DmaBufVideoFrameBuffer::FromNative(
       input_frame.video_frame_buffer().get());
   if (dmabuf) {
     if (!encoder_.EncodeDmaBuf(dmabuf->dmabuf_fd(), is_keyframe_needed,

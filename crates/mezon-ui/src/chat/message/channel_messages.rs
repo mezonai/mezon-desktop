@@ -2523,21 +2523,14 @@ impl ChannelMessages {
         self.selection_press_origin = None;
         self.expanded_selection = None;
         self.selection_autoscroll_scheduled = false;
-        let (initial_content, initial_spans) = MessagesStore::global(cx)
-            .read(cx)
-            .viewport_messages()
-            .iter()
-            .find(|m| m.id == message_id)
+        let (initial_content, initial_spans) = self
+            .find_local_message(message_id, cx)
             .map(|m| {
                 let source =
                     markdown_edit_source(&m.content, &m.spans).unwrap_or_else(|| m.content.clone());
-                (source, m.spans.clone())
+                (source, m.spans)
             })
-            .unwrap_or_else(|| {
-                self.find_local_message(message_id, cx)
-                    .map(|m| (m.content.clone(), m.spans.clone()))
-                    .unwrap_or_default()
-            });
+            .unwrap_or_default();
         let settings = self.settings.clone();
         let input = cx.new(|cx| {
             MentionInput::new_edit(

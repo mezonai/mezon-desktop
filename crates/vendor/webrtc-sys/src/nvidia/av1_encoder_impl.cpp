@@ -315,7 +315,7 @@ int32_t NvidiaAV1EncoderImpl::Encode(
         continue;
       }
 
-      livekit::av1::NormalizeForRtp(&packet);
+      mezon_rtc::av1::NormalizeForRtp(&packet);
       if (packet.empty()) {
         RTC_LOG(LS_ERROR)
             << "NVIDIA AV1 NVENC packet contained no transferable OBUs "
@@ -324,18 +324,18 @@ int32_t NvidiaAV1EncoderImpl::Encode(
       }
 
       std::vector<uint8_t> sequence_header;
-      if (livekit::av1::ExtractSequenceHeaderObu(
+      if (mezon_rtc::av1::ExtractSequenceHeaderObu(
               packet.data(), packet.size(), &sequence_header)) {
         cached_sequence_header_obu_ = std::move(sequence_header);
       }
 
       const bool treat_as_keyframe = is_keyframe_needed;
       if (treat_as_keyframe) {
-        livekit::av1::EnsureSequenceHeaderOnKeyframe(
+        mezon_rtc::av1::EnsureSequenceHeaderOnKeyframe(
             &packet, cached_sequence_header_obu_);
       }
 
-      if (!livekit::av1::IsWebRtcParseable(packet.data(), packet.size())) {
+      if (!mezon_rtc::av1::IsWebRtcParseable(packet.data(), packet.size())) {
         RTC_LOG(LS_ERROR)
             << "NVIDIA AV1 NVENC bitstream is not parseable by WebRTC; "
                "dropping frame (size="
@@ -344,7 +344,7 @@ int32_t NvidiaAV1EncoderImpl::Encode(
       }
 
       if (treat_as_keyframe &&
-          livekit::av1::HasSequenceHeaderObu(packet.data(), packet.size())) {
+          mezon_rtc::av1::HasSequenceHeaderObu(packet.data(), packet.size())) {
         sent_decodable_keyframe_ = true;
         configuration_.key_frame_request = false;
       } else if (!sent_decodable_keyframe_) {

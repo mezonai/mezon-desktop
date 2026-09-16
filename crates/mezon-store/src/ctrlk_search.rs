@@ -67,6 +67,7 @@ pub struct CtrlKSearchStore {
     state: CtrlKSearchState,
     api: Arc<AppApi>,
     search_generation: u64,
+    last_response_query: Option<String>,
     _search_task: Task<()>,
 }
 
@@ -81,6 +82,7 @@ impl CtrlKSearchStore {
             state: CtrlKSearchState::default(),
             api,
             search_generation: 0,
+            last_response_query: None,
             _search_task: Task::ready(()),
         });
         cx.set_global(GlobalCtrlKSearchStore(entity.clone()));
@@ -100,9 +102,14 @@ impl CtrlKSearchStore {
         &self.state
     }
 
+    pub fn has_settled_response(&self) -> bool {
+        self.last_response_query.is_some()
+    }
+
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.cancel_pending();
         self.state = CtrlKSearchState::default();
+        self.last_response_query = None;
         cx.emit(CtrlKSearchEvent::Changed);
         cx.notify();
     }
@@ -115,11 +122,7 @@ impl CtrlKSearchStore {
         }
 
         self.cancel_pending();
-        self.state.users.clear();
-        self.state.channels.clear();
-        self.state.is_searching = true;
-        cx.emit(CtrlKSearchEvent::Changed);
-        cx.notify();
+        mark_search_in_flight(&mut self.state);
 
         let api = self.api.clone();
         let store_generation = self.search_generation;
@@ -141,6 +144,7 @@ impl CtrlKSearchStore {
                         this.state.channels.clear();
                     }
                 }
+                this.last_response_query = Some(trimmed);
                 cx.emit(CtrlKSearchEvent::Changed);
                 cx.notify();
             });
@@ -150,6 +154,10 @@ impl CtrlKSearchStore {
     fn cancel_pending(&mut self) {
         self.search_generation = self.search_generation.wrapping_add(1);
     }
+}
+
+fn mark_search_in_flight(state: &mut CtrlKSearchState) {
+    state.is_searching = true;
 }
 
 fn map_users(users: Vec<mezon_proto::api::User>) -> Vec<CtrlKUser> {
@@ -225,6 +233,29 @@ mod tests {
         assert_eq!(users.len(), 1);
         assert_eq!(users[0].id, UserId(42));
         assert_eq!(users[0].nicknames, vec!["nick".to_string()]);
+    }
+
+    #[test]
+    fn beginning_a_search_keeps_previous_hits() {
+        let mut state = CtrlKSearchState {
+            users: vec![CtrlKUser {
+                id: UserId(7),
+                username: "gia".into(),
+                ..Default::default()
+            }],
+            channels: vec![CtrlKChannel {
+                channel_id: ChannelId(3),
+                label: "general".into(),
+                ..Default::default()
+            }],
+            is_searching: false,
+        };
+        mark_search_in_flight(&mut state);
+        assert!(state.is_searching);
+        assert_eq!(state.users.len(), 1);
+        assert_eq!(state.channels.len(), 1);
+        assert_eq!(state.users[0].id, UserId(7));
+        assert_eq!(state.channels[0].channel_id, ChannelId(3));
     }
 
     #[test]

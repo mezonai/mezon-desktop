@@ -23,6 +23,7 @@ static MENU_NAME_CHAR: LazyLock<Regex> = LazyLock::new(|| {
 #[derive(Debug, Clone)]
 pub struct QuickMenuItem {
     pub id: i64,
+    pub bot_id: i64,
     pub menu_name: SharedString,
     pub action_msg: SharedString,
     pub menu_type: i32,
@@ -116,7 +117,8 @@ fn apply_update(
         return;
     };
     if let Some(existing) = items.iter_mut().find(|existing| existing.id == item.id) {
-        *existing = item;
+        let bot_id = existing.bot_id;
+        *existing = QuickMenuItem { bot_id, ..item };
     }
 }
 
@@ -284,6 +286,7 @@ impl QuickMenuStore {
                             .into_iter()
                             .map(|item| QuickMenuItem {
                                 id: item.id,
+                                bot_id: item.bot_id,
                                 menu_name: item.menu_name.into(),
                                 action_msg: item.action_msg.into(),
                                 menu_type: item.menu_type,
@@ -329,6 +332,7 @@ impl QuickMenuStore {
                     channel_id,
                     QuickMenuItem {
                         id,
+                        bot_id: 0,
                         menu_name: menu_name.into(),
                         action_msg: action_msg.into(),
                         menu_type,
@@ -370,6 +374,7 @@ impl QuickMenuStore {
                     channel_id,
                     QuickMenuItem {
                         id,
+                        bot_id: 0,
                         menu_name: menu_name.into(),
                         action_msg: action_msg.into(),
                         menu_type,
@@ -414,6 +419,7 @@ mod tests {
     fn item(id: i64, name: &str, action: &str, menu_type: i32) -> QuickMenuItem {
         QuickMenuItem {
             id,
+            bot_id: 0,
             menu_name: name.into(),
             action_msg: action.into(),
             menu_type,

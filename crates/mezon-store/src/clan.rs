@@ -933,7 +933,7 @@ impl ClanList {
     /// answers every later join for the clan from the tracker instead of
     /// re-running the fan-out. A join sent from here, before the listing, would
     /// be the one that counts.
-    pub fn subscribe_clan_realtime(&self, clan_id: ClanId, cx: &mut Context<Self>) {
+    pub fn subscribe_clan_realtime(clan_id: ClanId, cx: &mut App) {
         crate::channel::ChannelList::global(cx).update(cx, |channels, cx| {
             drop(channels.ensure_clan_joined(clan_id, cx));
         });

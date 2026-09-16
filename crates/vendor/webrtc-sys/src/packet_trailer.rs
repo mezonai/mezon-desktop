@@ -1,17 +1,3 @@
-// Copyright 2026 LiveKit, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 use crate::impl_thread_safety;
 
 /// Callback invoked for native video publish pipeline timing events.
@@ -20,7 +6,7 @@ pub type OnVideoPublishTiming = Box<dyn Fn(ffi::VideoPublishTimingEvent) + Send 
 pub type OnVideoSubscribeTiming =
     Box<dyn Fn(ffi::VideoSubscribeTimingEvent) + Send + Sync + 'static>;
 
-#[cxx::bridge(namespace = "livekit_ffi")]
+#[cxx::bridge(namespace = "mezon_ffi")]
 pub mod ffi {
     #[repr(i32)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,10 +41,10 @@ pub mod ffi {
     }
 
     unsafe extern "C++" {
-        include!("livekit/packet_trailer.h");
-        include!("livekit/rtp_sender.h");
-        include!("livekit/rtp_receiver.h");
-        include!("livekit/peer_connection_factory.h");
+        include!("mezon_rtc/packet_trailer.h");
+        include!("mezon_rtc/rtp_sender.h");
+        include!("mezon_rtc/rtp_receiver.h");
+        include!("mezon_rtc/peer_connection_factory.h");
 
         type RtpSender = crate::rtp_sender::ffi::RtpSender;
         type RtpReceiver = crate::rtp_receiver::ffi::RtpReceiver;

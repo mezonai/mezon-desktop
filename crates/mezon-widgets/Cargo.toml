@@ -14,5 +14,8 @@ mezon-store.workspace = true
 unicode-segmentation.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc.workspace = true

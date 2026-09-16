@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use libwebrtc::prelude::VideoBuffer;
 use libwebrtc::video_frame::{I420Buffer, VideoFrame, VideoRotation};
-use libwebrtc::video_source::native::NativeVideoSource;
 use libwebrtc::video_source::VideoResolution;
+use libwebrtc::video_source::native::NativeVideoSource;
 use nokhwa::Camera;
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{

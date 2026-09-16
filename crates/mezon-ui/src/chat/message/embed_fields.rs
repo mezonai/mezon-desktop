@@ -1,6 +1,9 @@
 use std::time::Instant;
 
-use gpui::{AnyElement, FontWeight, Rgba, SharedString, div, img, prelude::*, px, rgb};
+use gpui::{
+    AnyElement, FocusHandle, Focusable, FontWeight, Rgba, SharedString, div, img, prelude::*, px,
+    rgb,
+};
 use mezon_store::{
     EmbedAnimation, EmbedField, EmbedGrid, EmbedInput, EmbedRadio, EmbedRadioOption,
     EmbedTextInput, Message, MessageId, MessagesStore, SpriteAtlas,
@@ -9,7 +12,7 @@ use mezon_store::{
 use super::content::{SelectableSectionCursor, SelectableTextContext};
 use super::context::RowCtx;
 use super::message_actions_panel::{button_bg, render_message_button, render_message_select};
-use crate::components::primitives::TextAreaField;
+use crate::components::primitives::{FocusCycle, TextAreaField};
 
 const INPUT_WIDTH: f32 = 300.0;
 const INPUT_HEIGHT: f32 = 36.0;
@@ -56,7 +59,24 @@ pub fn render_embed_fields(
         }
         grid = grid.child(row);
     }
-    grid.into_any_element()
+    grid.focus_cycle(text_input_fields(fields, msg.id, ctx))
+        .into_any_element()
+}
+
+fn text_input_fields<'a>(
+    fields: &'a [EmbedField],
+    message_id: MessageId,
+    ctx: &'a RowCtx,
+) -> impl Iterator<Item = FocusHandle> + 'a {
+    fields
+        .iter()
+        .filter_map(move |field| match field.input.as_ref() {
+            Some(EmbedInput::Text(text)) if !text.disabled => ctx
+                .embed_inputs
+                .get(&(message_id, text.id.clone()))
+                .map(|state| state.focus_handle(ctx.app)),
+            _ => None,
+        })
 }
 
 fn group_fields(fields: &[EmbedField]) -> Vec<Vec<&EmbedField>> {

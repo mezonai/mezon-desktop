@@ -1008,6 +1008,13 @@ fn open_main_window(
         std::sync::Arc::new(|url: &str| mezon_native::browser::open_url_app_window(url)),
         cx,
     );
+    mezon_store::PlatformStore::set_open_managed_app_window(
+        &platform_store,
+        std::sync::Arc::new(|url: &str, key: &str| {
+            mezon_native::browser::open_url_managed_app_window(url, key)
+        }),
+        cx,
+    );
     mezon_store::PlatformStore::set_save_attachment(
         &platform_store,
         std::sync::Arc::new(|url: &str, filename: &str| save_attachment(url, filename)),

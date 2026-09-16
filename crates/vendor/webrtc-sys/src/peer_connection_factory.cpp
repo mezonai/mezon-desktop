@@ -1,20 +1,4 @@
-/*
- * Copyright 2025 LiveKit, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-#include "livekit/peer_connection_factory.h"
+#include "mezon_rtc/peer_connection_factory.h"
 
 #include <memory>
 #include <utility>
@@ -34,19 +18,19 @@
 #include "api/video_codecs/builtin_video_encoder_factory.h"
 #include "api/audio/audio_device.h"
 #include "api/audio_options.h"
-#include "livekit/adm_proxy.h"
-#include "livekit/audio_track.h"
-#include "livekit/peer_connection.h"
-#include "livekit/rtc_error.h"
-#include "livekit/rtp_parameters.h"
-#include "livekit/video_decoder_factory.h"
-#include "livekit/video_encoder_factory.h"
-#include "livekit/webrtc.h"
+#include "mezon_rtc/adm_proxy.h"
+#include "mezon_rtc/audio_track.h"
+#include "mezon_rtc/peer_connection.h"
+#include "mezon_rtc/rtc_error.h"
+#include "mezon_rtc/rtp_parameters.h"
+#include "mezon_rtc/video_decoder_factory.h"
+#include "mezon_rtc/video_encoder_factory.h"
+#include "mezon_rtc/webrtc.h"
 #include "rtc_base/thread.h"
 #include "webrtc-sys/src/peer_connection.rs.h"
 #include "webrtc-sys/src/peer_connection_factory.rs.h"
 
-namespace livekit_ffi {
+namespace mezon_ffi {
 namespace {
 
 constexpr char kForcePlayoutDelayFieldTrial[] =
@@ -100,7 +84,7 @@ PeerConnectionFactory::PeerConnectionFactory(
 
   // Create AdmProxy - it creates and initializes Platform ADM internally
   adm_proxy_ = rtc_runtime_->worker_thread()->BlockingCall([&] {
-    return webrtc::make_ref_counted<livekit_ffi::AdmProxy>(
+    return webrtc::make_ref_counted<mezon_ffi::AdmProxy>(
         env_, rtc_runtime_->worker_thread());
   });
   audio_device_ = std::make_shared<AudioDeviceController>(adm_proxy_);
@@ -108,9 +92,9 @@ PeerConnectionFactory::PeerConnectionFactory(
   dependencies.adm = adm_proxy_;
 
   dependencies.video_encoder_factory =
-      std::move(std::make_unique<livekit_ffi::VideoEncoderFactory>());
+      std::move(std::make_unique<mezon_ffi::VideoEncoderFactory>());
   dependencies.video_decoder_factory =
-      std::move(std::make_unique<livekit_ffi::VideoDecoderFactory>());
+      std::move(std::make_unique<mezon_ffi::VideoDecoderFactory>());
   dependencies.audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
   dependencies.audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
   dependencies.audio_processing_builder = std::make_unique<webrtc::BuiltinAudioProcessingBuilder>();
@@ -215,4 +199,4 @@ create_peer_connection_factory_with_zero_playout_delay() {
   return std::make_shared<PeerConnectionFactory>(RtcRuntime::create(), true);
 }
 
-}  // namespace livekit_ffi
+}

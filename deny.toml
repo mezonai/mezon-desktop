@@ -10,13 +10,12 @@ unmaintained = "workspace"
 # Zed snapshot and its font/svg/git stack). Tracked for separate remediation and
 # ignored here so the CI gate fails on NEW advisories our own crates introduce.
 ignore = [
-    "RUSTSEC-2024-0415", # gtk3 bindings unmaintained (transitive, linux)
     "RUSTSEC-2026-0183", # git2/libgit2 Remote::list unsound (transitive)
     "RUSTSEC-2026-0184", # git2/libgit2 BlameHunk Signature unsound (transitive)
     "RUSTSEC-2026-0192", # ttf-parser unmaintained (vendored font stack)
     "RUSTSEC-2026-0194", # quick-xml quadratic attribute check (usvg/resvg)
     "RUSTSEC-2026-0195", # quick-xml namespace-declaration alloc DoS (usvg/resvg)
-"RUSTSEC-2026-0274", # rtrb ReadChunk::commit double-free (libwebrtc -> livekit)
+    "RUSTSEC-2026-0274", # rtrb ReadChunk::commit double-free (vendored libwebrtc)
 ]
 
 [licenses]

@@ -105,10 +105,7 @@ pub struct FlowerInteractiveParams {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GiftParams {
-    Flower {
-        receiver_id: String,
-        timestamp: i64,
-    },
+    Flower { receiver_id: String, timestamp: i64 },
     OtherGift,
     Unreadable,
 }

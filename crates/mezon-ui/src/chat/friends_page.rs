@@ -605,7 +605,7 @@ fn build_activity_rows(
             group.len()
         ))));
         for (a, f) in group {
-            let description = activity_row_subtitle(a);
+            let description = activity_row_subtitle(a, locale);
             rows.push(ActivityRow::Item {
                 label: SharedString::from(f.label().to_string()),
                 description: SharedString::from(description),
@@ -617,11 +617,21 @@ fn build_activity_rows(
     rows
 }
 
-fn activity_row_subtitle(activity: &UserActivity) -> String {
+fn activity_row_subtitle(activity: &UserActivity, locale: &str) -> String {
     if !activity.activity_description.is_empty() {
-        activity.activity_description.clone()
+        return activity.activity_description.clone();
+    }
+    let kind_key = match activity.activity_type {
+        ACTIVITY_TYPE_WORK => "friendsPage.activity.codingStatus",
+        ACTIVITY_TYPE_LIVE => "friendsPage.activity.musicStatus",
+        ACTIVITY_TYPE_PLAY => "friendsPage.activity.gamingStatus",
+        _ => return activity.activity_name.clone(),
+    };
+    let kind_label = mezon_i18n::t(locale, kind_key);
+    if activity.activity_name.is_empty() {
+        kind_label.to_string()
     } else {
-        activity.activity_name.clone()
+        format!("{kind_label} · {}", activity.activity_name)
     }
 }
 
@@ -1633,25 +1643,30 @@ mod tests {
     #[test]
     fn subtitle_prefers_description_over_name() {
         let a = activity(ACTIVITY_TYPE_WORK, "Code", "Editing friends_page.rs");
-        assert_eq!(activity_row_subtitle(&a), "Editing friends_page.rs");
+        assert_eq!(activity_row_subtitle(&a, "en"), "Editing friends_page.rs");
     }
 
     #[test]
-    fn subtitle_falls_back_to_name_without_a_kind_prefix() {
-        for kind in [
-            ACTIVITY_TYPE_WORK,
-            ACTIVITY_TYPE_LIVE,
-            ACTIVITY_TYPE_PLAY,
-            99,
+    fn subtitle_prefixes_the_name_with_the_kind_label() {
+        for (kind, expected) in [
+            (ACTIVITY_TYPE_WORK, "Coding · Code"),
+            (ACTIVITY_TYPE_LIVE, "Music · Code"),
+            (ACTIVITY_TYPE_PLAY, "Gaming · Code"),
         ] {
             let a = activity(kind, "Code", "");
-            assert_eq!(activity_row_subtitle(&a), "Code");
+            assert_eq!(activity_row_subtitle(&a, "en"), expected);
         }
     }
 
     #[test]
-    fn subtitle_is_empty_when_the_activity_carries_no_text() {
+    fn subtitle_is_just_the_kind_label_when_the_name_is_empty() {
         let a = activity(ACTIVITY_TYPE_WORK, "", "");
-        assert!(activity_row_subtitle(&a).is_empty());
+        assert_eq!(activity_row_subtitle(&a, "en"), "Coding");
+    }
+
+    #[test]
+    fn subtitle_falls_back_to_the_bare_name_for_an_unknown_kind() {
+        let a = activity(99, "Code", "");
+        assert_eq!(activity_row_subtitle(&a, "en"), "Code");
     }
 }

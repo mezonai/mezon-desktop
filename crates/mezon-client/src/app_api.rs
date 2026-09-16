@@ -193,6 +193,7 @@ impl AppApi {
             .send_channel_message_structured_with_code(channel_id, content_json, mode, message_code)
             .await
     }
+
     pub fn new(transport: Arc<TransportClient>, base_img_url: String) -> Self {
         let (realtime_tx, _) = tokio::sync::broadcast::channel(1024);
         let (status_tx, _) = tokio::sync::watch::channel(ConnectionStatus::Disconnected);
@@ -1112,6 +1113,7 @@ impl AppApi {
         emojis: Vec<crate::transport::OutgoingEmoji>,
         attachments: Vec<mezon_proto::api::MessageAttachment>,
         reply: Option<crate::transport::OutgoingReply>,
+        topic_id: i64,
     ) -> Result<()> {
         self.transport
             .write_ephemeral_message(
@@ -1126,6 +1128,41 @@ impl AppApi {
                 emojis,
                 attachments,
                 reply,
+                topic_id,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_ephemeral_message_to_bots(
+        &self,
+        receiver_ids: Vec<i64>,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
+        attachments: Vec<mezon_proto::api::MessageAttachment>,
+        reply: Option<crate::transport::OutgoingReply>,
+        topic_id: i64,
+    ) -> Result<mezon_proto::realtime::ChannelMessageAck> {
+        self.transport
+            .send_ephemeral_message_to_bots(
+                receiver_ids,
+                clan_id,
+                channel_id,
+                content,
+                is_public,
+                mode,
+                mentions,
+                hashtags,
+                emojis,
+                attachments,
+                reply,
+                topic_id,
             )
             .await
     }

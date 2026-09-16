@@ -908,8 +908,8 @@ Parameters: none.",
 Debug builds only. Fill the current call with synthetic participants so a crowded
 room can be driven on one machine. They are drawn from the connected clan's member
 list, so names and avatars resolve exactly like real participants; the first one is
-marked speaking and every third is muted. They persist across LiveKit updates until
-cleared.
+marked speaking and every third is muted. They persist across SFU participant updates
+until cleared.
 
 Parameters: count (integer) - how many to add; 0 clears them.
 Optional: screenshare (bool) - the first one also publishes a screen share;

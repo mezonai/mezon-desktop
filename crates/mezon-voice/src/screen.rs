@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use libwebrtc::video_frame::{I420Buffer, VideoFrame, VideoRotation};
-use libwebrtc::video_source::native::NativeVideoSource;
 use libwebrtc::video_source::VideoResolution;
+use libwebrtc::video_source::native::NativeVideoSource;
 use parking_lot::{Condvar, Mutex};
 use scap::capturer::{Capturer, Options, Resolution};
 use scap::frame::FrameType;
@@ -304,7 +304,11 @@ pub fn start_screen(
             let first_frame_deadline = (!use_portal).then(|| Instant::now() + FIRST_FRAME_TIMEOUT);
 
             loop {
-                let deadline = if sent_track { None } else { first_frame_deadline };
+                let deadline = if sent_track {
+                    None
+                } else {
+                    first_frame_deadline
+                };
                 let Some(captured) = slot.take_latest(&thread_stop, deadline) else {
                     break;
                 };
@@ -317,11 +321,18 @@ pub fn start_screen(
                     None => (full_w, full_h),
                 };
                 #[cfg(not(target_os = "macos"))]
-                let Some(row_stride) = bgra_row_stride(captured.width, captured.height, captured.data.len()) else {
+                let Some(row_stride) =
+                    bgra_row_stride(captured.width, captured.height, captured.data.len())
+                else {
                     invalid_frames += 1;
                     if invalid_frames % 100 == 1 {
-                        tracing::warn!(invalid_frames, width = captured.width, height = captured.height,
-                            bytes = captured.data.len(), "dropping invalid screen capture buffer");
+                        tracing::warn!(
+                            invalid_frames,
+                            width = captured.width,
+                            height = captured.height,
+                            bytes = captured.data.len(),
+                            "dropping invalid screen capture buffer"
+                        );
                     }
                     continue;
                 };
@@ -421,8 +432,13 @@ pub fn start_screen(
                         ) {
                             invalid_frames += 1;
                             if invalid_frames % 100 == 1 {
-                                tracing::warn!(invalid_frames, width = src_w, height = src_h,
-                                    row_stride, "dropping screen frame after BGRA conversion failed");
+                                tracing::warn!(
+                                    invalid_frames,
+                                    width = src_w,
+                                    height = src_h,
+                                    row_stride,
+                                    "dropping screen frame after BGRA conversion failed"
+                                );
                             }
                             continue;
                         }
@@ -517,11 +533,11 @@ pub fn start_screen(
 fn bgra_row_stride(width: i32, height: i32, len: usize) -> Option<usize> {
     let width = usize::try_from(width).ok().filter(|&width| width > 0)?;
     let height = usize::try_from(height).ok().filter(|&height| height > 0)?;
-    if len % height != 0 {
+    if !len.is_multiple_of(height) {
         return None;
     }
     let stride = len / height;
-    (stride >= width.checked_mul(4)? && stride % 4 == 0).then_some(stride)
+    (stride >= width.checked_mul(4)? && stride.is_multiple_of(4)).then_some(stride)
 }
 
 #[cfg(any(not(target_os = "macos"), test))]
@@ -740,8 +756,15 @@ mod frame_layout_tests {
 
     #[test]
     fn rejects_invalid_dimensions_and_incomplete_rows() {
-        for (width, height, len) in [(0, 2, 16), (-2, 2, 16), (2, 0, 16), (2, -2, 16),
-            (2, 2, 15), (2, 2, 12), (2, 2, 18)] {
+        for (width, height, len) in [
+            (0, 2, 16),
+            (-2, 2, 16),
+            (2, 0, 16),
+            (2, -2, 16),
+            (2, 2, 15),
+            (2, 2, 12),
+            (2, 2, 18),
+        ] {
             assert_eq!(bgra_row_stride(width, height, len), None);
         }
     }

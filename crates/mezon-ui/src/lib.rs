@@ -104,6 +104,7 @@ pub fn init(cx: &mut gpui::App) {
         command_palette::CommandPaletteModal::try_toggle_authenticated(cx);
     });
     components::primitives::init_text_input(cx);
+    components::primitives::init_focus_cycle(cx);
     chat::mention_input::init(cx);
     mezon_canvas::init(cx);
     canvas_navigation::init(cx);

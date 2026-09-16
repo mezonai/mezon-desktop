@@ -6,6 +6,7 @@ use std::any::Any;
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::router::{Route, Router};
 use gpui::{
@@ -23,8 +24,8 @@ use mezon_store::{
     DirectEvent, DirectMessageStore, Emoji, EmojiEvent, EmojiStore, GroupMembersEvent,
     GroupMembersStore, MENTION_HERE_USER_ID, MessageSpan, MessagesStore, OgpResult,
     OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention,
-    OutgoingOgp, QuickMenuStore, RolesEvent, RolesStore, Settings, fetch_invite_preview, fetch_ogp,
-    first_previewable_url, internal_invite_id,
+    OutgoingOgp, QuickMenuStore, RolesEvent, RolesStore, Settings, UserId, fetch_invite_preview,
+    fetch_ogp, first_previewable_url, internal_invite_id, is_clan_invite_url,
 };
 use std::time::Duration;
 
@@ -44,6 +45,7 @@ use crate::chat::message::CreatePollModal;
 use crate::chat::message::MessageBuzzModal;
 use crate::chat::message::ShareLocationModal;
 use crate::chat::role_style::role_fallback_color;
+use crate::components::compositions::channel_row::voice_busy_tag;
 use crate::components::primitives::{Avatar, Icon, IconName, ToastKind};
 use crate::image_cache::{
     AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
@@ -68,6 +70,7 @@ const MENTION_HERE_DISPLAY: &str = "@here";
 const MENTION_HERE_NORM: &str = "@HERE";
 const CONVERT_TO_FILE_THRESHOLD: usize = 3700;
 const CONVERT_PREFIX_LEN: usize = 8;
+const PASTE_SAFETY_CAP_UTF16: usize = 100_000;
 const STREAM_MODE_DM: i32 = 4;
 const MENTION_ROW_PX: f32 = 40.;
 const MENTION_POPUP_MAX_PX: f32 = MENTION_ROW_PX * MAX_SUGGESTIONS as f32;
@@ -101,7 +104,7 @@ pub fn init(cx: &mut App) {
         };
         cx.defer(move |cx| {
             let _ = cx.update_window(window_handle, |_, window, cx| {
-                open_message_buzz(window, cx);
+                open_message_buzz(false, window, cx);
             });
         });
     });
@@ -125,7 +128,7 @@ fn toggle_anonymous_shortcut(cx: &mut App) {
     MessagesStore::global(cx).update(cx, |store, cx| store.toggle_anonymous_mode(cx));
 }
 
-fn open_message_buzz(window: &mut Window, cx: &mut App) {
+fn open_message_buzz(for_topic: bool, window: &mut Window, cx: &mut App) {
     if MessagesStore::global(cx)
         .read(cx)
         .active_channel_id()
@@ -136,13 +139,21 @@ fn open_message_buzz(window: &mut Window, cx: &mut App) {
     let locale = Settings::try_global(cx)
         .map(|settings| SharedString::from(settings.read(cx).language.clone()))
         .unwrap_or_else(|| SharedString::from("en"));
-    if MessagesStore::global(cx).read(cx).is_anonymous_mode() {
+    let anonymous = {
+        let store = MessagesStore::global(cx).read(cx);
+        if for_topic {
+            store.topic_anonymous_mode()
+        } else {
+            store.is_anonymous_mode()
+        }
+    };
+    if anonymous {
         let message =
             SharedString::from(mezon_i18n::t(&locale, "common.cannotSendBuzzWithAnonymous"));
         Shell::global(cx).update(cx, |shell, cx| shell.info(message, cx));
         return;
     }
-    MessageBuzzModal::open(locale, window, cx);
+    MessageBuzzModal::open(locale, for_topic, window, cx);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -289,6 +300,21 @@ struct SlashCommandRaw {
     display_lc: String,
     description: SharedString,
     action_msg: Option<SharedString>,
+    bot_id: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FlashCommand {
+    pub bot_id: i64,
+    pub menu_name: SharedString,
+    action_msg: SharedString,
+}
+
+impl FlashCommand {
+    fn still_prefixes(&self, content: &str) -> bool {
+        let action = self.action_msg.trim();
+        !action.is_empty() && content.trim_start().starts_with(action)
+    }
 }
 
 #[derive(Clone)]
@@ -455,6 +481,8 @@ pub struct MentionInput {
     session_commands: Vec<Rc<SlashCommandRaw>>,
     ephemeral_mode: bool,
     ephemeral_target: Option<(i64, SharedString)>,
+    flash_command: Option<FlashCommand>,
+    flash_send: Option<FlashCommand>,
     base_placeholder: SharedString,
     popup: Option<Entity<GifStickerEmojiPopup>>,
     toggle_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -469,9 +497,11 @@ pub struct MentionInput {
     encoding_recording: bool,
     _record_task: Option<RecordTask>,
     compact: bool,
+    for_topic: bool,
     file_menu_open: bool,
     overflow_to_file: bool,
     overflow_counter: Option<isize>,
+    converting_to_file: bool,
     last_content: SharedString,
     draft_channel: Option<ChannelId>,
     suppress_typing: bool,
@@ -508,16 +538,59 @@ fn single_edit_region(old: &str, new: &str) -> (usize, usize, usize) {
     )
 }
 
-fn json_string_utf16_len(s: &str) -> usize {
-    serde_json::to_string(s)
-        .map(|j| j.encode_utf16().count())
-        .unwrap_or_else(|_| s.encode_utf16().count() + 2)
-}
-
+/// Byte length of the `{"t": text}` payload the socket carries. The realtime server caps a
+/// frame in bytes, so every convert-to-file gate (paste, counter, Enter) measures this — a
+/// UTF-16 count would let non-ASCII drafts slip past the counter and still convert on send.
 fn content_payload_utf8_len(text: &str) -> usize {
     serde_json::to_string(&serde_json::json!({ "t": text }))
         .map(|j| j.len())
         .unwrap_or(text.len() + CONVERT_PREFIX_LEN)
+}
+
+fn exceeds_convert_threshold(text: &str) -> bool {
+    content_payload_utf8_len(text) > CONVERT_TO_FILE_THRESHOLD
+}
+
+fn should_convert_paste_to_file(current_input: &str, pasted: &str) -> bool {
+    current_input.trim().is_empty() && exceeds_convert_threshold(pasted)
+}
+
+fn trim_paste_to_utf16_cap<'a>(current: &str, pasted: &'a str, cap: usize) -> &'a str {
+    let current_len = current.encode_utf16().count();
+    if current_len >= cap {
+        return "";
+    }
+    let remaining = cap - current_len;
+    let mut used = 0usize;
+    let mut end = 0usize;
+    for (i, ch) in pasted.char_indices() {
+        let units = ch.len_utf16();
+        if used + units > remaining {
+            break;
+        }
+        used += units;
+        end = i + ch.len_utf8();
+    }
+    &pasted[..end]
+}
+
+/// The recipient sees this name in chat, so keep it readable; the counter keeps two
+/// conversions in the same millisecond from sharing a temp path.
+fn next_converted_text_filename() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let millis = chrono::Utc::now().timestamp_millis();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("message-{millis}-{n}.txt")
+}
+
+fn write_text_as_pending_attachment(text: &str) -> Option<PendingAttachment> {
+    let filename = next_converted_text_filename();
+    let path = std::env::temp_dir().join(&filename);
+    if let Err(err) = std::fs::write(&path, text.as_bytes()) {
+        tracing::warn!("failed to write converted text attachment: {err}");
+        return None;
+    }
+    build_pending(path)
 }
 
 fn needs_png_transcode(format: ImageFormat) -> bool {
@@ -573,6 +646,17 @@ impl MentionInput {
     ) -> Self {
         let mut this = Self::build(placeholder, settings, false, window, cx);
         this.overflow_to_file = true;
+        this
+    }
+
+    pub fn new_for_topic(
+        placeholder: impl Into<SharedString>,
+        settings: Entity<Settings>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::new(placeholder, settings, window, cx);
+        this.for_topic = true;
         this
     }
 
@@ -659,6 +743,8 @@ impl MentionInput {
             session_commands: Vec::new(),
             ephemeral_mode: false,
             ephemeral_target: None,
+            flash_command: None,
+            flash_send: None,
             base_placeholder,
             popup: None,
             toggle_bounds: Rc::new(Cell::new(Bounds::default())),
@@ -673,9 +759,11 @@ impl MentionInput {
             encoding_recording: false,
             _record_task: None,
             compact,
+            for_topic: false,
             file_menu_open: false,
             overflow_to_file: false,
             overflow_counter: None,
+            converting_to_file: false,
             last_content: SharedString::default(),
             draft_channel: None,
             suppress_typing: false,
@@ -778,6 +866,7 @@ impl MentionInput {
         self.clear_suggestions(cx);
         self.clear_ephemeral(cx);
         self.clear_ogp_preview(cx);
+        self.flash_command = None;
         self.overflow_counter = None;
         self.suppress_typing = true;
         self.last_content = SharedString::from(text.clone());
@@ -825,24 +914,26 @@ impl MentionInput {
         } else {
             raw.trim_end().to_string()
         };
-        if self.overflow_to_file
-            && !text.is_empty()
-            && content_payload_utf8_len(&text) > CONVERT_TO_FILE_THRESHOLD
-        {
-            self.convert_text_to_file(text, window, cx);
-            self.committed.clear();
-            self.reset_popup();
-            self.close_popup(window, cx);
-            self.clear_ogp_preview(cx);
-            self.input.update(cx, |input, cx| {
-                input.set_mention_spans(Vec::new(), cx);
-                input.clear_after_send(swallow.clone(), window, cx);
-            });
+        if self.overflow_to_file && !text.is_empty() && exceeds_convert_threshold(&text) {
+            if MessagesStore::global(cx).read(cx).is_anonymous_mode() {
+                self.show_anonymous_convert_blocked(cx);
+                return None;
+            }
+            if self.pending_attachments.len() + 1 > MAX_FILE_ATTACHMENTS {
+                Self::show_upload_limit(AttachmentLimit::Count, window, cx);
+                return None;
+            }
+            // The draft stays in the composer until the .txt exists; the conversion re-emits
+            // Submit, so one Enter still sends. A second Enter meanwhile is a no-op.
+            if !self.converting_to_file {
+                self.convert_text_to_file(text, true, window, cx);
+            }
             return None;
         }
         let content = outgoing_content_from_committed(&raw, &self.committed);
-        let attachments = outgoing_attachments(&std::mem::take(&mut self.pending_attachments));
         let ogp = self.take_outgoing_ogp();
+        let attachments = outgoing_attachments(&std::mem::take(&mut self.pending_attachments));
+        self.flash_send = self.flash_command.take();
         self.committed.clear();
         self.reset_popup();
         self.close_popup(window, cx);
@@ -867,9 +958,18 @@ impl MentionInput {
         cx.notify();
     }
 
+    fn composer_anonymous(&self, cx: &App) -> bool {
+        let store = MessagesStore::global(cx).read(cx);
+        if self.for_topic {
+            store.topic_anonymous_mode()
+        } else {
+            store.is_anonymous_mode()
+        }
+    }
+
     fn open_share_location(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.file_menu_open = false;
-        if MessagesStore::global(cx).read(cx).is_anonymous_mode() {
+        if self.composer_anonymous(cx) {
             let locale = self.settings.read(cx).language.clone();
             let message = SharedString::from(mezon_i18n::t(
                 &locale,
@@ -880,8 +980,9 @@ impl MentionInput {
             return;
         }
         let locale = SharedString::from(self.settings.read(cx).language.clone());
+        let for_topic = self.for_topic;
         window.defer(cx, move |window, cx| {
-            ShareLocationModal::open(locale, window, cx);
+            ShareLocationModal::open(locale, for_topic, window, cx);
         });
         cx.notify();
     }
@@ -889,8 +990,9 @@ impl MentionInput {
     fn render_file_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let locale = SharedString::from(self.settings.read(cx).language.clone());
-        let show_poll = MessagesStore::global(cx).read(cx).mode() != STREAM_MODE_DM;
-        let show_location = !MessagesStore::global(cx).read(cx).is_anonymous_mode();
+        let show_poll =
+            !self.for_topic && MessagesStore::global(cx).read(cx).mode() != STREAM_MODE_DM;
+        let show_location = !self.composer_anonymous(cx);
         let text_color = theme.text_muted;
         let text_hover = theme.text_primary;
         let bg_hover = theme.bg_hover;
@@ -1050,48 +1152,78 @@ impl MentionInput {
         if text.is_empty() {
             return;
         }
-        if self.overflow_to_file {
-            if json_string_utf16_len(&text) > CONVERT_TO_FILE_THRESHOLD {
-                self.convert_text_to_file(text, window, cx);
-                return;
-            }
-            let current = self.input.read(cx).value().to_string();
-            let combined = format!("{current}{text}");
-            if json_string_utf16_len(&combined) > CONVERT_TO_FILE_THRESHOLD {
-                self.committed.clear();
-                self.reset_popup();
-                self.input.update(cx, |input, cx| {
-                    input.set_mention_spans(Vec::new(), cx);
-                    input.set_value("", window, cx);
-                });
-                self.convert_text_to_file(combined, window, cx);
-                cx.notify();
+        let current = self.input.read(cx).value().to_string();
+        if self.overflow_to_file && should_convert_paste_to_file(&current, &text) {
+            if MessagesStore::global(cx).read(cx).is_anonymous_mode() {
+                self.show_anonymous_convert_blocked(cx);
+            } else {
+                if !current.is_empty() {
+                    self.committed.clear();
+                    self.reset_popup();
+                    self.input.update(cx, |input, cx| {
+                        input.set_mention_spans(Vec::new(), cx);
+                        input.set_value("", window, cx);
+                    });
+                }
+                self.convert_text_to_file(text, false, window, cx);
                 return;
             }
         }
+        let pasted = trim_paste_to_utf16_cap(&current, &text, PASTE_SAFETY_CAP_UTF16);
+        if pasted.len() < text.len() {
+            Self::show_paste_truncated(cx);
+        }
+        if pasted.is_empty() {
+            return;
+        }
         self.input
-            .update(cx, |input, cx| input.insert_text(&text, window, cx));
+            .update(cx, |input, cx| input.insert_text(pasted, window, cx));
     }
 
-    fn convert_text_to_file(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
-        let filename = format!("{}.txt", chrono::Utc::now().timestamp_millis());
+    /// Writes `text` to a temp `.txt` off the foreground thread and stages it as a pending
+    /// attachment. With `send_when_ready` the draft is cleared and `Submit` re-emitted once the
+    /// file is staged, so the caller's next `take_payload` sends it in the same keypress.
+    fn convert_text_to_file(
+        &mut self,
+        text: String,
+        send_when_ready: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.converting_to_file = send_when_ready;
+        let channel = self.draft_channel;
         cx.spawn_in(window, async move |this, cx| {
             let pending = cx
-                .background_spawn(async move {
-                    let path = std::env::temp_dir().join(&filename);
-                    if let Err(err) = std::fs::write(&path, text.as_bytes()) {
-                        tracing::warn!("failed to write converted text attachment: {err}");
-                        return None;
-                    }
-                    build_pending(path)
-                })
+                .background_spawn(async move { write_text_as_pending_attachment(&text) })
                 .await;
-            if let Some(pending) = pending {
-                this.update_in(cx, |this, window, cx| {
-                    this.add_pending(vec![pending], window, cx)
-                })
-                .ok();
-            }
+            this.update_in(cx, |this, window, cx| {
+                this.converting_to_file = false;
+                let Some(pending) = pending else {
+                    Self::show_convert_file_failed(cx);
+                    return;
+                };
+                let path = pending.path.clone();
+                // The composer moved to another channel while the file was being written: the
+                // text is still in that channel's draft, so drop the file rather than misfile it.
+                if this.draft_channel != channel || !this.add_pending(vec![pending], window, cx) {
+                    let _ = std::fs::remove_file(&path);
+                    return;
+                }
+                if !send_when_ready {
+                    return;
+                }
+                // Drop the text now so the re-entered take_payload sends only the file.
+                let swallow = this.input.read(cx).pending_send_ime_token();
+                this.committed.clear();
+                this.reset_popup();
+                this.clear_ogp_preview(cx);
+                this.input.update(cx, |input, cx| {
+                    input.set_mention_spans(Vec::new(), cx);
+                    input.clear_after_send(swallow, window, cx);
+                });
+                cx.emit(MentionInputEvent::Submit);
+            })
+            .ok();
         })
         .detach();
     }
@@ -1182,7 +1314,9 @@ impl MentionInput {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.encoding_recording = false;
                 match built {
-                    Ok(attachment) => this.add_pending(vec![attachment], window, cx),
+                    Ok(attachment) => {
+                        this.add_pending(vec![attachment], window, cx);
+                    }
                     Err(err) => tracing::warn!("voice recording failed: {err}"),
                 }
                 cx.notify();
@@ -1213,21 +1347,47 @@ impl MentionInput {
         });
     }
 
+    fn show_anonymous_convert_blocked(&self, cx: &mut Context<Self>) {
+        let locale = self.settings.read(cx).language.clone();
+        let message = SharedString::from(mezon_i18n::t(
+            &locale,
+            "common.cannotSendConvertedFileWithAnonymous",
+        ));
+        Shell::global(cx).update(cx, |shell, cx| shell.info(message, cx));
+    }
+
+    fn show_convert_file_failed(cx: &mut Context<Self>) {
+        Shell::global(cx).update(cx, |shell, cx| {
+            shell.toast(ToastKind::Error, "Failed to convert message to file", cx)
+        });
+    }
+
+    fn show_paste_truncated(cx: &mut Context<Self>) {
+        let message = format!(
+            "Pasted text was cut to fit the {PASTE_SAFETY_CAP_UTF16}-character composer limit"
+        );
+        Shell::global(cx).update(cx, |shell, cx| shell.info(message, cx));
+    }
+
     fn add_pending(
         &mut self,
         candidates: Vec<PendingAttachment>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if candidates.is_empty() {
-            return;
+            return false;
         }
         match validate_batch(self.pending_attachments.len(), &candidates) {
             Ok(()) => {
                 self.pending_attachments.extend(candidates);
                 cx.notify();
+                true
             }
-            Err(limit) => Self::show_upload_limit(limit, window, cx),
+            Err(limit) => {
+                Self::show_upload_limit(limit, window, cx);
+                false
+            }
         }
     }
 
@@ -1398,11 +1558,21 @@ impl MentionInput {
 
     fn after_content_change(&mut self, content: SharedString, cx: &mut Context<Self>) {
         self.check_trigger(&content, cx);
+        if self
+            .flash_command
+            .as_ref()
+            .is_some_and(|command| !command.still_prefixes(&content))
+        {
+            self.flash_command = None;
+        }
         self.overflow_counter = {
+            // Raw UTF-8 length is a lower bound on the payload, so serialize only when the
+            // draft can actually be over.
             let threshold = CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN;
             if self.overflow_to_file && content.len() > threshold {
-                let len = content.encode_utf16().count();
-                (len > threshold).then_some(threshold as isize - len as isize)
+                let over = content_payload_utf8_len(&content) as isize
+                    - CONVERT_TO_FILE_THRESHOLD as isize;
+                (over > 0).then_some(-over)
             } else {
                 None
             }
@@ -1459,7 +1629,9 @@ impl MentionInput {
         self.ogp_generation += 1;
         let generation = self.ogp_generation;
         cx.notify();
-        let invite_id = internal_invite_id(&url, internal_domain.as_deref());
+        let invite_id = is_clan_invite_url(&url, internal_domain.as_deref())
+            .then(|| internal_invite_id(&url, internal_domain.as_deref()))
+            .flatten();
         let invite_gateway = invite_id
             .is_some()
             .then(|| {
@@ -1516,6 +1688,10 @@ impl MentionInput {
         };
         self.input
             .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+    }
+
+    pub fn take_flash_command(&mut self) -> Option<FlashCommand> {
+        self.flash_send.take()
     }
 
     pub fn take_ephemeral_receiver(&mut self, cx: &mut Context<Self>) -> Option<i64> {
@@ -1940,6 +2116,11 @@ impl MentionInput {
                 self.input.update(cx, |input, cx| {
                     input.replace_range(at..replace_end, action_msg.as_ref(), window, cx)
                 });
+                self.flash_command = Some(FlashCommand {
+                    bot_id: command.bot_id,
+                    menu_name: command.display.clone(),
+                    action_msg: action_msg.clone(),
+                });
                 self.reset_popup();
                 self.sync_ranges(cx);
                 cx.notify();
@@ -2305,6 +2486,14 @@ impl MentionInput {
         }
     }
 
+    fn on_open_buzz(&mut self, _: &OpenMessageBuzz, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.for_topic {
+            cx.propagate();
+            return;
+        }
+        open_message_buzz(true, window, cx);
+    }
+
     fn on_accept(&mut self, _: &MentionAccept, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup_open() {
             self.accept(self.selected, window, cx);
@@ -2492,16 +2681,7 @@ impl MentionInput {
                             .text_color(display_color)
                             .child(highlighted_label(display, &query)),
                     )
-                    .when(voice_busy, |row| {
-                        row.child(
-                            div()
-                                .flex_shrink_0()
-                                .text_size(px(15.))
-                                .italic()
-                                .text_color(theme.danger_text)
-                                .child("(busy)"),
-                        )
-                    }),
+                    .when(voice_busy, |row| row.child(voice_busy_tag(theme))),
             )
             .when(!secondary.is_empty(), |row| {
                 row.child(
@@ -2743,21 +2923,35 @@ fn slash_command_pool(locale: &str, cx: &App) -> Vec<Rc<SlashCommandRaw>> {
         display_lc: "ephemeral".to_string(),
         description,
         action_msg: None,
+        bot_id: 0,
     })];
     let Some(channel_id) = MessagesStore::global(cx).read(cx).active_channel_id() else {
         return commands;
     };
+    let clan_id = MessagesStore::global(cx).read(cx).active_clan_id();
     for item in QuickMenuStore::global(cx)
         .read(cx)
         .items(channel_id, QUICK_MENU_TYPE_FLASH)
     {
         let display = item.menu_name.to_string();
+        let bot_name = (item.bot_id != 0)
+            .then(|| {
+                let clan_id = clan_id?;
+                ClanMembersStore::try_global(cx).and_then(|store| {
+                    store
+                        .read(cx)
+                        .member(clan_id, UserId(item.bot_id))
+                        .map(|member| SharedString::from(member.name().to_string()))
+                })
+            })
+            .flatten();
         commands.push(Rc::new(SlashCommandRaw {
             id: format!("quick_menu_{}", item.id).into(),
             display: display.clone().into(),
             display_lc: display.to_lowercase(),
-            description: item.action_msg.clone(),
+            description: bot_name.unwrap_or_else(|| item.action_msg.clone()),
             action_msg: Some(item.action_msg.clone()),
+            bot_id: item.bot_id,
         }));
     }
     commands
@@ -2924,6 +3118,7 @@ impl Render for MentionInput {
             .w_full()
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(Self::on_dismiss))
+            .on_action(cx.listener(Self::on_open_buzz))
             .when(open, |this| this.on_action(cx.listener(Self::on_accept)))
             .child(MentionInputField::new(&self.input))
             .child(
@@ -2963,6 +3158,10 @@ impl Render for MentionInput {
                 div()
                     .id("mic-record")
                     .absolute()
+                    // The toolbar floats over the text field: without occluding, the mouse-down
+                    // also reaches the field, which moves the caret to the end of the line under
+                    // the button — so a picked emoji lands there instead of where the user was.
+                    .occlude()
                     .right(px(96.))
                     .top(px(12.))
                     .flex()
@@ -2998,6 +3197,7 @@ impl Render for MentionInput {
             .child(
                 div()
                     .absolute()
+                    .occlude()
                     .children(crate::tour::probe(crate::tour::TourAnchor::ComposerTools))
                     .right(px(12.))
                     .top(px(12.))
@@ -3079,10 +3279,42 @@ impl Render for MentionInput {
 }
 
 #[cfg(test)]
+mod flash_command_tests {
+    use super::FlashCommand;
+
+    fn command(action: &str) -> FlashCommand {
+        FlashCommand {
+            bot_id: 7,
+            menu_name: "daily".into(),
+            action_msg: action.into(),
+        }
+    }
+
+    #[test]
+    fn command_survives_arguments_but_not_prefix_edits() {
+        let cmd = command("*daily");
+        assert!(cmd.still_prefixes("*daily"));
+        assert!(cmd.still_prefixes("*daily report for today"));
+        assert!(cmd.still_prefixes("  *daily"));
+        assert!(!cmd.still_prefixes("daily"));
+        assert!(!cmd.still_prefixes("hello *daily"));
+        assert!(!cmd.still_prefixes(""));
+    }
+
+    #[test]
+    fn action_msg_whitespace_does_not_matter() {
+        let cmd = command("*daily ");
+        assert!(cmd.still_prefixes("*daily"));
+        assert!(!command("   ").still_prefixes("anything"));
+    }
+}
+
+#[cfg(test)]
 mod convert_tests {
     use super::{
-        CONVERT_PREFIX_LEN, CONVERT_TO_FILE_THRESHOLD, content_payload_utf8_len,
-        json_string_utf16_len,
+        CONVERT_PREFIX_LEN, CONVERT_TO_FILE_THRESHOLD, PASTE_SAFETY_CAP_UTF16,
+        content_payload_utf8_len, exceeds_convert_threshold, should_convert_paste_to_file,
+        trim_paste_to_utf16_cap, write_text_as_pending_attachment,
     };
 
     #[test]
@@ -3092,17 +3324,19 @@ mod convert_tests {
     }
 
     #[test]
-    fn json_utf16_len_counts_quotes_and_escapes_like_js() {
-        assert_eq!(json_string_utf16_len(""), 2);
-        assert_eq!(json_string_utf16_len("ab"), 4);
-        assert_eq!(json_string_utf16_len("\n"), 4);
+    fn payload_counts_utf8_bytes_and_json_escapes() {
+        assert_eq!(content_payload_utf8_len("é"), 10);
+        assert_eq!(content_payload_utf8_len("\n"), 10);
     }
 
     #[test]
-    fn send_measures_utf8_bytes_paste_measures_utf16_units() {
-        let s = "é";
-        assert_eq!(json_string_utf16_len(s), 3);
-        assert_eq!(content_payload_utf8_len(s), 10);
+    fn paste_gate_and_send_gate_agree_on_non_ascii_text() {
+        // Fewer UTF-16 units than the threshold, but more payload bytes: both gates must trip
+        // together, otherwise the draft converts on Enter with no warning beforehand.
+        let text = "ế".repeat(CONVERT_TO_FILE_THRESHOLD / 3 + 1);
+        assert!(text.encode_utf16().count() < CONVERT_TO_FILE_THRESHOLD);
+        assert!(exceeds_convert_threshold(&text));
+        assert!(should_convert_paste_to_file("", &text));
     }
 
     #[test]
@@ -3112,6 +3346,58 @@ mod convert_tests {
         assert!(content_payload_utf8_len(&text) <= CONVERT_TO_FILE_THRESHOLD);
         let over = "a".repeat(CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN + 1);
         assert!(content_payload_utf8_len(&over) > CONVERT_TO_FILE_THRESHOLD);
+    }
+
+    #[test]
+    fn paste_converts_only_when_input_empty_and_chunk_over_threshold() {
+        let over = "a".repeat(CONVERT_TO_FILE_THRESHOLD);
+        assert!(should_convert_paste_to_file("", &over));
+        assert!(should_convert_paste_to_file("   ", &over));
+        assert!(!should_convert_paste_to_file("draft", &over));
+        assert!(!should_convert_paste_to_file("", "short"));
+    }
+
+    #[test]
+    fn write_text_pending_attachment_is_plain_txt() {
+        let pending =
+            write_text_as_pending_attachment("hello long text").expect("temp txt attachment");
+        assert!(pending.filename.starts_with("message-"));
+        assert!(pending.filename.ends_with(".txt"));
+        assert_eq!(pending.filetype, "text/plain");
+        assert!(!pending.is_image);
+        let _ = std::fs::remove_file(&pending.path);
+    }
+
+    #[test]
+    fn paste_into_draft_trims_to_safety_cap() {
+        let current = "a".repeat(10);
+        let pasted = "b".repeat(PASTE_SAFETY_CAP_UTF16);
+        let trimmed = trim_paste_to_utf16_cap(&current, &pasted, PASTE_SAFETY_CAP_UTF16);
+        assert_eq!(
+            current.encode_utf16().count() + trimmed.encode_utf16().count(),
+            PASTE_SAFETY_CAP_UTF16
+        );
+        assert!(trimmed.chars().all(|ch| ch == 'b'));
+        assert!(!should_convert_paste_to_file(&current, &pasted));
+    }
+
+    #[test]
+    fn converted_filenames_never_collide_within_a_process() {
+        let a = write_text_as_pending_attachment("a").expect("temp txt attachment");
+        let b = write_text_as_pending_attachment("b").expect("temp txt attachment");
+        assert_ne!(a.path, b.path);
+        let _ = std::fs::remove_file(&a.path);
+        let _ = std::fs::remove_file(&b.path);
+    }
+
+    #[test]
+    fn paste_trim_keeps_full_chunk_under_cap() {
+        let current = "draft";
+        let pasted = "hello";
+        assert_eq!(
+            trim_paste_to_utf16_cap(current, pasted, PASTE_SAFETY_CAP_UTF16),
+            pasted
+        );
     }
 }
 

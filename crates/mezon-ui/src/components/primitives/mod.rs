@@ -28,6 +28,10 @@ pub mod icon {
     pub use mezon_widgets::{Icon, IconName};
 }
 
+pub mod focus_cycle {
+    pub use mezon_widgets::focus_cycle::*;
+}
+
 pub mod input {
     pub use mezon_widgets::input::*;
 }
@@ -72,10 +76,11 @@ pub use tooltip::Tooltip;
 pub use unsaved_changes_bar::UnsavedChangesBar;
 
 pub use button::{Button, ButtonVariant, ButtonVariants};
+pub use focus_cycle::FocusCycle;
 pub use icon::{Icon, IconName};
 pub use input::{Input, InputEvent, InputState};
 pub use sizing::{Sizable, Size};
 pub use spinner::Spinner;
 pub use stack::{h_flex, v_flex};
 
-pub use mezon_widgets::init_text_input;
+pub use mezon_widgets::{init_focus_cycle, init_text_input};

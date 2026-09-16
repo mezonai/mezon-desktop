@@ -253,6 +253,7 @@ pub struct MessageReference {
     pub sender_avatar: String,
     pub content: String,
     pub content_preview: SharedString,
+    pub preview_spans: Vec<MessageSpan>,
     pub has_attachment: bool,
     pub has_embed: bool,
     pub is_poll: bool,
@@ -1135,7 +1136,26 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
     if last < total {
         spans.push(MessageSpan::Text(slice(last, total).into()));
     }
+    drop_hanging_line_break(&mut spans);
     apply_headings(spans)
+}
+
+fn drop_hanging_line_break(spans: &mut Vec<MessageSpan>) {
+    let Some(MessageSpan::Text(text)) = spans.last() else {
+        return;
+    };
+    let trimmed = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
+        .map(str::to_string);
+    let Some(trimmed) = trimmed else {
+        return;
+    };
+    if trimmed.is_empty() {
+        spans.pop();
+    } else {
+        *spans.last_mut().expect("checked above") = MessageSpan::Text(trimmed.into());
+    }
 }
 
 pub fn inbox_spans_from_raw(raw_content: &str) -> Option<Vec<MessageSpan>> {
@@ -1417,8 +1437,104 @@ pub(crate) fn split_token_transaction(content: &str) -> TokenTransaction {
     }
 }
 
+const REPLY_PREVIEW_MAX_CHARS: usize = 120;
+
+pub(crate) fn reply_preview_spans(spans: &[MessageSpan]) -> Vec<MessageSpan> {
+    if !spans
+        .iter()
+        .any(|span| matches!(span, MessageSpan::Hashtag { .. }))
+    {
+        return Vec::new();
+    }
+    let mut builder = ReplyPreviewBuilder::default();
+    for span in spans {
+        if builder.full {
+            break;
+        }
+        match span {
+            MessageSpan::Hashtag {
+                display,
+                channel_id,
+            } => builder.push_hashtag(display, channel_id.clone()),
+            MessageSpan::Text(text)
+            | MessageSpan::Bold(text)
+            | MessageSpan::Code(text)
+            | MessageSpan::CodeBlock { text, .. }
+            | MessageSpan::Link { text, .. }
+            | MessageSpan::Mention { display: text, .. }
+            | MessageSpan::Emoji { name: text, .. }
+            | MessageSpan::Canvas { title: text, .. }
+            | MessageSpan::Heading { text, .. } => builder.push_text(text),
+        }
+    }
+    builder.finish()
+}
+
+#[derive(Default)]
+struct ReplyPreviewBuilder {
+    out: Vec<MessageSpan>,
+    text: String,
+    chars: usize,
+    needs_space: bool,
+    full: bool,
+}
+
+impl ReplyPreviewBuilder {
+    fn push_char(&mut self, ch: char) {
+        if self.chars >= REPLY_PREVIEW_MAX_CHARS {
+            self.full = true;
+            return;
+        }
+        self.text.push(ch);
+        self.chars += 1;
+    }
+
+    fn push_text(&mut self, text: &str) {
+        for word in text.split_whitespace() {
+            if self.full {
+                return;
+            }
+            if self.needs_space {
+                self.push_char(' ');
+            }
+            for ch in word.chars() {
+                self.push_char(ch);
+            }
+            self.needs_space = true;
+        }
+    }
+
+    fn push_hashtag(&mut self, display: &str, channel_id: Option<String>) {
+        let label: String = display.split_whitespace().collect::<Vec<_>>().join(" ");
+        if self.chars + label.chars().count() > REPLY_PREVIEW_MAX_CHARS {
+            self.full = true;
+            return;
+        }
+        self.flush_text();
+        self.chars += label.chars().count();
+        self.out.push(MessageSpan::Hashtag {
+            display: label.into(),
+            channel_id,
+        });
+        self.needs_space = false;
+    }
+
+    fn flush_text(&mut self) {
+        if self.text.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut self.text);
+        self.out.push(MessageSpan::Text(text.into()));
+    }
+
+    fn finish(mut self) -> Vec<MessageSpan> {
+        self.flush_text();
+        self.out
+    }
+}
+
 pub(crate) fn reply_preview_line(content: &str) -> String {
-    const MAX_CHARS: usize = 120;
+    const MAX_CHARS: usize = REPLY_PREVIEW_MAX_CHARS;
     let mut out = String::new();
     let mut chars = 0usize;
     let mut first = true;
@@ -1870,6 +1986,112 @@ mod tests {
 
     fn forwarded(id: i64, sender: &str, time: i64) -> Message {
         Message::new(MessageId(id), "m", sender, "U", time).with_forwarded(true)
+    }
+
+    fn hashtag(display: &str, channel_id: &str) -> MessageSpan {
+        MessageSpan::Hashtag {
+            display: display.into(),
+            channel_id: Some(channel_id.into()),
+        }
+    }
+
+    #[test]
+    fn parse_spans_drops_a_single_hanging_line_break() {
+        let content = ApiMessageContent {
+            t: "line one\n".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![MessageSpan::Text("line one".into())]
+        );
+        let content = ApiMessageContent {
+            t: "keep\n\n".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![MessageSpan::Text("keep\n".into())],
+            "only the hanging break goes; an intentional blank line stays"
+        );
+        let content = ApiMessageContent {
+            t: "\n".into(),
+            ..Default::default()
+        };
+        assert!(parse_spans(&content).is_empty());
+    }
+
+    #[test]
+    fn parse_spans_keeps_a_trailing_mention_when_only_the_break_follows_it() {
+        let content = ApiMessageContent {
+            t: "hi @bob\n".into(),
+            mentions: vec![ContentToken {
+                user_id: Some("1".into()),
+                ..token(3, 7)
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![
+                MessageSpan::Text("hi ".into()),
+                MessageSpan::Mention {
+                    display: "@bob".into(),
+                    user_id: Some("1".into()),
+                    role_id: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn reply_preview_spans_is_empty_without_a_hashtag() {
+        let spans = vec![
+            MessageSpan::Text("hello ".into()),
+            MessageSpan::Mention {
+                display: "@bob".into(),
+                user_id: Some("1".into()),
+                role_id: None,
+            },
+        ];
+        assert!(reply_preview_spans(&spans).is_empty());
+    }
+
+    #[test]
+    fn reply_preview_spans_keeps_hashtags_and_collapses_the_text_around_them() {
+        let spans = vec![
+            MessageSpan::Text("see   ".into()),
+            hashtag("#general", "10"),
+            MessageSpan::Text("\n and ".into()),
+            MessageSpan::Mention {
+                display: "@bob".into(),
+                user_id: Some("1".into()),
+                role_id: None,
+            },
+            MessageSpan::Text(" in ".into()),
+            hashtag("#voice room", "11"),
+        ];
+        assert_eq!(
+            reply_preview_spans(&spans),
+            vec![
+                MessageSpan::Text("see".into()),
+                hashtag("#general", "10"),
+                MessageSpan::Text("and @bob in".into()),
+                hashtag("#voice room", "11"),
+            ]
+        );
+    }
+
+    #[test]
+    fn reply_preview_spans_stops_at_the_preview_cap() {
+        let long = "x".repeat(REPLY_PREVIEW_MAX_CHARS + 5);
+        let spans = vec![MessageSpan::Text(long.into()), hashtag("#late", "10")];
+        let preview = reply_preview_spans(&spans);
+        assert_eq!(preview.len(), 1);
+        match &preview[0] {
+            MessageSpan::Text(text) => assert_eq!(text.chars().count(), REPLY_PREVIEW_MAX_CHARS),
+            other => panic!("expected text, got {other:?}"),
+        }
     }
 
     #[test]

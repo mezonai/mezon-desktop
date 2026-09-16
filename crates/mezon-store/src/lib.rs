@@ -199,7 +199,7 @@ pub use notification_push::NotificationPushStore;
 pub use notification_setting::{NotificationSettingEvent, NotificationSettingStore};
 pub use ogp::{
     OgpResult, OutgoingOgp, fetch_invite_preview, fetch_ogp, first_previewable_url,
-    internal_invite_id, invite_id_from_url, trusted_invite_id,
+    internal_invite_id, invite_id_from_url, is_clan_invite_url, trusted_invite_id,
 };
 pub use onboarding::{
     ClanOnboarding, DONE_ONBOARDING_STATUS, GUIDE_TYPE_GREETING, GUIDE_TYPE_QUESTION,
@@ -215,8 +215,8 @@ pub use pinned::{PinnedEvent, PinnedMessage, PinnedMessagesStore};
 pub use platform::{
     CliInstallHooks, CliInstallStateFn, CliInstallToggleFn, CliInstallVisibleFn,
     DesktopNotification, DownloadEvent, McpServerHooks, McpServerStatus, McpSetPortFn, McpStartFn,
-    McpStatusFn, McpStopFn, NotifyFn, OpenUrlFn, PlatformStore, copy_image_url_to_clipboard,
-    download_url_with_dialog,
+    McpStatusFn, McpStopFn, NotifyFn, OpenManagedAppWindowFn, OpenUrlFn, PlatformStore,
+    copy_image_url_to_clipboard, download_url_with_dialog,
 };
 pub use presence::*;
 pub use quick_menu::{
@@ -250,12 +250,13 @@ pub use voice::SimulatedCall;
 pub use voice::record_wayland_session;
 pub use voice::{
     DeviceKind, DeviceMenuKind, DisplayedFlower, DisplayedReaction, MAX_SOUND_BYTES,
-    NetworkQuality, PickedScreen, RecordingState, RecordingToast, SOUND_ALLOWED_EXTENSIONS,
-    ScreenShareKind, ScreenShareListError, ScreenShareOption, ScreenSharePreview, SfuRole,
-    VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceModerationError,
-    VoiceParticipant, VoiceRenderFrame, VoiceStore, VoiceStoreEvent, camera_tile_id,
-    capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
-    screen_tile_id, system_screen_share_pick, upload_sound_file, validate_sound_file,
+    NetworkQuality, PickedScreen, RecordingState, RecordingToast, RemovalCause,
+    SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareOption,
+    ScreenSharePreview, SfuRole, VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection,
+    VoiceModerationError, VoiceParticipant, VoiceRenderFrame, VoiceStore, VoiceStoreEvent,
+    camera_tile_id, capture_screen_share_preview, list_screen_share_options,
+    peek_screen_share_options, screen_tile_id, system_screen_share_pick, upload_sound_file,
+    validate_sound_file,
 };
 pub use wallet::{
     SendTokenRequest, TransactionCursor, WalletDetail, WalletEvent, WalletStore, WalletTransaction,
@@ -286,6 +287,7 @@ struct SettingsSaver {
     dirty: bool,
     entity_id: Option<gpui::EntityId>,
 }
+
 impl gpui::Global for SettingsSaver {}
 
 /// `UserClanRemoved` / `UserChannelRemoved` / `UserChannelAdded` are broadcast to
@@ -331,6 +333,7 @@ pub fn clear_tour_progress(cx: &mut gpui::App) {
 /// overlap (so the shared tmp-file path cannot commit an older snapshot last),
 /// and the snapshot is taken at write time so the latest state always wins.
 pub fn schedule_settings_save(settings: &gpui::Entity<Settings>, cx: &mut gpui::App) {
+    mezon_audio::set_output_device(settings.read(cx).output_device_id.clone());
     let saver = cx.default_global::<SettingsSaver>();
     debug_assert!(
         saver.entity_id.is_none_or(|id| id == settings.entity_id()),
@@ -580,6 +583,7 @@ impl Settings {
     }
 
     pub fn init_global(entity: &gpui::Entity<Self>, cx: &mut gpui::App) {
+        mezon_audio::set_output_device(entity.read(cx).output_device_id.clone());
         cx.set_global(GlobalSettings(entity.clone()));
     }
 

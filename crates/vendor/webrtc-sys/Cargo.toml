@@ -4,8 +4,8 @@ version = "0.3.41"
 edition = "2021"
 publish = false
 license = "Apache-2.0"
-description = "Unsafe bindings to libwebrtc, vendored from livekit/rust-sdks"
-repository = "https://github.com/livekit/rust-sdks"
+description = "Unsafe bindings to libwebrtc"
+repository = "https://github.com/mezonai/mezon-desktop"
 build = "build.rs"
 
 [features]

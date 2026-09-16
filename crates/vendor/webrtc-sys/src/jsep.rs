@@ -1,17 +1,3 @@
-// Copyright 2025 LiveKit, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 use std::{
     error::Error,
     fmt::{Display, Formatter},
@@ -19,7 +5,7 @@ use std::{
 
 use crate::impl_thread_safety;
 
-#[cxx::bridge(namespace = "livekit_ffi")]
+#[cxx::bridge(namespace = "mezon_ffi")]
 pub mod ffi {
     #[derive(Debug)]
     #[repr(i32)]
@@ -37,13 +23,13 @@ pub mod ffi {
     }
 
     extern "C++" {
-        include!("livekit/rtc_error.h");
+        include!("mezon_rtc/rtc_error.h");
 
         type RtcError = crate::rtc_error::ffi::RtcError;
     }
 
     unsafe extern "C++" {
-        include!("livekit/jsep.h");
+        include!("mezon_rtc/jsep.h");
 
         type IceCandidate;
         type SessionDescription;
@@ -99,10 +85,10 @@ impl ffi::SdpParseError {
 
 #[cfg(test)]
 mod tests {
-    #[cxx::bridge(namespace = "livekit_ffi")]
+    #[cxx::bridge(namespace = "mezon_ffi")]
     pub mod ffi_tests {
         unsafe extern "C++" {
-            include!("livekit/jsep.h");
+            include!("mezon_rtc/jsep.h");
 
             fn serialize_sdp_parse_error_for_test() -> String;
         }

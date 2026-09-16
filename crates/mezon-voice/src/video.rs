@@ -286,8 +286,18 @@ pub fn bgra_to_i420(
         .any(|&value| value > u32::MAX as usize)
         || !plane_fits(bgra.len(), src_row_stride, row_bytes, height)
         || !plane_fits(y_plane.len(), stride_y, width, height)
-        || !plane_fits(u_plane.len(), stride_u, width.div_ceil(2), height.div_ceil(2))
-        || !plane_fits(v_plane.len(), stride_v, width.div_ceil(2), height.div_ceil(2))
+        || !plane_fits(
+            u_plane.len(),
+            stride_u,
+            width.div_ceil(2),
+            height.div_ceil(2),
+        )
+        || !plane_fits(
+            v_plane.len(),
+            stride_v,
+            width.div_ceil(2),
+            height.div_ceil(2),
+        )
     {
         return false;
     }
@@ -343,15 +353,30 @@ pub(crate) fn try_i420_to_bgra_into(
     width: usize,
     height: usize,
 ) -> bool {
-    let Some(needed) = width.checked_mul(height).and_then(|size| size.checked_mul(4)) else {
+    let Some(needed) = width
+        .checked_mul(height)
+        .and_then(|size| size.checked_mul(4))
+    else {
         return false;
     };
     if width > u32::MAX as usize / 4
-        || [height, stride_y, stride_u, stride_v].iter().any(|&value| value > u32::MAX as usize)
+        || [height, stride_y, stride_u, stride_v]
+            .iter()
+            .any(|&value| value > u32::MAX as usize)
         || out.len() < needed
         || !plane_fits(y_plane.len(), stride_y, width, height)
-        || !plane_fits(u_plane.len(), stride_u, width.div_ceil(2), height.div_ceil(2))
-        || !plane_fits(v_plane.len(), stride_v, width.div_ceil(2), height.div_ceil(2))
+        || !plane_fits(
+            u_plane.len(),
+            stride_u,
+            width.div_ceil(2),
+            height.div_ceil(2),
+        )
+        || !plane_fits(
+            v_plane.len(),
+            stride_v,
+            width.div_ceil(2),
+            height.div_ceil(2),
+        )
     {
         return false;
     }
@@ -858,7 +883,15 @@ mod frame_validation_tests {
     fn truncated_chroma_is_rejected_before_rendering() {
         let mut output = [77; 16];
         assert!(!try_i420_to_bgra_into(
-            &mut output, &[16; 4], &[], &[128], 2, 1, 1, 2, 2,
+            &mut output,
+            &[16; 4],
+            &[],
+            &[128],
+            2,
+            1,
+            1,
+            2,
+            2,
         ));
         assert_eq!(output, [77; 16]);
     }
@@ -867,7 +900,15 @@ mod frame_validation_tests {
     fn overlapping_i420_rows_are_rejected() {
         let mut output = [77; 16];
         assert!(!try_i420_to_bgra_into(
-            &mut output, &[16; 4], &[128], &[128], 1, 1, 1, 2, 2,
+            &mut output,
+            &[16; 4],
+            &[128],
+            &[128],
+            1,
+            1,
+            1,
+            2,
+            2,
         ));
         assert_eq!(output, [77; 16]);
     }
@@ -876,10 +917,26 @@ mod frame_validation_tests {
     fn invalid_dimensions_and_short_output_are_rejected() {
         let mut output = [77; 15];
         assert!(!try_i420_to_bgra_into(
-            &mut output, &[16; 4], &[128], &[128], 2, 1, 1, 2, 2,
+            &mut output,
+            &[16; 4],
+            &[128],
+            &[128],
+            2,
+            1,
+            1,
+            2,
+            2,
         ));
         assert!(!try_i420_to_bgra_into(
-            &mut output, &[16; 4], &[128], &[128], 2, 1, 1, usize::MAX, 2,
+            &mut output,
+            &[16; 4],
+            &[128],
+            &[128],
+            2,
+            1,
+            1,
+            usize::MAX,
+            2,
         ));
         assert_eq!(output, [77; 15]);
     }
@@ -888,7 +945,15 @@ mod frame_validation_tests {
     fn padded_i420_rows_render_without_reading_padding() {
         let mut output = [77; 16];
         assert!(try_i420_to_bgra_into(
-            &mut output, &[16, 16, 255, 255, 16, 16], &[128], &[128], 4, 1, 1, 2, 2,
+            &mut output,
+            &[16, 16, 255, 255, 16, 16],
+            &[128],
+            &[128],
+            4,
+            1,
+            1,
+            2,
+            2,
         ));
         assert_eq!(output, [0, 0, 0, 255].repeat(4).as_slice());
     }
@@ -899,7 +964,9 @@ mod frame_validation_tests {
             let mut y = [77; 4];
             let mut u = [77];
             let mut v = [77];
-            assert!(!bgra_to_i420(input, 2, 2, stride, &mut y, &mut u, &mut v, 2, 1, 1));
+            assert!(!bgra_to_i420(
+                input, 2, 2, stride, &mut y, &mut u, &mut v, 2, 1, 1
+            ));
             assert_eq!(y, [77; 4]);
             assert_eq!(u, [77]);
             assert_eq!(v, [77]);
@@ -914,7 +981,9 @@ mod frame_validation_tests {
         let mut y = [77; 4];
         let mut u = [77];
         let mut v = [77];
-        assert!(bgra_to_i420(&input, 2, 2, 12, &mut y, &mut u, &mut v, 2, 1, 1));
+        assert!(bgra_to_i420(
+            &input, 2, 2, 12, &mut y, &mut u, &mut v, 2, 1, 1
+        ));
         assert_eq!(y, [16; 4]);
         assert_eq!(u, [128]);
         assert_eq!(v, [128]);

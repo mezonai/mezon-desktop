@@ -16,7 +16,7 @@ namespace webrtc {
 
 namespace {
 
-constexpr char kDisableNvdecEnvVar[] = "LK_DISABLE_NVDEC";
+constexpr char kDisableNvdecEnvVar[] = "MEZON_DISABLE_NVDEC";
 
 bool IsNvdecDisabledByEnv() {
   return std::getenv(kDisableNvdecEnvVar) != nullptr;
@@ -117,7 +117,7 @@ NvidiaVideoDecoderFactory::NvidiaVideoDecoderFactory()
     return;
   }
 
-  cu_context_ = livekit_ffi::CudaContext::GetInstance();
+  cu_context_ = mezon_ffi::CudaContext::GetInstance();
   if (cu_context_->Initialize()) {
     supported_formats_ = SupportedNvDecoderCodecs(cu_context_->GetContext());
   } else {
@@ -135,7 +135,7 @@ bool NvidiaVideoDecoderFactory::IsSupported() {
     return false;
   }
 
-  if (!livekit_ffi::CudaContext::IsAvailable()) {
+  if (!mezon_ffi::CudaContext::IsAvailable()) {
     RTC_LOG(LS_WARNING) << "Cuda Context is not available.";
     return false;
   }
@@ -156,7 +156,7 @@ std::unique_ptr<VideoDecoder> NvidiaVideoDecoderFactory::Create(
     if (format.IsSameCodec(supported_format)) {
       // If the format is supported, create and return the decoder.
       if (!cu_context_) {
-        cu_context_ = livekit_ffi::CudaContext::GetInstance();
+        cu_context_ = mezon_ffi::CudaContext::GetInstance();
         if (!cu_context_->Initialize()) {
           RTC_LOG(LS_ERROR) << "Failed to initialize CUDA context.";
           return nullptr;

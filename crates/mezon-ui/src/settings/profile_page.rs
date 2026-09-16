@@ -1,11 +1,12 @@
 use crate::components::compositions::CustomStatusBubble;
 use crate::components::primitives::{
-    Avatar, Button as GpuiButton, ButtonVariants, Icon, IconName, Input, InputEvent, InputState,
-    Label, TextArea, TextAreaEvent, TextAreaField, h_flex, v_flex,
+    Avatar, Button as GpuiButton, ButtonVariants, FocusCycle, Icon, IconName, Input, InputEvent,
+    InputState, Label, TextArea, TextAreaEvent, TextAreaField, h_flex, v_flex,
 };
 use gpui::{
-    Context, Entity, FontWeight, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point,
-    Rgba, SharedString, Subscription, Task, Window, anchored, deferred, div, img, prelude::*, px,
+    Context, Entity, Focusable, FontWeight, MouseButton, MouseDownEvent, PathPromptOptions, Pixels,
+    Point, Rgba, SharedString, Subscription, Task, Window, anchored, deferred, div, img,
+    prelude::*, px,
 };
 use mezon_store::{
     AccountEvent, AccountStore, AppConfig, ClanList, LoginStore, Settings, UserAccount,
@@ -916,6 +917,16 @@ impl ProfilePage {
 
         v_flex()
             .gap_4()
+            .focus_cycle(
+                self.display_name_input
+                    .iter()
+                    .map(|input| input.focus_handle(cx))
+                    .chain(
+                        self.about_me_input
+                            .iter()
+                            .map(|input| input.focus_handle(cx)),
+                    ),
+            )
             .child(
                 v_flex()
                     .gap_2()

@@ -416,6 +416,41 @@ pub struct Category {
     pub channels: Vec<Channel>,
 }
 
+/// One list in the sidebar whose rows a user may drag into an order of their own.
+///
+/// Unlike the category order, which the server keeps per user, this one has nowhere to go:
+/// `ChannelDescription` carries no order field and no endpoint sets one. So it lives on this
+/// machine, beside the collapsed-category state, and every client shows its own arrangement.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum SidebarOrderKey {
+    /// The channels drawn directly under one category. Favourites is a category here too —
+    /// the rows it holds are copies, and none of them is drawn as a thread.
+    ///
+    /// The id is shared rather than owned because the sidebar hands one of these to every row
+    /// it draws, on every rebuild — and it rebuilds whenever a badge moves.
+    Category(ClanId, Arc<str>),
+    /// The threads drawn under one channel.
+    Threads(ChannelId),
+}
+
+impl SidebarOrderKey {
+    /// Key for the saved map. JSON object keys are strings, so the variants flatten into one.
+    fn storage_key(&self) -> String {
+        match self {
+            Self::Category(clan_id, category_id) => format!("c:{clan_id}:{category_id}"),
+            Self::Threads(parent_id) => format!("t:{parent_id}"),
+        }
+    }
+
+    fn parse_storage_key(key: &str) -> Option<Self> {
+        if let Some(rest) = key.strip_prefix("c:") {
+            let (clan_id, category_id) = rest.split_once(':')?;
+            return Some(Self::Category(clan_id.parse().ok()?, category_id.into()));
+        }
+        Some(Self::Threads(key.strip_prefix("t:")?.parse().ok()?))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WebhookTargetChannel {
     pub id: ChannelId,
@@ -528,6 +563,13 @@ fn previous_channels_path() -> std::path::PathBuf {
         .join("previous_channels.json")
 }
 
+fn channel_order_path() -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("mezon")
+        .join("channel_order.json")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TopicParentBadge {
     clan_id: ClanId,
@@ -601,6 +643,17 @@ pub struct ChannelList {
     previous_channels: HashMap<ClanId, Vec<ChannelId>>,
     api: Arc<AppApi>,
     collapsed: HashSet<(String, String)>,
+    /// The order each sidebar list was dragged into, for the lists that were, split the way
+    /// the sidebar reads it: categories by clan and then by id, threads by parent. Keeping
+    /// the clan on the outside is what lets a clan nobody arranged cost one lookup and no
+    /// allocation on a path that runs whenever a badge moves. Local only — see
+    /// [`SidebarOrderKey`].
+    category_order: HashMap<ClanId, HashMap<String, SavedOrder>>,
+    thread_order: HashMap<ChannelId, SavedOrder>,
+    /// Bumped whenever a saved order changes, so it lands in [`rows_fingerprint`].
+    order_generation: u64,
+    /// What each category last drew, kept until its inputs change. See [`rows_fingerprint`].
+    sidebar_rows_cache: RefCell<HashMap<ClanId, HashMap<String, CachedRows>>>,
     show_empty_categories: HashSet<ClanId>,
     channel_index: RefCell<ChannelLocationCache>,
     reset_generation: u64,
@@ -830,9 +883,15 @@ impl ChannelList {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
         cx.spawn(async move |this, cx| {
-            let (collapsed, previous_channels) = cx
+            let (collapsed, previous_channels, (category_order, thread_order)) = cx
                 .background_executor()
-                .spawn(async { (load_collapse_state(), load_previous_channels()) })
+                .spawn(async {
+                    (
+                        load_collapse_state(),
+                        load_previous_channels(),
+                        load_channel_order(),
+                    )
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let mut changed = false;
@@ -842,6 +901,12 @@ impl ChannelList {
                 }
                 if !previous_channels.is_empty() {
                     this.previous_channels = previous_channels;
+                    changed = true;
+                }
+                if !category_order.is_empty() || !thread_order.is_empty() {
+                    this.category_order = category_order;
+                    this.thread_order = thread_order;
+                    this.order_generation += 1;
                     changed = true;
                 }
                 if changed {
@@ -882,6 +947,10 @@ impl ChannelList {
             previous_channels: HashMap::new(),
             api,
             collapsed: HashSet::new(),
+            category_order: HashMap::new(),
+            thread_order: HashMap::new(),
+            order_generation: 0,
+            sidebar_rows_cache: RefCell::new(HashMap::new()),
             show_empty_categories: HashSet::new(),
             channel_index: RefCell::new(ChannelLocationCache::default()),
             reset_generation: 0,
@@ -1001,10 +1070,15 @@ impl ChannelList {
 
     fn invalidate_channel_index(&mut self, clan_id: ClanId) {
         self.channel_index.get_mut().invalidate(clan_id);
+        // Housekeeping, not correctness: `rows_fingerprint` is what decides whether a cached
+        // row list still applies. This keeps a clan nobody visits any more from holding on to
+        // one.
+        self.sidebar_rows_cache.get_mut().remove(&clan_id);
     }
 
     fn invalidate_channel_index_all(&mut self) {
         self.channel_index.get_mut().invalidate_all();
+        self.sidebar_rows_cache.get_mut().clear();
     }
 
     fn channel_location(&self, clan_id: ClanId, channel_id: ChannelId) -> Option<(usize, usize)> {
@@ -4784,6 +4858,255 @@ impl ChannelList {
             .detach();
     }
 
+    /// One category's rows, filtered to what the sidebar draws and put in the order this user
+    /// dragged them into — if they dragged this category at all; untouched otherwise.
+    ///
+    /// A channel and the threads drawn under it move as a block. A channel that left its
+    /// threads behind would have them show up under whichever channel ended up above them,
+    /// which is not a place they mean anything. Each block's threads are then ordered among
+    /// themselves.
+    pub fn sidebar_rows<'a>(&'a self, clan_id: ClanId, category: &'a Category) -> Vec<&'a Channel> {
+        // Nothing was ever dragged in this clan, so nothing below would move a row. The
+        // sidebar rebuilds on every notification this store sends — a badge landing is enough
+        // — so the cost of finding that out has to be one lookup and no allocation.
+        let clan_categories = self.category_order.get(&clan_id);
+        if clan_categories.is_none() && self.thread_order.is_empty() {
+            return category
+                .channels
+                .iter()
+                .filter(|ch| ch.visible_in_sidebar())
+                .collect();
+        }
+
+        let fingerprint = self.rows_fingerprint(category);
+        if let Some(cached) = self
+            .sidebar_rows_cache
+            .borrow()
+            .get(&clan_id)
+            .and_then(|per_category| per_category.get(category.id.as_str()))
+            .filter(|cached| cached.fingerprint == fingerprint)
+        {
+            return cached
+                .rows
+                .iter()
+                .map(|index| &category.channels[*index as usize])
+                .collect();
+        }
+
+        let rows = self.sidebar_row_indices(clan_id, category);
+        let out = rows
+            .iter()
+            .map(|index| &category.channels[*index as usize])
+            .collect();
+        self.sidebar_rows_cache
+            .borrow_mut()
+            .entry(clan_id)
+            .or_default()
+            .insert(category.id.clone(), CachedRows { fingerprint, rows });
+        out
+    }
+
+    /// What [`sidebar_rows`] answers, as positions in `category.channels`.
+    fn sidebar_row_indices(&self, clan_id: ClanId, category: &Category) -> Vec<u32> {
+        let mut rows: Vec<u32> = category
+            .channels
+            .iter()
+            .enumerate()
+            .filter(|(_, ch)| ch.visible_in_sidebar())
+            .map(|(index, _)| index as u32)
+            .collect();
+        let row = |index: u32| &category.channels[index as usize];
+
+        let category_ranks = self
+            .category_order
+            .get(&clan_id)
+            .and_then(|categories| categories.get(category.id.as_str()))
+            .map(|order| order.ranks.as_slice());
+
+        // A clan can be arranged one category at a time; the rest still pay nothing.
+        if category_ranks.is_none()
+            && !rows.iter().any(|index| {
+                row(*index)
+                    .parent_id
+                    .is_some_and(|parent_id| self.thread_order.contains_key(&parent_id))
+            })
+        {
+            return rows;
+        }
+
+        if category.id == FAVOR_CATE_ID {
+            // Favourites draws every row it holds as a channel, so there are no blocks to keep.
+            if let Some(ranks) = category_ranks {
+                rows.sort_by_cached_key(|index| saved_rank(ranks, row(*index).id));
+            }
+            return rows;
+        }
+
+        // Where each block starts and ends, rather than the blocks themselves: they are only
+        // needed to move a channel and its threads together, and indices do that in one small
+        // allocation instead of one per channel.
+        let mut blocks: Vec<std::ops::Range<usize>> = Vec::new();
+        for position in 0..rows.len() {
+            // A thread whose parent is not on screen — archived, say — opens a block of its
+            // own rather than riding along with whatever happens to precede it.
+            let under_current_parent = blocks.last().is_some_and(|block| {
+                row(rows[position]).parent_id == Some(row(rows[block.start]).id)
+            });
+            match blocks.last_mut() {
+                Some(block) if under_current_parent => block.end = position + 1,
+                _ => blocks.push(position..position + 1),
+            }
+        }
+        for block in &blocks {
+            let parent_id = row(rows[block.start]).id;
+            if let Some(order) = self.thread_order.get(&parent_id) {
+                rows[block.start + 1..block.end]
+                    .sort_by_cached_key(|index| saved_rank(&order.ranks, row(*index).id));
+            }
+        }
+        let Some(ranks) = category_ranks else {
+            return rows;
+        };
+        blocks.sort_by_cached_key(|block| saved_rank(ranks, row(rows[block.start]).id));
+        blocks
+            .iter()
+            .flat_map(|block| rows[block.clone()].iter().copied())
+            .collect()
+    }
+
+    /// Everything [`sidebar_row_indices`] reads, in one number.
+    ///
+    /// The cache is checked against this rather than against a list of places that must
+    /// remember to clear it: channels are moved, archived and replaced from twenty-nine
+    /// places in this file, and a cache that goes stale because one of them forgot shows the
+    /// wrong sidebar with nothing to say it is wrong.
+    fn rows_fingerprint(&self, category: &Category) -> u64 {
+        let mut hash = self
+            .order_generation
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add(category.channels.len() as u64);
+        for ch in &category.channels {
+            hash ^= ch.id.get() as u64;
+            // The parent decides which block a row joins, so it belongs here even though a
+            // thread rarely changes hands: a field the rows are shaped from and the
+            // fingerprint does not watch is a cache that goes stale in silence.
+            hash = hash.rotate_left(17) ^ ch.parent_id.map_or(0, |parent| parent.get() as u64);
+            if !ch.visible_in_sidebar() {
+                hash ^= 0xA076_1D64_78BD_642F;
+            }
+            hash = hash.wrapping_mul(0x0000_0100_0000_01B3).rotate_left(7);
+        }
+        hash
+    }
+
+    /// The rows of one sidebar list in the order this user dragged them into, or `None` if
+    /// they never dragged anything in it. A channel created since then is not named here,
+    /// and belongs after every channel that is.
+    pub fn sidebar_order(&self, key: &SidebarOrderKey) -> Option<&[ChannelId]> {
+        self.saved_order(key).map(|order| order.sequence.as_slice())
+    }
+
+    fn saved_order(&self, key: &SidebarOrderKey) -> Option<&SavedOrder> {
+        match key {
+            SidebarOrderKey::Category(clan_id, category_id) => {
+                self.category_order.get(clan_id)?.get(&**category_id)
+            }
+            SidebarOrderKey::Threads(parent_id) => self.thread_order.get(parent_id),
+        }
+    }
+
+    /// Drop `moved` where `target` sits, and remember the list that leaves.
+    ///
+    /// Dragging down lands the row after its target, dragging up lands it before — the same
+    /// remove-then-insert `move_category` does, and the same thing the indicator drawn on the
+    /// target's near edge promised.
+    ///
+    /// The whole list is stored rather than the one row that moved, because it is the only
+    /// place this order exists: nothing on the server would fill in a row left unnamed. Rows
+    /// the list has since lost are dropped on the next move, when the order is rebuilt from
+    /// the channels that are actually there.
+    pub fn move_sidebar_row(
+        &mut self,
+        key: SidebarOrderKey,
+        moved: ChannelId,
+        target: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        if moved == target {
+            return;
+        }
+        let mut ids = self.sidebar_row_order(&key);
+        let (Some(from), Some(to)) = (
+            ids.iter().position(|id| *id == moved),
+            ids.iter().position(|id| *id == target),
+        ) else {
+            return;
+        };
+        ids.remove(from);
+        ids.insert(to, moved);
+        match key {
+            SidebarOrderKey::Category(clan_id, category_id) => {
+                self.category_order
+                    .entry(clan_id)
+                    .or_default()
+                    .insert(category_id.to_string(), SavedOrder::new(ids));
+            }
+            SidebarOrderKey::Threads(parent_id) => {
+                self.thread_order.insert(parent_id, SavedOrder::new(ids));
+            }
+        }
+        self.order_generation += 1;
+        cx.notify();
+        let categories = self.category_order.clone();
+        let threads = self.thread_order.clone();
+        cx.background_executor()
+            .spawn(async move { save_channel_order(categories, threads) })
+            .detach();
+    }
+
+    /// Every row of `key`'s list, in the order the sidebar draws them. Rows the saved order
+    /// does not name keep the order the server sent them in, after the ones it does — which
+    /// is where a channel created since the last drag belongs.
+    fn sidebar_row_order(&self, key: &SidebarOrderKey) -> Vec<ChannelId> {
+        let mut ids = self.sidebar_row_members(key);
+        if let Some(saved) = self.saved_order(key) {
+            ids.sort_by_key(|id| saved_rank(&saved.ranks, *id));
+        }
+        ids
+    }
+
+    /// The rows that belong to `key`'s list right now, in the order the store holds them.
+    fn sidebar_row_members(&self, key: &SidebarOrderKey) -> Vec<ChannelId> {
+        match key {
+            SidebarOrderKey::Category(clan_id, category_id) => self
+                .categories_for_clan(*clan_id)
+                .iter()
+                .find(|category| category.id.as_str() == &**category_id)
+                .map(|category| {
+                    category
+                        .channels
+                        .iter()
+                        // Favourites draws every row it holds as a channel, threads included.
+                        .filter(|ch| category.id == FAVOR_CATE_ID || ch.parent_id.is_none())
+                        .map(|ch| ch.id)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            SidebarOrderKey::Threads(parent_id) => {
+                let Some(clan_id) = self.clan_id_for_channel(*parent_id) else {
+                    return Vec::new();
+                };
+                self.categories_for_clan(clan_id)
+                    .iter()
+                    .filter(|category| category.id != FAVOR_CATE_ID)
+                    .flat_map(|category| category.channels.iter())
+                    .filter(|ch| ch.parent_id == Some(*parent_id))
+                    .map(|ch| ch.id)
+                    .collect()
+            }
+        }
+    }
+
     pub fn is_channel_favorite(&self, clan_id: ClanId, channel_id: ChannelId) -> bool {
         self.favorites
             .get(&clan_id)
@@ -6040,6 +6363,126 @@ fn save_collapse_state(pairs: Vec<(String, String)>) {
             }
         }
         Err(e) => tracing::warn!("Failed to serialize collapse state: {e}"),
+    }
+}
+
+/// One list's saved order, kept both ways it is needed: the sequence is what gets written
+/// back to disk, the index is what a sort looks rows up in. Building the index when the order
+/// changes — which is once per drag — rather than on every read keeps it off a path that runs
+/// whenever a badge moves.
+struct CachedRows {
+    fingerprint: u64,
+    /// Positions in `Category::channels`.
+    rows: Vec<u32>,
+}
+
+#[derive(Clone, Debug)]
+struct SavedOrder {
+    sequence: Vec<ChannelId>,
+    ranks: Vec<(ChannelId, usize)>,
+}
+
+impl SavedOrder {
+    fn new(sequence: Vec<ChannelId>) -> Self {
+        let ranks = rank_index(&sequence);
+        Self { sequence, ranks }
+    }
+}
+
+/// Where each row sits in a saved order, in a shape a sort can look up.
+///
+/// Sorting asks for the key of every row, so finding each one by scanning the saved list costs
+/// the square of that list's length — measured at 19us for a single category of 300 channels,
+/// on a path that runs whenever a badge moves. Sorting the pairs once and searching them keeps
+/// that flat, and unlike a hash map it stays cheap at the size most categories actually are:
+/// hashing three hundred ids costs more than binary-searching them.
+fn rank_index(order: &[ChannelId]) -> Vec<(ChannelId, usize)> {
+    let mut ranks: Vec<(ChannelId, usize)> = order
+        .iter()
+        .enumerate()
+        .map(|(rank, id)| (*id, rank))
+        .collect();
+    ranks.sort_unstable_by_key(|(id, _)| *id);
+    ranks
+}
+
+/// A row the order does not name belongs after every row it does — which is where a channel
+/// created since the drag goes.
+fn saved_rank(ranks: &[(ChannelId, usize)], id: ChannelId) -> usize {
+    ranks
+        .binary_search_by_key(&id, |(id, _)| *id)
+        .map_or(usize::MAX, |found| ranks[found].1)
+}
+
+type LoadedChannelOrder = (
+    HashMap<ClanId, HashMap<String, SavedOrder>>,
+    HashMap<ChannelId, SavedOrder>,
+);
+
+fn load_channel_order() -> LoadedChannelOrder {
+    let mut categories: HashMap<ClanId, HashMap<String, SavedOrder>> = HashMap::new();
+    let mut threads: HashMap<ChannelId, SavedOrder> = HashMap::new();
+    let Ok(data) = std::fs::read_to_string(channel_order_path()) else {
+        return (categories, threads);
+    };
+    let stored: HashMap<String, Vec<ChannelId>> = match serde_json::from_str(&data) {
+        Ok(stored) => stored,
+        Err(_) => return (categories, threads),
+    };
+    for (key, ids) in stored {
+        match SidebarOrderKey::parse_storage_key(&key) {
+            Some(SidebarOrderKey::Category(clan_id, category_id)) => {
+                categories
+                    .entry(clan_id)
+                    .or_default()
+                    .insert(category_id.to_string(), SavedOrder::new(ids));
+            }
+            Some(SidebarOrderKey::Threads(parent_id)) => {
+                threads.insert(parent_id, SavedOrder::new(ids));
+            }
+            None => {}
+        }
+    }
+    (categories, threads)
+}
+
+fn save_channel_order(
+    categories: HashMap<ClanId, HashMap<String, SavedOrder>>,
+    threads: HashMap<ChannelId, SavedOrder>,
+) {
+    if cfg!(test) {
+        // The tests below drag rows for real, and this file sits in the config directory of
+        // whoever is running them — a `just test` must not cost them their own sidebar.
+        return;
+    }
+    let path = channel_order_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let stored: HashMap<String, Vec<ChannelId>> = categories
+        .into_iter()
+        .flat_map(|(clan_id, per_category)| {
+            per_category.into_iter().map(move |(category_id, order)| {
+                (
+                    SidebarOrderKey::Category(clan_id, category_id.into()).storage_key(),
+                    order.sequence,
+                )
+            })
+        })
+        .chain(threads.into_iter().map(|(parent_id, order)| {
+            (
+                SidebarOrderKey::Threads(parent_id).storage_key(),
+                order.sequence,
+            )
+        }))
+        .collect();
+    match serde_json::to_string(&stored) {
+        Ok(data) => {
+            if let Err(e) = std::fs::write(&path, data) {
+                tracing::warn!("Failed to save channel order: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("Failed to serialize channel order: {e}"),
     }
 }
 
@@ -7586,6 +8029,58 @@ mod tests {
             },
         ];
         build_categories(api_cats, &mut channels)
+    }
+
+    /// One category holding `channel_ids` as channels, with two threads under the first.
+    fn structure_for_sidebar_order(channel_ids: &[i64]) -> Vec<Category> {
+        let api_cats = vec![ApiCategoryDesc {
+            category_id: 1,
+            category_name: "General".into(),
+            clan_id: 1,
+            category_order: 0,
+        }];
+        let mut channels: Vec<Channel> = channel_ids
+            .iter()
+            .map(|id| make_channel(*id, &format!("channel-{id}"), "1"))
+            .collect();
+        for (id, name) in [(41, "one"), (42, "two")] {
+            let mut thread = make_channel(id, name, "1");
+            thread.parent_id = Some(ChannelId(channel_ids[0]));
+            channels.push(thread);
+        }
+        build_categories(api_cats, &mut channels)
+    }
+
+    fn category_key() -> SidebarOrderKey {
+        SidebarOrderKey::Category(ClanId(1), "1".into())
+    }
+
+    fn row_order(channels: &ChannelList, key: &SidebarOrderKey) -> Vec<i64> {
+        channels
+            .sidebar_row_order(key)
+            .into_iter()
+            .map(|id| id.get())
+            .collect()
+    }
+
+    fn drawn(channels: &ChannelList) -> Vec<&Channel> {
+        channels
+            .categories_for_clan(ClanId(1))
+            .iter()
+            .filter(|category| category.id != FAVOR_CATE_ID)
+            .flat_map(|category| channels.sidebar_rows(ClanId(1), category))
+            .collect()
+    }
+
+    /// What the sidebar would draw, threads included, as one flat list.
+    fn drawn_rows(channels: &ChannelList) -> Vec<i64> {
+        channels
+            .categories_for_clan(ClanId(1))
+            .iter()
+            .filter(|category| category.id != FAVOR_CATE_ID)
+            .flat_map(|category| channels.sidebar_rows(ClanId(1), category))
+            .map(|ch| ch.id.get())
+            .collect()
     }
 
     fn favor_ids(ids: &[ChannelId]) -> Option<HashSet<ChannelId>> {
@@ -9294,6 +9789,21 @@ mod tests {
     }
 
     #[gpui::test]
+    fn subscribing_a_clan_from_the_clan_list_does_not_hold_its_lease(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            crate::clan::ClanList::subscribe_clan_realtime(ClanId(1), cx);
+            assert!(
+                channels.read(cx).joining_clans.contains_key(&ClanId(1)),
+                "the join must start; it reads ClanList on the way, which panics if the \
+                 caller is still inside a ClanList update"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn clan_join_waits_for_the_channel_listing(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let channels = init_channel_list(cx);
@@ -10515,6 +11025,15 @@ mod tests {
             validate_channel_name(&too_long),
             Err(CreateChannelError::InvalidName)
         );
+        // Punctuation the thread form used to hand straight to the server.
+        assert_eq!(
+            validate_channel_name("19/8"),
+            Err(CreateChannelError::InvalidName)
+        );
+        assert_eq!(
+            validate_channel_name("hahah!"),
+            Err(CreateChannelError::InvalidName)
+        );
         assert_eq!(
             validate_channel_name("it's"),
             Err(CreateChannelError::InvalidName)
@@ -11722,6 +12241,393 @@ mod tests {
                         .find(|cat| cat.id == FAVOR_CATE_ID)
                         .is_none_or(|cat| !cat.channels.iter().any(|ch| ch.id == ChannelId(1)))
                 );
+            });
+        });
+    }
+
+    #[test]
+    fn a_saved_order_key_survives_the_trip_through_the_file() {
+        for key in [
+            SidebarOrderKey::Category(ClanId(7), "12".into()),
+            SidebarOrderKey::Category(ClanId(7), FAVOR_CATE_ID.into()),
+            SidebarOrderKey::Threads(ChannelId(99)),
+        ] {
+            assert_eq!(
+                SidebarOrderKey::parse_storage_key(&key.storage_key()),
+                Some(key)
+            );
+        }
+        assert_eq!(SidebarOrderKey::parse_storage_key("nonsense"), None);
+    }
+
+    #[gpui::test]
+    fn a_channel_dragged_down_lands_after_the_row_it_was_dropped_on(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_for_sidebar_order(&[1, 2, 3]),
+                    None,
+                    cx,
+                );
+                assert_eq!(row_order(channels, &category_key()), vec![1, 2, 3]);
+
+                channels.move_sidebar_row(category_key(), ChannelId(1), ChannelId(3), cx);
+
+                assert_eq!(row_order(channels, &category_key()), vec![2, 3, 1]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_channel_dragged_up_lands_before_the_row_it_was_dropped_on(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_for_sidebar_order(&[1, 2, 3]),
+                    None,
+                    cx,
+                );
+
+                channels.move_sidebar_row(category_key(), ChannelId(3), ChannelId(1), cx);
+
+                assert_eq!(row_order(channels, &category_key()), vec![3, 1, 2]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_moved_channel_takes_its_threads_with_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_for_sidebar_order(&[1, 2, 3]),
+                    None,
+                    cx,
+                );
+                assert_eq!(drawn_rows(channels), vec![1, 41, 42, 2, 3]);
+
+                channels.move_sidebar_row(category_key(), ChannelId(1), ChannelId(3), cx);
+
+                assert_eq!(drawn_rows(channels), vec![2, 3, 1, 41, 42]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_thread_reorders_among_its_siblings_and_nothing_else(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_for_sidebar_order(&[1, 2, 3]),
+                    None,
+                    cx,
+                );
+
+                channels.move_sidebar_row(
+                    SidebarOrderKey::Threads(ChannelId(1)),
+                    ChannelId(42),
+                    ChannelId(41),
+                    cx,
+                );
+
+                assert_eq!(drawn_rows(channels), vec![1, 42, 41, 2, 3]);
+                assert_eq!(row_order(channels, &category_key()), vec![1, 2, 3]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_row_dropped_outside_its_own_list_is_left_alone(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_for_sidebar_order(&[1, 2, 3]),
+                    None,
+                    cx,
+                );
+
+                // A thread is no part of the category's own list, and a channel is no part of
+                // any thread block: both of those moves belong to the server.
+                channels.move_sidebar_row(category_key(), ChannelId(41), ChannelId(2), cx);
+                channels.move_sidebar_row(
+                    SidebarOrderKey::Threads(ChannelId(1)),
+                    ChannelId(2),
+                    ChannelId(41),
+                    cx,
+                );
+
+                assert_eq!(drawn_rows(channels), vec![1, 41, 42, 2, 3]);
+            });
+        });
+    }
+
+    /// The drawn rows are cached, so the tests that matter are the ones that change their
+    /// inputs without touching the order: a stale cache here is a sidebar that quietly stops
+    /// matching the clan.
+    #[gpui::test]
+    fn a_channel_added_after_the_first_draw_shows_up(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_for_sidebar_order(&[1, 2, 3]),
+                    None,
+                    cx,
+                );
+                channels.move_sidebar_row(category_key(), ChannelId(1), ChannelId(3), cx);
+                assert_eq!(drawn_rows(channels), vec![2, 3, 1, 41, 42]);
+
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_for_sidebar_order(&[1, 2, 3, 4]),
+                    None,
+                    cx,
+                );
+
+                assert_eq!(drawn_rows(channels), vec![2, 3, 1, 41, 42, 4]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_thread_that_changes_parent_leaves_its_old_block(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_for_sidebar_order(&[1, 2, 3]),
+                    None,
+                    cx,
+                );
+                channels.move_sidebar_row(category_key(), ChannelId(1), ChannelId(3), cx);
+                channels.move_sidebar_row(
+                    SidebarOrderKey::Threads(ChannelId(1)),
+                    ChannelId(42),
+                    ChannelId(41),
+                    cx,
+                );
+                assert_eq!(drawn_rows(channels), vec![2, 3, 1, 42, 41]);
+
+                // Only the parent changes: same id, same slot, still visible. If the
+                // fingerprint did not watch this field the sidebar would keep drawing 42 in
+                // its old block.
+                channels
+                    .channel_mut(ClanId(1), ChannelId(42))
+                    .expect("thread is in the clan")
+                    .parent_id = Some(ChannelId(2));
+
+                assert_eq!(drawn_rows(channels), vec![2, 3, 1, 41, 42]);
+            });
+        });
+    }
+
+    /// A category that was dragged serves its rows from the cache. Everything the sidebar
+    /// draws *on* a row — badge, unread — must still be live, and everything that adds or
+    /// removes a row must still get through. These go in through the realtime handlers, the
+    /// way the running app does it.
+    #[gpui::test]
+    fn a_realtime_badge_shows_through_the_cached_rows(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_for_sidebar_order(&[1, 2, 3]),
+                    None,
+                    cx,
+                );
+                channels.move_sidebar_row(category_key(), ChannelId(1), ChannelId(3), cx);
+                let before: Vec<(i64, u32)> = drawn(channels)
+                    .iter()
+                    .map(|ch| (ch.id.get(), ch.badge_count))
+                    .collect();
+                assert_eq!(before, vec![(2, 0), (3, 0), (1, 0), (41, 0), (42, 0)]);
+
+                // A mention lands in channel 2 — a row the cache already holds.
+                channels.note_channel_message(
+                    ClanId(1),
+                    ChannelId(2),
+                    true,
+                    false,
+                    10,
+                    MessageId(500),
+                    cx,
+                );
+
+                let after: Vec<(i64, u32)> = drawn(channels)
+                    .iter()
+                    .map(|ch| (ch.id.get(), ch.badge_count))
+                    .collect();
+                assert_eq!(after, vec![(2, 1), (3, 0), (1, 0), (41, 0), (42, 0)]);
+                assert!(drawn(channels)[0].is_unread());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_realtime_created_channel_joins_the_cached_rows(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_for_sidebar_order(&[1, 2, 3]),
+                    None,
+                    cx,
+                );
+                channels.move_sidebar_row(category_key(), ChannelId(1), ChannelId(3), cx);
+                assert_eq!(drawn_rows(channels), vec![2, 3, 1, 41, 42]);
+
+                channels.handle_event(
+                    &RealtimeEvent::ChannelCreated(mezon_proto::realtime::ChannelCreatedEvent {
+                        clan_id: 1,
+                        channel_id: 9,
+                        parent_id: 0,
+                        category_id: 1,
+                        channel_type: 1,
+                        channel_label: "brand-new".into(),
+                        status: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+
+                // Not named by the saved order, so it lands last — and it lands.
+                assert_eq!(drawn_rows(channels), vec![2, 3, 1, 41, 42, 9]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_realtime_deleted_channel_leaves_the_cached_rows(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_for_sidebar_order(&[1, 2, 3]),
+                    None,
+                    cx,
+                );
+                channels.move_sidebar_row(category_key(), ChannelId(1), ChannelId(3), cx);
+                assert_eq!(drawn_rows(channels), vec![2, 3, 1, 41, 42]);
+
+                channels.apply_local_delete(ClanId(1), ChannelId(3), ChannelId(0), cx);
+
+                assert_eq!(drawn_rows(channels), vec![2, 1, 41, 42]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn dragging_a_row_leaves_collapse_state_alone_and_vice_versa(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_for_sidebar_order(&[1, 2, 3]),
+                    None,
+                    cx,
+                );
+                channels.toggle_category(ClanId(1), "1", cx);
+                assert!(channels.is_category_collapsed(ClanId(1), "1"));
+
+                channels.move_sidebar_row(category_key(), ChannelId(1), ChannelId(3), cx);
+
+                assert!(
+                    channels.is_category_collapsed(ClanId(1), "1"),
+                    "a drag is not a click on the header"
+                );
+                assert_eq!(drawn_rows(channels), vec![2, 3, 1, 41, 42]);
+
+                channels.toggle_category(ClanId(1), "1", cx);
+                assert!(!channels.is_category_collapsed(ClanId(1), "1"));
+                assert_eq!(
+                    drawn_rows(channels),
+                    vec![2, 3, 1, 41, 42],
+                    "collapsing is drawing-only; the order underneath does not move"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn archiving_a_thread_takes_it_off_the_drawn_rows(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_for_sidebar_order(&[1, 2, 3]),
+                    None,
+                    cx,
+                );
+                channels.move_sidebar_row(category_key(), ChannelId(1), ChannelId(3), cx);
+                assert_eq!(drawn_rows(channels), vec![2, 3, 1, 41, 42]);
+
+                // Archived in place: the channel keeps its slot in the store, so nothing about
+                // the category's shape changes except this one flag.
+                channels
+                    .channel_mut(ClanId(1), ChannelId(41))
+                    .expect("thread is in the clan")
+                    .active = CHANNEL_ACTIVE_ARCHIVED;
+
+                assert_eq!(drawn_rows(channels), vec![2, 3, 1, 42]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_channel_created_since_the_drag_lands_last(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_for_sidebar_order(&[1, 2, 3]),
+                    None,
+                    cx,
+                );
+                channels.move_sidebar_row(category_key(), ChannelId(1), ChannelId(3), cx);
+
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_for_sidebar_order(&[1, 2, 3, 4]),
+                    None,
+                    cx,
+                );
+
+                assert_eq!(row_order(channels, &category_key()), vec![2, 3, 1, 4]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_category_nobody_dragged_keeps_the_order_the_server_sent(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_for_sidebar_order(&[3, 1, 2]),
+                    None,
+                    cx,
+                );
+
+                assert_eq!(drawn_rows(channels), vec![1, 2, 3, 41, 42]);
             });
         });
     }

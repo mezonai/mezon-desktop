@@ -1,20 +1,4 @@
-/*
- * Copyright 2026 LiveKit, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-#include "livekit/passthrough_video_encoder.h"
+#include "mezon_rtc/passthrough_video_encoder.h"
 
 #include <algorithm>
 #include <map>
@@ -32,7 +16,7 @@
 #include "api/video_codecs/video_encoder.h"
 #include "av1_bitstream.h"
 #include "common_video/h264/h264_common.h"
-#include "livekit/encoded_video_frame_buffer.h"
+#include "mezon_rtc/encoded_video_frame_buffer.h"
 #include "media/base/media_constants.h"
 #include "modules/video_coding/include/video_codec_interface.h"
 #include "modules/video_coding/include/video_error_codes.h"
@@ -40,10 +24,10 @@
 #include "rtc_base/logging.h"
 #include "rtc_base/synchronization/mutex.h"
 
-namespace livekit_ffi {
+namespace mezon_ffi {
 namespace {
 
-using livekit::EncodedVideoFrameBuffer;
+using mezon_rtc::EncodedVideoFrameBuffer;
 using webrtc::CodecSpecificInfo;
 using webrtc::EncodedImage;
 using webrtc::EncodedImageBuffer;
@@ -80,26 +64,26 @@ VideoCodecType CodecTypeFromFormat(const SdpVideoFormat& format) {
   return webrtc::kVideoCodecGeneric;
 }
 
-VideoCodecType CodecTypeFromBuffer(livekit::EncodedVideoCodec codec) {
+VideoCodecType CodecTypeFromBuffer(mezon_rtc::EncodedVideoCodec codec) {
   switch (codec) {
-    case livekit::EncodedVideoCodec::kH264:
+    case mezon_rtc::EncodedVideoCodec::kH264:
       return webrtc::kVideoCodecH264;
-    case livekit::EncodedVideoCodec::kH265:
+    case mezon_rtc::EncodedVideoCodec::kH265:
       return webrtc::kVideoCodecH265;
-    case livekit::EncodedVideoCodec::kVP8:
+    case mezon_rtc::EncodedVideoCodec::kVP8:
       return webrtc::kVideoCodecVP8;
-    case livekit::EncodedVideoCodec::kVP9:
+    case mezon_rtc::EncodedVideoCodec::kVP9:
       return webrtc::kVideoCodecVP9;
-    case livekit::EncodedVideoCodec::kAV1:
+    case mezon_rtc::EncodedVideoCodec::kAV1:
       return webrtc::kVideoCodecAV1;
   }
 }
 
-VideoFrameType FrameTypeFromBuffer(livekit::EncodedFrameType frame_type) {
+VideoFrameType FrameTypeFromBuffer(mezon_rtc::EncodedFrameType frame_type) {
   switch (frame_type) {
-    case livekit::EncodedFrameType::kKey:
+    case mezon_rtc::EncodedFrameType::kKey:
       return VideoFrameType::kVideoFrameKey;
-    case livekit::EncodedFrameType::kDelta:
+    case mezon_rtc::EncodedFrameType::kDelta:
       return VideoFrameType::kVideoFrameDelta;
   }
 }
@@ -108,8 +92,8 @@ bool IsAv1Codec(VideoCodecType codec_type) {
   return codec_type == webrtc::kVideoCodecAV1;
 }
 
-bool IsKeyframe(livekit::EncodedFrameType frame_type) {
-  return frame_type == livekit::EncodedFrameType::kKey;
+bool IsKeyframe(mezon_rtc::EncodedFrameType frame_type) {
+  return frame_type == mezon_rtc::EncodedFrameType::kKey;
 }
 
 // SDP profile parameters constrain real encoders, not a pass-through: the
@@ -265,18 +249,18 @@ class PassthroughVideoEncoder final : public VideoEncoder {
       std::vector<uint8_t> payload(
           encoded_buffer->payload_data(),
           encoded_buffer->payload_data() + encoded_buffer->payload_size());
-      livekit::av1::NormalizeForRtp(&payload);
+      mezon_rtc::av1::NormalizeForRtp(&payload);
 
       std::vector<uint8_t> sequence_header;
-      if (livekit::av1::ExtractSequenceHeaderObu(
+      if (mezon_rtc::av1::ExtractSequenceHeaderObu(
               payload.data(), payload.size(), &sequence_header)) {
         cached_sequence_header_obu_ = std::move(sequence_header);
       } else if (is_keyframe && !cached_sequence_header_obu_.empty()) {
-        livekit::av1::EnsureSequenceHeaderOnKeyframe(
+        mezon_rtc::av1::EnsureSequenceHeaderOnKeyframe(
             &payload, cached_sequence_header_obu_);
       }
       if (payload.empty() ||
-          !livekit::av1::IsWebRtcParseable(payload.data(), payload.size())) {
+          !mezon_rtc::av1::IsWebRtcParseable(payload.data(), payload.size())) {
         RTC_LOG(LS_ERROR)
             << "PassthroughVideoEncoder received an AV1 frame that WebRTC "
                "cannot packetize";
@@ -322,14 +306,14 @@ class PassthroughVideoEncoder final : public VideoEncoder {
 
   void SetRates(const RateControlParameters& parameters) override {
     webrtc::MutexLock lock(&rate_control_mutex_);
-    latest_rate_control_request_ = livekit::EncodedRateControlRequest{
+    latest_rate_control_request_ = mezon_rtc::EncodedRateControlRequest{
         true, parameters.bitrate.get_sum_bps(), parameters.framerate_fps};
   }
 
   EncoderInfo GetEncoderInfo() const override {
     EncoderInfo info;
     info.supports_native_handle = true;
-    info.implementation_name = "LiveKit pre-encoded passthrough";
+    info.implementation_name = "Mezon pre-encoded passthrough";
     info.scaling_settings = VideoEncoder::ScalingSettings::kOff;
     info.is_hardware_accelerated = false;
     info.supports_simulcast = false;
@@ -340,7 +324,7 @@ class PassthroughVideoEncoder final : public VideoEncoder {
  private:
   void ForwardPendingRateControl(
       EncodedVideoFrameBuffer* encoded_buffer) {
-    std::optional<livekit::EncodedRateControlRequest> request;
+    std::optional<mezon_rtc::EncodedRateControlRequest> request;
     {
       webrtc::MutexLock lock(&rate_control_mutex_);
       request = latest_rate_control_request_;
@@ -360,7 +344,7 @@ class PassthroughVideoEncoder final : public VideoEncoder {
   ScalableVideoControllerNoLayering av1_svc_controller_;
   std::vector<uint8_t> cached_sequence_header_obu_;
   webrtc::Mutex rate_control_mutex_;
-  std::optional<livekit::EncodedRateControlRequest> latest_rate_control_request_;
+  std::optional<mezon_rtc::EncodedRateControlRequest> latest_rate_control_request_;
 };
 
 }  // namespace
@@ -423,4 +407,4 @@ std::unique_ptr<VideoEncoder> PassthroughVideoEncoderFactory::Create(
   return nullptr;
 }
 
-}  // namespace livekit_ffi
+}

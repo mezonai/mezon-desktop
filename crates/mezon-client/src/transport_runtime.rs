@@ -452,6 +452,7 @@ impl TransportClient {
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
+
     pub fn new(base_path: String) -> Self {
         let adapter = Box::new(AbridgedTcpAdapter::new());
         let transport = MezonTransport::new(adapter, base_path);
@@ -1095,7 +1096,11 @@ impl TransportClient {
             .parse::<i64>()
             .map_err(|e| anyhow::anyhow!("invalid user_id: {e}"))?;
         runtime()
-            .spawn(async move { transport.remove_participant_mezon_meet(channel_id, clan_id, user_id).await })
+            .spawn(async move {
+                transport
+                    .remove_participant_mezon_meet(channel_id, clan_id, user_id)
+                    .await
+            })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
@@ -1115,7 +1120,11 @@ impl TransportClient {
             .parse::<i64>()
             .map_err(|e| anyhow::anyhow!("invalid user_id: {e}"))?;
         runtime()
-            .spawn(async move { transport.mute_participant_mezon_meet(channel_id, clan_id, user_id).await })
+            .spawn(async move {
+                transport
+                    .mute_participant_mezon_meet(channel_id, clan_id, user_id)
+                    .await
+            })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
@@ -2095,6 +2104,7 @@ impl TransportClient {
         emojis: Vec<crate::transport::OutgoingEmoji>,
         attachments: Vec<mezon_proto::api::MessageAttachment>,
         reply: Option<crate::transport::OutgoingReply>,
+        topic_id: i64,
     ) -> Result<()> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -2113,6 +2123,48 @@ impl TransportClient {
                         emojis,
                         attachments,
                         reply,
+                        topic_id,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_ephemeral_message_to_bots(
+        &self,
+        receiver_ids: Vec<i64>,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
+        attachments: Vec<mezon_proto::api::MessageAttachment>,
+        reply: Option<crate::transport::OutgoingReply>,
+        topic_id: i64,
+    ) -> Result<mezon_proto::realtime::ChannelMessageAck> {
+        let transport = self.inner.clone();
+        let content = content.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .send_ephemeral_message_to_bots(
+                        receiver_ids,
+                        clan_id,
+                        channel_id,
+                        &content,
+                        is_public,
+                        mode,
+                        mentions,
+                        hashtags,
+                        emojis,
+                        attachments,
+                        reply,
+                        topic_id,
                     )
                     .await
             })

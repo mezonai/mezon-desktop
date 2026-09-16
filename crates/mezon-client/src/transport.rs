@@ -218,6 +218,7 @@ pub enum RealtimeEvent {
     VoiceReaction(realtime::VoiceReactionSend),
     VoiceInteractive(realtime::VoiceInteractiveEvent),
     ScreenShare(realtime::ScreenShareEvent),
+    AiAgentEnabled(realtime::AiAgentEnabledEvent),
     UserChannelAdded(realtime::UserChannelAdded),
     UserChannelRemoved(realtime::UserChannelRemoved),
     NotifUserChannel(api::NotificationUserChannel),
@@ -280,6 +281,7 @@ impl RealtimeEvent {
             Self::VoiceReaction(_) => "VoiceReaction",
             Self::VoiceInteractive(_) => "VoiceInteractive",
             Self::ScreenShare(_) => "ScreenShare",
+            Self::AiAgentEnabled(_) => "AiAgentEnabled",
             Self::UserChannelAdded(_) => "UserChannelAdded",
             Self::UserChannelRemoved(_) => "UserChannelRemoved",
             Self::NotifUserChannel(_) => "NotifUserChannel",
@@ -344,6 +346,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::VoiceReactionSend(m) => Ok(Self::VoiceReaction(m)),
             realtime::envelope::Message::VoiceInteractiveEvent(m) => Ok(Self::VoiceInteractive(m)),
             realtime::envelope::Message::ScreenShareEvent(m) => Ok(Self::ScreenShare(m)),
+            realtime::envelope::Message::AiagentEnabledEvent(m) => Ok(Self::AiAgentEnabled(m)),
             realtime::envelope::Message::UserChannelAddedEvent(m) => Ok(Self::UserChannelAdded(m)),
             realtime::envelope::Message::UserChannelRemovedEvent(m) => {
                 Ok(Self::UserChannelRemoved(m))
@@ -442,7 +445,7 @@ fn push_varint(buf: &mut Vec<u8>, mut value: u64) {
 }
 
 /// `TypeMessage.Ephemeral` — the message code carried by an ephemeral send.
-const EPHEMERAL_MESSAGE_CODE: i32 = 12;
+pub const EPHEMERAL_MESSAGE_CODE: i32 = 12;
 pub const MESSAGE_BUZZ_CODE: i32 = 8;
 pub const SHARE_CONTACT_CODE: i32 = 16;
 pub const SHARE_CONTACT_KEY: &str = "share_contact";
@@ -462,6 +465,7 @@ pub fn build_location_content_json(latitude: f64, longitude: f64) -> String {
     })
     .to_string()
 }
+
 pub const QUICK_MENU_TYPE_FLASH: i32 = 1;
 pub const QUICK_MENU_TYPE_QUICK: i32 = 2;
 const CHANNEL_TYPE_MEZON_VOICE: i32 = 10;
@@ -3259,6 +3263,58 @@ pub struct SendContent {
     pub markdowns: Vec<OutgoingMarkdown>,
 }
 
+#[allow(clippy::too_many_arguments)]
+fn ephemeral_message_send(
+    clan_id: i64,
+    channel_id: i64,
+    content: &str,
+    is_public: bool,
+    mode: i32,
+    mentions: Vec<OutgoingMention>,
+    hashtags: Vec<OutgoingHashtag>,
+    emojis: Vec<OutgoingEmoji>,
+    attachments: Vec<api::MessageAttachment>,
+    reply: Option<OutgoingReply>,
+    topic_id: i64,
+) -> realtime::ChannelMessageSend {
+    let sent = build_send_content(content, &mentions, &hashtags, &emojis);
+    let mention_everyone = sent.mentions.iter().any(OutgoingMention::is_here);
+    let proto_mentions: Vec<api::MessageMention> = sent
+        .mentions
+        .iter()
+        .filter_map(OutgoingMention::to_proto)
+        .collect();
+    let references = reply
+        .map(|reply| api::MessageRef {
+            message_ref_id: reply.message_ref_id,
+            content: reply.content,
+            has_attachment: reply.has_attachment,
+            ref_type: 0,
+            message_sender_id: reply.message_sender_id,
+            message_sender_username: reply.message_sender_username,
+            message_sender_avatar: reply.message_sender_avatar,
+            message_sender_clan_nick: reply.message_sender_clan_nick,
+            message_sender_display_name: reply.message_sender_display_name,
+            ..Default::default()
+        })
+        .into_iter()
+        .collect();
+    realtime::ChannelMessageSend {
+        clan_id,
+        channel_id,
+        content: sent.json,
+        mentions: proto_mentions,
+        attachments,
+        references,
+        mode,
+        is_public,
+        mention_everyone,
+        code: EPHEMERAL_MESSAGE_CODE,
+        topic_id,
+        ..Default::default()
+    }
+}
+
 pub fn build_send_content(
     text: &str,
     mentions: &[OutgoingMention],
@@ -5513,7 +5569,7 @@ impl MezonTransport {
             content: sent.text.clone(),
             content_raw: String::new(),
             content_tokens,
-            code: 0,
+            code: flags.message_code,
             sender_id: 0,
             sender_name: ack.username,
             avatar: String::new(),
@@ -8207,43 +8263,22 @@ impl MezonTransport {
         emojis: Vec<OutgoingEmoji>,
         attachments: Vec<api::MessageAttachment>,
         reply: Option<OutgoingReply>,
+        topic_id: i64,
     ) -> Result<()> {
         let cid = self.generate_cid();
-        let sent = build_send_content(content, &mentions, &hashtags, &emojis);
-        let mention_everyone = sent.mentions.iter().any(OutgoingMention::is_here);
-        let proto_mentions: Vec<api::MessageMention> = sent
-            .mentions
-            .iter()
-            .filter_map(OutgoingMention::to_proto)
-            .collect();
-        let references = reply
-            .map(|reply| api::MessageRef {
-                message_ref_id: reply.message_ref_id,
-                content: reply.content,
-                has_attachment: reply.has_attachment,
-                ref_type: 0,
-                message_sender_id: reply.message_sender_id,
-                message_sender_username: reply.message_sender_username,
-                message_sender_avatar: reply.message_sender_avatar,
-                message_sender_clan_nick: reply.message_sender_clan_nick,
-                message_sender_display_name: reply.message_sender_display_name,
-                ..Default::default()
-            })
-            .into_iter()
-            .collect();
-        let message = realtime::ChannelMessageSend {
+        let message = ephemeral_message_send(
             clan_id,
             channel_id,
-            content: sent.json,
-            mentions: proto_mentions,
-            attachments,
-            references,
-            mode,
+            content,
             is_public,
-            mention_everyone,
-            code: EPHEMERAL_MESSAGE_CODE,
-            ..Default::default()
-        };
+            mode,
+            mentions,
+            hashtags,
+            emojis,
+            attachments,
+            reply,
+            topic_id,
+        );
         let envelope = realtime::Envelope {
             cid: i32::from(cid),
             message: Some(realtime::envelope::Message::EphemeralMessageSend(
@@ -8258,6 +8293,46 @@ impl MezonTransport {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_ephemeral_message_to_bots(
+        &self,
+        receiver_ids: Vec<i64>,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        mentions: Vec<OutgoingMention>,
+        hashtags: Vec<OutgoingHashtag>,
+        emojis: Vec<OutgoingEmoji>,
+        attachments: Vec<api::MessageAttachment>,
+        reply: Option<OutgoingReply>,
+        topic_id: i64,
+    ) -> Result<realtime::ChannelMessageAck> {
+        let message = ephemeral_message_send(
+            clan_id,
+            channel_id,
+            content,
+            is_public,
+            mode,
+            mentions,
+            hashtags,
+            emojis,
+            attachments,
+            reply,
+            topic_id,
+        );
+        let body = realtime::EphemeralMessageSend {
+            message: Some(message),
+            receiver_ids,
+        }
+        .encode_to_vec();
+        let response = self
+            .send_api_request_over_http("SendEphemeralMessageToBots", body)
+            .await?;
+        Ok(realtime::ChannelMessageAck::decode(response.as_slice())?)
     }
 
     pub async fn write_message_typing(
@@ -9319,8 +9394,9 @@ impl MezonTransport {
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        bare_jwt(&response)
-            .ok_or_else(|| anyhow::anyhow!("RemoveParticipantMezonMeet returned no SFU action token"))
+        bare_jwt(&response).ok_or_else(|| {
+            anyhow::anyhow!("RemoveParticipantMezonMeet returned no SFU action token")
+        })
     }
 
     pub async fn mute_participant_mezon_meet(

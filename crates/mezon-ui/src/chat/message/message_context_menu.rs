@@ -1,8 +1,8 @@
 use gpui::{App, ClipboardItem, SharedString, WeakEntity, Window};
 use mezon_client::transport::QUICK_MENU_TYPE_QUICK;
 use mezon_store::{
-    AppConfig, ChannelPermissionsStore, DirectKind, DirectMessageStore, EmojiStore, Message,
-    MessageCode, MessageId, MessagesStore, PERMISSION_DELETE_MESSAGE, PinnedMessagesStore,
+    AppConfig, ChannelId, ChannelPermissionsStore, DirectKind, DirectMessageStore, EmojiStore,
+    Message, MessageCode, MessageId, MessagesStore, PERMISSION_DELETE_MESSAGE, PinnedMessagesStore,
     QuickMenuStore, ThreadsStore, TopicsStore,
 };
 
@@ -108,11 +108,17 @@ fn close_quick_menu_submenu(
     }
 }
 
-fn is_first_topic_message(message_id: MessageId, cx: &App) -> bool {
+fn is_first_topic_message(msg: &Message, cx: &App) -> bool {
     let topics = TopicsStore::global(cx).read(cx);
+    if topics
+        .active_topic_id()
+        .is_some_and(|topic_id| msg.channel_id == ChannelId(topic_id))
+    {
+        return false;
+    }
     topics
         .origin_message()
-        .is_some_and(|origin| origin.id == message_id)
+        .is_some_and(|origin| origin.id == msg.id)
 }
 
 fn channel_delete_blocked(msg: &Message, cx: &App) -> bool {
@@ -198,7 +204,7 @@ pub(crate) fn message_is_editable(msg: &Message, current_user_id: &str) -> bool 
 
 fn can_delete_message(msg: &Message, current_user_id: &str, is_topic_box: bool, cx: &App) -> bool {
     if is_topic_box {
-        if is_first_topic_message(msg.id, cx) {
+        if is_first_topic_message(msg, cx) {
             return false;
         }
     } else if channel_delete_blocked(msg, cx) {

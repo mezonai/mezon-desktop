@@ -103,6 +103,7 @@ pub struct TextArea {
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
     discard_ime_commit: Option<String>,
+    focused_at_prepaint: bool,
     last_lines: Vec<DocLine>,
     last_bounds: Option<Bounds<Pixels>>,
     line_height: Pixels,
@@ -155,6 +156,7 @@ impl TextArea {
             selection_reversed: false,
             marked_range: None,
             discard_ime_commit: None,
+            focused_at_prepaint: false,
             last_lines: Vec::new(),
             last_bounds: None,
             line_height: px(20.),
@@ -186,6 +188,7 @@ impl TextArea {
         })
         .detach();
         cx.on_blur(&focus_handle, window, |this, _window, cx| {
+            this.discard_ime_commit = None;
             this.caret_blink.sync_blurred(cx);
         })
         .detach();
@@ -1233,6 +1236,23 @@ impl IntoElement for TextAreaElement {
     }
 }
 
+fn reveal_on_focus(
+    input: &Entity<TextArea>,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let state = input.read(cx);
+    let focused = state.focus_handle.is_focused(window);
+    if focused == state.focused_at_prepaint {
+        return;
+    }
+    input.update(cx, |input, _| input.focused_at_prepaint = focused);
+    if focused {
+        window.request_autoscroll(bounds);
+    }
+}
+
 impl Element for TextAreaElement {
     type RequestLayoutState = ();
     type PrepaintState = PrepaintState;
@@ -1269,6 +1289,7 @@ impl Element for TextAreaElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        reveal_on_focus(&self.input, bounds, window, cx);
         let placeholder_color: Hsla = cx.theme().text_muted.into();
         let cursor_color: Hsla = cx.theme().brand.into();
         let selection_color: Hsla = cx.theme().brand.into();

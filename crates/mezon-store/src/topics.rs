@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
-use mezon_client::transport::OutgoingMessageFlags;
+use mezon_client::transport::{LOCATION_CODE, MESSAGE_BUZZ_CODE, OutgoingMessageFlags};
 use mezon_client::{
     AppApi, AttachmentUploadOutcome, ConnectionStatus, RealtimeEvent, TopicDiscussion, UploadFile,
     UrlAttachment, topic_discussion_from_api,
@@ -908,6 +908,7 @@ impl TopicsStore {
 
     pub fn should_close_on_message_deleted(
         &self,
+        deleted_in: ChannelId,
         message_id: MessageId,
         message_topic_id: Option<ChannelId>,
     ) -> bool {
@@ -915,6 +916,7 @@ impl TopicsStore {
             self.panel_open,
             &self.compose,
             &self.data,
+            deleted_in,
             message_id,
             message_topic_id,
         )
@@ -939,11 +941,12 @@ impl TopicsStore {
 
     pub fn maybe_close_on_message_deleted(
         &mut self,
+        deleted_in: ChannelId,
         message_id: MessageId,
         message_topic_id: Option<ChannelId>,
         cx: &mut Context<Self>,
     ) {
-        if self.should_close_on_message_deleted(message_id, message_topic_id) {
+        if self.should_close_on_message_deleted(deleted_in, message_id, message_topic_id) {
             self.close_panel(cx);
         }
     }
@@ -956,6 +959,42 @@ impl TopicsStore {
         content: String,
         content_tokens: OutgoingContent,
         attachments: Vec<OutgoingAttachment>,
+        cx: &mut Context<Self>,
+    ) {
+        self.submit_reply_with_code(content, content_tokens, attachments, 0, cx);
+    }
+
+    pub fn submit_buzz(&mut self, content: String, cx: &mut Context<Self>) {
+        if content.trim().is_empty() {
+            return;
+        }
+        self.submit_reply_with_code(
+            content,
+            OutgoingContent::default(),
+            Vec::new(),
+            MESSAGE_BUZZ_CODE,
+            cx,
+        );
+        MessagesStore::global(cx).update(cx, |store, cx| store.play_buzz_sound(cx));
+    }
+
+    pub fn submit_location(&mut self, latitude: f64, longitude: f64, cx: &mut Context<Self>) {
+        let link = mezon_client::transport::build_location_maps_link(latitude, longitude);
+        self.submit_reply_with_code(
+            link,
+            OutgoingContent::default(),
+            Vec::new(),
+            LOCATION_CODE,
+            cx,
+        );
+    }
+
+    fn submit_reply_with_code(
+        &mut self,
+        content: String,
+        content_tokens: OutgoingContent,
+        attachments: Vec<OutgoingAttachment>,
+        message_code: i32,
         cx: &mut Context<Self>,
     ) {
         let content = content.trim().to_string();
@@ -978,7 +1017,7 @@ impl TopicsStore {
         let anonymous = topic_anonymous_send(existing_topic_id, clan_id, cx);
         let send_flags = OutgoingMessageFlags {
             anonymous_message: anonymous,
-            message_code: 0,
+            message_code,
         };
         let has_attachments = !attachments.is_empty();
         // The reply row is built from the server's echo, which knows nothing about
@@ -999,7 +1038,7 @@ impl TopicsStore {
                 .take()
                 .map(|draft| mezon_client::transport::OutgoingReply {
                     message_ref_id: draft.message_ref_id.get(),
-                    content: draft.content_preview,
+                    content: draft.content_raw,
                     has_attachment: draft.has_attachment,
                     message_sender_id: draft.sender_id.get(),
                     message_sender_username: draft.sender_name.clone(),
@@ -1278,6 +1317,161 @@ impl TopicsStore {
         .detach();
     }
 
+    pub fn submit_ephemeral_reply(
+        &mut self,
+        receiver_id: i64,
+        content: String,
+        content_tokens: OutgoingContent,
+        attachments: Vec<OutgoingAttachment>,
+        cx: &mut Context<Self>,
+    ) {
+        let content = content.trim().to_string();
+        if (content.is_empty() && attachments.is_empty()) || self.compose.submitting {
+            return;
+        }
+        let (Some(parent_channel_id), Some(clan_id), Some(origin_message_id)) = (
+            self.compose.parent_channel_id,
+            self.compose.clan_id,
+            self.compose.origin_message_id,
+        ) else {
+            return;
+        };
+        let mode = self.compose.mode;
+        let is_public = self.compose.is_public;
+        let existing_topic_id = self.compose.active_topic_id;
+        if existing_topic_id.is_none() && !self.begin_topic_create(origin_message_id) {
+            return;
+        }
+        let reply_ref =
+            self.reply_target
+                .take()
+                .map(|draft| mezon_client::transport::OutgoingReply {
+                    message_ref_id: draft.message_ref_id.get(),
+                    content: draft.content_raw,
+                    has_attachment: draft.has_attachment,
+                    message_sender_id: draft.sender_id.get(),
+                    message_sender_username: draft.sender_name.clone(),
+                    message_sender_avatar: draft.sender_avatar,
+                    message_sender_clan_nick: String::new(),
+                    message_sender_display_name: draft.sender_name,
+                });
+        let transport_mentions: Vec<mezon_client::transport::OutgoingMention> = content_tokens
+            .mentions
+            .into_iter()
+            .map(OutgoingMention::into_transport)
+            .collect();
+        let transport_hashtags: Vec<mezon_client::transport::OutgoingHashtag> = content_tokens
+            .hashtags
+            .into_iter()
+            .map(OutgoingHashtag::into_transport)
+            .collect();
+        let transport_emojis: Vec<mezon_client::transport::OutgoingEmoji> = content_tokens
+            .emojis
+            .into_iter()
+            .map(OutgoingEmoji::into_transport)
+            .collect();
+
+        self.compose.submitting = true;
+        self.compose.creating = existing_topic_id.is_none();
+        self.compose.error = None;
+        cx.emit(TopicsEvent::ReplyTargetChanged);
+        cx.notify();
+
+        let generation = self.compose_generation;
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let fail =
+                |this: &gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp, e: anyhow::Error| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.finish_topic_create(origin_message_id);
+                        if this.compose_generation != generation {
+                            return;
+                        }
+                        this.compose.submitting = false;
+                        this.compose.creating = false;
+                        this.compose.error = Some(e.to_string());
+                        cx.notify();
+                    });
+                };
+            let topic_id = match existing_topic_id {
+                Some(id) => id,
+                None => match api
+                    .create_sd_topic(origin_message_id.get(), clan_id, parent_channel_id)
+                    .await
+                {
+                    Ok(topic) => topic.id,
+                    Err(e) => {
+                        tracing::error!("submit_ephemeral_reply create_sd_topic failed: {e}");
+                        fail(&this, cx, e);
+                        return;
+                    }
+                },
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.finish_topic_create(origin_message_id);
+                if this.compose_generation != generation {
+                    return;
+                }
+                this.compose.active_topic_id = Some(topic_id);
+                let creator_id = viewer_user_id(cx);
+                MessagesStore::global(cx).update(cx, |store, cx| {
+                    store.set_active_topic(Some(topic_id), cx);
+                    store.ensure_topic_bucket(topic_id);
+                    if existing_topic_id.is_none() {
+                        store.mark_message_as_topic(
+                            ChannelId(parent_channel_id),
+                            origin_message_id,
+                            topic_id,
+                            creator_id,
+                            cx,
+                        );
+                    }
+                });
+            });
+            let proto_attachments =
+                match crate::messages::upload_attachments_now(&api, attachments).await {
+                    Ok(attachments) => attachments,
+                    Err(e) => {
+                        tracing::error!("submit_ephemeral_reply attachments failed: {e}");
+                        fail(&this, cx, e);
+                        return;
+                    }
+                };
+            if let Err(e) = api
+                .write_ephemeral_message(
+                    receiver_id,
+                    clan_id,
+                    parent_channel_id,
+                    &content,
+                    is_public,
+                    mode,
+                    transport_mentions,
+                    transport_hashtags,
+                    transport_emojis,
+                    proto_attachments,
+                    reply_ref,
+                    topic_id,
+                )
+                .await
+            {
+                tracing::error!("submit_ephemeral_reply failed: {e}");
+                fail(&this, cx, e);
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                if this.compose_generation != generation {
+                    return;
+                }
+                this.compose.submitting = false;
+                this.compose.creating = false;
+                cx.emit(TopicsEvent::Updated);
+                cx.emit(TopicsEvent::ReplySent);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn begin_topic_create(&mut self, origin_message_id: MessageId) -> bool {
         if self.creating_topic_for == Some(origin_message_id) {
             return false;
@@ -1373,7 +1567,7 @@ impl TopicsStore {
                 .take()
                 .map(|draft| mezon_client::transport::OutgoingReply {
                     message_ref_id: draft.message_ref_id.get(),
-                    content: draft.content_preview,
+                    content: draft.content_raw,
                     has_attachment: draft.has_attachment,
                     message_sender_id: draft.sender_id.get(),
                     message_sender_username: draft.sender_name.clone(),
@@ -1607,10 +1801,14 @@ fn panel_should_close_on_message_deleted(
     panel_open: bool,
     compose: &TopicCompose,
     data: &TopicsData,
+    deleted_in: ChannelId,
     message_id: MessageId,
     message_topic_id: Option<ChannelId>,
 ) -> bool {
     if !panel_open {
+        return false;
+    }
+    if compose.active_topic_id == Some(deleted_in.get()) {
         return false;
     }
     if compose.origin_message_id == Some(message_id) {
@@ -2295,7 +2493,23 @@ mod tests {
             true,
             &compose,
             &data,
+            ChannelId(555),
             MessageId(900),
+            Some(ChannelId(555)),
+        ));
+    }
+
+    #[test]
+    fn deleting_a_reply_that_shares_the_origin_id_does_not_close_the_panel() {
+        let data = data_with_active_topic();
+        let compose = compose_for(100, 555);
+
+        assert!(!panel_should_close_on_message_deleted(
+            true,
+            &compose,
+            &data,
+            ChannelId(555),
+            MessageId(100),
             Some(ChannelId(555)),
         ));
     }
@@ -2309,6 +2523,7 @@ mod tests {
             true,
             &compose,
             &data,
+            ChannelId(10),
             MessageId(100),
             None,
         ));
@@ -2316,6 +2531,7 @@ mod tests {
             true,
             &compose,
             &data,
+            ChannelId(10),
             MessageId(100),
             Some(ChannelId(555)),
         ));
@@ -2333,6 +2549,7 @@ mod tests {
             true,
             &compose,
             &data,
+            ChannelId(10),
             MessageId(100),
             Some(ChannelId(555)),
         ));
@@ -2347,6 +2564,7 @@ mod tests {
             true,
             &compose,
             &data,
+            ChannelId(10),
             MessageId(700),
             Some(ChannelId(777)),
         ));
@@ -2361,6 +2579,7 @@ mod tests {
             false,
             &compose,
             &data,
+            ChannelId(10),
             MessageId(100),
             None,
         ));

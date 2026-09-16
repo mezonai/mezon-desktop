@@ -105,7 +105,7 @@ static VADisplay va_open_display_drm(int* drm_fd) {
   return NULL;
 }
 
-namespace livekit_ffi {
+namespace mezon_ffi {
 
 bool VaapiDisplayDrm::Open() {
   va_display_ = va_open_display_drm(&drm_fd_);
@@ -132,4 +132,4 @@ void VaapiDisplayDrm::Close() {
   }
 }
 
-}  // namespace livekit_ffi
+}

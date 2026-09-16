@@ -11,7 +11,7 @@ use mezon_client::transport::api_status_from_error;
 use mezon_client::transport::{ApiThreadDesc, THREAD_LIST_LIMIT};
 use mezon_proto::{api, realtime};
 
-use crate::channel::{Channel, ChannelEvent, ChannelList, ChannelType};
+use crate::channel::{Channel, ChannelEvent, ChannelList, ChannelType, validate_channel_name};
 use crate::channel_members::ChannelMembersStore;
 use crate::channel_permissions::{ChannelPermissionsStore, PERMISSION_MANAGE_THREAD};
 use crate::clan::ClanList;
@@ -86,6 +86,9 @@ pub enum ThreadCreateFailReason {
     Other,
 }
 
+/// A thread name must be longer than this many characters (web `MINIMUM_CHAT_NAME_LENGTH`).
+const THREAD_NAME_MIN_CHARS: usize = 3;
+
 pub struct ThreadsStore {
     list_channel_id: Option<String>,
     clan_id: Option<String>,
@@ -106,6 +109,9 @@ pub struct ThreadsStore {
     _create_task: Option<Task<()>>,
     create_private: i32,
     name_error: Option<String>,
+    /// The name currently in the form fails the character rule — shown under the field as the
+    /// user types, before any submit, the way web's `ThreadNameTextField` does.
+    name_live_invalid: bool,
     api: Arc<AppApi>,
     _channel_sub: Subscription,
     _conn_watch: Task<()>,
@@ -160,6 +166,7 @@ impl ThreadsStore {
             _create_task: None,
             create_private: 0,
             name_error: None,
+            name_live_invalid: false,
             api,
             _channel_sub: channel_sub,
             _conn_watch: conn_watch,
@@ -633,7 +640,26 @@ impl ThreadsStore {
     }
 
     pub fn name_error(&self) -> Option<&str> {
-        self.name_error.as_deref()
+        self.name_error
+            .as_deref()
+            .or(self.name_live_invalid.then_some("thread_name_invalid"))
+    }
+
+    /// The user is editing the form again: drop the last submit's inline error, the way
+    /// React's `ThreadNameTextField` resets `nameThreadError` on change.
+    pub fn clear_name_error(&mut self, cx: &mut Context<Self>) {
+        if self.name_error.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Live result of the character rule for the name in the form; only a change of verdict
+    /// repaints, so ordinary typing costs nothing here.
+    pub fn set_name_live_invalid(&mut self, invalid: bool, cx: &mut Context<Self>) {
+        if self.name_live_invalid != invalid {
+            self.name_live_invalid = invalid;
+            cx.notify();
+        }
     }
 
     pub fn show_threads_popover(&self, cx: &App) -> bool {
@@ -721,6 +747,7 @@ impl ThreadsStore {
         self.fetch_error = false;
         self.invalidate_create_request();
         self.name_error = None;
+        self.name_live_invalid = false;
         cx.notify();
     }
 
@@ -983,6 +1010,7 @@ impl ThreadsStore {
         self.submitting = false;
         self.create_private = 0;
         self.name_error = None;
+        self.name_live_invalid = false;
         cx.notify();
     }
 
@@ -999,6 +1027,7 @@ impl ThreadsStore {
         self.invalidate_create_request();
         self.create_private = 0;
         self.name_error = None;
+        self.name_live_invalid = false;
         cx.notify();
     }
 
@@ -1014,8 +1043,17 @@ impl ThreadsStore {
             return;
         }
         let name = name.trim().to_string();
-        if name.is_empty() {
+        // Web's `ThreadBox` rejects `length <= MINIMUM_CHAT_NAME_LENGTH` (3), so the shortest
+        // accepted name is four characters — what the "longer than 3" message promises.
+        if name.chars().count() <= THREAD_NAME_MIN_CHARS {
             self.name_error = Some("thread_name_too_short".into());
+            cx.notify();
+            return;
+        }
+        // Same rule as the web client's `ValidateSpecialCharacters`; the server rejects such a
+        // name too, but with a bare error code that only ever surfaced as "Something went wrong".
+        if validate_channel_name(&name).is_err() {
+            self.name_error = Some("thread_name_invalid".into());
             cx.notify();
             return;
         }

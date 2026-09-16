@@ -3,4 +3,4 @@ pub mod messages;
 pub mod mid;
 pub mod sdp;
 
-pub use engine::{ScreenTrack, SfuConfig, SfuEngine, SfuEvent, SfuPeer, SfuRole};
+pub use engine::{RemovalCause, ScreenTrack, SfuConfig, SfuEngine, SfuEvent, SfuPeer, SfuRole};

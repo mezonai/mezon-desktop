@@ -18,6 +18,8 @@ use libwebrtc::peer_connection_factory::{
     ContinualGatheringPolicy, IceServer, IceTransportsType, PeerConnectionFactory, RtcConfiguration,
 };
 use libwebrtc::prelude::{AudioFrame, AudioSourceOptions, MediaType, VideoBuffer};
+use libwebrtc::rtp_parameters::DegradationPreference;
+use libwebrtc::rtp_sender::RtpSender;
 use libwebrtc::rtp_transceiver::{RtpTransceiverDirection, RtpTransceiverInit};
 use libwebrtc::session_description::{SdpType, SessionDescription};
 use libwebrtc::stats::RtcStats;
@@ -153,6 +155,18 @@ impl Drop for CallEngine {
     fn drop(&mut self) {
         let _ = self.stop_tx.send(());
     }
+}
+
+fn attach_camera(sender: &RtpSender, track: &RtcVideoTrack) -> Result<()> {
+    sender
+        .set_track(Some(MediaStreamTrack::from(track.clone())))
+        .context("attach video track failed")?;
+    let mut parameters = sender.parameters();
+    parameters.set_degradation_preference(DegradationPreference::MaintainFramerate);
+    if let Err(e) = sender.set_parameters(parameters) {
+        tracing::warn!("call: camera degradation preference rejected: {e}");
+    }
+    Ok(())
 }
 
 async fn run_engine(
@@ -306,10 +320,7 @@ async fn run_engine(
         false,
     );
     let video_track = factory.create_video_track("call-camera", video_source.clone());
-    video_transceiver
-        .sender()
-        .set_track(Some(MediaStreamTrack::from(video_track.clone())))
-        .context("attach video track failed")?;
+    attach_camera(&video_transceiver.sender(), &video_track)?;
 
     let mic_enabled = Arc::new(AtomicBool::new(true));
     let mic_task = handle.spawn(mic_capture(

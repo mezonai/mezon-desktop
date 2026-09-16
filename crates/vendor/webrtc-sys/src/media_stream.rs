@@ -1,26 +1,12 @@
-// Copyright 2025 LiveKit, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 use crate::impl_thread_safety;
 
-#[cxx::bridge(namespace = "livekit_ffi")]
+#[cxx::bridge(namespace = "mezon_ffi")]
 pub mod ffi {
     extern "C++" {
-        include!("livekit/helper.h");
-        include!("livekit/media_stream_track.h");
-        include!("livekit/audio_track.h");
-        include!("livekit/video_track.h");
+        include!("mezon_rtc/helper.h");
+        include!("mezon_rtc/media_stream_track.h");
+        include!("mezon_rtc/audio_track.h");
+        include!("mezon_rtc/video_track.h");
 
         type MediaStreamTrack = crate::media_stream_track::ffi::MediaStreamTrack;
         type AudioTrack = crate::audio_track::ffi::AudioTrack;
@@ -30,7 +16,7 @@ pub mod ffi {
     }
 
     unsafe extern "C++" {
-        include!("livekit/media_stream.h");
+        include!("mezon_rtc/media_stream.h");
 
         type MediaStream;
 

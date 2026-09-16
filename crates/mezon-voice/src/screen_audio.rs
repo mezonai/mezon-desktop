@@ -71,9 +71,10 @@ mod linux {
         fn new(core: pw::core::Core) -> Self {
             Self {
                 own_pid: std::process::id().to_string(),
-                own_binary: std::env::current_exe()
-                    .ok()
-                    .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned())),
+                own_binary: std::env::current_exe().ok().and_then(|path| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                }),
                 core,
                 own_node: None,
                 own_ports: HashMap::new(),
@@ -188,7 +189,9 @@ mod linux {
                 .ports
                 .iter()
                 .filter(|(id, port)| {
-                    port.output && self.app_nodes.contains(&port.node) && !self.links.contains_key(id)
+                    port.output
+                        && self.app_nodes.contains(&port.node)
+                        && !self.links.contains_key(id)
                 })
                 .map(|(id, port)| (*id, port.channel.clone()))
                 .collect();
@@ -420,10 +423,10 @@ mod wasapi {
 
     use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
     use windows::Win32::Media::Audio::{
-        ActivateAudioInterfaceAsync, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
-        AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
-        AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
-        AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
+        AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+        AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS,
+        AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+        AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, ActivateAudioInterfaceAsync,
         IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
         IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient,
         PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
@@ -506,9 +509,8 @@ mod wasapi {
         let thread = std::thread::Builder::new()
             .name("mezon-screen-audio".into())
             .spawn(move || {
-                let com = unsafe {
-                    CoInitializeEx(None, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE)
-                };
+                let com =
+                    unsafe { CoInitializeEx(None, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE) };
                 if com.is_err() {
                     let _ = init_tx.try_send(Err(format!("screen audio COM init failed: {com}")));
                     return;
@@ -597,7 +599,8 @@ mod wasapi {
             let mut data: *mut u8 = std::ptr::null_mut();
             let mut frames: u32 = 0;
             let mut flags: u32 = 0;
-            if unsafe { capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None) }.is_err() {
+            if unsafe { capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None) }.is_err()
+            {
                 return;
             }
             if !*logged_first {

@@ -15,7 +15,7 @@ use crate::chat::message::{ReactionPicker, ReactionPickerEvent};
 use crate::components::primitives::{Icon, IconName, Input, InputEvent, InputState};
 use crate::theme::ActiveTheme;
 
-const PANEL_W: f32 = 500.;
+pub(super) const PANEL_W: f32 = 500.;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SubPanel {

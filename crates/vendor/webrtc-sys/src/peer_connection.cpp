@@ -1,36 +1,20 @@
-/*
- * Copyright 2025 LiveKit, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-#include "livekit/peer_connection.h"
-#include "livekit/peer_connection_factory.h"
+#include "mezon_rtc/peer_connection.h"
+#include "mezon_rtc/peer_connection_factory.h"
 
 #include <memory>
 
 #include "api/data_channel_interface.h"
 #include "api/peer_connection_interface.h"
 #include "api/scoped_refptr.h"
-#include "livekit/candidate.h"
-#include "livekit/data_channel.h"
-#include "livekit/jsep.h"
-#include "livekit/media_stream.h"
-#include "livekit/rtc_error.h"
-#include "livekit/rtp_transceiver.h"
+#include "mezon_rtc/candidate.h"
+#include "mezon_rtc/data_channel.h"
+#include "mezon_rtc/jsep.h"
+#include "mezon_rtc/media_stream.h"
+#include "mezon_rtc/rtc_error.h"
+#include "mezon_rtc/rtp_transceiver.h"
 #include "rtc_base/logging.h"
 
-namespace livekit_ffi {
+namespace mezon_ffi {
 
 webrtc::PeerConnectionInterface::RTCConfiguration to_native_rtc_configuration(
     RtcConfiguration config) {
@@ -473,4 +457,4 @@ void PeerConnection::OnInterestingUsage(int usage_pattern) {
   observer_->on_interesting_usage(usage_pattern);
 }
 
-}  // namespace livekit_ffi
+}

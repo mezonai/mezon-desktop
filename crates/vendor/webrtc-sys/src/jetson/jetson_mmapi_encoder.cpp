@@ -1,19 +1,3 @@
-/*
- * Copyright 2026 LiveKit, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 #include "jetson_mmapi_encoder.h"
 
 #include "jetson_plane_layout.h"
@@ -147,7 +131,7 @@ bool SetEncoderControl(NvVideoEncoder* encoder, uint32_t id, int32_t value) {
 
 }  // namespace
 
-namespace livekit {
+namespace mezon_rtc {
 
 JetsonMmapiEncoder::JetsonMmapiEncoder(JetsonCodec codec) : codec_(codec) {}
 
@@ -167,7 +151,7 @@ bool JetsonMmapiEncoder::IsCodecSupported(JetsonCodec codec) {
     return false;
   }
   std::unique_ptr<NvVideoEncoder> encoder(
-      NvVideoEncoder::createVideoEncoder("livekit-encoder"));
+      NvVideoEncoder::createVideoEncoder("mezon-encoder"));
   if (!encoder) {
     return false;
   }
@@ -365,7 +349,7 @@ void JetsonMmapiEncoder::SetKeyframeInterval(int keyframe_interval) {
 }
 
 bool JetsonMmapiEncoder::CreateEncoder() {
-  encoder_ = NvVideoEncoder::createVideoEncoder("livekit-encoder");
+  encoder_ = NvVideoEncoder::createVideoEncoder("mezon-encoder");
   if (!encoder_) {
     RTC_LOG(LS_ERROR) << "Failed to create NvVideoEncoder.";
     return false;
@@ -924,7 +908,7 @@ bool JetsonMmapiEncoder::DequeueCaptureBuffer(std::vector<uint8_t>* encoded,
   static std::atomic<bool> dumped(false);
   static std::atomic<bool> logged_env(false);
   static std::atomic<int> verbose_left(10);
-  const bool verbose = std::getenv("LK_DUMP_H264_VERBOSE") != nullptr;
+  const bool verbose = std::getenv("MEZON_DUMP_H264_VERBOSE") != nullptr;
   constexpr int kMaxEmptyRetries = 5;
   constexpr int kDequeueTimeoutMs = 1000;
   v4l2_buffer v4l2_buf = {};
@@ -981,11 +965,11 @@ bool JetsonMmapiEncoder::DequeueCaptureBuffer(std::vector<uint8_t>* encoded,
   }
 
   if (!dumped.load(std::memory_order_relaxed)) {
-    const char* dump_path = std::getenv("LK_DUMP_H264");
+    const char* dump_path = std::getenv("MEZON_DUMP_H264");
     if (!dump_path || dump_path[0] == '\0') {
       if (!logged_env.exchange(true)) {
         std::fprintf(stderr,
-                     "LK_DUMP_H264 not set; skipping H264 dump (MMAPI).\n");
+                     "MEZON_DUMP_H264 not set; skipping H264 dump (MMAPI).\n");
         std::fflush(stderr);
       }
     } else if (bytesused == 0) {
@@ -1002,13 +986,13 @@ bool JetsonMmapiEncoder::DequeueCaptureBuffer(std::vector<uint8_t>* encoded,
         if (out.good()) {
           std::fprintf(
               stderr,
-              "LK_DUMP_H264 set to %s but packet is empty (MMAPI); created "
+              "MEZON_DUMP_H264 set to %s but packet is empty (MMAPI); created "
               "empty dump file\n",
               dump_path);
           std::fflush(stderr);
         } else {
           std::fprintf(stderr,
-                       "Failed to open LK_DUMP_H264 path (MMAPI): %s\n",
+                       "Failed to open MEZON_DUMP_H264 path (MMAPI): %s\n",
                        dump_path);
           std::fflush(stderr);
         }
@@ -1032,7 +1016,7 @@ bool JetsonMmapiEncoder::DequeueCaptureBuffer(std::vector<uint8_t>* encoded,
         dumped.store(true, std::memory_order_relaxed);
       } else {
         std::fprintf(stderr,
-                     "Failed to open LK_DUMP_H264 path (MMAPI): %s\n",
+                     "Failed to open MEZON_DUMP_H264 path (MMAPI): %s\n",
                      dump_path);
         std::fflush(stderr);
       }
@@ -1212,4 +1196,4 @@ bool JetsonMmapiEncoder::ForceKeyframe() {
   return encoder_->setExtControls(controls) == 0;
 }
 
-}  // namespace livekit
+}

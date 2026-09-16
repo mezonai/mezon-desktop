@@ -222,6 +222,27 @@ extern "C" fn did_receive_notification_response(
 }
 
 #[cfg(target_os = "macos")]
+const PRESENT_BANNER_LIST_SOUND: usize = (1 << 4) | (1 << 3) | (1 << 1);
+
+#[cfg(target_os = "macos")]
+extern "C" fn will_present_notification(
+    _this: &objc::runtime::Object,
+    _sel: objc::runtime::Sel,
+    _center: *mut objc::runtime::Object,
+    _notification: *mut objc::runtime::Object,
+    completion: *mut objc::runtime::Object,
+) {
+    tracing::debug!(target: "noti", "presenting a notification while the app is active");
+    if completion.is_null() {
+        return;
+    }
+    unsafe {
+        let block = completion as *mut block::Block<(usize,), ()>;
+        (*block).call((PRESENT_BANNER_LIST_SOUND,));
+    }
+}
+
+#[cfg(target_os = "macos")]
 unsafe fn nsstring_to_string(s: *mut objc::runtime::Object) -> Option<String> {
     use objc::{msg_send, sel, sel_impl};
 
@@ -258,6 +279,12 @@ fn install_notification_delegate(center: *mut objc::runtime::Object) {
         decl.add_method(
             sel!(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:),
             callback,
+        );
+        let present: extern "C" fn(&Object, Sel, *mut Object, *mut Object, *mut Object) =
+            will_present_notification;
+        decl.add_method(
+            sel!(userNotificationCenter:willPresentNotification:withCompletionHandler:),
+            present,
         );
         let cls: &Class = decl.register();
         let instance: *mut Object = msg_send![cls, new];

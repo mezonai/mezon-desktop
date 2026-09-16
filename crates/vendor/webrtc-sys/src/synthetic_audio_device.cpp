@@ -1,27 +1,11 @@
-/*
- * Copyright 2025 LiveKit, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-#include "livekit/synthetic_audio_device.h"
+#include "mezon_rtc/synthetic_audio_device.h"
 
 const int kSampleRate = 48000;
 const int kChannels = 2;
 const int kBytesPerSample = kChannels * sizeof(int16_t);
 const int kSamplesPer10Ms = kSampleRate / 100;
 
-namespace livekit_ffi {
+namespace mezon_ffi {
 
 SyntheticAudioDevice::SyntheticAudioDevice(const webrtc::Environment& env)
     : env_(env),
@@ -332,4 +316,4 @@ int32_t SyntheticAudioDevice::SetObserver(webrtc::AudioDeviceObserver* observer)
   return 0;
 }
 
-}  // namespace livekit_ffi
+}

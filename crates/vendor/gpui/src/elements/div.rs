@@ -1614,6 +1614,33 @@ impl ParentElement for Div {
     }
 }
 
+fn autoscroll_delta(container: Bounds<Pixels>, target: Bounds<Pixels>) -> Point<Pixels> {
+    fn axis_delta(lo: Pixels, hi: Pixels, target_lo: Pixels, target_hi: Pixels) -> Pixels {
+        let mut delta = Pixels::ZERO;
+        if target_hi > hi {
+            delta = hi - target_hi;
+        }
+        if target_lo + delta < lo {
+            delta = lo - target_lo;
+        }
+        delta
+    }
+    point(
+        axis_delta(
+            container.left(),
+            container.right(),
+            target.left(),
+            target.right(),
+        ),
+        axis_delta(
+            container.top(),
+            container.bottom(),
+            target.top(),
+            target.bottom(),
+        ),
+    )
+}
+
 impl Element for Div {
     type RequestLayoutState = DivFrameState;
     type PrepaintState = Option<Hitbox>;
@@ -1730,6 +1757,7 @@ impl Element for Div {
             scroll_handle.scroll_to_active_item();
         }
 
+        let autoscroll_offset = self.interactivity.scroll_offset.clone();
         self.interactivity.prepaint(
             global_id,
             inspector_id,
@@ -1745,6 +1773,9 @@ impl Element for Div {
 
                 window.with_image_cache(image_cache, |window| {
                     window.with_element_offset(scroll_offset, |window| {
+                        let outer_autoscroll = autoscroll_offset
+                            .as_ref()
+                            .and_then(|_| window.take_autoscroll());
                         if let Some(order_fn) = &self.prepaint_order_fn {
                             let order = order_fn(window, cx);
                             for idx in order {
@@ -1755,6 +1786,19 @@ impl Element for Div {
                         } else {
                             for child in &mut self.children {
                                 child.prepaint(window, cx);
+                            }
+                        }
+                        if let Some(offset) = autoscroll_offset.as_ref() {
+                            if let Some(target) = window.take_autoscroll() {
+                                let delta = autoscroll_delta(bounds, target);
+                                if delta != Point::default() {
+                                    let mut offset = offset.borrow_mut();
+                                    offset.x += delta.x;
+                                    offset.y += delta.y;
+                                    window.request_animation_frame();
+                                }
+                            } else if let Some(outer) = outer_autoscroll {
+                                window.request_autoscroll(outer);
                             }
                         }
                     });

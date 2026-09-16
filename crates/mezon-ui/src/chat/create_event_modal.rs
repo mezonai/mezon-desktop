@@ -12,7 +12,8 @@ use std::rc::Rc;
 use crate::app::shell::Shell;
 use crate::components::primitives::{
     Button, ButtonVariants, DatePicker, DatePickerEvent, Dropdown, DropdownPlacement,
-    DropdownTriggerStyle, Icon, IconName, Input, InputEvent, InputState, TextArea, TextAreaEvent,
+    DropdownTriggerStyle, FocusCycle, Icon, IconName, Input, InputEvent, InputState, TextArea,
+    TextAreaEvent,
 };
 use crate::theme::ActiveTheme;
 
@@ -1558,6 +1559,13 @@ impl Render for CreateEventModal {
             Step::Details => self.details_content(cx),
             Step::Review => self.review_content(cx),
         };
+        let fields: Vec<FocusHandle> = match self.step {
+            Step::Details => vec![
+                self.topic.focus_handle(cx),
+                self.description.focus_handle(cx),
+            ],
+            Step::Location | Step::Review => Vec::new(),
+        };
         let footer = div()
             .mt_5()
             .flex_shrink_0()
@@ -1618,7 +1626,7 @@ impl Render for CreateEventModal {
             );
         let card = div()
             .track_focus(&self.focus_handle)
-            .key_context("menu")
+            .focus_cycle_with_context("menu", fields)
             .on_action(cx.listener(|this, _: &::menu::Cancel, window, cx| {
                 if !this.creating {
                     this.return_to_events(window, cx)

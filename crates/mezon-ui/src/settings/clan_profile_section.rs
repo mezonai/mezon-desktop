@@ -333,9 +333,7 @@ impl ClanProfileSection {
         });
         self.refresh_banner_color(cx);
         cx.notify();
-        self.clan_list.update(cx, |clans, cx| {
-            clans.subscribe_clan_realtime(clan_id_value, cx);
-        });
+        ClanList::subscribe_clan_realtime(clan_id_value, cx);
         AccountStore::global(cx)
             .update(cx, |store, cx| store.fetch_clan_profile(clan_id_value, cx));
     }

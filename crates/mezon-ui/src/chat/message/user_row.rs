@@ -139,7 +139,7 @@ pub fn render_user_message(
     let shows_text_content =
         !editing && msg.call_log.is_none() && msg.code != MessageCode::SendToken;
     if ephemeral && shows_text_content {
-        body_column = body_column.child(render_ephemeral_notice(ctx));
+        body_column = body_column.child(render_ephemeral_notice(msg, ctx));
     }
 
     if msg.ogp.is_some()
@@ -309,7 +309,7 @@ pub fn render_user_message(
             )
         })
         .when(has_reply && !ephemeral, |d| {
-            d.child(render_reply(&msg.references[0], ctx))
+            d.child(render_reply(msg, &msg.references[0], ctx))
         })
         .child(body)
         .when(interactive && hover_actions_visible(msg, ctx), |d| {
@@ -322,7 +322,8 @@ pub fn render_user_message(
         .into_any_element()
 }
 
-fn render_ephemeral_notice(ctx: &RowCtx) -> AnyElement {
+fn render_ephemeral_notice(msg: &Message, ctx: &RowCtx) -> AnyElement {
+    let message_id = msg.id;
     div()
         .flex()
         .items_center()
@@ -339,6 +340,20 @@ fn render_ephemeral_notice(ctx: &RowCtx) -> AnyElement {
                 .text_color(ctx.theme.tokens.text_theme_primary),
         )
         .child(mezon_i18n::t(ctx.locale, "message.onlyVisibleToRecipient"))
+        .child("·")
+        .child(
+            div()
+                .id(("ephemeral-dismiss", msg.row_anchor_id.0 as usize))
+                .cursor_pointer()
+                .not_italic()
+                .text_color(rgb(super::context::REPLY_USERNAME_COLOR))
+                .hover(|s| s.underline())
+                .child(mezon_i18n::t(ctx.locale, "message.dismissMessage"))
+                .on_click(move |_, _, cx| {
+                    mezon_store::MessagesStore::global(cx)
+                        .update(cx, |store, cx| store.dismiss_local_message(message_id, cx));
+                }),
+        )
         .into_any_element()
 }
 

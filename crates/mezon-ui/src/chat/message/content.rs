@@ -11,7 +11,7 @@ use gpui::{
 use mezon_store::{
     AppConfig, ChannelId, ChannelList, ChannelType, ClanId, Embed, LinkKind, Message, MessageCode,
     MessageId, MessageSpan, PlatformStore, ProfileContext, RichClick, RichLayout, RichRunKind,
-    RichToken, UserId, is_here_user_id,
+    RichToken, UserId, invite_id_from_url, is_clan_invite_url, is_here_user_id,
 };
 
 use ui::Clickable;
@@ -692,6 +692,11 @@ fn render_selectable_segmented_spans(
                     match piece {
                         CachedSelectableTextPiece::LineBreak => {
                             row = row.child(div().w_full().h_0());
+                        }
+                        CachedSelectableTextPiece::EmptyLine => {
+                            // An empty text still lays out one line tall, which is exactly
+                            // the gap wanted; `w_full` keeps it on a row of its own.
+                            row = row.child(div().w_full().child(SharedString::default()));
                         }
                         CachedSelectableTextPiece::Text { text, range } => {
                             let chunk_base = base + range.start;
@@ -1449,6 +1454,9 @@ pub(crate) enum CachedSelectableTextPiece {
         range: Range<usize>,
     },
     LineBreak,
+    /// A line with nothing on it (`\n\n` in the source): a break alone is zero-height, so the
+    /// blank line the author typed with Shift+Enter has to reserve a line of its own.
+    EmptyLine,
 }
 
 fn memoized_selectable_text_pieces(
@@ -1465,11 +1473,32 @@ fn memoized_selectable_text_pieces(
         return pieces;
     }
 
+    let pieces: Rc<[CachedSelectableTextPiece]> = build_selectable_text_pieces(text).into();
+    let mut memo = ctx.row_memo.borrow_mut();
+    if memo.selection_text_pieces.len() >= SELECTABLE_TEXT_PIECE_LIMIT
+        && !memo.selection_text_pieces.contains_key(text)
+    {
+        memo.selection_text_pieces.clear();
+    }
+    memo.selection_text_pieces
+        .insert(text.clone(), pieces.clone());
+    pieces
+}
+
+fn build_selectable_text_pieces(text: &str) -> Vec<CachedSelectableTextPiece> {
     let mut pieces = Vec::new();
     let mut line_base = 0usize;
+    let line_count = text.split('\n').count();
     for (line_index, line) in text.split('\n').enumerate() {
         if line_index > 0 {
             pieces.push(CachedSelectableTextPiece::LineBreak);
+        }
+        // Only a line *between* two breaks is a blank line the author typed; a newline that
+        // merely ends the span (say, right before a code block) is just the break itself.
+        if line.trim().is_empty() && line_index > 0 && line_index + 1 < line_count {
+            pieces.push(CachedSelectableTextPiece::EmptyLine);
+            line_base += line.len() + 1;
+            continue;
         }
         for range in selectable_text_chunks(line) {
             let chunk = &line[range.clone()];
@@ -1499,15 +1528,6 @@ fn memoized_selectable_text_pieces(
         }
         line_base += line.len() + 1;
     }
-    let pieces: Rc<[CachedSelectableTextPiece]> = pieces.into();
-    let mut memo = ctx.row_memo.borrow_mut();
-    if memo.selection_text_pieces.len() >= SELECTABLE_TEXT_PIECE_LIMIT
-        && !memo.selection_text_pieces.contains_key(text)
-    {
-        memo.selection_text_pieces.clear();
-    }
-    memo.selection_text_pieces
-        .insert(text.clone(), pieces.clone());
     pieces
 }
 
@@ -2213,9 +2233,9 @@ fn render_hashtag_chip(chip: HashtagChip, ctx: &RowCtx) -> AnyElement {
     }
 }
 
-struct HashtagChip {
-    label: SharedString,
-    icon: IconName,
+pub(super) struct HashtagChip {
+    pub(super) label: SharedString,
+    pub(super) icon: IconName,
     italic: bool,
     channel_id: Option<ChannelId>,
 }
@@ -2225,7 +2245,12 @@ struct ResolvedHashtag {
     icon: IconName,
 }
 
-fn hashtag_chip(display: &str, channel_id: Option<&str>, locale: &str, cx: &App) -> HashtagChip {
+pub(super) fn hashtag_chip(
+    display: &str,
+    channel_id: Option<&str>,
+    locale: &str,
+    cx: &App,
+) -> HashtagChip {
     let parsed_channel = channel_id.and_then(parse_channel_id);
     let resolved = parsed_channel.and_then(|cid| hashtag_channel(cid, cx));
     hashtag_chip_for(display, parsed_channel, resolved, locale)
@@ -2578,9 +2603,20 @@ pub(crate) fn open_message_link(url: String, cx: &mut App) {
     if url.is_empty() {
         return;
     }
+    if let Some(invite_id) = clan_invite_id(&url, cx) {
+        crate::invite::join_clan_modal::JoinClanModal::open(invite_id, cx);
+        return;
+    }
     if let Some(store) = PlatformStore::try_global(cx) {
         let _ = store.read(cx).open_url_external(&url);
     }
+}
+
+fn clan_invite_id(url: &str, cx: &App) -> Option<String> {
+    let cfg = AppConfig::try_global(cx)?;
+    is_clan_invite_url(url, Some(&cfg.domain_url))
+        .then(|| invite_id_from_url(url))
+        .flatten()
 }
 
 pub(crate) fn resolve_message_link_url(url: &str, text: &str) -> String {
@@ -2866,6 +2902,7 @@ fn split_unbreakable(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::{CachedSelectableTextPiece, build_selectable_text_pieces};
     use super::{
         INLINE_ICON_PLACEHOLDER, INLINE_ICON_RESERVE, RichRunPalette, RichTextRenderPlan,
         SelectableSectionCursor, parse_channel_id, rich_highlights_with_link_hover,
@@ -2873,6 +2910,34 @@ mod tests {
         selectable_message_layout_identity, selectable_text_chunks,
     };
     use gpui::{Hsla, SharedString};
+
+    fn piece_shape(text: &str) -> String {
+        build_selectable_text_pieces(text)
+            .iter()
+            .map(|p| match p {
+                CachedSelectableTextPiece::Text { text, .. } => text.to_string(),
+                CachedSelectableTextPiece::LineBreak => "⏎".into(),
+                CachedSelectableTextPiece::EmptyLine => "▯".into(),
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    #[test]
+    fn a_blank_line_between_two_breaks_reserves_a_line() {
+        assert_eq!(piece_shape("a\nb"), "a|⏎|b");
+        assert_eq!(piece_shape("a\n\nb"), "a|⏎|▯|⏎|b");
+        assert_eq!(piece_shape("a\n\n\nb"), "a|⏎|▯|⏎|▯|⏎|b");
+        assert_eq!(piece_shape("a\n  \nb"), "a|⏎|▯|⏎|b");
+    }
+
+    #[test]
+    fn a_newline_that_merely_ends_or_starts_the_span_is_only_a_break() {
+        // The text before / after a code block carries the fence's newline.
+        assert_eq!(piece_shape("a\n"), "a|⏎");
+        assert_eq!(piece_shape("\nb"), "⏎|b");
+        assert_eq!(piece_shape("a\n\n"), "a|⏎|▯|⏎");
+    }
     use mezon_store::{ChannelId, Message, MessageId, MessageSpan, RichRunKind, build_rich_layout};
 
     /// The shaped string and the string selection indexes into carry different characters

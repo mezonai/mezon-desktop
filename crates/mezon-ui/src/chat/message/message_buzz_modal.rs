@@ -2,7 +2,7 @@ use gpui::{
     App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, Render, SharedString,
     Subscription, Window, div, prelude::*, px,
 };
-use mezon_store::MessagesStore;
+use mezon_store::{MessagesStore, TopicsStore};
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{Button, ButtonVariants, InputEvent, InputState};
@@ -13,6 +13,7 @@ const MAX_BUZZ_LEN: usize = 160;
 pub struct MessageBuzzModal {
     focus_handle: FocusHandle,
     locale: SharedString,
+    for_topic: bool,
     message: Entity<InputState>,
     _message_sub: Subscription,
 }
@@ -24,7 +25,7 @@ impl Focusable for MessageBuzzModal {
 }
 
 impl MessageBuzzModal {
-    pub fn open(locale: SharedString, window: &mut Window, cx: &mut App) {
+    pub fn open(locale: SharedString, for_topic: bool, window: &mut Window, cx: &mut App) {
         if Shell::global(cx).read(cx).has_modal() {
             return;
         }
@@ -47,6 +48,7 @@ impl MessageBuzzModal {
             Self {
                 focus_handle: cx.focus_handle(),
                 locale,
+                for_topic,
                 message,
                 _message_sub: message_sub,
             }
@@ -68,9 +70,13 @@ impl MessageBuzzModal {
         if text.is_empty() {
             return;
         }
-        MessagesStore::global(cx).update(cx, |store, cx| {
-            store.send_buzz_message(text, cx);
-        });
+        if self.for_topic {
+            TopicsStore::global(cx).update(cx, |store, cx| store.submit_buzz(text, cx));
+        } else {
+            MessagesStore::global(cx).update(cx, |store, cx| {
+                store.send_buzz_message(text, cx);
+            });
+        }
         Self::close(cx);
     }
 }

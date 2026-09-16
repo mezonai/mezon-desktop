@@ -164,6 +164,7 @@ pub fn copy_image_url_to_clipboard(
 }
 
 pub type OpenUrlFn = Arc<dyn Fn(&str) -> anyhow::Result<()> + Send + Sync>;
+pub type OpenManagedAppWindowFn = Arc<dyn Fn(&str, &str) -> anyhow::Result<()> + Send + Sync>;
 /// Download `url` and save it locally under the given suggested filename.
 pub type SaveAttachmentFn = Arc<dyn Fn(&str, &str) -> anyhow::Result<()> + Send + Sync>;
 pub type NotifyFn = Arc<dyn Fn(DesktopNotification) + Send + Sync>;
@@ -213,6 +214,7 @@ pub struct DesktopNotification {
 pub struct PlatformStore {
     open_url: Option<OpenUrlFn>,
     open_url_app_window: Option<OpenUrlFn>,
+    open_managed_app_window: Option<OpenManagedAppWindowFn>,
     save_attachment: Option<SaveAttachmentFn>,
     notifier: Option<NotifyFn>,
     cli_install: Option<CliInstallHooks>,
@@ -226,6 +228,7 @@ impl PlatformStore {
         let entity = cx.new(|_| Self {
             open_url: None,
             open_url_app_window: None,
+            open_managed_app_window: None,
             save_attachment: None,
             notifier: None,
             cli_install: None,
@@ -263,6 +266,18 @@ impl PlatformStore {
         entity.update(cx, |store, _| {
             store.open_url_app_window = Some(f);
         });
+    }
+
+    pub fn set_open_managed_app_window(
+        entity: &Entity<Self>,
+        f: OpenManagedAppWindowFn,
+        cx: &mut App,
+    ) {
+        entity.update(cx, |store, _| store.open_managed_app_window = Some(f));
+    }
+
+    pub fn managed_app_window_opener(&self) -> Option<OpenManagedAppWindowFn> {
+        self.open_managed_app_window.clone()
     }
 
     /// Hand back the toolbar-less-window opener, falling back to the normal-tab

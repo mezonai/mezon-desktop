@@ -21,6 +21,18 @@ fn topic_remember_key(channel_id: &str, message_id: &str) -> String {
     format!("{channel_id}:{message_id}")
 }
 
+fn message_key(notification: &InboxNotification) -> Option<(String, String)> {
+    Some((
+        notification.effective_channel_id()?,
+        notification.effective_message_id()?,
+    ))
+}
+
+fn remember_key(notification: &InboxNotification) -> Option<String> {
+    message_key(notification)
+        .map(|(channel_id, message_id)| topic_remember_key(&channel_id, &message_id))
+}
+
 #[derive(Debug, Clone)]
 pub enum InboxEvent {
     Updated { clan_id: Option<String> },
@@ -275,15 +287,11 @@ impl InboxStore {
     ) -> bool {
         self.remember_topic_id(&notification);
         let bucket = self.bucket_mut(category);
-        let incoming_message_id = notification.effective_message_id();
+        let incoming_key = message_key(&notification);
         if let Some(pos) = bucket.items.iter().position(|existing| {
             let same_id =
                 existing.id == notification.id && existing.channel_id == notification.channel_id;
-            same_id
-                || incoming_message_id.as_deref().is_some_and(|message_id| {
-                    existing.channel_id == notification.channel_id
-                        && existing.effective_message_id().as_deref() == Some(message_id)
-                })
+            same_id || (incoming_key.is_some() && message_key(existing) == incoming_key)
         }) {
             let existing = bucket.items.remove(pos);
             let existing_topic_id = existing.topic_id.clone();
@@ -340,16 +348,13 @@ impl InboxStore {
     }
 
     fn remember_topic_id(&mut self, notification: &InboxNotification) {
-        let Some(message_id) = notification.effective_message_id() else {
+        let Some(key) = remember_key(notification) else {
             return;
         };
         let Some(topic_id) = notification.effective_topic_id() else {
             return;
         };
-        self.topic_by_message.insert(
-            topic_remember_key(&notification.channel_id, &message_id),
-            topic_id,
-        );
+        self.topic_by_message.insert(key, topic_id);
     }
 
     fn apply_remembered_topic_ids(
@@ -358,10 +363,9 @@ impl InboxStore {
     ) -> HashSet<String> {
         let mut touched = HashSet::new();
         for item in items {
-            let Some(message_id) = item.effective_message_id() else {
+            let Some(key) = remember_key(item) else {
                 continue;
             };
-            let key = topic_remember_key(&item.channel_id, &message_id);
             touched.insert(key.clone());
             if has_concrete_topic_id(item) {
                 continue;
@@ -378,10 +382,8 @@ impl InboxStore {
     }
 
     fn drop_pending_duplicates(items: &mut Vec<InboxNotification>, incoming: &[InboxNotification]) {
-        let incoming_keys: HashSet<(String, String)> = incoming
-            .iter()
-            .filter_map(|n| Some((n.channel_id.clone(), n.effective_message_id()?)))
-            .collect();
+        let incoming_keys: HashSet<(String, String)> =
+            incoming.iter().filter_map(message_key).collect();
         if incoming_keys.is_empty() {
             return;
         }
@@ -389,9 +391,7 @@ impl InboxStore {
             if !is_pending_inbox_notification_id(&existing.id) {
                 return true;
             }
-            existing.effective_message_id().is_none_or(|message_id| {
-                !incoming_keys.contains(&(existing.channel_id.clone(), message_id))
-            })
+            message_key(existing).is_none_or(|key| !incoming_keys.contains(&key))
         });
     }
 
@@ -400,10 +400,8 @@ impl InboxStore {
         fetched: Vec<InboxNotification>,
     ) -> Vec<InboxNotification> {
         let fetched_ids: HashSet<String> = fetched.iter().map(|n| n.id.clone()).collect();
-        let fetched_keys: HashSet<(String, String)> = fetched
-            .iter()
-            .filter_map(|n| Some((n.channel_id.clone(), n.effective_message_id()?)))
-            .collect();
+        let fetched_keys: HashSet<(String, String)> =
+            fetched.iter().filter_map(message_key).collect();
         let mut merged: Vec<InboxNotification> = local
             .into_iter()
             .filter(|item| {
@@ -411,9 +409,7 @@ impl InboxStore {
                     return false;
                 }
                 if is_pending_inbox_notification_id(&item.id) {
-                    return item.effective_message_id().is_none_or(|message_id| {
-                        !fetched_keys.contains(&(item.channel_id.clone(), message_id))
-                    });
+                    return message_key(item).is_none_or(|key| !fetched_keys.contains(&key));
                 }
                 true
             })
@@ -510,14 +506,7 @@ impl InboxStore {
             }
             return;
         };
-        let present: HashSet<String> = bucket
-            .items
-            .iter()
-            .filter_map(|item| {
-                let message_id = item.effective_message_id()?;
-                Some(topic_remember_key(&item.channel_id, &message_id))
-            })
-            .collect();
+        let present: HashSet<String> = bucket.items.iter().filter_map(remember_key).collect();
         for key in touched.difference(&present) {
             self.topic_by_message.remove(key);
         }
@@ -873,6 +862,18 @@ mod tests {
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].id, "500");
         assert_eq!(merged[1].id, "10");
+    }
+
+    #[test]
+    fn first_page_drops_the_pending_copy_when_the_server_row_names_the_channel_only_in_its_preview()
+    {
+        let mut pending = notification_with_message("pending-7-99", "99", 100);
+        pending.channel_id = "7".into();
+        let mut fetched = notification_with_message("500", "99", 200);
+        fetched.channel_id = "0".into();
+        let merged = InboxStore::merge_server_page(vec![pending], vec![fetched]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, "500");
     }
 
     #[test]

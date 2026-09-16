@@ -335,9 +335,7 @@ impl PinnedPopoverPanel {
             })
             .or_else(|| {
                 state.segment_registry.iter().find_map(|(id, entry)| {
-                    let Some((top, bottom)) = entry.vertical_bounds() else {
-                        return None;
-                    };
+                    let (top, bottom) = entry.vertical_bounds()?;
                     if position.y < top || position.y > bottom {
                         return None;
                     }

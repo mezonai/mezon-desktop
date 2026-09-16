@@ -31,6 +31,32 @@ impl ChatSending {
         });
     }
 
+    pub fn send_to_bots(
+        bot_id: i64,
+        content: impl Into<String>,
+        content_tokens: OutgoingContent,
+        attachments: Vec<OutgoingAttachment>,
+        auth_state: &Entity<AuthState>,
+        cx: &mut App,
+    ) {
+        let content = content.into();
+        if content.is_empty() && content_tokens.is_empty() && attachments.is_empty() {
+            return;
+        }
+        let (uid, uname) = Self::current_user(auth_state, cx);
+        MessagesStore::global(cx).update(cx, |store, cx| {
+            store.send_message_to_bots(
+                bot_id,
+                content,
+                uid,
+                uname,
+                content_tokens,
+                attachments,
+                cx,
+            );
+        });
+    }
+
     pub fn send_ephemeral(
         receiver_id: i64,
         content: impl Into<String>,

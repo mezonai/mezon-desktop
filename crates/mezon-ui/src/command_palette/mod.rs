@@ -290,10 +290,26 @@ impl CommandPaletteModal {
             return;
         }
 
-        let ctrlk = CtrlKSearchStore::global(cx).read(cx);
-        let state = ctrlk.state();
-        self.items = Rc::new(build_palette_items_from_ctrlk(state, cx));
-        self.filtered = Rc::new(sort_palette_indices(self.items.as_ref(), query));
+        let ctrlk = CtrlKSearchStore::global(cx);
+        if !ctrlk.read(cx).has_settled_response() {
+            self.items = Rc::new(build_palette_items(cx));
+            self.recompute_local_filtered(cx, previous_selection);
+            return;
+        }
+
+        let (items, in_flight) = {
+            let store = ctrlk.read(cx);
+            (
+                build_palette_items_from_ctrlk(store.state(), cx),
+                store.state().is_searching,
+            )
+        };
+        self.items = Rc::new(items);
+        self.filtered = Rc::new(if in_flight {
+            filter_and_sort_indices(self.items.as_ref(), query)
+        } else {
+            sort_palette_indices(self.items.as_ref(), query)
+        });
         self.display_rows = Rc::new(build_display_rows(
             self.items.as_ref(),
             self.filtered.as_ref(),
@@ -335,14 +351,6 @@ impl CommandPaletteModal {
                 find_visible_row_by_item_id(self.display_rows.as_ref(), self.items.as_ref(), id)
             })
             .unwrap_or_else(|| first_selectable_row(self.display_rows.as_ref()));
-    }
-
-    fn ctrlk_searching(&self, cx: &App) -> bool {
-        let (api_text, _) = parse_ctrlk_query(&self.debounced_query);
-        if self.debounced_query.trim().is_empty() || api_text.is_empty() {
-            return false;
-        }
-        CtrlKSearchStore::global(cx).read(cx).state().is_searching
     }
 
     fn selected_item_id(&self) -> Option<PaletteItemId> {
@@ -522,21 +530,7 @@ impl Render for CommandPaletteModal {
 
         let count = self.display_rows.len();
         let search_query = self.debounced_query.trim().to_string();
-        let ctrlk_searching = self.ctrlk_searching(cx);
-        let list = if count == 0 && ctrlk_searching {
-            div()
-                .id("command-palette-list")
-                .flex_shrink_0()
-                .max_h(px(250.))
-                .min_h(px(120.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .px_4()
-                .text_size(px(14.))
-                .text_color(theme.tokens.text_theme_primary)
-                .child(mezon_i18n::t(&locale, "channelTopbar.loading"))
-        } else if count == 0 {
+        let list = if count == 0 {
             div()
                 .id("command-palette-list")
                 .flex_shrink_0()

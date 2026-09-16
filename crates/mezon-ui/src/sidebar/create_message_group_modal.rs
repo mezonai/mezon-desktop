@@ -296,22 +296,6 @@ fn remaining_group_capacity(selected_count: usize, unselected_count: usize) -> u
         .min(unselected_count)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::remaining_group_capacity;
-    use mezon_store::MAX_GROUP_MEMBERS;
-
-    #[test]
-    fn required_dm_peer_does_not_reduce_available_friend_count_twice() {
-        assert_eq!(remaining_group_capacity(1, 5), 5);
-    }
-
-    #[test]
-    fn remaining_count_respects_group_member_limit() {
-        assert_eq!(remaining_group_capacity(MAX_GROUP_MEMBERS - 2, 5), 1);
-    }
-}
-
 impl Render for CreateMessageGroupModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
@@ -451,5 +435,21 @@ impl Render for CreateMessageGroupModal {
             .child(list_body)
             .child(div().p(px(20.)).child(create_button))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remaining_group_capacity;
+    use mezon_store::MAX_GROUP_MEMBERS;
+
+    #[test]
+    fn required_dm_peer_does_not_reduce_available_friend_count_twice() {
+        assert_eq!(remaining_group_capacity(1, 5), 5);
+    }
+
+    #[test]
+    fn remaining_count_respects_group_member_limit() {
+        assert_eq!(remaining_group_capacity(MAX_GROUP_MEMBERS - 2, 5), 1);
     }
 }

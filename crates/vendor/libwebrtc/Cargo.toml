@@ -4,8 +4,8 @@ version = "0.3.44"
 edition = "2021"
 publish = false
 license = "Apache-2.0"
-description = "Safe bindings to libwebrtc, vendored from livekit/rust-sdks and trimmed to the modules this workspace uses"
-repository = "https://github.com/livekit/rust-sdks"
+description = "Safe bindings to libwebrtc, trimmed to the modules this workspace uses"
+repository = "https://github.com/mezonai/mezon-desktop"
 
 [lib]
 name = "libwebrtc"

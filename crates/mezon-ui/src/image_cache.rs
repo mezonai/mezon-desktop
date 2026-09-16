@@ -1370,6 +1370,10 @@ impl LruImageCache {
     pub fn prefetch(&mut self, resource: &Resource, window: &mut Window, cx: &mut App) {
         let _ = self.load(resource, window, cx);
     }
+
+    pub fn is_resident(&self, resource: &Resource) -> bool {
+        self.cache.contains_key(&hash(resource))
+    }
 }
 
 impl ImageCache for LruImageCache {
@@ -2676,6 +2680,150 @@ mod tests {
                      current frame requested, or budget eviction blinks them"
                 );
             });
+        });
+    }
+
+    #[gpui::test]
+    fn residency_covers_loaded_and_in_flight_entries_only(cx: &mut gpui::TestAppContext) {
+        fn entry(item: ImageCacheItem) -> CacheEntry {
+            let (abort, _reg) = AbortHandle::new_pair();
+            CacheEntry {
+                item,
+                abort,
+                bytes: None,
+                touched_epoch: 0,
+                last_used: Instant::now(),
+                failed_at: None,
+            }
+        }
+
+        cx.update(|cx| {
+            let cache = cx.new(|cx| LruImageCache::new(4, 1024, cx));
+            cache.update(cx, |cache, _| {
+                let loaded = Resource::Uri("https://cdn.example/loaded.webp".into());
+                let in_flight = Resource::Uri("https://cdn.example/in-flight.webp".into());
+                let never_requested = Resource::Uri("https://cdn.example/fresh.webp".into());
+                cache.cache.insert(
+                    hash(&loaded),
+                    entry(ImageCacheItem::Loaded(Err(ImageCacheError::Asset(
+                        "test".into(),
+                    )))),
+                );
+                cache.cache.insert(
+                    hash(&in_flight),
+                    entry(ImageCacheItem::Loading(
+                        gpui::Task::ready(Err(ImageCacheError::Asset("test".into()))).shared(),
+                    )),
+                );
+                assert!(cache.is_resident(&loaded));
+                assert!(
+                    cache.is_resident(&Resource::Uri(
+                        gpui::SharedString::from("https://cdn.example/loaded.webp").into()
+                    )),
+                    "the key built from the cell's SharedString must hash like the one img() \
+                     builds from a String, or the grid never sees its own entries"
+                );
+                assert!(
+                    cache.is_resident(&in_flight),
+                    "a request already queued keeps its element so it paints when it lands"
+                );
+                assert!(
+                    !cache.is_resident(&never_requested),
+                    "a cell that has never asked for its image must not be treated as loaded, \
+                     or the sticker grid would paint it mid-scroll and enqueue the fetch"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn an_unswept_cache_still_holds_to_its_item_and_byte_budgets(cx: &mut gpui::TestAppContext) {
+        const SIDE: u32 = 32;
+        const ENTRY_BYTES: u64 = (SIDE * SIDE * 4) as u64;
+        const MAX_ITEMS: usize = 8;
+        const MAX_BYTES: u64 = ENTRY_BYTES * 4;
+
+        fn loaded(touched_epoch: u64) -> CacheEntry {
+            let (abort, _reg) = AbortHandle::new_pair();
+            let pixels = image::RgbaImage::from_pixel(SIDE, SIDE, image::Rgba([0, 0, 0, 255]));
+            let image = Arc::new(RenderImage::new(vec![image::Frame::new(pixels)]));
+            assert_eq!(image_bytes(&image), ENTRY_BYTES);
+            CacheEntry {
+                item: ImageCacheItem::Loaded(Ok(image)),
+                abort,
+                bytes: Some(ENTRY_BYTES),
+                touched_epoch,
+                last_used: Instant::now(),
+                failed_at: None,
+            }
+        }
+
+        let cx = cx.add_empty_window();
+        cx.update(|window, cx| {
+            let cache = cx.new(|cx| LruImageCache::new(MAX_ITEMS, MAX_BYTES, cx));
+            cache.update(cx, |cache, cx| {
+                for epoch in 0..64u64 {
+                    cache.epoch = epoch;
+                    let key = hash(&Resource::Uri(
+                        format!("https://cdn.example/{epoch}.webp").into(),
+                    ));
+                    cache.cache.insert(key, loaded(epoch));
+                    cache.total_bytes += ENTRY_BYTES;
+                    cache.evict_to_budget(window, cx);
+                    assert!(
+                        cache.cache.len() <= MAX_ITEMS && cache.total_bytes <= MAX_BYTES,
+                        "a surface that never sweeps relies on the budget alone to bound its \
+                         memory; at epoch {epoch} it holds {} entries / {} bytes",
+                        cache.cache.len(),
+                        cache.total_bytes
+                    );
+                }
+                let newest = hash(&Resource::Uri("https://cdn.example/63.webp".into()));
+                let oldest = hash(&Resource::Uri("https://cdn.example/0.webp".into()));
+                assert!(cache.cache.contains_key(&newest));
+                assert!(
+                    !cache.cache.contains_key(&oldest),
+                    "eviction must drop the least recently used entry, not a recent one"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn releasing_the_cache_entity_queues_every_decoded_image_for_the_atlas(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        fn loaded() -> CacheEntry {
+            let (abort, _reg) = AbortHandle::new_pair();
+            let pixels = image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 0, 255]));
+            CacheEntry {
+                item: ImageCacheItem::Loaded(Ok(Arc::new(RenderImage::new(vec![
+                    image::Frame::new(pixels),
+                ])))),
+                abort,
+                bytes: Some(64),
+                touched_epoch: 0,
+                last_used: Instant::now(),
+                failed_at: None,
+            }
+        }
+
+        cx.update(|cx| {
+            cx.default_global::<PendingAtlasDrops>().0.clear();
+            let cache = cx.new(|cx| LruImageCache::new(8, 1 << 20, cx));
+            cache.update(cx, |cache, _| {
+                for key in 0..3u64 {
+                    cache.cache.insert(key, loaded());
+                }
+            });
+        });
+        cx.update(|cx| {
+            assert_eq!(
+                cx.default_global::<PendingAtlasDrops>().0.len(),
+                3,
+                "a picker that keeps its cache while open must hand every image back when it \
+                 closes, or each open/close cycle pins another screenful in the atlas"
+            );
         });
     }
 

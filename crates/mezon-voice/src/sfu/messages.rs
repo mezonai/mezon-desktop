@@ -205,7 +205,10 @@ mod tests {
     fn push_to_talk_carries_the_active_flag() {
         let got: serde_json::Value =
             serde_json::to_value(ClientMessage::PushToTalk { active: true }).expect("serialize");
-        assert_eq!(got, serde_json::json!({"type": "push_to_talk", "active": true}));
+        assert_eq!(
+            got,
+            serde_json::json!({"type": "push_to_talk", "active": true})
+        );
     }
 
     #[test]

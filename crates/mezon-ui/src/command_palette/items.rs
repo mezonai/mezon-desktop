@@ -12,6 +12,7 @@ use mezon_store::{
 };
 
 use crate::SHOW_UNREAD_BADGE_COUNT;
+use crate::components::compositions::channel_row::voice_busy_tag;
 use crate::components::primitives::Avatar;
 use crate::theme::Theme;
 use crate::util::assets::AVATAR_GROUP;
@@ -663,43 +664,28 @@ pub fn render_palette_row(
             ))
     });
 
-    let row_content = match item.kind {
-        PaletteItemKind::Channel => div()
-            .flex_1()
-            .min_w_0()
-            .w_full()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .child(leading)
-                    .child(label),
-            )
-            .children(subtext)
-            .into_any_element(),
-        PaletteItemKind::Direct | PaletteItemKind::Member => div()
-            .flex_1()
-            .min_w_0()
-            .w_full()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .overflow_hidden()
-            .child(leading)
-            .child(label)
-            .children(subtext)
-            .into_any_element(),
-    };
+    let row_content = div()
+        .flex_1()
+        .min_w_0()
+        .w_full()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .min_w_0()
+                .overflow_hidden()
+                .child(leading)
+                .child(label),
+        )
+        .children(subtext)
+        .into_any_element();
 
     let mut row = div()
         .id(format!(
@@ -782,14 +768,7 @@ fn render_palette_label(
         .min_w_0()
         .overflow_hidden()
         .child(label)
-        .child(
-            div()
-                .flex_shrink_0()
-                .text_size(px(15.))
-                .italic()
-                .text_color(theme.danger_text)
-                .child("(busy)"),
-        )
+        .child(voice_busy_tag(theme))
         .into_any_element()
 }
 

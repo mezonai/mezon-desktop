@@ -2,15 +2,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt as _, App, Context, Entity, FontWeight, Hsla, MouseButton, RenderImage,
-    Subscription, Task, Window, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
-    rgba, svg, white,
+    Animation, AnimationExt as _, App, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla,
+    MouseButton, RenderImage, Subscription, Task, Window, div, img, linear_color_stop,
+    linear_gradient, prelude::*, px, rgb, rgba, svg, white,
 };
 use mezon_store::{AuthState, LoginMethod, LoginStore, Session, Settings, WalletStore};
 
 use crate::app::window_controls;
 use crate::components::compositions::OtpInput;
-use crate::components::primitives::{Input, InputEvent, InputState, Spinner};
+use crate::components::primitives::{FocusCycle, Input, InputEvent, InputState, Spinner};
 
 pub struct LoginView {
     auth_state: Entity<AuthState>,
@@ -541,6 +541,27 @@ impl LoginView {
         });
     }
 
+    fn form_fields(&self, cx: &App) -> Vec<FocusHandle> {
+        let text_field = |input: &Option<Entity<InputState>>| {
+            input
+                .as_ref()
+                .map(|input| input.focus_handle(cx))
+                .into_iter()
+        };
+
+        match self.method {
+            LoginMethod::Password => text_field(&self.email_input)
+                .chain(text_field(&self.password_input))
+                .collect(),
+            LoginMethod::Otp if self.otp_step == 0 => Vec::new(),
+            LoginMethod::Otp => self
+                .otp_input
+                .as_ref()
+                .map(|otp| otp.read(cx).field_handles(cx))
+                .unwrap_or_default(),
+        }
+    }
+
     fn render_otp_form(&self, locale: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
         let show_loading = self.show_loading;
         let mut col = div().flex().flex_col();
@@ -880,7 +901,8 @@ impl Render for LoginView {
         left_col = match self.method {
             LoginMethod::Otp => left_col.child(self.render_otp_form(&locale, cx)),
             LoginMethod::Password => left_col.child(self.render_password_form(&locale, cx)),
-        };
+        }
+        .focus_cycle(self.form_fields(cx));
 
         if !on_otp_step1 {
             let checked = self.is_remember;

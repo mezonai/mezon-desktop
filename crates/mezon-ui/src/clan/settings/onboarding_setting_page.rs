@@ -2276,9 +2276,19 @@ impl OnboardingSettingPage {
                     ),
             )
             .into_any_element();
+        let fields = match editor {
+            Editor::Answer {
+                title, description, ..
+            }
+            | Editor::Resource {
+                title, description, ..
+            } => vec![title.focus_handle(cx), description.focus_handle(cx)],
+            Editor::Mission { .. } => Vec::new(),
+        };
         Some(onboarding_modal::editor_modal(
             body,
             footer,
+            fields,
             theme,
             move |_, _, cx| {
                 let _ = close.update(cx, |this, cx| {

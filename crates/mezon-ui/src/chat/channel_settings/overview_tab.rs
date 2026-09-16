@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use gpui::{
-    App, Context, Entity, FontWeight, ObjectFit, SharedString, Subscription, Task, Window, div,
-    img, prelude::*, px, rgb,
+    App, Context, Entity, Focusable, FontWeight, ObjectFit, SharedString, Subscription, Task,
+    Window, div, img, prelude::*, px, rgb,
 };
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelType, ClanId, MAX_CHANNEL_TOPIC_CHARS,
@@ -13,8 +13,8 @@ use mezon_store::{
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{
-    Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, Switch, TextArea,
-    TextAreaEvent, TextAreaField, h_flex, v_flex,
+    Button, ButtonVariants, FocusCycle, Icon, IconName, Input, InputEvent, InputState, Switch,
+    TextArea, TextAreaEvent, TextAreaField, h_flex, v_flex,
 };
 use crate::theme::{ActiveTheme, Theme};
 use crate::util::assets::{CHANNEL_SETTING_LOGO_DARK, CHANNEL_SETTING_LOGO_LIGHT};
@@ -871,6 +871,12 @@ impl Render for OverviewTab {
 
         v_flex()
             .id("channel-overview-tab")
+            .when(can_edit, |el| {
+                el.focus_cycle([
+                    self.name_input.focus_handle(cx),
+                    self.topic_input.focus_handle(cx),
+                ])
+            })
             .w_full()
             .text_size(px(15.0))
             .child(

@@ -1,6 +1,8 @@
 use gpui::SharedString;
 use mezon_store::{AppChannel, ChannelType};
 
+use super::drag::ChannelReorderDrag;
+
 #[derive(Clone, PartialEq)]
 pub(super) struct VoiceMemberSlot {
     pub(super) user_id: String,
@@ -65,5 +67,10 @@ pub(super) enum SidebarItem {
         line_below: bool,
         voice_members: Vec<VoiceMemberSlot>,
         voice_compact: bool,
+        /// What dragging this row would carry, and so also what a drop onto it lands beside.
+        /// `None` while its category is collapsed: the rows still drawn there are the few
+        /// with something to say, and an order dragged out of that handful would mean
+        /// nothing once the rest came back.
+        reorder: Option<ChannelReorderDrag>,
     },
 }

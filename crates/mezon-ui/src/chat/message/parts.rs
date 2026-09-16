@@ -8,19 +8,23 @@ use gpui::{
     SharedString, Transformation, Window, div, img, prelude::*, px, radians, rems, rgba,
 };
 use mezon_store::{
-    AccountStore, AlbumLayout, AppConfig, AttachmentSeedInput, BadgeService, ChannelType, ClanId,
-    ClanList, ClanMembersStore, Emoji, Message, MessageAttachment, MessageCode, MessageId,
-    MessageReference, MessagesStore, ProfileContext, Reaction, ThreadsStore, TopicsStore, UserId,
-    UsersByUserStore, ViewerMedia, resolve_avatar_url, resolve_user_profile,
+    AccountStore, AlbumLayout, AppConfig, AttachmentSeedInput, BadgeService, ChannelId,
+    ChannelType, ClanId, ClanList, ClanMembersStore, Emoji, Message, MessageAttachment,
+    MessageCode, MessageId, MessageReference, MessageSpan, MessagesStore, ProfileContext, Reaction,
+    ThreadsStore, TopicsStore, UserId, UsersByUserStore, ViewerMedia, resolve_avatar_url,
+    resolve_user_profile,
 };
 use smallvec::SmallVec;
 
 use super::audio_player::{
     AudioActivation, audio_failed_pill, audio_pill, audio_sending_pill, audio_time_label,
 };
-use super::content::{SELECTION_BG, SelectableTextContext, profile_popover_trigger};
+use super::content::{
+    INLINE_ICON_RESERVE, SELECTION_BG, SelectableTextContext, hashtag_chip, profile_popover_trigger,
+};
 use super::context::{REPLY_USERNAME_COLOR, ROW_MEMO_CAPACITY, RecentEmojiCell, RowCtx};
 use super::gif_video::GifVideoView;
+use super::inline_content::{IconOverlay, InlineContent, StyledRun};
 use super::reaction_detail::{UserReactionPanel, emoji_error_fallback};
 use super::selection::{SelectableRegion, TextSegment};
 use super::time::format_message_time;
@@ -499,7 +503,7 @@ fn profile_name_trigger(msg: &Message, ctx: &RowCtx, name: gpui::Div) -> AnyElem
     .into_any_element()
 }
 
-pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
+pub fn render_reply(msg: &Message, reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     if reference.message_ref_id.is_zero() {
         return div()
@@ -565,6 +569,11 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
     };
 
     let jump_target = reference.message_ref_id;
+    let topic_bucket = ctx
+        .is_topic_box
+        .then(|| TopicsStore::global(ctx.app).read(ctx.app).active_topic_id())
+        .flatten()
+        .filter(|topic_id| msg.channel_id == ChannelId(*topic_id));
     div()
         .id(("reply", reference.message_ref_id.0 as usize))
         .flex()
@@ -578,8 +587,10 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
         .cursor_pointer()
         .when(!jump_target.is_zero(), |d| {
             d.on_click(move |_, _, cx| {
-                MessagesStore::global(cx)
-                    .update(cx, |store, cx| store.jump_to_message(jump_target, None, cx));
+                MessagesStore::global(cx).update(cx, |store, cx| match topic_bucket {
+                    Some(topic_id) => store.request_topic_jump(topic_id, jump_target, cx),
+                    None => store.jump_to_message(jump_target, None, cx),
+                });
             })
         })
         .child(
@@ -631,6 +642,8 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
                 .child("📊")
                 .child(mezon_i18n::t(ctx.locale, "message.poll.pollLabel"))
                 .into_any_element()
+        } else if !is_deleted && !reference.preview_spans.is_empty() {
+            render_reply_preview_spans(reference, &reference.preview_spans, ctx)
         } else {
             div()
                 .flex_1()
@@ -641,6 +654,76 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
                 .child(reference.content_preview.clone())
                 .into_any_element()
         })
+        .into_any_element()
+}
+
+fn render_reply_preview_spans(
+    reference: &MessageReference,
+    spans: &[MessageSpan],
+    ctx: &RowCtx,
+) -> AnyElement {
+    let theme = ctx.theme;
+    let mention_color: Hsla = theme.tokens.mention_color.into();
+    let mention_bg: Hsla = theme.tokens.mention_primary.into();
+    let body: Hsla = theme.tokens.text_theme_message.into();
+    let mut text = String::new();
+    let mut runs: Vec<StyledRun> = Vec::new();
+    let mut icons: Vec<IconOverlay> = Vec::new();
+    for span in spans {
+        match span {
+            MessageSpan::Hashtag {
+                display,
+                channel_id,
+            } => {
+                let chip = hashtag_chip(display, channel_id.as_deref(), ctx.locale, ctx.app);
+                if !text.is_empty() && !text.ends_with(' ') {
+                    text.push(' ');
+                }
+                let icon_index = text.len();
+                text.push(INLINE_ICON_RESERVE);
+                let label_index = text.len();
+                text.push_str(&chip.label);
+                let end = text.len();
+                runs.push(StyledRun {
+                    range: icon_index..label_index,
+                    color: None,
+                    background: Some(mention_bg),
+                    font_weight: Some(FontWeight::NORMAL),
+                    fade_out: Some(1.),
+                });
+                runs.push(StyledRun {
+                    range: label_index..end,
+                    color: Some(mention_color),
+                    background: Some(mention_bg),
+                    font_weight: None,
+                    fade_out: None,
+                });
+                icons.push(IconOverlay {
+                    byte_index: icon_index,
+                    end_index: label_index,
+                    icon: chip.icon,
+                    color: mention_color,
+                });
+                text.push(' ');
+            }
+            MessageSpan::Text(chunk) => text.push_str(chunk),
+            _ => {}
+        }
+    }
+    div()
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .child(InlineContent::new(
+            ("reply-preview", reference.message_ref_id.0 as usize),
+            text.into(),
+            runs,
+            icons,
+            Vec::new(),
+            body,
+            None,
+            ctx.selection.clone(),
+        ))
         .into_any_element()
 }
 

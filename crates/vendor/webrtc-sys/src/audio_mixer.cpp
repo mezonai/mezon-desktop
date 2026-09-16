@@ -1,20 +1,4 @@
-/*
- * Copyright 2025 LiveKit, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-#include "livekit/audio_mixer.h"
+#include "mezon_rtc/audio_mixer.h"
 
 #include <iostream>
 #include <memory>
@@ -24,7 +8,7 @@
 #include "modules/audio_mixer/audio_mixer_impl.h"
 #include "webrtc-sys/src/audio_mixer.rs.h"
 
-namespace livekit_ffi {
+namespace mezon_ffi {
 
 AudioMixer::AudioMixer() {
   audio_mixer_ = webrtc::AudioMixerImpl::Create();
@@ -79,12 +63,12 @@ AudioMixerSource::GetAudioFrameWithInfo(int sample_rate,
                                         webrtc::AudioFrame* audio_frame) {
   NativeAudioFrame frame(audio_frame);
 
-  livekit_ffi::AudioFrameInfo result =
+  mezon_ffi::AudioFrameInfo result =
       source_->get_audio_frame_with_info(sample_rate, frame);
 
-  if (result == livekit_ffi::AudioFrameInfo::Normal) {
+  if (result == mezon_ffi::AudioFrameInfo::Normal) {
     return webrtc::AudioMixer::Source::AudioFrameInfo::kNormal;
-  } else if (result == livekit_ffi::AudioFrameInfo::Muted) {
+  } else if (result == mezon_ffi::AudioFrameInfo::Muted) {
     return webrtc::AudioMixer::Source::AudioFrameInfo::kMuted;
   } else {
     return webrtc::AudioMixer::Source::AudioFrameInfo::kError;
@@ -102,4 +86,4 @@ void NativeAudioFrame::update_frame(uint32_t timestamp,
                       num_channels);
 }
 
-}  // namespace livekit_ffi
+}
