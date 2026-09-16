@@ -129,7 +129,7 @@ async fn run_session(
     event_tx: Sender<StreamEvent>,
     runtime_handle: tokio::runtime::Handle,
 ) {
-    if let Err(_err) = run_session_inner(
+    if let Err(err) = run_session_inner(
         config,
         frame_store,
         audio,
@@ -139,7 +139,9 @@ async fn run_session(
     )
     .await
     {
-        tracing::warn!("stream session ended with error");
+        // The chain never carries the URL (and so never the token): tungstenite reports a
+        // refused upgrade as a bare status line.
+        tracing::warn!("stream session ended with error: {err:#}");
         let _ = event_tx.send(StreamEvent::Error("Stream connection failed".to_string()));
     }
     let _ = event_tx.send(StreamEvent::Disconnected);
@@ -157,6 +159,11 @@ async fn run_session_inner(
     let (ws_stream, _) = connect_async(url.as_str())
         .await
         .context("stream websocket connect failed")?;
+    tracing::info!(
+        "stream signaling connected channel_id={} stream_id={}",
+        config.channel_id,
+        config.stream_id
+    );
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
     let (outbound_tx, outbound_rx) = flume::unbounded::<OutboundMessage>();
 
@@ -280,6 +287,10 @@ async fn run_session_inner(
                         let Some(value) = inbound.value.as_ref() else { continue; };
                         let channels = parse_channels(value);
                         let is_live = channels.iter().any(|id| id == &config.stream_id);
+                        tracing::info!(
+                            "stream channels update: live={is_live} broadcasting={}",
+                            channels.len()
+                        );
                         if is_live && !live {
                             live = true;
                             send_ws(
