@@ -735,11 +735,11 @@ fn parse_message_preview_json(bytes: &[u8]) -> Option<InboxMessagePreview> {
     if preview.content.is_empty() && !preview.raw_content.is_empty() {
         preview.content = display_text_from_message_content(&preview.raw_content);
     }
-    apply_preview_attachments(&mut preview);
     apply_first_attachment(
         &mut preview,
         &serde_json::json!({ "attachments": raw.attachments }),
     );
+    apply_preview_attachments(&mut preview);
     Some(preview)
 }
 
@@ -1175,6 +1175,29 @@ mod tests {
         assert!(preview.content.is_empty());
         assert_eq!(preview.attachment_link, "https://cdn/a.pdf");
         assert_eq!(preview.attachment_type, "application/pdf");
+    }
+
+    #[test]
+    fn saved_inbox_fcm_restores_original_attachment_metadata() {
+        let fcm = api::DirectFcmProto {
+            message_id: 42,
+            attachment_link: "https://cdn/2100167210931589120.txt".into(),
+            attachment_type: "text/plain".into(),
+            has_more_attachment: true,
+            content: serde_json::json!({
+                "t": "",
+                "attachments": [
+                    {"url": "https://cdn/2100167210931589120.txt", "filename": "2 - Copy.txt", "size": 57651, "filetype": "text/plain"},
+                    {"url": "https://cdn/other.txt", "filename": "2.txt", "size": 57651}
+                ]
+            }).to_string(),
+            ..Default::default()
+        };
+        let preview = parse_notification_content(&fcm.encode_to_vec()).unwrap();
+        assert_eq!(preview.attachment_filename, "2 - Copy.txt");
+        assert_eq!(preview.attachment_size, 57651);
+        assert_eq!(preview.attachment_link, fcm.attachment_link);
+        assert!(preview.has_more_attachment);
     }
 
     #[test]

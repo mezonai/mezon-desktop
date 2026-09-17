@@ -3363,6 +3363,33 @@ impl MessagesStore {
                 size: i32::try_from(att.size).unwrap_or(0),
             })
             .collect();
+
+        let content_json = if attachments.is_empty() {
+            content_json
+        } else {
+            let mut content = serde_json::from_str::<serde_json::Value>(&content_json)
+                .ok()
+                .filter(serde_json::Value::is_object)
+                .unwrap_or_else(|| serde_json::json!({ "t": msg.content }));
+            content["attachments"] = serde_json::Value::Array(
+                attachments
+                    .iter()
+                    .map(|att| {
+                        serde_json::json!({
+                            "url": att.url,
+                            "filename": att.filename,
+                            "filetype": att.filetype,
+                            "size": att.size,
+                            "thumbnail": att.thumbnail,
+                            "width": att.width,
+                            "height": att.height,
+                            "duration": att.duration,
+                        })
+                    })
+                    .collect(),
+            );
+            content.to_string()
+        };
         let first_attachment = attachments.first();
         let attachment_link = first_attachment
             .map(|att| att.url.clone())
