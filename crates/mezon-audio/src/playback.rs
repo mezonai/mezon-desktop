@@ -1,7 +1,11 @@
 use std::cell::{Cell, RefCell};
 use std::num::{NonZeroU16, NonZeroU32};
 use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use parking_lot::Mutex;
+use rodio::cpal;
+use rodio::cpal::traits::{DeviceTrait, HostTrait};
 use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,20 +16,110 @@ use crate::stream::{ChunkState, PcmStream};
 
 const STREAM_SPAN: usize = 32_768;
 
+static PREFERRED_OUTPUT: Mutex<Option<String>> = Mutex::new(None);
+
 thread_local! {
-    static SHARED_SINK: RefCell<Weak<MixerDeviceSink>> = const { RefCell::new(Weak::new()) };
+    static SHARED_SINK: RefCell<Weak<SharedSink>> = const { RefCell::new(Weak::new()) };
 }
 
-fn shared_sink() -> Result<Rc<MixerDeviceSink>, AudioError> {
+pub fn set_output_device(device_id: Option<String>) {
+    let mut preferred = PREFERRED_OUTPUT.lock();
+    if *preferred != device_id {
+        tracing::info!(device_id = ?device_id, "sound output device preference changed");
+        *preferred = device_id;
+    }
+}
+
+struct SharedSink {
+    sink: MixerDeviceSink,
+    requested: String,
+    broken: Arc<AtomicBool>,
+}
+
+fn requested_output(host: &cpal::Host) -> String {
+    if let Some(id) = PREFERRED_OUTPUT.lock().clone() {
+        return id;
+    }
+    host.default_output_device()
+        .and_then(|device| device.id().ok())
+        .map(|id| id.to_string())
+        .unwrap_or_default()
+}
+
+fn find_output(host: &cpal::Host, id: &str) -> Option<cpal::Device> {
+    host.output_devices()
+        .ok()?
+        .find(|device| matches!(device.id(), Ok(found) if found.to_string() == id))
+}
+
+fn open_on(device: cpal::Device, broken: Arc<AtomicBool>) -> Result<MixerDeviceSink, String> {
+    DeviceSinkBuilder::from_device(device)
+        .map_err(|e| e.to_string())?
+        .with_error_callback(move |err| {
+            if !broken.swap(true, Ordering::Relaxed) {
+                tracing::warn!("sound output stream error: {err}");
+            }
+        })
+        .open_sink_or_fallback()
+        .map_err(|e| e.to_string())
+}
+
+fn open_shared_sink(host: &cpal::Host, requested: String) -> Result<SharedSink, AudioError> {
+    let preferred = PREFERRED_OUTPUT.lock().clone();
+    let device = preferred
+        .as_deref()
+        .and_then(|id| find_output(host, id))
+        .or_else(|| host.default_output_device());
+    let device_name = device
+        .as_ref()
+        .and_then(|device| device.description().ok())
+        .map(|description| description.to_string());
+    let broken = Arc::new(AtomicBool::new(false));
+    let opened = match device {
+        Some(device) => open_on(device, broken.clone()),
+        None => Err("no output device".to_string()),
+    };
+    let mut sink = match opened {
+        Ok(sink) => sink,
+        Err(e) => {
+            tracing::warn!(
+                requested = %requested,
+                device = ?device_name,
+                "sound output open failed, falling back to any output: {e}"
+            );
+            DeviceSinkBuilder::open_default_sink().map_err(|e| {
+                tracing::warn!("sound output fallback failed: {e}");
+                AudioError::Output(e.to_string())
+            })?
+        }
+    };
+    sink.log_on_drop(false);
+    tracing::info!(
+        requested = %requested,
+        device = ?device_name,
+        sample_rate = ?sink.config().sample_rate(),
+        channels = ?sink.config().channel_count(),
+        "sound output opened"
+    );
+    Ok(SharedSink {
+        sink,
+        requested,
+        broken,
+    })
+}
+
+fn shared_sink() -> Result<Rc<SharedSink>, AudioError> {
+    let host = cpal::default_host();
+    let requested = requested_output(&host);
     SHARED_SINK.with(|cell| {
         let mut slot = cell.borrow_mut();
-        if let Some(existing) = slot.upgrade() {
+        if let Some(existing) = slot.upgrade()
+            && existing.requested == requested
+            && !existing.broken.load(Ordering::Relaxed)
+        {
             return Ok(existing);
         }
-        let mut sink = DeviceSinkBuilder::open_default_sink()
-            .map_err(|e| AudioError::Output(e.to_string()))?;
-        sink.log_on_drop(false);
-        let sink = Rc::new(sink);
+        let sink = Rc::new(open_shared_sink(&host, requested)?);
         *slot = Rc::downgrade(&sink);
         Ok(sink)
     })
@@ -225,8 +319,9 @@ enum Playable {
 }
 
 pub struct AudioPlayer {
-    _sink: Rc<MixerDeviceSink>,
-    player: Player,
+    sink: RefCell<Rc<SharedSink>>,
+    player: RefCell<Player>,
+    volume: Cell<f32>,
     data: RefCell<Option<Playable>>,
     started: Cell<bool>,
 }
@@ -234,13 +329,31 @@ pub struct AudioPlayer {
 impl AudioPlayer {
     pub fn new() -> Result<Self, AudioError> {
         let sink = shared_sink()?;
-        let player = Player::connect_new(sink.mixer());
+        let player = Player::connect_new(sink.sink.mixer());
         Ok(Self {
-            _sink: sink,
-            player,
+            sink: RefCell::new(sink),
+            player: RefCell::new(player),
+            volume: Cell::new(1.0),
             data: RefCell::new(None),
             started: Cell::new(false),
         })
+    }
+
+    fn follow_output(&self) {
+        if !self.player.borrow().empty() {
+            return;
+        }
+        let Ok(sink) = shared_sink() else {
+            return;
+        };
+        let unchanged = Rc::ptr_eq(&sink, &self.sink.borrow());
+        if unchanged {
+            return;
+        }
+        let player = Player::connect_new(sink.sink.mixer());
+        player.set_volume(self.volume.get());
+        *self.player.borrow_mut() = player;
+        *self.sink.borrow_mut() = sink;
     }
 
     pub fn set_data(&self, pcm: DecodedPcm) {
@@ -266,14 +379,17 @@ impl AudioPlayer {
     }
 
     pub fn set_volume(&self, volume: f32) {
-        self.player.set_volume(volume);
+        self.volume.set(volume);
+        self.player.borrow().set_volume(volume);
     }
 
     pub fn play(&self) {
+        self.follow_output();
         if let Some(data) = self.data.borrow().as_ref() {
-            if self.player.empty() {
+            let player = self.player.borrow();
+            if player.empty() {
                 match data {
-                    Playable::Pcm(data) => self.player.append(SharedSamplesSource {
+                    Playable::Pcm(data) => player.append(SharedSamplesSource {
                         samples: Arc::clone(&data.samples),
                         position: 0,
                         channels: data.channels,
@@ -281,20 +397,22 @@ impl AudioPlayer {
                         duration: data.duration,
                     }),
                     Playable::Stream(stream) => {
-                        self.player.append(PcmStreamSource::new(Arc::clone(stream)))
+                        player.append(PcmStreamSource::new(Arc::clone(stream)))
                     }
                 }
             }
             self.started.set(true);
-            self.player.play();
+            player.play();
         }
     }
 
     pub fn play_looping(&self) {
+        self.follow_output();
         if let Some(data) = self.data.borrow().as_ref() {
-            if self.player.empty() {
+            let player = self.player.borrow();
+            if player.empty() {
                 match data {
-                    Playable::Pcm(data) => self.player.append(
+                    Playable::Pcm(data) => player.append(
                         SharedSamplesSource {
                             samples: Arc::clone(&data.samples),
                             position: 0,
@@ -304,30 +422,31 @@ impl AudioPlayer {
                         }
                         .repeat_infinite(),
                     ),
-                    Playable::Stream(stream) => self
-                        .player
-                        .append(PcmStreamSource::new(Arc::clone(stream)).looping()),
+                    Playable::Stream(stream) => {
+                        player.append(PcmStreamSource::new(Arc::clone(stream)).looping())
+                    }
                 }
             }
             self.started.set(true);
-            self.player.play();
+            player.play();
         }
     }
 
     pub fn pause(&self) {
-        self.player.pause();
+        self.player.borrow().pause();
     }
 
     pub fn is_playing(&self) -> bool {
-        !self.player.is_paused() && !self.player.empty()
+        let player = self.player.borrow();
+        !player.is_paused() && !player.empty()
     }
 
     pub fn finished(&self) -> bool {
-        self.started.get() && self.player.empty()
+        self.started.get() && self.player.borrow().empty()
     }
 
     pub fn position_secs(&self) -> f64 {
-        self.player.get_pos().as_secs_f64()
+        self.player.borrow().get_pos().as_secs_f64()
     }
 
     pub fn duration_secs(&self) -> f64 {
@@ -341,7 +460,7 @@ impl AudioPlayer {
 
 impl Drop for AudioPlayer {
     fn drop(&mut self) {
-        self.player.stop();
+        self.player.get_mut().stop();
     }
 }
 

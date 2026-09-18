@@ -211,6 +211,7 @@ impl Render for EditAvatar {
                                             + (bounds.size.height - height) / 2.0
                                             + pan.y;
                                         let _ = window.paint_image(
+                                            bounds,
                                             Bounds::from_corners(
                                                 point(x, y),
                                                 point(x + width, y + height),
@@ -221,6 +222,7 @@ impl Render for EditAvatar {
                                             false,
                                         );
                                         let _ = window.paint_image(
+                                            bounds,
                                             bounds,
                                             Corners::default(),
                                             crop_mask,

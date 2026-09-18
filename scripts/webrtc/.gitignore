@@ -1,0 +1,9 @@
+.cipd
+.vpython3
+src
+.gclient_*
+depot_tools
+ninja
+win-*
+mac-*
+linux-*

@@ -1,7 +1,7 @@
 use gpui::{
-    Anchor, Context, Empty, Entity, FontWeight, MouseButton, MouseDownEvent, Point, Render,
-    SharedString, Window, anchored, canvas, deferred, div, linear_color_stop, linear_gradient,
-    point, prelude::*, px, transparent_white,
+    Anchor, Context, Empty, Entity, Focusable, FontWeight, MouseButton, MouseDownEvent, Point,
+    Render, SharedString, Window, anchored, canvas, deferred, div, linear_color_stop,
+    linear_gradient, point, prelude::*, px, transparent_white,
 };
 
 use mezon_store::DEFAULT_ROLE_COLOR;
@@ -9,7 +9,7 @@ use mezon_store::DEFAULT_ROLE_COLOR;
 use super::role_list_side_bar::{parse_role_color, role_color_or_default};
 use super::role_setting_page::RoleSettingPage;
 use crate::components::primitives::{
-    Icon, IconName, Input, InputEvent, InputState, h_flex, v_flex,
+    FocusCycle, Icon, IconName, Input, InputEvent, InputState, h_flex, v_flex,
 };
 use crate::theme::{ActiveTheme, Theme};
 
@@ -469,8 +469,13 @@ impl RoleSettingPage {
             ))
     }
 
-    fn render_rgb_inputs(&self, theme: &Theme, _cx: &Context<Self>) -> impl IntoElement {
+    fn render_rgb_inputs(&self, theme: &Theme, cx: &Context<Self>) -> impl IntoElement {
+        let fields = [&self.rgb_r_input, &self.rgb_g_input, &self.rgb_b_input]
+            .into_iter()
+            .flatten()
+            .map(|input| input.focus_handle(cx));
         h_flex()
+            .focus_cycle(fields)
             .gap_2()
             .items_end()
             .children(

@@ -6,13 +6,14 @@ use gpui::{
     Window, div, point, prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, DirectKind, DirectMessageStore, DmAvatarPresence, InVoiceInfo, PinnedMessagesStore,
-    Settings, StreamStore, ThreadsStore,
+    ChannelId, DirectKind, DirectMessageStore, DmAvatarPresence, FriendEvent, FriendStore,
+    InVoiceInfo, PinnedMessagesStore, Settings, StreamStore, ThreadsStore,
 };
 use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable, Tooltip};
 
 use crate::app::shell::Shell;
 use crate::app::window_controls;
+use crate::chat::add_members_to_group_modal::AddMembersToGroupModal;
 use crate::chat::call_actions::call_current_dm;
 use crate::chat::edit_group_modal::EditGroupModal;
 use crate::chat::files_popover::{FilesPopoverPanel, files_popover_on_open};
@@ -22,8 +23,9 @@ use crate::chat::pinned_popover::{PinnedPopoverPanel, pin_popover_on_open};
 use crate::chat::threads_popover::{ThreadsPopoverPanel, thread_popover_on_open};
 use crate::chat::{CanvasPopoverPanel, canvas_popover_on_open};
 use crate::components::compositions::channel_row::{ChannelIcon, render_channel_icon};
-use crate::components::primitives::{Avatar, Icon, IconName, InputState};
+use crate::components::primitives::{Avatar, Divider, Icon, IconName, InputState};
 use crate::components::{Button, ButtonVariant, ButtonVariants, Sizable, Size};
+use crate::sidebar::create_message_group_modal::CreateMessageGroupModal;
 use crate::theme::{ActiveTheme, Theme};
 
 type ToggleHandler = Arc<dyn Fn(&mut Window, &mut App)>;
@@ -41,6 +43,7 @@ fn canvas_popover_y_offset() -> Pixels {
 pub struct DmHeaderInfo {
     pub channel_id: ChannelId,
     pub is_group: bool,
+    pub blocked_by_me: bool,
     /// Peer presence for a 1:1 DM; always `None` for a group.
     pub presence: DmAvatarPresence,
     pub label: SharedString,
@@ -48,6 +51,7 @@ pub struct DmHeaderInfo {
     pub avatar_raw: SharedString,
     pub members_text: Option<SharedString>,
     pub edit_tooltip: SharedString,
+    pub add_members_tooltip: SharedString,
     pub locale: SharedString,
 }
 
@@ -56,6 +60,7 @@ pub struct ChannelHeader {
     icon: Option<ChannelIcon>,
     dm: bool,
     dm_header: Option<DmHeaderInfo>,
+    create_group_handle: Option<PopoverMenuHandle<CreateMessageGroupModal>>,
     muted: bool,
     in_voice: Option<(SharedString, InVoiceInfo)>,
     members_action: bool,
@@ -88,6 +93,7 @@ impl ChannelHeader {
             icon: None,
             dm: false,
             dm_header: None,
+            create_group_handle: None,
             muted: false,
             in_voice: None,
             members_action: true,
@@ -121,6 +127,14 @@ impl ChannelHeader {
 
     pub fn dm_header(mut self, info: Option<DmHeaderInfo>) -> Self {
         self.dm_header = info;
+        self
+    }
+
+    pub fn create_group_popover(
+        mut self,
+        handle: PopoverMenuHandle<CreateMessageGroupModal>,
+    ) -> Self {
+        self.create_group_handle = Some(handle);
         self
     }
 
@@ -261,14 +275,25 @@ impl ChannelHeader {
             ("hdr-files", IconName::FileIcon),
         ];
         let dm_one_to_one = self.dm_header.as_ref().is_some_and(|info| !info.is_group);
+        let dm_one_to_one_blocked = self
+            .dm_header
+            .as_ref()
+            .is_some_and(|info| !info.is_group && info.blocked_by_me);
         let actions: Vec<(&str, IconName)> = if self.dm {
             let mut items: Vec<(&str, IconName)> = Vec::with_capacity(4);
-            if dm_one_to_one {
+            if dm_one_to_one && !dm_one_to_one_blocked {
                 items.push(("hdr-call", IconName::IconPhoneDM));
                 items.push(("hdr-video-call", IconName::IconMeetDM));
+                items.push(("hdr-pin", IconName::PinRight));
+                items.push(("hdr-add-members", IconName::IconAddFriendDM));
+                items.push(("hdr-members", IconName::IconUserProfileDM));
+            } else if !dm_one_to_one_blocked {
+                items.push(("hdr-add-members", IconName::IconAddFriendDM));
+                items.push(("hdr-members", IconName::MemberList));
+                items.push(("hdr-pin", IconName::PinRight));
+            } else {
+                items.push(("hdr-pin", IconName::PinRight));
             }
-            items.push(("hdr-members", IconName::MemberList));
-            items.push(("hdr-pin", IconName::PinRight));
             items
         } else {
             channel_only_actions.to_vec()
@@ -278,6 +303,7 @@ impl ChannelHeader {
             icon,
             dm,
             dm_header,
+            create_group_handle,
             muted: _,
             in_voice,
             members_action,
@@ -313,8 +339,24 @@ impl ChannelHeader {
         } else {
             None
         };
+        let add_members_button = dm_header.as_ref().and_then(|info| {
+            if info.blocked_by_me {
+                None
+            } else if info.is_group {
+                Some(Self::render_add_members_button(info, icon_color, bg_hover))
+            } else {
+                Some(Self::render_create_group_button(
+                    info,
+                    icon_color,
+                    bg_hover,
+                    create_group_handle.clone(),
+                    cx,
+                ))
+            }
+        });
         let buttons = Self::build_action_buttons(
             actions,
+            add_members_button,
             theme,
             icon_color,
             icon_active,
@@ -338,7 +380,6 @@ impl ChannelHeader {
             notification_trigger,
             cx,
         );
-
         div()
             .flex()
             .flex_row()
@@ -485,6 +526,10 @@ impl ChannelHeader {
             .child(div().flex_1())
             .child(
                 div()
+                    .relative()
+                    .children(crate::tour::probe(
+                        crate::tour::TourAnchor::ChannelHeaderTools,
+                    ))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -494,9 +539,9 @@ impl ChannelHeader {
                         div()
                             .flex()
                             .items_center()
-                            .pl_4()
-                            .border_l_1()
-                            .border_color(theme.tokens.border_primary)
+                            .ml(px(4.))
+                            .gap(px(8.))
+                            .child(Divider::vertical().flex_shrink_0().h(px(20.)))
                             .child(inbox)
                             .into_any_element()
                     }))
@@ -518,6 +563,7 @@ impl ChannelHeader {
             icon: None,
             dm: false,
             dm_header: None,
+            create_group_handle: None,
             in_voice: None,
             members_action: false,
             members_active: false,
@@ -543,8 +589,90 @@ impl ChannelHeader {
         header.render_inbox_button(theme, cx)
     }
 
+    fn render_add_members_button(
+        info: &DmHeaderInfo,
+        icon_color: gpui::Rgba,
+        bg_hover: gpui::Rgba,
+    ) -> AnyElement {
+        let tooltip = info.add_members_tooltip.clone();
+        let channel_id = info.channel_id;
+        let locale = info.locale.clone();
+        div()
+            .id("hdr-add-members")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(32.))
+            .h(px(32.))
+            .rounded_md()
+            .cursor_pointer()
+            .hover(move |s| s.bg(bg_hover))
+            .tooltip(Tooltip::text(tooltip))
+            .occlude()
+            .child(
+                Icon::new(IconName::IconAddFriendDM)
+                    .size(px(20.))
+                    .text_color(icon_color),
+            )
+            .on_click(move |_, window, cx| {
+                AddMembersToGroupModal::open(channel_id, locale.to_string(), window, cx);
+            })
+            .into_any_element()
+    }
+
+    fn render_create_group_button(
+        info: &DmHeaderInfo,
+        icon_color: gpui::Rgba,
+        bg_hover: gpui::Rgba,
+        handle: Option<PopoverMenuHandle<CreateMessageGroupModal>>,
+        cx: &App,
+    ) -> AnyElement {
+        let Some(peer_id) = DirectMessageStore::try_global(cx).and_then(|store| {
+            store
+                .read(cx)
+                .find(info.channel_id)
+                .and_then(|dm| dm.peer_user_id)
+        }) else {
+            return div().into_any_element();
+        };
+        let channel_id = info.channel_id;
+        let locale = info.locale.clone();
+        let tooltip = info.add_members_tooltip.clone();
+        let Some(handle) = handle else {
+            return div().into_any_element();
+        };
+        let is_open = handle.is_deployed();
+        let menu_handle = handle.clone();
+        PopoverMenu::new("hdr-add-friends-to-dm")
+            .with_handle(handle)
+            .anchor(Anchor::TopRight)
+            .attach(Anchor::BottomRight)
+            .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
+            .menu(move |window, cx| {
+                Some(cx.new(|cx| {
+                    CreateMessageGroupModal::new_for_dm(
+                        locale.to_string(),
+                        channel_id,
+                        peer_id,
+                        menu_handle.clone(),
+                        window,
+                        cx,
+                    )
+                }))
+            })
+            .trigger(AddFriendsPopoverTrigger {
+                open: is_open,
+                icon_color,
+                bg_hover,
+                tooltip,
+                on_click: None,
+            })
+            .into_any_element()
+    }
+
     fn build_action_buttons(
         actions: Vec<(&'static str, IconName)>,
+        add_members_button: Option<AnyElement>,
         theme: &Theme,
         icon_color: gpui::Rgba,
         icon_active: gpui::Rgba,
@@ -575,6 +703,7 @@ impl ChannelHeader {
             icon: None,
             dm: false,
             dm_header: None,
+            create_group_handle: None,
             in_voice: None,
             members_action,
             members_active,
@@ -599,6 +728,7 @@ impl ChannelHeader {
         };
         header.action_buttons(
             actions,
+            add_members_button,
             theme,
             icon_color,
             icon_active,
@@ -611,6 +741,7 @@ impl ChannelHeader {
     fn action_buttons(
         self,
         actions: Vec<(&'static str, IconName)>,
+        mut add_members_button: Option<AnyElement>,
         theme: &Theme,
         icon_color: gpui::Rgba,
         icon_active: gpui::Rgba,
@@ -636,6 +767,12 @@ impl ChannelHeader {
         let mut notification_trigger = self.notification_trigger;
         let mut buttons: Vec<AnyElement> = Vec::new();
         for (id, icon) in actions {
+            if id == "hdr-add-members" {
+                if let Some(button) = add_members_button.take() {
+                    buttons.push(button);
+                }
+                continue;
+            }
             if id == "hdr-call" || id == "hdr-video-call" {
                 let video = id == "hdr-video-call";
                 let tooltip = if video {
@@ -870,11 +1007,8 @@ impl ChannelHeader {
                 .into_any_element();
         };
 
-        let show_badge = self
-            .clan_id
-            .as_deref()
-            .is_some_and(|id| clan_has_inbox_badge(id, cx));
         let clan_id = self.clan_id.clone().unwrap_or_default();
+        let show_badge = clan_has_inbox_badge(&clan_id, cx);
         let locale = self.locale.clone().unwrap_or_else(|| "en".to_string());
         let badge_color = theme.mention_badge;
         let is_open = handle.is_deployed();
@@ -917,7 +1051,13 @@ fn dm_peer_presence(dm: &mezon_store::DirectChannel, cx: &App) -> DmAvatarPresen
     dm.peer_user_id
         .filter(|_| dm.kind != DirectKind::Group)
         .zip(mezon_store::PresenceStore::try_global(cx))
-        .map(|(user_id, presence)| presence.read(cx).dm_avatar_presence(user_id, dm.online))
+        .map(|(user_id, presence)| {
+            presence.read(cx).dm_avatar_presence(
+                user_id,
+                dm.online,
+                mezon_store::current_user_presence(cx),
+            )
+        })
         .unwrap_or(DmAvatarPresence::None)
 }
 
@@ -928,6 +1068,7 @@ pub struct ChatHeader {
     /// Cached so the header does not re-derive it (and re-allocate the proxied
     /// avatar url and member-count string) on every repaint.
     dm_header: Option<DmHeaderInfo>,
+    create_group_handle: PopoverMenuHandle<CreateMessageGroupModal>,
     in_voice: Option<InVoiceInfo>,
     members_action: bool,
     members_active: bool,
@@ -936,6 +1077,7 @@ pub struct ChatHeader {
     show_search_options: bool,
     search_input: Option<Entity<InputState>>,
     show_inbox: bool,
+    inbox_badge: bool,
     inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
     clan_id: Option<String>,
     locale: Option<SharedString>,
@@ -949,10 +1091,14 @@ pub struct ChatHeader {
     settings: Entity<Settings>,
     _settings_observe: Subscription,
     _notification_observe: Subscription,
+    _clan_observe: Subscription,
+    _inbox_observe: Subscription,
     _pinned_observe: Subscription,
     _direct_observe: Subscription,
+    _friend_subscribe: Subscription,
     _group_members_observe: Subscription,
     _presence_subscribe: Subscription,
+    _account_subscribe: Subscription,
 }
 
 impl ChatHeader {
@@ -966,6 +1112,26 @@ impl ChatHeader {
             &mezon_store::NotificationSettingStore::global(cx),
             |_, _, cx| cx.notify(),
         );
+        let _clan_observe = cx.observe(&mezon_store::ClanList::global(cx), |this, _, cx| {
+            let inbox_badge = this
+                .clan_id
+                .as_deref()
+                .is_some_and(|id| clan_has_inbox_badge(id, cx));
+            if this.inbox_badge != inbox_badge {
+                this.inbox_badge = inbox_badge;
+                cx.notify();
+            }
+        });
+        let _inbox_observe = cx.observe(&mezon_store::InboxStore::global(cx), |this, _, cx| {
+            let inbox_badge = this
+                .clan_id
+                .as_deref()
+                .is_some_and(|id| clan_has_inbox_badge(id, cx));
+            if this.inbox_badge != inbox_badge {
+                this.inbox_badge = inbox_badge;
+                cx.notify();
+            }
+        });
         let _pinned_observe = cx.observe(&PinnedMessagesStore::global(cx), |_, _, cx| cx.notify());
         // The DM store carries the group's label and avatar; the layout's own
         // change gate only tracks the label, so an avatar-only edit reaches the
@@ -973,6 +1139,14 @@ impl ChatHeader {
         let _direct_observe = cx.observe(&DirectMessageStore::global(cx), |this, _, cx| {
             this.refresh_dm_header(cx)
         });
+        let _friend_subscribe = cx.subscribe(
+            &FriendStore::global(cx),
+            |this, _, event: &FriendEvent, cx| {
+                if matches!(event, FriendEvent::Changed) {
+                    this.refresh_dm_header(cx);
+                }
+            },
+        );
         let _group_members_observe = cx.observe(
             &mezon_store::GroupMembersStore::global(cx),
             |this, _, cx| this.refresh_dm_header(cx),
@@ -986,11 +1160,24 @@ impl ChatHeader {
                 }
             },
         );
+        let _account_subscribe = cx.subscribe(
+            &mezon_store::AccountStore::global(cx),
+            |this, _, event, cx| {
+                if matches!(
+                    event,
+                    mezon_store::AccountEvent::StatusUpdated
+                        | mezon_store::AccountEvent::AccountLoaded
+                ) {
+                    this.refresh_dm_presence(cx);
+                }
+            },
+        );
         Self {
             name: SharedString::default(),
             icon: None,
             dm: false,
             dm_header: None,
+            create_group_handle: PopoverMenuHandle::default(),
             in_voice: None,
             members_action: true,
             members_active: false,
@@ -999,6 +1186,7 @@ impl ChatHeader {
             show_search_options: false,
             search_input: None,
             show_inbox: true,
+            inbox_badge: false,
             inbox_handle: None,
             clan_id: None,
             locale: None,
@@ -1012,10 +1200,14 @@ impl ChatHeader {
             settings: settings.clone(),
             _settings_observe,
             _notification_observe,
+            _clan_observe,
+            _inbox_observe,
             _pinned_observe,
             _direct_observe,
+            _friend_subscribe,
             _group_members_observe,
             _presence_subscribe,
+            _account_subscribe,
         }
     }
 
@@ -1033,6 +1225,11 @@ impl ChatHeader {
         let store = DirectMessageStore::try_global(cx)?;
         let dm = store.read(cx).find(direct_id)?;
         let is_group = dm.kind == DirectKind::Group;
+        let blocked_by_me = dm.peer_user_id.is_some_and(|peer| {
+            !is_group
+                && FriendStore::try_global(cx)
+                    .is_some_and(|store| store.read(cx).is_user_blocked_by_me(peer, cx))
+        });
         let presence = dm_peer_presence(dm, cx);
         let avatar_src = if dm.avatar.is_empty() {
             String::new()
@@ -1057,6 +1254,7 @@ impl ChatHeader {
         Some(DmHeaderInfo {
             channel_id: dm.id,
             is_group,
+            blocked_by_me,
             presence,
             label: SharedString::from(dm.label.clone()),
             avatar_src: SharedString::from(avatar_src),
@@ -1064,6 +1262,9 @@ impl ChatHeader {
             members_text,
             edit_tooltip: SharedString::from(
                 mezon_i18n::t(locale, "channelTopbar.tooltips.clickToEdit").to_string(),
+            ),
+            add_members_tooltip: SharedString::from(
+                mezon_i18n::t(locale, "channelTopbar.tooltips.addFriendsToDM").to_string(),
             ),
             locale: SharedString::from(locale.to_string()),
         })
@@ -1172,6 +1373,9 @@ impl ChatHeader {
         } else {
             Self::compute_dm_header(dm, locale.unwrap_or("en"), cx)
         };
+        let inbox_badge = clan_id
+            .as_deref()
+            .is_some_and(|id| clan_has_inbox_badge(id, cx));
         if self.name == name
             && self.dm_header == dm_header
             && self.icon == icon
@@ -1183,6 +1387,7 @@ impl ChatHeader {
             && self.search_expanded == search_expanded
             && self.show_search_options == show_search_options
             && self.show_inbox == show_inbox
+            && self.inbox_badge == inbox_badge
             && self.clan_id == clan_id
             && self.locale.as_deref() == locale
             && self.show_threads == show_threads
@@ -1203,6 +1408,7 @@ impl ChatHeader {
         self.search_expanded = search_expanded;
         self.show_search_options = show_search_options;
         self.show_inbox = show_inbox;
+        self.inbox_badge = inbox_badge;
         self.clan_id = clan_id;
         self.locale = locale.map(|locale| SharedString::from(locale.to_string()));
         self.show_threads = show_threads;
@@ -1310,8 +1516,8 @@ impl Render for ChatHeader {
             None
         };
 
-        let members_toggle = Arc::new(move |_window: &mut Window, cx: &mut App| {
-            let _ = layout_weak.update(cx, |this, cx| this.toggle_member_list(cx));
+        let members_toggle = Arc::new(move |window: &mut Window, cx: &mut App| {
+            let _ = layout_weak.update(cx, |this, cx| this.toggle_member_list(window, cx));
         });
         let layout_weak_timeline = self.layout.clone();
         let timeline_toggle = Arc::new(move |_window: &mut Window, cx: &mut App| {
@@ -1327,6 +1533,7 @@ impl Render for ChatHeader {
             .icon(self.icon)
             .dm(self.dm)
             .dm_header(dm_header)
+            .create_group_popover(self.create_group_handle.clone())
             .members_action(self.members_action)
             .members_active(self.members_active)
             .gallery_trigger(gallery_trigger)
@@ -1458,6 +1665,58 @@ fn render_stream_chat_sidebar_header(
                     });
                 }),
         )
+}
+
+#[derive(IntoElement)]
+struct AddFriendsPopoverTrigger {
+    open: bool,
+    icon_color: gpui::Rgba,
+    bg_hover: gpui::Rgba,
+    tooltip: SharedString,
+    on_click: Option<ClickHandler>,
+}
+
+impl Toggleable for AddFriendsPopoverTrigger {
+    fn toggle_state(mut self, selected: bool) -> Self {
+        self.open = selected;
+        self
+    }
+}
+
+impl Clickable for AddFriendsPopoverTrigger {
+    fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+
+    fn cursor_style(self, _cursor_style: CursorStyle) -> Self {
+        self
+    }
+}
+
+impl RenderOnce for AddFriendsPopoverTrigger {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let bg_hover = self.bg_hover;
+        div()
+            .id("hdr-add-members")
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(32.))
+            .h(px(32.))
+            .rounded_md()
+            .cursor_pointer()
+            .when(self.open, |el| el.bg(bg_hover))
+            .hover(move |s| s.bg(bg_hover))
+            .tooltip(Tooltip::text(self.tooltip))
+            .child(
+                Icon::new(IconName::IconAddFriendDM)
+                    .size(px(20.))
+                    .text_color(self.icon_color),
+            )
+            .when_some(self.on_click, |el, handler| el.on_click(handler))
+    }
 }
 
 #[derive(IntoElement)]

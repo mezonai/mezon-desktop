@@ -27,6 +27,9 @@ impl ThreadCreateToastBridge {
                             ThreadCreateFailReason::ChannelLimitExceeded => {
                                 mezon_i18n::t(&locale, "channel.createLimitExceeded").to_string()
                             }
+                            ThreadCreateFailReason::Api(code) => {
+                                mezon_i18n::api_error(&locale, *code).to_string()
+                            }
                             ThreadCreateFailReason::Other => {
                                 mezon_i18n::t(&locale, "common.somethingWentWrong").to_string()
                             }

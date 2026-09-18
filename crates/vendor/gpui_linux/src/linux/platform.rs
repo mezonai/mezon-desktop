@@ -13,6 +13,8 @@ use std::{
     time::Duration,
 };
 
+#[cfg(any(feature = "wayland", feature = "x11"))]
+use anyhow::ensure;
 use anyhow::{Context as _, anyhow};
 use calloop::LoopSignal;
 use futures::channel::oneshot;
@@ -105,7 +107,7 @@ pub(crate) trait LinuxClient {
 #[derive(Default)]
 pub(crate) struct PlatformHandlers {
     pub(crate) open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
-    pub(crate) quit: Option<Box<dyn FnMut()>>,
+    pub(crate) quit: Option<Box<dyn FnMut() -> bool>>,
     pub(crate) reopen: Option<Box<dyn FnMut()>>,
     pub(crate) app_menu_action: Option<Box<dyn FnMut(&dyn Action)>>,
     pub(crate) will_open_app_menu: Option<Box<dyn FnMut()>>,
@@ -474,7 +476,7 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
             .detach();
     }
 
-    fn on_quit(&self, callback: Box<dyn FnMut()>) {
+    fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) {
         self.inner.with_common(|common| {
             common.callbacks.quit = Some(callback);
         });
@@ -730,6 +732,20 @@ pub(super) fn is_within_click_distance(a: Point<Pixels>, b: Point<Pixels>) -> bo
 }
 
 #[cfg(any(feature = "wayland", feature = "x11"))]
+pub(super) fn new_xkb_context() -> anyhow::Result<xkb::Context> {
+    validate_xkb_context(xkb::Context::new(xkb::CONTEXT_NO_FLAGS))
+}
+
+#[cfg(any(feature = "wayland", feature = "x11"))]
+fn validate_xkb_context(context: xkb::Context) -> anyhow::Result<xkb::Context> {
+    ensure!(
+        !context.get_raw_ptr().is_null(),
+        "libxkbcommon failed to create an XKB context"
+    );
+    Ok(context)
+}
+
+#[cfg(any(feature = "wayland", feature = "x11"))]
 pub(super) fn get_xkb_compose_state(cx: &xkb::Context) -> Option<xkb::compose::State> {
     let mut locales = Vec::default();
     if let Some(locale) = env::var_os("LC_CTYPE") {
@@ -892,16 +908,8 @@ fn guess_ascii(keycode: Keycode, shift: bool) -> Option<char> {
 }
 
 #[cfg(any(feature = "wayland", feature = "x11"))]
-pub(super) fn keystroke_from_xkb(
-    state: &State,
-    mut modifiers: gpui::Modifiers,
-    keycode: Keycode,
-) -> gpui::Keystroke {
-    let key_utf32 = state.key_get_utf32(keycode);
-    let key_utf8 = state.key_get_utf8(keycode);
-    let key_sym = state.key_get_one_sym(keycode);
-
-    let key = match key_sym {
+fn special_key_name(key_sym: Keysym) -> Option<String> {
+    Some(match key_sym {
         Keysym::Return => "enter".to_owned(),
         Keysym::Prior => "pageup".to_owned(),
         Keysym::Next => "pagedown".to_owned(),
@@ -965,8 +973,28 @@ pub(super) fn keystroke_from_xkb(
         Keysym::Home => "home".to_owned(),
         Keysym::End => "end".to_owned(),
         Keysym::Insert => "insert".to_owned(),
+        _ => return None,
+    })
+}
 
-        _ => {
+#[cfg(any(feature = "wayland", feature = "x11"))]
+pub(super) fn key_name_from_keysym(key_sym: Keysym) -> String {
+    special_key_name(key_sym).unwrap_or_else(|| xkb::keysym_get_name(key_sym).to_lowercase())
+}
+
+#[cfg(any(feature = "wayland", feature = "x11"))]
+pub(super) fn keystroke_from_xkb(
+    state: &State,
+    mut modifiers: gpui::Modifiers,
+    keycode: Keycode,
+) -> gpui::Keystroke {
+    let key_utf32 = state.key_get_utf32(keycode);
+    let key_utf8 = state.key_get_utf8(keycode);
+    let key_sym = state.key_get_one_sym(keycode);
+
+    let key = match special_key_name(key_sym) {
+        Some(key) => key,
+        None => {
             let name = xkb::keysym_get_name(key_sym).to_lowercase();
             if key_sym.is_keypad_key() {
                 name.replace("kp_", "")
@@ -1013,6 +1041,39 @@ pub(super) fn keystroke_from_xkb(
         modifiers,
         key,
         key_char,
+    }
+}
+
+#[cfg(any(feature = "wayland", feature = "x11"))]
+pub(super) fn key_char_from_keysym(keysym: Keysym) -> Option<String> {
+    let key_utf32 = xkb::keysym_to_utf32(keysym);
+    if key_utf32 < 32 || key_utf32 == 127 {
+        return None;
+    }
+    char::from_u32(key_utf32).map(String::from)
+}
+
+#[cfg(all(test, any(feature = "wayland", feature = "x11")))]
+mod key_char_from_keysym_tests {
+    use super::{key_char_from_keysym, key_name_from_keysym};
+    use xkbcommon::xkb::Keysym;
+
+    #[test]
+    fn forwarded_keys_use_gpui_binding_names() {
+        assert_eq!(key_name_from_keysym(Keysym::Return), "enter");
+        assert_eq!(key_name_from_keysym(Keysym::BackSpace), "backspace");
+        assert_eq!(key_name_from_keysym(Keysym::Escape), "escape");
+        assert_eq!(key_name_from_keysym(Keysym::Left), "left");
+    }
+
+    #[test]
+    fn space_inserts_a_character() {
+        assert_eq!(key_char_from_keysym(Keysym::space).as_deref(), Some(" "));
+    }
+
+    #[test]
+    fn enter_is_not_a_character() {
+        assert_eq!(key_char_from_keysym(Keysym::Return), None);
     }
 }
 
@@ -1140,6 +1201,23 @@ pub(super) fn compositor_gpu_hint_from_dev_t(dev: u64) -> Option<gpui_wgpu::Comp
 mod tests {
     use super::*;
     use gpui::{Point, px};
+
+    #[cfg(any(feature = "wayland", feature = "x11"))]
+    #[test]
+    fn rejects_null_xkb_context() {
+        let context = unsafe {
+            // libxkbcommon permits unref on null, matching the value returned by Context::new on failure.
+            xkb::Context::from_raw_ptr(std::ptr::null_mut())
+        };
+        let error = validate_xkb_context(context)
+            .err()
+            .expect("null XKB context should be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "libxkbcommon failed to create an XKB context"
+        );
+    }
 
     #[test]
     fn test_is_within_click_distance() {

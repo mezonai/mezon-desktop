@@ -2,12 +2,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
-use mezon_client::{AppApi, ConnectionStatus};
-use mezon_proto::api;
+use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
+use mezon_proto::{api, realtime};
 
 use crate::KeyedCache;
+use crate::badge::BadgeService;
 use crate::ids::{ChannelId, ClanId, RoleId, UserId};
 use crate::permissions::PermissionStore;
+use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const MAX_CACHED_ENTITIES: usize = 128;
 
@@ -77,6 +79,12 @@ impl ChannelRolePermissionsStore {
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
+        let entity = cx.entity();
+        RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
+            dispatch.on(RealtimeKind::PermissionSet, &entity, |this, event, cx| {
+                this.handle_permission_set(event, cx);
+            });
+        });
         Self {
             cache: KeyedCache::new(Some(MAX_CACHED_ENTITIES)),
             loading: HashSet::new(),
@@ -127,6 +135,48 @@ impl ChannelRolePermissionsStore {
                 }
             }
         })
+    }
+
+    fn handle_permission_set(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::Unhandled(realtime::envelope::Message::PermissionSetEvent(set)) = event
+        else {
+            return;
+        };
+        let me = BadgeService::try_global(cx).and_then(|b| b.read(cx).current_user_id(cx));
+        let caller = set.caller.parse::<i64>().ok();
+        if let (Some(me), Some(caller)) = (me, caller)
+            && me.get() == caller
+        {
+            return;
+        }
+        let Some(entity) = permission_entity_of(set) else {
+            return;
+        };
+        let key = EntityKey {
+            channel_id: ChannelId(set.channel_id),
+            entity,
+        };
+        let Some(perms) = self.cache.get_mut(&key) else {
+            return;
+        };
+        let mut changed = false;
+        for update in &set.permission_updates {
+            if update.r#type == OVERRIDE_TYPE_NEUTRAL || update.permission_id == 0 {
+                continue;
+            }
+            let active = update.r#type == OVERRIDE_TYPE_ALLOW;
+            if perms.insert(update.permission_id, active) != Some(active) {
+                changed = true;
+            }
+        }
+        if !changed {
+            return;
+        }
+        cx.emit(ChannelRolePermissionsEvent::Changed {
+            channel_id: key.channel_id,
+            entity,
+        });
+        cx.notify();
     }
 
     pub fn is_loaded(&self, channel_id: ChannelId, entity: PermissionEntity) -> bool {
@@ -298,9 +348,150 @@ fn applied_overrides(updates: &[api::PermissionUpdate]) -> HashMap<i64, bool> {
         .collect()
 }
 
+fn permission_entity_of(set: &realtime::PermissionSetEvent) -> Option<PermissionEntity> {
+    if set.role_id != 0 {
+        return Some(PermissionEntity::Role(RoleId(set.role_id)));
+    }
+    if set.user_id != 0 {
+        return Some(PermissionEntity::User(UserId(set.user_id)));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_CALLER: i64 = 91;
+    const TEST_CHANNEL: ChannelId = ChannelId(7);
+    const TEST_ROLE: RoleId = RoleId(3);
+
+    fn init_role_permissions_store(cx: &mut App) -> Entity<ChannelRolePermissionsStore> {
+        let api = Arc::new(AppApi::new(
+            Arc::new(mezon_client::TransportClient::new(String::new())),
+            String::new(),
+        ));
+        crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+        let auth_state = cx.new(|_| {
+            crate::AuthState::Authenticated(mezon_client::Session {
+                user_id: TEST_CALLER.to_string(),
+                ..Default::default()
+            })
+        });
+        BadgeService::init(auth_state, cx);
+        cx.new(|cx| ChannelRolePermissionsStore::new(api, cx))
+    }
+
+    fn permission_set(caller: i64) -> RealtimeEvent {
+        RealtimeEvent::Unhandled(realtime::envelope::Message::PermissionSetEvent(
+            realtime::PermissionSetEvent {
+                caller: caller.to_string(),
+                role_id: TEST_ROLE.get(),
+                user_id: 0,
+                channel_id: TEST_CHANNEL.get(),
+                permission_updates: vec![
+                    api::PermissionUpdate {
+                        permission_id: 1,
+                        slug: "send-message".into(),
+                        r#type: OVERRIDE_TYPE_ALLOW,
+                    },
+                    api::PermissionUpdate {
+                        permission_id: 2,
+                        slug: "delete-message".into(),
+                        r#type: OVERRIDE_TYPE_DENY,
+                    },
+                    api::PermissionUpdate {
+                        permission_id: 3,
+                        slug: "manage-thread".into(),
+                        r#type: OVERRIDE_TYPE_NEUTRAL,
+                    },
+                ],
+            },
+        ))
+    }
+
+    fn seed_role(store: &mut ChannelRolePermissionsStore) {
+        store.cache.insert(
+            EntityKey {
+                channel_id: TEST_CHANNEL,
+                entity: PermissionEntity::Role(TEST_ROLE),
+            },
+            HashMap::from([(1, false), (2, true), (3, true)]),
+            None,
+        );
+    }
+
+    fn cached(store: &ChannelRolePermissionsStore, id: i64) -> Option<bool> {
+        store
+            .cache
+            .get(&EntityKey {
+                channel_id: TEST_CHANNEL,
+                entity: PermissionEntity::Role(TEST_ROLE),
+            })
+            .and_then(|perms| perms.get(&id).copied())
+    }
+
+    #[gpui::test]
+    fn a_permission_set_from_someone_else_applies_allow_and_deny(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_role_permissions_store(cx);
+            store.update(cx, |store, cx| {
+                seed_role(store);
+                store.handle_permission_set(&permission_set(TEST_CALLER + 1), cx);
+                assert_eq!(cached(store, 1), Some(true), "allow flips on");
+                assert_eq!(cached(store, 2), Some(false), "deny flips off");
+                assert_eq!(
+                    cached(store, 3),
+                    Some(true),
+                    "neutral is skipped, exactly as React filters type 0"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn my_own_permission_set_echo_is_ignored(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_role_permissions_store(cx);
+            store.update(cx, |store, cx| {
+                seed_role(store);
+                store.handle_permission_set(&permission_set(TEST_CALLER), cx);
+                assert_eq!(cached(store, 1), Some(false));
+                assert_eq!(cached(store, 2), Some(true));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_permission_set_for_an_uncached_entity_is_dropped(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_role_permissions_store(cx);
+            store.update(cx, |store, cx| {
+                store.handle_permission_set(&permission_set(TEST_CALLER + 1), cx);
+                assert!(cached(store, 1).is_none());
+            });
+        });
+    }
+
+    #[test]
+    fn permission_entity_prefers_role_then_user() {
+        let mut event = realtime::PermissionSetEvent {
+            role_id: 3,
+            user_id: 9,
+            ..Default::default()
+        };
+        assert_eq!(
+            permission_entity_of(&event),
+            Some(PermissionEntity::Role(RoleId(3)))
+        );
+        event.role_id = 0;
+        assert_eq!(
+            permission_entity_of(&event),
+            Some(PermissionEntity::User(UserId(9)))
+        );
+        event.user_id = 0;
+        assert_eq!(permission_entity_of(&event), None);
+    }
 
     fn definitions() -> Vec<(i64, String)> {
         vec![

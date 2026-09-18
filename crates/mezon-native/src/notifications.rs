@@ -222,6 +222,27 @@ extern "C" fn did_receive_notification_response(
 }
 
 #[cfg(target_os = "macos")]
+const PRESENT_BANNER_LIST_SOUND: usize = (1 << 4) | (1 << 3) | (1 << 1);
+
+#[cfg(target_os = "macos")]
+extern "C" fn will_present_notification(
+    _this: &objc::runtime::Object,
+    _sel: objc::runtime::Sel,
+    _center: *mut objc::runtime::Object,
+    _notification: *mut objc::runtime::Object,
+    completion: *mut objc::runtime::Object,
+) {
+    tracing::debug!(target: "noti", "presenting a notification while the app is active");
+    if completion.is_null() {
+        return;
+    }
+    unsafe {
+        let block = completion as *mut block::Block<(usize,), ()>;
+        (*block).call((PRESENT_BANNER_LIST_SOUND,));
+    }
+}
+
+#[cfg(target_os = "macos")]
 unsafe fn nsstring_to_string(s: *mut objc::runtime::Object) -> Option<String> {
     use objc::{msg_send, sel, sel_impl};
 
@@ -259,6 +280,12 @@ fn install_notification_delegate(center: *mut objc::runtime::Object) {
             sel!(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:),
             callback,
         );
+        let present: extern "C" fn(&Object, Sel, *mut Object, *mut Object, *mut Object) =
+            will_present_notification;
+        decl.add_method(
+            sel!(userNotificationCenter:willPresentNotification:withCompletionHandler:),
+            present,
+        );
         let cls: &Class = decl.register();
         let instance: *mut Object = msg_send![cls, new];
         instance as usize
@@ -280,7 +307,11 @@ fn init_macos() {
     use objc::{class, msg_send, sel, sel_impl};
 
     if !has_bundle_identifier() {
-        tracing::debug!("skipping notification setup: not running from an app bundle");
+        tracing::warn!(
+            target: "noti",
+            "notification setup skipped: not running from an app bundle, so macOS will \
+             refuse every notification this process posts"
+        );
         return;
     }
 
@@ -294,10 +325,14 @@ fn init_macos() {
         let options: usize = AUTH_OPTIONS_BADGE_SOUND_ALERT;
         let handler = ConcreteBlock::new(move |granted: BOOL, _error: *mut Object| {
             if granted == YES {
-                tracing::info!("notification authorisation granted");
+                tracing::info!(target: "noti", "macOS notification authorisation granted");
                 NOTIFICATION_AUTH.store(AUTH_GRANTED, std::sync::atomic::Ordering::Relaxed);
             } else {
-                tracing::warn!("notification authorisation denied; notifications will not appear");
+                tracing::warn!(
+                    target: "noti",
+                    "macOS notification authorisation DENIED — no notification will appear. \
+                     Enable it in System Settings > Notifications > Mezon, then restart the app."
+                );
                 NOTIFICATION_AUTH.store(AUTH_DENIED, std::sync::atomic::Ordering::Relaxed);
             }
         });
@@ -317,7 +352,11 @@ fn show_macos(n: &Notification) {
     use objc::{class, msg_send, sel, sel_impl};
 
     if !has_bundle_identifier() {
-        tracing::debug!("skipping notification: not running from an app bundle");
+        tracing::warn!(
+            target: "noti",
+            title = %n.title,
+            "notification dropped: not running from an app bundle"
+        );
         return;
     }
 
@@ -368,11 +407,29 @@ fn show_macos(n: &Notification) {
         let _: () = msg_send![ns_identifier, release];
         let _: () = msg_send![content, release];
 
+        // A null completion handler throws the OS's verdict away; with one we learn
+        // whether macOS actually accepted the request, which is otherwise invisible.
+        let title = n.title.clone();
+        let handler = block::ConcreteBlock::new(move |error: *mut Object| {
+            if error.is_null() {
+                tracing::info!(target: "noti", title = %title, "macOS accepted the notification");
+            } else {
+                let description: *mut Object = msg_send![error, localizedDescription];
+                let reason = nsstring_to_string(description).unwrap_or_default();
+                tracing::warn!(
+                    target: "noti",
+                    title = %title,
+                    "macOS rejected the notification: {reason}"
+                );
+            }
+        });
+        let handler = handler.copy();
         let _: () = msg_send![
             center,
             addNotificationRequest: request
-            withCompletionHandler: std::ptr::null::<Object>()
+            withCompletionHandler: &*handler
         ];
+        leak_for_async_objc_callback(handler);
     }
 }
 

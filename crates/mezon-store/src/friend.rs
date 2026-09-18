@@ -68,6 +68,10 @@ pub enum FriendEvent {
     BlockFailed,
     UnblockSucceeded,
     UnblockFailed,
+    FollowerChecked {
+        user: UserId,
+        is_follower: bool,
+    },
 }
 
 fn friend_from_api(f: ApiFriend) -> Friend {
@@ -264,6 +268,10 @@ impl FriendStore {
             .any(|f| f.state == FriendState::Blocked && f.source_id == me && f.username == username)
     }
 
+    pub fn is_user_blocked_by_me(&self, user_id: UserId, cx: &App) -> bool {
+        is_blocked_by(&self.friends, user_id, self.current_user_id(cx))
+    }
+
     /// Count of incoming friend requests awaiting the current user's response
     /// (React `quantityPendingRequest` = friends with state `MY_PENDING`).
     pub fn pending_incoming_count(&self) -> usize {
@@ -280,6 +288,12 @@ impl FriendStore {
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.fetch(cx);
+    }
+
+    /// Whether `ListFriends` has landed at least once. Callers that refuse an action for a
+    /// non-friend have to tell "not a friend" apart from "the list is not here yet".
+    pub fn has_loaded(&self) -> bool {
+        self.freshness.was_fetched()
     }
 
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
@@ -354,6 +368,28 @@ impl FriendStore {
 
     /// Send a friend request by username (React add-friend modal). Optimistically inserts
     /// an outgoing request on success so the Pending tab reflects it immediately.
+    pub fn check_is_follower(&mut self, user: UserId, cx: &mut Context<Self>) {
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        cx.spawn(async move |this, cx| {
+            let result = api.is_follower(user.0).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != generation {
+                    return;
+                }
+                let is_follower = match result {
+                    Ok(is_follower) => is_follower,
+                    Err(error) => {
+                        tracing::warn!("is_follower check failed: {error}");
+                        false
+                    }
+                };
+                cx.emit(FriendEvent::FollowerChecked { user, is_follower });
+            });
+        })
+        .detach();
+    }
+
     pub fn add_friend_by_username(&mut self, username: String, cx: &mut Context<Self>) {
         if self.adding || username.is_empty() {
             return;
@@ -635,6 +671,8 @@ mod tests {
             logo: None,
             status: String::new(),
             user_status: String::new(),
+            dob_seconds: 0,
+            create_time_seconds: 0,
         }
     }
 

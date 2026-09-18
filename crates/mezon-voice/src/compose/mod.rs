@@ -2,7 +2,7 @@ mod layout;
 mod render;
 mod text;
 
-pub use layout::{GAP, RADIUS, TileRect, TileShape, layout_tiles};
+pub use layout::{GAP, PADDING, RADIUS, TileRect, TileShape, layout_tiles};
 pub use render::{DrawTile, Renderer, SourceImage, accent_for};
 pub use text::TextPainter;
 
@@ -26,7 +26,9 @@ pub struct SceneTile {
     pub avatar: Option<Arc<AvatarImage>>,
     pub is_screen_share: bool,
     pub focused: bool,
+    pub fullscreen: bool,
     pub speaking: bool,
+    pub muted: bool,
 }
 
 #[derive(Clone, Default)]

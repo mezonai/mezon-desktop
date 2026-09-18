@@ -11,11 +11,11 @@ use blink_manager::CaretBlink;
 use gpui::{
     App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, Div, Element, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    FontWeight, GlobalElementId, Hsla, Image, InspectorElementId, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render,
-    RenderOnce, ScrollWheelEvent, SharedString, Style, StyleRefinement, Styled, Subscription,
-    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, div, fill, point,
-    prelude::*, px, rgb, size,
+    FontWeight, GlobalElementId, Hsla, Image, ImeSurroundingText, InspectorElementId, IntoElement,
+    KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
+    Pixels, Point, Render, RenderOnce, ScrollWheelEvent, SharedString, Style, StyleRefinement,
+    Styled, Subscription, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
+    div, fill, point, prelude::*, px, rgb, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -30,11 +30,14 @@ use crate::components::primitives::text_actions::{
 use crate::theme::ActiveTheme;
 use crate::util::text_edit::{
     EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
-    granularity_for_click, home_target, line_end, line_start, next_word_boundary,
-    previous_word_boundary, range_for_granularity, should_coalesce,
+    granularity_for_click, home_target, ime_replace_range, line_end, line_start,
+    marked_caret_range, marked_range_after_delete, next_word_boundary, previous_word_boundary,
+    range_for_granularity, should_coalesce, splice_out_byte_range, surrounding_delete_range,
+    swallow_discarded_ime_commit,
 };
 
 const MASK: char = '\u{2022}';
+const MEASURE_CACHE_ENTRIES: usize = 4;
 const MAX_VISIBLE_LINES: usize = 10;
 
 struct DocLine {
@@ -191,6 +194,7 @@ pub(crate) struct MentionInputState {
     line_height: Pixels,
     scroll_offset: Point<Pixels>,
     measured_rows: usize,
+    measure_cache: Vec<(SharedString, Pixels, usize)>,
     content_height: Pixels,
     pending_caret_reveal: bool,
     is_selecting: bool,
@@ -207,12 +211,21 @@ pub(crate) struct MentionInputState {
     _window_activation_sub: Subscription,
 }
 
+impl MentionInputState {
+    pub(crate) fn is_composing(&self) -> bool {
+        self.marked_range.is_some()
+    }
+}
+
 impl EventEmitter<MentionFieldEvent> for MentionInputState {}
 
 impl MentionInputState {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         let window_activation_sub = cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.discard_ime_commit = None;
+            }
             this.caret_blink
                 .sync_window_active(window.is_window_active(), cx);
         });
@@ -230,6 +243,7 @@ impl MentionInputState {
             line_height: px(20.),
             scroll_offset: Point::default(),
             measured_rows: 1,
+            measure_cache: Vec::new(),
             content_height: px(0.),
             pending_caret_reveal: true,
             is_selecting: false,
@@ -330,6 +344,39 @@ impl MentionInputState {
         }
     }
 
+    pub(crate) fn drop_uncommitted_preedit(&mut self, cx: &mut Context<Self>) {
+        let Some(marked) = self.marked_range.take() else {
+            return;
+        };
+        let Some((next, discarded, caret)) = splice_out_byte_range(&self.content, marked) else {
+            return;
+        };
+        self.discard_ime_commit = Some(discarded);
+        self.set_content(next);
+        self.selected_range = caret..caret;
+        self.selection_reversed = false;
+        cx.notify();
+        cx.emit(MentionFieldEvent::Change);
+    }
+
+    pub(crate) fn pending_send_ime_token(&self) -> Option<String> {
+        if let Some(marked) = self.marked_range.clone() {
+            let marked = self.clamp_range(marked);
+            return self.content.get(marked).map(str::to_string);
+        }
+        self.discard_ime_commit.clone()
+    }
+
+    pub(crate) fn clear_after_send(
+        &mut self,
+        swallow_commit: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.discard_ime_commit = swallow_commit;
+        self.set_value("", window, cx);
+    }
+
     pub fn set_value(
         &mut self,
         value: impl Into<SharedString>,
@@ -371,6 +418,7 @@ impl MentionInputState {
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.marked_range = None;
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx)
     }
@@ -473,7 +521,7 @@ impl MentionInputState {
             }
             self.extend_selection(prev, cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_selected_range(window, cx);
     }
 
     fn delete_to_next_word_end(
@@ -490,7 +538,7 @@ impl MentionInputState {
             }
             self.extend_selection(next, cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_selected_range(window, cx);
     }
 
     fn delete_to_line_start(
@@ -507,7 +555,7 @@ impl MentionInputState {
             }
             self.extend_selection(target, cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_selected_range(window, cx);
     }
 
     fn delete_to_line_end(
@@ -524,7 +572,7 @@ impl MentionInputState {
             }
             self.extend_selection(target, cx);
         }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_selected_range(window, cx);
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
@@ -600,7 +648,7 @@ impl MentionInputState {
             }
             self.extend_selection(prev, cx)
         }
-        self.replace_text_in_range(None, "", window, cx)
+        self.delete_selected_range(window, cx)
     }
 
     fn enter(&mut self, _: &Enter, _window: &mut Window, cx: &mut Context<Self>) {
@@ -666,7 +714,12 @@ impl MentionInputState {
             }
             self.extend_selection(next, cx)
         }
-        self.replace_text_in_range(None, "", window, cx)
+        self.delete_selected_range(window, cx)
+    }
+
+    fn delete_selected_range(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let range_utf16 = self.range_to_utf16(&self.selected_range);
+        self.replace_text_in_range(Some(range_utf16), "", window, cx)
     }
 
     fn on_mouse_down(
@@ -743,10 +796,13 @@ impl MentionInputState {
         window.show_character_palette();
     }
 
-    fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = cx.read_from_clipboard() else {
-            return;
-        };
+    fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        mezon_widgets::clipboard::read_then(self, window, cx, |this, item, _window, cx| {
+            this.apply_paste(item, cx)
+        });
+    }
+
+    fn apply_paste(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
         let images: Vec<Image> = item
             .entries()
             .iter()
@@ -781,6 +837,13 @@ impl MentionInputState {
         self.replace_text_in_range(None, text, window, cx);
     }
 
+    fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {
+        if event.keystroke.key == "enter" && !event.keystroke.modifiers.modified() {
+            return;
+        }
+        self.discard_ime_commit = None;
+    }
+
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() && !self.masked {
             cx.write_to_clipboard(ClipboardItem::new_string(
@@ -796,7 +859,7 @@ impl MentionInputState {
                     self.content[self.selected_range.clone()].to_string(),
                 ));
             }
-            self.replace_text_in_range(None, "", window, cx)
+            self.delete_selected_range(window, cx)
         }
     }
 
@@ -1046,30 +1109,28 @@ impl EntityInputHandler for MentionInputState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if range_utf16.is_none()
-            && self.marked_range.is_none()
-            && let Some(expected) = self.discard_ime_commit.as_deref()
-        {
-            if new_text == expected {
-                self.discard_ime_commit = None;
-                return;
-            }
-            if !new_text.is_empty() {
-                self.discard_ime_commit = None;
-            }
+        if swallow_discarded_ime_commit(
+            &mut self.discard_ime_commit,
+            range_utf16.as_ref(),
+            self.marked_range.is_some(),
+            new_text,
+        ) {
+            return;
         }
-        let range = range_utf16
-            .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
+        if new_text.is_empty() && range_utf16.is_none() && self.marked_range.is_none() {
+            return;
+        }
+        let range = if let Some(range_utf16) = range_utf16.as_ref() {
+            self.range_from_utf16(range_utf16)
+        } else {
+            ime_replace_range(&self.selected_range, self.marked_range.as_ref())
+        };
         let range = self.clamp_range(range);
+        let prior_marked = self.marked_range.clone();
 
-        let kind = if self.marked_range.is_some() {
-            EditKind::Insert
-        } else if new_text.is_empty() {
+        let kind = if new_text.is_empty() {
             EditKind::Delete
-        } else if range.is_empty() && !new_text.contains('\n') {
+        } else if self.marked_range.is_some() || (range.is_empty() && !new_text.contains('\n')) {
             EditKind::Insert
         } else {
             EditKind::Other
@@ -1079,7 +1140,11 @@ impl EntityInputHandler for MentionInputState {
         let next = self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
         self.set_content(next);
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
-        self.marked_range.take();
+        if new_text.is_empty() {
+            self.marked_range = marked_range_after_delete(prior_marked.as_ref(), &range);
+        } else {
+            self.marked_range.take();
+        }
         self.pause_caret_blink(cx);
         cx.notify();
         cx.emit(MentionFieldEvent::Change);
@@ -1093,17 +1158,16 @@ impl EntityInputHandler for MentionInputState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if range_utf16.is_none()
-            && self.marked_range.is_none()
-            && let Some(expected) = self.discard_ime_commit.as_deref()
-        {
-            if new_text == expected {
-                self.discard_ime_commit = None;
-                return;
-            }
-            if !new_text.is_empty() {
-                self.discard_ime_commit = None;
-            }
+        if swallow_discarded_ime_commit(
+            &mut self.discard_ime_commit,
+            range_utf16.as_ref(),
+            self.marked_range.is_some(),
+            new_text,
+        ) {
+            return;
+        }
+        if new_text.is_empty() && range_utf16.is_none() && self.marked_range.is_none() {
+            return;
         }
         let range = range_utf16
             .as_ref()
@@ -1123,11 +1187,8 @@ impl EntityInputHandler for MentionInputState {
         } else {
             self.marked_range = None;
         }
-        self.selected_range = new_selected_range_utf16
-            .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.start)
-            .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+        self.selected_range =
+            marked_caret_range(range.start, new_text, new_selected_range_utf16.as_ref());
 
         self.pause_caret_blink(cx);
         cx.notify();
@@ -1183,6 +1244,44 @@ impl EntityInputHandler for MentionInputState {
     ) -> Option<usize> {
         self.last_bounds?;
         Some(self.offset_to_utf16(self.index_for_mouse_position(point)))
+    }
+
+    fn surrounding_text(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<ImeSurroundingText> {
+        if self.masked {
+            return None;
+        }
+        Some(ImeSurroundingText::from_selection(
+            &self.content,
+            self.selected_range.clone(),
+            self.selection_reversed,
+            self.marked_range.clone(),
+        ))
+    }
+
+    fn delete_surrounding_text(
+        &mut self,
+        before_len: usize,
+        after_len: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = surrounding_delete_range(
+            &self.content,
+            &self.selected_range,
+            self.marked_range.as_ref(),
+            self.selection_reversed,
+            before_len,
+            after_len,
+        );
+        if range.is_empty() {
+            return;
+        }
+        let range_utf16 = self.range_to_utf16(&range);
+        self.replace_text_in_range(Some(range_utf16), "", window, cx);
     }
 }
 
@@ -1249,6 +1348,7 @@ impl Render for MentionInputState {
             .key_context(TEXT_INPUT_CONTEXT)
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
+            .on_key_down(cx.listener(Self::on_key_down))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::enter))
@@ -1337,6 +1437,78 @@ impl IntoElement for MentionTextElement {
     }
 }
 
+impl MentionTextElement {
+    fn measured_rows(
+        state: &Entity<MentionInputState>,
+        width: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> usize {
+        let input = state.read(cx);
+        if input.is_masked() || input.content.is_empty() {
+            return 1;
+        }
+        if width <= Pixels::ZERO {
+            return input.visible_line_count();
+        }
+        let display_text = input.display_text();
+        if let Some((_, _, rows)) = input
+            .measure_cache
+            .iter()
+            .find(|(text, cached_width, _)| *cached_width == width && *text == display_text)
+        {
+            return (*rows).max(input.line_count);
+        }
+        let hard_lines = input.line_count;
+        let marked_range = input.marked_range.clone();
+        let brand_color: Hsla = cx.theme().brand.into();
+        let emoji_color: Hsla = rgb(EMOJI_SPAN_COLOR).into();
+        let resolved_spans: Vec<ResolvedSpan> = input
+            .mention_spans
+            .iter()
+            .map(|span| {
+                let (color, bold) = match span.kind {
+                    MentionSpanKind::Mention | MentionSpanKind::Hashtag => (brand_color, false),
+                    MentionSpanKind::Emoji => (emoji_color, true),
+                };
+                ResolvedSpan {
+                    range: span.range.clone(),
+                    color,
+                    bold,
+                }
+            })
+            .collect();
+        let style = window.text_style();
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let line_height = window.line_height();
+        let base = TextRun {
+            len: display_text.len(),
+            font: style.font(),
+            color: style.color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let runs = build_text_runs(display_text.len(), &base, marked_range, &resolved_spans);
+        let wrapped = window
+            .text_system()
+            .shape_text(display_text.clone(), font_size, &runs, Some(width), None)
+            .unwrap_or_default();
+        let total_h = wrapped
+            .iter()
+            .fold(Pixels::ZERO, |acc, line| {
+                acc + wrapped_line_height(line, line_height)
+            })
+            .max(line_height);
+        let rows = (total_h / line_height).round().max(1.) as usize;
+        state.update(cx, |input, _| {
+            input.measure_cache.insert(0, (display_text, width, rows));
+            input.measure_cache.truncate(MEASURE_CACHE_ENTRIES);
+        });
+        rows.max(hard_lines)
+    }
+}
+
 impl Element for MentionTextElement {
     type RequestLayoutState = ();
     type PrepaintState = PrepaintState;
@@ -1354,14 +1526,30 @@ impl Element for MentionTextElement {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         window: &mut Window,
-        cx: &mut App,
+        _cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let line_count = self.input.read(cx).visible_line_count();
-        let visible = line_count.clamp(1, MAX_VISIBLE_LINES);
         let mut style = Style::default();
         style.size.width = gpui::relative(1.).into();
-        style.size.height = (window.line_height() * visible as f32).into();
-        (window.request_layout(style, [], cx), ())
+        let state = self.input.clone();
+        let layout_id = window.request_measured_layout(
+            style,
+            move |known_dimensions, available_space, window, cx| {
+                let width = known_dimensions.width.or(match available_space.width {
+                    gpui::AvailableSpace::Definite(width) => Some(width),
+                    _ => None,
+                });
+                let line_count = match width {
+                    Some(width) => Self::measured_rows(&state, width, window, cx),
+                    None => state.read(cx).visible_line_count(),
+                };
+                let visible = line_count.clamp(1, MAX_VISIBLE_LINES);
+                let height = known_dimensions
+                    .height
+                    .unwrap_or(window.line_height() * visible as f32);
+                gpui::size(width.unwrap_or(Pixels::ZERO), height)
+            },
+        );
+        (layout_id, ())
     }
 
     fn prepaint(

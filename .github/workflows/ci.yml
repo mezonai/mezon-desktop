@@ -91,6 +91,36 @@ jobs:
 #       - name: Check Windows platform crates
 #         run: cargo check -p mezon-app --locked
 #
+  windows-pdf:
+    name: Windows PDF
+    # The one backend no other runner can prove. `Windows.Data.Pdf` exists only on
+    # Windows, so the macOS and Linux jobs compile `windows_pdf.rs` at best and never
+    # run a page through it - which is how the Windows path shipped unverified.
+    # `mezon-pdf` is a leaf crate (anyhow, image, windows), so this costs minutes
+    # rather than the half hour a full `mezon-app` build takes.
+    runs-on: windows-latest
+    env:
+      # Without this the smoke tests skip themselves when the backend is missing, and
+      # the job would go green having rendered nothing.
+      MEZON_PDF_REQUIRE_BACKEND: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      # `--nocapture` so a backend that refuses to activate names its HRESULT in the log.
+      - name: Render a page through Windows.Data.Pdf
+        run: cargo test -p mezon-pdf --locked -- --nocapture
+
   test:
     name: Test
     runs-on: ubuntu-latest

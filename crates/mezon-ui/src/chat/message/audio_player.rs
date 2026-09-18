@@ -351,7 +351,11 @@ pub(crate) fn audio_pill(
         .into_any_element()
 }
 
-pub(crate) fn audio_sending_pill(duration: f64) -> gpui::AnyElement {
+/// The pill a voice message shows while its bytes are still on their way — for
+/// the sender until the upload finishes, for everyone else until `presign_finish`
+/// names the key. Spelling out "Uploading…" beats a bare spinner: the row is
+/// otherwise indistinguishable from an audio player that simply will not start.
+pub(crate) fn audio_sending_pill(duration: f64, locale: &str) -> gpui::AnyElement {
     div()
         .flex()
         .w_full()
@@ -383,8 +387,16 @@ pub(crate) fn audio_sending_pill(duration: f64) -> gpui::AnyElement {
                         .ml_2()
                         .text_size(px(14.))
                         .whitespace_nowrap()
-                        .child(audio_time_label(0.0, duration)),
-                ),
+                        .child(mezon_i18n::t(locale, "message.attachment.uploading")),
+                )
+                .when(duration > 0.0, |d| {
+                    d.child(
+                        div()
+                            .text_size(px(14.))
+                            .whitespace_nowrap()
+                            .child(audio_time_label(0.0, duration)),
+                    )
+                }),
         )
         .into_any_element()
 }

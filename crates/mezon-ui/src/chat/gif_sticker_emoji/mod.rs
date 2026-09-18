@@ -15,7 +15,7 @@ use crate::chat::message::{ReactionPicker, ReactionPickerEvent};
 use crate::components::primitives::{Icon, IconName, Input, InputEvent, InputState};
 use crate::theme::ActiveTheme;
 
-const PANEL_W: f32 = 500.;
+pub(super) const PANEL_W: f32 = 500.;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SubPanel {
@@ -236,6 +236,17 @@ impl GifStickerEmojiPopup {
         let query = self.search.read(cx).value().to_string();
         self.apply_query(query, cx);
         cx.notify();
+    }
+
+    pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    pub fn drop_search_preedit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.update(cx, |input, cx| {
+            input.drop_uncommitted_preedit(cx);
+        });
+        window.reset_ime();
     }
 }
 

@@ -10,6 +10,13 @@ use mezon_store::{AuthState, LoginStore, Settings};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+#[derive(Debug, Clone, Copy)]
+pub struct McpLaunch {
+    pub enabled: bool,
+    pub read_only: bool,
+    pub port: u16,
+}
+
 pub struct McpRuntime {
     controller: Arc<McpController>,
     _control_server: Option<ControlServer>,
@@ -23,16 +30,20 @@ impl McpRuntime {
     pub fn start(
         api: Arc<AppApi>,
         mcp_cmd_tx: futures::channel::mpsc::UnboundedSender<McpCommand>,
+        launch: McpLaunch,
     ) -> anyhow::Result<Self> {
         let controller = Arc::new(McpController::new());
+        controller.set_preferred_port(launch.port);
         let controller_for_handler = controller.clone();
         let runtime_handle = mezon_client::transport_runtime::handle();
         let runtime_for_handler = runtime_handle.clone();
+        let ui_tx_for_handler = mcp_cmd_tx.clone();
 
         let handler: ControlHandler = Arc::new(move |request| {
             let controller = controller_for_handler.clone();
+            let ui_tx = ui_tx_for_handler.clone();
             let request_id = request.id;
-            match runtime_for_handler.block_on(handle_control_request(controller, request)) {
+            match runtime_for_handler.block_on(handle_control_request(controller, ui_tx, request)) {
                 Ok(response) => response,
                 Err(error) => ControlResponse::err(request_id, error.to_string()),
             }
@@ -53,6 +64,13 @@ impl McpRuntime {
             controller_for_backend
                 .set_backend(api_for_backend, ui_tx_for_backend)
                 .await;
+            if !launch.enabled {
+                return;
+            }
+            match controller_for_backend.start(launch.read_only, None).await {
+                Ok(result) => tracing::info!("MCP server listening at {}", result.url),
+                Err(error) => tracing::warn!("Failed to start the MCP server on launch: {error}"),
+            }
         });
 
         Ok(Self {
@@ -76,6 +94,73 @@ impl McpRuntime {
                     }
                     McpCommand::Navigate { path, reply } => {
                         let result = cx.update(|cx| navigate_path(cx, &path));
+                        let _ = reply.send(result);
+                    }
+                    #[cfg(debug_assertions)]
+                    McpCommand::SetChannelAgeRestricted {
+                        clan_id,
+                        channel_id,
+                        on,
+                        reply,
+                    } => {
+                        let clan_id = mezon_store::ClanId(clan_id);
+                        let channel_id = mezon_store::ChannelId(channel_id);
+                        let prepared = cx.update(|cx| {
+                            let store = mezon_store::ChannelList::global(cx);
+                            let channel = store.read(cx).channel(clan_id, channel_id).cloned();
+                            channel.map(|channel| {
+                                store.update(cx, |store, cx| {
+                                    store.update_channel_overview(
+                                        clan_id,
+                                        channel_id,
+                                        channel.name.to_string(),
+                                        channel.topic.clone(),
+                                        i32::from(on),
+                                        cx,
+                                    )
+                                })
+                            })
+                        });
+                        let result = match prepared {
+                            Some(task) => match task.await {
+                                Ok(()) => {
+                                    Ok(serde_json::json!({ "ok": true, "age_restricted": on }))
+                                }
+                                Err(e) => Err(anyhow::anyhow!("update failed: {e:?}")),
+                            },
+                            None => Err(anyhow::anyhow!("channel not loaded")),
+                        };
+                        let _ = reply.send(result);
+                    }
+                    #[cfg(debug_assertions)]
+                    McpCommand::SetLocalDob { seconds, reply } => {
+                        let result = cx.update(|cx| {
+                            mezon_store::AccountStore::global(cx).update(cx, |store, cx| {
+                                match store.account.as_mut() {
+                                    Some(account) => {
+                                        account.dob_seconds = seconds;
+                                        cx.notify();
+                                        Ok(serde_json::json!({ "ok": true, "dob_seconds": seconds }))
+                                    }
+                                    None => Err(anyhow::anyhow!("account not loaded")),
+                                }
+                            })
+                        });
+                        let _ = reply.send(result);
+                    }
+                    #[cfg(debug_assertions)]
+                    McpCommand::InjectPreviewMessage {
+                        content,
+                        sender_name,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_store::MessagesStore::global(cx).update(cx, |store, cx| {
+                                store.inject_preview_message(content, sender_name, cx).map(
+                                    |message_id| serde_json::json!({ "message_id": message_id }),
+                                )
+                            })
+                        });
                         let _ = reply.send(result);
                     }
                     McpCommand::Logout { reply } => {
@@ -123,7 +208,16 @@ impl McpRuntime {
                         let result = cx.update(|cx| set_setting(cx, &settings, &key, value));
                         let _ = reply.send(result);
                     }
-                    McpCommand::SetCliEnabled { enabled, reply } => {
+                    McpCommand::SetMcpEnabled { enabled } => {
+                        cx.update(|cx| {
+                            settings.update(cx, |settings, cx| {
+                                settings.mcp_enabled = enabled;
+                                cx.notify();
+                            });
+                            mezon_store::schedule_settings_save(&settings, cx);
+                        });
+                    }
+                McpCommand::SetCliEnabled { enabled, reply } => {
                         let result = cx.update(|_| set_cli_enabled(enabled));
                         let _ = reply.send(result);
                     }
@@ -139,6 +233,26 @@ impl McpRuntime {
                     }
                     McpCommand::LeaveVoice { reply } => {
                         let result = cx.update(mezon_ui::app::capture::leave_voice);
+                        let _ = reply.send(result);
+                    }
+                    #[cfg(debug_assertions)]
+                    McpCommand::SimulateParticipants {
+                        count,
+                        screenshare,
+                        focus,
+                        fullscreen,
+                        member_strip,
+                        reply,
+                    } => {
+                        let options = mezon_store::SimulatedCall {
+                            screenshare,
+                            focus,
+                            fullscreen,
+                            member_strip,
+                        };
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::simulate_participants(count, options, cx)
+                        });
                         let _ = reply.send(result);
                     }
                     McpCommand::GetRecordingState { reply } => {
@@ -158,6 +272,18 @@ impl McpRuntime {
                         let result = cx.update(scroll_state);
                         let _ = reply.send(result);
                     }
+                    McpCommand::TourState { reply } => {
+                        let result = cx.update(tour_state);
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::TourStart { track, reply } => {
+                        let result = cx.update(|cx| tour_start(track.as_deref(), cx));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::TourAdvance { forward, reply } => {
+                        let result = cx.update(|cx| tour_advance(forward, cx));
+                        let _ = reply.send(result);
+                    }
                     McpCommand::SetPanel { kind, reply } => {
                         let result = cx.update(|cx| {
                             mezon_ui::app::capture::set_composer_panel(cx, kind.as_deref())
@@ -171,6 +297,21 @@ impl McpRuntime {
                     } => {
                         let result = cx.update(|cx| {
                             mezon_ui::app::capture::open_message_image_viewer(
+                                &settings,
+                                message_id,
+                                attachment_index,
+                                cx,
+                            )
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::OpenPdfViewer {
+                        message_id,
+                        attachment_index,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::open_message_pdf_viewer(
                                 &settings,
                                 message_id,
                                 attachment_index,
@@ -211,8 +352,9 @@ impl McpRuntime {
                         let _ = reply.send(result);
                     }
                     McpCommand::OpenTopic { message_id, reply } => {
-                        let result =
-                            cx.update(|cx| mezon_ui::app::capture::open_topic(cx, message_id));
+                        let result = cx
+                            .update(|cx| mezon_ui::app::capture::open_topic(cx, message_id))
+                            .and_then(|_| cx.update(|cx| mezon_ui::app::capture::topic_state(cx)));
                         let _ = reply.send(result);
                     }
                     McpCommand::CloseTopic { reply } => {
@@ -225,6 +367,15 @@ impl McpRuntime {
                     }
                     McpCommand::TopicType { text, reply } => {
                         let result = cx.update(|cx| mezon_ui::app::capture::topic_type(cx, &text));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::TopicPick { index, reply } => {
+                        let result = cx.update(|cx| mezon_ui::app::capture::topic_pick(cx, index));
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::TopicDropPaths { paths, reply } => {
+                        let result =
+                            cx.update(|cx| mezon_ui::app::capture::topic_drop_paths(cx, paths));
                         let _ = reply.send(result);
                     }
                     McpCommand::TopicSubmit { reply } => {
@@ -324,9 +475,19 @@ impl McpRuntime {
                         let result = cx.update(|cx| load_more_messages(cx, older));
                         let _ = reply.send(result);
                     }
-                    McpCommand::ListLoadedMessages { limit, reply } => {
+                    McpCommand::ListLoadedMessages {
+                        limit,
+                        topic,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::list_loaded_messages(cx, limit, topic)
+                        });
+                        let _ = reply.send(result);
+                    }
+                    McpCommand::ReplyBegin { message_id, reply } => {
                         let result =
-                            cx.update(|cx| mezon_ui::app::capture::list_loaded_messages(cx, limit));
+                            cx.update(|cx| mezon_ui::app::capture::reply_begin(cx, message_id));
                         let _ = reply.send(result);
                     }
                     McpCommand::JumpToMessage { message_id, reply } => {
@@ -561,12 +722,17 @@ impl McpRuntime {
 
 async fn handle_control_request(
     controller: Arc<McpController>,
+    ui_tx: futures::channel::mpsc::UnboundedSender<McpCommand>,
     request: ControlRequest,
 ) -> anyhow::Result<ControlResponse> {
     match request.method.as_str() {
         "mcp.start" => {
             let params: McpStartParams = serde_json::from_value(request.params)?;
+            if let Some(port) = params.port {
+                controller.set_preferred_port(port);
+            }
             let result = controller.start(params.read_only, params.port).await?;
+            let _ = ui_tx.unbounded_send(McpCommand::SetMcpEnabled { enabled: true });
             Ok(ControlResponse::ok(
                 request.id,
                 serde_json::to_value(result)?,
@@ -581,7 +747,11 @@ async fn handle_control_request(
         }
         "mcp.stop" => {
             controller.stop().await?;
-            Ok(ControlResponse::ok(request.id, Value::Null))
+            let _ = ui_tx.unbounded_send(McpCommand::SetMcpEnabled { enabled: false });
+            Ok(ControlResponse::ok(
+                request.id,
+                serde_json::to_value(controller.status().await)?,
+            ))
         }
         "tool.call" => {
             let params: ToolCallParams = serde_json::from_value(request.params)?;
@@ -723,6 +893,54 @@ async fn topic_scroll_wheel(cx: &mut AsyncApp, delta_y: f32, ticks: u32) -> anyh
         "first_visible_index": first_visible,
         "at_bottom": at_bottom,
     }))
+}
+
+fn tour_state(cx: &mut App) -> anyhow::Result<Value> {
+    let Some(entity) = mezon_ui::tour::TourState::try_global(cx) else {
+        return Ok(json!({ "active": false }));
+    };
+    let status = entity.read(cx).status(cx);
+    Ok(match status {
+        None => json!({ "active": false }),
+        Some(status) => json!({
+            "active": true,
+            "resolving": status.resolving,
+            "hole": status.hole.map(|(x, y, w, h)| json!([x, y, w, h])),
+            "track": status.track,
+            "index": status.index,
+            "position": status.position,
+            "total": status.total,
+            "title_key": status.title_key,
+            "anchor": status.anchor,
+            "has_hole": status.has_hole,
+        }),
+    })
+}
+
+fn tour_start(track: Option<&str>, cx: &mut App) -> anyhow::Result<Value> {
+    match mezon_ui::tour::mcp_start(track, cx)? {
+        Some(id) => Ok(json!({ "ok": true, "track": id })),
+        None => Ok(json!({
+            "ok": false,
+            "reason": "no track matched this route, it is already done, or a tour is already running",
+        })),
+    }
+}
+
+fn tour_advance(forward: bool, cx: &mut App) -> anyhow::Result<Value> {
+    match mezon_ui::tour::mcp_advance(forward, cx)? {
+        Some(advance) => Ok(json!({
+            "ok": true,
+            "moved": advance.moved,
+            "active": advance.still_active,
+        })),
+        None => Ok(json!({
+            "ok": false,
+            "moved": false,
+            "active": false,
+            "reason": "no tour is running",
+        })),
+    }
 }
 
 fn scroll_state(cx: &mut App) -> anyhow::Result<Value> {

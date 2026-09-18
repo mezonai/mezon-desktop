@@ -38,7 +38,11 @@ pub struct AppConfig {
     pub tcp_port: Option<u16>,
     pub stream_ws_url: String,
     pub meet_ws_url: String,
+    pub sfu_ws_url: String,
     pub notification_ws_url: String,
+    pub blackboard_url: String,
+    pub quiz_url: String,
+    pub interactive_url: String,
 
     // ── OAuth2 ────────────────────────────────────────────────────────────────
     pub oauth2_authorize_url: String,
@@ -81,6 +85,7 @@ pub struct AppConfig {
     pub webrtc_ice_servers_url: String,
     pub webrtc_ice_servers_username: String,
     pub webrtc_ice_servers_credential: String,
+    pub voice_agent_ids: Vec<String>,
 
     // ── Firebase / FCM ────────────────────────────────────────────────────────
     pub fcm_api_key: String,
@@ -120,7 +125,11 @@ impl AppConfig {
             tcp_port: Some(7349),
             stream_ws_url: "wss://stn.nccsoft.vn".into(),
             meet_ws_url: "wss://meet.nccsoft.vn".into(),
+            sfu_ws_url: "wss://test-sfu.nccsoft.vn/ws".into(),
             notification_ws_url: "wss://gotify.mezon.ai".into(),
+            blackboard_url: "https://blackboard.mezon.ai".into(),
+            quiz_url: "https://quiz.mezon.ai".into(),
+            interactive_url: "https://interactive.mezon.ai".into(),
 
             oauth2_authorize_url: "https://oauth2.mezon.ai/oauth2/auth".into(),
             oauth2_client_id: "f049f29e-12a9-464c-938f-0a2f60c3210b".into(),
@@ -158,6 +167,7 @@ impl AppConfig {
             webrtc_ice_servers_url: "turn:relay.mezon.vn:5349".into(),
             webrtc_ice_servers_username: "turnmezon".into(),
             webrtc_ice_servers_credential: String::new(),
+            voice_agent_ids: vec!["2037383744142184448".into()],
 
             fcm_api_key: String::new(),
             fcm_auth_domain: "mezon-772fa.firebaseapp.com".into(),
@@ -178,6 +188,16 @@ impl AppConfig {
 
     pub fn from_env() -> Self {
         let defaults = Self::dev_defaults();
+        let mmn_api_url = opt_str(baked_env::NX_CHAT_APP_MMN_API_URL, &defaults.mmn_api_url);
+        let indexer_api_url = opt_str(
+            baked_env::NX_CHAT_APP_INDEXER_API_URL,
+            &defaults.indexer_api_url,
+        );
+        let indexer_api_url = if indexer_api_url.is_empty() {
+            sibling_wallet_service_url(&mmn_api_url, "indexer-api").unwrap_or_default()
+        } else {
+            indexer_api_url
+        };
         Self {
             api_host: opt_str(baked_env::NX_CHAT_APP_API_HOST, &defaults.api_host),
             api_port: opt_u16(baked_env::NX_CHAT_APP_API_PORT, defaults.api_port),
@@ -192,9 +212,19 @@ impl AppConfig {
                 &defaults.stream_ws_url,
             ),
             meet_ws_url: opt_str(baked_env::NX_CHAT_APP_MEET_WS_URL, &defaults.meet_ws_url),
+            sfu_ws_url: opt_str(baked_env::NX_CHAT_APP_SFU_WS_URL, &defaults.sfu_ws_url),
             notification_ws_url: opt_str(
                 baked_env::NX_CHAT_APP_NOTIFICATION_WS_URL,
                 &defaults.notification_ws_url,
+            ),
+            blackboard_url: opt_str(
+                baked_env::NX_CHAT_APP_BLACKBOARD_URL,
+                &defaults.blackboard_url,
+            ),
+            quiz_url: opt_str(baked_env::NX_CHAT_APP_QUIZ_URL, &defaults.quiz_url),
+            interactive_url: opt_str(
+                baked_env::NX_CHAT_APP_INTERACTIVE_URL,
+                &defaults.interactive_url,
             ),
 
             oauth2_authorize_url: opt_str(
@@ -266,11 +296,8 @@ impl AppConfig {
                 &defaults.mezon_treasury_url_network,
             ),
 
-            mmn_api_url: opt_str(baked_env::NX_CHAT_APP_MMN_API_URL, &defaults.mmn_api_url),
-            indexer_api_url: opt_str(
-                baked_env::NX_CHAT_APP_INDEXER_API_URL,
-                &defaults.indexer_api_url,
-            ),
+            mmn_api_url,
+            indexer_api_url,
             zk_api_url: opt_str(baked_env::NX_CHAT_APP_ZK_API_URL, &defaults.zk_api_url),
             dong_service_api_url: opt_str(
                 baked_env::NX_CHAT_APP_DONG_SERVICE_API_URL,
@@ -289,6 +316,7 @@ impl AppConfig {
                 baked_env::NX_WEBRTC_ICESERVERS_CREDENTIAL,
                 &defaults.webrtc_ice_servers_credential,
             ),
+            voice_agent_ids: opt_list(baked_env::NX_VOICE_AGENT_ID, &defaults.voice_agent_ids),
 
             fcm_api_key: opt_str(baked_env::NX_CHAT_APP_FCM_API_KEY, &defaults.fcm_api_key),
             fcm_auth_domain: opt_str(
@@ -341,6 +369,11 @@ impl AppConfig {
     /// (`NX_CHAT_APP_API_GW_HOST`, not `NX_CHAT_APP_API_HOST`).
     pub fn client_host(&self) -> &str {
         &self.api_gw_host
+    }
+
+    pub fn client_base_url(&self) -> String {
+        let scheme = if self.api_secure { "https" } else { "http" };
+        format!("{scheme}://{}:{}", self.api_gw_host, self.api_gw_port)
     }
 
     /// REST client bootstrap port — mirrors `getMezonConfig()` in the web app.
@@ -424,6 +457,10 @@ impl AppConfig {
         let path = format!("/{}/plain/{}@webp", processing_options, source_image_url);
         let base = self.imgproxy_base_url.trim_end_matches('/');
         format!("{}/{}{}", base, self.imgproxy_key, path)
+    }
+
+    pub fn is_voice_agent(&self, user_id: &str) -> bool {
+        self.voice_agent_ids.iter().any(|id| id == user_id)
     }
 
     pub fn voice_link(&self, clan_id: &str, channel_id: &str) -> String {
@@ -712,10 +749,27 @@ fn normalize(value: Option<&'static str>) -> Option<&'static str> {
     value.map(str::trim).filter(|v| !v.is_empty())
 }
 
+fn sibling_wallet_service_url(mmn_api_url: &str, service: &str) -> Option<String> {
+    let base = mmn_api_url.trim_end_matches('/').strip_suffix("/mmn-api")?;
+    Some(format!("{base}/{service}/"))
+}
+
 fn opt_str(value: Option<&'static str>, default: &str) -> String {
     normalize(value)
         .map(str::to_owned)
         .unwrap_or_else(|| default.to_owned())
+}
+
+fn opt_list(value: Option<&'static str>, default: &[String]) -> Vec<String> {
+    match normalize(value) {
+        Some(raw) => raw
+            .split(',')
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        None => default.to_vec(),
+    }
 }
 
 fn opt_u16(value: Option<&'static str>, default: u16) -> u16 {
@@ -761,6 +815,24 @@ mod tests {
     #[test]
     fn media_dimensions_landscape_caps_to_available_width() {
         assert_eq!(dims(800, 600), (464.0, 348.0, false));
+    }
+
+    #[test]
+    fn indexer_url_is_derived_from_the_mmn_url_when_unset() {
+        assert_eq!(
+            sibling_wallet_service_url("https://dong.mezon.ai/mmn-api/", "indexer-api").as_deref(),
+            Some("https://dong.mezon.ai/indexer-api/")
+        );
+        assert_eq!(
+            sibling_wallet_service_url("https://dev-mmn.nccsoft.vn/mmn-api", "indexer-api")
+                .as_deref(),
+            Some("https://dev-mmn.nccsoft.vn/indexer-api/")
+        );
+        assert_eq!(sibling_wallet_service_url("", "indexer-api"), None);
+        assert_eq!(
+            sibling_wallet_service_url("https://dong.mezon.ai/wallet/", "indexer-api"),
+            None
+        );
     }
 
     #[test]
@@ -995,6 +1067,26 @@ mod tests {
     fn imgproxy_url_empty_returns_empty() {
         let cfg = AppConfig::dev_defaults();
         assert_eq!(cfg.imgproxy_url("", 100, 100, "fit"), "");
+    }
+
+    #[test]
+    fn voice_agent_ids_match_only_the_configured_ids() {
+        let cfg = AppConfig {
+            voice_agent_ids: vec!["1".into(), "2".into()],
+            ..AppConfig::dev_defaults()
+        };
+        assert!(cfg.is_voice_agent("1"));
+        assert!(cfg.is_voice_agent("2"));
+        assert!(!cfg.is_voice_agent("3"));
+        assert!(!cfg.is_voice_agent(""));
+        assert_eq!(AppConfig::dev_defaults().voice_agent_ids, ["2037383744142184448"]);
+    }
+
+    #[test]
+    fn opt_list_splits_comma_separated_ids_and_falls_back_to_defaults() {
+        assert_eq!(opt_list(Some(" 1, 2 ,,3 "), &[]), ["1", "2", "3"]);
+        assert_eq!(opt_list(Some("   "), &["9".to_string()]), ["9"]);
+        assert_eq!(opt_list(None, &["9".to_string()]), ["9"]);
     }
 
     #[test]

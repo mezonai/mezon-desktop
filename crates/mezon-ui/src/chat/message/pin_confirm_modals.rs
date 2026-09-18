@@ -348,7 +348,7 @@ fn preview_from_message(
         sender_label,
         avatar_src,
         avatar_fallback,
-        body: render_pin_message_preview(msg, theme, image_cache, ogp_cache),
+        body: render_pin_message_preview(msg, theme, locale, image_cache, ogp_cache),
         timestamp,
     }
 }
@@ -358,7 +358,7 @@ fn preview_from_pin(
     clan_id: Option<ClanId>,
     channel_id: Option<ChannelId>,
     fallback_sender_label: &SharedString,
-    _locale: &str,
+    locale: &str,
     image_cache: Entity<LruImageCache>,
     ogp_cache: Entity<LruImageCache>,
     cx: &App,
@@ -398,7 +398,7 @@ fn preview_from_pin(
         sender_label,
         avatar_src,
         avatar_fallback,
-        body: render_pinned_message_preview(pin, theme, image_cache, ogp_cache),
+        body: render_pinned_message_preview(pin, theme, locale, image_cache, ogp_cache),
         timestamp: None,
     }
 }

@@ -83,6 +83,22 @@ pub fn trusted_invite_id(url: &str, internal_domain: Option<&str>) -> Option<i64
         .filter(|id| *id != 0)
 }
 
+/// Whether `url` is a clan invite link — exactly our own host plus a numeric invite id — and
+/// so gets the join card rather than an OGP embed. Mirrors mezon-react's `checkInviteLinkValid`
+/// (`NX_DOMAIN_URL/invite/` prefix + all-digit id): a `/invite/<code>` path on any other host,
+/// a subdomain included (say a third-party app's own invite page), is an ordinary link whose
+/// OGP metadata is shown as-is.
+pub fn is_clan_invite_url(url: &str, internal_domain: Option<&str>) -> bool {
+    let (Some(host), Some(internal)) = (host_of(url), normalized_internal_domain(internal_domain))
+    else {
+        return false;
+    };
+    host == internal
+        && invite_id_from_url(url).is_some_and(|id| {
+            id.bytes().all(|b| b.is_ascii_digit()) && id.bytes().any(|b| b != b'0')
+        })
+}
+
 fn normalized_internal_domain(internal_domain: Option<&str>) -> Option<String> {
     let internal = internal_domain?
         .trim()
@@ -242,6 +258,37 @@ mod tests {
             internal_invite_id("https://mezon.ai/invite/123", Some("")),
             None
         );
+    }
+
+    #[test]
+    fn only_a_numeric_invite_on_our_domain_is_a_clan_invite() {
+        assert!(is_clan_invite_url(
+            "https://mezon.ai/invite/1840670747886882816",
+            Some("https://mezon.ai")
+        ));
+        // A third-party app's invite page: OGP embed, not a join card.
+        assert!(!is_clan_invite_url(
+            "https://meknow.mezon.vn/invite/MZ-3TKK-2D4DZS5N",
+            Some("https://mezon.ai")
+        ));
+        assert!(!is_clan_invite_url(
+            "https://mezon.ai/invite/MZ-3TKK-2D4DZS5N",
+            Some("https://mezon.ai")
+        ));
+        // Only the exact host: React matches the `NX_DOMAIN_URL/invite/` prefix, so a
+        // subdomain's invite page is not a clan invite either.
+        assert!(!is_clan_invite_url(
+            "https://app.mezon.ai/invite/1840670747886882816",
+            Some("https://mezon.ai")
+        ));
+        assert!(!is_clan_invite_url(
+            "https://mezon.ai/invite/0",
+            Some("https://mezon.ai")
+        ));
+        assert!(!is_clan_invite_url(
+            "https://mezon.ai/invite/1840670747886882816",
+            None
+        ));
     }
 
     #[test]

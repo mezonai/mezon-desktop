@@ -1,4 +1,4 @@
-use std::{rc::Rc, sync::atomic::Ordering};
+use std::{cell::Cell, rc::Rc, sync::atomic::Ordering};
 
 use ::util::ResultExt;
 use anyhow::Context as _;
@@ -28,8 +28,40 @@ pub(crate) const WM_GPUI_FORCE_UPDATE_WINDOW: u32 = WM_USER + 5;
 pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_KEYDOWN: u32 = WM_USER + 8;
+pub(crate) const WM_GPUI_END_SESSION: u32 = WM_USER + 9;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
+
+pub(crate) struct DrawCoordinator {
+    drawing: Cell<bool>,
+}
+
+impl DrawCoordinator {
+    pub(crate) fn new() -> Self {
+        Self {
+            drawing: Cell::new(false),
+        }
+    }
+
+    fn try_begin_draw(&self) -> Option<DrawWindowGuard<'_>> {
+        if self.drawing.get() {
+            None
+        } else {
+            self.drawing.set(true);
+            Some(DrawWindowGuard { coordinator: self })
+        }
+    }
+}
+
+struct DrawWindowGuard<'a> {
+    coordinator: &'a DrawCoordinator,
+}
+
+impl Drop for DrawWindowGuard<'_> {
+    fn drop(&mut self) {
+        self.coordinator.drawing.set(false);
+    }
+}
 
 impl WindowsWindowInner {
     pub(crate) fn handle_msg(
@@ -40,11 +72,13 @@ impl WindowsWindowInner {
         lparam: LPARAM,
     ) -> LRESULT {
         let handled = match msg {
-            // eagerly activate the window, so calls to `active_window` will work correctly
-            WM_MOUSEACTIVATE => {
-                unsafe { SetActiveWindow(handle).ok() };
-                None
-            }
+            // `DefWindowProc` answers `MA_NOACTIVATE` for a left click on `HTCAPTION`.
+            // The activation is only triggered when `DefWindowProc` handles the following `WM_NCLBUTTONDOWN`.
+            // The GPUI event is dispatched in between, so a click handler runs while `active_window` is still
+            // whichever window was active before the click. If that handler consumes the
+            // press, `DefWindowProc` never sees it, so the window is never activated at all.
+            // So, let's eagerly activate the window.
+            WM_MOUSEACTIVATE => Some(MA_ACTIVATE as isize),
             WM_ACTIVATE => self.handle_activate_msg(wparam),
             WM_CREATE => self.handle_create_msg(handle),
             WM_MOVE => self.handle_move_msg(handle, lparam),
@@ -60,6 +94,8 @@ impl WindowsWindowInner {
             WM_PAINT => self.handle_paint_msg(handle),
             WM_CLOSE => self.handle_close_msg(),
             WM_DESTROY => self.handle_destroy_msg(handle),
+            WM_QUERYENDSESSION => Some(1),
+            WM_ENDSESSION => self.handle_end_session_msg(wparam),
             WM_MOUSEMOVE => self.handle_mouse_move_msg(handle, lparam, wparam),
             WM_MOUSELEAVE | WM_NCMOUSELEAVE => self.handle_mouse_leave_msg(),
             WM_NCMOUSEMOVE => self.handle_nc_mouse_move_msg(handle, lparam),
@@ -120,6 +156,20 @@ impl WindowsWindowInner {
         } else {
             unsafe { DefWindowProcW(handle, msg, wparam, lparam) }
         }
+    }
+
+    fn handle_end_session_msg(&self, wparam: WPARAM) -> Option<isize> {
+        if wparam.0 != 0 {
+            unsafe {
+                SendMessageW(
+                    self.platform_window_handle,
+                    WM_GPUI_END_SESSION,
+                    Some(WPARAM(self.validation_number)),
+                    None,
+                );
+            }
+        }
+        Some(0)
     }
 
     fn handle_move_msg(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
@@ -652,7 +702,11 @@ impl WindowsWindowInner {
                     .ok()
                     .log_err();
             } else {
-                if let Some(ctx) = ImeContext::get(handle) {
+                // The IME context is per-thread, so without this check a change in this
+                // window's text input state could commit an IME composition happening in another window.
+                if GetFocus() == handle
+                    && let Some(ctx) = ImeContext::get(handle)
+                {
                     ImmNotifyIME(*ctx, NI_COMPOSITIONSTR, CPS_COMPLETE, 0)
                         .ok()
                         .log_err();
@@ -899,7 +953,7 @@ impl WindowsWindowInner {
     }
 
     fn handle_hit_test_msg(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
-        if !self.is_movable || self.state.is_fullscreen() {
+        if self.state.is_fullscreen() {
             return None;
         }
 
@@ -918,16 +972,17 @@ impl WindowsWindowInner {
                 .callbacks
                 .hit_test_window_control
                 .set(Some(callback));
-            if let Some(area) = area {
-                match area {
-                    WindowControlArea::Drag => Some(HTCAPTION as _),
-                    WindowControlArea::Close => return Some(HTCLOSE as _),
-                    WindowControlArea::Max => return Some(HTMAXBUTTON as _),
-                    WindowControlArea::Min => return Some(HTMINBUTTON as _),
-                }
-            } else {
-                None
-            }
+            area.and_then(|area| match area {
+                WindowControlArea::Drag if self.is_movable => Some(HTCAPTION as _),
+                WindowControlArea::Drag => None,
+                WindowControlArea::Close => Some(HTCLOSE as _),
+                WindowControlArea::Max if self.is_resizable => Some(HTMAXBUTTON as _),
+                WindowControlArea::Max if self.is_movable => Some(HTCAPTION as _),
+                WindowControlArea::Max => Some(HTNOWHERE as _),
+                WindowControlArea::Min if self.is_minimizable => Some(HTMINBUTTON as _),
+                WindowControlArea::Min if self.is_movable => Some(HTCAPTION as _),
+                WindowControlArea::Min => Some(HTNOWHERE as _),
+            })
         } else {
             None
         };
@@ -943,7 +998,8 @@ impl WindowsWindowInner {
         let frame_y = get_frame_thicknessx(dpi);
         let frame_x = get_frame_thicknessy(dpi);
 
-        if !self.state.is_maximized()
+        if self.is_resizable
+            && !self.state.is_maximized()
             && let Some(edge) = hit_test_resize_edge(handle, cursor_point, frame_x, frame_y)
         {
             return Some(edge as _);
@@ -1067,11 +1123,12 @@ impl WindowsWindowInner {
             && let Some(last_pressed) = last_pressed
         {
             let handled = match (wparam.0 as u32, last_pressed) {
-                (HTMINBUTTON, HTMINBUTTON) => {
+                (HTMINBUTTON, HTMINBUTTON) if self.is_minimizable => {
                     unsafe { ShowWindowAsync(handle, SW_MINIMIZE).ok().log_err() };
                     true
                 }
-                (HTMAXBUTTON, HTMAXBUTTON) => {
+                (HTMINBUTTON, HTMINBUTTON) => true,
+                (HTMAXBUTTON, HTMAXBUTTON) if self.is_resizable => {
                     if self.state.is_maximized() {
                         unsafe { ShowWindowAsync(handle, SW_NORMAL).ok().log_err() };
                     } else {
@@ -1079,6 +1136,7 @@ impl WindowsWindowInner {
                     }
                     true
                 }
+                (HTMAXBUTTON, HTMAXBUTTON) => true,
                 (HTCLOSE, HTCLOSE) => {
                     unsafe {
                         PostMessageW(Some(handle), WM_CLOSE, WPARAM::default(), LPARAM::default())
@@ -1219,7 +1277,7 @@ impl WindowsWindowInner {
         // from the forced WM_GPUI_FORCE_UPDATE_WINDOW or a stray WM_PAINT in
         // between) is treated as a forced render so it both clears
         // `skip_draws` and bypasses the view cache.
-        self.state.force_render_after_recovery.set(true);
+        self.state.force_render_pending.set(true);
         Some(0)
     }
 
@@ -1230,6 +1288,14 @@ impl WindowsWindowInner {
 
     #[inline]
     fn draw_window(&self, handle: HWND, force_render: bool) -> Option<isize> {
+        let Some(_guard) = self.state.draw_coordinator.try_begin_draw() else {
+            log::debug!("deferring re-entrant draw of window {handle:?}");
+            if force_render {
+                self.state.force_render_pending.set(true);
+            }
+            unsafe { ValidateRect(Some(handle), None).ok().log_err() };
+            return Some(0);
+        };
         let mut request_frame = self.state.callbacks.request_frame.take()?;
 
         self.state.direct_manipulation.update();
@@ -1244,7 +1310,7 @@ impl WindowsWindowInner {
             }
         }
 
-        let force_render = force_render || self.state.force_render_after_recovery.take();
+        let force_render = force_render || self.state.force_render_pending.take();
         if force_render {
             // Re-enable drawing after a device loss recovery. The forced render
             // will rebuild the scene with fresh atlas textures.

@@ -7,15 +7,68 @@ use crate::wallet::SendTokenRequest;
 
 pub const FLOWER_PRICE: i64 = 50_000;
 pub const FLOWER_GIFT_TYPE: &str = "flower";
+const FLOWER_REACTION_PREFIX: &str = "flower:";
+const APP_REACTION_PREFIX: &str = "app:";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(i32)]
 pub enum VoiceInteractiveEventType {
     Gift = 1,
     Recording = 2,
-    AppKahoot = 10,
+    AppQuiz = 10,
     AppBlackboard = 11,
-    AppSlido = 12,
+    AppInteractive = 12,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VoiceInteractiveApp {
+    Quiz,
+    Blackboard,
+    Interactive,
+}
+
+impl VoiceInteractiveApp {
+    pub fn app_id(self) -> i64 {
+        match self {
+            Self::Quiz => 2_089_257_413_122_199_552,
+            Self::Blackboard => 2_089_294_331_818_020_864,
+            Self::Interactive => 2_089_273_739_668_623_360,
+        }
+    }
+
+    pub fn event_type(self) -> VoiceInteractiveEventType {
+        match self {
+            Self::Quiz => VoiceInteractiveEventType::AppQuiz,
+            Self::Blackboard => VoiceInteractiveEventType::AppBlackboard,
+            Self::Interactive => VoiceInteractiveEventType::AppInteractive,
+        }
+    }
+
+    pub fn from_event_type(value: i32) -> Option<Self> {
+        match VoiceInteractiveEventType::from_i32(value) {
+            Some(VoiceInteractiveEventType::AppQuiz) => Some(Self::Quiz),
+            Some(VoiceInteractiveEventType::AppBlackboard) => Some(Self::Blackboard),
+            Some(VoiceInteractiveEventType::AppInteractive) => Some(Self::Interactive),
+            _ => None,
+        }
+    }
+
+    fn slug(self) -> &'static str {
+        match self {
+            Self::Quiz => "quiz",
+            Self::Blackboard => "blackboard",
+            Self::Interactive => "interactive",
+        }
+    }
+
+    fn from_slug(slug: &str) -> Option<Self> {
+        match slug {
+            "quiz" => Some(Self::Quiz),
+            "blackboard" => Some(Self::Blackboard),
+            "interactive" => Some(Self::Interactive),
+            _ => None,
+        }
+    }
 }
 
 impl VoiceInteractiveEventType {
@@ -23,107 +76,16 @@ impl VoiceInteractiveEventType {
         match value {
             1 => Some(Self::Gift),
             2 => Some(Self::Recording),
-            10 => Some(Self::AppKahoot),
+            10 => Some(Self::AppQuiz),
             11 => Some(Self::AppBlackboard),
-            12 => Some(Self::AppSlido),
+            12 => Some(Self::AppInteractive),
             _ => None,
         }
     }
 }
 pub const FLOWER_RATE_LIMIT: Duration = Duration::from_secs(1);
-pub const FLOWER_ANIMATION_TTL: Duration = Duration::from_secs(7);
-pub const FLOWER_PARTICLE_COUNT: usize = 128;
-pub const FLOWER_PALETTE_SIZE: u8 = 14;
-pub const FLOWER_SPRITE_COUNT: u8 = 14;
-
-const FLOWER_BURST_SECS: f32 = 0.4;
-const FLOWER_GROW_SECS: f32 = 2.0;
-const FLOWER_SCALE_START: f32 = 1.0;
-const FLOWER_SCALE_END: f32 = 1.5;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct FlowerParticle {
-    pub sprite: u8,
-    pub angle: f32,
-    pub speed: f32,
-    pub gravity: f32,
-    pub spin0: f32,
-    pub spin_vel: f32,
-    pub size: f32,
-    pub delay: f32,
-    pub palette: u8,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct FlowerParticlePose {
-    pub x: f32,
-    pub y: f32,
-    pub spin: f32,
-    pub opacity: f32,
-    pub scale: f32,
-}
-
-fn particle_rng(state: &mut u64) -> f32 {
-    *state = state
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1_442_695_040_888_963_407);
-    ((*state >> 33) as f32) * (1.0 / ((1u32 << 31) as f32))
-}
-
-pub fn flower_particles(seed: u64) -> Vec<FlowerParticle> {
-    let mut state = seed | 1;
-    (0..FLOWER_PARTICLE_COUNT)
-        .map(|index| {
-            let sprite = (index % usize::from(FLOWER_SPRITE_COUNT)) as u8;
-            let angle = std::f32::consts::TAU * (index as f32 + particle_rng(&mut state))
-                / FLOWER_PARTICLE_COUNT as f32;
-            let speed = 0.24 + particle_rng(&mut state) * 0.28;
-            let size = 24.0 + particle_rng(&mut state) * 8.0;
-            FlowerParticle {
-                sprite,
-                angle,
-                speed,
-                gravity: 0.045 + particle_rng(&mut state) * 0.08,
-                spin0: particle_rng(&mut state) * std::f32::consts::TAU,
-                spin_vel: (particle_rng(&mut state) - 0.5) * 8.0,
-                size,
-                delay: particle_rng(&mut state) * 0.12,
-                palette: (particle_rng(&mut state) * f32::from(FLOWER_PALETTE_SIZE)) as u8
-                    % FLOWER_PALETTE_SIZE,
-            }
-        })
-        .collect()
-}
-
-pub fn flower_particle_pose(
-    particle: &FlowerParticle,
-    elapsed: f32,
-    ttl: f32,
-) -> FlowerParticlePose {
-    let t = (elapsed - particle.delay).max(0.0);
-    let explode = 1.0 - (-t * 5.5).exp();
-    let fade_in = (t / 0.12).min(1.0);
-    let fade_out = if ttl > 0.0 && elapsed > ttl - 1.0 {
-        ((ttl - elapsed) / 1.0).clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
-    let grow_span = FLOWER_BURST_SECS + FLOWER_GROW_SECS;
-    let u = if grow_span > 0.0 {
-        (t / grow_span).clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
-    let smooth = u * u * (3.0 - 2.0 * u);
-    let scale = FLOWER_SCALE_START + (FLOWER_SCALE_END - FLOWER_SCALE_START) * smooth;
-    FlowerParticlePose {
-        x: particle.angle.cos() * particle.speed * explode,
-        y: particle.angle.sin() * particle.speed * explode + particle.gravity * t * t,
-        spin: particle.spin0 + particle.spin_vel * t,
-        opacity: fade_in * fade_out,
-        scale,
-    }
-}
+pub const FLOWER_SCENE_TTL: Duration = Duration::from_millis(4000);
+pub const FLOWER_DEDUP_WINDOW: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GiveFlowerDeny {
@@ -139,6 +101,39 @@ pub struct FlowerInteractiveParams {
     pub receiver_id: String,
     pub gift_type: String,
     pub timestamp: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GiftParams {
+    Flower { receiver_id: String, timestamp: i64 },
+    OtherGift,
+    Unreadable,
+}
+
+#[derive(Deserialize)]
+struct RawGiftParams {
+    #[serde(default, alias = "receiverId", alias = "ReceiverId")]
+    receiver_id: Option<JsonId>,
+    #[serde(default, alias = "giftType", alias = "GiftType")]
+    gift_type: Option<String>,
+    #[serde(default, alias = "Timestamp")]
+    timestamp: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum JsonId {
+    Text(String),
+    Number(i64),
+}
+
+impl JsonId {
+    fn into_string(self) -> String {
+        match self {
+            Self::Text(text) => text,
+            Self::Number(number) => number.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,12 +232,42 @@ pub fn build_flower_transfer(
     }
 }
 
-pub fn parse_flower_interactive_params(params: &str) -> Option<FlowerInteractiveParams> {
-    let parsed: FlowerInteractiveParams = serde_json::from_str(params).ok()?;
-    if parsed.gift_type != FLOWER_GIFT_TYPE || parsed.receiver_id.is_empty() {
-        return None;
+pub fn classify_gift_params(params: &str) -> GiftParams {
+    let Ok(raw) = serde_json::from_str::<RawGiftParams>(params) else {
+        return GiftParams::Unreadable;
+    };
+    if raw
+        .gift_type
+        .as_deref()
+        .is_some_and(|gift_type| gift_type != FLOWER_GIFT_TYPE)
+    {
+        return GiftParams::OtherGift;
     }
-    Some(parsed)
+    let Some(receiver_id) = raw
+        .receiver_id
+        .map(JsonId::into_string)
+        .filter(|receiver_id| !receiver_id.is_empty())
+    else {
+        return GiftParams::Unreadable;
+    };
+    GiftParams::Flower {
+        receiver_id,
+        timestamp: raw.timestamp.unwrap_or_default(),
+    }
+}
+
+pub fn parse_flower_interactive_params(params: &str) -> Option<FlowerInteractiveParams> {
+    match classify_gift_params(params) {
+        GiftParams::Flower {
+            receiver_id,
+            timestamp,
+        } => Some(FlowerInteractiveParams {
+            receiver_id,
+            gift_type: FLOWER_GIFT_TYPE.to_string(),
+            timestamp,
+        }),
+        GiftParams::OtherGift | GiftParams::Unreadable => None,
+    }
 }
 
 pub fn serialize_flower_interactive_params(receiver_id: &str, timestamp: i64) -> String {
@@ -258,9 +283,32 @@ pub fn flower_effect_key(giver_id: &str, receiver_id: &str, timestamp: i64) -> S
     format!("{giver_id}:{receiver_id}:{timestamp}")
 }
 
+pub fn flower_pair_key(giver_id: &str, receiver_id: &str) -> String {
+    format!("{giver_id}:{receiver_id}")
+}
+
+pub fn flower_reaction_token(receiver_id: &str) -> String {
+    format!("{FLOWER_REACTION_PREFIX}{receiver_id}")
+}
+
+pub fn parse_flower_reaction_token(token: &str) -> Option<&str> {
+    let receiver_id = token.strip_prefix(FLOWER_REACTION_PREFIX)?;
+    (!receiver_id.is_empty() && receiver_id.bytes().all(|b| b.is_ascii_digit()))
+        .then_some(receiver_id)
+}
+
+pub fn app_reaction_token(app: VoiceInteractiveApp) -> String {
+    format!("{APP_REACTION_PREFIX}{}", app.slug())
+}
+
+pub fn parse_app_reaction_token(token: &str) -> Option<VoiceInteractiveApp> {
+    VoiceInteractiveApp::from_slug(token.strip_prefix(APP_REACTION_PREFIX)?)
+}
+
 pub fn flower_event_from_payload(
     event_type: i32,
     giver_id: i64,
+    receiver_id: i64,
     voice_channel_id: i64,
     params: &str,
     joined_channel_id: i64,
@@ -271,10 +319,18 @@ pub fn flower_event_from_payload(
     if voice_channel_id != joined_channel_id {
         return None;
     }
-    let parsed = parse_flower_interactive_params(params)?;
+    let (receiver, timestamp) = match classify_gift_params(params) {
+        GiftParams::Flower {
+            receiver_id,
+            timestamp,
+        } => (receiver_id, timestamp),
+        GiftParams::OtherGift => return None,
+        GiftParams::Unreadable if receiver_id != 0 => (receiver_id.to_string(), 0),
+        GiftParams::Unreadable => return None,
+    };
     let giver = giver_id.to_string();
-    let key = flower_effect_key(&giver, &parsed.receiver_id, parsed.timestamp);
-    Some((giver, parsed.receiver_id, parsed.timestamp, key))
+    let key = flower_effect_key(&giver, &receiver, timestamp);
+    Some((giver, receiver, timestamp, key))
 }
 
 pub fn is_uncertain_transfer_error(message: &str) -> bool {
@@ -290,12 +346,13 @@ pub fn is_uncertain_transfer_error(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        FLOWER_ANIMATION_TTL, FLOWER_PALETTE_SIZE, FLOWER_PARTICLE_COUNT, FLOWER_PRICE,
-        FLOWER_RATE_LIMIT, FLOWER_SPRITE_COUNT, FlowerParticle, GiveFlowerDeny,
-        VoiceInteractiveEventType, build_flower_transfer, can_afford, can_give_flower,
-        flower_effect_key, flower_event_from_payload, flower_menu_blocked, flower_particle_pose,
-        flower_particles, flower_price, format_flower_amount, is_uncertain_transfer_error,
-        parse_flower_interactive_params, serialize_flower_interactive_params,
+        FLOWER_PRICE, FLOWER_RATE_LIMIT, FLOWER_SCENE_TTL, GiftParams, GiveFlowerDeny,
+        VoiceInteractiveApp, VoiceInteractiveEventType, app_reaction_token, build_flower_transfer,
+        can_afford, can_give_flower, classify_gift_params, flower_effect_key,
+        flower_event_from_payload, flower_menu_blocked, flower_pair_key, flower_price,
+        flower_reaction_token, format_flower_amount, is_uncertain_transfer_error,
+        parse_app_reaction_token, parse_flower_interactive_params, parse_flower_reaction_token,
+        serialize_flower_interactive_params,
     };
     use mmn_client::{DECIMALS, TRANSFER_TYPE_TRANSFER_TOKEN, scale_amount_to_decimals};
     use std::time::{Duration, Instant};
@@ -420,22 +477,36 @@ mod tests {
     #[test]
     fn flower_event_from_payload_filters_channel_and_type() {
         let params = serialize_flower_interactive_params("20", 99);
-        let applied =
-            flower_event_from_payload(VoiceInteractiveEventType::Gift as i32, 10, 2, &params, 2)
-                .expect("apply");
+        let applied = flower_event_from_payload(
+            VoiceInteractiveEventType::Gift as i32,
+            10,
+            20,
+            2,
+            &params,
+            2,
+        )
+        .expect("apply");
         assert_eq!(applied.0, "10");
         assert_eq!(applied.1, "20");
         assert_eq!(applied.2, 99);
         assert_eq!(applied.3, flower_effect_key("10", "20", 99));
         assert!(
-            flower_event_from_payload(VoiceInteractiveEventType::Gift as i32, 10, 2, &params, 3,)
-                .is_none()
+            flower_event_from_payload(
+                VoiceInteractiveEventType::Gift as i32,
+                10,
+                20,
+                2,
+                &params,
+                3,
+            )
+            .is_none()
         );
-        assert!(flower_event_from_payload(0, 10, 2, &params, 2).is_none());
+        assert!(flower_event_from_payload(0, 10, 20, 2, &params, 2).is_none());
         assert!(
             flower_event_from_payload(
                 VoiceInteractiveEventType::Recording as i32,
                 10,
+                20,
                 2,
                 &params,
                 2,
@@ -444,103 +515,147 @@ mod tests {
         );
         assert!(
             flower_event_from_payload(
-                VoiceInteractiveEventType::AppKahoot as i32,
+                VoiceInteractiveEventType::AppQuiz as i32,
                 10,
+                20,
                 2,
                 &params,
                 2,
             )
             .is_none()
         );
+    }
+
+    fn gift(receiver_id: i64, params: &str) -> Option<(String, String, i64, String)> {
+        flower_event_from_payload(
+            VoiceInteractiveEventType::Gift as i32,
+            10,
+            receiver_id,
+            2,
+            params,
+            2,
+        )
+    }
+
+    #[test]
+    fn a_sender_that_only_fills_the_event_fields_still_shows_a_flower() {
+        for params in ["", "{}", "null", "not json", r#"{"giftId":"7"}"#] {
+            let applied = gift(20, params).unwrap_or_else(|| panic!("params {params:?}"));
+            assert_eq!(applied.1, "20", "params {params:?}");
+            assert_eq!(applied.2, 0, "params {params:?}");
+        }
+        assert!(gift(0, "").is_none());
+    }
+
+    #[test]
+    fn the_receiver_is_read_whatever_shape_the_sender_wrote_it_in() {
+        for params in [
+            r#"{"receiver_id":"20","gift_type":"flower","timestamp":99}"#,
+            r#"{"receiverId":"20","giftType":"flower","timestamp":99}"#,
+            r#"{"receiver_id":20,"gift_type":"flower","timestamp":99}"#,
+        ] {
+            let applied = gift(0, params).unwrap_or_else(|| panic!("params {params:?}"));
+            assert_eq!(applied.1, "20", "params {params:?}");
+            assert_eq!(applied.2, 99, "params {params:?}");
+        }
+        let no_timestamp = gift(0, r#"{"receiver_id":"20","gift_type":"flower"}"#).expect("gift");
+        assert_eq!(no_timestamp.1, "20");
+        assert_eq!(no_timestamp.2, 0);
+    }
+
+    #[test]
+    fn a_gift_that_says_it_is_not_a_flower_is_still_refused() {
+        let coffee = r#"{"receiver_id":"20","gift_type":"coffee","timestamp":99}"#;
+        assert_eq!(classify_gift_params(coffee), GiftParams::OtherGift);
+        assert!(gift(20, coffee).is_none());
     }
 
     #[test]
     fn voice_interactive_event_type_matches_js_enum() {
         assert_eq!(VoiceInteractiveEventType::Gift as i32, 1);
         assert_eq!(VoiceInteractiveEventType::Recording as i32, 2);
-        assert_eq!(VoiceInteractiveEventType::AppKahoot as i32, 10);
+        assert_eq!(VoiceInteractiveEventType::AppQuiz as i32, 10);
         assert_eq!(VoiceInteractiveEventType::AppBlackboard as i32, 11);
-        assert_eq!(VoiceInteractiveEventType::AppSlido as i32, 12);
+        assert_eq!(VoiceInteractiveEventType::AppInteractive as i32, 12);
         assert_eq!(
             VoiceInteractiveEventType::from_i32(1),
             Some(VoiceInteractiveEventType::Gift)
         );
         assert_eq!(VoiceInteractiveEventType::from_i32(3), None);
-    }
-
-    #[test]
-    fn flower_particles_are_deterministic_burst() {
-        let first = flower_particles(42);
-        let second = flower_particles(42);
-        assert_eq!(first, second);
-        assert_eq!(first.len(), FLOWER_PARTICLE_COUNT);
-        assert_eq!(FLOWER_PARTICLE_COUNT, 128);
-        assert_eq!(FLOWER_ANIMATION_TTL.as_secs(), 7);
-        let sprites = first
-            .iter()
-            .map(|particle| particle.sprite)
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(sprites.len(), usize::from(FLOWER_SPRITE_COUNT));
-        assert!(first.iter().all(|particle| {
-            particle.sprite < FLOWER_SPRITE_COUNT && (24.0..32.01).contains(&particle.size)
-        }));
-        assert!(
-            first
-                .iter()
-                .all(|particle| particle.palette < FLOWER_PALETTE_SIZE)
+        assert_eq!(
+            VoiceInteractiveApp::Quiz.event_type(),
+            VoiceInteractiveEventType::AppQuiz
         );
-        let flower_palettes = first
-            .iter()
-            .map(|particle| particle.palette)
-            .collect::<std::collections::BTreeSet<_>>();
-        assert!(flower_palettes.len() >= 4);
-        let flower_span = first
-            .iter()
-            .map(|particle| particle.angle)
-            .fold((f32::MAX, f32::MIN), |(min, max), angle| {
-                (min.min(angle), max.max(angle))
-            });
-        assert!(flower_span.1 - flower_span.0 > std::f32::consts::PI);
-        let max_run = first
-            .windows(2)
-            .fold((1_usize, 1_usize), |(best, run), pair| {
-                if pair[0].sprite == pair[1].sprite {
-                    (best.max(run + 1), run + 1)
-                } else {
-                    (best, 1)
-                }
-            });
-        assert!(max_run.0 <= 2);
-        assert_ne!(flower_particles(1)[0].angle, flower_particles(2)[0].angle);
+        assert_eq!(
+            VoiceInteractiveApp::Blackboard.event_type(),
+            VoiceInteractiveEventType::AppBlackboard
+        );
+        assert_eq!(
+            VoiceInteractiveApp::Interactive.event_type(),
+            VoiceInteractiveEventType::AppInteractive
+        );
+        assert_eq!(
+            VoiceInteractiveApp::Quiz.app_id(),
+            2_089_257_413_122_199_552
+        );
+        assert_eq!(
+            VoiceInteractiveApp::Blackboard.app_id(),
+            2_089_294_331_818_020_864
+        );
+        assert_eq!(
+            VoiceInteractiveApp::Interactive.app_id(),
+            2_089_273_739_668_623_360
+        );
     }
 
     #[test]
-    fn flower_particle_moves_outward_then_falls() {
-        let particle = FlowerParticle {
-            sprite: 1,
-            angle: 0.0,
-            speed: 0.4,
-            gravity: 0.1,
-            spin0: 0.0,
-            spin_vel: 1.0,
-            size: 12.0,
-            delay: 0.0,
-            palette: 0,
-        };
-        let ttl = FLOWER_ANIMATION_TTL.as_secs_f32();
-        let start = flower_particle_pose(&particle, 0.0, ttl);
-        let early = flower_particle_pose(&particle, 0.08, ttl);
-        let after_burst = flower_particle_pose(&particle, 0.45, ttl);
-        let mid = flower_particle_pose(&particle, 2.5, ttl);
-        let late = flower_particle_pose(&particle, ttl - 0.4, ttl);
-        assert!(start.opacity < 0.15);
-        assert!(early.x > start.x);
-        assert!(mid.x > early.x);
-        assert!(mid.y > early.y);
-        assert!(mid.scale > after_burst.scale + 0.3);
-        assert!(after_burst.scale > early.scale);
-        assert!(mid.scale > 1.4);
-        assert!(late.opacity < 0.5);
+    fn flower_scene_ttl_matches_web() {
+        assert_eq!(FLOWER_SCENE_TTL, Duration::from_millis(4000));
+    }
+
+    #[test]
+    fn flower_reaction_token_round_trips_the_receiver() {
+        let token = flower_reaction_token("1826814768338440192");
+        assert_eq!(token, "flower:1826814768338440192");
+        assert_eq!(
+            parse_flower_reaction_token(&token),
+            Some("1826814768338440192")
+        );
+    }
+
+    #[test]
+    fn other_reaction_tokens_are_left_to_their_own_handlers() {
+        assert_eq!(parse_flower_reaction_token("raising-up:12"), None);
+        assert_eq!(parse_flower_reaction_token("sound:https://x.mp3"), None);
+        assert_eq!(parse_flower_reaction_token(":smile:"), None);
+        assert_eq!(parse_flower_reaction_token("flower:"), None);
+        assert_eq!(parse_flower_reaction_token("flower:not-an-id"), None);
+        assert_eq!(parse_flower_reaction_token(""), None);
+        assert_eq!(parse_app_reaction_token("flower:12"), None);
+        assert_eq!(parse_flower_reaction_token("app:quiz"), None);
+    }
+
+    #[test]
+    fn every_app_round_trips_through_a_reaction_token() {
+        for app in [
+            VoiceInteractiveApp::Quiz,
+            VoiceInteractiveApp::Blackboard,
+            VoiceInteractiveApp::Interactive,
+        ] {
+            let token = app_reaction_token(app);
+            assert_eq!(parse_app_reaction_token(&token), Some(app), "{app:?}");
+        }
+        assert_eq!(app_reaction_token(VoiceInteractiveApp::Quiz), "app:quiz");
+        assert_eq!(parse_app_reaction_token("app:"), None);
+        assert_eq!(parse_app_reaction_token("app:solitaire"), None);
+        assert_eq!(parse_app_reaction_token("quiz"), None);
+    }
+
+    #[test]
+    fn the_pair_key_ignores_the_timestamp_the_effect_key_carries() {
+        assert_eq!(flower_pair_key("10", "20"), "10:20");
+        assert_ne!(flower_pair_key("10", "20"), flower_pair_key("20", "10"));
+        assert!(flower_effect_key("10", "20", 99).starts_with(&flower_pair_key("10", "20")));
     }
 
     #[test]

@@ -64,14 +64,21 @@ impl SurfaceGradients {
 pub struct ThemeSurface {
     pub solid: Rgba,
     pub gradient: Option<SurfaceGradient>,
+    background: Background,
 }
 
 impl ThemeSurface {
-    pub const fn from_solid(color: Rgba) -> Self {
+    pub fn new(solid: Rgba, gradient: Option<SurfaceGradient>) -> Self {
+        let background = Self::build_background(solid, gradient);
         Self {
-            solid: color,
-            gradient: None,
+            solid,
+            gradient,
+            background,
         }
+    }
+
+    pub fn from_solid(color: Rgba) -> Self {
+        Self::new(color, None)
     }
 
     pub fn viewport_anchored(&self) -> bool {
@@ -81,22 +88,22 @@ impl ThemeSurface {
 
     pub fn fill(&self) -> Background {
         match self.gradient {
-            Some(gradient) if !gradient.viewport_anchored => self.ramp_of(gradient),
+            Some(gradient) if !gradient.viewport_anchored => self.background,
             _ => Background::from(Hsla::from(self.solid)),
         }
     }
 
     pub fn ramp(&self) -> Background {
-        match self.gradient {
-            Some(gradient) => self.ramp_of(gradient),
-            None => Background::from(Hsla::from(self.solid)),
-        }
+        self.background
     }
 
-    fn ramp_of(&self, gradient: SurfaceGradient) -> Background {
+    fn build_background(solid: Rgba, gradient: Option<SurfaceGradient>) -> Background {
+        let Some(gradient) = gradient else {
+            return Background::from(Hsla::from(solid));
+        };
         let count = gradient.stops.len().min(MAX_GRADIENT_RAMP_STOPS);
         let Some(first) = gradient.stops.first() else {
-            return Background::from(Hsla::from(self.solid));
+            return Background::from(Hsla::from(solid));
         };
         if count < 2 {
             return Background::from(Hsla::from(gradient.composite(first.color)));
@@ -158,42 +165,24 @@ impl ThemeSurfaces {
     pub fn for_theme(theme: &str, tokens: &ThemeTokens) -> Self {
         let gradients = surface_gradients(theme);
         Self {
-            primary: ThemeSurface {
-                solid: tokens.bg_primary,
-                gradient: gradients.primary,
-            },
-            secondary: ThemeSurface {
-                solid: tokens.bg_secondary,
-                gradient: gradients.secondary,
-            },
-            surface: ThemeSurface {
-                solid: tokens.bg_surface,
-                gradient: gradients.surface,
-            },
-            direct_message: ThemeSurface {
-                solid: tokens.bg_theme_direct_message,
-                gradient: gradients.direct_message,
-            },
-            input_primary: ThemeSurface {
-                solid: tokens.bg_theme_input_primary,
-                gradient: gradients.input_primary,
-            },
-            active_friend_list: ThemeSurface {
-                solid: tokens.bg_active_friend_list,
-                gradient: gradients.active_friend_list,
-            },
-            modal_search: ThemeSurface {
-                solid: tokens.bg_modal_theme_search,
-                gradient: gradients.modal_search,
-            },
-            outside_footer: ThemeSurface {
-                solid: tokens.bg_outside_footer,
-                gradient: gradients.outside_footer,
-            },
-            footer: ThemeSurface {
-                solid: tokens.bg_footer,
-                gradient: gradients.footer,
-            },
+            primary: ThemeSurface::new(tokens.bg_primary, gradients.primary),
+            secondary: ThemeSurface::new(tokens.bg_secondary, gradients.secondary),
+            surface: ThemeSurface::new(tokens.bg_surface, gradients.surface),
+            direct_message: ThemeSurface::new(
+                tokens.bg_theme_direct_message,
+                gradients.direct_message,
+            ),
+            input_primary: ThemeSurface::new(
+                tokens.bg_theme_input_primary,
+                gradients.input_primary,
+            ),
+            active_friend_list: ThemeSurface::new(
+                tokens.bg_active_friend_list,
+                gradients.active_friend_list,
+            ),
+            modal_search: ThemeSurface::new(tokens.bg_modal_theme_search, gradients.modal_search),
+            outside_footer: ThemeSurface::new(tokens.bg_outside_footer, gradients.outside_footer),
+            footer: ThemeSurface::new(tokens.bg_footer, gradients.footer),
         }
     }
 }
@@ -288,16 +277,16 @@ mod tests {
 
     #[test]
     fn every_stop_survives_the_ramp() {
-        let surface = ThemeSurface {
-            solid: rgba(0.0, 0.0, 0.0, 1.0),
-            gradient: Some(SurfaceGradient {
+        let surface = ThemeSurface::new(
+            rgba(0.0, 0.0, 0.0, 1.0),
+            Some(SurfaceGradient {
                 angle: 90.0,
                 stops: THREE_STOPS,
                 overlay: None,
                 base: None,
                 viewport_anchored: false,
             }),
-        };
+        );
         let ramp = surface.ramp();
         assert!(ramp.as_solid().is_none());
         assert_eq!(ramp, surface.fill());
@@ -323,16 +312,16 @@ mod tests {
 
     #[test]
     fn viewport_anchored_surface_falls_back_to_solid_fill() {
-        let surface = ThemeSurface {
-            solid: rgba(0.1, 0.2, 0.3, 1.0),
-            gradient: Some(SurfaceGradient {
+        let surface = ThemeSurface::new(
+            rgba(0.1, 0.2, 0.3, 1.0),
+            Some(SurfaceGradient {
                 angle: 154.19,
                 stops: RED_TO_BLUE,
                 overlay: None,
                 base: None,
                 viewport_anchored: true,
             }),
-        };
+        );
         assert_eq!(surface.fill().as_solid(), Some(Hsla::from(surface.solid)));
         assert!(surface.ramp().as_solid().is_none());
     }

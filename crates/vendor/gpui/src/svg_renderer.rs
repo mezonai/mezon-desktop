@@ -94,12 +94,21 @@ pub struct SvgRenderer {
     usvg_options: Arc<usvg::Options<'static>>,
 }
 
-/// The size in which to render the SVG.
+/// The size in which to rasterize the SVG.
+#[derive(Clone, Copy)]
 pub enum SvgSize {
-    /// An absolute size in device pixels.
+    /// A width in device pixels. The SVG retains its aspect ratio.
     Size(Size<DevicePixels>),
-    /// A scaling factor to apply to the size provided by the SVG.
+    /// An exact width and height in device pixels.
+    ExactSize(Size<DevicePixels>),
+    /// A logical scaling factor to apply to the size provided by the SVG.
     ScaleFactor(f32),
+}
+
+impl From<f32> for SvgSize {
+    fn from(scale_factor: f32) -> Self {
+        Self::ScaleFactor(scale_factor)
+    }
 }
 
 impl SvgRenderer {
@@ -202,7 +211,7 @@ impl SvgRenderer {
         anyhow::ensure!(!params.size.is_zero(), "can't render at a zero size");
 
         let render_pixmap = |bytes| {
-            let pixmap = self.render_pixmap(bytes, SvgSize::Size(params.size))?;
+            let pixmap = self.render_pixmap(bytes, SvgSize::ExactSize(params.size))?;
 
             // Convert the pixmap's pixels into an alpha mask.
             let size = Size::new(
@@ -228,21 +237,41 @@ impl SvgRenderer {
     }
 
     fn render_pixmap(&self, bytes: &[u8], size: SvgSize) -> Result<Pixmap, usvg::Error> {
+        const MAX_SIZE: f32 = 8192.0;
+
         let tree = usvg::Tree::from_data(bytes, &self.usvg_options)?;
         let svg_size = tree.size();
-        let scale = match size {
-            SvgSize::Size(size) => size.width.0 as f32 / svg_size.width(),
-            SvgSize::ScaleFactor(scale) => scale,
+        let (mut width, mut height) = match size {
+            SvgSize::Size(size) => {
+                let scale = size.width.0 as f32 / svg_size.width();
+                (svg_size.width() * scale, svg_size.height() * scale)
+            }
+            SvgSize::ExactSize(size) => (size.width.0 as f32, size.height.0 as f32),
+            SvgSize::ScaleFactor(scale) => {
+                (svg_size.width() * scale, svg_size.height() * scale)
+            }
         };
 
-        // Render the SVG to a pixmap with the specified width and height.
-        let mut pixmap = resvg::tiny_skia::Pixmap::new(
-            (svg_size.width() * scale) as u32,
-            (svg_size.height() * scale) as u32,
-        )
-        .ok_or(usvg::Error::InvalidSize)?;
+        if width > MAX_SIZE {
+            log::warn!("Attempted to render pixmap where width ({width}) > MAX_SIZE ({MAX_SIZE})");
+        }
+        if height > MAX_SIZE {
+            log::warn!(
+                "Attempted to render pixmap where height ({height}) > MAX_SIZE ({MAX_SIZE})"
+            );
+        }
+        let scale = (MAX_SIZE / width).min(MAX_SIZE / height).min(1.0);
+        width *= scale;
+        height *= scale;
 
-        let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+        // Render the SVG to a pixmap with the specified width and height.
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(width as u32, height as u32)
+            .ok_or(usvg::Error::InvalidSize)?;
+
+        let transform = resvg::tiny_skia::Transform::from_scale(
+            width / svg_size.width(),
+            height / svg_size.height(),
+        );
 
         resvg::render(&tree, transform, &mut pixmap.as_mut());
 

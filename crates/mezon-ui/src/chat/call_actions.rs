@@ -1,6 +1,7 @@
 use gpui::{App, SharedString};
 use mezon_store::{
-    CallPeer, CallPhase, CallStore, ChannelId, DirectKind, DirectMessageStore, Settings, UserId,
+    CallPeer, CallPhase, CallStore, ChannelId, DirectKind, DirectMessageStore, FriendStore,
+    Settings, UserId,
 };
 
 use crate::app::shell::Shell;
@@ -44,6 +45,9 @@ pub(crate) fn call_current_dm(video: bool, cx: &mut App) {
         info_toast("common.comingSoon", cx);
         return;
     };
+    if is_blocked_by_me(UserId(peer.user_id), cx) {
+        return;
+    }
     CallStore::global(cx).update(cx, |store, cx| store.start_call(peer, video, cx));
 }
 
@@ -53,6 +57,9 @@ pub(crate) fn call_user(
     error_message: SharedString,
     cx: &mut App,
 ) {
+    if is_blocked_by_me(target.user, cx) {
+        return;
+    }
     if warn_already_in_call(cx) {
         return;
     }
@@ -99,6 +106,11 @@ fn start_call_in(target: &CallTarget, channel: ChannelId, video: bool, cx: &mut 
         avatar: (!target.avatar.is_empty()).then(|| target.avatar.to_string()),
     };
     CallStore::global(cx).update(cx, |store, cx| store.start_call(peer, video, cx));
+}
+
+fn is_blocked_by_me(user_id: UserId, cx: &App) -> bool {
+    FriendStore::try_global(cx)
+        .is_some_and(|store| store.read(cx).is_user_blocked_by_me(user_id, cx))
 }
 
 fn warn_already_in_call(cx: &mut App) -> bool {

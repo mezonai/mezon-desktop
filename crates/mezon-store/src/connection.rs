@@ -5,15 +5,18 @@
 //! gpui-coupled lifecycle lives here as a store instead of in the app binary.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use gpui::{
     App, AppContext, AsyncApp, BackgroundExecutor, Context, Entity, Global, Subscription, Task,
 };
 use mezon_client::{
-    AppApi, ConnectionStatus, DEFAULT_WS_HOST, HttpFallbackSession, NetworkMonitor,
-    RECONNECT_NETWORK_PROBE_TIMEOUT, RealtimeEvent, Session, TransportClient, favicon_probe_url,
-    keychain, probe_network_reachability,
+    AppApi, ConnectionStatus, DEFAULT_WS_HOST, EndpointHealth, HealthyEndpointReason,
+    HealthyEndpointSession, HealthyEndpointStatusError, HttpFallbackSession, MezonClient,
+    NetworkMonitor, RealtimeEndpoint, RealtimeEvent, Session, TransportClient, keychain,
 };
+use parking_lot::Mutex;
 
 use crate::login::{session_credentials, spawn_session_logout};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
@@ -23,32 +26,49 @@ const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1
 const CONNECT_CONFIRM_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const RECONNECT_BACKOFF_CAP_SECS: u64 = 60;
-const NETWORK_PROBE_RETRY_MIN_SECS: u64 = 1;
-const NETWORK_PROBE_RETRY_CAP_SECS: u64 = 15;
-const DEFAULT_TLS_PORT: u16 = 443;
-/// The gateway discards its own 401 before it reaches the wire (`cleanup_connection` clears the
-/// write queue that `flush_ssl_wbio` had only queued), so a dead `session_id`, the per-user session
-/// limit and a plain outage all arrive as an identical silent close. After this many silent
-/// refusals we stop guessing and re-handshake with the JWT — the one credential the server has just
-/// confirmed by minting it.
+/// How long to leave `SessionRefresh` alone after the server throttled it, and the ceiling that
+/// pacing doubles to. The reconnect ladder retries far faster than this (1s doubling to 60s), and a
+/// JWT-only session asks for a fresh token on every rung, so without a separate cooldown one
+/// throttled client keeps calling ~6 times a minute — and every client does it at once, which is
+/// what holds the shared limiter bucket shut. Pacing from a minute up to five keeps a stale JWT
+/// recoverable without feeding the storm.
+/// Rotate the refresh token once it is this close to expiring. Prod issues it for thirty days, so
+/// a week of runway leaves many launches in which to catch it while costing nothing in between.
+const REFRESH_TOKEN_ROTATE_WITHIN_SECS: u64 = 7 * 24 * 60 * 60;
+const SESSION_REFRESH_THROTTLED_SECS: u64 = 60;
+const SESSION_REFRESH_THROTTLED_CAP_SECS: u64 = 300;
+const HEALTHY_ENDPOINT_RETRY_SECS: u64 = 5;
+const HEALTHY_ENDPOINT_SETTLED_SECS: u64 = 60;
+const HEALTHY_ENDPOINT_RETRY_CAP_SECS: u64 = 60;
+const HEALTHY_ENDPOINT_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(debug_assertions)]
+const DEBUG_FAILOVER_SIMULATION_ENV: &str = "MEZON_DEBUG_FAILOVER_SIMULATION";
+#[cfg(debug_assertions)]
+const DEBUG_FAILOVER_FULL_CYCLE: &str = "full-cycle";
+#[cfg(debug_assertions)]
+const DEBUG_FAILOVER_SLOW_SWITCH: &str = "slow-switch";
+/// After this many SID handshake failures (explicit 401/403 *or* silent drop) we re-handshake with
+/// the JWT. Proto-server often cleans up before the 401 reaches the wire, so a dead SID arrives as
+/// a silent drop — credential *switch* must treat that as recoverable. This counter never logs out.
 const SSID_REFUSALS_BEFORE_JWT: u32 = 1;
-/// How many refusals of the JWT itself before asking the API host whether the account still
-/// exists. The JWT was just minted by the server, so its refusal means either the whole session is
-/// gone or the gateway is turning connections away for its own reasons — only an authenticated
-/// HTTP call separates the two.
+/// How many JWT handshake failures (explicit 401/403 *or* silent drop) before asking the API host
+/// whether the account still exists. Proto-server often drops the 401 before it reaches the wire,
+/// so a dead JWT arrives as SilentDrop — counting only ExplicitReject would never run the probe.
 const JWT_REFUSALS_BEFORE_PROBE: u32 = 1;
 const JWT_SKEW: std::time::Duration = std::time::Duration::from_secs(60);
-/// Result of a single reconnect attempt. Only a rejected credential (the server accepted the TCP
-/// connection but refused the handshake) is treated as a dead session; an unreachable server must
-/// never discard the persisted session.
+/// Result of a single reconnect attempt. Credential *switch* (SID → JWT) and *logout* are separate
+/// policies: SID silent/explicit failures may remint then JWT; JWT silent/explicit failures plus
+/// a rejected GetAccount probe may log out.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ConnectOutcome {
     Confirmed,
-    /// The gateway took the connection and then dropped it. It is up and choosing not to serve us,
-    /// so the credentials are worth questioning.
-    Refused,
+    /// Gateway returned HTTP 401/403 for the handshake credential.
+    ExplicitReject,
+    /// TCP opened then closed without an explicit 401/403. Dead SID, session-limit, and many
+    /// gateway incidents look like this — never logout from this alone.
+    SilentDrop,
     /// The host never answered — DNS, routing, a dead port. This says nothing about credentials
-    /// and must never advance the checks that can end in a logout.
+    /// and must never advance credential switch or logout.
     Unreachable,
 }
 
@@ -58,6 +78,21 @@ enum ConnectOutcome {
 enum RefreshVerdict {
     Renewed,
     Transient,
+    /// The server answered 429/503: it is asking for fewer calls, not reporting a dead session.
+    Throttled,
+}
+
+#[derive(Clone)]
+struct EndpointRefreshRequest {
+    endpoint: RealtimeEndpoint,
+    reason: HealthyEndpointReason,
+    generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HealthyEndpointCredential {
+    Jwt,
+    SessionId,
 }
 
 /// Owns the transport connection manager task + the auth-state observation. Registered as a
@@ -67,6 +102,10 @@ pub struct ConnectionStore {
     connecting_attempt: u32,
     transport: Arc<TransportClient>,
     wake: Arc<tokio::sync::Notify>,
+    /// Bumped whenever the live connection is replaced. Callbacks captured by an
+    /// older attempt compare against it and stay quiet, so a socket that dies
+    /// while its successor is already up cannot mark the new one disconnected.
+    connection_generation: Arc<AtomicU64>,
     _manager: Task<()>,
     _auth_observe: Subscription,
     _heartbeat: Task<()>,
@@ -112,8 +151,12 @@ impl ConnectionStore {
     pub fn reconnect(&self, cx: &mut Context<Self>) {
         let transport = self.transport.clone();
         let wake = self.wake.clone();
+        let connection_generation = self.connection_generation.clone();
         cx.background_executor()
             .spawn(async move {
+                // Retire the live connection first: its close callback must not
+                // land on the attempt this reconnect is about to start.
+                connection_generation.fetch_add(1, Ordering::AcqRel);
                 if let Err(e) = transport.close().await {
                     tracing::warn!("Failed to close the transport before reconnect: {e}");
                 }
@@ -139,7 +182,15 @@ impl ConnectionStore {
             move |_, _, _| wake.notify_one()
         });
 
-        let network = NetworkMonitor::new();
+        // The OS signal drives the "no internet" toast and nothing else. Reconnect reads the
+        // connect outcome instead: an `Unreachable` is the network answering, and a refusal means
+        // we reached something. Keeping it out of that decision is deliberate — twice today a
+        // misread flag would otherwise have parked the app.
+        let network = NetworkMonitor::for_host(
+            &AppConfig::try_global(cx)
+                .map(|cfg| cfg.api_host.clone())
+                .unwrap_or_default(),
+        );
         let online = network.is_online();
         let online_watch = {
             let wake = wake.clone();
@@ -164,31 +215,54 @@ impl ConnectionStore {
         };
 
         let token_watch = Self::spawn_token_watch(api.clone(), auth_state.clone(), cx);
-        let heartbeat = Self::spawn_heartbeat(transport.clone(), api.clone(), wake.clone(), cx);
+        let endpoint_health = Arc::new(Mutex::new(EndpointHealth::default()));
+        let connection_generation = Arc::new(AtomicU64::new(0));
+        let (endpoint_refresh_tx, endpoint_refresh_rx) = tokio::sync::mpsc::unbounded_channel();
+        let heartbeat = Self::spawn_heartbeat(
+            transport.clone(),
+            api.clone(),
+            wake.clone(),
+            endpoint_health.clone(),
+            connection_generation.clone(),
+            endpoint_refresh_tx.clone(),
+            cx,
+        );
         let transport_handle = transport.clone();
         let wake_handle = wake.clone();
+        let connection_generation_handle = connection_generation.clone();
 
-        let probe_url = AppConfig::try_global(cx)
-            .map(|cfg| favicon_probe_url(&cfg.redirect_uri))
-            .unwrap_or_else(|| favicon_probe_url(""));
         let tcp_default_port = AppConfig::try_global(cx).and_then(|cfg| cfg.tcp_port);
         let configured_api_base = AppConfig::try_global(cx).map(configured_api_base_url);
         let auth_client = crate::login::LoginStore::global(cx).read(cx).client();
         let api_server_key = AppConfig::try_global(cx)
             .map(|cfg| cfg.api_key.clone())
             .unwrap_or_default();
+        let gw_base = AppConfig::try_global(cx)
+            .filter(|cfg| !cfg.client_host().trim().is_empty())
+            .map(|cfg| cfg.client_base_url())
+            .unwrap_or_default();
 
         let manager = cx.spawn(async move |this, cx| {
             let exec = cx.background_executor().clone();
+            #[cfg(debug_assertions)]
+            let debug_disconnect_step = Arc::new(AtomicU64::new(0));
             let mut connected_user_id: Option<String> = None;
             let mut retry_backoff_secs = 1u64;
             let mut consecutive_failures = 0u32;
             let mut connect_ack_rx = connect_ack_rx;
-            let mut network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
             let mut refreshed_this_run = false;
             let mut gateway_refusals = 0u32;
             let mut jwt_refusals = 0u32;
             let mut probed_this_outage = false;
+            let mut reminted_this_outage = false;
+            let mut last_remint_attempt_at: Option<Instant> = None;
+            let mut remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+            let mut remint_unsupported = false;
+            let mut endpoint_refresh_rx = endpoint_refresh_rx;
+            let mut pending_endpoint_refresh: Option<EndpointRefreshRequest> = None;
+            let mut last_endpoint_refresh_at: Option<Instant> = None;
+            let mut healthy_endpoint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+            let mut refresh_pacer = RefreshPacer::new();
 
             loop {
                 let (session, is_connecting) = cx.update(|cx| match auth_state.read(cx).clone() {
@@ -207,7 +281,12 @@ impl ConnectionStore {
 
                 let Some(mut session) = session else {
                     api.set_http_fallback(None);
+                    endpoint_health.lock().set_endpoint(None);
+                    pending_endpoint_refresh = None;
+                    last_endpoint_refresh_at = None;
+                    healthy_endpoint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
                     if connected_user_id.take().is_some() {
+                        connection_generation.fetch_add(1, Ordering::AcqRel);
                         if let Err(e) = transport.close().await {
                             tracing::warn!("Failed to close TCP transport after logout: {e}");
                         }
@@ -215,10 +294,210 @@ impl ConnectionStore {
                     }
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
-                    network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
+                    gateway_refusals = 0;
+                    jwt_refusals = 0;
+                    probed_this_outage = false;
+                    reminted_this_outage = false;
+                    last_remint_attempt_at = None;
+                    remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+                    remint_unsupported = false;
                     wake.notified().await;
                     continue;
                 };
+
+                while let Ok(request) = endpoint_refresh_rx.try_recv() {
+                    if request.generation != connection_generation.load(Ordering::Acquire) {
+                        tracing::debug!(
+                            "Dropping stale healthy endpoint request for {}",
+                            request.endpoint.label()
+                        );
+                        continue;
+                    }
+                    pending_endpoint_refresh = Some(request);
+                }
+
+                let endpoint_refresh_wait = endpoint_refresh_retry_in(
+                    last_endpoint_refresh_at,
+                    healthy_endpoint_retry_secs,
+                    Instant::now(),
+                );
+                if endpoint_refresh_wait.is_zero()
+                    && let Some(request) = pending_endpoint_refresh.take()
+                {
+                    if request.generation != connection_generation.load(Ordering::Acquire) {
+                        tracing::debug!(
+                            "Dropping stale healthy endpoint request for {}",
+                            request.endpoint.label()
+                        );
+                        last_endpoint_refresh_at = None;
+                        continue;
+                    }
+                    last_endpoint_refresh_at = Some(Instant::now());
+                    tracing::info!(
+                        "Asking the gateway for a node: current_endpoint_id={} reason_code={}",
+                        request.endpoint.id,
+                        request.reason as i32
+                    );
+                    if healthy_endpoint_credential(&session).is_none()
+                        && refresh_pacer.may_refresh(Instant::now())
+                    {
+                        let (renewed, verdict) = refresh_jwt_within(
+                            &exec,
+                            &api,
+                            &auth_state,
+                            session.clone(),
+                            HEALTHY_ENDPOINT_TIMEOUT,
+                            cx,
+                        )
+                        .await;
+                        session = renewed;
+                        refresh_pacer.record(verdict, Instant::now());
+                        if verdict == RefreshVerdict::Renewed {
+                            refreshed_this_run = true;
+                        }
+                    }
+                    let Some(credential) = healthy_endpoint_credential(&session) else {
+                        tracing::warn!(
+                            "Healthy endpoint request deferred — no credential the gateway would accept"
+                        );
+                        pending_endpoint_refresh = Some(request);
+                        healthy_endpoint_retry_secs =
+                            next_healthy_endpoint_retry_secs(healthy_endpoint_retry_secs);
+                        continue;
+                    };
+                    let mut response = fetch_healthy_endpoint_with_timeout(
+                        &exec,
+                        &auth_client,
+                        healthy_endpoint_credential_value(&session, credential),
+                        request.endpoint.id,
+                        request.reason,
+                    )
+                    .await;
+                    if response.as_ref().is_err_and(healthy_endpoint_auth_rejected) {
+                        if credential == HealthyEndpointCredential::SessionId
+                            && !jwt_is_fresh(&session)
+                            && refresh_pacer.may_refresh(Instant::now())
+                        {
+                            let (renewed, verdict) = refresh_jwt_within(
+                                &exec,
+                                &api,
+                                &auth_state,
+                                session.clone(),
+                                HEALTHY_ENDPOINT_TIMEOUT,
+                                cx,
+                            )
+                            .await;
+                            session = renewed;
+                            refresh_pacer.record(verdict, Instant::now());
+                            if verdict == RefreshVerdict::Renewed {
+                                refreshed_this_run = true;
+                            }
+                        }
+                        if let Some(fallback) =
+                            healthy_endpoint_fallback_credential(&session, credential)
+                        {
+                            response = fetch_healthy_endpoint_with_timeout(
+                                &exec,
+                                &auth_client,
+                                healthy_endpoint_credential_value(&session, fallback),
+                                request.endpoint.id,
+                                request.reason,
+                            )
+                            .await;
+                        }
+                    }
+                    if request.generation != connection_generation.load(Ordering::Acquire) {
+                        tracing::debug!(
+                            "Dropping stale healthy endpoint response for {}",
+                            request.endpoint.label()
+                        );
+                        continue;
+                    }
+                    match response {
+                        Ok(response) => {
+                            let node_before =
+                                session.realtime_endpoint(DEFAULT_WS_HOST, tcp_default_port);
+                            let Some(updated) = apply_healthy_endpoint_to_auth(
+                                &auth_state,
+                                &session.user_id,
+                                &response,
+                                tcp_default_port,
+                                MintedSessionId::KeepUnlessMoved,
+                                cx,
+                            ) else {
+                                tracing::warn!(
+                                    "Healthy endpoint response did not match the authenticated session"
+                                );
+                                pending_endpoint_refresh = Some(request);
+                                healthy_endpoint_retry_secs =
+                                    next_healthy_endpoint_retry_secs(healthy_endpoint_retry_secs);
+                                continue;
+                            };
+                            session = updated;
+                            let node_after =
+                                session.realtime_endpoint(DEFAULT_WS_HOST, tcp_default_port);
+                            let stayed_put = match (&node_before, &node_after) {
+                                (Some(before), Some(after)) => before.is_same_node(after),
+                                _ => false,
+                            };
+                            endpoint_health.lock().set_endpoint(node_after);
+                            if stayed_put {
+                                healthy_endpoint_retry_secs = next_healthy_endpoint_retry_secs(
+                                    healthy_endpoint_retry_secs,
+                                );
+                                if request.reason == HealthyEndpointReason::HighLatency {
+                                    endpoint_health.lock().disable_slow_reports();
+                                    tracing::warn!(
+                                        "Gateway kept us on {} after a high-latency report — staying put",
+                                        request.endpoint.label()
+                                    );
+                                }
+                                // The gateway kept us where we were, so nothing about the next
+                                // attempt has changed. Looping straight back would spend a connect
+                                // the backoff had already paid for — measured at 47ms after the
+                                // one that just failed. proto-server admits one handshake per
+                                // second per (IP, user), so that free retry is not merely wasted:
+                                // it is refused, and a refusal arrives as a silent drop that counts
+                                // against the session.
+                                // A confirmed handshake resets the ladder to 1s, so this costs a
+                                // connected client a second and saves it a handshake it would
+                                // otherwise spend 3ms after the last one.
+                                backoff_wait(&exec, &wake, retry_backoff_secs).await;
+                                continue;
+                            }
+                            tracing::info!(
+                                "Gateway moved us off {} — reconnecting",
+                                request.endpoint.label()
+                            );
+                            healthy_endpoint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+                            retry_backoff_secs = 1;
+                            consecutive_failures = 0;
+                            gateway_refusals = 0;
+                            jwt_refusals = 0;
+                            probed_this_outage = false;
+                            if connected_user_id.take().is_some() {
+                                connection_generation.fetch_add(1, Ordering::AcqRel);
+                                api.set_status(ConnectionStatus::Disconnected);
+                                if let Err(e) = transport.close().await {
+                                    tracing::warn!(
+                                        "Failed to close the transport of the node we left: {e}"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Healthy endpoint request failed: {e}");
+                            pending_endpoint_refresh = Some(request);
+                            healthy_endpoint_retry_secs =
+                                next_healthy_endpoint_retry_secs(healthy_endpoint_retry_secs);
+                            // Same reasoning as the "stayed put" path above: the ask told us
+                            // nothing, so the next connect deserves the backoff the last failure
+                            // earned rather than a free immediate retry. This is the branch prod
+                            // takes today, where the route answers 404.
+                            backoff_wait(&exec, &wake, retry_backoff_secs).await;
+                        }
+                    }
+                }
 
                 api.set_http_fallback(http_fallback_session(
                     &session,
@@ -226,63 +505,166 @@ impl ConnectionStore {
                     &api_server_key,
                 ));
 
-                if connected_user_id.as_deref() == Some(session.user_id.as_str())
-                    && transport.is_open().await
-                {
+                let already_connected = connected_user_id.as_deref() == Some(session.user_id.as_str())
+                    && transport.is_open().await;
+                if already_connected && !session.session_id.is_empty() {
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
-                    wake.notified().await;
+                    if pending_endpoint_refresh.is_some() {
+                        let report_due_in = endpoint_refresh_retry_in(
+                            last_endpoint_refresh_at,
+                            healthy_endpoint_retry_secs,
+                            Instant::now(),
+                        );
+                        tokio::select! {
+                            _ = wake.notified() => {}
+                            _ = exec.timer(report_due_in) => {}
+                        }
+                    } else {
+                        wake.notified().await;
+                    }
                     continue;
                 }
 
-                let mut network_confirmed = false;
-                if requires_network_probe(consecutive_failures) {
-                    // Probe the deployment this session actually belongs to; the baked config can
-                    // point somewhere else entirely.
-                    let target = session
-                        .api_url
-                        .as_deref()
-                        .filter(|url| !url.is_empty())
-                        .map(favicon_probe_url)
-                        .unwrap_or_else(|| probe_url.clone());
-                    let reachable =
-                        probe_network_reachability(&target, RECONNECT_NETWORK_PROBE_TIMEOUT).await;
-                    let _ = this.update(cx, |store, cx| {
-                        if store.online != reachable {
-                            store.online = reachable;
-                            cx.notify();
-                        }
-                    });
-                    if !reachable {
-                        if network_retry_secs == NETWORK_PROBE_RETRY_MIN_SECS {
-                            tracing::warn!(
-                                "Network unreachable ({target} did not answer) — pausing reconnect until it is back"
-                            );
-                        }
-                        promote_connecting_to_authenticated(&auth_state, cx);
-                        backoff_wait(&exec, &wake, network_retry_secs).await;
-                        network_retry_secs = next_network_retry_secs(network_retry_secs);
-                        continue;
-                    }
-                    network_confirmed = true;
-                    if network_retry_secs != NETWORK_PROBE_RETRY_MIN_SECS {
-                        tracing::info!("Network reachable again — resuming reconnect");
-                        network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
-                    }
-
-                }
-
-                // Two credentials authenticate the same session; the JWT is the escape hatch when
-                // the stored `session_id` keeps being refused.
-                let use_jwt = should_lead_with_jwt(&session, gateway_refusals);
-                if use_jwt && !jwt_is_fresh(&session) {
+                // Two credentials authenticate the same session. SID handshake failures (including
+                // silent drops — proto-server often drops the 401 before it reaches the wire) first
+                // try GetHealthyEndpoint to mint a fresh SID. JWT socket is only the fallback when
+                // remint fails. Logout follows a JWT handshake failure (silent or explicit) plus a
+                // rejected authenticated HTTP probe.
+                //
+                // `reminted_this_outage` latches only on *success* so a dead reminted SID is not
+                // re-minted in a tight loop; remint *errors* must not latch — otherwise one gw 503
+                // leaves the session SID-empty for the whole outage. Errors are paced instead
+                // (5s doubling to 60s): a connected JWT-only session wakes on every auth-state
+                // change, and each wake would otherwise cost the gateway a call. A 404 says the
+                // gateway has no such route at all, so that one does latch until the next
+                // confirmed handshake.
+                let remint_due_in = endpoint_refresh_retry_in(
+                    last_remint_attempt_at,
+                    remint_retry_secs,
+                    Instant::now(),
+                );
+                let needs_sid_recovery = should_attempt_sid_remint(
+                    &session,
+                    gateway_refusals,
+                    reminted_this_outage,
+                    !gw_base.is_empty() && !remint_unsupported,
+                );
+                if (needs_sid_recovery || should_lead_with_jwt(&session, gateway_refusals))
+                    && !jwt_is_fresh(&session)
+                    && refresh_pacer.may_refresh(Instant::now())
+                {
                     let (renewed, verdict) =
                         refresh_jwt_for_fallback(&api, &auth_state, session.clone(), cx).await;
                     session = renewed;
+                    refresh_pacer.record(verdict, Instant::now());
                     if verdict == RefreshVerdict::Renewed {
-                        // This rotation counts as the once-per-run keep-alive.
                         refreshed_this_run = true;
                     }
+                }
+                let refresh_due_in = refresh_pacer.hold_left(Instant::now());
+                if needs_sid_recovery && remint_due_in.is_zero() {
+                    if jwt_is_fresh(&session) {
+                        last_remint_attempt_at = Some(Instant::now());
+                        match remint_session_via_healthy_endpoint(
+                            &auth_client,
+                            &api,
+                            &auth_state,
+                            &session,
+                            configured_api_base.as_deref(),
+                            &api_server_key,
+                            &exec,
+                            tcp_default_port,
+                            cx,
+                        )
+                        .await
+                        {
+                            Ok(renewed) => {
+                                session = renewed;
+                                gateway_refusals = 0;
+                                reminted_this_outage = true;
+                                last_remint_attempt_at = None;
+                                remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+                                tracing::info!(
+                                    "Reminted session_id via GetHealthyEndpoint — retrying SID handshake"
+                                );
+                                // Retire a JWT-only connection the way a node move does: bump the
+                                // generation first so its close callback cannot land on the SID
+                                // handshake that follows.
+                                if connected_user_id.take().is_some() || transport.is_open().await {
+                                    connection_generation.fetch_add(1, Ordering::AcqRel);
+                                    api.set_status(ConnectionStatus::Disconnected);
+                                    if let Err(e) = transport.close().await {
+                                        tracing::warn!(
+                                            "Failed to close the JWT-only transport before the SID handshake: {e}"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                remint_retry_secs =
+                                    next_healthy_endpoint_retry_secs(remint_retry_secs);
+                                if healthy_endpoint_route_missing(&e) {
+                                    remint_unsupported = true;
+                                    tracing::warn!(
+                                        "The gateway has no healthy-endpoint route ({e}) — staying on the JWT handshake until the next confirmed connection"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "GetHealthyEndpoint could not remint session_id ({e}) — falling back to JWT handshake, next remint in {remint_retry_secs}s"
+                                    );
+                                }
+                                if already_connected {
+                                    retry_backoff_secs = 1;
+                                    consecutive_failures = 0;
+                                    if remint_unsupported {
+                                        wake.notified().await;
+                                    } else {
+                                        tokio::select! {
+                                            _ = wake.notified() => {}
+                                            _ = exec.timer(Duration::from_secs(remint_retry_secs)) => {}
+                                        }
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                    } else if already_connected {
+                        retry_backoff_secs = 1;
+                        consecutive_failures = 0;
+                        wake.notified().await;
+                        continue;
+                    }
+                } else if already_connected {
+                    retry_backoff_secs = 1;
+                    consecutive_failures = 0;
+                    if needs_sid_recovery {
+                        // A JWT-only connection whose remint is paced out: come back when it is due.
+                        tokio::select! {
+                            _ = wake.notified() => {}
+                            _ = exec.timer(remint_due_in) => {}
+                        }
+                    } else {
+                        wake.notified().await;
+                    }
+                    continue;
+                }
+
+                let use_jwt = should_lead_with_jwt(&session, gateway_refusals);
+
+                // Nothing left to hand the gateway: the JWT it would take is expired and the
+                // refresh that would replace it is in its throttle cooldown. Handshaking anyway
+                // buys a certain 401 and spends a slot on the gateway's own per-user handshake
+                // limiter, so wait for the cooldown instead. It is bounded, so this delays a
+                // reconnect rather than blocking one.
+                if use_jwt && !jwt_is_fresh(&session) && !refresh_due_in.is_zero() {
+                    tracing::info!(
+                        "Holding the reconnect for {}s — the JWT is stale and SessionRefresh is throttled",
+                        refresh_due_in.as_secs()
+                    );
+                    promote_connecting_to_authenticated(&auth_state, cx);
+                    backoff_wait(&exec, &wake, refresh_due_in.as_secs().max(1)).await;
+                    continue;
                 }
 
                 // Probe only with a token the server would still accept. A JWT we failed to renew
@@ -320,6 +702,11 @@ impl ConnectionStore {
                                 consecutive_failures = 0;
                                 gateway_refusals = 0;
                                 jwt_refusals = 0;
+                                reminted_this_outage = false;
+                                last_remint_attempt_at = None;
+                                remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+                                remint_unsupported = false;
+                                probed_this_outage = false;
                                 retry_backoff_secs = 1;
                                 continue;
                             }
@@ -336,13 +723,20 @@ impl ConnectionStore {
                     }
                 }
 
-                let host = session
-                    .tcp_host
-                    .clone()
-                    .or(session.ws_host.clone())
-                    .unwrap_or_else(|| DEFAULT_WS_HOST.to_string());
-                let explicit_port = resolve_tcp_port(&session, tcp_default_port);
-                let endpoint_label = format!("{host}:{explicit_port}");
+                let Some(endpoint) = session.realtime_endpoint(DEFAULT_WS_HOST, tcp_default_port)
+                else {
+                    tracing::warn!("This session names no realtime node — retrying");
+                    promote_connecting_to_authenticated(&auth_state, cx);
+                    retry_backoff_secs = next_backoff_secs(retry_backoff_secs);
+                    backoff_wait(&exec, &wake, retry_backoff_secs).await;
+                    continue;
+                };
+                {
+                    let mut health = endpoint_health.lock();
+                    health.set_endpoint(Some(endpoint.clone()));
+                    health.record_disconnected();
+                }
+                let endpoint_label = endpoint.label();
 
                 if transport.is_open().await
                     && let Err(e) = transport.close().await
@@ -350,11 +744,12 @@ impl ConnectionStore {
                     tracing::warn!("Failed to close stale transport: {e}");
                 }
 
+                let generation = connection_generation.fetch_add(1, Ordering::AcqRel) + 1;
                 tracing::info!("Connecting shared abridged TCP transport to {endpoint_label}");
                 api.set_status(ConnectionStatus::Connecting);
                 let token = if use_jwt {
                     tracing::info!(
-                        "Handshaking with the JWT after {gateway_refusals} refusals by the gateway"
+                        "Handshaking with the JWT after {gateway_refusals} SID handshake failures (session_id kept)"
                     );
                     session.token.clone()
                 } else {
@@ -363,20 +758,47 @@ impl ConnectionStore {
                 let api_for_publish = api.clone();
                 let api_for_close = api.clone();
                 let wake_for_close = wake.clone();
+                let endpoint_health_for_close = endpoint_health.clone();
+                let connection_generation_for_publish = connection_generation.clone();
+                let connection_generation_for_close = connection_generation.clone();
+                let connection_confirmed = Arc::new(AtomicBool::new(false));
+                let connection_confirmed_for_close = connection_confirmed.clone();
+                let endpoint_for_close = endpoint.clone();
+                let endpoint_refresh_tx_for_close = endpoint_refresh_tx.clone();
                 connect_ack_rx.borrow_and_update();
                 let connect_result = transport
                     .connect(
-                        &host,
-                        explicit_port,
+                        &endpoint.host,
+                        endpoint.port,
                         &token,
                         move |event| {
-                            api_for_publish.publish_event(event);
+                            if connection_generation_for_publish.load(Ordering::Acquire)
+                                == generation
+                            {
+                                api_for_publish.publish_event(event);
+                            }
                         },
                         move |was_clean| {
+                            if connection_generation_for_close.load(Ordering::Acquire) != generation
+                            {
+                                return;
+                            }
                             if was_clean {
                                 tracing::info!("TCP transport closed cleanly");
                             } else {
                                 tracing::warn!("TCP transport closed with error");
+                            }
+                            if connection_confirmed_for_close.load(Ordering::Acquire) {
+                                endpoint_health_for_close.lock().record_disconnected();
+                                if !was_clean {
+                                    let _ = endpoint_refresh_tx_for_close.send(
+                                        EndpointRefreshRequest {
+                                            endpoint: endpoint_for_close.clone(),
+                                            reason: HealthyEndpointReason::Unreachable,
+                                            generation,
+                                        },
+                                    );
+                                }
                             }
                             api_for_close.set_status(ConnectionStatus::Disconnected);
                             wake_for_close.notify_one();
@@ -389,19 +811,35 @@ impl ConnectionStore {
                         tracing::info!("Shared abridged TCP transport connected");
                         let signaled = tokio::select! {
                             res = connect_ack_rx.changed() => res.is_ok(),
-                            _ = exec.timer(CONNECT_CONFIRM_GRACE) => true,
+                            _ = exec.timer(CONNECT_CONFIRM_GRACE) => false,
                         };
-                        let handshake_ok = signaled && transport.is_open().await;
+                        // Running out the grace period is not evidence the gateway
+                        // accepted us — it only means nothing arrived yet. Ask the
+                        // socket directly instead of assuming.
+                        let handshake_ok = if !transport.is_open().await {
+                            false
+                        } else if signaled {
+                            true
+                        } else {
+                            transport.ping_roundtrip().await.is_ok()
+                        };
                         if handshake_ok {
                             ConnectOutcome::Confirmed
                         } else {
                             let rejected = transport.credential_rejected();
+                            let frames = transport.frames_received();
                             let _ = transport.close().await;
-                            tracing::warn!(
-                                "Gateway dropped the connection (explicit rejection: {rejected}, server frames: {})",
-                                transport.frames_received()
-                            );
-                            ConnectOutcome::Refused
+                            if rejected {
+                                tracing::warn!(
+                                    "Gateway explicitly rejected the credential (server frames: {frames})"
+                                );
+                                ConnectOutcome::ExplicitReject
+                            } else {
+                                tracing::warn!(
+                                    "Gateway dropped the connection without an explicit reject (server frames: {frames}) — treating as transient"
+                                );
+                                ConnectOutcome::SilentDrop
+                            }
                         }
                     }
                     Err(e) => {
@@ -413,36 +851,104 @@ impl ConnectionStore {
                 };
 
                 if outcome == ConnectOutcome::Confirmed {
+                    connection_confirmed.store(true, Ordering::Release);
+                    endpoint_health.lock().record_connected(Instant::now());
                     connected_user_id = Some(session.user_id.clone());
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
                     gateway_refusals = 0;
                     jwt_refusals = 0;
                     probed_this_outage = false;
-                    network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
+                    reminted_this_outage = false;
+                    last_remint_attempt_at = None;
+                    remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+                    remint_unsupported = false;
+                    pending_endpoint_refresh = None;
+                    // A throttle belongs to the outage it happened in. Carrying its pacing past a
+                    // confirmed handshake would make the next unrelated outage start out slower
+                    // than it should, for no reason the server ever asked for.
+                    refresh_pacer.release();
+                    if endpoint_refresh_retry_in(
+                        last_endpoint_refresh_at,
+                        HEALTHY_ENDPOINT_SETTLED_SECS,
+                        Instant::now(),
+                    )
+                    .is_zero()
+                    {
+                        last_endpoint_refresh_at = None;
+                        healthy_endpoint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+                    }
                     api.set_status(ConnectionStatus::Connected);
                     tracing::info!("Connection confirmed — handshake accepted");
-                    if !refreshed_this_run {
+                    #[cfg(debug_assertions)]
+                    if std::env::var(DEBUG_FAILOVER_SIMULATION_ENV).as_deref()
+                        == Ok(DEBUG_FAILOVER_FULL_CYCLE)
+                    {
+                        let step = debug_disconnect_step.fetch_add(1, Ordering::AcqRel);
+                        if step < 2 {
+                            let transport = transport.clone();
+                            let timer = exec.clone();
+                            let endpoint_health = endpoint_health.clone();
+                            let connection_generation = connection_generation.clone();
+                            let api = api.clone();
+                            let wake = wake.clone();
+                            let endpoint = endpoint.clone();
+                            let endpoint_refresh_tx = endpoint_refresh_tx.clone();
+                            exec.spawn(async move {
+                                timer.timer(Duration::from_secs(2)).await;
+                                let next_generation = generation.wrapping_add(1);
+                                if connection_generation
+                                    .compare_exchange(
+                                        generation,
+                                        next_generation,
+                                        Ordering::AcqRel,
+                                        Ordering::Acquire,
+                                    )
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                                tracing::info!(
+                                    "Debug failover simulation disconnecting {} step={}",
+                                    endpoint.label(),
+                                    step + 1
+                                );
+                                if let Err(error) = transport.close().await {
+                                    tracing::warn!(
+                                        "Debug failover simulation could not close the transport: {error}"
+                                    );
+                                }
+                                endpoint_health.lock().record_disconnected();
+                                let _ = endpoint_refresh_tx.send(EndpointRefreshRequest {
+                                    endpoint,
+                                    reason: HealthyEndpointReason::Unreachable,
+                                    generation: next_generation,
+                                });
+                                api.set_status(ConnectionStatus::Disconnected);
+                                wake.notify_one();
+                            })
+                            .detach();
+                        }
+                    }
+                    // Arm the HTTP fallback from whatever we hold; it has to be live whether or not
+                    // the rotation below runs, or `ListChannelMessages` has nothing to fall back to.
+                    if !refreshed_this_run && refresh_token_needs_rotation(&session, now_secs()) {
                         refreshed_this_run = true;
                         let (renewed, _) =
                             refresh_jwt_for_fallback(&api, &auth_state, session.clone(), cx).await;
-                        api.set_http_fallback(http_fallback_session(
-                            &renewed,
-                            configured_api_base.as_deref(),
-                            &api_server_key,
-                        ));
+                        session = renewed;
                     }
+                    api.set_http_fallback(http_fallback_session(
+                        &session,
+                        configured_api_base.as_deref(),
+                        &api_server_key,
+                    ));
 
-                    let api_for_join = api.clone();
-                    exec.spawn(async move {
-                        match api_for_join.join_clan_chat(0).await {
-                            Ok(()) => tracing::info!("DM-space subscribed (clan_join clan_id=0)"),
-                            Err(e) => {
-                                tracing::warn!("DM-space join (clan_join clan_id=0) failed: {e}")
-                            }
-                        }
-                    })
-                    .detach();
+                    // The DM-space join (`clan_join{clan_id: 0}`) is owned by
+                    // `DirectMessageStore`: the gateway derives the DM and group
+                    // stream subscriptions from its cached channel listing for
+                    // this user, so the join has to follow the DM listing fetch
+                    // instead of racing it from here.
                     cx.update(|cx| {
                         auth_state.update(cx, |state, cx| {
                             if let AuthState::Connecting(s) = state {
@@ -458,26 +964,48 @@ impl ConnectionStore {
                 connected_user_id = None;
                 api.set_status(ConnectionStatus::Disconnected);
                 consecutive_failures += 1;
-                let refused = outcome == ConnectOutcome::Refused;
-                if refused {
-                    gateway_refusals += 1;
-                    if use_jwt && network_confirmed {
-                        jwt_refusals += 1;
-                    } else if use_jwt {
-                        tracing::info!(
-                            "JWT refusal seen without a confirmed network — not counting it against the session"
-                        );
-                    }
-                }
 
-                let switched_to_jwt = if refused && !use_jwt {
-                    discard_session_id(&auth_state, cx).await
-                } else {
-                    false
+                let refused = matches!(
+                    outcome,
+                    ConnectOutcome::ExplicitReject | ConnectOutcome::SilentDrop
+                );
+
+                let switched_to_jwt = match (outcome, use_jwt) {
+                    (
+                        ConnectOutcome::ExplicitReject | ConnectOutcome::SilentDrop,
+                        false,
+                    ) => {
+                        gateway_refusals += 1;
+                        tracing::info!(
+                            "SID handshake failed ({outcome:?}) — reminting session_id and retrying SID before JWT fallback, without discarding session_id"
+                        );
+                        true
+                    }
+                    (
+                        ConnectOutcome::ExplicitReject | ConnectOutcome::SilentDrop,
+                        true,
+                    ) => {
+                        // A refusal means we reached something that answered, so it counts.
+                        // Logout stays behind `SessionProbe::Rejected` from an authenticated call,
+                        // which a dead network answers `Inconclusive` and a captive portal answers
+                        // `Alive` — neither can end a session on its own.
+                        jwt_refusals += 1;
+                        false
+                    }
+                    (ConnectOutcome::Unreachable | ConnectOutcome::Confirmed, _) => false,
                 };
 
-                // No connect failure ends the session: a refusal is answered by trying the other
-                // credential and then asking the API host, an unreachable host by waiting.
+                let node_is_not_serving = outcome == ConnectOutcome::Unreachable
+                    || (refused && use_jwt && jwt_refusals >= JWT_REFUSALS_BEFORE_PROBE);
+                if node_is_not_serving {
+                    endpoint_health.lock().record_disconnected();
+                    pending_endpoint_refresh = Some(EndpointRefreshRequest {
+                        endpoint: endpoint.clone(),
+                        reason: HealthyEndpointReason::Unreachable,
+                        generation,
+                    });
+                }
+
                 if reached_failure_limit(consecutive_failures) {
                     promote_connecting_to_authenticated(&auth_state, cx);
                 }
@@ -487,7 +1015,20 @@ impl ConnectionStore {
                 }
 
                 retry_backoff_secs = next_backoff_secs(retry_backoff_secs);
-                backoff_wait(&exec, &wake, retry_backoff_secs).await;
+                if pending_endpoint_refresh.is_some() {
+                    let ask_due_in = endpoint_refresh_retry_in(
+                        last_endpoint_refresh_at,
+                        healthy_endpoint_retry_secs,
+                        Instant::now(),
+                    );
+                    if ask_due_in.is_zero() {
+                        continue;
+                    }
+                    wait_or_wake(&exec, &wake, ask_due_in.min(backoff_delay(retry_backoff_secs)))
+                        .await;
+                } else {
+                    backoff_wait(&exec, &wake, retry_backoff_secs).await;
+                }
             }
         });
 
@@ -496,6 +1037,7 @@ impl ConnectionStore {
             connecting_attempt: 0,
             transport: transport_handle,
             wake: wake_handle,
+            connection_generation: connection_generation_handle,
             _manager: manager,
             _auth_observe: auth_observe,
             _heartbeat: heartbeat,
@@ -563,20 +1105,94 @@ impl ConnectionStore {
         transport: Arc<TransportClient>,
         api: Arc<AppApi>,
         wake: Arc<tokio::sync::Notify>,
+        endpoint_health: Arc<Mutex<EndpointHealth>>,
+        connection_generation: Arc<AtomicU64>,
+        endpoint_refresh_tx: tokio::sync::mpsc::UnboundedSender<EndpointRefreshRequest>,
         cx: &mut Context<Self>,
     ) -> Task<()> {
         let exec = cx.background_executor().clone();
         exec.clone().spawn(async move {
             loop {
-                exec.timer(HEARTBEAT_INTERVAL).await;
+                #[cfg(debug_assertions)]
+                let interval = if std::env::var(DEBUG_FAILOVER_SIMULATION_ENV).as_deref()
+                    == Ok(DEBUG_FAILOVER_SLOW_SWITCH)
+                {
+                    Duration::from_secs(1)
+                } else {
+                    HEARTBEAT_INTERVAL
+                };
+                #[cfg(not(debug_assertions))]
+                let interval = HEARTBEAT_INTERVAL;
+                exec.timer(interval).await;
                 if !transport.is_open().await {
                     continue;
                 }
-                if let Err(e) = transport.ping_roundtrip().await {
-                    tracing::warn!("heartbeat ping failed ({e}) — forcing reconnect");
-                    let _ = transport.close().await;
-                    api.set_status(ConnectionStatus::Disconnected);
-                    wake.notify_one();
+                let Some(endpoint) = endpoint_health.lock().connected_endpoint() else {
+                    continue;
+                };
+                let observed_generation = connection_generation.load(Ordering::Acquire);
+                let started = Instant::now();
+                let ping = transport.ping_roundtrip().await;
+                if !endpoint_observation_is_current(
+                    &endpoint_health,
+                    &connection_generation,
+                    observed_generation,
+                    &endpoint,
+                ) {
+                    continue;
+                }
+                match ping {
+                    Ok(()) => {
+                        #[cfg(debug_assertions)]
+                        let rtt = if std::env::var(DEBUG_FAILOVER_SIMULATION_ENV).as_deref()
+                            == Ok(DEBUG_FAILOVER_SLOW_SWITCH)
+                        {
+                            Duration::from_millis(800)
+                        } else {
+                            started.elapsed()
+                        };
+                        #[cfg(not(debug_assertions))]
+                        let rtt = started.elapsed();
+                        if endpoint_health
+                            .lock()
+                            .record_active_probe(rtt, Instant::now())
+                        {
+                            tracing::info!(
+                                "{} has been slow for three heartbeats — asking the gateway",
+                                endpoint.label()
+                            );
+                            let _ = endpoint_refresh_tx.send(EndpointRefreshRequest {
+                                endpoint,
+                                reason: HealthyEndpointReason::HighLatency,
+                                generation: observed_generation,
+                            });
+                            wake.notify_one();
+                        }
+                    }
+                    Err(e) => {
+                        let next_generation = observed_generation.wrapping_add(1);
+                        if connection_generation
+                            .compare_exchange(
+                                observed_generation,
+                                next_generation,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_err()
+                        {
+                            continue;
+                        }
+                        tracing::warn!("heartbeat ping failed ({e}) — forcing reconnect");
+                        endpoint_health.lock().record_disconnected();
+                        let _ = endpoint_refresh_tx.send(EndpointRefreshRequest {
+                            endpoint,
+                            reason: HealthyEndpointReason::Unreachable,
+                            generation: next_generation,
+                        });
+                        let _ = transport.close().await;
+                        api.set_status(ConnectionStatus::Disconnected);
+                        wake.notify_one();
+                    }
                 }
             }
         })
@@ -676,8 +1292,21 @@ async fn refresh_jwt_for_fallback(
     let renewed = match api.renew_fallback_token().await {
         Ok(renewed) => renewed,
         Err(e) => {
+            // A throttle is the server rationing this route, not a verdict on the session. It has
+            // to pace the *next* call rather than ride the reconnect ladder, which retries far
+            // sooner than the limiter refills.
+            let throttled = e
+                .downcast_ref::<mezon_client::SessionRefreshRejected>()
+                .is_some_and(|rejected| rejected.is_throttled());
             tracing::warn!("SessionRefresh failed ({e}) — keeping the current session");
-            return (session, RefreshVerdict::Transient);
+            return (
+                session,
+                if throttled {
+                    RefreshVerdict::Throttled
+                } else {
+                    RefreshVerdict::Transient
+                },
+            );
         }
     };
 
@@ -736,53 +1365,184 @@ async fn refresh_jwt_for_fallback(
     (session, RefreshVerdict::Renewed)
 }
 
-fn should_lead_with_jwt(session: &Session, gateway_refusals: u32) -> bool {
-    session.session_id.is_empty() || gateway_refusals >= SSID_REFUSALS_BEFORE_JWT
-}
+async fn remint_session_via_healthy_endpoint(
+    auth_client: &MezonClient,
+    api: &Arc<AppApi>,
+    auth_state: &Entity<AuthState>,
+    session: &Session,
+    configured_api_base: Option<&str>,
+    api_server_key: &str,
+    exec: &BackgroundExecutor,
+    tcp_default_port: Option<u16>,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<Session> {
+    let healthy = fetch_healthy_endpoint_with_timeout(
+        exec,
+        auth_client,
+        &session.token,
+        session.endpoint_id,
+        HealthyEndpointReason::Unreachable,
+    )
+    .await?;
 
-fn clear_socket_credential(session: &mut Session) -> bool {
-    if session.session_id.is_empty() {
-        return false;
+    let renewed = apply_healthy_endpoint_to_auth(
+        auth_state,
+        &session.user_id,
+        &healthy,
+        tcp_default_port,
+        MintedSessionId::Adopt,
+        cx,
+    )
+    .ok_or_else(|| anyhow::anyhow!("auth state changed during GetHealthyEndpoint"))?;
+    // A gateway that only mints when the node changes answers with the old credential — retrying
+    // the SID handshake with it would just fail again.
+    if renewed.session_id.is_empty() || renewed.session_id == session.session_id {
+        anyhow::bail!("the gateway answered without minting a new session_id");
     }
-    session.session_id.clear();
-    true
+
+    api.set_http_fallback(http_fallback_session(
+        &renewed,
+        configured_api_base,
+        api_server_key,
+    ));
+
+    let persisted = renewed.clone();
+    exec.spawn(async move {
+        if let Err(e) = keychain::save_session(&persisted) {
+            tracing::warn!("Failed to persist reminted session_id: {e}");
+        }
+    })
+    .await;
+
+    Ok(renewed)
 }
 
-async fn discard_session_id(auth_state: &Entity<AuthState>, cx: &mut AsyncApp) -> bool {
-    let cleared = cx.update(|cx| {
+fn should_attempt_sid_remint(
+    session: &Session,
+    sid_failures: u32,
+    reminted_successfully_this_outage: bool,
+    gw_configured: bool,
+) -> bool {
+    gw_configured
+        && !reminted_successfully_this_outage
+        && (session.session_id.is_empty() || sid_failures >= SSID_REFUSALS_BEFORE_JWT)
+}
+
+fn should_lead_with_jwt(session: &Session, sid_failures: u32) -> bool {
+    session.session_id.is_empty() || sid_failures >= SSID_REFUSALS_BEFORE_JWT
+}
+
+fn jwt_is_fresh(session: &Session) -> bool {
+    !session.token.is_empty()
+        && session.expires_at != 0
+        && now_secs() + JWT_SKEW.as_secs() < session.expires_at
+}
+
+fn healthy_endpoint_credential(session: &Session) -> Option<HealthyEndpointCredential> {
+    if !session.session_id.is_empty() {
+        Some(HealthyEndpointCredential::SessionId)
+    } else if jwt_is_fresh(session) {
+        Some(HealthyEndpointCredential::Jwt)
+    } else {
+        None
+    }
+}
+
+fn healthy_endpoint_credential_value(
+    session: &Session,
+    credential: HealthyEndpointCredential,
+) -> &str {
+    match credential {
+        HealthyEndpointCredential::Jwt => &session.token,
+        HealthyEndpointCredential::SessionId => &session.session_id,
+    }
+}
+
+fn healthy_endpoint_fallback_credential(
+    session: &Session,
+    attempted: HealthyEndpointCredential,
+) -> Option<HealthyEndpointCredential> {
+    match attempted {
+        HealthyEndpointCredential::SessionId if jwt_is_fresh(session) => {
+            Some(HealthyEndpointCredential::Jwt)
+        }
+        _ => None,
+    }
+}
+
+fn healthy_endpoint_auth_rejected(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<HealthyEndpointStatusError>()
+        .is_some_and(|error| matches!(error.status, 401 | 403))
+}
+
+/// The gateway answered 404: it has no healthy-endpoint route (not deployed yet), which no retry
+/// within this connection will change.
+fn healthy_endpoint_route_missing(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<HealthyEndpointStatusError>()
+        .is_some_and(|error| error.status == 404)
+}
+
+fn endpoint_observation_is_current(
+    endpoint_health: &Mutex<EndpointHealth>,
+    connection_generation: &AtomicU64,
+    observed_generation: u64,
+    endpoint: &RealtimeEndpoint,
+) -> bool {
+    connection_generation.load(Ordering::Acquire) == observed_generation
+        && endpoint_health.lock().connected_endpoint().as_ref() == Some(endpoint)
+}
+
+/// What to do with the `session_id` a healthy-endpoint answer carries.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MintedSessionId {
+    /// A health report: the credential we hold is live, keep it unless the gateway moves us.
+    KeepUnlessMoved,
+    /// A remint after a refused handshake: the credential we hold is the one to replace.
+    Adopt,
+}
+
+fn apply_healthy_endpoint_to_auth(
+    auth_state: &Entity<AuthState>,
+    expected_user_id: &str,
+    response: &HealthyEndpointSession,
+    default_port: Option<u16>,
+    minted: MintedSessionId,
+    cx: &mut AsyncApp,
+) -> Option<Session> {
+    let updated = cx.update(|cx| {
         auth_state.update(cx, |state, cx| {
             let session = match state {
-                AuthState::Authenticated(s) | AuthState::Connecting(s) => s,
+                AuthState::Authenticated(session) | AuthState::Connecting(session) => session,
                 _ => return None,
             };
-            if !clear_socket_credential(session) {
+            if session.user_id != expected_user_id {
+                return None;
+            }
+            let applied = match minted {
+                MintedSessionId::KeepUnlessMoved => {
+                    session.apply_healthy_endpoint(response, default_port)
+                }
+                MintedSessionId::Adopt => session.apply_reminted_endpoint(response, default_port),
+            };
+            if !applied {
                 return None;
             }
             cx.notify();
             Some(session.clone())
         })
     });
-    let Some(session) = cleared else {
-        return false;
-    };
-
-    tracing::info!(
-        "The gateway refused the stored session_id — dropping it so the JWT leads until the server pushes a new one"
-    );
+    let session = updated?;
+    let persisted = session.clone();
     cx.background_executor()
         .spawn(async move {
-            if let Err(e) = keychain::save_session(&session) {
-                tracing::warn!("Failed to persist the session without its refused session_id: {e}");
+            if let Err(e) = keychain::save_session(&persisted) {
+                tracing::warn!("Failed to persist healthy endpoint session: {e}");
             }
         })
-        .await;
-    true
-}
-
-/// Whether the JWT can still authenticate a handshake or an HTTP call.
-fn jwt_is_fresh(session: &Session) -> bool {
-    !session.token.is_empty()
-        && (session.expires_at == 0 || now_secs() + JWT_SKEW.as_secs() < session.expires_at)
+        .detach();
+    Some(session)
 }
 
 fn configured_api_base_url(config: &AppConfig) -> String {
@@ -814,10 +1574,6 @@ fn http_fallback_session(
     })
 }
 
-fn requires_network_probe(consecutive_failures: u32) -> bool {
-    consecutive_failures >= 1
-}
-
 fn reached_failure_limit(consecutive_failures: u32) -> bool {
     consecutive_failures >= MAX_CONSECUTIVE_FAILURES
 }
@@ -826,20 +1582,168 @@ fn next_backoff_secs(current: u64) -> u64 {
     current.saturating_mul(2).min(RECONNECT_BACKOFF_CAP_SECS)
 }
 
-fn next_network_retry_secs(current: u64) -> u64 {
-    current.saturating_mul(2).min(NETWORK_PROBE_RETRY_CAP_SECS)
+/// Whether the refresh token is close enough to expiry to be worth spending a `SessionRefresh` on.
+///
+/// The launch-time rotation exists so a client that never needs the JWT still keeps its refresh
+/// token alive. It used to run on every launch, on the belief that the token lives a week — prod
+/// sets `refresh_token_expiry_sec: 2592000`, thirty days, so that was four times more often than
+/// the token ever needed. A connected client with a working `session_id` therefore spent an HTTP
+/// call on every launch to renew something with weeks left on it, and every launch of every client
+/// landed on the one route that authenticates with a shared key.
+///
+/// An unreadable token rotates: better one needless call than a session that quietly expires.
+fn refresh_token_needs_rotation(session: &Session, now: u64) -> bool {
+    mezon_client::jwt_expires_at(&session.refresh_token)
+        .is_none_or(|exp| exp.saturating_sub(now) < REFRESH_TOKEN_ROTATE_WITHIN_SECS)
 }
 
-/// Wait out a reconnect backoff, but wake early if auth/connection state changes.
-async fn backoff_wait(exec: &BackgroundExecutor, wake: &tokio::sync::Notify, secs: u64) {
+/// Pacing shared by every path that can spend a `SessionRefresh`.
+///
+/// The paths do not otherwise resemble each other — the reconnect ladder, the gateway ask that
+/// needs a credential to make, and the retry after the gateway refuses one — but they all land on
+/// the same route, and that route is throttled for everyone at once. Pacing has to be shared or it
+/// is not pacing: with the bookkeeping living only in the reconnect ladder, a session holding a
+/// valid `session_id` over a dead socket spent five refreshes in 150s of 503 through the gateway
+/// path while the ladder sat quietly on its cooldown.
+#[derive(Debug)]
+struct RefreshPacer {
+    hold_until: Option<Instant>,
+    retry_secs: u64,
+}
+
+impl RefreshPacer {
+    fn new() -> Self {
+        Self {
+            hold_until: None,
+            retry_secs: SESSION_REFRESH_THROTTLED_SECS,
+        }
+    }
+
+    fn hold_left(&self, now: Instant) -> Duration {
+        refresh_hold_in(self.hold_until, now)
+    }
+
+    fn may_refresh(&self, now: Instant) -> bool {
+        self.hold_left(now).is_zero()
+    }
+
+    fn record(&mut self, verdict: RefreshVerdict, now: Instant) {
+        match verdict {
+            RefreshVerdict::Renewed => self.release(),
+            RefreshVerdict::Throttled => {
+                tracing::warn!(
+                    "SessionRefresh is being throttled — pacing the next one {}s out",
+                    self.retry_secs
+                );
+                self.hold_until = Some(now + Duration::from_secs(self.retry_secs));
+                self.retry_secs = next_refresh_retry_secs(self.retry_secs);
+            }
+            RefreshVerdict::Transient => {}
+        }
+    }
+
+    /// A confirmed handshake, or a token we actually got, ends the outage the throttle belonged to.
+    fn release(&mut self) {
+        self.hold_until = None;
+        self.retry_secs = SESSION_REFRESH_THROTTLED_SECS;
+    }
+}
+
+/// How long `SessionRefresh` stays parked, or zero once the cooldown has run out.
+fn refresh_hold_in(hold_until: Option<Instant>, now: Instant) -> Duration {
+    hold_until
+        .map(|until| until.saturating_duration_since(now))
+        .unwrap_or(Duration::ZERO)
+}
+
+fn next_refresh_retry_secs(current: u64) -> u64 {
+    current
+        .saturating_mul(2)
+        .min(SESSION_REFRESH_THROTTLED_CAP_SECS)
+}
+
+fn next_healthy_endpoint_retry_secs(current: u64) -> u64 {
+    current
+        .saturating_mul(2)
+        .min(HEALTHY_ENDPOINT_RETRY_CAP_SECS)
+}
+
+fn endpoint_refresh_retry_in(
+    last_attempt: Option<Instant>,
+    retry_secs: u64,
+    now: Instant,
+) -> Duration {
+    last_attempt
+        .map(|attempted_at| {
+            Duration::from_secs(retry_secs)
+                .saturating_sub(now.saturating_duration_since(attempted_at))
+        })
+        .unwrap_or(Duration::ZERO)
+}
+
+async fn refresh_jwt_within(
+    exec: &BackgroundExecutor,
+    api: &Arc<AppApi>,
+    auth_state: &Entity<AuthState>,
+    session: Session,
+    timeout_after: Duration,
+    cx: &mut AsyncApp,
+) -> (Session, RefreshVerdict) {
+    let unchanged = session.clone();
+    let refresh = std::pin::pin!(refresh_jwt_for_fallback(api, auth_state, session, cx));
+    let timeout = std::pin::pin!(exec.timer(timeout_after));
+    match futures::future::select(refresh, timeout).await {
+        futures::future::Either::Left((renewed, _)) => renewed,
+        futures::future::Either::Right(_) => {
+            tracing::warn!("Session refresh timed out — carrying on with the token we hold");
+            (unchanged, RefreshVerdict::Transient)
+        }
+    }
+}
+
+async fn fetch_healthy_endpoint_with_timeout(
+    executor: &BackgroundExecutor,
+    client: &MezonClient,
+    credential: &str,
+    current_endpoint_id: i32,
+    reason: HealthyEndpointReason,
+) -> anyhow::Result<HealthyEndpointSession> {
+    wait_for_healthy_endpoint(
+        executor,
+        client.get_healthy_endpoint(credential, current_endpoint_id, reason),
+        HEALTHY_ENDPOINT_TIMEOUT,
+    )
+    .await
+}
+
+async fn wait_for_healthy_endpoint(
+    executor: &BackgroundExecutor,
+    request: impl std::future::Future<Output = anyhow::Result<HealthyEndpointSession>>,
+    timeout_after: Duration,
+) -> anyhow::Result<HealthyEndpointSession> {
+    let request = std::pin::pin!(request);
+    let timeout = std::pin::pin!(executor.timer(timeout_after));
+    match futures::future::select(request, timeout).await {
+        futures::future::Either::Left((response, _)) => response,
+        futures::future::Either::Right(_) => {
+            anyhow::bail!("healthy endpoint request timed out")
+        }
+    }
+}
+
+fn backoff_delay(secs: u64) -> Duration {
     let base_ms = secs.saturating_mul(1000);
     let jitter_cap = (base_ms / 4).max(1);
     let jitter_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| u64::from(d.subsec_nanos()) % jitter_cap)
         .unwrap_or(0);
-    let delay = std::time::Duration::from_millis(base_ms + jitter_ms);
-    wait_or_wake(exec, wake, delay).await;
+    Duration::from_millis(base_ms + jitter_ms)
+}
+
+/// Wait out a reconnect backoff, but wake early if auth/connection state changes.
+async fn backoff_wait(exec: &BackgroundExecutor, wake: &tokio::sync::Notify, secs: u64) {
+    wait_or_wake(exec, wake, backoff_delay(secs)).await;
 }
 
 /// Wait out `delay`, cut short only by an event that arrives **during** the wait.
@@ -875,14 +1779,6 @@ fn promote_connecting_to_authenticated(auth_state: &Entity<AuthState>, cx: &mut 
             }
         });
     });
-}
-
-pub(crate) fn resolve_tcp_port(session: &Session, default_port: Option<u16>) -> u16 {
-    session
-        .tcp_port
-        .or(session.ws_port)
-        .or(default_port)
-        .unwrap_or(DEFAULT_TLS_PORT)
 }
 
 /// Restore a stored session from the OS keychain.
@@ -987,49 +1883,30 @@ mod tests {
         assert_eq!(fallback.server_key, "api-key");
     }
 
+    /// How long a client can stay down after the far side is healthy again. Nothing tells it the
+    /// server came back, so recovery costs at most one wait at the ladder's ceiling — measured at
+    /// 33s in a live run where the socket returned mid-wait. Bound the ceiling itself, jitter
+    /// included, because jitter is part of what actually elapses.
     #[test]
-    fn resolve_tcp_port_uses_tcp_port_field_first() {
-        let s = Session {
-            tcp_port: Some(9999),
-            ws_port: Some(1111),
-            ..Default::default()
-        };
-        assert_eq!(resolve_tcp_port(&s, Some(4433)), 9999);
-    }
-
-    #[test]
-    fn resolve_tcp_port_falls_back_to_ws_port() {
-        let s = Session {
-            ws_port: Some(8888),
-            ..Default::default()
-        };
-        assert_eq!(resolve_tcp_port(&s, Some(4433)), 8888);
-    }
-
-    #[test]
-    fn resolve_tcp_port_uses_config_default_when_session_has_no_port() {
-        let s = Session {
-            tcp_host: Some("mezon.ai".to_owned()),
-            ..Default::default()
-        };
-        assert_eq!(resolve_tcp_port(&s, Some(7349)), 7349);
-    }
-
-    #[test]
-    fn resolve_tcp_port_falls_back_to_tls_default_when_unset() {
-        assert_eq!(
-            resolve_tcp_port(&Session::default(), None),
-            DEFAULT_TLS_PORT
-        );
-    }
-
-    #[test]
-    fn backoff_wait_caps_at_60_seconds() {
-        let mut secs = 1u64;
+    fn the_longest_a_reconnect_can_sit_out_is_bounded() {
+        let mut secs = 1;
         for _ in 0..10 {
-            secs = (secs * 2).min(60);
+            secs = next_backoff_secs(secs);
         }
-        assert_eq!(secs, 60);
+        assert_eq!(
+            secs, RECONNECT_BACKOFF_CAP_SECS,
+            "the ladder must settle at its cap"
+        );
+
+        let worst = backoff_delay(secs);
+        assert!(
+            worst >= Duration::from_secs(RECONNECT_BACKOFF_CAP_SECS),
+            "jitter must never shorten a wait below the rung it belongs to"
+        );
+        assert!(
+            worst <= Duration::from_secs(RECONNECT_BACKOFF_CAP_SECS * 5 / 4),
+            "worst-case recovery stretched to {worst:?}; jitter is meant to stay within a quarter"
+        );
     }
 
     #[test]
@@ -1042,21 +1919,574 @@ mod tests {
     }
 
     #[test]
-    fn first_attempt_connects_without_probe_then_probes_every_retry() {
-        assert!(!requires_network_probe(0));
-        assert!(requires_network_probe(1));
-        assert!(requires_network_probe(4));
+    fn session_refresh_throttle_paces_a_minute_up_to_five() {
+        assert_eq!(next_refresh_retry_secs(SESSION_REFRESH_THROTTLED_SECS), 120);
+        assert_eq!(next_refresh_retry_secs(120), 240);
+        assert_eq!(
+            next_refresh_retry_secs(240),
+            SESSION_REFRESH_THROTTLED_CAP_SECS
+        );
+        assert_eq!(
+            next_refresh_retry_secs(SESSION_REFRESH_THROTTLED_CAP_SECS),
+            SESSION_REFRESH_THROTTLED_CAP_SECS
+        );
+    }
+
+    /// The reconnect ladder tops out at 60s, so the cooldown has to outlast a full rung — otherwise
+    /// the ladder, not the cooldown, decides how often the limiter is asked.
+    #[test]
+    fn session_refresh_cooldown_outlasts_the_reconnect_ladder() {
+        const { assert!(SESSION_REFRESH_THROTTLED_SECS >= RECONNECT_BACKOFF_CAP_SECS) };
+    }
+
+    /// base64url without padding — what a JWT payload is encoded with. Hand-rolled because
+    /// `mezon-store` does not depend on a base64 crate and this is the only place that needs one.
+    fn base64url_no_pad(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let b = [
+                chunk[0],
+                chunk.get(1).copied().unwrap_or(0),
+                chunk.get(2).copied().unwrap_or(0),
+            ];
+            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            for i in 0..chunk.len() + 1 {
+                out.push(ALPHABET[((n >> (18 - 6 * i)) & 0x3f) as usize] as char);
+            }
+        }
+        out
+    }
+
+    fn session_with_refresh_token_expiring_at(exp: Option<u64>) -> Session {
+        let refresh_token = match exp {
+            Some(exp) => format!(
+                "header.{}.signature",
+                base64url_no_pad(format!(r#"{{"exp":{exp}}}"#).as_bytes())
+            ),
+            None => String::new(),
+        };
+        Session {
+            refresh_token,
+            ..Default::default()
+        }
+    }
+
+    /// The encoder above has to agree with the decoder the production path uses, or every test
+    /// below would pass against a token the client itself cannot read.
+    #[test]
+    fn the_test_token_is_one_the_client_can_actually_decode() {
+        let session = session_with_refresh_token_expiring_at(Some(1_700_000_000));
+        assert_eq!(
+            mezon_client::jwt_expires_at(&session.refresh_token),
+            Some(1_700_000_000)
+        );
+    }
+
+    /// The launch-time rotation is the one `SessionRefresh` a healthy, connected client still made.
+    /// With weeks left on the token there is nothing to renew, so it must not fire.
+    #[test]
+    fn a_refresh_token_with_weeks_left_is_not_rotated() {
+        let now = 1_700_000_000;
+        let month = 30 * 24 * 60 * 60;
+        assert!(!refresh_token_needs_rotation(
+            &session_with_refresh_token_expiring_at(Some(now + month)),
+            now
+        ));
+        assert!(!refresh_token_needs_rotation(
+            &session_with_refresh_token_expiring_at(Some(
+                now + REFRESH_TOKEN_ROTATE_WITHIN_SECS + 1
+            )),
+            now
+        ));
+    }
+
+    /// Inside the window it must fire, or the session expires and the user is asked to log in again.
+    #[test]
+    fn a_refresh_token_near_expiry_is_rotated() {
+        let now = 1_700_000_000;
+        assert!(refresh_token_needs_rotation(
+            &session_with_refresh_token_expiring_at(Some(
+                now + REFRESH_TOKEN_ROTATE_WITHIN_SECS - 1
+            )),
+            now
+        ));
+        assert!(refresh_token_needs_rotation(
+            &session_with_refresh_token_expiring_at(Some(now)),
+            now
+        ));
+        // Already expired, and clock skew past it, must not read as "plenty of time".
+        assert!(refresh_token_needs_rotation(
+            &session_with_refresh_token_expiring_at(Some(now - 1)),
+            now
+        ));
+    }
+
+    /// A token whose expiry cannot be read gets rotated: one needless call beats a session that
+    /// quietly dies.
+    #[test]
+    fn an_unreadable_refresh_token_is_rotated() {
+        let now = 1_700_000_000;
+        assert!(refresh_token_needs_rotation(
+            &session_with_refresh_token_expiring_at(None),
+            now
+        ));
+        let garbage = Session {
+            refresh_token: "not-a-jwt".into(),
+            ..Default::default()
+        };
+        assert!(refresh_token_needs_rotation(&garbage, now));
+    }
+
+    /// Walks the real `RefreshPacer` — the one every call site shares — rather than a copy of its
+    /// rules, so a change to production pacing shows up here instead of quietly diverging.
+    struct RefreshGate {
+        pacer: RefreshPacer,
+        calls: u32,
+    }
+
+    impl RefreshGate {
+        fn new() -> Self {
+            Self {
+                pacer: RefreshPacer::new(),
+                calls: 0,
+            }
+        }
+
+        /// Returns whether the request actually left the client.
+        fn wants_refresh(&mut self, now: Instant, verdict: RefreshVerdict) -> bool {
+            if !self.pacer.may_refresh(now) {
+                return false;
+            }
+            self.calls += 1;
+            self.pacer.record(verdict, now);
+            true
+        }
+
+        fn on_confirmed_handshake(&mut self) {
+            self.pacer.release();
+        }
+
+        fn retry_secs(&self) -> u64 {
+            self.pacer.retry_secs
+        }
     }
 
     #[test]
-    fn network_retry_backoff_doubles_up_to_its_own_cap() {
-        assert_eq!(next_network_retry_secs(NETWORK_PROBE_RETRY_MIN_SECS), 2);
-        assert_eq!(next_network_retry_secs(4), 8);
-        assert_eq!(next_network_retry_secs(8), NETWORK_PROBE_RETRY_CAP_SECS);
-        assert_eq!(
-            next_network_retry_secs(NETWORK_PROBE_RETRY_CAP_SECS),
-            NETWORK_PROBE_RETRY_CAP_SECS
+    fn a_throttled_refresh_is_not_retried_before_its_cooldown() {
+        let t0 = Instant::now();
+        let mut gate = RefreshGate::new();
+        assert!(gate.wants_refresh(t0, RefreshVerdict::Throttled));
+        for offset in [1, 5, 30, SESSION_REFRESH_THROTTLED_SECS - 1] {
+            assert!(
+                !gate.wants_refresh(t0 + Duration::from_secs(offset), RefreshVerdict::Throttled),
+                "a refresh escaped the cooldown at +{offset}s"
+            );
+        }
+        assert!(gate.wants_refresh(
+            t0 + Duration::from_secs(SESSION_REFRESH_THROTTLED_SECS),
+            RefreshVerdict::Throttled
+        ));
+        assert_eq!(gate.calls, 2);
+    }
+
+    /// The incident this pacing exists for: 07/09/2026, `SessionRefresh` answered 503 for 14
+    /// minutes and one client spent 21 requests on it, peaking at 6 a minute. The ladder has to
+    /// bring that down by roughly four times without ever giving up on recovery.
+    #[test]
+    fn a_fourteen_minute_throttle_costs_a_handful_of_requests_not_a_storm() {
+        let t0 = Instant::now();
+        let mut gate = RefreshGate::new();
+        // The loop wakes far more often than the cooldown; every second is generous.
+        for second in 0..(14 * 60) {
+            gate.wants_refresh(t0 + Duration::from_secs(second), RefreshVerdict::Throttled);
+        }
+        assert!(
+            (1..=6).contains(&gate.calls),
+            "14 minutes of 503 spent {} requests; the outage that prompted this spent 21",
+            gate.calls
         );
+    }
+
+    /// A throttle holds the reconnect too, so no handshake is attempted while it runs. That is what
+    /// keeps a backend throttle from walking the session towards the logout probe.
+    #[test]
+    fn a_throttled_refresh_never_walks_the_session_towards_logout() {
+        let t0 = Instant::now();
+        let mut gate = RefreshGate::new();
+        let mut sim = ReconnectSim::new();
+        for second in 0..600 {
+            let now = t0 + Duration::from_secs(second);
+            if gate.wants_refresh(now, RefreshVerdict::Throttled) {
+                // Only a refresh that actually happened lets a handshake follow, and a throttled
+                // one never returns a usable token, so the loop holds instead of handshaking.
+                continue;
+            }
+        }
+        assert_eq!(sim.jwt_refusals, 0);
+        assert_eq!(sim.logout_count, 0);
+        sim.record_api_probe(false);
+        assert_eq!(
+            sim.logout_count, 0,
+            "a backend throttle must never reach the logout probe"
+        );
+    }
+
+    /// Only a throttle paces. A transient failure (a dropped connection, a timeout) says nothing
+    /// about how often the server wants to be asked, so it must not slow recovery down.
+    #[test]
+    fn a_transient_refresh_failure_starts_no_cooldown() {
+        let t0 = Instant::now();
+        let mut gate = RefreshGate::new();
+        for second in 0..10 {
+            assert!(
+                gate.wants_refresh(t0 + Duration::from_secs(second), RefreshVerdict::Transient)
+            );
+        }
+        assert_eq!(gate.calls, 10);
+    }
+
+    #[test]
+    fn a_renewed_token_and_a_confirmed_handshake_both_clear_the_cooldown() {
+        let t0 = Instant::now();
+        let mut gate = RefreshGate::new();
+        gate.wants_refresh(t0, RefreshVerdict::Throttled);
+        assert!(!gate.wants_refresh(t0 + Duration::from_secs(1), RefreshVerdict::Throttled));
+        gate.on_confirmed_handshake();
+        assert!(
+            gate.wants_refresh(t0 + Duration::from_secs(2), RefreshVerdict::Renewed),
+            "a confirmed handshake must release the hold"
+        );
+        assert_eq!(
+            gate.retry_secs(),
+            SESSION_REFRESH_THROTTLED_SECS,
+            "the ladder must start over, not stay escalated into the next outage"
+        );
+    }
+
+    /// What one pass of the loop decided to do about reachability, so an outage can be walked as a
+    /// timeline. Mirrors the loop: latch when the answer first turns offline, clear on the edge
+    /// back, and stop believing an answer that never changes.
+
+    #[test]
+    fn refresh_hold_counts_down_then_releases() {
+        let now = Instant::now();
+        assert_eq!(refresh_hold_in(None, now), Duration::ZERO);
+        let until = now + Duration::from_secs(60);
+        assert_eq!(refresh_hold_in(Some(until), now), Duration::from_secs(60));
+        assert_eq!(
+            refresh_hold_in(Some(until), now + Duration::from_secs(59)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            refresh_hold_in(Some(until), now + Duration::from_secs(90)),
+            Duration::ZERO
+        );
+    }
+
+    /// Only the two statuses that mean "call me less" pace the refresh. A 401/403 is a verdict on
+    /// the credentials and a 500 is a real failure — pacing either would delay a recovery.
+    #[test]
+    fn only_429_and_503_count_as_a_refresh_throttle() {
+        use mezon_client::SessionRefreshRejected;
+        assert!(SessionRefreshRejected { status: 429 }.is_throttled());
+        assert!(SessionRefreshRejected { status: 503 }.is_throttled());
+        assert!(!SessionRefreshRejected { status: 401 }.is_throttled());
+        assert!(!SessionRefreshRejected { status: 403 }.is_throttled());
+        assert!(!SessionRefreshRejected { status: 500 }.is_throttled());
+    }
+
+    /// The status has to survive the trip through `anyhow`, which is how the reconnect loop reads
+    /// it back — a plain `bail!` string would classify every failure as transient.
+    #[test]
+    fn refresh_rejection_survives_anyhow_downcast() {
+        use mezon_client::SessionRefreshRejected;
+        let err: anyhow::Error = SessionRefreshRejected { status: 503 }.into();
+        assert_eq!(err.to_string(), "SessionRefresh failed with status 503");
+        assert!(
+            err.downcast_ref::<SessionRefreshRejected>()
+                .is_some_and(|r| r.is_throttled())
+        );
+    }
+
+    #[test]
+    fn reminting_sid_clears_sid_failures_so_jwt_is_not_needed() {
+        let session = Session {
+            token: "jwt".into(),
+            session_id: "fresh-sid".into(),
+            expires_at: now_secs() + 600,
+            ..Default::default()
+        };
+        assert!(
+            !should_lead_with_jwt(&session, 0),
+            "after GetHealthyEndpoint remint, SID handshake leads again"
+        );
+    }
+
+    #[test]
+    fn asking_the_gateway_backs_off_so_it_cannot_burn_the_session_slots() {
+        assert_eq!(
+            next_healthy_endpoint_retry_secs(HEALTHY_ENDPOINT_RETRY_SECS),
+            10
+        );
+        assert_eq!(next_healthy_endpoint_retry_secs(20), 40);
+        assert_eq!(
+            next_healthy_endpoint_retry_secs(40),
+            HEALTHY_ENDPOINT_RETRY_CAP_SECS
+        );
+        assert_eq!(
+            next_healthy_endpoint_retry_secs(HEALTHY_ENDPOINT_RETRY_CAP_SECS),
+            HEALTHY_ENDPOINT_RETRY_CAP_SECS
+        );
+    }
+
+    #[test]
+    fn a_missing_healthy_endpoint_route_is_told_apart_from_a_refusal() {
+        let missing: anyhow::Error = HealthyEndpointStatusError { status: 404 }.into();
+        let refused: anyhow::Error = HealthyEndpointStatusError { status: 401 }.into();
+        let outage: anyhow::Error = HealthyEndpointStatusError { status: 503 }.into();
+        let timeout = anyhow::anyhow!("healthy endpoint request timed out");
+        assert!(healthy_endpoint_route_missing(&missing));
+        assert!(!healthy_endpoint_route_missing(&refused));
+        assert!(!healthy_endpoint_route_missing(&outage));
+        assert!(!healthy_endpoint_route_missing(&timeout));
+        assert!(healthy_endpoint_auth_rejected(&refused));
+        assert!(!healthy_endpoint_auth_rejected(&missing));
+    }
+
+    #[test]
+    fn remint_errors_are_paced_like_gateway_asks() {
+        let attempted_at = Instant::now();
+        let mut retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+        assert_eq!(
+            endpoint_refresh_retry_in(None, retry_secs, attempted_at),
+            Duration::ZERO,
+            "the first remint of an outage is immediate"
+        );
+        retry_secs = next_healthy_endpoint_retry_secs(retry_secs);
+        assert_eq!(
+            endpoint_refresh_retry_in(Some(attempted_at), retry_secs, attempted_at),
+            Duration::from_secs(10),
+            "a failed remint waits before the gateway is asked again"
+        );
+        for _ in 0..8 {
+            retry_secs = next_healthy_endpoint_retry_secs(retry_secs);
+        }
+        assert_eq!(retry_secs, HEALTHY_ENDPOINT_RETRY_CAP_SECS);
+    }
+
+    #[test]
+    fn remint_is_retried_after_errors_but_not_after_a_successful_mint() {
+        let empty_sid = Session {
+            token: "jwt".into(),
+            expires_at: now_secs() + 600,
+            ..Default::default()
+        };
+        assert!(should_attempt_sid_remint(&empty_sid, 0, false, true));
+        assert!(
+            should_attempt_sid_remint(&empty_sid, 0, false, true),
+            "a failed remint must not latch — the next loop may retry"
+        );
+        assert!(
+            !should_attempt_sid_remint(&empty_sid, 0, true, true),
+            "a successful remint latches until the outage clears so a dead mint is not tight-looped"
+        );
+        assert!(!should_attempt_sid_remint(&empty_sid, 0, false, false));
+
+        let with_sid = Session {
+            session_id: "sid".into(),
+            ..empty_sid
+        };
+        assert!(!should_attempt_sid_remint(&with_sid, 0, false, true));
+        assert!(should_attempt_sid_remint(
+            &with_sid,
+            SSID_REFUSALS_BEFORE_JWT,
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn the_first_ask_is_immediate_and_the_next_waits_out_the_pace() {
+        let attempted_at = Instant::now();
+        assert_eq!(
+            endpoint_refresh_retry_in(None, HEALTHY_ENDPOINT_RETRY_SECS, attempted_at),
+            Duration::ZERO,
+            "a node just went down and we have not asked yet"
+        );
+        assert_eq!(
+            endpoint_refresh_retry_in(
+                Some(attempted_at),
+                HEALTHY_ENDPOINT_RETRY_SECS,
+                attempted_at
+            ),
+            Duration::from_secs(HEALTHY_ENDPOINT_RETRY_SECS)
+        );
+        assert_eq!(
+            endpoint_refresh_retry_in(
+                Some(attempted_at),
+                HEALTHY_ENDPOINT_RETRY_SECS,
+                attempted_at + Duration::from_secs(HEALTHY_ENDPOINT_RETRY_SECS)
+            ),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn a_reconnect_backoff_never_collapses_to_zero() {
+        for secs in [1u64, 2, 8, RECONNECT_BACKOFF_CAP_SECS] {
+            let delay = backoff_delay(secs);
+            assert!(
+                delay >= Duration::from_secs(secs),
+                "{secs}s backoff was cut short"
+            );
+            assert!(delay < Duration::from_secs(secs) + Duration::from_millis(secs * 250 + 1));
+        }
+    }
+
+    #[test]
+    fn a_two_minute_outage_cannot_spend_the_users_session_slots() {
+        let start = Instant::now();
+        let mut now = start;
+        let mut last_ask: Option<Instant> = None;
+        let mut retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+        let mut asks = 0u32;
+
+        while now.duration_since(start) < Duration::from_secs(120) {
+            if endpoint_refresh_retry_in(last_ask, retry_secs, now).is_zero() {
+                asks += 1;
+                last_ask = Some(now);
+                retry_secs = next_healthy_endpoint_retry_secs(retry_secs);
+            }
+            now += Duration::from_secs(1);
+        }
+
+        assert!(
+            asks <= 5,
+            "a two-minute outage asked the gateway {asks} times; the user holds ten session slots and each answer mints one"
+        );
+    }
+
+    #[gpui::test]
+    async fn healthy_endpoint_timeout_runs_on_the_gpui_executor(cx: &mut gpui::TestAppContext) {
+        let request = futures::future::pending::<anyhow::Result<HealthyEndpointSession>>();
+        let error = wait_for_healthy_endpoint(&cx.executor(), request, Duration::from_millis(1))
+            .await
+            .expect_err("a stalled request must time out");
+
+        assert!(error.to_string().contains("timed out"));
+    }
+
+    #[test]
+    fn healthy_endpoint_prefers_the_session_id_even_with_a_fresh_jwt() {
+        let session = Session {
+            session_id: "sid".into(),
+            token: "jwt".into(),
+            expires_at: now_secs() + 600,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            healthy_endpoint_credential(&session),
+            Some(HealthyEndpointCredential::SessionId)
+        );
+        assert_eq!(
+            healthy_endpoint_credential_value(&session, HealthyEndpointCredential::SessionId),
+            "sid"
+        );
+        assert_eq!(
+            healthy_endpoint_fallback_credential(&session, HealthyEndpointCredential::SessionId),
+            Some(HealthyEndpointCredential::Jwt)
+        );
+    }
+
+    #[test]
+    fn a_stale_jwt_is_no_fallback_for_a_rejected_socket_credential() {
+        let session = Session {
+            session_id: "sid".into(),
+            token: "stale-jwt".into(),
+            expires_at: now_secs().saturating_sub(1),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            healthy_endpoint_credential(&session),
+            Some(HealthyEndpointCredential::SessionId)
+        );
+        assert_eq!(
+            healthy_endpoint_fallback_credential(&session, HealthyEndpointCredential::SessionId),
+            None
+        );
+    }
+
+    #[test]
+    fn only_auth_statuses_trigger_a_healthy_endpoint_credential_fallback() {
+        for status in [401, 403] {
+            let error = anyhow::Error::new(HealthyEndpointStatusError { status });
+            assert!(healthy_endpoint_auth_rejected(&error));
+        }
+        let unavailable = anyhow::Error::new(HealthyEndpointStatusError { status: 503 });
+        assert!(!healthy_endpoint_auth_rejected(&unavailable));
+        assert!(!healthy_endpoint_auth_rejected(&anyhow::anyhow!(
+            "network error"
+        )));
+    }
+
+    #[test]
+    fn heartbeat_observations_are_scoped_to_connection_generation_and_endpoint() {
+        let generation = AtomicU64::new(7);
+        let health = Mutex::new(EndpointHealth::default());
+        let node = RealtimeEndpoint {
+            id: 1,
+            host: "sock.example.com".into(),
+            port: 4433,
+        };
+        let moved_to = RealtimeEndpoint {
+            id: 2,
+            host: "sock2.example.com".into(),
+            port: 4433,
+        };
+        health.lock().set_endpoint(Some(node.clone()));
+        health.lock().record_connected(Instant::now());
+
+        assert!(endpoint_observation_is_current(
+            &health,
+            &generation,
+            7,
+            &node
+        ));
+
+        generation.store(8, Ordering::Release);
+        assert!(!endpoint_observation_is_current(
+            &health,
+            &generation,
+            7,
+            &node
+        ));
+
+        health.lock().set_endpoint(Some(moved_to.clone()));
+        health.lock().record_connected(Instant::now());
+        assert!(!endpoint_observation_is_current(
+            &health,
+            &generation,
+            8,
+            &node
+        ));
+        assert!(endpoint_observation_is_current(
+            &health,
+            &generation,
+            8,
+            &moved_to
+        ));
+
+        health.lock().record_disconnected();
+        assert!(!endpoint_observation_is_current(
+            &health,
+            &generation,
+            8,
+            &moved_to
+        ));
     }
 
     #[test]
@@ -1069,35 +2499,25 @@ mod tests {
         assert!(jwt_only.session_id.is_empty());
         assert_eq!(jwt_only.ws_credential(), "jwt");
         assert!(jwt_is_fresh(&jwt_only));
+        assert!(should_lead_with_jwt(&jwt_only, 0));
+        assert_eq!(
+            healthy_endpoint_credential(&jwt_only),
+            Some(HealthyEndpointCredential::Jwt)
+        );
     }
 
     #[test]
-    fn a_refused_socket_credential_is_dropped_and_the_jwt_takes_over() {
-        let mut session = Session {
+    fn a_sid_failure_switches_to_jwt_without_clearing_session_id() {
+        let session = Session {
             token: "jwt".into(),
-            session_id: "dead-sid".into(),
+            session_id: "sid".into(),
             expires_at: now_secs() + 600,
             ..Default::default()
         };
         assert!(!should_lead_with_jwt(&session, 0));
-
-        assert!(clear_socket_credential(&mut session));
-        assert!(should_lead_with_jwt(&session, 0));
-        assert_eq!(session.ws_credential(), "jwt");
-        assert!(jwt_is_fresh(&session));
-
-        assert!(!clear_socket_credential(&mut session));
-    }
-
-    #[test]
-    fn a_single_gateway_refusal_moves_the_ladder_to_the_jwt() {
-        let session = Session {
-            token: "jwt".into(),
-            session_id: "sid".into(),
-            ..Default::default()
-        };
-        assert!(!should_lead_with_jwt(&session, 0));
         assert!(should_lead_with_jwt(&session, SSID_REFUSALS_BEFORE_JWT));
+        assert_eq!(session.session_id, "sid");
+        assert_eq!(session.ws_credential(), "sid");
     }
 
     #[test]
@@ -1108,6 +2528,16 @@ mod tests {
             ..Default::default()
         };
         assert!(!jwt_is_fresh(&stale));
+
+        let missing_exp = Session {
+            token: "jwt".into(),
+            expires_at: 0,
+            ..Default::default()
+        };
+        assert!(
+            !jwt_is_fresh(&missing_exp),
+            "expires_at=0 matches Session::is_expired — do not treat as fresh"
+        );
 
         let inside_skew = Session {
             expires_at: now_secs() + JWT_SKEW.as_secs() / 2,
@@ -1137,11 +2567,12 @@ mod tests {
         LoggedOut,
     }
 
-    /// Models the loop's decision state: what a connect outcome advances, and what may end in a
-    /// logout. Only a gateway refusal followed by a refused API probe may.
+    /// Models reconnect decisions with credential-switch separate from logout:
+    /// SID silent/explicit failures may remint then JWT; JWT silent/explicit failures plus a
+    /// refused API probe may log out.
     struct ReconnectSim {
         consecutive_failures: u32,
-        gateway_refusals: u32,
+        sid_failures: u32,
         jwt_refusals: u32,
         logout_count: u32,
         surface: Surface,
@@ -1152,7 +2583,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 consecutive_failures: 0,
-                gateway_refusals: 0,
+                sid_failures: 0,
                 jwt_refusals: 0,
                 logout_count: 0,
                 surface: Surface::Connecting,
@@ -1168,12 +2599,8 @@ mod tests {
             };
         }
 
-        fn probe_required(&self) -> bool {
-            requires_network_probe(self.consecutive_failures)
-        }
-
         fn uses_jwt(&self) -> bool {
-            self.gateway_refusals >= SSID_REFUSALS_BEFORE_JWT
+            self.sid_failures >= SSID_REFUSALS_BEFORE_JWT
         }
 
         fn record_unreachable(&mut self) {
@@ -1183,19 +2610,34 @@ mod tests {
             }
         }
 
-        fn record_refusal(&mut self) {
+        fn record_sid_silent_drop(&mut self) {
             self.consecutive_failures += 1;
-            let was_jwt = self.uses_jwt();
-            self.gateway_refusals += 1;
-            if was_jwt {
-                self.jwt_refusals += 1;
-            }
+            self.sid_failures += 1;
             if reached_failure_limit(self.consecutive_failures) {
                 self.surface = Surface::AppShell;
             }
         }
 
-        /// The API host answering 403 is the only thing that ends the session.
+        fn record_sid_explicit_reject(&mut self) {
+            self.record_sid_silent_drop();
+        }
+
+        fn record_jwt_silent_drop(&mut self) {
+            assert!(
+                self.uses_jwt(),
+                "JWT silent drop only applies after SID→JWT switch"
+            );
+            self.consecutive_failures += 1;
+            self.jwt_refusals += 1;
+            if reached_failure_limit(self.consecutive_failures) {
+                self.surface = Surface::AppShell;
+            }
+        }
+
+        fn record_jwt_explicit_reject(&mut self) {
+            self.record_jwt_silent_drop();
+        }
+
         fn record_api_probe(&mut self, session_alive: bool) {
             if self.jwt_refusals < JWT_REFUSALS_BEFORE_PROBE {
                 return;
@@ -1208,40 +2650,43 @@ mod tests {
 
         fn record_connect_success(&mut self) {
             self.consecutive_failures = 0;
-            self.gateway_refusals = 0;
+            self.sid_failures = 0;
             self.jwt_refusals = 0;
             self.surface = Surface::AppShell;
         }
     }
 
-    /// The whole point: a network problem produces refusals of a kind that can never reach the
-    /// logout branch, however long it lasts.
     #[test]
-    fn an_unreachable_host_never_logs_out() {
+    fn an_unreachable_host_never_logs_out_or_switches_credential() {
         let mut sim = ReconnectSim::new();
         for _ in 0..200 {
             sim.record_unreachable();
             sim.record_api_probe(false);
         }
         assert_eq!(sim.logout_count, 0);
-        assert_eq!(
-            sim.gateway_refusals, 0,
-            "reachability failures are not refusals"
-        );
-        assert!(!sim.uses_jwt(), "the JWT escape hatch must stay disarmed");
+        assert_eq!(sim.sid_failures, 0);
+        assert!(!sim.uses_jwt());
         assert_eq!(sim.surface, Surface::AppShell);
     }
 
-    /// A dead session must be decided fast: one refusal of each credential, then the probe.
     #[test]
-    fn a_dead_session_logs_out_after_one_refusal_of_each_credential() {
+    fn a_sid_silent_drop_switches_to_jwt_then_confirms_without_logout() {
         let mut sim = ReconnectSim::new();
-        sim.record_refusal();
-        assert!(
-            sim.uses_jwt(),
-            "the JWT is tried straight after the first refusal"
-        );
-        sim.record_refusal();
+        sim.record_sid_silent_drop();
+        assert!(sim.uses_jwt());
+        assert_eq!(sim.logout_count, 0);
+        sim.record_connect_success();
+        assert!(!sim.uses_jwt());
+        assert_eq!(sim.logout_count, 0);
+        assert_eq!(sim.surface, Surface::AppShell);
+    }
+
+    #[test]
+    fn jwt_silent_drops_count_toward_logout_probe() {
+        let mut sim = ReconnectSim::new();
+        sim.record_sid_silent_drop();
+        assert!(sim.uses_jwt());
+        sim.record_jwt_silent_drop();
         assert_eq!(sim.jwt_refusals, JWT_REFUSALS_BEFORE_PROBE);
 
         sim.record_api_probe(false);
@@ -1249,12 +2694,37 @@ mod tests {
         assert_eq!(sim.surface, Surface::LoggedOut);
     }
 
-    /// Same refusals, but the account is fine — the gateway is simply turning us away.
     #[test]
-    fn refusals_with_a_live_account_keep_the_session() {
+    fn jwt_silent_drops_with_a_live_account_keep_the_session() {
         let mut sim = ReconnectSim::new();
+        sim.record_sid_silent_drop();
         for _ in 0..20 {
-            sim.record_refusal();
+            sim.record_jwt_silent_drop();
+            sim.record_api_probe(true);
+        }
+        assert_eq!(sim.logout_count, 0);
+        assert_eq!(sim.surface, Surface::AppShell);
+    }
+
+    #[test]
+    fn a_dead_session_logs_out_after_explicit_jwt_reject_and_probe() {
+        let mut sim = ReconnectSim::new();
+        sim.record_sid_explicit_reject();
+        assert!(sim.uses_jwt());
+        sim.record_jwt_explicit_reject();
+        assert_eq!(sim.jwt_refusals, JWT_REFUSALS_BEFORE_PROBE);
+
+        sim.record_api_probe(false);
+        assert_eq!(sim.logout_count, 1);
+        assert_eq!(sim.surface, Surface::LoggedOut);
+    }
+
+    #[test]
+    fn explicit_rejects_with_a_live_account_keep_the_session() {
+        let mut sim = ReconnectSim::new();
+        sim.record_sid_explicit_reject();
+        for _ in 0..20 {
+            sim.record_jwt_explicit_reject();
             sim.record_api_probe(true);
         }
         assert_eq!(sim.logout_count, 0);
@@ -1264,25 +2734,12 @@ mod tests {
     #[test]
     fn a_successful_connect_disarms_everything() {
         let mut sim = ReconnectSim::new();
-        sim.record_refusal();
-        sim.record_refusal();
+        sim.record_sid_silent_drop();
+        sim.record_jwt_explicit_reject();
         sim.record_connect_success();
-        assert_eq!(sim.gateway_refusals, 0);
+        assert_eq!(sim.sid_failures, 0);
         assert_eq!(sim.jwt_refusals, 0);
         assert!(!sim.uses_jwt());
-    }
-
-    #[test]
-    fn offline_skips_do_not_consume_attempts_or_log_out() {
-        let mut sim = ReconnectSim::new();
-        sim.record_unreachable();
-        assert!(sim.probe_required());
-
-        for _ in 0..50 {
-            assert!(sim.probe_required());
-            assert_eq!(sim.logout_count, 0);
-            assert_eq!(sim.consecutive_failures, 1);
-        }
     }
 
     #[test]
@@ -1291,8 +2748,8 @@ mod tests {
         sim.begin_iteration();
         assert_eq!(sim.displayed_attempt, 0);
 
-        sim.record_refusal();
-        sim.record_refusal();
+        sim.record_sid_silent_drop();
+        sim.record_jwt_explicit_reject();
         sim.begin_iteration();
         assert_eq!(sim.displayed_attempt, 2);
 
@@ -1307,7 +2764,7 @@ mod tests {
         let mut sim = ReconnectSim::new();
         sim.record_connect_success();
         for _ in 0..4 {
-            sim.record_refusal();
+            sim.record_sid_silent_drop();
             sim.begin_iteration();
             assert_eq!(sim.surface, Surface::AppShell);
             assert_eq!(sim.displayed_attempt, 0);

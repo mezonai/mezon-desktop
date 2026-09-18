@@ -2,12 +2,14 @@ mod avatar;
 mod badge;
 mod checkbox;
 mod context_menu;
+mod copy_button;
 mod date_picker;
 mod divider;
 mod dropdown;
 mod label;
 mod mention_count_badge;
 mod modal;
+mod pagination;
 mod progress;
 mod select;
 mod slider;
@@ -24,6 +26,10 @@ pub mod button {
 
 pub mod icon {
     pub use mezon_widgets::{Icon, IconName};
+}
+
+pub mod focus_cycle {
+    pub use mezon_widgets::focus_cycle::*;
 }
 
 pub mod input {
@@ -51,12 +57,14 @@ pub(crate) use avatar::{avatar_color, name_initials};
 pub use badge::Badge;
 pub use checkbox::{Checkbox, Radio};
 pub use context_menu::{ContextMenu, SubmenuOption, context_menu_at};
+pub use copy_button::CopyButton;
 pub use date_picker::{DatePicker, DatePickerEvent, DatePickerPopupMode};
 pub use divider::Divider;
 pub use dropdown::{Dropdown, DropdownPlacement, DropdownTriggerStyle};
 pub use label::Label;
 pub use mention_count_badge::{mention_count_badge, mention_count_badge_on_channel_row};
 pub use modal::Modal;
+pub use pagination::{PaginationButton, pagination_button, pagination_items};
 pub use progress::Progress;
 pub use select::{Select, SelectEvent};
 pub use slider::{Slider, SliderEvent, SliderState, SliderValue};
@@ -68,10 +76,11 @@ pub use tooltip::Tooltip;
 pub use unsaved_changes_bar::UnsavedChangesBar;
 
 pub use button::{Button, ButtonVariant, ButtonVariants};
+pub use focus_cycle::FocusCycle;
 pub use icon::{Icon, IconName};
 pub use input::{Input, InputEvent, InputState};
 pub use sizing::{Sizable, Size};
 pub use spinner::Spinner;
 pub use stack::{h_flex, v_flex};
 
-pub use mezon_widgets::init_text_input;
+pub use mezon_widgets::{init_focus_cycle, init_text_input};

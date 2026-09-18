@@ -8,7 +8,7 @@ use gpui::{
 use mezon_store::{
     ChannelId, ChannelMembersStore, ChannelPermissionsStore, ClanId, ClanList, ClanMembersStore,
     MessagesStore, ProfileContext, THREAD_STATUS_JOINED, ThreadSummary, ThreadsStore, UserId,
-    group_threads, resolve_user_profile,
+    group_threads, resolve_user_profile, thread_preview_display,
 };
 use ui::utils::{DateTimeType, format_distance_from_now};
 use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
@@ -682,13 +682,13 @@ fn thread_card(
     let time_label = format_thread_time(preview.timestamp, locale);
     let sender_color = Hsla::from(gpui::rgb(DEFAULT_DISPLAY_NAME_COLOR));
 
-    let preview_text = if preview.content.trim().is_empty() && preview.has_attachment {
+    let preview_text = if preview.display_text.is_empty() && preview.has_attachment {
         format!(
             "[{}]",
             mezon_i18n::t(locale, "message.attachments.attachment")
         )
     } else {
-        preview.content.clone()
+        preview.display_text.clone()
     };
 
     let mut avatar = Avatar::new()
@@ -706,6 +706,7 @@ fn thread_card(
         .h(px(72.))
         .mb_2()
         .px_4()
+        .overflow_hidden()
         .items_center()
         .justify_between()
         .gap_3()
@@ -716,21 +717,26 @@ fn thread_card(
             v_flex()
                 .flex_1()
                 .min_w_0()
+                .overflow_hidden()
                 .gap_1()
                 .child(
                     div()
+                        .w_full()
+                        .min_w_0()
                         .text_base()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(tokens.text_theme_message)
-                        .overflow_hidden()
-                        .text_ellipsis()
+                        .truncate()
                         .child(thread.channel_label.clone()),
                 )
                 .child(
                     h_flex()
+                        .w_full()
+                        .h(px(24.))
                         .items_center()
                         .gap_2()
                         .min_w_0()
+                        .overflow_hidden()
                         .child(avatar)
                         .when(!sender_label.is_empty(), |this| {
                             this.child(
@@ -740,8 +746,7 @@ fn thread_card(
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(sender_color)
                                     .flex_shrink_0()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
+                                    .truncate()
                                     .child(format!("{sender_label}:")),
                             )
                         })
@@ -751,8 +756,7 @@ fn thread_card(
                                 .min_w_0()
                                 .text_sm()
                                 .text_color(tokens.text_theme_message)
-                                .overflow_hidden()
-                                .text_ellipsis()
+                                .truncate()
                                 .child(preview_text),
                         )
                         .when(!time_label.is_empty(), |this| {
@@ -860,7 +864,7 @@ fn thread_member_avatars(
 }
 
 struct ThreadCardPreview {
-    content: String,
+    display_text: String,
     sender_id_raw: String,
     sender_name: String,
     sender_avatar: String,
@@ -874,7 +878,7 @@ fn resolve_thread_preview(thread: &ThreadSummary, cx: &App) -> ThreadCardPreview
         .last_cached_message(&thread.channel_id)
     {
         return ThreadCardPreview {
-            content: message.content.clone(),
+            display_text: thread_preview_display(&message.content),
             sender_id_raw: message.sender_id.clone(),
             sender_name: message.sender_name.to_string(),
             sender_avatar: message.avatar_url.to_string(),
@@ -890,7 +894,7 @@ fn resolve_thread_preview(thread: &ThreadSummary, cx: &App) -> ThreadCardPreview
     };
 
     ThreadCardPreview {
-        content: thread.last_message_content.clone(),
+        display_text: thread.last_message_preview.clone(),
         sender_id_raw,
         sender_name: thread.last_message_sender_name.clone(),
         sender_avatar: thread.last_message_sender_avatar.clone(),

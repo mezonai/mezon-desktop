@@ -107,12 +107,9 @@ impl EditGroupModal {
         cx.notify();
         self._upload_task.take();
         self._upload_task = Some(cx.spawn(async move |this, cx| {
-            let paths = match rx.await {
-                Ok(Ok(Some(paths))) => paths,
-                _ => {
-                    let _ = this.update(cx, |this, cx| this.finish_upload(cx));
-                    return;
-                }
+            let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
+                let _ = this.update(cx, |this, cx| this.finish_upload(cx));
+                return;
             };
             let path = match paths.into_iter().next() {
                 Some(path) => path,

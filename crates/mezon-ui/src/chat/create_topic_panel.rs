@@ -1,6 +1,8 @@
+use std::path::PathBuf;
+
 use gpui::{
-    AnyView, ClickEvent, Context, Entity, FontWeight, KeyDownEvent, SharedString, StyleRefinement,
-    Subscription, Window, div, prelude::*, px,
+    AnyView, App, ClickEvent, Context, Entity, ExternalPaths, FontWeight, KeyDownEvent,
+    SharedString, StyleRefinement, Subscription, Window, div, prelude::*, px, rgb, rgba,
 };
 use mezon_store::{ChannelId, MessageId, MessagesStore, Settings, TopicsEvent, TopicsStore};
 
@@ -15,6 +17,36 @@ use crate::theme::ActiveTheme;
 
 const PANEL_WIDTH: f32 = 510.;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct ComposerTarget {
+    topic_id: Option<i64>,
+    origin_id: Option<MessageId>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ComposerBinding {
+    Keep,
+    Adopt(ChannelId),
+    Bind(Option<ChannelId>),
+}
+
+impl ComposerTarget {
+    fn binding_from(self, previous: Option<ComposerTarget>) -> ComposerBinding {
+        if previous == Some(self) {
+            return ComposerBinding::Keep;
+        }
+        let created_under_composer = previous.is_some_and(|previous| {
+            previous.topic_id.is_none()
+                && previous.origin_id.is_some()
+                && previous.origin_id == self.origin_id
+        });
+        match self.topic_id {
+            Some(topic_id) if created_under_composer => ComposerBinding::Adopt(ChannelId(topic_id)),
+            topic_id => ComposerBinding::Bind(topic_id.map(ChannelId)),
+        }
+    }
+}
+
 pub struct TopicPanel {
     settings: Entity<Settings>,
     mention_input: Entity<MentionInput>,
@@ -22,6 +54,7 @@ pub struct TopicPanel {
     typing: Entity<ChannelTyping>,
     topic_timeline: Entity<ChannelMessages>,
     reply_target_id: Option<MessageId>,
+    composer_target: Option<ComposerTarget>,
     _subs: Vec<Subscription>,
 }
 
@@ -30,7 +63,7 @@ impl TopicPanel {
         let locale = settings.read(cx).language.clone();
         let placeholder = mezon_i18n::t(&locale, "messageBox.placeholder").to_string();
         let mention_input =
-            cx.new(|cx| MentionInput::new(placeholder, settings.clone(), window, cx));
+            cx.new(|cx| MentionInput::new_for_topic(placeholder, settings.clone(), window, cx));
         let input_bar = cx.new(|cx| {
             InputBar::new(
                 mention_input.clone(),
@@ -58,6 +91,7 @@ impl TopicPanel {
             &TopicsStore::global(cx),
             window,
             |this, store, event: &TopicsEvent, window, cx| {
+                this.sync_composer_target(window, cx);
                 if !matches!(event, TopicsEvent::ReplyTargetChanged) {
                     return;
                 }
@@ -115,7 +149,28 @@ impl TopicPanel {
             typing,
             topic_timeline,
             reply_target_id: None,
+            composer_target: None,
             _subs: subs,
+        }
+    }
+
+    fn sync_composer_target(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let next = {
+            let topics = TopicsStore::global(cx).read(cx);
+            ComposerTarget {
+                topic_id: topics.active_topic_id(),
+                origin_id: topics.origin_message().map(|origin| origin.id),
+            }
+        };
+        let previous = self.composer_target.replace(next);
+        match next.binding_from(previous) {
+            ComposerBinding::Keep => {}
+            ComposerBinding::Adopt(channel_id) => self
+                .mention_input
+                .update(cx, |input, cx| input.adopt_channel(channel_id, window, cx)),
+            ComposerBinding::Bind(channel_id) => self
+                .mention_input
+                .update(cx, |input, cx| input.bind_channel(channel_id, window, cx)),
         }
     }
 
@@ -129,8 +184,14 @@ impl TopicPanel {
         else {
             return;
         };
-        TopicsStore::global(cx).update(cx, |store, cx| {
-            store.submit_reply(content, content_tokens, attachments, cx);
+        let ephemeral_receiver = self
+            .mention_input
+            .update(cx, |input, cx| input.take_ephemeral_receiver(cx));
+        TopicsStore::global(cx).update(cx, |store, cx| match ephemeral_receiver {
+            Some(receiver_id) => {
+                store.submit_ephemeral_reply(receiver_id, content, content_tokens, attachments, cx)
+            }
+            None => store.submit_reply(content, content_tokens, attachments, cx),
         });
     }
 
@@ -170,7 +231,7 @@ impl TopicPanel {
 }
 
 impl Render for TopicPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (topic_id, error) = {
             let topics = TopicsStore::global(cx).read(cx);
             (
@@ -179,6 +240,7 @@ impl Render for TopicPanel {
             )
         };
 
+        self.sync_composer_target(window, cx);
         self.typing.update(cx, |typing, cx| {
             typing.sync(topic_id.map(ChannelId), cx);
         });
@@ -252,23 +314,54 @@ impl Render for TopicPanel {
             .child(self.input_bar.clone())
             .child(self.typing.clone());
 
-        v_flex()
-            .w(px(PANEL_WIDTH))
-            .min_w(px(PANEL_WIDTH))
-            .flex_shrink_0()
-            .h_full()
+        let drop_title: SharedString =
+            mezon_i18n::t(&locale, "common.dropFilesToUploadToTopic").into();
+        let mention_input = self.mention_input.clone();
+        let drop_overlay = div()
+            .absolute()
+            .inset_0()
+            .invisible()
+            .group_drag_over::<ExternalPaths>("topic-drop-zone", |style| style.visible())
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x3b82f633))
+            .border_2()
+            .border_dashed()
+            .border_color(rgb(0x3b82f6))
+            .rounded(px(8.))
+            .child(
+                div()
+                    .px(px(24.))
+                    .py(px(12.))
+                    .rounded(px(8.))
+                    .bg(rgb(0x3b82f6))
+                    .shadow_lg()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0xffffff))
+                            .child(drop_title),
+                    ),
+            );
+
+        let drop_body = v_flex()
+            .relative()
+            .group("topic-drop-zone")
+            .flex_1()
             .min_h_0()
+            .w_full()
             .overflow_hidden()
-            .border_l_1()
-            .border_color(tokens.border_primary)
-            .bg(theme.bg_primary)
-            .text_color(tokens.text_theme_message)
-            .on_key_down(cx.listener(|_this, event: &KeyDownEvent, _window, cx| {
-                if event.keystroke.key == "escape" {
-                    TopicsStore::global(cx).update(cx, |store, cx| store.close_panel(cx));
-                }
-            }))
-            .child(header)
+            .on_drop(
+                move |paths: &ExternalPaths, window: &mut Window, cx: &mut App| {
+                    let dropped: Vec<PathBuf> = paths.paths().to_vec();
+                    mention_input.update(cx, |input, cx| {
+                        input.focus_input(window, cx);
+                        input.add_dropped_paths(dropped, window, cx);
+                    });
+                },
+            )
             .child(
                 div()
                     .id("topic-timeline-host")
@@ -292,5 +385,104 @@ impl Render for TopicPanel {
                     .children(self.topic_timeline.read(cx).skeleton_overlay(cx.theme())),
             )
             .child(composer)
+            .child(drop_overlay);
+
+        v_flex()
+            .w(px(PANEL_WIDTH))
+            .min_w(px(PANEL_WIDTH))
+            .flex_shrink_0()
+            .h_full()
+            .min_h_0()
+            .overflow_hidden()
+            .border_l_1()
+            .border_color(tokens.border_primary)
+            .bg(theme.bg_primary)
+            .text_color(tokens.text_theme_message)
+            .on_key_down(cx.listener(|_this, event: &KeyDownEvent, _window, cx| {
+                if event.keystroke.key == "escape" {
+                    TopicsStore::global(cx).update(cx, |store, cx| store.close_panel(cx));
+                }
+            }))
+            .child(header)
+            .child(drop_body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(topic_id: Option<i64>, origin_id: Option<i64>) -> ComposerTarget {
+        ComposerTarget {
+            topic_id,
+            origin_id: origin_id.map(MessageId),
+        }
+    }
+
+    #[test]
+    fn first_sync_binds_whatever_is_on_screen() {
+        assert_eq!(
+            target(Some(7), Some(1)).binding_from(None),
+            ComposerBinding::Bind(Some(ChannelId(7)))
+        );
+        assert_eq!(
+            target(None, Some(1)).binding_from(None),
+            ComposerBinding::Bind(None)
+        );
+    }
+
+    #[test]
+    fn a_re_render_of_the_same_topic_keeps_the_composer() {
+        let current = target(Some(7), Some(1));
+        assert_eq!(current.binding_from(Some(current)), ComposerBinding::Keep);
+        let uncreated = target(None, Some(1));
+        assert_eq!(
+            uncreated.binding_from(Some(uncreated)),
+            ComposerBinding::Keep
+        );
+    }
+
+    #[test]
+    fn moving_between_topics_rebinds_to_the_new_topic() {
+        assert_eq!(
+            target(Some(8), Some(2)).binding_from(Some(target(Some(7), Some(1)))),
+            ComposerBinding::Bind(Some(ChannelId(8)))
+        );
+    }
+
+    #[test]
+    fn moving_between_two_uncreated_topics_resets_the_composer() {
+        assert_eq!(
+            target(None, Some(2)).binding_from(Some(target(None, Some(1)))),
+            ComposerBinding::Bind(None)
+        );
+    }
+
+    #[test]
+    fn the_first_reply_creating_the_topic_adopts_the_composer() {
+        assert_eq!(
+            target(Some(7), Some(1)).binding_from(Some(target(None, Some(1)))),
+            ComposerBinding::Adopt(ChannelId(7))
+        );
+    }
+
+    #[test]
+    fn a_created_topic_on_another_message_is_a_plain_switch() {
+        assert_eq!(
+            target(Some(7), Some(2)).binding_from(Some(target(None, Some(1)))),
+            ComposerBinding::Bind(Some(ChannelId(7)))
+        );
+    }
+
+    #[test]
+    fn closing_the_panel_persists_by_binding_to_nothing() {
+        assert_eq!(
+            target(None, None).binding_from(Some(target(Some(7), Some(1)))),
+            ComposerBinding::Bind(None)
+        );
+        assert_eq!(
+            target(None, None).binding_from(Some(target(None, Some(1)))),
+            ComposerBinding::Bind(None)
+        );
     }
 }

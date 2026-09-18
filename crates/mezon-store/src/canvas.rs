@@ -5,12 +5,14 @@ use gpui::{App, AppContext, Context, Entity, Global, Subscription, Task};
 use mezon_client::transport::{
     ApiCanvas, ApiCanvasDetail, CANVAS_LIST_LIMIT, CANVAS_STATUS_CREATED, CANVAS_STATUS_UPDATE,
 };
-use mezon_client::{AppApi, ConnectionStatus};
+use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
+use mezon_proto::realtime;
 
 use crate::KeyedCache;
 use crate::channel::{ChannelEvent, ChannelList};
 use crate::config::AppConfig;
 use crate::ids::{ChannelId, ClanId, UserId};
+use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const MAX_CACHED_CHANNELS: usize = 32;
 
@@ -84,6 +86,12 @@ impl CanvasStore {
             }
         });
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
+        let entity = cx.entity();
+        RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
+            dispatch.on(RealtimeKind::CanvasEvent, &entity, |this, event, cx| {
+                this.handle_canvas_event(event, cx);
+            });
+        });
         let mut store = Self {
             channel_id: None,
             clan_id: None,
@@ -125,6 +133,50 @@ impl CanvasStore {
                 }
             }
         })
+    }
+
+    fn handle_canvas_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::Unhandled(realtime::envelope::Message::CanvasEvent(canvas)) = event
+        else {
+            return;
+        };
+        if canvas.id == 0 {
+            return;
+        }
+        let channel_id = canvas.channel_id.to_string();
+        if self.channel_id.as_deref() != Some(channel_id.as_str()) {
+            self.cache.mark_stale(&channel_id);
+            return;
+        }
+        let canvas_id = canvas.id.to_string();
+        if canvas.status == CANVAS_STATUS_CREATED || canvas.status == CANVAS_STATUS_UPDATE {
+            let known = self
+                .cache
+                .get_mut(&channel_id)
+                .and_then(|list| list.iter_mut().find(|item| item.id == canvas_id))
+                .map(|item| {
+                    item.title = canvas.title.clone();
+                    item.is_default = canvas.is_default;
+                    if canvas.status == CANVAS_STATUS_CREATED {
+                        item.creator_id = UserId(canvas.editor_id);
+                    }
+                })
+                .is_some();
+            if known {
+                cx.notify();
+            } else if canvas.status == CANVAS_STATUS_CREATED {
+                self.refresh(cx);
+            }
+            return;
+        }
+        let Some(list) = self.cache.get_mut(&channel_id) else {
+            return;
+        };
+        let before = list.len();
+        list.retain(|item| item.id != canvas_id);
+        if list.len() != before {
+            cx.notify();
+        }
     }
 
     pub fn canvases(&self) -> &[CanvasSummary] {
@@ -510,6 +562,114 @@ fn display_title(title: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn init_canvas_store(cx: &mut App) -> Entity<CanvasStore> {
+        let api = Arc::new(mezon_client::AppApi::new(
+            Arc::new(mezon_client::TransportClient::new(String::new())),
+            String::new(),
+        ));
+        crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+        crate::clan::ClanList::init(api.clone(), cx);
+        ChannelList::init(api.clone(), cx);
+        CanvasStore::init(api, cx)
+    }
+
+    fn canvas_event(id: i64, channel_id: i64, status: i32, title: &str) -> RealtimeEvent {
+        RealtimeEvent::Unhandled(realtime::envelope::Message::CanvasEvent(
+            realtime::ChannelCanvas {
+                id,
+                title: title.into(),
+                channel_id,
+                status,
+                editor_id: 5,
+                ..Default::default()
+            },
+        ))
+    }
+
+    fn seed(store: &mut CanvasStore, channel_id: &str, ids: &[i64]) {
+        store.channel_id = Some(channel_id.to_string());
+        store.clan_id = Some("1".to_string());
+        let list = ids
+            .iter()
+            .map(|id| CanvasSummary {
+                id: id.to_string(),
+                title: format!("canvas {id}"),
+                is_default: false,
+                creator_id: UserId(1),
+                update_time: *id,
+                create_time: *id,
+            })
+            .collect();
+        store.cache.insert(channel_id.to_string(), list, None);
+    }
+
+    #[gpui::test]
+    fn a_created_event_updates_a_canvas_already_in_the_list(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_canvas_store(cx);
+            store.update(cx, |store, cx| {
+                seed(store, "42", &[7]);
+                store.handle_canvas_event(
+                    &canvas_event(7, 42, CANVAS_STATUS_CREATED, "renamed"),
+                    cx,
+                );
+                assert_eq!(store.canvases().len(), 1);
+                assert_eq!(store.canvases()[0].title, "renamed");
+                assert_eq!(store.canvases()[0].creator_id, UserId(5));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn an_update_event_renames_in_place_and_never_removes(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_canvas_store(cx);
+            store.update(cx, |store, cx| {
+                seed(store, "42", &[7, 8]);
+                store.handle_canvas_event(&canvas_event(7, 42, CANVAS_STATUS_UPDATE, "edited"), cx);
+                let ids: Vec<_> = store.canvases().iter().map(|c| c.id.as_str()).collect();
+                assert_eq!(
+                    ids,
+                    ["7", "8"],
+                    "saving a canvas must not drop it from the list"
+                );
+                assert_eq!(store.canvases()[0].title, "edited");
+                assert_eq!(
+                    store.canvases()[0].creator_id,
+                    UserId(1),
+                    "an edit by someone else must not rewrite the author"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn an_unknown_status_removes_the_canvas(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_canvas_store(cx);
+            store.update(cx, |store, cx| {
+                seed(store, "42", &[7, 8]);
+                store.handle_canvas_event(&canvas_event(7, 42, 3, ""), cx);
+                let ids: Vec<_> = store.canvases().iter().map(|c| c.id.as_str()).collect();
+                assert_eq!(ids, ["8"]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn an_event_for_another_channel_only_stales_that_cache(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_canvas_store(cx);
+            store.update(cx, |store, cx| {
+                seed(store, "42", &[7]);
+                store.cache.insert("99".to_string(), Vec::new(), None);
+                store.handle_canvas_event(&canvas_event(7, 99, 3, ""), cx);
+                assert_eq!(store.canvases().len(), 1, "the open channel is untouched");
+                assert!(!store.cache.is_fresh("99", crate::CACHE_TTL));
+            });
+        });
+    }
 
     #[test]
     fn summary_from_api_maps_fields() {

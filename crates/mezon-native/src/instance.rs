@@ -1,6 +1,17 @@
 #[cfg(unix)]
 use std::path::PathBuf;
 
+/// Outcome of trying to take ownership of one socket path.
+#[cfg(unix)]
+enum Claim {
+    /// We bound the socket and now hold the lock.
+    Ours(std::os::unix::net::UnixListener),
+    /// Another live instance owns it; the stream reaches that instance.
+    Taken(std::os::unix::net::UnixStream),
+    /// Unusable path — try the next candidate.
+    Failed(std::io::Error),
+}
+
 /// Ensures only one instance of the app runs at a time.
 ///
 /// Unix (macOS / Linux): Unix domain socket at `$XDG_RUNTIME_DIR/mezon.sock`.
@@ -69,33 +80,24 @@ impl SingleInstance {
                 continue;
             }
 
-            if socket_path.exists() {
-                match std::os::unix::net::UnixStream::connect(&socket_path) {
-                    Ok(mut stream) => {
-                        tracing::info!("Another instance is already running");
-                        if let Some(url) = forward_url {
-                            let _ = stream.write_all(url.as_bytes());
-                            let safe = url.split(['?', '#']).next().unwrap_or_default();
-                            tracing::debug!("Forwarded URL to running instance: {safe}");
-                        }
-                        return Ok(None);
-                    }
-                    Err(_) => {
-                        // Stale socket — clean up
-                        let _ = std::fs::remove_file(&socket_path);
-                    }
-                }
-            }
-
-            match std::os::unix::net::UnixListener::bind(&socket_path) {
-                Ok(listener) => {
+            match Self::claim(&socket_path) {
+                Claim::Ours(listener) => {
                     tracing::debug!("Single instance lock acquired at {}", socket_path.display());
                     return Ok(Some(Self {
                         socket_path: Some(socket_path),
                         _listener: Some(listener),
                     }));
                 }
-                Err(e) => {
+                Claim::Taken(mut stream) => {
+                    tracing::info!("Another instance is already running");
+                    if let Some(url) = forward_url {
+                        let _ = stream.write_all(url.as_bytes());
+                        let safe = url.split(['?', '#']).next().unwrap_or_default();
+                        tracing::debug!("Forwarded URL to running instance: {safe}");
+                    }
+                    return Ok(None);
+                }
+                Claim::Failed(e) => {
                     last_bind_error = Some(e);
                 }
             }
@@ -104,38 +106,101 @@ impl SingleInstance {
         let error = last_bind_error
             .unwrap_or_else(|| std::io::Error::other("no Unix socket path candidates available"));
 
-        if error.kind() == std::io::ErrorKind::PermissionDenied {
-            tracing::warn!(
-                "Single instance lock disabled because Unix socket binding is not permitted: {error}"
-            );
-            return Ok(Some(Self {
-                socket_path: None,
-                _listener: None,
-            }));
+        // Losing the lock must never stop the app from starting: a second copy
+        // running is a far smaller problem than a window that never appears.
+        tracing::warn!("Single instance lock disabled because no socket could be bound: {error}");
+        Ok(Some(Self {
+            socket_path: None,
+            _listener: None,
+        }))
+    }
+
+    /// Try to become the owner of `socket_path`.
+    #[cfg(unix)]
+    fn claim(socket_path: &std::path::Path) -> Claim {
+        // A peer that answers owns the lock; a refused connection means the
+        // file outlived the process that made it and can be cleared.
+        if socket_path.exists() {
+            match std::os::unix::net::UnixStream::connect(socket_path) {
+                Ok(stream) => return Claim::Taken(stream),
+                Err(_) => {
+                    let _ = std::fs::remove_file(socket_path);
+                }
+            }
         }
 
-        Err(error.into())
+        Self::bind_or_detect(socket_path)
+    }
+
+    /// `bind` half of [`Self::claim`], split out so the lost-race branch can be
+    /// tested directly.
+    #[cfg(unix)]
+    fn bind_or_detect(socket_path: &std::path::Path) -> Claim {
+        match std::os::unix::net::UnixListener::bind(socket_path) {
+            Ok(listener) => Claim::Ours(listener),
+            // Somebody claimed the path between the probe above and this bind.
+            // Ask who: a live peer means we are the second instance after all,
+            // and must not wander off to bind a different candidate.
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                match std::os::unix::net::UnixStream::connect(socket_path) {
+                    Ok(stream) => Claim::Taken(stream),
+                    Err(_) => Claim::Failed(e),
+                }
+            }
+            Err(e) => Claim::Failed(e),
+        }
+    }
+
+    /// `sockaddr_un::sun_path` holds 104 bytes including the NUL terminator, so
+    /// a bindable socket path is at most 103 bytes. Longer paths fail `bind`
+    /// with `InvalidInput` rather than an OS errno, which is easy to mistake
+    /// for a bug in the caller.
+    #[cfg(unix)]
+    pub(crate) const MAX_SOCKET_PATH: usize = 103;
+
+    /// Stable across processes and runs: `DefaultHasher::new` is seeded with a
+    /// fixed key, unlike `RandomState`.
+    #[cfg(unix)]
+    pub(crate) fn user_digest(user: &str) -> u64 {
+        use std::hash::{Hash as _, Hasher as _};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        user.hash(&mut hasher);
+        hasher.finish()
     }
 
     #[cfg(unix)]
     fn socket_paths() -> Vec<PathBuf> {
-        let mut paths = Vec::new();
-
-        if let Some(runtime_dir) = dirs::runtime_dir() {
-            paths.push(runtime_dir.join("mezon.sock"));
-        }
-
         let user = std::env::var("USER")
             .ok()
             .filter(|user| !user.is_empty())
             .unwrap_or_else(|| "user".to_owned());
 
-        paths.push(
-            std::env::temp_dir()
-                .join(format!("mezon-desktop-{user}"))
-                .join("mezon.sock"),
-        );
+        Self::socket_paths_for(dirs::runtime_dir().as_deref(), &std::env::temp_dir(), &user)
+    }
 
+    #[cfg(unix)]
+    fn socket_paths_for(
+        runtime_dir: Option<&std::path::Path>,
+        tmp: &std::path::Path,
+        user: &str,
+    ) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+
+        if let Some(runtime_dir) = runtime_dir {
+            paths.push(runtime_dir.join("mezon.sock"));
+        }
+
+        paths.push(tmp.join(format!("mezon-desktop-{user}")).join("mezon.sock"));
+
+        // A sandboxed (App Store) build gets a container `$TMPDIR` under
+        // `~/Library/Containers/<bundle id>/Data/tmp/`, which already eats ~66
+        // bytes before the user name. The readable path above then overruns
+        // `sun_path` for anything but a short login name, so keep a
+        // fixed-width per-user fallback that always fits.
+        paths.push(tmp.join(format!("mezon-{:08x}.sock", Self::user_digest(user) as u32)));
+
+        paths.retain(|path| path.as_os_str().len() <= Self::MAX_SOCKET_PATH);
         paths
     }
 
@@ -390,5 +455,156 @@ impl Drop for SingleInstance {
         if let Some(socket_path) = &self.socket_path {
             let _ = std::fs::remove_file(socket_path);
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{Claim, SingleInstance};
+    use std::path::{Path, PathBuf};
+
+    /// The container `$TMPDIR` a sandboxed macOS build actually runs with.
+    fn container_tmp(user: &str) -> PathBuf {
+        PathBuf::from(format!(
+            "/Users/{user}/Library/Containers/app.mezon.ai/Data/tmp"
+        ))
+    }
+
+    #[test]
+    fn candidates_always_fit_sun_path() {
+        for user in ["a", "ngoc", "hoangphuongnguyen", &"x".repeat(64)] {
+            for tmp in [
+                container_tmp(user),
+                PathBuf::from("/var/folders/ml/53wfzsjn4n1cx3lmty3p8npw0000gn/T"),
+                PathBuf::from("/tmp"),
+            ] {
+                for path in SingleInstance::socket_paths_for(None, &tmp, user) {
+                    assert!(
+                        path.as_os_str().len() <= SingleInstance::MAX_SOCKET_PATH,
+                        "{} is {} bytes",
+                        path.display(),
+                        path.as_os_str().len()
+                    );
+                }
+            }
+        }
+    }
+
+    /// The regression: a long login name plus a sandbox container `$TMPDIR`
+    /// pushed the only candidate past `sun_path`, so `bind` failed and the app
+    /// exited before opening a window.
+    #[test]
+    fn long_user_in_sandbox_container_still_has_a_candidate() {
+        let user = "hoangphuongnguyen";
+        let tmp = container_tmp(user);
+
+        let readable = tmp.join(format!("mezon-desktop-{user}")).join("mezon.sock");
+        assert!(
+            readable.as_os_str().len() > SingleInstance::MAX_SOCKET_PATH,
+            "expected the readable path to overrun sun_path"
+        );
+
+        let paths = SingleInstance::socket_paths_for(None, &tmp, user);
+        assert!(!paths.is_empty(), "no bindable candidate left");
+        assert!(!paths.contains(&readable));
+    }
+
+    /// The fallback has to survive realistic login names, not just the one that
+    /// triggered the bug — `bind` failing again would silently drop the guard.
+    #[test]
+    fn sandbox_container_leaves_a_candidate_for_realistic_user_names() {
+        for len in 1..=30 {
+            let user = "u".repeat(len);
+            let paths = SingleInstance::socket_paths_for(None, &container_tmp(&user), &user);
+            assert!(
+                !paths.is_empty(),
+                "no candidate for a {len}-char login name"
+            );
+        }
+    }
+
+    #[test]
+    fn short_user_keeps_the_readable_path_first() {
+        let user = "ngoc";
+        let tmp = container_tmp(user);
+
+        let paths = SingleInstance::socket_paths_for(None, &tmp, user);
+        assert_eq!(
+            paths.first(),
+            Some(&tmp.join(format!("mezon-desktop-{user}")).join("mezon.sock"))
+        );
+    }
+
+    #[test]
+    fn runtime_dir_is_dropped_when_it_cannot_fit() {
+        let long = PathBuf::from(format!("/run/user/1000/{}", "d".repeat(120)));
+        let paths = SingleInstance::socket_paths_for(Some(&long), Path::new("/tmp"), "ngoc");
+        assert!(paths.iter().all(|path| !path.starts_with(&long)));
+    }
+
+    /// Short-lived unique path: `sun_path` leaves no room for long temp names.
+    fn scratch_socket() -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        static N: AtomicU32 = AtomicU32::new(0);
+        std::env::temp_dir().join(format!(
+            "mz-{}-{}.sock",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[test]
+    fn claims_a_free_path() {
+        let path = scratch_socket();
+        assert!(matches!(SingleInstance::claim(&path), Claim::Ours(_)));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn detects_a_live_owner() {
+        let path = scratch_socket();
+        let _owner = std::os::unix::net::UnixListener::bind(&path).expect("bind owner");
+
+        assert!(matches!(SingleInstance::claim(&path), Claim::Taken(_)));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Losing the race between the `exists` probe and `bind` must report the
+    /// winner, not fall through to a different candidate — that would leave two
+    /// instances running with the guard silently gone.
+    #[test]
+    fn a_lost_bind_race_reports_the_winner() {
+        let path = scratch_socket();
+        let _winner = std::os::unix::net::UnixListener::bind(&path).expect("bind winner");
+
+        // `bind_or_detect` is what the loser reaches once the probe has already
+        // decided the path was free.
+        assert!(matches!(
+            SingleInstance::bind_or_detect(&path),
+            Claim::Taken(_)
+        ));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_stale_socket_file_is_cleared() {
+        let path = scratch_socket();
+        std::fs::write(&path, b"not a socket").expect("write stale file");
+
+        assert!(matches!(SingleInstance::claim(&path), Claim::Ours(_)));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn user_digest_is_stable_and_per_user() {
+        assert_eq!(
+            SingleInstance::user_digest("ngoc"),
+            SingleInstance::user_digest("ngoc")
+        );
+        assert_ne!(
+            SingleInstance::user_digest("ngoc"),
+            SingleInstance::user_digest("hoangphuongnguyen")
+        );
     }
 }

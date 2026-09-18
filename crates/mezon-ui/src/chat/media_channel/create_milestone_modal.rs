@@ -8,8 +8,8 @@ use gpui::{
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{
-    Button, ButtonVariants, DatePicker, Icon, IconName, Input, InputEvent, InputState, Spinner,
-    h_flex, v_flex,
+    Button, ButtonVariants, DatePicker, FocusCycle, Icon, IconName, Input, InputEvent, InputState,
+    Spinner, h_flex, v_flex,
 };
 use crate::image_cache::{
     LruImageCache, PREVIEW_ENTRY_MAX_BYTES, PREVIEW_IMAGE_CACHE_BYTES, PREVIEW_IMAGE_CACHE_CAPACITY,
@@ -142,7 +142,7 @@ impl CreateMilestoneModal {
             prompt: None,
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else {
+            let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
                 return;
             };
             let media_paths: Vec<PathBuf> = paths
@@ -339,6 +339,10 @@ impl Render for CreateMilestoneModal {
             .child(
                 div()
                     .id("create-milestone-scroll")
+                    .focus_cycle(
+                        [&self.title_input, &self.description_input]
+                            .map(|input| input.focus_handle(cx)),
+                    )
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()

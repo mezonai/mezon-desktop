@@ -34,6 +34,12 @@ const LANGUAGES: &[(&str, &str, &str, &str)] = &[
         "reburst",
     ),
     (
+        "ukr",
+        "icons/flags/ukr.svg",
+        "setting.language.ukrainian",
+        "robits",
+    ),
+    (
         "es",
         "icons/flags/es.svg",
         "setting.language.spanish",
@@ -70,6 +76,12 @@ const LANGUAGES: &[(&str, &str, &str, &str)] = &[
         "robits",
     ),
     (
+        "pl",
+        "icons/flags/pl.svg",
+        "setting.language.polish",
+        "robits",
+    ),
+    (
         "kr",
         "icons/flags/kr.svg",
         "setting.language.korean",
@@ -79,6 +91,24 @@ const LANGUAGES: &[(&str, &str, &str, &str)] = &[
         "swe",
         "icons/flags/swe.svg",
         "setting.language.swedish",
+        "robits",
+    ),
+    (
+        "blr",
+        "icons/flags/blr.svg",
+        "setting.language.belarusian",
+        "deferensed",
+    ),
+    (
+        "fr",
+        "icons/flags/fr.svg",
+        "setting.language.french",
+        "robits",
+    ),
+    (
+        "nl",
+        "icons/flags/nl.svg",
+        "setting.language.dutch",
         "robits",
     ),
 ];

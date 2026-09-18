@@ -2,7 +2,7 @@ use gpui::{
     App, ClickEvent, Context, FocusHandle, Focusable, FontWeight, Render, SharedString, Task,
     Window, div, prelude::*, px,
 };
-use mezon_store::{MessagesStore, PlatformStore};
+use mezon_store::{MessagesStore, PlatformStore, TopicsStore};
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{Button, ButtonVariants};
@@ -11,6 +11,7 @@ use crate::theme::ActiveTheme;
 pub struct ShareLocationModal {
     focus_handle: FocusHandle,
     locale: SharedString,
+    for_topic: bool,
     latitude: Option<f64>,
     longitude: Option<f64>,
     loading: bool,
@@ -25,7 +26,7 @@ impl Focusable for ShareLocationModal {
 }
 
 impl ShareLocationModal {
-    pub fn open(locale: SharedString, window: &mut Window, cx: &mut App) {
+    pub fn open(locale: SharedString, for_topic: bool, window: &mut Window, cx: &mut App) {
         if Shell::global(cx).read(cx).has_modal() {
             return;
         }
@@ -33,6 +34,7 @@ impl ShareLocationModal {
             let mut modal = Self {
                 focus_handle: cx.focus_handle(),
                 locale,
+                for_topic,
                 latitude: None,
                 longitude: None,
                 loading: true,
@@ -86,9 +88,15 @@ impl ShareLocationModal {
         let Some(longitude) = self.longitude else {
             return;
         };
-        MessagesStore::global(cx).update(cx, |store, cx| {
-            store.send_location_message(latitude, longitude, cx);
-        });
+        if self.for_topic {
+            TopicsStore::global(cx).update(cx, |store, cx| {
+                store.submit_location(latitude, longitude, cx);
+            });
+        } else {
+            MessagesStore::global(cx).update(cx, |store, cx| {
+                store.send_location_message(latitude, longitude, cx);
+            });
+        }
         Self::close(cx);
     }
 

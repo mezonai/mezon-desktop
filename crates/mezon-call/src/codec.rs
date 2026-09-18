@@ -33,6 +33,20 @@ pub struct OfferPayload {
     pub caller_name: String,
     #[serde(rename = "callerAvatar", default)]
     pub caller_avatar: String,
+    #[serde(rename = "sentAt", default, deserialize_with = "de_string_or_number")]
+    pub sent_at: String,
+}
+
+fn de_string_or_number<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(s) => s,
+        serde_json::Value::Number(n) => n.to_string(),
+        _ => String::new(),
+    })
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

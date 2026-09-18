@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use gpui::{
-    App, Context, Entity, FontWeight, ObjectFit, SharedString, Subscription, Task, Window, div,
-    img, prelude::*, px, rgb,
+    App, Context, Entity, Focusable, FontWeight, ObjectFit, SharedString, Subscription, Task,
+    Window, div, img, prelude::*, px, rgb,
 };
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelType, ClanId, MAX_CHANNEL_TOPIC_CHARS,
@@ -13,8 +13,8 @@ use mezon_store::{
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{
-    Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, Switch, TextArea,
-    TextAreaEvent, TextAreaField, h_flex, v_flex,
+    Button, ButtonVariants, FocusCycle, Icon, IconName, Input, InputEvent, InputState, Switch,
+    TextArea, TextAreaEvent, TextAreaField, h_flex, v_flex,
 };
 use crate::theme::{ActiveTheme, Theme};
 use crate::util::assets::{CHANNEL_SETTING_LOGO_DARK, CHANNEL_SETTING_LOGO_LIGHT};
@@ -44,7 +44,6 @@ pub struct OverviewTab {
     draft_age_restricted: i32,
     validation: NameValidation,
     duplicate_checking: bool,
-    detail_loading: bool,
     saving: bool,
     pending_store_sync: bool,
     _name_sub: Subscription,
@@ -52,7 +51,6 @@ pub struct OverviewTab {
     _channel_sync_sub: Subscription,
     _save_task: Option<Task<()>>,
     _duplicate_task: Task<()>,
-    _fetch_task: Task<()>,
     _subs: Vec<Subscription>,
 }
 
@@ -158,47 +156,6 @@ impl OverviewTab {
             cx.observe(&permission_store, |_, _, cx| cx.notify()),
         ];
 
-        let api = super::channel_acl::api(cx);
-        let fetch_task = cx.spawn(async move |this, cx| {
-            let Some(api) = api else {
-                let _ = this.update(cx, |this, cx| {
-                    this.detail_loading = false;
-                    cx.notify();
-                });
-                return;
-            };
-            let result = api.list_channel_detail(channel_id.get()).await;
-            let _ = this.update(cx, |this, cx| {
-                this.detail_loading = false;
-                if let Ok(detail) = result {
-                    let topic_dirty = this.is_topic_dirty(cx);
-                    let age_dirty = this.is_age_restricted_dirty(cx);
-                    if !topic_dirty {
-                        this.saved_topic = detail.topic.clone();
-                        this.topic_input.update(cx, |state, cx| {
-                            state.set_value(detail.topic.clone(), cx);
-                        });
-                    }
-                    if !age_dirty {
-                        this.saved_age_restricted = detail.age_restricted;
-                        this.draft_age_restricted = detail.age_restricted;
-                    }
-                    ChannelList::global(cx).update(cx, |store, cx| {
-                        store.patch_channel_overview_detail(
-                            clan_id,
-                            channel_id,
-                            detail.topic,
-                            detail.age_restricted,
-                            detail.e2ee,
-                            detail.app_id,
-                            cx,
-                        );
-                    });
-                }
-                cx.notify();
-            });
-        });
-
         Self {
             clan_id,
             channel_id,
@@ -213,7 +170,6 @@ impl OverviewTab {
             draft_age_restricted,
             validation: NameValidation::None,
             duplicate_checking: false,
-            detail_loading: true,
             saving: false,
             pending_store_sync: false,
             _name_sub: name_sub,
@@ -221,7 +177,6 @@ impl OverviewTab {
             _channel_sync_sub: channel_sync_sub,
             _save_task: None,
             _duplicate_task: Task::ready(()),
-            _fetch_task: fetch_task,
             _subs: subs,
         }
     }
@@ -276,7 +231,10 @@ impl OverviewTab {
             self.validation = NameValidation::None;
         }
 
-        if !self.is_topic_dirty(cx) && channel.topic != self.saved_topic {
+        if !self.is_topic_dirty(cx)
+            && channel.topic != self.saved_topic
+            && (!channel.topic.is_empty() || self.saved_topic.is_empty())
+        {
             self.saved_topic = channel.topic.clone();
             self.topic_input.update(cx, |state, cx| {
                 state.set_value(self.saved_topic.clone(), cx);
@@ -325,7 +283,7 @@ impl OverviewTab {
     }
 
     fn can_save(&self, cx: &App) -> bool {
-        if !self.can_edit(cx) || self.saving || self.duplicate_checking || self.detail_loading {
+        if !self.can_edit(cx) || self.saving || self.duplicate_checking {
             return false;
         }
         if !self.is_dirty(cx) {
@@ -913,6 +871,12 @@ impl Render for OverviewTab {
 
         v_flex()
             .id("channel-overview-tab")
+            .when(can_edit, |el| {
+                el.focus_cycle([
+                    self.name_input.focus_handle(cx),
+                    self.topic_input.focus_handle(cx),
+                ])
+            })
             .w_full()
             .text_size(px(15.0))
             .child(

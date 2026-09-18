@@ -821,8 +821,15 @@ impl App {
         platform.on_quit(Box::new({
             let cx = Rc::downgrade(&app);
             move || {
-                if let Some(cx) = cx.upgrade() {
-                    cx.borrow_mut().shutdown();
+                let Some(cx) = cx.upgrade() else {
+                    return true;
+                };
+                match cx.try_borrow_mut() {
+                    Ok(mut cx) => {
+                        cx.shutdown();
+                        true
+                    }
+                    Err(_) => false,
                 }
             }
         }));
@@ -1160,7 +1167,7 @@ impl App {
                     // on windows we quite frequently lose the race and return a window that has never rendered, which leads to a crash
                     // where DispatchTree::root_node_id asserts on empty nodes
                     let clear = window.draw(cx);
-                    clear.clear();
+                    clear.clear(cx);
 
                     cx.window_handles.insert(id, window.handle);
                     cx.windows.get_mut(id).unwrap().replace(Box::new(window));
@@ -1505,11 +1512,20 @@ impl App {
                     })
                     .collect::<Vec<_>>()
                 {
-                    self.update_window(window, |_, window, cx| window.draw(cx).clear())
+                    self.update_window(window, |_, window, cx| window.draw(cx).clear(cx))
                         .unwrap();
                 }
 
                 if self.pending_effects.is_empty() {
+                    for window in self.windows.values().filter_map(|window| window.as_deref()) {
+                        if window.invalidator.is_dirty()
+                            || window.needs_present.get()
+                            || !window.next_frame_callbacks.borrow().is_empty()
+                        {
+                            window.platform_window.schedule_frame();
+                        }
+                    }
+
                     self.event_arena.clear();
                     break;
                 }

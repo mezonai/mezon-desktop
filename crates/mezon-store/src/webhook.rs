@@ -3,17 +3,19 @@ use std::path::Path;
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
-use mezon_client::{AppApi, ConnectionStatus};
+use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 use mezon_proto::api;
 
 use crate::AppConfig;
 use crate::KeyedCache;
 use crate::clan::upload_image_to_cdn;
 use crate::ids::{ChannelId, ClanId, UserId};
+use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const MAX_CACHED_CLANS: usize = 16;
 pub const WEBHOOK_NAME_MAX_LENGTH: usize = 64;
 pub const MAX_WEBHOOK_AVATAR_BYTES: u64 = 1024 * 1024;
+const WEBHOOK_STATUS_DELETE: i32 = 3;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct ChannelWebhook {
@@ -121,6 +123,7 @@ impl WebhookStore {
     }
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
+        Self::register_realtime(cx);
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
         Self {
             channel_cache: KeyedCache::new(Some(MAX_CACHED_CLANS)),
@@ -129,6 +132,45 @@ impl WebhookStore {
             clan_loading: HashSet::new(),
             api,
             _conn_watch: conn_watch,
+        }
+    }
+
+    fn register_realtime(cx: &mut Context<Self>) {
+        let entity = cx.entity();
+        RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
+            dispatch.on(RealtimeKind::Webhook, &entity, |this, event, cx| {
+                this.handle_event(event, cx);
+            });
+            dispatch.on_lagged(&entity, |this, cx| this.refresh_after_lag(cx));
+        });
+    }
+
+    fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::Webhook(proto) = event else {
+            return;
+        };
+        let clan_id = ClanId(proto.clan_id);
+        if clan_id.is_zero() || !self.channel_cache.contains(&clan_id) {
+            return;
+        }
+        let Some(entry) = self.channel_cache.get_mut(&clan_id) else {
+            return;
+        };
+        if apply_channel_webhook_event(&mut entry.webhooks, proto.clone(), clan_id) {
+            cx.emit(WebhookEvent::ChannelWebhooksChanged { clan_id });
+            cx.notify();
+        }
+    }
+
+    fn refresh_after_lag(&mut self, cx: &mut Context<Self>) {
+        self.invalidate();
+        let channel_clan_ids: Vec<ClanId> = self.channel_cache.iter().map(|(id, _)| *id).collect();
+        for clan_id in channel_clan_ids {
+            self.fetch_channel_webhooks(clan_id, cx);
+        }
+        let clan_webhook_ids: Vec<ClanId> = self.clan_cache.iter().map(|(id, _)| *id).collect();
+        for clan_id in clan_webhook_ids {
+            self.fetch_clan_webhooks(clan_id, cx);
         }
     }
 
@@ -200,10 +242,7 @@ impl WebhookStore {
         clan_id: ClanId,
         channel_id: ChannelId,
     ) -> Vec<&ChannelWebhook> {
-        self.channel_webhooks_for_clan(clan_id)
-            .iter()
-            .filter(|webhook| webhook.channel_id == channel_id)
-            .collect()
+        webhooks_for_channel(self.channel_webhooks_for_clan(clan_id), channel_id)
     }
 
     pub fn clan_webhooks_for_clan(&self, clan_id: ClanId) -> &[ClanWebhook] {
@@ -468,6 +507,43 @@ impl WebhookStore {
     }
 }
 
+pub fn webhook_name_is_valid(name: &str) -> bool {
+    let len = name.trim().chars().count();
+    len > 0 && len <= WEBHOOK_NAME_MAX_LENGTH
+}
+
+fn webhooks_for_channel(
+    webhooks: &[ChannelWebhook],
+    channel_id: ChannelId,
+) -> Vec<&ChannelWebhook> {
+    webhooks
+        .iter()
+        .filter(|webhook| webhook.channel_id == channel_id)
+        .collect()
+}
+
+fn apply_channel_webhook_event(
+    webhooks: &mut Vec<ChannelWebhook>,
+    proto: api::Webhook,
+    fallback_clan_id: ClanId,
+) -> bool {
+    if proto.status == WEBHOOK_STATUS_DELETE {
+        let id = proto.id.to_string();
+        let before = webhooks.len();
+        webhooks.retain(|webhook| webhook.id != id);
+        return webhooks.len() != before;
+    }
+    let Some(mapped) = channel_webhook_from_proto(proto, fallback_clan_id) else {
+        return false;
+    };
+    if let Some(existing) = webhooks.iter_mut().find(|webhook| webhook.id == mapped.id) {
+        *existing = mapped;
+    } else {
+        webhooks.push(mapped);
+    }
+    true
+}
+
 fn channel_webhook_from_proto(proto: api::Webhook, clan_id: ClanId) -> Option<ChannelWebhook> {
     if proto.id == 0 {
         return None;
@@ -510,4 +586,146 @@ fn webhook_create_time_seconds(create_time: &str) -> i64 {
     chrono::DateTime::parse_from_rfc3339(create_time)
         .map(|dt| dt.timestamp())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proto_webhook(
+        id: i64,
+        channel_id: i64,
+        clan_id: i64,
+        name: &str,
+        status: i32,
+    ) -> api::Webhook {
+        api::Webhook {
+            id,
+            webhook_name: name.into(),
+            channel_id,
+            url: "https://secret.example/hooks/token".into(),
+            creator_id: 9,
+            create_time: "2024-01-15T12:00:00Z".into(),
+            avatar: "https://cdn.example/avatar.png".into(),
+            status,
+            clan_id,
+            ..Default::default()
+        }
+    }
+
+    fn sample(id: &str, channel_id: i64, clan_id: i64) -> ChannelWebhook {
+        ChannelWebhook {
+            id: id.into(),
+            webhook_name: "Captain hook".into(),
+            channel_id: ChannelId(channel_id),
+            clan_id: ClanId(clan_id),
+            url: "https://secret.example/hooks/token".into(),
+            avatar: String::new(),
+            creator_id: UserId(1),
+            create_time_seconds: 1_700_000_000,
+        }
+    }
+
+    #[test]
+    fn proto_mapping_rejects_zero_id() {
+        assert!(
+            channel_webhook_from_proto(proto_webhook(0, 10, 1, "hook", 1), ClanId(1)).is_none()
+        );
+    }
+
+    #[test]
+    fn proto_mapping_uses_fallback_clan_when_proto_clan_is_zero() {
+        let webhook =
+            channel_webhook_from_proto(proto_webhook(7, 10, 0, "Captain hook", 1), ClanId(42))
+                .expect("mapped");
+        assert_eq!(webhook.id, "7");
+        assert_eq!(webhook.webhook_name, "Captain hook");
+        assert_eq!(webhook.channel_id, ChannelId(10));
+        assert_eq!(webhook.clan_id, ClanId(42));
+        assert_eq!(webhook.creator_id, UserId(9));
+        assert_eq!(webhook.create_time_seconds, 1_705_320_000);
+        assert_eq!(webhook.url, "https://secret.example/hooks/token");
+    }
+
+    #[test]
+    fn channel_webhook_debug_redacts_url() {
+        let debug = format!("{:?}", sample("1", 10, 1));
+        assert!(debug.contains("url: \"<redacted>\""));
+        assert!(!debug.contains("secret.example"));
+    }
+
+    #[test]
+    fn filter_keeps_only_matching_channel() {
+        let webhooks = vec![sample("1", 10, 1), sample("2", 20, 1), sample("3", 10, 1)];
+        let filtered = webhooks_for_channel(&webhooks, ChannelId(10));
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|webhook| webhook.id.as_str())
+                .collect::<Vec<_>>(),
+            ["1", "3"]
+        );
+        assert!(webhooks_for_channel(&webhooks, ChannelId(99)).is_empty());
+    }
+
+    #[test]
+    fn webhook_name_rejects_empty_blank_and_too_long() {
+        assert!(!webhook_name_is_valid(""));
+        assert!(!webhook_name_is_valid("   "));
+        assert!(!webhook_name_is_valid(
+            &"a".repeat(WEBHOOK_NAME_MAX_LENGTH + 1)
+        ));
+        assert!(webhook_name_is_valid("Captain hook"));
+        assert!(webhook_name_is_valid(&"a".repeat(WEBHOOK_NAME_MAX_LENGTH)));
+        assert!(webhook_name_is_valid("  trimmed  "));
+    }
+
+    #[test]
+    fn realtime_create_and_update_upsert_in_place() {
+        let mut webhooks = Vec::new();
+        assert!(apply_channel_webhook_event(
+            &mut webhooks,
+            proto_webhook(7, 10, 1, "Captain hook", 1),
+            ClanId(1),
+        ));
+        assert_eq!(webhooks.len(), 1);
+        assert_eq!(webhooks[0].webhook_name, "Captain hook");
+
+        assert!(apply_channel_webhook_event(
+            &mut webhooks,
+            proto_webhook(7, 20, 1, "Spidey bot", 2),
+            ClanId(1),
+        ));
+        assert_eq!(webhooks.len(), 1);
+        assert_eq!(webhooks[0].webhook_name, "Spidey bot");
+        assert_eq!(webhooks[0].channel_id, ChannelId(20));
+    }
+
+    #[test]
+    fn realtime_delete_removes_existing_and_ignores_missing() {
+        let mut webhooks = vec![sample("7", 10, 1), sample("8", 10, 1)];
+        assert!(apply_channel_webhook_event(
+            &mut webhooks,
+            proto_webhook(7, 10, 1, "Captain hook", WEBHOOK_STATUS_DELETE),
+            ClanId(1),
+        ));
+        assert_eq!(webhooks.len(), 1);
+        assert_eq!(webhooks[0].id, "8");
+        assert!(!apply_channel_webhook_event(
+            &mut webhooks,
+            proto_webhook(7, 10, 1, "Captain hook", WEBHOOK_STATUS_DELETE),
+            ClanId(1),
+        ));
+    }
+
+    #[test]
+    fn realtime_create_with_zero_id_is_ignored() {
+        let mut webhooks = Vec::new();
+        assert!(!apply_channel_webhook_event(
+            &mut webhooks,
+            proto_webhook(0, 10, 1, "Captain hook", 1),
+            ClanId(1),
+        ));
+        assert!(webhooks.is_empty());
+    }
 }

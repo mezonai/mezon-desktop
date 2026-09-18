@@ -16,16 +16,19 @@ PKGS=(
     -p mezon-store
     -p mezon-client
     -p mezon-native
+    -p mezon-pdf
     -p mezon-proto
     -p mezon-i18n
     -p mezon-theme
     -p mezon-widgets
     -p mezon-canvas
+-p mezon-video
     -p mezon-updater
     -p mezon-audio
     -p mezon-voice
     -p mezon-stream
     -p mezon-record
+    -p mezon-active-windows
     -p mmn-client
 )
 

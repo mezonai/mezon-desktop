@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use gpui::{App, Entity, HighlightStyle, Hsla, SharedString, WeakEntity};
 use mezon_store::{
-    ChannelType, ClanId, MessageId, ProfileContext, RichClick, RichLayout, Settings, UserId,
+    ChannelType, ClanId, MessageId, ProfileContext, RichClick, RichLayout, Settings, SpriteAtlas,
+    UserId,
 };
 
 use super::audio_player::AudioPlayerView;
@@ -14,7 +15,7 @@ use super::channel_messages::ChannelMessages;
 use super::gif_video::GifVideoView;
 use super::video_player::VideoPlayerView;
 use crate::chat::mention_input::MentionInput;
-use crate::components::primitives::TextArea;
+use crate::components::primitives::{DatePicker, TextArea};
 use crate::image_cache::LruImageCache;
 use crate::theme::Theme;
 
@@ -70,6 +71,8 @@ pub struct RowCtx<'a> {
     pub large_avatar_cache: Entity<LruImageCache>,
     pub icon_cache: Entity<LruImageCache>,
     pub ogp_cache: Entity<LruImageCache>,
+    pub social_cache: Entity<LruImageCache>,
+    pub sprite_cache: Entity<LruImageCache>,
     pub unread_boundary_id: Option<MessageId>,
     pub highlight_id: Option<MessageId>,
     pub reply_highlight_id: Option<MessageId>,
@@ -79,6 +82,10 @@ pub struct RowCtx<'a> {
     pub active_audios: &'a indexmap::IndexMap<(MessageId, usize), Entity<AudioPlayerView>>,
     pub gif_videos: &'a HashMap<(MessageId, usize), Entity<GifVideoView>>,
     pub embed_inputs: &'a HashMap<(MessageId, SharedString), Entity<TextArea>>,
+    pub embed_date_pickers: &'a HashMap<(MessageId, SharedString), Entity<DatePicker>>,
+    pub sprite_atlases: &'a HashMap<SharedString, Arc<SpriteAtlas>>,
+    pub animation_starts: &'a HashMap<(MessageId, SharedString), std::time::Instant>,
+    pub window_active: bool,
     pub video_host: WeakEntity<ChannelMessages>,
     pub now: chrono::DateTime<chrono::Local>,
     pub content_width: f32,
@@ -91,6 +98,9 @@ pub struct RowCtx<'a> {
     pub can_manage_thread: bool,
     /// `send-message` on the open channel, resolved once per render pass.
     pub can_send_message: bool,
+    /// The open conversation is a DM or group DM, where the clan permission
+    /// above never applies.
+    pub is_dm: bool,
     /// Message currently being edited inline, if any (shared across all rows).
     pub editing_id: Option<MessageId>,
     pub edit_input: Option<Entity<MentionInput>>,

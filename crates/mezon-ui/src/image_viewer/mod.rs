@@ -437,6 +437,7 @@ impl ImageViewer {
             fullscreen_mode: VideoFullscreenMode::InPlaceTheater,
             layout: VideoLayout::Fixed,
             decode_max_size: None,
+            locale: SharedString::from(self.locale(cx)),
         };
         if let Some(view) = self.active_video.clone() {
             view.update(cx, |player, cx| player.reopen(activation, window, cx));
@@ -1273,6 +1274,7 @@ impl ImageViewer {
                         let x = bounds.origin.x + (bounds.size.width - w) / 2.0 + pan.x;
                         let y = bounds.origin.y + (bounds.size.height - h) / 2.0 + pan.y;
                         let _ = window.paint_image(
+                            bounds,
                             Bounds::from_corners(point(x, y), point(x + w, y + h)),
                             Corners::default(),
                             image,

@@ -46,6 +46,8 @@ pub struct InvitePeopleModal {
     sent: HashSet<SharedString>,
     sending: HashSet<SharedString>,
     copied: bool,
+    external_event: bool,
+    stacked: bool,
     scroll: UniformListScrollHandle,
     _input_sub: Subscription,
     _friend_sub: Subscription,
@@ -66,6 +68,30 @@ impl InvitePeopleModal {
         clan_name: String,
         clan_avatar_url: String,
         locale: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_link(
+            clan_id,
+            channel_id,
+            clan_name,
+            clan_avatar_url,
+            locale,
+            None,
+            false,
+            window,
+            cx,
+        )
+    }
+
+    fn new_with_link(
+        clan_id: ClanId,
+        channel_id: Option<ChannelId>,
+        clan_name: String,
+        clan_avatar_url: String,
+        locale: String,
+        external_link: Option<String>,
+        stacked: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -119,6 +145,7 @@ impl InvitePeopleModal {
         } else {
             imgproxy::avatar_url(cx, &clan_avatar_url)
         };
+        let external_event = external_link.is_some();
         let mut modal = Self {
             focus_handle: cx.focus_handle(),
             clan_id,
@@ -126,8 +153,8 @@ impl InvitePeopleModal {
             clan_avatar_src: SharedString::from(clan_avatar_src),
             clan_avatar_raw: SharedString::from(clan_avatar_url),
             locale,
-            invite_link: String::new(),
-            invite_link_loading: true,
+            invite_link: external_link.unwrap_or_default(),
+            invite_link_loading: !external_event,
             invite_link_error: None,
             qr_image: None,
             show_qr: false,
@@ -136,6 +163,8 @@ impl InvitePeopleModal {
             sent: HashSet::new(),
             sending: HashSet::new(),
             copied: false,
+            external_event,
+            stacked,
             scroll: UniformListScrollHandle::new(),
             _input_sub: input_sub,
             _friend_sub: friend_sub,
@@ -143,7 +172,9 @@ impl InvitePeopleModal {
             _member_sub: member_sub,
         };
         modal.rebuild_rows(cx);
-        modal.load_invite_link(clan_id, channel_id, cx);
+        if !external_event {
+            modal.load_invite_link(clan_id, channel_id, cx);
+        }
         modal
     }
 
@@ -237,7 +268,7 @@ impl InvitePeopleModal {
                 let Some(user_id) = direct.peer_user_id else {
                     continue;
                 };
-                if clan_members.contains(&user_id)
+                if (!self.external_event && clan_members.contains(&user_id))
                     || friends
                         .friends()
                         .iter()
@@ -267,6 +298,44 @@ impl InvitePeopleModal {
                 avatar_src: avatar_src.into(),
                 avatar_raw: direct.avatar.clone().into(),
             });
+        }
+
+        if self.external_event {
+            for member in ClanMembersStore::global(cx).read(cx).members(self.clan_id) {
+                let user_id = member.id();
+                if listed_users.contains(&user_id)
+                    || friends
+                        .friends()
+                        .iter()
+                        .any(|friend| friend.id == user_id && friend.state == FriendState::Blocked)
+                {
+                    continue;
+                }
+                let label = member.name().to_string();
+                let username = member.user.username.clone();
+                if !query.is_empty()
+                    && !label.to_lowercase().contains(&query)
+                    && !username.to_lowercase().contains(&query)
+                {
+                    continue;
+                }
+                listed_users.insert(user_id);
+                let avatar_raw = member.avatar().to_string();
+                let avatar_src = if avatar_raw.is_empty() {
+                    String::new()
+                } else {
+                    imgproxy::avatar_url(cx, &avatar_raw)
+                };
+                rows.push(InviteFriendRow {
+                    key: format!("user-{user_id}").into(),
+                    user_id: Some(user_id),
+                    channel: None,
+                    label: label.into(),
+                    username: username.into(),
+                    avatar_src: avatar_src.into(),
+                    avatar_raw: avatar_raw.into(),
+                });
+            }
         }
 
         for friend in friends.friends() {
@@ -355,6 +424,9 @@ impl InvitePeopleModal {
     }
 
     fn invite_message_body(&self, cx: &App) -> DirectMessageBody {
+        if self.external_event {
+            return DirectMessageBody::Text(self.invite_link());
+        }
         let Some(clan) = ClanList::global(cx)
             .read(cx)
             .clan_by_id(self.clan_id)
@@ -425,8 +497,14 @@ impl InvitePeopleModal {
         Shell::global(cx).update(cx, |shell, cx| shell.success(message, cx));
     }
 
-    fn close(cx: &mut App) {
-        Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        Shell::global(cx).update(cx, |shell, cx| {
+            if self.stacked {
+                shell.dismiss_modal(window, cx);
+            } else {
+                shell.close_modal(cx);
+            }
+        });
     }
 }
 
@@ -438,7 +516,14 @@ impl Render for InvitePeopleModal {
 
         let theme = cx.theme().clone();
         let entity = cx.entity();
-        let title = SharedString::from(invite_modal_title(&self.locale, &self.clan_name));
+        let title = SharedString::from(if self.external_event {
+            invite_modal_title(
+                &self.locale,
+                &tr(&self.locale, "invitation.modal.privateEvent"),
+            )
+        } else {
+            invite_modal_title(&self.locale, &self.clan_name)
+        });
         let invite_link = self.invite_link();
         let copied = self.copied;
         let invite_ready = self.invite_link_ready();
@@ -506,7 +591,7 @@ impl Render for InvitePeopleModal {
             .track_focus(&self.focus_handle)
             .key_context("menu")
             .occlude()
-            .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| Self::close(cx)))
+            .on_action(cx.listener(|this, _: &::menu::Cancel, window, cx| this.close(window, cx)))
             .w(px(500.))
             .max_w(px(500.))
             .flex()
@@ -545,7 +630,9 @@ impl Render for InvitePeopleModal {
                             .cursor_pointer()
                             .opacity(0.65)
                             .hover(|s| s.opacity(1.0))
-                            .on_click(|_: &ClickEvent, _window, cx| Self::close(cx))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.close(window, cx)
+                            }))
                             .child(
                                 Icon::new(IconName::Close)
                                     .size(px(24.))
@@ -580,22 +667,25 @@ impl Render for InvitePeopleModal {
                                 .text_size(px(14.))
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(theme.tokens.text_theme_primary)
-                                .child(invite_send_link_label(&self.locale))
-                                .child(
-                                    div()
-                                        .id("invite-copy-qr")
-                                        .text_color(theme.text_link)
-                                        .when(invite_ready, |el| {
-                                            el.cursor_pointer().on_click(
-                                                move |_: &ClickEvent, _window, cx| {
-                                                    qr_entity
-                                                        .update(cx, |this, cx| this.open_qr(cx));
-                                                },
-                                            )
-                                        })
-                                        .when(!invite_ready, |el| el.opacity(0.55))
-                                        .child(copy_qr_label(&self.locale)),
-                                ),
+                                .child(invite_send_link_label(&self.locale, self.external_event))
+                                .when(!self.external_event, |row| {
+                                    row.child(
+                                        div()
+                                            .id("invite-copy-qr")
+                                            .text_color(theme.text_link)
+                                            .when(invite_ready, |el| {
+                                                el.cursor_pointer().on_click(
+                                                    move |_: &ClickEvent, _window, cx| {
+                                                        qr_entity.update(cx, |this, cx| {
+                                                            this.open_qr(cx)
+                                                        });
+                                                    },
+                                                )
+                                            })
+                                            .when(!invite_ready, |el| el.opacity(0.55))
+                                            .child(copy_qr_label(&self.locale)),
+                                    )
+                                }),
                         )
                         .child(render_copy_link(
                             &theme,
@@ -798,11 +888,23 @@ fn render_friend_row(
                 .child(avatar)
                 .child(
                     div()
+                        .flex()
+                        .flex_col()
                         .truncate()
                         .text_size(px(14.))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.tokens.text_theme_primary)
-                        .child(row.label),
+                        .child(row.label)
+                        .when(!row.username.is_empty(), |name| {
+                            name.child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::NORMAL)
+                                    .text_color(theme.text_secondary)
+                                    .truncate()
+                                    .child(row.username),
+                            )
+                        }),
                 ),
         )
         .child(action)
@@ -944,10 +1046,17 @@ fn invite_modal_title(locale: &str, clan_name: &str) -> String {
     mezon_i18n::t(locale, "invitation.modal.title").replace("{{target}}", clan_name)
 }
 
-fn invite_send_link_label(locale: &str) -> String {
+fn invite_send_link_label(locale: &str, external_event: bool) -> String {
     mezon_i18n::t(locale, "invitation.modal.sendLinkText").replace(
         "{{type}}",
-        mezon_i18n::t(locale, "invitation.modal.clanInvite"),
+        mezon_i18n::t(
+            locale,
+            if external_event {
+                "invitation.modal.privateRoom"
+            } else {
+                "invitation.modal.clanInvite"
+            },
+        ),
     )
 }
 
@@ -1069,6 +1178,33 @@ pub fn open_invite_people_modal(
         )
     });
     Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
+}
+
+pub fn open_external_event_invite_modal(
+    clan_id: ClanId,
+    clan_name: String,
+    clan_avatar_url: String,
+    locale: String,
+    event_link: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let modal = cx.new(|cx| {
+        InvitePeopleModal::new_with_link(
+            clan_id,
+            None,
+            clan_name,
+            clan_avatar_url,
+            locale,
+            Some(event_link),
+            true,
+            window,
+            cx,
+        )
+    });
+    Shell::global(cx).update(cx, |shell, cx| {
+        shell.show_stacked_modal(modal.into(), window, cx)
+    });
 }
 
 #[cfg(test)]

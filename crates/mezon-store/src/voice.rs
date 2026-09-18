@@ -1,4 +1,6 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::{
     Arc,
@@ -11,17 +13,22 @@ use gpui::{
     Subscription, Task, Window,
 };
 use mezon_audio::{AudioPlayer, DecodedPcm};
-use mezon_client::{AppApi, RealtimeEvent};
-use mezon_voice::{IceServerConfig, VoiceEvent, VoiceSession};
+use mezon_client::{
+    AppApi, ChannelAppLaunchParams, RealtimeEvent, api_status_from_error, build_channel_app_url,
+};
+use mezon_voice::{
+    IceServerConfig, MEET_TOKEN_RETRY_LIMIT, TokenRefresher, VoiceConnectOptions, VoiceEvent,
+    VoiceSession,
+};
 use parking_lot::Mutex;
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use mezon_voice::record_wayland_session;
 pub use mezon_voice::{
-    CameraDeviceInfo, NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareListError,
-    ScreenShareOption, ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceParticipant,
-    capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
-    system_screen_share_pick,
+    CameraDeviceInfo, NetworkQuality, PickedScreen, RemovalCause, ScreenShareKind,
+    ScreenShareListError, ScreenShareOption, ScreenSharePreview, SfuRole, VideoFrameData,
+    VideoFrameStore, VoiceParticipant, capture_screen_share_preview, list_screen_share_options,
+    peek_screen_share_options, system_screen_share_pick,
 };
 
 use crate::AppConfig;
@@ -30,10 +37,11 @@ use crate::account::AccountStore;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::DirectMessageStore;
 use crate::gifts::{
-    FLOWER_ANIMATION_TTL, FLOWER_RATE_LIMIT, FlowerParticle, GiveFlowerDeny,
-    VoiceInteractiveEventType, build_flower_transfer, can_give_flower, flower_effect_key,
-    flower_event_from_payload, flower_particles, flower_price, format_flower_amount,
-    is_uncertain_transfer_error, serialize_flower_interactive_params,
+    FLOWER_DEDUP_WINDOW, FLOWER_RATE_LIMIT, FLOWER_SCENE_TTL, GiveFlowerDeny, VoiceInteractiveApp,
+    VoiceInteractiveEventType, app_reaction_token, build_flower_transfer, can_give_flower,
+    flower_event_from_payload, flower_pair_key, flower_price, flower_reaction_token,
+    format_flower_amount, is_uncertain_transfer_error, parse_app_reaction_token,
+    parse_flower_reaction_token, serialize_flower_interactive_params,
 };
 use crate::ids::{ClanId, UserId};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
@@ -62,13 +70,66 @@ const SOUND_REACTION_TAIL: Duration = Duration::from_millis(300);
 const SOUND_REACTION_THROTTLE: Duration = Duration::from_millis(500);
 const SOUND_CACHE_CAP: usize = 8;
 const EMOJI_REACTION_RATE_LIMIT: Duration = Duration::from_millis(150);
+const INTERACTIVE_LAUNCH_DEDUP_TTL: Duration = Duration::from_secs(10);
+
+fn interactive_app_fingerprint(sender_id: i64, clan_id: i64) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    (sender_id, clan_id).hash(&mut hasher);
+    hasher.finish()
+}
+
+fn release_interactive_window(
+    opened: &mut HashMap<VoiceInteractiveApp, u64>,
+    app: VoiceInteractiveApp,
+    window_token: u64,
+) -> bool {
+    if opened.get(&app) != Some(&window_token) {
+        return false;
+    }
+    opened.remove(&app);
+    true
+}
+
+fn is_duplicate_interactive_launch(
+    launches: &mut HashMap<(VoiceInteractiveApp, u64), Instant>,
+    key: (VoiceInteractiveApp, u64),
+    now: Instant,
+) -> bool {
+    launches
+        .retain(|_, launched_at| now.duration_since(*launched_at) < INTERACTIVE_LAUNCH_DEDUP_TTL);
+    launches.contains_key(&key)
+}
+
+fn is_duplicate_flower(shown: &mut HashMap<String, Instant>, pair: &str, now: Instant) -> bool {
+    shown.retain(|_, shown_at| now.duration_since(*shown_at) < FLOWER_DEDUP_WINDOW);
+    shown.contains_key(pair)
+}
+
+fn redact_interactive_app_url(url: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return "<invalid interactive app URL>".to_string();
+    };
+    let pairs = parsed
+        .query_pairs()
+        .map(|(key, value)| {
+            let value = if key == "data" && !value.is_empty() {
+                "REDACTED".to_string()
+            } else {
+                value.into_owned()
+            };
+            (key.into_owned(), value)
+        })
+        .collect::<Vec<_>>();
+    parsed.query_pairs_mut().clear().extend_pairs(pairs);
+    parsed.to_string()
+}
 const EMOJI_REACTION_TAIL: Duration = Duration::from_millis(500);
 const MAX_DISPLAYED_REACTIONS: usize = 20;
 const DEFAULT_NOISE_SUPPRESSION_LEVEL: u8 = 20;
 pub const MAX_SOUND_BYTES: u64 = 1024 * 1024;
 pub const SOUND_ALLOWED_EXTENSIONS: &[&str] = &["mp3", "wav", "mpeg"];
 const KICK_SUPPRESS_TIMEOUT: Duration = Duration::from_secs(5);
-const RECONNECT_STALL_TIMEOUT: Duration = Duration::from_secs(15);
+const RECONNECT_STALL_TIMEOUT: Duration = Duration::from_secs(40);
 const RECONNECT_RETRY_DELAY: Duration = Duration::from_secs(5);
 static RAISE_HAND_SOUND: &[u8] = include_bytes!("../assets/audio/raising-hand.mp3");
 static JOIN_VOICE_SOUND: &[u8] = include_bytes!("../assets/audio/joincallsound.mp3");
@@ -87,6 +148,19 @@ fn parse_raise_token(token: &str) -> Option<bool> {
 fn reaction_scatter(seq: u64, salt: u64) -> f32 {
     let h = seq.wrapping_add(salt).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     (h >> 40) as f32 / (1u64 << 24) as f32
+}
+
+fn current_locale(cx: &App) -> String {
+    Settings::try_global(cx)
+        .map(|settings| settings.read(cx).language.clone())
+        .unwrap_or_default()
+}
+
+fn voice_join_error_message(err: &anyhow::Error, locale: &str) -> String {
+    match api_status_from_error(err) {
+        Some(status) => mezon_i18n::api_error(locale, status.code).to_string(),
+        None => mezon_i18n::t(locale, "channelVoice.joinFailed").to_string(),
+    }
 }
 
 struct CachedMeetToken {
@@ -162,6 +236,23 @@ impl VoiceConnection {
             _ => None,
         }
     }
+
+    fn mark_connected(&mut self) -> bool {
+        let VoiceConnection::Connecting {
+            channel_id,
+            clan_id,
+        } = self
+        else {
+            return false;
+        };
+        let channel_id = std::mem::take(channel_id);
+        let clan_id = std::mem::take(clan_id);
+        *self = VoiceConnection::Connected {
+            channel_id,
+            clan_id,
+        };
+        true
+    }
 }
 
 pub struct VoiceStore {
@@ -184,7 +275,9 @@ pub struct VoiceStore {
     pending_kick: Option<(String, String)>,
     pending_removals: HashMap<String, Instant>,
     moderation_error: Option<VoiceModerationError>,
+    muted_by_moderator: bool,
     agent_pending: bool,
+    agent_channels: HashSet<String>,
     participants: Vec<VoiceParticipant>,
     join_ranks: Vec<String>,
     speak_ranks: HashMap<String, u64>,
@@ -198,9 +291,12 @@ pub struct VoiceStore {
     give_flower_player: Option<AudioPlayer>,
     give_flower_sound_loading: bool,
     join_sound_baseline_set: bool,
+    awaiting_room_snapshot: bool,
     last_reaction_send: Option<Instant>,
     last_flower_send: Option<Instant>,
     last_flower_effect_at: Option<Instant>,
+    shown_flowers: HashMap<String, Instant>,
+    flower_seq: u64,
     active_sounds: HashMap<String, ActiveSound>,
     sound_throttle: HashMap<String, Instant>,
     sound_cache: Vec<(String, Arc<DecodedPcm>)>,
@@ -212,9 +308,14 @@ pub struct VoiceStore {
     session: Option<VoiceSession>,
     session_generation: u64,
     reconnect_generation: u64,
+    reconnect_token_fetches: u32,
     frame_store: Option<Arc<VideoFrameStore>>,
     camera_devices: Vec<CameraDeviceInfo>,
     device_menu: Option<DeviceMenuKind>,
+    interactive_launches: HashMap<(VoiceInteractiveApp, u64), Instant>,
+    active_interactive_apps: HashMap<VoiceInteractiveApp, (i64, i64)>,
+    opened_interactive_apps: HashMap<VoiceInteractiveApp, u64>,
+    interactive_window_seq: u64,
     device_submenu: Option<DeviceKind>,
     _camera_enum_task: Option<Task<()>>,
     render_cache: Mutex<HashMap<u64, CachedRenderFrame>>,
@@ -222,13 +323,23 @@ pub struct VoiceStore {
     pending_texture_replaces: Mutex<Vec<Arc<RenderImage>>>,
     pending_texture_work: AtomicBool,
     cached_meet_token: Option<CachedMeetToken>,
+    role: SfuRole,
+    ptt_active: bool,
+    ptt_held: bool,
+    hold_to_talk: bool,
+    ptt_hint_dismissed: bool,
+    pending_join_role: SfuRole,
+    join_role_menu_open: bool,
     meet_token_prefetching: Option<String>,
     last_screen_share: Option<(PickedScreen, bool)>,
     link_copied: bool,
     recording: RecordingState,
     recording_elapsed: Duration,
     recording_stalled: bool,
-    recording_avatars: HashMap<String, Option<Arc<mezon_voice::compose::AvatarImage>>>,
+    member_strip_visible: bool,
+    recording_avatars: HashMap<String, RecordingAvatar>,
+    #[cfg(debug_assertions)]
+    simulated_participants: Vec<VoiceParticipant>,
     _recording_tick: Option<Task<()>>,
     _recording_start: Option<Task<()>>,
     _events_task: Option<Task<()>>,
@@ -281,14 +392,8 @@ pub struct DisplayedReaction {
 
 pub struct DisplayedFlower {
     pub key: String,
-    pub giver_id: String,
-    pub receiver_id: String,
-    pub giver_name: String,
-    pub receiver_name: String,
-    pub timestamp: i64,
-    pub particles: Arc<Vec<FlowerParticle>>,
     pub started_at: Instant,
-    pub label: SharedString,
+    pub caption: SharedString,
     _remove_timer: Task<()>,
 }
 
@@ -311,6 +416,7 @@ pub enum RecordingToast {
 pub enum VoiceStoreEvent {
     RecordingFinished(RecordingToast),
     RecordingVideoUnavailable,
+    RemovedFromChannel(RemovalCause),
 }
 
 impl EventEmitter<VoiceStoreEvent> for VoiceStore {}
@@ -324,12 +430,80 @@ impl VoiceStore {
         if !resolved.is_empty() {
             return resolved;
         }
-        // LiveKit hands back the identity as the name, and a raw user id in the
-        // recording reads as noise — leave the pill off instead.
         if participant.name.chars().all(|c| c.is_ascii_digit()) {
             return String::new();
         }
         participant.name.clone()
+    }
+}
+
+#[cfg(debug_assertions)]
+const SIMULATED_SCREEN_KEY: u64 = u64::MAX - 1;
+
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy)]
+pub struct SimulatedCall {
+    pub screenshare: bool,
+    pub focus: bool,
+    pub fullscreen: bool,
+    pub member_strip: bool,
+}
+
+#[cfg(debug_assertions)]
+impl Default for SimulatedCall {
+    fn default() -> Self {
+        Self {
+            screenshare: false,
+            focus: false,
+            fullscreen: false,
+            member_strip: true,
+        }
+    }
+}
+
+const RECORDING_AVATAR_PX: u32 = 256;
+
+const RECORDING_AVATAR_MAX_ATTEMPTS: u8 = 3;
+
+const RECORDING_AVATAR_WARMUP: Duration = Duration::from_millis(1_500);
+
+const RECORDING_AVATAR_WARMUP_STEP: Duration = Duration::from_millis(50);
+
+#[derive(Default)]
+struct RecordingAvatar {
+    url: String,
+    image: Option<Arc<mezon_voice::compose::AvatarImage>>,
+    loading: bool,
+    attempts: u8,
+}
+
+impl RecordingAvatar {
+    fn claim(&mut self, url: &str) -> bool {
+        if self.url != url {
+            *self = Self {
+                url: url.to_string(),
+                ..Self::default()
+            };
+        }
+        if self.loading || self.image.is_some() || self.attempts >= RECORDING_AVATAR_MAX_ATTEMPTS {
+            return false;
+        }
+        self.loading = true;
+        true
+    }
+
+    fn settle(&mut self, url: &str, image: Option<Arc<mezon_voice::compose::AvatarImage>>) {
+        if self.url != url {
+            return;
+        }
+        self.loading = false;
+        match image {
+            Some(image) => {
+                self.image = Some(image);
+                self.attempts = 0;
+            }
+            None => self.attempts += 1,
+        }
     }
 }
 
@@ -341,7 +515,7 @@ async fn load_avatar(url: &str) -> Option<Arc<mezon_voice::compose::AvatarImage>
     let decoded = image::load_from_memory(&bytes)
         .map_err(|error| tracing::warn!("could not decode a recording avatar: {error}"))
         .ok()?
-        .thumbnail(256, 256)
+        .thumbnail(RECORDING_AVATAR_PX, RECORDING_AVATAR_PX)
         .to_rgba8();
     let (width, height) = decoded.dimensions();
     let mut bgra = decoded.into_raw();
@@ -355,11 +529,30 @@ async fn load_avatar(url: &str) -> Option<Arc<mezon_voice::compose::AvatarImage>
     }))
 }
 
+fn solo_tile_for(
+    fullscreen_screen: Option<u64>,
+    member_strip_visible: bool,
+    focused_tile: Option<&str>,
+    participants: &[VoiceParticipant],
+) -> Option<String> {
+    if let Some(key) = fullscreen_screen {
+        return participants
+            .iter()
+            .find(|p| p.screenshare == Some(key))
+            .map(|p| screen_tile_id(&p.session_id));
+    }
+    if !member_strip_visible {
+        return focused_tile.map(str::to_string);
+    }
+    None
+}
+
 fn initial_of(name: &str) -> String {
     name.chars()
         .next()
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_default()
+        .and_then(|c| c.to_uppercase().next())
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "?".to_string())
 }
 
 pub fn screen_tile_id(identity: &str) -> String {
@@ -379,12 +572,12 @@ enum ScreenAutoFocus {
 
 fn default_focus_tile_for(participants: &[VoiceParticipant]) -> Option<String> {
     if let Some(p) = participants.iter().find(|p| p.screenshare.is_some()) {
-        return Some(screen_tile_id(&p.identity));
+        return Some(screen_tile_id(&p.session_id));
     }
     if let Some(p) = participants.iter().find(|p| p.camera.is_some()) {
-        return Some(camera_tile_id(&p.identity));
+        return Some(camera_tile_id(&p.session_id));
     }
-    participants.first().map(|p| camera_tile_id(&p.identity))
+    participants.first().map(|p| camera_tile_id(&p.session_id))
 }
 
 fn screen_auto_focus_transition(
@@ -394,7 +587,7 @@ fn screen_auto_focus_transition(
     let auto_still_live = auto_focused.is_some_and(|id| {
         participants
             .iter()
-            .any(|p| p.screenshare.is_some() && screen_tile_id(&p.identity) == id)
+            .any(|p| p.screenshare.is_some() && screen_tile_id(&p.session_id) == id)
     });
     if auto_still_live {
         return ScreenAutoFocus::Keep;
@@ -402,7 +595,7 @@ fn screen_auto_focus_transition(
     let next = participants
         .iter()
         .find(|p| p.screenshare.is_some())
-        .map(|p| screen_tile_id(&p.identity));
+        .map(|p| screen_tile_id(&p.session_id));
     match next {
         Some(id) => ScreenAutoFocus::Focus(id),
         None if auto_focused.is_some() => ScreenAutoFocus::Clear,
@@ -452,7 +645,9 @@ impl VoiceStore {
             pending_kick: None,
             pending_removals: HashMap::new(),
             moderation_error: None,
+            muted_by_moderator: false,
             agent_pending: false,
+            agent_channels: HashSet::new(),
             participants: Vec::new(),
             join_ranks: Vec::new(),
             speak_ranks: HashMap::new(),
@@ -466,9 +661,12 @@ impl VoiceStore {
             give_flower_player: None,
             give_flower_sound_loading: false,
             join_sound_baseline_set: false,
+            awaiting_room_snapshot: false,
             last_reaction_send: None,
             last_flower_send: None,
             last_flower_effect_at: None,
+            shown_flowers: HashMap::new(),
+            flower_seq: 0,
             active_sounds: HashMap::new(),
             sound_throttle: HashMap::new(),
             sound_cache: Vec::new(),
@@ -480,9 +678,14 @@ impl VoiceStore {
             session: None,
             session_generation: 0,
             reconnect_generation: 0,
+            reconnect_token_fetches: 0,
             frame_store: None,
             camera_devices: Vec::new(),
             device_menu: None,
+            interactive_launches: HashMap::new(),
+            active_interactive_apps: HashMap::new(),
+            opened_interactive_apps: HashMap::new(),
+            interactive_window_seq: 0,
             device_submenu: None,
             _camera_enum_task: None,
             render_cache: Mutex::new(HashMap::new()),
@@ -490,13 +693,23 @@ impl VoiceStore {
             pending_texture_replaces: Mutex::new(Vec::new()),
             pending_texture_work: AtomicBool::new(false),
             cached_meet_token: None,
+            role: SfuRole::Speaker,
+            ptt_active: false,
+            ptt_held: false,
+            hold_to_talk: false,
+            ptt_hint_dismissed: false,
+            pending_join_role: SfuRole::Speaker,
+            join_role_menu_open: false,
             meet_token_prefetching: None,
             last_screen_share: None,
             link_copied: false,
             recording: RecordingState::Idle,
             recording_elapsed: Duration::ZERO,
             recording_stalled: false,
+            member_strip_visible: true,
             recording_avatars: HashMap::new(),
+            #[cfg(debug_assertions)]
+            simulated_participants: Vec::new(),
             _recording_tick: None,
             _recording_start: None,
             _events_task: None,
@@ -557,35 +770,36 @@ impl VoiceStore {
         &self.participants
     }
 
-    pub fn join_rank(&self, identity: &str) -> usize {
+    pub fn join_rank(&self, session_id: &str) -> usize {
         self.join_ranks
             .iter()
-            .position(|id| id == identity)
+            .position(|id| id == session_id)
             .unwrap_or(usize::MAX)
     }
 
-    pub fn last_spoke_rank(&self, identity: &str) -> u64 {
-        self.speak_ranks.get(identity).copied().unwrap_or(0)
+    pub fn last_spoke_rank(&self, session_id: &str) -> u64 {
+        self.speak_ranks.get(session_id).copied().unwrap_or(0)
     }
 
     fn track_visual_ranks(&mut self, list: &[VoiceParticipant]) {
         self.join_ranks
-            .retain(|id| list.iter().any(|p| p.identity == *id));
+            .retain(|id| list.iter().any(|p| p.session_id == *id));
         for p in list {
-            if !self.join_ranks.contains(&p.identity) {
-                self.join_ranks.push(p.identity.clone());
+            if !self.join_ranks.contains(&p.session_id) {
+                self.join_ranks.push(p.session_id.clone());
             }
             let was_speaking = self
                 .participants
                 .iter()
-                .any(|old| old.identity == p.identity && old.speaking);
+                .any(|old| old.session_id == p.session_id && old.speaking);
             if p.speaking && !was_speaking {
                 self.speak_seq += 1;
-                self.speak_ranks.insert(p.identity.clone(), self.speak_seq);
+                self.speak_ranks
+                    .insert(p.session_id.clone(), self.speak_seq);
             }
         }
         self.speak_ranks
-            .retain(|id, _| list.iter().any(|p| p.identity == *id));
+            .retain(|id, _| list.iter().any(|p| p.session_id == *id));
     }
 
     pub fn mic_enabled(&self) -> bool {
@@ -621,7 +835,6 @@ impl VoiceStore {
 
     pub fn toggle_noise_suppression(&mut self, cx: &mut Context<Self>) {
         self.noise_suppression_enabled = !self.noise_suppression_enabled;
-        self.sync_noise_suppression();
         cx.notify();
     }
 
@@ -631,17 +844,7 @@ impl VoiceStore {
             return;
         }
         self.noise_suppression_level = level;
-        self.sync_noise_suppression();
         cx.notify();
-    }
-
-    fn sync_noise_suppression(&self) {
-        if let Some(session) = &self.session {
-            session.set_noise_suppression(
-                self.noise_suppression_enabled,
-                self.noise_suppression_level,
-            );
-        }
     }
 
     pub fn frame_store(&self) -> Option<Arc<VideoFrameStore>> {
@@ -784,6 +987,23 @@ impl VoiceStore {
         self.focused_tile.as_deref()
     }
 
+    pub fn member_strip_visible(&self) -> bool {
+        self.member_strip_visible
+    }
+
+    pub fn set_member_strip_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.member_strip_visible == visible {
+            return;
+        }
+        self.member_strip_visible = visible;
+        self.publish_recording_scene(cx);
+        cx.notify();
+    }
+
+    pub fn toggle_member_strip(&mut self, cx: &mut Context<Self>) {
+        self.set_member_strip_visible(!self.member_strip_visible, cx);
+    }
+
     pub fn link_copied(&self) -> bool {
         self.link_copied
     }
@@ -830,7 +1050,203 @@ impl VoiceStore {
                 &entity,
                 |this, event, cx| this.handle_voice_interactive(event, cx),
             );
+            dispatch.on(RealtimeKind::AiAgentEnabled, &entity, |this, event, cx| {
+                this.handle_agent_enabled(event, cx)
+            });
         });
+    }
+
+    fn handle_agent_enabled(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::AiAgentEnabled(event) = event else {
+            return;
+        };
+        let channel_key = event.channel_id.to_string();
+        if event.enabled {
+            self.agent_channels.insert(channel_key);
+        } else {
+            self.agent_channels.remove(&channel_key);
+        }
+        cx.notify();
+    }
+
+    fn handle_voice_interactive(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::VoiceInteractive(event) = event else {
+            return;
+        };
+        if event.event_type == VoiceInteractiveEventType::Gift as i32 {
+            let Some((channel_id, _)) = self.connection.connected_channel() else {
+                return;
+            };
+            let Ok(joined_channel) = channel_id.parse::<i64>() else {
+                return;
+            };
+            let Some((giver_id, receiver_id, _, _)) = flower_event_from_payload(
+                event.event_type,
+                event.sender_id,
+                event.receiver_id,
+                event.voice_channel_id,
+                &event.params,
+                joined_channel,
+            ) else {
+                return;
+            };
+            self.show_flower_effect(giver_id, receiver_id, cx);
+            return;
+        }
+        let Some(app) = VoiceInteractiveApp::from_event_type(event.event_type) else {
+            return;
+        };
+        if self
+            .connection
+            .active_channel_id()
+            .and_then(|id| id.parse::<i64>().ok())
+            != Some(event.voice_channel_id)
+        {
+            return;
+        }
+        self.handle_interactive_app_signal(app, event.sender_id, event.clan_id, cx);
+    }
+
+    fn handle_interactive_app_signal(
+        &mut self,
+        app: VoiceInteractiveApp,
+        sender_id: i64,
+        clan_id: i64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.opened_interactive_apps.contains_key(&app) {
+            return;
+        }
+        let current_user_id = crate::BadgeService::try_global(cx)
+            .and_then(|badges| badges.read(cx).current_user_id(cx))
+            .map(|user_id| user_id.0);
+        self.active_interactive_apps
+            .insert(app, (sender_id, clan_id));
+        if current_user_id == Some(sender_id) {
+            self.open_interactive_app(app, sender_id, clan_id, cx);
+        }
+        cx.notify();
+    }
+
+    fn finish_interactive_launch(
+        &mut self,
+        app: VoiceInteractiveApp,
+        launch_key: (VoiceInteractiveApp, u64),
+        window_token: u64,
+        cx: &mut Context<Self>,
+    ) {
+        self.interactive_launches.remove(&launch_key);
+        release_interactive_window(&mut self.opened_interactive_apps, app, window_token);
+        cx.notify();
+    }
+
+    fn open_interactive_app(
+        &mut self,
+        app: VoiceInteractiveApp,
+        sender_id: i64,
+        clan_id: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let fingerprint = interactive_app_fingerprint(sender_id, clan_id);
+        let now = Instant::now();
+        let launch_key = (app, fingerprint);
+        if is_duplicate_interactive_launch(&mut self.interactive_launches, launch_key, now) {
+            return;
+        }
+        self.interactive_launches.insert(launch_key, now);
+        self.interactive_window_seq += 1;
+        let window_token = self.interactive_window_seq;
+        self.opened_interactive_apps.insert(app, window_token);
+        let api = self.api.clone();
+        let app_id = app.app_id();
+        let config = AppConfig::global(cx);
+        let base_url = match app {
+            VoiceInteractiveApp::Quiz => config.quiz_url.clone(),
+            VoiceInteractiveApp::Blackboard => config.blackboard_url.clone(),
+            VoiceInteractiveApp::Interactive => config.interactive_url.clone(),
+        };
+        let clan_id_string = clan_id.to_string();
+        let clan_list = crate::ClanList::try_global(cx);
+        let clan_name = clan_list.as_ref().and_then(|clans| {
+            clans
+                .read(cx)
+                .clan(ClanId(clan_id))
+                .map(|clan| clan.name.clone())
+        });
+        cx.spawn(async move |this, cx| {
+            let hash = match api.generate_hash_channel_apps(app_id).await {
+                Ok(hash) if !hash.web_app_data.is_empty() => hash,
+                Ok(_) => {
+                    tracing::warn!(app_id, "voice app hash returned empty web_app_data");
+                    let _ = this.update(cx, |store, cx| {
+                        store.finish_interactive_launch(app, launch_key, window_token, cx);
+                    });
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(app_id, "generate voice app hash failed: {error:#}");
+                    let _ = this.update(cx, |store, cx| {
+                        store.finish_interactive_launch(app, launch_key, window_token, cx);
+                    });
+                    return;
+                }
+            };
+            let mut url = build_channel_app_url(
+                &base_url,
+                ChannelAppLaunchParams {
+                    web_app_data: &hash.web_app_data,
+                    clan_id: &clan_id_string,
+                    clan_name: clan_name.as_deref(),
+                },
+            );
+            if app == VoiceInteractiveApp::Blackboard
+                && let Ok(mut parsed) = url::Url::parse(&url)
+            {
+                parsed
+                    .query_pairs_mut()
+                    .append_pair("userId", &sender_id.to_string());
+                url = parsed.to_string();
+            }
+            tracing::info!(
+                url = %redact_interactive_app_url(&url),
+                event_type = app.event_type() as i32,
+                app_id,
+                "opening built-in voice interactive app"
+            );
+            let opener = cx.update(|cx| {
+                crate::PlatformStore::try_global(cx)
+                    .and_then(|platform| platform.read(cx).managed_app_window_opener())
+            });
+            let Some(opener) = opener else {
+                tracing::warn!("managed voice app launch skipped: no opener is registered");
+                let _ = this.update(cx, |store, cx| {
+                    store.finish_interactive_launch(app, launch_key, window_token, cx);
+                });
+                return;
+            };
+            let window_key = format!("voice-{}", app.app_id());
+            let (closed_tx, closed_rx) = futures::channel::oneshot::channel();
+            let waiter = std::thread::Builder::new()
+                .name(format!("voice-app-window-{app_id}"))
+                .spawn(move || {
+                    let _ = closed_tx.send(opener(&url, &window_key));
+                });
+            let result = match waiter {
+                Ok(_) => closed_rx.await.unwrap_or_else(|_| {
+                    Err(anyhow::anyhow!(
+                        "voice app window thread ended without a result"
+                    ))
+                }),
+                Err(error) => Err(error.into()),
+            };
+            if let Err(error) = result {
+                tracing::warn!("managed voice app window failed: {error:#}");
+            }
+            let _ = this.update(cx, |store, cx| {
+                store.finish_interactive_launch(app, launch_key, window_token, cx);
+            });
+        })
+        .detach();
     }
 
     fn handle_voice_reaction(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
@@ -850,6 +1266,21 @@ impl VoiceStore {
         };
         if let Some(sound_url) = token.strip_prefix("sound:") {
             self.handle_sound_reaction(msg.sender_id.to_string(), sound_url.to_string(), cx);
+            return;
+        }
+        if let Some(receiver_id) = parse_flower_reaction_token(token) {
+            let receiver_id = receiver_id.to_string();
+            self.show_flower_effect(msg.sender_id.to_string(), receiver_id, cx);
+            return;
+        }
+        if let Some(app) = parse_app_reaction_token(token) {
+            let clan_id = self
+                .connection
+                .connected_channel()
+                .and_then(|(_, clan)| clan.parse::<i64>().ok());
+            if let Some(clan_id) = clan_id {
+                self.handle_interactive_app_signal(app, msg.sender_id, clan_id, cx);
+            }
             return;
         }
         let Some(raise) = parse_raise_token(token) else {
@@ -1001,6 +1432,7 @@ impl VoiceStore {
     }
 
     fn play_join_sound(&mut self, cx: &mut Context<Self>) {
+        tracing::info!(cached = self.join_voice_player.is_some(), "join sound requested");
         if let Some(player) = &self.join_voice_player {
             player.play();
             return;
@@ -1169,44 +1601,24 @@ impl VoiceStore {
         &self.displayed_flowers
     }
 
-    fn handle_voice_interactive(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
-        let RealtimeEvent::VoiceInteractive(msg) = event else {
-            return;
-        };
-        let Some((channel_id, _)) = self.connection.connected_channel() else {
-            return;
-        };
-        let Ok(joined_channel) = channel_id.parse::<i64>() else {
-            return;
-        };
-        let Some((giver_id, receiver_id, timestamp, _)) = flower_event_from_payload(
-            msg.event_type,
-            msg.sender_id,
-            msg.voice_channel_id,
-            &msg.params,
-            joined_channel,
-        ) else {
-            return;
-        };
-        self.show_flower_effect(giver_id, receiver_id, timestamp, cx);
+    pub fn flower_caption(&self) -> Option<&SharedString> {
+        self.displayed_flowers.last().map(|flower| &flower.caption)
     }
 
     fn show_flower_effect(
         &mut self,
         giver_id: String,
         receiver_id: String,
-        timestamp: i64,
         cx: &mut Context<Self>,
     ) {
-        let key = flower_effect_key(&giver_id, &receiver_id, timestamp);
-        if self
-            .displayed_flowers
-            .iter()
-            .any(|flower| flower.key == key)
-        {
+        let now = Instant::now();
+        let pair = flower_pair_key(&giver_id, &receiver_id);
+        if is_duplicate_flower(&mut self.shown_flowers, &pair, now) {
             return;
         }
-        let now = Instant::now();
+        self.shown_flowers.insert(pair.clone(), now);
+        self.flower_seq = self.flower_seq.wrapping_add(1);
+        let key = format!("{pair}:{}", self.flower_seq);
         let play_sound = self
             .last_flower_effect_at
             .is_none_or(|last| now.duration_since(last) >= FLOWER_RATE_LIMIT);
@@ -1216,17 +1628,19 @@ impl VoiceStore {
         self.displayed_flowers.clear();
         let giver_name = self.resolve_flower_name(&giver_id, cx);
         let receiver_name = self.resolve_flower_name(&receiver_id, cx);
-        let locale = Settings::try_global(cx)
-            .map(|settings| settings.read(cx).language.clone())
-            .unwrap_or_default();
-        let label = SharedString::from(
+        let locale = current_locale(cx);
+        let local_is_receiver = self.local_user_id().as_deref() == Some(receiver_id.as_str());
+        let label = SharedString::from(if local_is_receiver {
+            mezon_i18n::t(&locale, "channelVoice.giveFlowerReceived")
+                .replace("{{giver}}", &giver_name)
+        } else {
             mezon_i18n::t(&locale, "channelVoice.giveFlowerGiven")
                 .replace("{{giver}}", &giver_name)
-                .replace("{{receiver}}", &receiver_name),
-        );
+                .replace("{{receiver}}", &receiver_name)
+        });
         let expire_key = key.clone();
         let remove_timer = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(FLOWER_ANIMATION_TTL).await;
+            cx.background_executor().timer(FLOWER_SCENE_TTL).await;
             this.update(cx, |this, cx| {
                 this.displayed_flowers
                     .retain(|flower| flower.key != expire_key);
@@ -1236,14 +1650,8 @@ impl VoiceStore {
         });
         self.displayed_flowers.push(DisplayedFlower {
             key,
-            giver_id,
-            receiver_id,
-            giver_name,
-            receiver_name,
-            timestamp,
-            particles: Arc::new(flower_particles(timestamp.unsigned_abs())),
             started_at: Instant::now(),
-            label,
+            caption: label,
             _remove_timer: remove_timer,
         });
         if play_sound {
@@ -1577,7 +1985,7 @@ impl VoiceStore {
         let focused = self
             .focused_tile
             .as_deref()
-            .is_some_and(|id| id == screen_tile_id(&local.identity));
+            .is_some_and(|id| id == screen_tile_id(&local.session_id));
         let fullscreen = self.fullscreen_screen == Some(screen_key);
         let pip = self.pip.as_ref().is_some_and(|p| p.key == screen_key);
         focused || fullscreen || pip
@@ -1653,7 +2061,7 @@ impl VoiceStore {
             && let Some(key) = self
                 .participants
                 .iter()
-                .find(|p| p.screenshare.is_some() && screen_tile_id(&p.identity) == focused)
+                .find(|p| p.screenshare.is_some() && screen_tile_id(&p.session_id) == focused)
                 .and_then(|p| p.screenshare)
         {
             return Some(key);
@@ -1733,6 +2141,10 @@ impl VoiceStore {
         self.moderation_error.take()
     }
 
+    pub fn take_muted_by_moderator(&mut self) -> bool {
+        std::mem::take(&mut self.muted_by_moderator)
+    }
+
     pub fn mute_participant(&mut self, identity: String, cx: &mut Context<Self>) {
         self.moderate_participant(identity, ModerationAction::Mute, cx);
     }
@@ -1794,9 +2206,7 @@ impl VoiceStore {
         let balance = wallet
             .as_ref()
             .and_then(|store| store.read(cx).balance().map(str::to_string));
-        let locale = Settings::try_global(cx)
-            .map(|settings| settings.read(cx).language.clone())
-            .unwrap_or_default();
+        let locale = current_locale(cx);
 
         match can_give_flower(
             identity == local_id,
@@ -1845,6 +2255,7 @@ impl VoiceStore {
             .unwrap_or_default();
         let timestamp = mezon_client::server_now_secs() as i64 * 1000;
         let params = serialize_flower_interactive_params(&identity, timestamp);
+        let reaction_token = flower_reaction_token(&identity);
         let gift_channel = channel_id.clone();
         let request = build_flower_transfer(
             local_id.clone(),
@@ -1900,12 +2311,12 @@ impl VoiceStore {
                         .connected_channel()
                         .is_some_and(|(channel, _)| channel == gift_channel);
                     if still_in_room {
-                        this.show_flower_effect(local_id, identity, timestamp, cx);
+                        this.show_flower_effect(local_id, identity, cx);
                     }
                 })
                 .ok();
                 if let Err(error) = api
-                    .write_voice_interactive(
+                    .write_voice_interactive_event(
                         clan_i64,
                         channel_i64,
                         giver_i64,
@@ -1915,7 +2326,13 @@ impl VoiceStore {
                     )
                     .await
                 {
-                    tracing::warn!("write_voice_interactive failed: {error}");
+                    tracing::warn!("write_voice_interactive_event failed: {error}");
+                }
+                if let Err(error) = api
+                    .write_voice_reaction(vec![reaction_token], channel_i64)
+                    .await
+                {
+                    tracing::warn!("flower voice reaction failed: {error}");
                 }
             }
             wallet_weak
@@ -1943,17 +2360,22 @@ impl VoiceStore {
     }
 
     pub fn agent_active(&self) -> bool {
-        self.participants.iter().any(|p| p.is_agent)
+        let Some((channel_id, _)) = self.connection.connected_channel() else {
+            return false;
+        };
+        self.agent_channels.contains(channel_id)
+            || self.participants.iter().any(|p| p.is_agent && !p.is_local)
     }
 
     pub fn toggle_agent(&mut self, cx: &mut Context<Self>) {
         if self.agent_pending {
             return;
         }
-        let Some((channel_id, _clan_id)) = self.connection.connected_channel() else {
+        let Some((channel_key, _clan_id)) = self.connection.connected_channel() else {
             return;
         };
-        let Ok(channel_id) = channel_id.parse::<i64>() else {
+        let channel_key = channel_key.to_string();
+        let Ok(channel_id) = channel_key.parse::<i64>() else {
             return;
         };
         if self.room_name.is_empty() {
@@ -1974,8 +2396,16 @@ impl VoiceStore {
             }
             let _ = this.update(cx, |this, cx| {
                 this.agent_pending = false;
-                if result.is_err() {
-                    this.moderation_error = Some(VoiceModerationError::AgentFailed);
+                match result {
+                    Ok(()) if on_agent => {
+                        this.agent_channels.remove(&channel_key);
+                    }
+                    Ok(()) => {
+                        this.agent_channels.insert(channel_key);
+                    }
+                    Err(_) => {
+                        this.moderation_error = Some(VoiceModerationError::AgentFailed);
+                    }
                 }
                 cx.notify();
             });
@@ -1997,31 +2427,50 @@ impl VoiceStore {
         }
         let channel_id = channel_id.to_string();
         let clan_id = clan_id.to_string();
-        let room_name = self.room_name.clone();
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let result = match action {
                 ModerationAction::Mute => {
-                    api.mute_participant_mezon_meet(&channel_id, &clan_id, &room_name, &identity)
+                    api.mute_participant_mezon_meet(&channel_id, &clan_id, &identity)
                         .await
                 }
                 ModerationAction::Kick => {
-                    api.remove_participant_mezon_meet(&channel_id, &clan_id, &room_name, &identity)
+                    api.remove_participant_mezon_meet(&channel_id, &clan_id, &identity)
                         .await
                 }
             };
-            if let Err(e) = result {
-                tracing::warn!("participant moderation failed: {e:#}");
-                let _ = this.update(cx, |this, cx| {
-                    if matches!(action, ModerationAction::Kick) {
-                        this.pending_removals.remove(&identity);
+            let _ = this.update(cx, |this, cx| {
+                let delivered = match result {
+                    Ok(token) => this.deliver_participant_action(token),
+                    Err(e) => {
+                        tracing::warn!("participant moderation failed: {e:#}");
+                        false
                     }
-                    this.moderation_error = Some(action.error());
-                    cx.notify();
-                });
-            }
+                };
+                if delivered {
+                    return;
+                }
+                if matches!(action, ModerationAction::Kick) {
+                    this.pending_removals.remove(&identity);
+                }
+                this.moderation_error = Some(action.error());
+                cx.notify();
+            });
         })
         .detach();
+    }
+
+    fn deliver_participant_action(&self, token: String) -> bool {
+        let Some(session) = &self.session else {
+            tracing::warn!("participant moderation has no voice session to reach the sfu");
+            return false;
+        };
+        if matches!(self.call_status, VoiceCallStatus::Reconnecting) {
+            tracing::warn!("participant moderation skipped while the sfu link is reconnecting");
+            return false;
+        }
+        session.participant_action(token);
+        true
     }
 
     fn prune_screen_targets(&mut self, cx: &mut Context<Self>) {
@@ -2051,6 +2500,7 @@ impl VoiceStore {
         channel_id: String,
         clan_id: String,
         channel_label: String,
+        role: SfuRole,
         input_device_id: Option<String>,
         output_device_id: Option<String>,
         camera_device_id: Option<String>,
@@ -2063,12 +2513,19 @@ impl VoiceStore {
 
         self.teardown(Some(window), cx);
         self.channel_label = channel_label;
+        self.role = role;
+        self.ptt_held = false;
+        self.hold_to_talk = false;
+        self.ptt_hint_dismissed = false;
+        self.pending_join_role = role;
+        self.join_role_menu_open = false;
 
-        let ws_url = AppConfig::global(cx).meet_ws_url.clone();
+        let ws_url = AppConfig::global(cx).sfu_ws_url.clone();
         if ws_url.is_empty() {
+            let locale = current_locale(cx);
             self.connection = VoiceConnection::Failed {
                 channel_id,
-                message: "meet server URL is not configured".into(),
+                message: mezon_i18n::t(&locale, "channelVoice.sfuNotConfigured").to_string(),
             };
             cx.notify();
             return;
@@ -2121,9 +2578,13 @@ impl VoiceStore {
                 }
                 Err(e) => {
                     tracing::error!("failed to generate meet token: {e:#}");
+                    if this.connection.active_channel_id() != Some(channel_id.as_str()) {
+                        return;
+                    }
+                    let locale = current_locale(cx);
                     this.connection = VoiceConnection::Failed {
                         channel_id,
-                        message: e.to_string(),
+                        message: voice_join_error_message(&e, &locale),
                     };
                     cx.notify();
                 }
@@ -2155,19 +2616,46 @@ impl VoiceStore {
         let session_generation = self.session_generation;
         self._events_task = None;
         self.session = None;
+        self.awaiting_room_snapshot = true;
         let ice_servers = Self::ice_servers(cx);
-        let session = VoiceSession::connect(
-            ws_url,
+        let local_user_id = AccountStore::try_global(cx)
+            .and_then(|account| {
+                account
+                    .read(cx)
+                    .account
+                    .as_ref()
+                    .map(|me| me.user_id.to_string())
+            })
+            .unwrap_or_default();
+        let refresh_api = self.api.clone();
+        let refresh_channel = channel_id.clone();
+        let session = VoiceSession::connect(VoiceConnectOptions {
+            url: ws_url,
             token,
+            room: channel_id.clone(),
+            role: self.role,
+            local_user_id,
             input_device_id,
             output_device_id,
             camera_device_id,
             ice_servers,
-        );
+            refresh_token: Some(TokenRefresher::new(move || {
+                let api = refresh_api.clone();
+                let channel_id = refresh_channel.clone();
+                async move {
+                    match api.generate_meet_token(&channel_id, "").await {
+                        Ok(token) => Some(token),
+                        Err(e) => {
+                            tracing::warn!("voice token refresh failed: {e:#}");
+                            None
+                        }
+                    }
+                }
+            })),
+        });
         let events = session.events();
         self.frame_store = Some(session.frame_store());
         self.session = Some(session);
-        self.sync_noise_suppression();
 
         let task = cx.spawn(async move |this, cx| {
             let mut pending: Option<VoiceEvent> = None;
@@ -2263,7 +2751,7 @@ impl VoiceStore {
 
     fn reconnect_snapshot(&self, cx: &App) -> Option<VoiceReconnectSnapshot> {
         let (channel_id, clan_id) = self.active_connection_ids()?;
-        let ws_url = AppConfig::global(cx).meet_ws_url.clone();
+        let ws_url = AppConfig::global(cx).sfu_ws_url.clone();
         if ws_url.is_empty() {
             return None;
         }
@@ -2303,6 +2791,7 @@ impl VoiceStore {
 
     fn cancel_reconnect_watchdog(&mut self) {
         self.reconnect_generation = self.reconnect_generation.wrapping_add(1);
+        self.reconnect_token_fetches = 0;
         self._reconnect_watch_task = None;
     }
 
@@ -2320,8 +2809,18 @@ impl VoiceStore {
                 if !this.reconnect_still_pending(generation) {
                     return None;
                 }
-                this._reconnect_watch_task = None;
-                this.reconnect_snapshot(cx)
+                if this.reconnect_token_fetches >= MEET_TOKEN_RETRY_LIMIT {
+                    tracing::warn!(
+                        fetches = this.reconnect_token_fetches,
+                        "voice reconnect token retry limit reached; ending the call"
+                    );
+                    this.teardown(None, cx);
+                    cx.notify();
+                    return None;
+                }
+                let snapshot = this.reconnect_snapshot(cx)?;
+                this.reconnect_token_fetches += 1;
+                Some(snapshot)
             }) {
                 Ok(snapshot) => snapshot,
                 Err(_) => return,
@@ -2338,7 +2837,7 @@ impl VoiceStore {
                 match token {
                     Ok(token) => {
                         tracing::info!(
-                            "voice reconnect watchdog rebuilding LiveKit session for channel {}",
+                            "voice reconnect watchdog rebuilding SFU session for channel {}",
                             snapshot.channel_id
                         );
                         this.cached_meet_token = Some(CachedMeetToken {
@@ -2346,7 +2845,7 @@ impl VoiceStore {
                             token: token.clone(),
                             fetched_at: Instant::now(),
                         });
-                        this.restart_livekit_session(generation, snapshot, token, cx);
+                        this.restart_sfu_session(generation, snapshot, token, cx);
                     }
                     Err(e) => {
                         tracing::warn!("voice reconnect token refresh failed: {e:#}");
@@ -2358,6 +2857,12 @@ impl VoiceStore {
     }
 
     fn clear_session_handles(&mut self, mut window: Option<&mut Window>, cx: &mut Context<Self>) {
+        tracing::info!(
+            status = ?self.call_status,
+            generation = self.session_generation,
+            had_session = self.session.is_some(),
+            "voice session handles cleared"
+        );
         self.flush_recording(cx);
         self.recording = RecordingState::Idle;
         self.recording_elapsed = Duration::ZERO;
@@ -2385,7 +2890,7 @@ impl VoiceStore {
         self.flush_texture_drops(window, cx);
     }
 
-    fn restart_livekit_session(
+    fn restart_sfu_session(
         &mut self,
         generation: u64,
         snapshot: VoiceReconnectSnapshot,
@@ -2419,6 +2924,13 @@ impl VoiceStore {
             snapshot.camera_enabled,
             snapshot.screen_share,
         );
+        if self.is_audience()
+            && self.ptt_held
+            && !mezon_voice::microphone_denied()
+            && let Some(session) = &self.session
+        {
+            session.set_push_to_talk(true);
+        }
         if self.reconnect_still_pending(generation) {
             self.schedule_reconnect_recovery(generation, RECONNECT_STALL_TIMEOUT, cx);
         }
@@ -2453,6 +2965,8 @@ impl VoiceStore {
         }
         let reason = reason.trim();
         reason != "left"
+            && !reason.contains("invalid_token")
+            && !reason.contains("missing_token")
             && !reason.contains("ClientInitiated")
             && !reason.contains("ParticipantRemoved")
             && !reason.contains("RoomDeleted")
@@ -2475,26 +2989,26 @@ impl VoiceStore {
             VoiceEvent::Connected { room_name } => {
                 self.room_name = room_name;
                 self.cancel_reconnect_watchdog();
-                if let VoiceConnection::Connecting {
-                    channel_id,
-                    clan_id,
-                } = &self.connection
-                {
-                    self.connection = VoiceConnection::Connected {
-                        channel_id: channel_id.clone(),
-                        clan_id: clan_id.clone(),
-                    };
+                if self.connection.mark_connected() {
                     self.play_join_sound(cx);
                 }
                 self.call_status = VoiceCallStatus::Stable;
             }
+            VoiceEvent::RoomSnapshot => {
+                self.awaiting_room_snapshot = false;
+                self.join_sound_baseline_set = true;
+            }
             VoiceEvent::Reconnecting => {
                 self.call_status = VoiceCallStatus::Reconnecting;
+                self.awaiting_room_snapshot = true;
                 self.arm_reconnect_watchdog(RECONNECT_STALL_TIMEOUT, cx);
             }
             VoiceEvent::Reconnected => {
                 self.call_status = VoiceCallStatus::Stable;
                 self.cancel_reconnect_watchdog();
+                if self.connection.mark_connected() {
+                    self.play_join_sound(cx);
+                }
             }
             VoiceEvent::NetworkWeak => {
                 if !matches!(self.call_status, VoiceCallStatus::Reconnecting) {
@@ -2506,6 +3020,21 @@ impl VoiceStore {
                     self.call_status = VoiceCallStatus::Stable;
                 }
             }
+            VoiceEvent::RemovedFromChannel { cause, reason } => {
+                tracing::info!(?cause, "removed from voice channel: {reason}");
+                self.call_status = VoiceCallStatus::Stable;
+                self.teardown(None, cx);
+                cx.emit(VoiceStoreEvent::RemovedFromChannel(cause));
+            }
+            VoiceEvent::PushToTalkActive(active) => {
+                self.mic_enabled = active;
+                self.ptt_active = active;
+                cx.notify();
+            }
+            VoiceEvent::MutedByModerator => {
+                self.mic_enabled = false;
+                self.muted_by_moderator = true;
+            }
             VoiceEvent::DeviceResetToDefault { input } => {
                 let kind = if input {
                     DeviceKind::AudioInput
@@ -2516,6 +3045,11 @@ impl VoiceStore {
                 cx.notify();
             }
             VoiceEvent::Participants(mut list) => {
+                if let Some(config) = AppConfig::try_global(cx) {
+                    for participant in &mut list {
+                        participant.is_agent = config.is_voice_agent(&participant.identity);
+                    }
+                }
                 let refresh_scene = self.recording == RecordingState::Recording;
                 if !self.pending_removals.is_empty() {
                     let now = Instant::now();
@@ -2525,18 +3059,30 @@ impl VoiceStore {
                     });
                     list.retain(|p| !self.pending_removals.contains_key(&p.identity));
                 }
+                self.apply_simulated_participants(&mut list);
                 if self.participants == list {
                     return;
                 }
-                let remote_joined = self.join_sound_baseline_set
-                    && list.iter().any(|p| {
-                        !p.is_local
-                            && !p.is_agent
-                            && !self
-                                .participants
-                                .iter()
-                                .any(|old| old.identity == p.identity)
-                    });
+                let settling = self.awaiting_room_snapshot;
+                if settling {
+                    self.awaiting_room_snapshot = !list.iter().any(|p| !p.is_local);
+                }
+                let remote_arrived = list.iter().any(|p| {
+                    !p.is_local
+                        && !p.is_agent
+                        && !self
+                            .participants
+                            .iter()
+                            .any(|old| old.identity == p.identity)
+                });
+                let remote_joined = !settling && self.join_sound_baseline_set && remote_arrived;
+                if remote_arrived && !remote_joined {
+                    tracing::info!(
+                        settling,
+                        baseline = self.join_sound_baseline_set,
+                        "remote participant arrived; join sound suppressed"
+                    );
+                }
                 self.join_sound_baseline_set = true;
                 self.track_visual_ranks(&list);
                 self.participants = list;
@@ -2568,7 +3114,19 @@ impl VoiceStore {
                     return;
                 }
                 tracing::info!("voice disconnected: {reason}");
+                let unjoined_channel = match &self.connection {
+                    VoiceConnection::Connecting { channel_id, .. }
+                    | VoiceConnection::Failed { channel_id, .. } => Some(channel_id.clone()),
+                    _ => None,
+                };
                 self.teardown(None, cx);
+                if let Some(channel_id) = unjoined_channel {
+                    let locale = current_locale(cx);
+                    self.connection = VoiceConnection::Failed {
+                        channel_id,
+                        message: mezon_i18n::t(&locale, "channelVoice.joinFailed").to_string(),
+                    };
+                }
             }
             VoiceEvent::Error(message) => {
                 tracing::warn!("voice error: {message}");
@@ -2577,11 +3135,6 @@ impl VoiceStore {
                 } else if message.starts_with("screen:") {
                     self.screen_share_enabled = false;
                     self.last_screen_share = None;
-                } else if let VoiceConnection::Connecting { channel_id, .. } = &self.connection {
-                    self.connection = VoiceConnection::Failed {
-                        channel_id: channel_id.clone(),
-                        message,
-                    };
                 }
             }
         }
@@ -2599,7 +3152,102 @@ impl VoiceStore {
     }
 
     pub fn toggle_mic(&mut self, cx: &mut Context<Self>) {
+        if self.is_audience() {
+            return;
+        }
+        self.hold_to_talk = false;
         self.set_mic_enabled(!self.mic_enabled, cx);
+    }
+
+    pub fn role(&self) -> SfuRole {
+        self.role
+    }
+
+    pub fn pending_join_role(&self) -> SfuRole {
+        self.pending_join_role
+    }
+
+    pub fn join_role_menu_open(&self) -> bool {
+        self.join_role_menu_open
+    }
+
+    pub fn set_pending_join_role(&mut self, role: SfuRole, cx: &mut Context<Self>) {
+        self.pending_join_role = role;
+        self.join_role_menu_open = false;
+        cx.notify();
+    }
+
+    pub fn toggle_join_role_menu(&mut self, cx: &mut Context<Self>) {
+        self.join_role_menu_open = !self.join_role_menu_open;
+        cx.notify();
+    }
+
+    pub fn close_join_role_menu(&mut self, cx: &mut Context<Self>) {
+        if self.join_role_menu_open {
+            self.join_role_menu_open = false;
+            cx.notify();
+        }
+    }
+
+    pub fn is_audience(&self) -> bool {
+        self.role.is_audience()
+    }
+
+    pub fn push_to_talk_active(&self) -> bool {
+        self.ptt_active
+    }
+
+    pub fn ptt_hint_dismissed(&self) -> bool {
+        self.ptt_hint_dismissed
+    }
+
+    pub fn dismiss_ptt_hint(&mut self, cx: &mut Context<Self>) {
+        if !self.ptt_hint_dismissed {
+            self.ptt_hint_dismissed = true;
+            cx.notify();
+        }
+    }
+
+    pub fn set_push_to_talk(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.ptt_held == active {
+            return;
+        }
+        if !self.is_audience() {
+            self.set_hold_to_talk(active, cx);
+            return;
+        }
+        if active && mezon_voice::microphone_denied() {
+            self.mic_permission_denied = true;
+            cx.notify();
+            return;
+        }
+        self.mic_permission_denied = false;
+        self.ptt_held = active;
+        if let Some(session) = &self.session {
+            session.set_push_to_talk(active);
+        }
+        if !active {
+            self.ptt_active = false;
+            self.mic_enabled = false;
+        }
+        cx.notify();
+    }
+
+    fn set_hold_to_talk(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            return;
+        }
+        self.ptt_held = active;
+        if active {
+            if self.mic_enabled {
+                return;
+            }
+            self.set_mic_enabled(true, cx);
+            self.hold_to_talk = self.mic_enabled;
+        } else if self.hold_to_talk {
+            self.hold_to_talk = false;
+            self.set_mic_enabled(false, cx);
+        }
     }
 
     pub fn set_mic_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -2672,6 +3320,104 @@ impl VoiceStore {
 
     pub fn device_menu(&self) -> Option<DeviceMenuKind> {
         self.device_menu
+    }
+
+    pub fn request_interactive_app(&mut self, app: VoiceInteractiveApp, cx: &mut Context<Self>) {
+        if self.opened_interactive_apps.contains_key(&app) {
+            return;
+        }
+        let Some((voice_channel_id, clan_id)) = self.connection.connected_channel() else {
+            return;
+        };
+        let (Ok(voice_channel_id), Ok(clan_id)) =
+            (voice_channel_id.parse::<i64>(), clan_id.parse::<i64>())
+        else {
+            return;
+        };
+        let Some(user_id) = crate::BadgeService::try_global(cx)
+            .and_then(|badges| badges.read(cx).current_user_id(cx))
+            .map(|user_id| user_id.0)
+        else {
+            tracing::warn!("VoiceInteractiveEvent skipped: current user id is unavailable");
+            return;
+        };
+        let fingerprint = interactive_app_fingerprint(user_id, clan_id);
+        self.interactive_launches.remove(&(app, fingerprint));
+        let api = self.api.clone();
+        let params = if app == VoiceInteractiveApp::Blackboard {
+            format!("userId={user_id}")
+        } else {
+            String::new()
+        };
+        cx.spawn(async move |_this, _cx| {
+            match api
+                .write_voice_interactive_event(
+                    clan_id,
+                    voice_channel_id,
+                    user_id,
+                    user_id,
+                    app.event_type() as i32,
+                    params,
+                )
+                .await
+            {
+                Ok(Some(_event)) => {
+                    tracing::info!(
+                        clan_id,
+                        voice_channel_id,
+                        sender_id = user_id,
+                        receiver_id = user_id,
+                        event_type = app.event_type() as i32,
+                        "VoiceInteractiveEvent acknowledged with CID payload"
+                    );
+                }
+                Ok(None) => tracing::info!(
+                    clan_id,
+                    voice_channel_id,
+                    event_type = app.event_type() as i32,
+                    "VoiceInteractiveEvent acknowledged; waiting for realtime event"
+                ),
+                Err(error) => {
+                    tracing::warn!("write_voice_interactive_event failed: {error:#}");
+                }
+            }
+            if let Err(error) = api
+                .write_voice_reaction(vec![app_reaction_token(app)], voice_channel_id)
+                .await
+            {
+                tracing::warn!("interactive app voice reaction failed: {error:#}");
+            }
+        })
+        .detach();
+    }
+
+    pub fn has_active_interactive_apps(&self) -> bool {
+        !self.active_interactive_apps.is_empty()
+    }
+
+    pub fn has_opened_interactive_apps(&self) -> bool {
+        !self.opened_interactive_apps.is_empty()
+    }
+
+    pub fn is_interactive_app_active(&self, app: VoiceInteractiveApp) -> bool {
+        self.active_interactive_apps.contains_key(&app)
+    }
+
+    pub fn is_interactive_app_opened(&self, app: VoiceInteractiveApp) -> bool {
+        self.opened_interactive_apps.contains_key(&app)
+    }
+
+    pub fn join_interactive_app(&mut self, app: VoiceInteractiveApp, cx: &mut Context<Self>) {
+        if self.opened_interactive_apps.contains_key(&app) {
+            return;
+        }
+        let Some(&(sender_id, clan_id)) = self.active_interactive_apps.get(&app) else {
+            return;
+        };
+        let fingerprint = interactive_app_fingerprint(sender_id, clan_id);
+        self.interactive_launches.remove(&(app, fingerprint));
+        self.open_interactive_app(app, sender_id, clan_id, cx);
+        cx.notify();
     }
 
     pub fn device_submenu(&self) -> Option<DeviceKind> {
@@ -2807,6 +3553,33 @@ impl VoiceStore {
         cx.notify();
 
         self._recording_start = Some(cx.spawn(async move |this, cx| {
+            let deadline = Instant::now() + RECORDING_AVATAR_WARMUP;
+            while Instant::now() < deadline {
+                let loading = this
+                    .update(cx, |this, _| this.recording_avatars_loading())
+                    .unwrap_or(false);
+                if !loading {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(RECORDING_AVATAR_WARMUP_STEP)
+                    .await;
+            }
+            let still_starting = this
+                .update(cx, |this, cx| {
+                    if this.session_generation != generation
+                        || this.recording != RecordingState::Starting
+                    {
+                        return false;
+                    }
+                    this.publish_recording_scene(cx);
+                    true
+                })
+                .unwrap_or(false);
+            if !still_starting {
+                return;
+            }
+
             let started = cx
                 .background_executor()
                 .spawn(async move { starter.start(path, scene) })
@@ -2858,15 +3631,17 @@ impl VoiceStore {
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_default();
         let receiver = cx.prompt_for_new_path(&directory, Some(suggested.as_str()));
+        let fallback_directory = directory.clone();
+        let fallback_name = suggested.clone();
 
         self.recording = RecordingState::Starting;
         let generation = self.session_generation;
         cx.notify();
 
         self._recording_start = Some(cx.spawn(async move |this, cx| {
-            let path = match receiver.await {
-                Ok(Ok(Some(path))) => path,
-                Ok(Ok(None)) => {
+            let path = match crate::dialog::classify_dialog(receiver.await) {
+                crate::dialog::DialogOutcome::Picked(path) => path,
+                crate::dialog::DialogOutcome::Cancelled => {
                     tracing::info!("the recording save dialog was cancelled");
                     let _ = this.update(cx, |this, cx| {
                         this.recording = RecordingState::Idle;
@@ -2874,20 +3649,46 @@ impl VoiceStore {
                     });
                     return;
                 }
-                failed => {
-                    let reason = match failed {
-                        Ok(Err(error)) => error.to_string(),
-                        _ => "the save dialog is unavailable".to_string(),
-                    };
-                    tracing::error!("could not ask where to save the recording: {reason}");
+                crate::dialog::DialogOutcome::Lost => {
+                    tracing::warn!("the recording save dialog went away before answering");
                     let _ = this.update(cx, |this, cx| {
                         this.recording = RecordingState::Idle;
-                        cx.emit(VoiceStoreEvent::RecordingFinished(RecordingToast::Failed(
-                            reason,
-                        )));
                         cx.notify();
                     });
                     return;
+                }
+                crate::dialog::DialogOutcome::Unavailable(failure) => {
+                    tracing::warn!(
+                        "could not ask where to save the recording: {}",
+                        failure.reason
+                    );
+                    // Being asked is the convenience; the recording is the point. Keep
+                    // it under the name we suggested so a machine with no working file
+                    // dialog can still record.
+                    let reserved = cx
+                        .background_executor()
+                        .spawn(async move {
+                            mezon_client::reserve_path_in(&fallback_directory, &fallback_name)
+                        })
+                        .await;
+                    match reserved {
+                        Ok(path) => path,
+                        Err(error) => {
+                            tracing::error!("could not reserve a path for the recording: {error}");
+                            let _ = this.update(cx, |this, cx| {
+                                let locale = current_locale(cx);
+                                this.recording = RecordingState::Idle;
+                                cx.emit(VoiceStoreEvent::RecordingFinished(
+                                    RecordingToast::Failed(
+                                        mezon_i18n::t(&locale, "file.dialogUnavailable")
+                                            .to_string(),
+                                    ),
+                                ));
+                                cx.notify();
+                            });
+                            return;
+                        }
+                    }
                 }
             };
             let _ = this.update(cx, |this, cx| {
@@ -2937,6 +3738,119 @@ impl VoiceStore {
         .detach();
     }
 
+    fn recording_avatars_loading(&self) -> bool {
+        self.recording_avatars.values().any(|entry| entry.loading)
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn apply_simulated_participants(&self, _list: &mut Vec<VoiceParticipant>) {}
+
+    #[cfg(debug_assertions)]
+    fn apply_simulated_participants(&self, list: &mut Vec<VoiceParticipant>) {
+        for fake in &self.simulated_participants {
+            if !list.iter().any(|p| p.identity == fake.identity) {
+                list.push(fake.clone());
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn simulate_participants(&mut self, count: usize, cx: &mut Context<Self>) -> usize {
+        self.simulate_call(count, &SimulatedCall::default(), cx)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn simulate_call(
+        &mut self,
+        count: usize,
+        options: &SimulatedCall,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let previous: Vec<String> = self
+            .simulated_participants
+            .iter()
+            .map(|p| p.identity.clone())
+            .collect();
+        self.simulated_participants.clear();
+
+        if count > 0 {
+            let taken: HashSet<String> = self
+                .participants
+                .iter()
+                .filter(|p| !previous.contains(&p.identity))
+                .map(|p| p.identity.clone())
+                .collect();
+            let clan_id = self
+                .connection
+                .connected_channel()
+                .and_then(|(_, clan)| clan.parse::<i64>().ok());
+            let mut pool: Vec<(String, String)> = Vec::new();
+            if let Some(clan_id) = clan_id
+                && let Some(store) = ClanMembersStore::try_global(cx)
+            {
+                for member in store.read(cx).members(ClanId(clan_id)) {
+                    let identity = member.id().0.to_string();
+                    if taken.contains(&identity) {
+                        continue;
+                    }
+                    pool.push((identity, member.name().to_string()));
+                    if pool.len() == count {
+                        break;
+                    }
+                }
+            }
+            for index in pool.len()..count {
+                pool.push((
+                    format!("9000000000000000{index:03}"),
+                    format!("test.user{index}"),
+                ));
+            }
+
+            self.simulated_participants = pool
+                .into_iter()
+                .enumerate()
+                .map(|(index, (identity, name))| VoiceParticipant {
+                    session_id: identity.clone(),
+                    screenshare: (index == 0 && options.screenshare)
+                        .then_some(SIMULATED_SCREEN_KEY),
+                    identity,
+                    name,
+                    is_local: false,
+                    is_agent: false,
+                    is_audience: false,
+                    speaking: index == 0,
+                    muted: index % 3 == 2,
+                    camera: None,
+                    quality: NetworkQuality::Excellent,
+                })
+                .collect();
+        }
+
+        let mut list = self.participants.clone();
+        list.retain(|p| !previous.contains(&p.identity));
+        self.apply_simulated_participants(&mut list);
+        self.track_visual_ranks(&list);
+        self.participants = list;
+
+        let screen_owner = self
+            .simulated_participants
+            .first()
+            .filter(|_| options.screenshare)
+            .map(|p| p.session_id.clone());
+        self.focused_tile = match (&screen_owner, options.focus) {
+            (Some(identity), true) => Some(screen_tile_id(identity)),
+            _ => None,
+        };
+        self.fullscreen_screen =
+            (options.fullscreen && screen_owner.is_some()).then_some(SIMULATED_SCREEN_KEY);
+        self.member_strip_visible = options.member_strip;
+
+        self.fetch_missing_avatars(cx);
+        self.publish_recording_scene(cx);
+        cx.notify();
+        self.simulated_participants.len()
+    }
+
     fn fetch_missing_avatars(&mut self, cx: &mut Context<Self>) {
         let Some((_, clan)) = self.connection.connected_channel() else {
             return;
@@ -2944,35 +3858,72 @@ impl VoiceStore {
         let Ok(clan_id) = clan.parse::<i64>() else {
             return;
         };
-        let wanted: Vec<(String, String)> = self
-            .participants
-            .iter()
-            .filter(|p| !self.recording_avatars.contains_key(&p.identity))
-            .filter_map(|p| {
-                let uid = p.identity.parse::<i64>().ok()?;
-                let url = ClanMembersStore::try_global(cx).and_then(|store| {
-                    store
-                        .read(cx)
-                        .member(ClanId(clan_id), UserId(uid))
-                        .map(|m| m.avatar().to_string())
-                })?;
-                (!url.is_empty()).then_some((p.identity.clone(), url))
-            })
-            .collect();
+        let members = ClanMembersStore::try_global(cx);
+        let mut wanted: Vec<(String, String)> = Vec::new();
+        for participant in &self.participants {
+            let Ok(uid) = participant.identity.parse::<i64>() else {
+                continue;
+            };
+            let Some(source) = members.as_ref().and_then(|store| {
+                store
+                    .read(cx)
+                    .member(ClanId(clan_id), UserId(uid))
+                    .map(|m| m.avatar().to_string())
+            }) else {
+                continue;
+            };
+            if source.is_empty() {
+                continue;
+            }
+            let url = AppConfig::try_global(cx)
+                .map(|cfg| {
+                    cfg.imgproxy_url(&source, RECORDING_AVATAR_PX, RECORDING_AVATAR_PX, "fit")
+                })
+                .unwrap_or(source);
+            if self
+                .recording_avatars
+                .entry(participant.identity.clone())
+                .or_default()
+                .claim(&url)
+            {
+                wanted.push((participant.identity.clone(), url));
+            }
+        }
 
         for (identity, url) in wanted {
-            self.recording_avatars.insert(identity.clone(), None);
             cx.spawn(async move |this, cx| {
+                let fetch_url = url.clone();
                 let decoded = cx
                     .background_executor()
-                    .spawn(async move { load_avatar(&url).await })
+                    .spawn(async move { load_avatar(&fetch_url).await })
                     .await;
-                let _ = this.update(cx, |this, _| {
-                    this.recording_avatars.insert(identity, decoded);
+                let _ = this.update(cx, |this, cx| {
+                    let Some(entry) = this.recording_avatars.get_mut(&identity) else {
+                        return;
+                    };
+                    entry.settle(&url, decoded);
+                    this.publish_recording_scene(cx);
                 });
             })
             .detach();
         }
+    }
+
+    fn solo_recording_tile(&self) -> Option<String> {
+        solo_tile_for(
+            self.fullscreen_screen,
+            self.member_strip_visible,
+            self.focused_tile.as_deref(),
+            &self.participants,
+        )
+    }
+
+    fn fullscreen_recording_tile(&self) -> Option<String> {
+        let key = self.fullscreen_screen?;
+        self.participants
+            .iter()
+            .find(|p| p.screenshare == Some(key))
+            .map(|p| screen_tile_id(&p.session_id))
     }
 
     fn publish_recording_scene(&self, cx: &App) {
@@ -2980,37 +3931,55 @@ impl VoiceStore {
             return;
         };
         let focused = self.focused_tile();
+        let solo = self.solo_recording_tile();
+        let fullscreen = self.fullscreen_recording_tile();
         let mut tiles = Vec::new();
         for participant in &self.participants {
             let label = self.display_name_for(participant, cx);
             let avatar = self
                 .recording_avatars
                 .get(&participant.identity)
-                .cloned()
-                .flatten();
+                .and_then(|entry| entry.image.clone());
             if let Some(key) = participant.screenshare {
-                let id = screen_tile_id(&participant.identity);
-                tiles.push(mezon_voice::compose::SceneTile {
-                    focused: focused == Some(id.as_str()),
-                    key: id,
-                    label: label.clone(),
-                    initial: initial_of(&label),
-                    avatar: avatar.clone(),
-                    frame_key: Some(key),
-                    is_screen_share: true,
-                    speaking: false,
-                });
+                let id = screen_tile_id(&participant.session_id);
+                let solo_tile = solo.as_deref() == Some(id.as_str());
+                if solo.is_none() || solo_tile {
+                    let is_fullscreen = fullscreen.as_deref() == Some(id.as_str());
+                    let label = if is_fullscreen {
+                        String::new()
+                    } else {
+                        label.clone()
+                    };
+                    tiles.push(mezon_voice::compose::SceneTile {
+                        focused: solo_tile || focused == Some(id.as_str()),
+                        fullscreen: is_fullscreen,
+                        key: id,
+                        initial: initial_of(&label),
+                        label,
+                        avatar: avatar.clone(),
+                        frame_key: Some(key),
+                        is_screen_share: true,
+                        speaking: false,
+                        muted: participant.muted,
+                    });
+                }
             }
-            let id = camera_tile_id(&participant.identity);
+            let id = camera_tile_id(&participant.session_id);
+            let solo_tile = solo.as_deref() == Some(id.as_str());
+            if solo.is_some() && !solo_tile {
+                continue;
+            }
             tiles.push(mezon_voice::compose::SceneTile {
-                focused: focused == Some(id.as_str()),
+                focused: solo_tile || focused == Some(id.as_str()),
+                fullscreen: false,
                 key: id,
-                label: label.clone(),
                 initial: initial_of(&label),
-                avatar: avatar.clone(),
+                label,
+                avatar,
                 frame_key: participant.camera,
                 is_screen_share: false,
                 speaking: participant.speaking,
+                muted: participant.muted,
             });
         }
         session.record_scene().set(tiles);
@@ -3107,11 +4076,14 @@ impl VoiceStore {
         self.cancel_reconnect_watchdog();
         self.close_pip(cx);
         self.fullscreen_screen = None;
+        self.member_strip_visible = true;
         self.clear_session_handles(window, cx);
         self.connection = VoiceConnection::Idle;
         self.call_status = VoiceCallStatus::Stable;
         self.channel_label.clear();
         self.mic_enabled = false;
+        self.hold_to_talk = false;
+        self.ptt_held = false;
         self.mic_permission_denied = false;
         self.camera_enabled = false;
         self.screen_share_enabled = false;
@@ -3123,10 +4095,14 @@ impl VoiceStore {
         self.device_menu = None;
         self.device_submenu = None;
         self.participant_menu = None;
+        self.interactive_launches.clear();
+        self.active_interactive_apps.clear();
+        self.opened_interactive_apps.clear();
         self.pending_kick = None;
         self.pending_removals.clear();
         self.moderation_error = None;
         self.agent_pending = false;
+        self.agent_channels.clear();
         self.participants.clear();
         self.join_ranks.clear();
         self.speak_ranks.clear();
@@ -3148,6 +4124,8 @@ impl VoiceStore {
         self.last_emoji_at = None;
         self.last_flower_send = None;
         self.last_flower_effect_at = None;
+        self.shown_flowers.clear();
+        self.flower_seq = 0;
         self.meet_token_prefetching = None;
         self.last_screen_share = None;
         self.link_copied = false;
@@ -3224,12 +4202,222 @@ pub async fn upload_sound_file(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use super::parse_raise_token;
-    use super::{MAX_SOUND_BYTES, validate_sound_file};
+    use super::{
+        FLOWER_DEDUP_WINDOW, INTERACTIVE_LAUNCH_DEDUP_TTL, MAX_SOUND_BYTES,
+        RECORDING_AVATAR_MAX_ATTEMPTS, RecordingAvatar, VoiceConnection, flower_pair_key,
+        is_duplicate_flower, is_duplicate_interactive_launch, redact_interactive_app_url,
+        release_interactive_window, solo_tile_for, validate_sound_file, voice_join_error_message,
+    };
+    use crate::{VoiceInteractiveApp, VoiceInteractiveEventType};
     use gpui::RenderImage;
     use parking_lot::Mutex;
+
+    #[test]
+    fn a_closed_window_from_an_earlier_launch_does_not_release_the_current_one() {
+        let app = VoiceInteractiveApp::Quiz;
+        let mut opened = HashMap::from([(app, 2u64)]);
+        assert!(!release_interactive_window(&mut opened, app, 1));
+        assert!(
+            opened.contains_key(&app),
+            "after reset() and a relaunch the first window's exit must leave the new window \
+             marked open, or Launch/Join reappear while it is still on screen"
+        );
+        assert!(release_interactive_window(&mut opened, app, 2));
+        assert!(opened.is_empty());
+        assert!(!release_interactive_window(&mut opened, app, 2));
+    }
+
+    #[test]
+    fn an_open_member_strip_records_everyone() {
+        let people = [
+            voice_participant("1", Some(7)),
+            voice_participant("2", None),
+        ];
+        assert_eq!(
+            solo_tile_for(None, true, Some(&screen_tile_id("1")), &people),
+            None
+        );
+    }
+
+    #[test]
+    fn a_closed_member_strip_records_only_the_focused_tile() {
+        let people = [
+            voice_participant("1", Some(7)),
+            voice_participant("2", None),
+        ];
+        assert_eq!(
+            solo_tile_for(None, false, Some(&screen_tile_id("1")), &people),
+            Some(screen_tile_id("1"))
+        );
+        assert_eq!(
+            solo_tile_for(None, false, Some(&camera_tile_id("2")), &people),
+            Some(camera_tile_id("2"))
+        );
+    }
+
+    #[test]
+    fn a_closed_strip_with_nothing_focused_still_records_the_grid() {
+        let people = [voice_participant("1", None)];
+        assert_eq!(solo_tile_for(None, false, None, &people), None);
+    }
+
+    #[test]
+    fn a_fullscreen_share_records_only_that_share() {
+        let people = [
+            voice_participant("1", Some(7)),
+            voice_participant("2", None),
+        ];
+        assert_eq!(
+            solo_tile_for(Some(7), true, Some(&camera_tile_id("2")), &people),
+            Some(screen_tile_id("1"))
+        );
+    }
+
+    #[test]
+    fn a_fullscreen_key_whose_sharer_left_records_nothing_extra() {
+        let people = [voice_participant("2", None)];
+        assert_eq!(solo_tile_for(Some(7), true, None, &people), None);
+    }
+
+    fn avatar_pixel() -> Arc<mezon_voice::compose::AvatarImage> {
+        Arc::new(mezon_voice::compose::AvatarImage {
+            width: 1,
+            height: 1,
+            bgra: vec![0, 0, 0, 255],
+        })
+    }
+
+    #[test]
+    fn a_loaded_avatar_is_not_fetched_again() {
+        let mut slot = RecordingAvatar::default();
+        assert!(slot.claim("https://cdn/a.png"));
+        slot.settle("https://cdn/a.png", Some(avatar_pixel()));
+        assert!(!slot.claim("https://cdn/a.png"));
+    }
+
+    #[test]
+    fn a_changed_avatar_drops_the_picture_it_replaces() {
+        let mut slot = RecordingAvatar::default();
+        assert!(slot.claim("https://cdn/old.png"));
+        slot.settle("https://cdn/old.png", Some(avatar_pixel()));
+
+        assert!(slot.claim("https://cdn/new.png"));
+        assert!(
+            slot.image.is_none(),
+            "the recording must not keep drawing the old avatar"
+        );
+    }
+
+    #[test]
+    fn a_fetch_that_lands_after_the_avatar_changed_is_ignored() {
+        let mut slot = RecordingAvatar::default();
+        assert!(slot.claim("https://cdn/old.png"));
+        assert!(slot.claim("https://cdn/new.png"));
+
+        slot.settle("https://cdn/old.png", Some(avatar_pixel()));
+        assert!(slot.image.is_none());
+        assert!(slot.loading, "the newer fetch is still in flight");
+    }
+
+    #[test]
+    fn a_failed_fetch_retries_a_bounded_number_of_times() {
+        let mut slot = RecordingAvatar::default();
+        for _ in 0..RECORDING_AVATAR_MAX_ATTEMPTS {
+            assert!(slot.claim("https://cdn/a.png"));
+            slot.settle("https://cdn/a.png", None);
+        }
+        assert!(
+            !slot.claim("https://cdn/a.png"),
+            "a URL that keeps failing must stop hitting the CDN every tick"
+        );
+        assert!(
+            slot.claim("https://cdn/b.png"),
+            "a new URL starts over from a clean slot"
+        );
+    }
+
+    #[test]
+    fn a_recovered_fetch_clears_the_failure_count() {
+        let mut slot = RecordingAvatar::default();
+        assert!(slot.claim("https://cdn/a.png"));
+        slot.settle("https://cdn/a.png", None);
+        assert!(slot.claim("https://cdn/a.png"));
+        slot.settle("https://cdn/a.png", Some(avatar_pixel()));
+        assert_eq!(slot.attempts, 0);
+    }
+
+    #[test]
+    fn interactive_app_type_maps_only_app_events() {
+        assert_eq!(
+            VoiceInteractiveApp::from_event_type(VoiceInteractiveEventType::AppQuiz as i32),
+            Some(VoiceInteractiveApp::Quiz)
+        );
+        assert_eq!(
+            VoiceInteractiveApp::from_event_type(VoiceInteractiveEventType::AppBlackboard as i32),
+            Some(VoiceInteractiveApp::Blackboard)
+        );
+        assert_eq!(
+            VoiceInteractiveApp::from_event_type(VoiceInteractiveEventType::AppInteractive as i32),
+            Some(VoiceInteractiveApp::Interactive)
+        );
+        assert_eq!(
+            VoiceInteractiveApp::from_event_type(VoiceInteractiveEventType::Gift as i32),
+            None
+        );
+        assert_eq!(VoiceInteractiveApp::from_event_type(999), None);
+    }
+
+    #[test]
+    fn interactive_app_log_url_redacts_signed_data() {
+        assert_eq!(
+            redact_interactive_app_url(
+                "https://quiz.mezon.ai/?data=signed-secret&clanId=42&clanName=Class"
+            ),
+            "https://quiz.mezon.ai/?data=REDACTED&clanId=42&clanName=Class"
+        );
+        assert_eq!(
+            redact_interactive_app_url(
+                "https://quiz.mezon.ai/?appdata=keep-data%3D&data=signed-secret&clanId=42"
+            ),
+            "https://quiz.mezon.ai/?appdata=keep-data%3D&data=REDACTED&clanId=42"
+        );
+        assert_eq!(
+            redact_interactive_app_url("not a URL?data=signed-secret"),
+            "<invalid interactive app URL>"
+        );
+    }
+
+    #[test]
+    fn interactive_launch_dedup_is_keyed_by_app_and_initiator() {
+        let now = std::time::Instant::now();
+        let mut launches = std::collections::HashMap::new();
+        let quiz = (VoiceInteractiveApp::Quiz, 1);
+        let blackboard = (VoiceInteractiveApp::Blackboard, 2);
+        assert!(!is_duplicate_interactive_launch(&mut launches, quiz, now));
+        launches.insert(quiz, now);
+        assert!(!is_duplicate_interactive_launch(
+            &mut launches,
+            blackboard,
+            now
+        ));
+        launches.insert(blackboard, now);
+        assert!(is_duplicate_interactive_launch(&mut launches, quiz, now));
+        assert!(!is_duplicate_interactive_launch(
+            &mut launches,
+            (VoiceInteractiveApp::Quiz, 3),
+            now
+        ));
+        assert!(!is_duplicate_interactive_launch(
+            &mut launches,
+            quiz,
+            now + INTERACTIVE_LAUNCH_DEDUP_TTL
+        ));
+    }
 
     #[test]
     fn validate_sound_file_rejects_mismatched_extension() {
@@ -3282,16 +4470,40 @@ mod tests {
 
     fn voice_participant(identity: &str, screenshare: Option<u64>) -> VoiceParticipant {
         VoiceParticipant {
+            session_id: identity.to_string(),
             identity: identity.to_string(),
             name: identity.to_string(),
             is_local: false,
             is_agent: false,
+            is_audience: false,
             speaking: false,
             muted: false,
             camera: None,
             screenshare,
             quality: NetworkQuality::Unknown,
         }
+    }
+
+    #[test]
+    fn focus_tracks_the_device_when_one_account_shares_twice() {
+        let mut first = voice_participant("same-account", Some(11));
+        first.session_id = "device-1".into();
+        let mut second = voice_participant("same-account", Some(22));
+        second.session_id = "device-2".into();
+        let focused = screen_tile_id(&first.session_id);
+        let participants = vec![second.clone(), first];
+        assert_eq!(
+            screen_auto_focus_transition(&participants, Some(&focused)),
+            ScreenAutoFocus::Keep
+        );
+        assert_eq!(
+            super::solo_tile_for(Some(22), true, None, &participants),
+            Some(screen_tile_id(&second.session_id))
+        );
+        assert_eq!(
+            screen_auto_focus_transition(&[second.clone()], Some(&focused)),
+            ScreenAutoFocus::Focus(screen_tile_id(&second.session_id))
+        );
     }
 
     #[test]
@@ -3395,12 +4607,108 @@ mod tests {
     }
 
     #[test]
+    fn active_channel_id_only_tracks_connecting_and_connected() {
+        assert_eq!(
+            VoiceConnection::Connecting {
+                channel_id: "a".into(),
+                clan_id: "1".into(),
+            }
+            .active_channel_id(),
+            Some("a")
+        );
+        assert_eq!(
+            VoiceConnection::Connected {
+                channel_id: "a".into(),
+                clan_id: "1".into(),
+            }
+            .active_channel_id(),
+            Some("a")
+        );
+        assert_eq!(
+            VoiceConnection::Failed {
+                channel_id: "a".into(),
+                message: "boom".into(),
+            }
+            .active_channel_id(),
+            None
+        );
+        assert_eq!(VoiceConnection::Idle.active_channel_id(), None);
+    }
+
+    #[test]
+    fn mark_connected_only_promotes_a_pending_connection() {
+        let mut connection = VoiceConnection::Connecting {
+            channel_id: "a".into(),
+            clan_id: "1".into(),
+        };
+        assert!(connection.mark_connected());
+        assert_eq!(
+            connection,
+            VoiceConnection::Connected {
+                channel_id: "a".into(),
+                clan_id: "1".into(),
+            }
+        );
+        assert!(!connection.mark_connected());
+        assert_eq!(connection.connected_channel(), Some(("a", "1")));
+
+        let mut idle = VoiceConnection::Idle;
+        assert!(!idle.mark_connected());
+        assert_eq!(idle, VoiceConnection::Idle);
+
+        let mut failed = VoiceConnection::Failed {
+            channel_id: "a".into(),
+            message: "boom".into(),
+        };
+        assert!(!failed.mark_connected());
+        assert_eq!(failed.active_channel_id(), None);
+    }
+
+    #[test]
+    fn voice_join_error_maps_typed_api_status_and_generic() {
+        let permission_denied: anyhow::Error = mezon_client::ApiStatusError { code: 7 }.into();
+        assert_eq!(
+            voice_join_error_message(&permission_denied, "en"),
+            mezon_i18n::api_error("en", 7)
+        );
+        assert_eq!(
+            voice_join_error_message(&anyhow::anyhow!("empty body (code=0)"), "en"),
+            mezon_i18n::t("en", "channelVoice.joinFailed")
+        );
+        assert_eq!(
+            voice_join_error_message(&anyhow::anyhow!("invalid_token"), "en"),
+            mezon_i18n::t("en", "channelVoice.joinFailed")
+        );
+    }
+
+    #[test]
     fn parse_raise_token_classifies_prefixes() {
         assert_eq!(parse_raise_token("raising-up:123"), Some(true));
         assert_eq!(parse_raise_token("raising-down:123"), Some(false));
         assert_eq!(parse_raise_token("sound:https://x.mp3"), None);
         assert_eq!(parse_raise_token(":smile:"), None);
         assert_eq!(parse_raise_token(""), None);
+    }
+
+    #[test]
+    fn the_second_copy_of_one_flower_is_dropped_but_a_later_one_is_not() {
+        let mut shown = HashMap::new();
+        let now = Instant::now();
+        let pair = flower_pair_key("10", "20");
+        assert!(!is_duplicate_flower(&mut shown, &pair, now));
+        shown.insert(pair.clone(), now);
+
+        let reaction_arrives = now + Duration::from_millis(30);
+        assert!(is_duplicate_flower(&mut shown, &pair, reaction_arrives));
+        assert!(!is_duplicate_flower(
+            &mut shown,
+            &flower_pair_key("10", "21"),
+            reaction_arrives
+        ));
+
+        let window_passed = now + FLOWER_DEDUP_WINDOW + Duration::from_millis(1);
+        assert!(!is_duplicate_flower(&mut shown, &pair, window_passed));
+        assert!(shown.is_empty());
     }
 
     #[test]

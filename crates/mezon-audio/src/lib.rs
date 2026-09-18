@@ -5,7 +5,7 @@ mod stream;
 
 pub use decode::{DecodedPcm, decode_audio, sniff_sound_mime};
 pub use encode::{VoiceEncoder, VoiceRecording};
-pub use playback::AudioPlayer;
+pub use playback::{AudioPlayer, set_output_device};
 pub use stream::{PcmStream, spawn_stream_decode};
 
 #[derive(Debug, thiserror::Error)]
