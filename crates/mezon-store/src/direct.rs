@@ -625,8 +625,9 @@ impl DirectMessageStore {
         cx.spawn(async move |this, cx| {
             let desc = api.create_direct_channel(&[user_id.0]).await?;
             let channel_id = ChannelId(desc.channel_id);
-            let channel_type = desc.channel_type as i32;
-            let send_mode = DirectKind::Dm.stream_mode();
+            let kind = DirectKind::from_raw(desc.channel_type);
+            let channel_type = kind.channel_type();
+            let send_mode = kind.stream_mode();
 
             this.update(cx, |this, cx| {
                 let (peer_username, peer_avatar) =
@@ -666,12 +667,8 @@ impl DirectMessageStore {
                 cx.notify();
             })?;
 
-            if let Err(e) = api
-                .join_chat(0, channel_id.get(), channel_type, false)
-                .await
-            {
-                tracing::warn!("join_chat after create DM failed: {e}");
-            }
+            api.join_chat(0, channel_id.get(), channel_type, false)
+                .await?;
 
             let content_json = body.into_content_json();
             let sent = api

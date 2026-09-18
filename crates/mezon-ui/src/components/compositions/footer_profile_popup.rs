@@ -5,12 +5,14 @@ use gpui::{
     Focusable, FontWeight, SharedString, Subscription, Task, Window, deferred, div, prelude::*, px,
 };
 use mezon_store::{
-    AccountStore, BadgeService, Settings, UserPresence, WalletStore, current_user_status,
+    AccountStore, BadgeService, DirectMessageBody, DirectMessageStore, Settings, UserId,
+    UserPresence, WalletStore, current_user_status,
 };
 
 use crate::chat::message::{CustomStatusModal, SendTokenModal, TransactionHistoryModal};
 use crate::components::compositions::CustomStatusBubble;
-use crate::components::primitives::{Avatar, Icon, IconName};
+use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, InputState};
+use crate::router::{Route, navigate};
 use crate::theme::ActiveTheme;
 use crate::util::user_status::{status_color, status_glyph, status_label_key};
 
@@ -68,9 +70,12 @@ pub struct FooterProfilePopup {
     status_menu_open: bool,
     status_duration_for: Option<UserPresence>,
     custom_status_bubble: Entity<CustomStatusBubble>,
+    message_input: Entity<InputState>,
+    sending_message: bool,
     user_id_copied: bool,
     _copy_user_id_reset: Option<Task<()>>,
     _account_sub: Option<Subscription>,
+    _input_sub: Subscription,
 }
 
 impl Focusable for FooterProfilePopup {
@@ -82,7 +87,7 @@ impl Focusable for FooterProfilePopup {
 impl EventEmitter<DismissEvent> for FooterProfilePopup {}
 
 impl FooterProfilePopup {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let locale: SharedString = Settings::try_global(cx)
             .map(|s| s.read(cx).language.clone())
             .unwrap_or_default()
@@ -127,6 +132,21 @@ impl FooterProfilePopup {
                 this.sync_avatar(cx);
             })
         });
+        let message_ph = mezon_i18n::t(&locale, "userProfile.placeholders.messageUser")
+            .replace("{{username}}", &display_name);
+        let message_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(message_ph)
+                .text_size(px(14.))
+        });
+        let input_sub = cx.subscribe(
+            &message_input,
+            |this: &mut Self, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::PressEnter) {
+                    this.send_message(cx);
+                }
+            },
+        );
 
         Self {
             focus_handle: cx.focus_handle(),
@@ -142,9 +162,12 @@ impl FooterProfilePopup {
             status_menu_open: false,
             status_duration_for: None,
             custom_status_bubble: cx.new(|_| CustomStatusBubble::new()),
+            message_input,
+            sending_message: false,
             user_id_copied: false,
             _copy_user_id_reset: None,
             _account_sub: account_sub,
+            _input_sub: input_sub,
         }
     }
 
@@ -204,6 +227,63 @@ impl FooterProfilePopup {
         }));
     }
 
+    fn send_message(&mut self, cx: &mut Context<Self>) {
+        if self.sending_message || self.username.is_empty() {
+            return;
+        }
+        let content = self.message_input.read(cx).value().trim().to_string();
+        if content.is_empty() {
+            return;
+        }
+        let Ok(user_id_raw) = self.user_id.parse::<i64>() else {
+            return;
+        };
+        if user_id_raw == 0 {
+            return;
+        }
+        self.sending_message = true;
+        cx.notify();
+        let user_id = UserId(user_id_raw);
+        let label = self.display_name.to_string();
+        let avatar = self.avatar_raw.to_string();
+        let username = self.username.to_string();
+        let task = DirectMessageStore::global(cx).update(cx, |store, cx| {
+            store.create_dm_and_send_text(
+                user_id,
+                label,
+                avatar,
+                username,
+                DirectMessageBody::Text(content),
+                cx,
+            )
+        });
+        cx.spawn(async move |this, cx| match task.await {
+            Ok((channel_id, channel_type)) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.sending_message = false;
+                    cx.emit(DismissEvent);
+                });
+                cx.update(|cx| {
+                    navigate(
+                        cx,
+                        Route::DirectMessage {
+                            direct_id: channel_id,
+                            message_type: channel_type.to_string(),
+                        },
+                    );
+                });
+            }
+            Err(err) => {
+                tracing::warn!("footer profile message send failed: {err}");
+                let _ = this.update(cx, |this, cx| {
+                    this.sending_message = false;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
     fn apply_status(
         &mut self,
         status: UserPresence,
@@ -256,6 +336,11 @@ impl Render for FooterProfilePopup {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let locale = self.locale.clone();
         let tk = |key: &'static str| mezon_i18n::t(&locale, key).to_string();
+        let message_placeholder = mezon_i18n::t(&locale, "userProfile.placeholders.messageUser")
+            .replace("{{username}}", self.display_name.as_ref());
+        self.message_input.update(cx, |input, cx| {
+            input.set_placeholder(message_placeholder, cx);
+        });
         let (
             bg_banner,
             bg_card,
@@ -734,7 +819,37 @@ impl Render for FooterProfilePopup {
                             .flex()
                             .flex_col()
                             .child(identity)
-                            .child(actions),
+                            .child(actions)
+                            .when(!self.username.is_empty() && !self.sending_message, |card| {
+                                card.child(
+                                    div()
+                                        .occlude()
+                                        .mt_2()
+                                        .rounded(px(5.))
+                                        .border_1()
+                                        .border_color(border)
+                                        .bg(bg_status_menu)
+                                        .child(
+                                            Input::new(&self.message_input)
+                                                .w_full()
+                                                .text_color(text_primary),
+                                        ),
+                                )
+                            })
+                            .when(self.username.is_empty(), |card| {
+                                card.child(
+                                    div()
+                                        .mt_2()
+                                        .p_2()
+                                        .rounded(px(5.))
+                                        .text_center()
+                                        .text_sm()
+                                        .italic()
+                                        .bg(bg_box)
+                                        .text_color(text_primary)
+                                        .child(tk("userProfile.labels.userNotFound")),
+                                )
+                            }),
                     ),
             )
             .when(has_custom, |popup| popup.child(custom_status_overlay))

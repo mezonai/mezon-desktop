@@ -4946,11 +4946,8 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("join_chat error: code={code}");
-        }
-        Ok(())
+        let (code, response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        complete_realtime_control_request("join_chat", code, &response)
     }
 
     pub async fn write_voice_reaction(&self, emojis: Vec<String>, channel_id: i64) -> Result<()> {
@@ -10221,6 +10218,20 @@ fn realtime_error_from_body(body: &[u8]) -> Option<realtime::Error> {
     }
 }
 
+fn complete_realtime_control_request(action: &str, code: u32, response: &[u8]) -> Result<()> {
+    if let Some(error) = realtime_error_from_body(response) {
+        anyhow::bail!(
+            "{action} error: code={} {}",
+            error.code,
+            error.message.trim()
+        );
+    }
+    if code != 0 {
+        anyhow::bail!("{action} error: code={code}");
+    }
+    Ok(())
+}
+
 fn api_response_or_realtime_error(code: u32, api_name: &str) -> Result<()> {
     if code != 0 {
         tracing::error!(target: "socket", "{api_name} failed: code={code}");
@@ -12175,6 +12186,25 @@ mod tests {
     fn meet_token_raw_jwt_is_accepted() {
         let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
         assert_eq!(meet_token_from_raw_body(0, jwt.as_bytes()).unwrap(), jwt);
+    }
+
+    #[test]
+    fn join_chat_rejects_a_realtime_error_envelope() {
+        let body = realtime::Envelope {
+            cid: 7,
+            message: Some(realtime::envelope::Message::Error(realtime::Error {
+                code: 403,
+                message: "Not allowed".into(),
+                context: Default::default(),
+            })),
+        }
+        .encode_to_vec();
+        let err = complete_realtime_control_request("join_chat", 0, &body).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("join_chat error: code=403 Not allowed"),
+            "{message}"
+        );
     }
 
     #[test]

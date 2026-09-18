@@ -79,14 +79,14 @@ impl UserInfoBar {
         true
     }
 
-    fn toggle_profile_popup(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_profile_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.profile_popup.is_some() {
             self.profile_popup = None;
             self._popup_sub = None;
             cx.notify();
             return;
         }
-        let popup = cx.new(FooterProfilePopup::new);
+        let popup = cx.new(|cx| FooterProfilePopup::new(window, cx));
         self._popup_sub = Some(cx.subscribe(&popup, |this, _, _: &DismissEvent, cx| {
             this.profile_popup = None;
             cx.notify();
