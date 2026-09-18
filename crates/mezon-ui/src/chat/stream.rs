@@ -999,10 +999,10 @@ fn volume_icon(volume: f32, muted: bool) -> IconName {
     }
 }
 
-fn render_stream_thumbnail(channel: &Channel, _cx: &App) -> AnyElement {
+fn render_stream_thumbnail(channel: &Channel, cx: &App) -> AnyElement {
     let raw = channel.avatar_url.trim();
     if !raw.is_empty() && raw != "0" {
-        let raw = SharedString::from(raw.to_string());
+        let raw = SharedString::from(crate::util::imgproxy::stream_cover_url(cx, raw));
         return img(raw)
             .size_full()
             .object_fit(ObjectFit::Cover)
