@@ -13,8 +13,8 @@ use gpui::{
 };
 use mezon_store::{
     AccountStore, AttachmentSeedInput, ChannelId, ClanMembersStore, DirectMessageStore, Embed,
-    Message, MessageAttachment, MessageId, MessageSpan, MessagesStore, PinnedMessage,
-    PinnedMessagesStore, PollData, RichLayout, Settings, UserId, UsersByUserStore,
+    Message, MessageAttachment, MessageId, MessageSpan, MessagesEvent, MessagesStore,
+    PinnedMessage, PinnedMessagesStore, PollData, RichLayout, Settings, UserId, UsersByUserStore,
     strip_code_fence,
 };
 use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
@@ -56,6 +56,22 @@ const EMPTY_BODY_HEIGHT: f32 = 144.;
 const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 const ATTACHMENT_PREVIEW_SIZE: f32 = 120.;
 
+fn pin_attachments_match(left: &[MessageAttachment], right: &[MessageAttachment]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.url == right.url
+                && left.filename == right.filename
+                && left.filetype == right.filetype
+                && left.proxied_src == right.proxied_src
+                && left.thumbnail == right.thumbnail
+                && left.thumbnail_proxied == right.thumbnail_proxied
+                && left.width == right.width
+                && left.height == right.height
+                && left.size == right.size
+                && left.duration == right.duration
+        })
+}
+
 #[derive(Clone)]
 struct PinCardVm {
     pin_id: SharedString,
@@ -91,6 +107,17 @@ impl PinCardVm {
         let (poll, poll_my_vote) = resolve_pin_poll(msg, channel_id, cx);
         let text_spans = prepare_pin_text_spans(msg);
         let selectable_text = pin_canonical_text(msg, &text_spans);
+        let mut pin = msg.clone();
+        if let Some(channel_id) = channel_id
+            && !pin.attachments_from_source
+            && let Ok(message_id) = msg.message_id.parse::<MessageId>()
+            && let Some(message) = MessagesStore::global(cx)
+                .read(cx)
+                .message_in_channel(channel_id, message_id)
+            && !message.attachments.is_empty()
+        {
+            pin.attachments = msg.preview_attachments(Some(message)).to_vec();
+        }
         Self {
             pin_id: msg.id.clone().into(),
             message_id: msg.message_id.clone().into(),
@@ -99,7 +126,7 @@ impl PinCardVm {
             is_anonymous: mezon_store::is_anonymous_sender_id(&msg.sender_id, cx),
             avatar_src,
             avatar_fallback,
-            pin: Arc::new(msg.clone()),
+            pin: Arc::new(pin),
             text_spans,
             selectable_text,
             poll,
@@ -169,6 +196,7 @@ fn pinned_message_from_chat_message(msg: &Message) -> PinnedMessage {
         ogp: msg.ogp.clone(),
         embeds: msg.embeds.clone(),
         attachments: msg.attachments.clone(),
+        attachments_from_source: false,
         poll: msg.poll.clone(),
         create_time: msg.create_time,
     }
@@ -217,6 +245,24 @@ impl PinnedPopoverPanel {
                 this.pin_cards = this.compute_pin_cards(cx);
                 cx.notify();
             }),
+            cx.subscribe(
+                &MessagesStore::global(cx),
+                |this, _, event, cx| match event {
+                    MessagesEvent::Updated { message_id } => {
+                        this.refresh_attachment_rows(*message_id, cx);
+                    }
+                    MessagesEvent::Reset { .. }
+                    | MessagesEvent::Resized { .. }
+                    | MessagesEvent::Shifted { .. } => this.refresh_attachment_rows(None, cx),
+                    MessagesEvent::TopicUpdated { topic_id }
+                        if PinnedMessagesStore::global(cx).read(cx).channel_id()
+                            == Some(ChannelId(*topic_id)) =>
+                    {
+                        this.refresh_attachment_rows(None, cx);
+                    }
+                    _ => {}
+                },
+            ),
             cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
                 this.refresh_name_rows(cx);
             }),
@@ -259,6 +305,42 @@ impl PinnedPopoverPanel {
         };
         panel.pin_cards = panel.compute_pin_cards(cx);
         panel
+    }
+
+    fn refresh_attachment_rows(&mut self, message_id: Option<MessageId>, cx: &mut Context<Self>) {
+        let pins = PinnedMessagesStore::global(cx).read(cx);
+        let Some(channel_id) = pins.channel_id() else {
+            return;
+        };
+        let messages = MessagesStore::global(cx).read(cx);
+        let mut changed = false;
+        for (index, vm) in self.pin_cards.iter_mut().enumerate() {
+            if vm.pin.attachments_from_source {
+                continue;
+            }
+            let Ok(id) = vm.message_id.parse::<MessageId>() else {
+                continue;
+            };
+            if message_id.is_some_and(|message_id| message_id != id) {
+                continue;
+            }
+            let Some(message) = messages.message_in_channel(channel_id, id) else {
+                continue;
+            };
+            if message.attachments.is_empty()
+                || pin_attachments_match(&vm.pin.attachments, &message.attachments)
+            {
+                continue;
+            }
+            Arc::make_mut(&mut vm.pin).attachments = message.attachments.clone();
+            if index < self.list_state.item_count() {
+                self.list_state.remeasure_items(index..index + 1);
+            }
+            changed = true;
+        }
+        if changed {
+            cx.notify();
+        }
     }
 
     fn refresh_name_rows(&mut self, cx: &mut Context<Self>) {
