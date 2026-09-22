@@ -7,9 +7,9 @@ use gpui::{
 };
 use mezon_store::activity::{ACTIVITY_TYPE_LIVE, ACTIVITY_TYPE_PLAY, ACTIVITY_TYPE_WORK};
 use mezon_store::{
-    ActivityEvent, ActivityStore, BadgeService, DirectMessageStore, DmAvatarPresence, Friend,
-    FriendEvent, FriendState, FriendStore, PresenceEvent, PresenceStore, Settings, UserActivity,
-    UserId, current_user_presence,
+    ActivityEvent, ActivityStore, BadgeService, ChannelId, DirectMessageStore, DmAvatarPresence,
+    Friend, FriendEvent, FriendState, FriendStore, PresenceEvent, PresenceStore, Settings,
+    UserActivity, UserId, current_user_presence,
 };
 
 use crate::app::shell::{FriendRemovalKind, Shell};
@@ -693,6 +693,29 @@ pub(crate) fn open_dm_with_user(user: UserId, error_message: SharedString, cx: &
         }
     })
     .detach();
+}
+
+pub(crate) fn open_created_dm_if_route_unchanged(
+    channel_id: ChannelId,
+    channel_type: i32,
+    origin: &Route,
+    cx: &mut App,
+) {
+    if Router::global(cx).read(cx).route() == *origin {
+        navigate(
+            cx,
+            Route::DirectMessage {
+                direct_id: channel_id,
+                message_type: channel_type.to_string(),
+            },
+        );
+    }
+}
+
+pub(crate) fn toast_send_failed(message: impl Into<SharedString>, cx: &mut App) {
+    if let Some(shell) = Shell::try_global(cx) {
+        shell.update(cx, |shell, cx| shell.error(message, cx));
+    }
 }
 
 impl Render for FriendsPage {

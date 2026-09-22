@@ -11,6 +11,12 @@ pub const DM_ROW_HEIGHT: f32 = 42.;
 
 const DM_AVATAR_SIZE: Pixels = px(32.);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DmVoiceBadge {
+    InVoice,
+    SharingScreen,
+}
+
 pub struct DmRow {
     id: SharedString,
     label: SharedString,
@@ -24,7 +30,7 @@ pub struct DmRow {
     group_name: SharedString,
     close_id: SharedString,
     suppress_hover: bool,
-    in_voice_label: Option<SharedString>,
+    voice_badge: Option<(DmVoiceBadge, SharedString)>,
     image_cache: Option<gpui::Entity<crate::image_cache::LruImageCache>>,
     on_close: Option<(ChannelId, CloseHandler)>,
 }
@@ -64,7 +70,7 @@ impl DmRow {
             group_name,
             close_id,
             suppress_hover: false,
-            in_voice_label: None,
+            voice_badge: None,
             image_cache: None,
             on_close: None,
         }
@@ -105,8 +111,8 @@ impl DmRow {
         self
     }
 
-    pub fn in_voice_label(mut self, label: SharedString) -> Self {
-        self.in_voice_label = Some(label);
+    pub fn voice_badge(mut self, badge: DmVoiceBadge, label: SharedString) -> Self {
+        self.voice_badge = Some((badge, label));
         self
     }
 
@@ -193,36 +199,46 @@ impl DmRow {
                     .text_color(name_color)
                     .truncate()
                     .child(self.label.clone());
-                match self.in_voice_label.clone() {
-                    Some(label) => div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .justify_center()
-                        .gap(px(2.))
-                        .child(name_el.line_height(px(16.)))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(2.))
-                                .h(px(16.))
-                                .opacity(0.6)
-                                .child(
-                                    Icon::new(IconName::Speaker)
-                                        .size(px(10.))
-                                        .text_color(gpui::rgb(0x22c55e)),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.tokens.text_theme_primary)
-                                        .child(label),
-                                ),
-                        )
-                        .into_any_element(),
+                match self.voice_badge.clone() {
+                    Some((badge, label)) => {
+                        let icon = match badge {
+                            DmVoiceBadge::InVoice => Icon::new(IconName::Speaker)
+                                .size(px(10.))
+                                .text_color(gpui::rgb(0x22c55e))
+                                .into_any_element(),
+                            DmVoiceBadge::SharingScreen => {
+                                Icon::new(IconName::VoiceScreenShareIcon)
+                                    .size(px(10.))
+                                    .text_color(gpui::rgb(0x22c55e))
+                                    .into_any_element()
+                            }
+                        };
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .justify_center()
+                            .gap(px(2.))
+                            .child(name_el.line_height(px(16.)))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(2.))
+                                    .h(px(16.))
+                                    .opacity(0.6)
+                                    .child(icon)
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.tokens.text_theme_primary)
+                                            .child(label),
+                                    ),
+                            )
+                            .into_any_element()
+                    }
                     None => name_el.flex_1().min_w_0().into_any_element(),
                 }
             })

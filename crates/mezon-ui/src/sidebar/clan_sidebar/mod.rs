@@ -282,8 +282,11 @@ impl ClanSidebar {
                 let row_id = SharedString::from(format!("clan-{}", clan.id));
                 let group_name = SharedString::from(format!("clan-group-{}", clan.id));
                 let avatar_id = SharedString::from(format!("clan-avatar-{}", clan.id));
-                let proxied_avatar_url: Option<SharedString> =
-                    clan.avatar_url.as_deref().map(|url| {
+                let proxied_avatar_url: Option<SharedString> = clan
+                    .avatar_url
+                    .as_deref()
+                    .filter(|url| !url.is_empty())
+                    .map(|url| {
                         SharedString::from(crate::util::imgproxy::proxied(
                             cx,
                             url,

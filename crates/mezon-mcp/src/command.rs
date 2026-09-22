@@ -309,6 +309,18 @@ pub enum McpCommand {
         name: String,
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
+    SidebarChannels {
+        clan_id: i64,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
+    CreateChannel {
+        clan_id: i64,
+        category_id: i64,
+        name: String,
+        channel_type: String,
+        private: bool,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
     ChannelMenuState {
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },

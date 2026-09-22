@@ -403,7 +403,7 @@ impl DirectMessageStore {
         cx.spawn(async move |this, cx| {
             let desc = api.create_direct_channel(&[user_id.0]).await?;
             let channel_id = ChannelId(desc.channel_id);
-            let channel_type = desc.channel_type as i32;
+            let channel_type = DirectKind::from_raw(desc.channel_type).channel_type();
             this.update(cx, |this, cx| {
                 let (peer_username, peer_avatar) =
                     if !member_username.is_empty() && !member_avatar.is_empty() {
@@ -457,7 +457,7 @@ impl DirectMessageStore {
             let fallback_member_count = (user_ids.len() + 1) as u32;
             let desc = api.create_direct_channel(&ids).await?;
             let channel_id = ChannelId(desc.channel_id);
-            let channel_type = desc.channel_type as i32;
+            let channel_type = DirectKind::from_raw(desc.channel_type).channel_type();
             this.update(cx, |this, cx| {
                 let channel = direct_group_from_created(&desc, &group_label, fallback_member_count);
                 this.channels.upsert_created(channel);
@@ -625,8 +625,9 @@ impl DirectMessageStore {
         cx.spawn(async move |this, cx| {
             let desc = api.create_direct_channel(&[user_id.0]).await?;
             let channel_id = ChannelId(desc.channel_id);
-            let channel_type = desc.channel_type as i32;
-            let send_mode = DirectKind::Dm.stream_mode();
+            let kind = DirectKind::from_raw(desc.channel_type);
+            let channel_type = kind.channel_type();
+            let send_mode = kind.stream_mode();
 
             this.update(cx, |this, cx| {
                 let (peer_username, peer_avatar) =
@@ -670,7 +671,7 @@ impl DirectMessageStore {
                 .join_chat(0, channel_id.get(), channel_type, false)
                 .await
             {
-                tracing::warn!("join_chat after create DM failed: {e}");
+                tracing::warn!("join_chat before dm send failed: {e}");
             }
 
             let content_json = body.into_content_json();
@@ -1941,6 +1942,9 @@ mod tests {
         assert_eq!(DirectKind::Group.stream_mode(), 3);
         assert_eq!(DirectKind::Dm.channel_type(), 3);
         assert_eq!(DirectKind::Group.channel_type(), 2);
+        assert_eq!(DirectKind::from_raw(0).channel_type(), 3);
+        assert_eq!(DirectKind::from_raw(3).channel_type(), 3);
+        assert_eq!(DirectKind::from_raw(2).channel_type(), 2);
     }
 
     fn api_channel_desc(

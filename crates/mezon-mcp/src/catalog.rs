@@ -156,6 +156,17 @@ Parameters:
         write: false,
     },
     ToolSpec {
+        name: "search_users",
+        description: "\
+Search users the way the send-token recipient box and Ctrl+K do: the server matches
+username, display name and clan nickname (ILIKE, max 50) among friends and members of
+the caller's clans, bots included.
+
+Parameters:
+- query (required): search text",
+        write: false,
+    },
+    ToolSpec {
         name: "get_current_context",
         description: "\
 Return the UI route and parsed context for the active screen.
@@ -457,6 +468,35 @@ Parameters:
         write: true,
     },
     ToolSpec {
+        name: "sidebar_channels",
+        description: "\
+List the channels the app currently holds for a clan — the store behind the sidebar, not a
+fresh API call (list_channels asks the server). Use it to see what realtime events did to
+the client.
+
+Parameters:
+- clan_id (required): clan snowflake id.
+
+Returns [{ id, label, channel_type, private, category_id, category_name, voice_member_ids }].",
+        write: false,
+    },
+    ToolSpec {
+        name: "create_channel",
+        description: "\
+Create a channel in a clan through the same store path the Create Channel modal uses.
+
+Parameters:
+- clan_id (required): clan snowflake id.
+- category_id (required): category snowflake id from list_categories.
+- name (required): channel name (same rules as the modal).
+- channel_type (optional): \"text\" (default), \"voice\" or \"stream\".
+- private (optional, default false): create it private — text and voice only; the store
+  ignores it for any other type, exactly like the modal.
+
+Returns { ok, channel_id, channel_type }.",
+        write: true,
+    },
+    ToolSpec {
         name: "mute_channel",
         description: "\
 Mute or unmute a channel for the signed-in user (backend SetMuteChannel).
@@ -642,8 +682,9 @@ Parameters: none.",
 Report what the open topic panel holds.
 
 Returns panel_open, topic_id, origin_message_id, loaded_count, has_more_top,
-loading_more and the panel list's item_count / first_visible_index / at_bottom.
-has_more_top drives topic paging the way get_scroll_state does for a channel.
+loading_more, the panel list's item_count / first_visible_index / at_bottom, and the
+topic composer's text / attachments. has_more_top drives topic paging the way
+get_scroll_state does for a channel.
 
 Parameters: none.",
         write: false,

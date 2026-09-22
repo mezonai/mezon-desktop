@@ -63,7 +63,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "2.1.2"
+version = "2.1.4"
 edition = "2024"
 authors = ["Mezon Team"]
 license = "GPL-3.0-or-later"
@@ -378,6 +378,7 @@ bindgen               = "0.71"
 cbindgen              = "0.28.0"
 
 [patch.crates-io]
+nokhwa-bindings-macos = { path = "crates/vendor/nokhwa-bindings-macos" }
 gpui = { path = "crates/vendor/gpui" }
 libspa = { path = "crates/vendor/libspa" }
 

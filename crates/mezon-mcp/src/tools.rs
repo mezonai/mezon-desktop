@@ -97,6 +97,14 @@ impl McpBackend {
                 let size = arguments.get("size").and_then(Value::as_i64).unwrap_or(20) as i32;
                 self.search_messages(&query, size).await
             }
+            "search_users" => {
+                let query = arguments
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                self.search_users(&query).await
+            }
             "get_current_context" => self.get_current_context().await,
             "get_scroll_state" => self.get_scroll_state().await,
             "tour_state" => {
@@ -311,6 +319,8 @@ impl McpBackend {
             "clan_menu_state" => self.clan_menu_state().await,
             "list_categories" => self.list_categories(&arguments).await,
             "create_category" => self.create_category(&arguments).await,
+            "create_channel" => self.create_channel(&arguments).await,
+            "sidebar_channels" => self.sidebar_channels(&arguments).await,
             "mute_channel" => {
                 self.require_write_mode("mute_channel")?;
                 self.mute_channel(&arguments).await
@@ -1082,6 +1092,23 @@ impl McpBackend {
         }))
     }
 
+    async fn search_users(&self, query: &str) -> anyhow::Result<Value> {
+        let response = self.api.search_ctrl_k(query, 1).await?;
+        let users: Vec<Value> = response
+            .users
+            .iter()
+            .map(|user| {
+                serde_json::json!({
+                    "id": user.id.to_string(),
+                    "username": user.username,
+                    "display_name": user.display_name,
+                    "nicknames": user.list_nick_names,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "total": users.len(), "users": users }))
+    }
+
     async fn get_current_context(&self) -> anyhow::Result<Value> {
         self.send_ui_value(|reply| McpCommand::GetContext { reply })
             .await
@@ -1445,6 +1472,43 @@ impl McpBackend {
         self.send_ui_result(|reply| McpCommand::CreateCategory {
             clan_id,
             name,
+            reply,
+        })
+        .await
+    }
+
+    async fn sidebar_channels(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = optional_i64_field(arguments, "clan_id")
+            .ok_or_else(|| anyhow::anyhow!("sidebar_channels requires field clan_id"))?;
+        self.send_ui_result(|reply| McpCommand::SidebarChannels { clan_id, reply })
+            .await
+    }
+
+    async fn create_channel(&self, arguments: &Value) -> anyhow::Result<Value> {
+        let clan_id = optional_i64_field(arguments, "clan_id")
+            .ok_or_else(|| anyhow::anyhow!("create_channel requires field clan_id"))?;
+        let category_id = optional_i64_field(arguments, "category_id")
+            .ok_or_else(|| anyhow::anyhow!("create_channel requires field category_id"))?;
+        let name = arguments
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("create_channel requires string field name"))?;
+        let channel_type = arguments
+            .get("channel_type")
+            .and_then(Value::as_str)
+            .unwrap_or("text")
+            .to_owned();
+        let private = arguments
+            .get("private")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        self.send_ui_result(|reply| McpCommand::CreateChannel {
+            clan_id,
+            category_id,
+            name,
+            channel_type,
+            private,
             reply,
         })
         .await

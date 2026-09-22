@@ -1874,13 +1874,14 @@ fn decode_static_image(
     Ok(image::load_from_memory_with_format(bytes, format)?)
 }
 
-const MAX_DECODE_PIXELS: u64 = 48_000_000;
-const MAX_DECODER_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_DECODE_PIXELS: u64 = 48_000_000;
+pub(crate) const MAX_DECODER_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_IMAGE_DECODE_DIMENSION: u32 = 16_384;
 
 fn decoder_limits() -> image::Limits {
     let mut limits = image::Limits::default();
-    limits.max_image_width = Some(16_384);
-    limits.max_image_height = Some(16_384);
+    limits.max_image_width = Some(MAX_IMAGE_DECODE_DIMENSION);
+    limits.max_image_height = Some(MAX_IMAGE_DECODE_DIMENSION);
     limits.max_alloc = Some(MAX_DECODER_ALLOC_BYTES);
     limits
 }

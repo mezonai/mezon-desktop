@@ -17,6 +17,36 @@ use crate::theme::ActiveTheme;
 
 const PANEL_WIDTH: f32 = 510.;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct ComposerTarget {
+    topic_id: Option<i64>,
+    origin_id: Option<MessageId>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ComposerBinding {
+    Keep,
+    Adopt(ChannelId),
+    Bind(Option<ChannelId>),
+}
+
+impl ComposerTarget {
+    fn binding_from(self, previous: Option<ComposerTarget>) -> ComposerBinding {
+        if previous == Some(self) {
+            return ComposerBinding::Keep;
+        }
+        let created_under_composer = previous.is_some_and(|previous| {
+            previous.topic_id.is_none()
+                && previous.origin_id.is_some()
+                && previous.origin_id == self.origin_id
+        });
+        match self.topic_id {
+            Some(topic_id) if created_under_composer => ComposerBinding::Adopt(ChannelId(topic_id)),
+            topic_id => ComposerBinding::Bind(topic_id.map(ChannelId)),
+        }
+    }
+}
+
 pub struct TopicPanel {
     settings: Entity<Settings>,
     mention_input: Entity<MentionInput>,
@@ -24,6 +54,7 @@ pub struct TopicPanel {
     typing: Entity<ChannelTyping>,
     topic_timeline: Entity<ChannelMessages>,
     reply_target_id: Option<MessageId>,
+    composer_target: Option<ComposerTarget>,
     _subs: Vec<Subscription>,
 }
 
@@ -60,6 +91,7 @@ impl TopicPanel {
             &TopicsStore::global(cx),
             window,
             |this, store, event: &TopicsEvent, window, cx| {
+                this.sync_composer_target(window, cx);
                 if !matches!(event, TopicsEvent::ReplyTargetChanged) {
                     return;
                 }
@@ -117,7 +149,28 @@ impl TopicPanel {
             typing,
             topic_timeline,
             reply_target_id: None,
+            composer_target: None,
             _subs: subs,
+        }
+    }
+
+    fn sync_composer_target(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let next = {
+            let topics = TopicsStore::global(cx).read(cx);
+            ComposerTarget {
+                topic_id: topics.active_topic_id(),
+                origin_id: topics.origin_message().map(|origin| origin.id),
+            }
+        };
+        let previous = self.composer_target.replace(next);
+        match next.binding_from(previous) {
+            ComposerBinding::Keep => {}
+            ComposerBinding::Adopt(channel_id) => self
+                .mention_input
+                .update(cx, |input, cx| input.adopt_channel(channel_id, window, cx)),
+            ComposerBinding::Bind(channel_id) => self
+                .mention_input
+                .update(cx, |input, cx| input.bind_channel(channel_id, window, cx)),
         }
     }
 
@@ -178,7 +231,7 @@ impl TopicPanel {
 }
 
 impl Render for TopicPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (topic_id, error) = {
             let topics = TopicsStore::global(cx).read(cx);
             (
@@ -187,6 +240,7 @@ impl Render for TopicPanel {
             )
         };
 
+        self.sync_composer_target(window, cx);
         self.typing.update(cx, |typing, cx| {
             typing.sync(topic_id.map(ChannelId), cx);
         });
@@ -351,5 +405,84 @@ impl Render for TopicPanel {
             }))
             .child(header)
             .child(drop_body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(topic_id: Option<i64>, origin_id: Option<i64>) -> ComposerTarget {
+        ComposerTarget {
+            topic_id,
+            origin_id: origin_id.map(MessageId),
+        }
+    }
+
+    #[test]
+    fn first_sync_binds_whatever_is_on_screen() {
+        assert_eq!(
+            target(Some(7), Some(1)).binding_from(None),
+            ComposerBinding::Bind(Some(ChannelId(7)))
+        );
+        assert_eq!(
+            target(None, Some(1)).binding_from(None),
+            ComposerBinding::Bind(None)
+        );
+    }
+
+    #[test]
+    fn a_re_render_of_the_same_topic_keeps_the_composer() {
+        let current = target(Some(7), Some(1));
+        assert_eq!(current.binding_from(Some(current)), ComposerBinding::Keep);
+        let uncreated = target(None, Some(1));
+        assert_eq!(
+            uncreated.binding_from(Some(uncreated)),
+            ComposerBinding::Keep
+        );
+    }
+
+    #[test]
+    fn moving_between_topics_rebinds_to_the_new_topic() {
+        assert_eq!(
+            target(Some(8), Some(2)).binding_from(Some(target(Some(7), Some(1)))),
+            ComposerBinding::Bind(Some(ChannelId(8)))
+        );
+    }
+
+    #[test]
+    fn moving_between_two_uncreated_topics_resets_the_composer() {
+        assert_eq!(
+            target(None, Some(2)).binding_from(Some(target(None, Some(1)))),
+            ComposerBinding::Bind(None)
+        );
+    }
+
+    #[test]
+    fn the_first_reply_creating_the_topic_adopts_the_composer() {
+        assert_eq!(
+            target(Some(7), Some(1)).binding_from(Some(target(None, Some(1)))),
+            ComposerBinding::Adopt(ChannelId(7))
+        );
+    }
+
+    #[test]
+    fn a_created_topic_on_another_message_is_a_plain_switch() {
+        assert_eq!(
+            target(Some(7), Some(2)).binding_from(Some(target(None, Some(1)))),
+            ComposerBinding::Bind(Some(ChannelId(7)))
+        );
+    }
+
+    #[test]
+    fn closing_the_panel_persists_by_binding_to_nothing() {
+        assert_eq!(
+            target(None, None).binding_from(Some(target(Some(7), Some(1)))),
+            ComposerBinding::Bind(None)
+        );
+        assert_eq!(
+            target(None, None).binding_from(Some(target(None, Some(1)))),
+            ComposerBinding::Bind(None)
+        );
     }
 }

@@ -217,6 +217,42 @@ impl<'a> Drop for PixelBufferData<'a> {
 
 impl RawCapturer<'_> {
     #[cfg(target_os = "macos")]
+    pub fn get_next_pixel_buffer_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<Option<PixelBuffer>, mpsc::RecvError> {
+        use std::time::{Duration, Instant};
+
+        let capturer = &self.capturer;
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            if capturer
+                .engine
+                .error_flag
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Err(mpsc::RecvError);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(None);
+            }
+            let wait = (deadline - now).min(Duration::from_millis(10));
+            let item = match capturer.rx.recv_timeout(wait) {
+                Ok(item) => item,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Err(mpsc::RecvError),
+            };
+            let Ok(item) = item else {
+                return Err(mpsc::RecvError);
+            };
+            if let Some(frame) = PixelBuffer::new(item) {
+                return Ok(Some(frame));
+            }
+        }
+    }
+
     pub fn get_next_pixel_buffer(&self) -> Result<PixelBuffer, mpsc::RecvError> {
         use std::time::Duration;
 

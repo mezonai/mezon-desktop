@@ -6,6 +6,7 @@ pub mod overview_tab;
 pub mod permission_overrides;
 pub mod permissions_tab;
 pub mod quick_actions_tab;
+pub mod stream_thumbnail_tab;
 
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, FontWeight, ScrollHandle, SharedString,
@@ -24,6 +25,7 @@ use integrations_tab::{IntegrationsTab, render_channel_integrations_save_bar};
 use overview_tab::{OverviewTab, render_channel_overview_save_bar};
 use permissions_tab::PermissionsTab;
 use quick_actions_tab::QuickActionsTab;
+use stream_thumbnail_tab::StreamThumbnailTab;
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 const SIDEBAR_WIDTH: f32 = 224.0;
@@ -116,9 +118,11 @@ impl ChannelSettingsTab {
         match self {
             Self::Overview => true,
             Self::Category => !ctx.is_thread,
+            // Voice gets the tab too: a private voice room is gated by the same
+            // member/role lists as a private text channel (the server hands a
+            // meet token to `chlu:` members only). Stream and app stay public.
             Self::Permissions => {
                 !ctx.is_thread
-                    && !is_voice
                     && !is_stream
                     && !is_app
                     && !ctx.is_welcome_channel
@@ -158,6 +162,7 @@ pub struct ChannelSettingScreen {
     integrations_sub: Option<Subscription>,
     quick_actions_tab: Option<Entity<QuickActionsTab>>,
     quick_actions_sub: Option<Subscription>,
+    stream_thumbnail_tab: Option<Entity<StreamThumbnailTab>>,
     content_scroll: ScrollHandle,
     nav_scroll: ScrollHandle,
     focus_handle: FocusHandle,
@@ -189,6 +194,7 @@ impl ChannelSettingScreen {
             integrations_sub: None,
             quick_actions_tab: None,
             quick_actions_sub: None,
+            stream_thumbnail_tab: None,
             content_scroll: ScrollHandle::new(),
             nav_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
@@ -197,6 +203,7 @@ impl ChannelSettingScreen {
     }
 
     pub fn release_active_tab(&mut self, cx: &mut Context<Self>) {
+        self.stream_thumbnail_tab = None;
         let had_permissions_tab = self.permissions_tab.take().is_some();
         let had_overview_tab = self.overview_tab.take().is_some();
         let had_category_tab = self.category_tab.take().is_some();
@@ -263,6 +270,7 @@ impl ChannelSettingScreen {
             return;
         }
         if target_changed {
+            self.stream_thumbnail_tab = None;
             self.permissions_tab = None;
             self.permissions_sub = None;
             self.overview_tab = None;
@@ -372,6 +380,13 @@ impl ChannelSettingScreen {
                 let tab = cx.new(|cx| QuickActionsTab::new(clan_id, channel_id, settings, cx));
                 self.quick_actions_sub = Some(cx.observe(&tab, |_, _, cx| cx.notify()));
                 self.quick_actions_tab = Some(tab);
+            }
+            ChannelSettingsTab::StreamThumbnail if self.stream_thumbnail_tab.is_none() => {
+                let clan_id = self.clan_id;
+                let channel_id = self.channel_id;
+                let settings = self.settings.clone();
+                self.stream_thumbnail_tab =
+                    Some(cx.new(|cx| StreamThumbnailTab::new(clan_id, channel_id, settings, cx)));
             }
             _ => {}
         }
@@ -656,6 +671,10 @@ impl Render for ChannelSettingScreen {
                 .quick_actions_tab
                 .as_ref()
                 .map(|tab| tab.clone().into_any_element()),
+            ChannelSettingsTab::StreamThumbnail => self
+                .stream_thumbnail_tab
+                .as_ref()
+                .map(|tab| tab.clone().into_any_element()),
             _ => None,
         }
         .unwrap_or_else(|| {
@@ -781,8 +800,24 @@ mod tests {
     }
 
     #[test]
-    fn permissions_tab_hidden_for_thread_voice_stream_app_and_welcome() {
-        for channel_type in [ChannelType::Voice, ChannelType::Stream, ChannelType::App] {
+    fn permissions_tab_shown_for_voice_with_manage_channel() {
+        assert!(ChannelSettingsTab::Permissions.visible_in_sidebar(ctx(
+            ChannelType::Voice,
+            false,
+            false,
+            true
+        )));
+        assert!(!ChannelSettingsTab::Permissions.visible_in_sidebar(ctx(
+            ChannelType::Voice,
+            false,
+            false,
+            false
+        )));
+    }
+
+    #[test]
+    fn permissions_tab_hidden_for_thread_stream_app_and_welcome() {
+        for channel_type in [ChannelType::Stream, ChannelType::App] {
             assert!(!ChannelSettingsTab::Permissions.visible_in_sidebar(ctx(
                 channel_type,
                 false,

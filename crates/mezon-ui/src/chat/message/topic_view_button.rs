@@ -2,9 +2,10 @@ use super::context::RowCtx;
 use super::parts::resolve_message_display_name;
 use super::time::format_relative_time_from_seconds;
 use crate::components::primitives::{
-    Icon, IconName, avatar_color, mention_count_badge, name_initials,
+    Icon, IconName, avatar_color, avatar_text_color, initials_tile, mention_count_badge,
+    name_initials,
 };
-use gpui::{AnyElement, App, ObjectFit, SharedString, div, img, prelude::*, px, rgb};
+use gpui::{AnyElement, App, ObjectFit, SharedString, div, img, prelude::*, px};
 use mezon_store::{ClanMembersStore, Message, TopicBadgeStore, TopicsStore};
 
 const AVATAR_SIZE: f32 = 28.0;
@@ -172,13 +173,14 @@ fn creator_avatar_element(
             )
             .into_any_element()
     } else {
-        base.flex()
-            .items_center()
-            .justify_center()
-            .bg(avatar_color(name))
-            .text_color(rgb(0xffffff))
-            .text_size(px(12.))
-            .child(name_initials(name))
-            .into_any_element()
+        let bg = avatar_color(name);
+        base.child(initials_tile(
+            size,
+            Some(px(AVATAR_ROUNDING)),
+            bg,
+            avatar_text_color(bg),
+            name_initials(name),
+        ))
+        .into_any_element()
     }
 }

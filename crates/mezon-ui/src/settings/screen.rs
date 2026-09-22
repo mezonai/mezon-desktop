@@ -4,10 +4,12 @@ use gpui::{
     prelude::*, px,
 };
 use mezon_store::{
-    AuthState, AutoUpdateStatus, ClanList, LoginStore, Settings, effective_update_status,
+    AuthState, AutoUpdateStatus, ClanList, Settings, effective_update_status,
     update_available_clicked, update_check_clicked, update_error_clicked,
     update_manual_install_clicked, update_restart_clicked,
 };
+
+use crate::app::shell::Shell;
 
 use super::account_page::AccountPage;
 use super::activity_page::ActivityPage;
@@ -588,9 +590,12 @@ impl Render for SettingsScreen {
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.bg_hover))
                     .child(mezon_i18n::t(&locale, "setting.logOut"))
-                    .on_click(move |_, _, cx| {
-                        LoginStore::global(cx).update(cx, |store, cx| store.logout(cx));
-                    }),
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let locale = this.settings.read(cx).language.clone();
+                        Shell::global(cx).update(cx, |shell, cx| {
+                            shell.confirm_logout(&locale, window, cx);
+                        });
+                    })),
             )
             .child(
                 div()

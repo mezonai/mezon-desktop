@@ -7,7 +7,7 @@ use gpui::{
 use mezon_client::AppApi;
 use mezon_client::ConnectionStatus;
 use mezon_client::RealtimeEvent;
-use mezon_client::transport::{ApiPinMessage, parse_message_content_tokens};
+use mezon_client::transport::{ApiMessage, ApiPinMessage, parse_message_content_tokens};
 use mezon_proto::realtime::LastPinMessageEvent;
 
 use crate::AppConfig;
@@ -37,8 +37,25 @@ pub struct PinnedMessage {
     pub ogp: Option<Box<OgpPreview>>,
     pub embeds: Arc<[Embed]>,
     pub attachments: Vec<MessageAttachment>,
+    /// Verified against the original message API; a display cache must not override it.
+    pub attachments_from_source: bool,
     pub poll: Option<Box<PollData>>,
     pub create_time: i64,
+}
+
+impl PinnedMessage {
+    pub fn preview_attachments<'a>(
+        &'a self,
+        cached: Option<&'a Message>,
+    ) -> &'a [MessageAttachment] {
+        if !self.attachments_from_source
+            && let Some(message) = cached
+            && !message.attachments.is_empty()
+        {
+            return &message.attachments;
+        }
+        &self.attachments
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -51,11 +68,59 @@ pub struct PinnedMessagesStore {
     clan_id: Option<String>,
     messages: Vec<PinnedMessage>,
     loaded_channel: Option<String>,
-    loading: bool,
+    fetch_state: PinFetchState,
     pin_badges: HashSet<String>,
     api: Arc<AppApi>,
     _messages_sub: Subscription,
     _conn_watch: Task<()>,
+}
+
+#[derive(Default)]
+struct PinFetchState {
+    generation: u64,
+    active: Option<u64>,
+    dirty: bool,
+}
+
+#[derive(Debug, PartialEq)]
+enum PinFetchCompletion {
+    Ignore,
+    Retry,
+    Apply,
+}
+
+impl PinFetchState {
+    fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
+    fn reset(&mut self) {
+        self.generation += 1;
+        self.active = None;
+        self.dirty = false;
+    }
+
+    fn start(&mut self) -> Option<u64> {
+        if self.active.is_some() {
+            return None;
+        }
+        self.generation += 1;
+        self.active = Some(self.generation);
+        self.dirty = false;
+        self.active
+    }
+
+    fn finish(&mut self, generation: u64) -> PinFetchCompletion {
+        if self.active != Some(generation) {
+            return PinFetchCompletion::Ignore;
+        }
+        self.active = None;
+        if self.dirty {
+            PinFetchCompletion::Retry
+        } else {
+            PinFetchCompletion::Apply
+        }
+    }
 }
 
 struct GlobalPinnedMessagesStore(Entity<PinnedMessagesStore>);
@@ -84,7 +149,7 @@ impl PinnedMessagesStore {
         self.clan_id = None;
         self.messages.clear();
         self.loaded_channel = None;
-        self.loading = false;
+        self.fetch_state.reset();
         self.pin_badges.clear();
         cx.notify();
     }
@@ -103,7 +168,7 @@ impl PinnedMessagesStore {
             clan_id: None,
             messages: Vec::new(),
             loaded_channel: None,
-            loading: false,
+            fetch_state: PinFetchState::default(),
             pin_badges: HashSet::new(),
             api,
             _messages_sub: messages_sub,
@@ -156,7 +221,7 @@ impl PinnedMessagesStore {
     }
 
     pub fn is_loading(&self) -> bool {
-        self.loading
+        self.fetch_state.active.is_some()
     }
 
     pub fn clan_id(&self) -> Option<ClanId> {
@@ -184,6 +249,7 @@ impl PinnedMessagesStore {
         self.clan_id = clan_id;
         self.messages.clear();
         self.loaded_channel = None;
+        self.fetch_state.invalidate();
         cx.notify();
     }
 
@@ -192,7 +258,7 @@ impl PinnedMessagesStore {
         let Some(channel_id) = self.channel_id.clone() else {
             return;
         };
-        if self.loading || self.loaded_channel.as_deref() == Some(channel_id.as_str()) {
+        if self.is_loading() || self.loaded_channel.as_deref() == Some(channel_id.as_str()) {
             return;
         }
         self.fetch(cx);
@@ -204,6 +270,7 @@ impl PinnedMessagesStore {
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.loaded_channel = None;
+        self.fetch_state.invalidate();
         self.fetch(cx);
     }
 
@@ -214,25 +281,59 @@ impl PinnedMessagesStore {
         let Some(clan_id) = self.clan_id.clone() else {
             return;
         };
-        if self.loading {
+        let Some(generation) = self.fetch_state.start() else {
             return;
-        }
-        self.loading = true;
+        };
         cx.notify();
 
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let result = api.get_pin_messages_list(&channel_id, &clan_id).await;
+            let result = match result {
+                Ok(mut pins) => {
+                    if let (Ok(clan), Ok(channel)) = (clan_id.parse(), channel_id.parse()) {
+                        let verified =
+                            hydrate_pin_attachments(&api, clan, channel, &mut pins).await;
+                        Ok((pins, verified))
+                    } else {
+                        Ok((pins, HashSet::new()))
+                    }
+                }
+                Err(error) => Err(error),
+            };
             let _ = this.update(cx, |this, cx| {
-                this.loading = false;
-                if this.channel_id.as_deref() != Some(channel_id.as_str()) {
+                match this.fetch_state.finish(generation) {
+                    PinFetchCompletion::Ignore => return,
+                    PinFetchCompletion::Retry => {
+                        this.fetch(cx);
+                        cx.notify();
+                        return;
+                    }
+                    PinFetchCompletion::Apply => {}
+                }
+                if this.channel_id.as_deref() != Some(channel_id.as_str())
+                    || this.clan_id.as_deref() != Some(clan_id.as_str())
+                {
                     cx.notify();
+                    this.fetch(cx);
                     return;
                 }
                 match result {
-                    Ok(list) => {
+                    Ok((list, verified)) => {
                         let cfg = AppConfig::try_global(cx);
-                        this.messages = list.into_iter().map(|m| pinned_from_api(m, cfg)).collect();
+                        this.messages = list
+                            .into_iter()
+                            .map(|m| {
+                                let from_source = m
+                                    .message_id
+                                    .parse()
+                                    .ok()
+                                    .is_some_and(|id| verified.contains(&id));
+                                let mut pin = pinned_from_api(m, cfg);
+                                pin.attachments_from_source = from_source;
+                                pin
+                            })
+                            .collect();
                         this.loaded_channel = Some(channel_id);
                     }
                     Err(e) => tracing::error!("get_pin_messages_list failed: {e}"),
@@ -288,12 +389,14 @@ impl PinnedMessagesStore {
         }
         let message_id = pin.message_id.to_string();
         if self.messages.iter().any(|m| m.message_id == message_id) {
+            self.refresh(cx);
             return;
         }
         let cfg = AppConfig::try_global(cx);
         self.messages
             .insert(0, pinned_from_last_pin_event(pin, cfg));
         cx.notify();
+        self.refresh(cx);
     }
 
     fn handle_unpin(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
@@ -315,6 +418,7 @@ impl PinnedMessagesStore {
         if self.messages.len() != before {
             cx.notify();
         }
+        self.refresh(cx);
     }
 
     /// Pin a message. Mirrors React `setChannelPinMessage` + `joinPinMessage`:
@@ -343,12 +447,7 @@ impl PinnedMessagesStore {
         let clan_id_opt = self.clan_id();
         let channel_id_opt = self.channel_id();
         let msg = messages
-            .messages()
-            .iter()
-            .find(|m| m.id.get() == message_id_i64)
-            .or_else(|| {
-                messages.message_in_channel(ChannelId(channel_id_i64), MessageId(message_id_i64))
-            })
+            .message_in_channel(ChannelId(channel_id_i64), MessageId(message_id_i64))
             .cloned();
 
         let (
@@ -386,12 +485,7 @@ impl PinnedMessagesStore {
             let created_time_iso = chrono::DateTime::from_timestamp(create_time, 0)
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
-            let pin_attachments: Vec<_> = msg
-                .attachments
-                .iter()
-                .filter(|att| pin_attachment_url_valid(&att.url))
-                .cloned()
-                .collect();
+            let pin_attachments = pin_message_attachments(msg);
             (
                 sender_id,
                 sender_name,
@@ -411,29 +505,6 @@ impl PinnedMessagesStore {
             .map(|c| c.avatar_proxy(&avatar_url))
             .unwrap_or_else(|| avatar_url.clone());
         let body = enrich_pin_body(&content_wire, pin_attachments, cfg);
-        let attachment = if body.attachments.is_empty() {
-            "[]".to_string()
-        } else {
-            serde_json::to_string(
-                &body
-                    .attachments
-                    .iter()
-                    .map(|a| {
-                        serde_json::json!({
-                            "url": a.url,
-                            "filename": a.filename,
-                            "filetype": a.filetype,
-                            "width": a.width,
-                            "height": a.height,
-                            "thumbnail": a.thumbnail,
-                            "duration": a.duration,
-                            "size": a.size,
-                        })
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap_or_else(|_| "[]".into())
-        };
         self.messages.insert(
             0,
             PinnedMessage {
@@ -450,21 +521,63 @@ impl PinnedMessagesStore {
                 ogp: body.ogp,
                 embeds: body.embeds,
                 attachments: body.attachments,
+                attachments_from_source: false,
                 poll: body.poll,
                 create_time,
             },
         );
+        self.fetch_state.invalidate();
         self.set_pin_badge(&channel_id_str, cx);
         cx.notify();
 
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
+            let source = match api
+                .list_channel_messages(clan_id_i64, channel_id_i64, message_id_i64, 2, 3)
+                .await
+            {
+                Ok(page) => page
+                    .messages
+                    .into_iter()
+                    .find(|m| m.message_id == message_id_i64),
+                Err(error) => {
+                    tracing::error!("read original message before pin failed: {error}");
+                    None
+                }
+            };
+            let Some(source) = source else {
+                tracing::error!("original message unavailable; pin was not written");
+                let _ = this.update(cx, |this, cx| {
+                    if this.channel_id.as_deref() == Some(channel_id_str.as_str())
+                        && this.clan_id.as_deref() == Some(clan_id_str.as_str())
+                    {
+                        this.messages
+                            .retain(|pin| pin.message_id != message_id_i64.to_string());
+                        this.refresh(cx);
+                    }
+                });
+                return;
+            };
+            let attachment = pin_attachments_wire(
+                &source
+                    .attachments
+                    .into_iter()
+                    .filter(|a| pin_attachment_url_valid(&a.url))
+                    .map(|a| MessageAttachment::from_api(a, None))
+                    .collect::<Vec<_>>(),
+            );
             if let Err(e) = api
                 .create_pin_message(message_id_i64, channel_id_i64, clan_id_i64)
                 .await
             {
                 tracing::error!("create_pin_message failed: {e}");
-                let _ = this.update(cx, |this, cx| this.refresh(cx));
+                let _ = this.update(cx, |this, cx| {
+                    if this.channel_id.as_deref() == Some(channel_id_str.as_str())
+                        && this.clan_id.as_deref() == Some(clan_id_str.as_str())
+                    {
+                        this.refresh(cx);
+                    }
+                });
                 return;
             }
             if let Err(e) = api
@@ -487,6 +600,13 @@ impl PinnedMessagesStore {
             {
                 tracing::error!("write_last_pin_message failed: {e}");
             }
+            let _ = this.update(cx, |this, cx| {
+                if this.channel_id.as_deref() == Some(channel_id_str.as_str())
+                    && this.clan_id.as_deref() == Some(clan_id_str.as_str())
+                {
+                    this.refresh(cx);
+                }
+            });
         })
         .detach();
     }
@@ -499,6 +619,7 @@ impl PinnedMessagesStore {
             return;
         };
         self.messages.retain(|m| m.id != pin_id);
+        self.fetch_state.invalidate();
         cx.notify();
 
         let api = self.api.clone();
@@ -510,8 +631,14 @@ impl PinnedMessagesStore {
                 .await;
             if let Err(e) = result {
                 tracing::error!("delete_pin_message failed: {e}");
-                let _ = this.update(cx, |this, cx| this.refresh(cx));
             }
+            let _ = this.update(cx, |this, cx| {
+                if this.channel_id.as_deref() == Some(channel_id.as_str())
+                    && this.clan_id.as_deref() == Some(clan_id.as_str())
+                {
+                    this.refresh(cx);
+                }
+            });
         })
         .detach();
     }
@@ -519,9 +646,78 @@ impl PinnedMessagesStore {
 
 fn pin_attachment_url_valid(url: &str) -> bool {
     let url = url.trim();
-    !url.is_empty()
-        && url.len() < 512
-        && (url.starts_with("http://") || url.starts_with("https://"))
+    !url.is_empty() && (url.starts_with("http://") || url.starts_with("https://"))
+}
+
+fn apply_source_attachments(pins: &mut [ApiPinMessage], sources: &[ApiMessage]) {
+    for pin in pins {
+        if let Some(source) = sources
+            .iter()
+            .find(|m| m.message_id.to_string() == pin.message_id)
+        {
+            pin.attachments = source.attachments.clone();
+        }
+    }
+}
+
+async fn hydrate_pin_attachments(
+    api: &AppApi,
+    clan_id: i64,
+    channel_id: i64,
+    pins: &mut [ApiPinMessage],
+) -> HashSet<i64> {
+    let mut verified = HashSet::new();
+    let mut pending: HashSet<i64> = pins
+        .iter()
+        .filter_map(|p| p.message_id.parse().ok())
+        .collect();
+    while let Some(anchor) = pending.iter().copied().next() {
+        pending.remove(&anchor);
+        match api
+            .list_channel_messages(clan_id, channel_id, anchor, 2, 100)
+            .await
+        {
+            Ok(page) => {
+                for source in &page.messages {
+                    pending.remove(&source.message_id);
+                    verified.insert(source.message_id);
+                }
+                apply_source_attachments(pins, &page.messages);
+            }
+            Err(error) => tracing::warn!("read original pinned messages failed: {error}"),
+        }
+    }
+    verified
+}
+
+fn pin_message_attachments(message: &Message) -> Vec<MessageAttachment> {
+    message
+        .attachments
+        .iter()
+        .filter(|attachment| pin_attachment_url_valid(&attachment.url))
+        .cloned()
+        .collect()
+}
+
+fn pin_attachments_wire(attachments: &[MessageAttachment]) -> String {
+    serde_json::Value::Array(
+        attachments
+            .iter()
+            .map(|attachment| {
+                serde_json::json!({
+                    "url": attachment.url,
+                    "filename": attachment.filename,
+                    "filetype": attachment.filetype,
+                    "width": attachment.width,
+                    "height": attachment.height,
+                    "thumbnail": attachment.thumbnail,
+                    "duration": attachment.duration,
+                    "size": attachment.size,
+                })
+            })
+            .collect(),
+    )
+    .to_string()
 }
 
 fn pin_content_wire(msg: &Message) -> String {
@@ -744,6 +940,7 @@ fn pinned_from_api(m: ApiPinMessage, cfg: Option<&AppConfig>) -> PinnedMessage {
         ogp: body.ogp,
         embeds: body.embeds,
         attachments: body.attachments,
+        attachments_from_source: false,
         poll: body.poll,
         create_time: m.create_time,
     }
@@ -779,6 +976,7 @@ fn pinned_from_last_pin_event(pin: &LastPinMessageEvent, cfg: Option<&AppConfig>
         ogp: body.ogp,
         embeds: body.embeds,
         attachments: body.attachments,
+        attachments_from_source: false,
         poll: body.poll,
         create_time,
     }
@@ -809,6 +1007,253 @@ fn context_from_active(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verified_source_image_and_empty_source_cannot_be_overridden_by_stale_cache() {
+        let mut cached = Message::new(MessageId(42), "", "7", "user", 0);
+        cached.attachments = vec![MessageAttachment {
+            url: "https://cdn.example/wrong-godzilla.jpg".into(),
+            ..Default::default()
+        }];
+        let mut pin = pinned_from_last_pin_event(
+            &LastPinMessageEvent {
+                message_id: 42,
+                message_attachment:
+                    r#"[{"url":"https://cdn.example/correct-portrait.png","filetype":"image"}]"#
+                        .into(),
+                ..Default::default()
+            },
+            None,
+        );
+        pin.attachments_from_source = true;
+        assert_eq!(
+            pin.preview_attachments(Some(&cached))[0].url,
+            "https://cdn.example/correct-portrait.png"
+        );
+        pin.attachments.clear();
+        assert!(pin.preview_attachments(Some(&cached)).is_empty());
+        pin.attachments_from_source = false;
+        assert_eq!(
+            pin.preview_attachments(Some(&cached))[0].url,
+            "https://cdn.example/wrong-godzilla.jpg"
+        );
+    }
+
+    #[test]
+    fn refresh_during_fetch_discards_old_result_and_coalesces_requests() {
+        let mut state = PinFetchState::default();
+        let old = state.start().unwrap();
+        state.invalidate();
+        state.invalidate();
+        assert_eq!(state.start(), None);
+        assert_eq!(state.finish(old), PinFetchCompletion::Retry);
+        let fresh = state.start().unwrap();
+        assert_eq!(state.finish(old), PinFetchCompletion::Ignore);
+        assert_eq!(state.active, Some(fresh));
+        assert_eq!(state.finish(fresh), PinFetchCompletion::Apply);
+        assert!(state.active.is_none());
+    }
+
+    #[test]
+    fn reset_and_reload_same_channel_rejects_previous_session_result() {
+        let mut state = PinFetchState::default();
+        let old = state.start().unwrap();
+        state.reset();
+        let current = state.start().unwrap();
+        assert_eq!(state.finish(old), PinFetchCompletion::Ignore);
+        assert_eq!(state.active, Some(current));
+        assert_eq!(state.finish(current), PinFetchCompletion::Apply);
+    }
+
+    #[test]
+    fn another_mutation_during_retry_requires_another_fresh_snapshot() {
+        let mut state = PinFetchState::default();
+        let first = state.start().unwrap();
+        state.invalidate();
+        assert_eq!(state.finish(first), PinFetchCompletion::Retry);
+        let second = state.start().unwrap();
+        state.invalidate();
+        assert_eq!(state.finish(second), PinFetchCompletion::Retry);
+        let third = state.start().unwrap();
+        assert_eq!(state.finish(third), PinFetchCompletion::Apply);
+    }
+
+    #[test]
+    fn original_messages_repair_empty_and_wrong_pin_images_without_cache() {
+        let record = |id: i64, url: &str| ApiPinMessage {
+            id: (id + 100).to_string(),
+            message_id: id.to_string(),
+            content: String::new(),
+            content_text: String::new(),
+            sender_id: "7".into(),
+            sender_name: "user".into(),
+            avatar: String::new(),
+            create_time: 0,
+            attachments: if url.is_empty() {
+                vec![]
+            } else {
+                vec![mezon_client::transport::ApiAttachment {
+                    url: url.into(),
+                    filetype: "image".into(),
+                    ..Default::default()
+                }]
+            },
+        };
+        let mut pins = vec![
+            record(42, ""),
+            record(43, "https://cdn.example/wrong.jpg"),
+            record(44, "https://cdn.example/removed.jpg"),
+            record(45, "https://cdn.example/unavailable.jpg"),
+        ];
+        let source = |id, url: &str| ApiMessage {
+            message_id: id,
+            content: String::new(),
+            content_tokens: Default::default(),
+            content_raw: String::new(),
+            code: 0,
+            sender_id: 7,
+            sender_name: "user".into(),
+            avatar: String::new(),
+            create_time: 0,
+            update_time: 0,
+            hide_editted: false,
+            attachments: record(id, url).attachments,
+            references: vec![],
+            reactions: vec![],
+            entity_mentions: vec![],
+            topic_id: 0,
+        };
+        apply_source_attachments(
+            &mut pins,
+            &[
+                source(43, "https://cdn.example/godzilla.jpg"),
+                source(44, ""),
+                source(42, "https://cdn.example/portrait.png"),
+                source(999, "https://cdn.example/unrelated.jpg"),
+            ],
+        );
+        let pins: Vec<_> = pins.into_iter().map(|p| pinned_from_api(p, None)).collect();
+        assert_eq!(
+            pins[0].attachments[0].url,
+            "https://cdn.example/portrait.png"
+        );
+        assert_eq!(
+            pins[1].attachments[0].url,
+            "https://cdn.example/godzilla.jpg"
+        );
+        assert!(pins[2].attachments.is_empty());
+        assert_eq!(
+            pins[3].attachments[0].url,
+            "https://cdn.example/unavailable.jpg"
+        );
+    }
+
+    #[test]
+    fn pin_attachment_write_round_trip_preserves_distinct_images_and_long_urls() {
+        let mut message = Message::new(MessageId(42), "", "7", "user", 0);
+        let long_url = format!("https://cdn.example/{}.png", "a".repeat(512));
+        message.attachments = vec![
+            MessageAttachment {
+                url: long_url.clone(),
+                filename: "ChatGPT Image.png".into(),
+                filetype: "image/png".into(),
+                width: 1200,
+                height: 800,
+                size: 1762267,
+                ..Default::default()
+            },
+            MessageAttachment {
+                url: "https://cdn.example/godzulaThum.jpg".into(),
+                filename: "godzulaThum.jpg".into(),
+                filetype: "image/jpeg".into(),
+                ..Default::default()
+            },
+            MessageAttachment {
+                url: "file:///local-preview.png".into(),
+                ..Default::default()
+            },
+        ];
+        let attachment = pin_attachments_wire(&pin_message_attachments(&message));
+        let pin = pinned_from_last_pin_event(
+            &LastPinMessageEvent {
+                message_id: 42,
+                message_attachment: attachment,
+                ..Default::default()
+            },
+            None,
+        );
+        assert_eq!(pin.message_id, "42");
+        assert_eq!(pin.attachments.len(), 2);
+        assert_eq!(pin.attachments[0].url, long_url);
+        assert_eq!(pin.attachments[0].filename, "ChatGPT Image.png");
+        assert_eq!(pin.attachments[0].width, 1200);
+        assert_eq!(pin.attachments[0].height, 800);
+        assert_eq!(pin.attachments[0].size, 1762267);
+        assert_eq!(
+            pin.attachments[1].url,
+            "https://cdn.example/godzulaThum.jpg"
+        );
+        assert!(pin.attachments.iter().all(MessageAttachment::is_image));
+    }
+
+    #[test]
+    fn pin_attachment_url_validation_keeps_remote_urls_only() {
+        assert!(pin_attachment_url_valid("http://cdn.example/image.jpg"));
+        for url in [
+            "",
+            " ",
+            "file:///image.png",
+            "blob:local",
+            "data:image/png;base64,abc",
+        ] {
+            assert!(!pin_attachment_url_valid(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn pin_write_and_api_reload_preserve_separate_messages_without_cache() {
+        let urls = [
+            format!("https://cdn.example/{}.png", "a".repeat(512)),
+            "https://cdn.example/godzulaThum.jpg".into(),
+        ];
+        let api_records: Vec<_> = urls
+            .iter()
+            .enumerate()
+            .map(|(index, url)| {
+                let id = MessageId(42 + index as i64);
+                let mut message = Message::new(id, "", "7", "user", 0);
+                message.attachments = vec![MessageAttachment {
+                    url: url.clone(),
+                    filetype: "image".into(),
+                    ..Default::default()
+                }];
+                let wire = pin_attachments_wire(&pin_message_attachments(&message));
+                ApiPinMessage {
+                    id: (100 + index).to_string(),
+                    message_id: id.to_string(),
+                    content: "{\"t\":\"\"}".into(),
+                    content_text: String::new(),
+                    sender_id: "7".into(),
+                    sender_name: "user".into(),
+                    avatar: String::new(),
+                    create_time: 0,
+                    attachments: mezon_client::parse_search_attachment_field(&wire),
+                }
+            })
+            .collect();
+        // Only the API records survive; no message cache is available on reload.
+        let pins: Vec<_> = api_records
+            .into_iter()
+            .map(|record| pinned_from_api(record, None))
+            .collect();
+        for (index, pin) in pins.iter().enumerate() {
+            assert_eq!(pin.id, (100 + index).to_string());
+            assert_eq!(pin.message_id, (42 + index).to_string());
+            assert_eq!(pin.attachments.len(), 1);
+            assert_eq!(pin.attachments[0].url, urls[index]);
+            assert!(pin.attachments[0].is_image());
+        }
+    }
 
     #[test]
     fn parse_pin_create_time_unix() {

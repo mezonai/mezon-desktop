@@ -176,28 +176,21 @@ pub fn codec_summary(sdp: &str) -> String {
     out
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BitrateLimits {
-    pub min_kbps: u32,
-    pub start_kbps: u32,
-    pub max_kbps: u32,
-}
-
-pub fn munge_uplink_bitrates(sdp: &str, camera: BitrateLimits, screen: BitrateLimits) -> String {
+pub fn munge_uplink_start_bitrate(sdp: &str, start_kbps: u32) -> String {
     let split = split_sections(sdp);
     let mut rebuilt: Vec<Vec<String>> = Vec::with_capacity(split.media.len());
     let mut changed = false;
 
     for section in split.media {
-        let limits = match section_mid(&section).as_deref() {
-            Some(MID_CAMERA) => camera,
-            Some(MID_SCREEN) => screen,
-            _ => {
-                rebuilt.push(section);
-                continue;
-            }
-        };
-        let (patched, touched) = apply_bitrate_hints(section, limits);
+        let uplink = matches!(
+            section_mid(&section).as_deref(),
+            Some(MID_CAMERA) | Some(MID_SCREEN)
+        );
+        if !uplink {
+            rebuilt.push(section);
+            continue;
+        }
+        let (patched, touched) = apply_start_bitrate_hint(section, start_kbps);
         changed |= touched;
         rebuilt.push(patched);
     }
@@ -220,7 +213,7 @@ pub fn munge_uplink_bitrates(sdp: &str, camera: BitrateLimits, screen: BitrateLi
     out
 }
 
-fn apply_bitrate_hints(section: Vec<String>, limits: BitrateLimits) -> (Vec<String>, bool) {
+fn apply_start_bitrate_hint(section: Vec<String>, start_kbps: u32) -> (Vec<String>, bool) {
     let payload_types: Vec<String> = section
         .iter()
         .filter_map(|line| line.strip_prefix("a=rtpmap:"))
@@ -231,10 +224,7 @@ fn apply_bitrate_hints(section: Vec<String>, limits: BitrateLimits) -> (Vec<Stri
         })
         .collect();
 
-    let hints = format!(
-        "x-google-min-bitrate={};x-google-start-bitrate={};x-google-max-bitrate={}",
-        limits.min_kbps, limits.start_kbps, limits.max_kbps
-    );
+    let hint = format!("x-google-start-bitrate={start_kbps}");
 
     let mut out = section;
     let mut changed = false;
@@ -245,9 +235,9 @@ fn apply_bitrate_hints(section: Vec<String>, limits: BitrateLimits) -> (Vec<Stri
                 let existing = out[idx][fmtp_prefix.len()..].to_owned();
                 let kept = strip_bitrate_hints(&existing);
                 out[idx] = if kept.is_empty() {
-                    format!("{fmtp_prefix}{hints}")
+                    format!("{fmtp_prefix}{hint}")
                 } else {
-                    format!("{fmtp_prefix}{kept};{hints}")
+                    format!("{fmtp_prefix}{kept};{hint}")
                 };
             }
             None => {
@@ -255,7 +245,7 @@ fn apply_bitrate_hints(section: Vec<String>, limits: BitrateLimits) -> (Vec<Stri
                 let Some(idx) = out.iter().position(|l| l.starts_with(&rtpmap_prefix)) else {
                     continue;
                 };
-                out.insert(idx + 1, format!("{fmtp_prefix}{hints}"));
+                out.insert(idx + 1, format!("{fmtp_prefix}{hint}"));
             }
         }
         changed = true;
@@ -624,16 +614,7 @@ mod tests {
         assert_eq!(codec_summary(sdp), "5:[]");
     }
 
-    const CAM: BitrateLimits = BitrateLimits {
-        min_kbps: 250,
-        start_kbps: 500,
-        max_kbps: 1000,
-    };
-    const SCR: BitrateLimits = BitrateLimits {
-        min_kbps: 1000,
-        start_kbps: 2500,
-        max_kbps: 3500,
-    };
+    const START_KBPS: u32 = 2500;
 
     #[test]
     fn an_fmtp_line_is_created_when_the_codec_has_none() {
@@ -641,15 +622,15 @@ mod tests {
             m=video 9 RTP/SAVPF 96\r\n\
             a=mid:2\r\n\
             a=rtpmap:96 VP8/90000\r\n";
-        let got = munge_uplink_bitrates(sdp, CAM, SCR);
+        let got = munge_uplink_start_bitrate(sdp, START_KBPS);
         assert!(got.contains(
             "a=rtpmap:96 VP8/90000\r\n\
-             a=fmtp:96 x-google-min-bitrate=1000;x-google-start-bitrate=2500;x-google-max-bitrate=3500\r\n"
+             a=fmtp:96 x-google-start-bitrate=2500\r\n"
         ));
     }
 
     #[test]
-    fn each_uplink_gets_its_own_limits() {
+    fn every_uplink_shares_the_one_call_level_start_bitrate() {
         let sdp = "v=0\r\n\
             m=video 9 RTP/SAVPF 96\r\n\
             a=mid:1\r\n\
@@ -657,9 +638,8 @@ mod tests {
             m=video 9 RTP/SAVPF 96\r\n\
             a=mid:2\r\n\
             a=rtpmap:96 VP8/90000\r\n";
-        let got = munge_uplink_bitrates(sdp, CAM, SCR);
-        assert!(got.contains("x-google-start-bitrate=500"), "camera start");
-        assert!(got.contains("x-google-start-bitrate=2500"), "screen start");
+        let got = munge_uplink_start_bitrate(sdp, START_KBPS);
+        assert_eq!(got.matches("x-google-start-bitrate=2500").count(), 2);
     }
 
     #[test]
@@ -669,21 +649,23 @@ mod tests {
             a=mid:2\r\n\
             a=rtpmap:98 VP9/90000\r\n\
             a=fmtp:98 profile-id=0\r\n";
-        let got = munge_uplink_bitrates(sdp, CAM, SCR);
-        assert!(got.contains("a=fmtp:98 profile-id=0;x-google-min-bitrate=1000"));
+        let got = munge_uplink_start_bitrate(sdp, START_KBPS);
+        assert!(got.contains("a=fmtp:98 profile-id=0;x-google-start-bitrate=2500\r\n"));
     }
 
     #[test]
-    fn stale_hints_are_replaced_rather_than_appended() {
+    fn stale_hints_are_replaced_and_call_level_caps_are_dropped() {
         let sdp = "v=0\r\n\
             m=video 9 RTP/SAVPF 96\r\n\
             a=mid:2\r\n\
             a=rtpmap:96 VP8/90000\r\n\
-            a=fmtp:96 x-google-start-bitrate=100;profile-id=0\r\n";
-        let got = munge_uplink_bitrates(sdp, CAM, SCR);
+            a=fmtp:96 x-google-min-bitrate=1000;x-google-start-bitrate=100;x-google-max-bitrate=900;profile-id=0\r\n";
+        let got = munge_uplink_start_bitrate(sdp, START_KBPS);
         assert_eq!(got.matches("x-google-start-bitrate").count(), 1);
         assert!(got.contains("x-google-start-bitrate=2500"));
         assert!(got.contains("profile-id=0"));
+        assert!(!got.contains("x-google-min-bitrate"), "a min hint becomes an enforced floor");
+        assert!(!got.contains("x-google-max-bitrate"), "a max hint caps the whole connection");
     }
 
     #[test]
@@ -694,12 +676,12 @@ mod tests {
             a=rtpmap:96 VP8/90000\r\n\
             a=rtpmap:97 rtx/90000\r\n\
             a=fmtp:97 apt=96\r\n";
-        let got = munge_uplink_bitrates(sdp, CAM, SCR);
+        let got = munge_uplink_start_bitrate(sdp, START_KBPS);
         assert!(
             got.contains("a=fmtp:97 apt=96\r\n"),
             "rtx fmtp must be untouched"
         );
-        assert_eq!(got.matches("x-google-min-bitrate").count(), 1);
+        assert_eq!(got.matches("x-google-start-bitrate").count(), 1);
     }
 
     #[test]
@@ -708,6 +690,6 @@ mod tests {
             m=video 9 RTP/SAVPF 96\r\n\
             a=mid:5\r\n\
             a=rtpmap:96 VP8/90000\r\n";
-        assert_eq!(munge_uplink_bitrates(sdp, CAM, SCR), sdp);
+        assert_eq!(munge_uplink_start_bitrate(sdp, START_KBPS), sdp);
     }
 }

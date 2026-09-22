@@ -25,6 +25,7 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const NO_ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
 const ICE_DISCONNECT_GRACE: Duration = Duration::from_secs(12);
+const MAX_OFFER_AGE: Duration = Duration::from_secs(60);
 const MAX_PENDING_ICE: usize = 128;
 const MAX_KNOWN_OFFER_SESSIONS: usize = 8;
 const DM_STREAM_MODE: i32 = 4;
@@ -677,6 +678,7 @@ impl CallStore {
                     sdp,
                     caller_name: self.self_name.clone(),
                     caller_avatar: self.self_avatar.clone(),
+                    sent_at: now_ms().to_string(),
                 };
                 if let Some(compressed) = serde_json::to_string(&payload)
                     .ok()
@@ -878,6 +880,15 @@ impl CallStore {
             tracing::warn!("call: failed to decompress/parse remote offer");
             return;
         };
+        if let Some(age) = offer_age(&offer.sent_at)
+            && age > MAX_OFFER_AGE
+        {
+            tracing::info!(
+                "call: offer from {caller_id} sent {}s ago -> ignored as stale",
+                age.as_secs()
+            );
+            return;
+        }
         let from_peer = self.peer.as_ref().map(|p| p.user_id) == Some(caller_id);
         if from_peer && !matches!(self.phase, CallPhase::Idle) {
             self.remember_offer_session(caller_id, &offer.sdp);
@@ -1422,20 +1433,17 @@ fn self_identity(cx: &App) -> Option<(i64, String, String)> {
 
 fn ice_servers(cx: &App) -> Vec<IceServerConfig> {
     let config = AppConfig::global(cx);
-    let mut servers = vec![IceServerConfig {
-        urls: vec!["stun:stun.l.google.com:19302".into()],
-        username: String::new(),
-        credential: String::new(),
-    }];
-    if !config.webrtc_ice_servers_url.is_empty() && !config.webrtc_ice_servers_credential.is_empty()
-    {
-        servers.push(IceServerConfig {
-            urls: vec![config.webrtc_ice_servers_url.clone()],
-            username: config.webrtc_ice_servers_username.clone(),
-            credential: config.webrtc_ice_servers_credential.clone(),
-        });
+    if config.webrtc_ice_servers_url.is_empty() || config.webrtc_ice_servers_credential.is_empty() {
+        tracing::warn!(
+            "no turn credentials in this build; calls can only use host candidates"
+        );
+        return Vec::new();
     }
-    servers
+    vec![IceServerConfig {
+        urls: vec![config.webrtc_ice_servers_url.clone()],
+        username: config.webrtc_ice_servers_username.clone(),
+        credential: config.webrtc_ice_servers_credential.clone(),
+    }]
 }
 
 fn to_seconds_u32(create_time: i64) -> u32 {
@@ -1452,6 +1460,17 @@ fn now_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or_default()
+}
+
+fn offer_age(sent_at: &str) -> Option<Duration> {
+    let stamp: u128 = sent_at.trim().parse().ok().filter(|stamp| *stamp > 0)?;
+    let sent_ms = if stamp < 10_000_000_000 {
+        stamp * 1000
+    } else {
+        stamp
+    };
+    let age_ms = now_ms().checked_sub(sent_ms)?;
+    Some(Duration::from_millis(u64::try_from(age_ms).ok()?))
 }
 
 fn sdp_session_id(sdp: &str) -> Option<&str> {

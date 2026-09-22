@@ -52,15 +52,20 @@ impl Default for VideoFrameStore {
     }
 }
 
+#[derive(Default, Clone, Copy)]
+struct FramePathCounters {
+    received: u64,
+    published: u64,
+    taken: u64,
+}
+
 #[derive(Default)]
 struct VideoFrameState {
     frames: HashMap<u64, Arc<VideoFrameData>>,
     recycled: HashMap<u64, Vec<Vec<u8>>>,
     active: HashSet<u64>,
-    // The render path consumes frames with take_new, so a second reader would
-    // race the UI for every frame and mostly lose. While a recording is running
-    // each published frame is also kept here, where reads never remove it.
     recorded: HashMap<u64, Arc<VideoFrameData>>,
+    path_counters: HashMap<u64, FramePathCounters>,
 }
 
 impl VideoFrameStore {
@@ -78,6 +83,7 @@ impl VideoFrameStore {
         let recycled = {
             let mut state = self.state.lock();
             state.active.insert(key);
+            state.path_counters.entry(key).or_default().published += 1;
             if self.recording.load(Ordering::Relaxed) {
                 state.recorded.insert(key, frame.clone());
             } else if !state.recorded.is_empty() {
@@ -131,7 +137,35 @@ impl VideoFrameStore {
             return None;
         }
         let frame = state.frames.remove(&key)?;
+        state.path_counters.entry(key).or_default().taken += 1;
         Some(Arc::try_unwrap(frame).unwrap_or_else(|frame| (*frame).clone()))
+    }
+
+    pub fn note_received(&self, key: u64) {
+        self.state.lock().path_counters.entry(key).or_default().received += 1;
+    }
+
+    pub fn log_frame_path(&self) {
+        let snapshot: Vec<(u64, FramePathCounters)> = {
+            let mut state = self.state.lock();
+            state
+                .path_counters
+                .iter_mut()
+                .map(|(key, counters)| (*key, std::mem::take(counters)))
+                .collect()
+        };
+        for (key, counters) in snapshot {
+            if counters.received == 0 && counters.published == 0 && counters.taken == 0 {
+                continue;
+            }
+            tracing::info!(
+                key,
+                received = counters.received,
+                published = counters.published,
+                taken = counters.taken,
+                "video frame path"
+            );
+        }
     }
 
     pub fn recycle(&self, key: u64, mut buffer: Vec<u8>) {
@@ -152,6 +186,7 @@ impl VideoFrameStore {
         state.recorded.remove(&key);
         state.recycled.remove(&key);
         state.active.remove(&key);
+        state.path_counters.remove(&key);
     }
 }
 

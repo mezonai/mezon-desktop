@@ -88,6 +88,17 @@ mod tests {
     }
 
     #[test]
+    fn event_date_label_is_localized() {
+        assert_eq!(t("en", "eventCreator.fields.date.title"), "Date");
+        assert_eq!(t("vi", "eventCreator.fields.date.title"), "Ngày");
+        assert_eq!(t("en", "eventCreator.fields.startDate.title"), "Start Date");
+        for locale in LOCALES {
+            let key = "eventCreator.fields.date.title";
+            assert!(data(locale).contains_key(key), "{locale} missing {key}");
+        }
+    }
+
+    #[test]
     fn unknown_locale_falls_back_to_english() {
         assert_eq!(t("xx", "common.settings"), "Settings");
     }

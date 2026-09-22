@@ -1,12 +1,14 @@
 use std::collections::HashSet;
+use std::time::Duration;
 
 use gpui::{
-    App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, MouseButton,
-    SharedString, Subscription, Window, deferred, div, prelude::*, px, relative,
+    AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, MouseButton,
+    ScrollStrategy, SharedString, Subscription, Task, UniformListScrollHandle, Window, deferred,
+    div, prelude::*, px, relative, size, uniform_list,
 };
 use mezon_store::{
-    AccountStore, BadgeService, DirectMessageStore, FriendStore, UserId, UsersByUserStore,
-    WalletStore,
+    AccountStore, BadgeService, DirectMessageStore, FriendStore, UserId, UsersByUserEvent,
+    UsersByUserStore, WalletStore,
 };
 
 use crate::app::shell::Shell;
@@ -16,8 +18,10 @@ use crate::components::primitives::{
 use crate::theme::ActiveTheme;
 
 use mezon_store::TOKEN_DECIMAL_FACTOR as DECIMAL_FACTOR;
-const MAX_CANDIDATES_SHOWN: usize = 50;
 const MAX_AMOUNT_DIGITS: usize = 15;
+const SEARCH_DEBOUNCE_MS: u64 = 300;
+const RECIPIENT_ROW_PX: f32 = 48.;
+const RECIPIENT_MENU_MAX_PX: f32 = RECIPIENT_ROW_PX * 5.;
 
 #[derive(Clone)]
 struct Candidate {
@@ -27,23 +31,31 @@ struct Candidate {
     filter_key: String,
 }
 
+struct Candidates {
+    friends: Vec<Candidate>,
+    known_users: Vec<Candidate>,
+}
+
 pub struct SendTokenModal {
     focus_handle: FocusHandle,
     locale: SharedString,
     search: Entity<InputState>,
     amount: Entity<InputState>,
     note: Entity<InputState>,
-    candidates: Vec<Candidate>,
+    candidates: Candidates,
     visible: Vec<Candidate>,
+    recipient_scroll: UniformListScrollHandle,
     selected: Option<(String, SharedString)>,
     dropdown_open: bool,
     error: Option<SharedString>,
     sending: bool,
     suppress_search_change: bool,
     amount_reformat_queued: bool,
+    _search_task: Task<()>,
     _search_sub: Subscription,
     _search_blur_sub: Subscription,
     _amount_sub: Subscription,
+    _users_sub: Option<Subscription>,
 }
 
 impl Focusable for SendTokenModal {
@@ -99,6 +111,8 @@ impl SendTokenModal {
                         } else {
                             this.selected = None;
                             this.dropdown_open = true;
+                            this.recipient_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                            this.schedule_user_search(cx);
                         }
                         this.recompute_visible(cx);
                         cx.notify();
@@ -138,6 +152,21 @@ impl SendTokenModal {
                 },
             );
 
+            let users_sub = UsersByUserStore::try_global(cx).map(|store| {
+                cx.subscribe(
+                    &store,
+                    |this: &mut Self, _, event: &UsersByUserEvent, cx| {
+                        match event {
+                            UsersByUserEvent::Changed => {
+                                this.candidates = Self::build_candidates(cx);
+                            }
+                            UsersByUserEvent::SearchSettled => {}
+                        }
+                        this.recompute_visible(cx);
+                        cx.notify();
+                    },
+                )
+            });
             let search_blur_sub = cx.on_focus_out(
                 &search.focus_handle(cx),
                 window,
@@ -157,15 +186,18 @@ impl SendTokenModal {
                 note,
                 candidates,
                 visible: Vec::new(),
+                recipient_scroll: UniformListScrollHandle::new(),
                 selected: None,
                 dropdown_open: false,
                 error: None,
                 sending: false,
                 suppress_search_change: false,
                 amount_reformat_queued: false,
+                _search_task: Task::ready(()),
                 _search_sub: search_sub,
                 _search_blur_sub: search_blur_sub,
                 _amount_sub: amount_sub,
+                _users_sub: users_sub,
             };
             this.note
                 .update(cx, |input, cx| input.set_value(default_note, window, cx));
@@ -180,22 +212,24 @@ impl SendTokenModal {
         Shell::global(cx).update(cx, |shell, cx| shell.show_modal(view.into(), cx));
     }
 
-    fn build_candidates(cx: &App) -> Vec<Candidate> {
+    fn build_candidates(cx: &App) -> Candidates {
         let me = BadgeService::try_global(cx).and_then(|b| b.read(cx).current_user_id(cx));
         let me_id = me.map(|id| id.0.to_string());
         let mut seen: HashSet<String> = HashSet::new();
-        let mut out: Vec<Candidate> = Vec::new();
+        let mut friends: Vec<Candidate> = Vec::new();
+        let mut known_users: Vec<Candidate> = Vec::new();
 
         if let Some(store) = FriendStore::try_global(cx) {
             for friend in store.read(cx).friends() {
                 let id = friend.id.0.to_string();
                 Self::push_candidate(
-                    &mut out,
+                    &mut friends,
                     &mut seen,
                     me_id.as_deref(),
                     cx,
                     id,
                     &friend.username,
+                    &friend.display_name,
                     &friend.avatar_url,
                 );
             }
@@ -204,17 +238,22 @@ impl SendTokenModal {
             for user in store.read(cx).users() {
                 let id = user.id.0.to_string();
                 Self::push_candidate(
-                    &mut out,
+                    &mut known_users,
                     &mut seen,
                     me_id.as_deref(),
                     cx,
                     id,
                     &user.username,
+                    &user.display_name,
                     &user.avatar_url,
                 );
             }
         }
-        out
+        known_users.sort_by(|a, b| a.filter_key.cmp(&b.filter_key));
+        Candidates {
+            friends,
+            known_users,
+        }
     }
 
     fn push_candidate(
@@ -224,6 +263,7 @@ impl SendTokenModal {
         cx: &App,
         id: String,
         username: &str,
+        display_name: &str,
         avatar_url: &str,
     ) {
         if id.is_empty() || id == "0" || Some(id.as_str()) == me_id || username.is_empty() {
@@ -241,7 +281,27 @@ impl SendTokenModal {
             id,
             username: SharedString::from(username.to_string()),
             avatar,
-            filter_key: username.to_lowercase(),
+            filter_key: format!("{username} {display_name}").to_lowercase(),
+        });
+    }
+
+    fn schedule_user_search(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = UsersByUserStore::try_global(cx) else {
+            return;
+        };
+        if self.search.read(cx).value().trim().is_empty() {
+            self._search_task = Task::ready(());
+            store.update(cx, |store, cx| store.search("", cx));
+            return;
+        }
+        self._search_task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(SEARCH_DEBOUNCE_MS))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let query = this.search.read(cx).value().to_string();
+                store.update(cx, |store, cx| store.search(&query, cx));
+            });
         });
     }
 
@@ -256,6 +316,7 @@ impl SendTokenModal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self._search_task = Task::ready(());
         self.suppress_search_change = true;
         self.search.update(cx, |input, cx| {
             input.set_value(username.clone(), window, cx)
@@ -267,14 +328,14 @@ impl SendTokenModal {
 
     fn recompute_visible(&mut self, cx: &App) {
         let needle = self.search.read(cx).value().trim().to_lowercase();
-        let visible: Vec<Candidate> = self
-            .candidates
-            .iter()
-            .filter(|candidate| needle.is_empty() || candidate.filter_key.contains(&needle))
-            .take(MAX_CANDIDATES_SHOWN)
-            .cloned()
-            .collect();
-        self.visible = visible;
+        let hits = UsersByUserStore::try_global(cx)
+            .map(|store| {
+                let store = store.read(cx);
+                let (query, hits) = store.search_hits();
+                fresh_hits(&needle, query, hits)
+            })
+            .unwrap_or_default();
+        self.visible = order_visible(&self.candidates, &needle, &hits);
     }
 
     fn amount_value(&self, cx: &App) -> i64 {
@@ -481,8 +542,6 @@ impl Render for SendTokenModal {
                 .flex()
                 .flex_col()
                 .min_h_0()
-                .max_h(px(240.))
-                .overflow_y_scroll()
                 .rounded_md()
                 .border_1()
                 .border_color(theme.tokens.border_primary)
@@ -505,42 +564,26 @@ impl Render for SendTokenModal {
                         .child(tk("userProfile.statusProfile.sendTokenModal.noUsersFound")),
                 );
             }
-            for candidate in &self.visible {
-                let id = candidate.id.clone();
-                let username = candidate.username.clone();
-                menu = menu.child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "send-token-user-{}",
-                            candidate.id
-                        )))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_3()
-                        .px_3()
-                        .py_2()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.tokens.bg_item_hover))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, window, cx| {
-                                this.select_recipient(id.clone(), username.clone(), window, cx);
-                            }),
-                        )
-                        .child(
-                            Avatar::new()
-                                .name(candidate.username.clone())
-                                .src(candidate.avatar.clone())
-                                .size_px(px(28.)),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(theme.tokens.text_secondary)
-                                .child(candidate.username.clone()),
-                        ),
-                );
+            if !self.visible.is_empty() {
+                let entity = cx.entity();
+                let count = self.visible.len();
+                let list_h = (count as f32 * RECIPIENT_ROW_PX).min(RECIPIENT_MENU_MAX_PX);
+                let list =
+                    uniform_list("send-token-recipients", count, move |range, _window, cx| {
+                        let theme = cx.theme();
+                        let this = entity.read(cx);
+                        range
+                            .map(|ix| match this.visible.get(ix) {
+                                Some(candidate) => recipient_row(candidate, &entity, theme),
+                                None => div().h(px(RECIPIENT_ROW_PX)).into_any_element(),
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .with_item_size(size(px(1.), px(RECIPIENT_ROW_PX)))
+                    .track_scroll(&self.recipient_scroll)
+                    .h(px(list_h))
+                    .w_full();
+                menu = menu.child(list);
             }
             recipient_field = recipient_field.child(deferred(menu));
         }
@@ -738,11 +781,76 @@ fn section(theme: &crate::theme::Theme, label: impl Into<SharedString>) -> gpui:
     )
 }
 
+fn recipient_row(
+    candidate: &Candidate,
+    entity: &Entity<SendTokenModal>,
+    theme: &crate::theme::Theme,
+) -> AnyElement {
+    let id = candidate.id.clone();
+    let username = candidate.username.clone();
+    div()
+        .id(SharedString::from(format!(
+            "send-token-user-{}",
+            candidate.id
+        )))
+        .w_full()
+        .h(px(RECIPIENT_ROW_PX))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .px_3()
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.tokens.bg_item_hover))
+        .on_mouse_down(MouseButton::Left, {
+            let entity = entity.clone();
+            move |_, window: &mut Window, cx: &mut App| {
+                entity.update(cx, |this, cx| {
+                    this.select_recipient(id.clone(), username.clone(), window, cx)
+                });
+            }
+        })
+        .child(
+            Avatar::new()
+                .name(candidate.username.clone())
+                .src(candidate.avatar.clone())
+                .size_px(px(28.)),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme.tokens.text_secondary)
+                .child(candidate.username.clone()),
+        )
+        .into_any_element()
+}
+
+fn fresh_hits(needle: &str, settled_query: &str, hits: &[UserId]) -> HashSet<String> {
+    if needle.is_empty() || settled_query.trim().to_lowercase() != needle {
+        return HashSet::new();
+    }
+    hits.iter().map(|id| id.0.to_string()).collect()
+}
+
+fn order_visible(candidates: &Candidates, needle: &str, hits: &HashSet<String>) -> Vec<Candidate> {
+    let listed = |candidate: &Candidate| {
+        needle.is_empty() || candidate.filter_key.contains(needle) || hits.contains(&candidate.id)
+    };
+    candidates
+        .friends
+        .iter()
+        .chain(candidates.known_users.iter())
+        .filter(|candidate| listed(candidate))
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DECIMAL_FACTOR, MAX_AMOUNT_DIGITS, amount_exceeds_balance, amount_reformat_target,
-        digit_count, format_amount_input, format_thousands, parse_whole_token_amount,
+        Candidate, Candidates, DECIMAL_FACTOR, HashSet, MAX_AMOUNT_DIGITS, SharedString, UserId,
+        amount_exceeds_balance, amount_reformat_target, digit_count, format_amount_input,
+        format_thousands, fresh_hits, order_visible, parse_whole_token_amount,
     };
 
     #[test]
@@ -875,5 +983,88 @@ mod tests {
         for value in [1i64, 999, 1000, 1_234_567, i64::MAX / DECIMAL_FACTOR as i64] {
             assert_eq!(parse_whole_token_amount(&format_thousands(value)), value);
         }
+    }
+
+    fn candidate(id: &str, username: &str, display_name: &str) -> Candidate {
+        Candidate {
+            id: id.into(),
+            username: username.into(),
+            avatar: SharedString::default(),
+            filter_key: format!("{username} {display_name}").to_lowercase(),
+        }
+    }
+
+    fn sorted(mut users: Vec<Candidate>) -> Vec<Candidate> {
+        users.sort_by(|a, b| a.filter_key.cmp(&b.filter_key));
+        users
+    }
+
+    fn ids(visible: &[Candidate]) -> Vec<&str> {
+        visible.iter().map(|c| c.id.as_str()).collect()
+    }
+
+    fn hits(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
+    #[test]
+    fn server_hits_never_reorder_rows_that_were_already_listed() {
+        let candidates = Candidates {
+            friends: vec![candidate("1", "zed-bot-friend", "")],
+            known_users: sorted(vec![
+                candidate("2", "bot-reward", "Reward"),
+                candidate("3", "bot-hrm", "HRM"),
+                candidate("4", "Bot Interview English#9942", "Bot Interview English"),
+            ]),
+        };
+        let before = order_visible(&candidates, "bot", &hits(&[]));
+        let after = order_visible(&candidates, "bot", &hits(&["4", "2", "3"]));
+        assert_eq!(ids(&before), ids(&after));
+        assert_eq!(ids(&after), ["1", "4", "3", "2"]);
+    }
+
+    #[test]
+    fn a_hit_that_only_matches_by_nickname_is_listed_in_its_sorted_place() {
+        let candidates = Candidates {
+            friends: vec![candidate("1", "alice", "Alice")],
+            known_users: sorted(vec![
+                candidate("2", "bot-reward", "Reward"),
+                candidate("3", "carol", "Carol"),
+                candidate("4", "zeta", "Zeta"),
+            ]),
+        };
+        let visible = order_visible(&candidates, "bot", &hits(&["1", "4"]));
+        assert_eq!(ids(&visible), ["1", "2", "4"]);
+    }
+
+    #[test]
+    fn an_empty_query_lists_friends_before_the_user_cache() {
+        let candidates = Candidates {
+            friends: vec![candidate("2", "zoe", "Zoe")],
+            known_users: sorted(vec![candidate("3", "bot-hrm", "HRM")]),
+        };
+        let visible = order_visible(&candidates, "", &hits(&[]));
+        assert_eq!(ids(&visible), ["2", "3"]);
+    }
+
+    #[test]
+    fn hits_settled_for_another_query_are_not_fresh() {
+        let settled = [UserId(7), UserId(9)];
+        assert!(fresh_hits("bot-r", "bot", &settled).is_empty());
+        assert!(fresh_hits("", "bot", &settled).is_empty());
+        assert_eq!(fresh_hits("bot", " Bot ", &settled), hits(&["7", "9"]));
+    }
+
+    #[test]
+    fn a_stale_hit_that_no_longer_matches_locally_disappears() {
+        let candidates = Candidates {
+            friends: Vec::new(),
+            known_users: sorted(vec![
+                candidate("2", "bot-reward", "Reward"),
+                candidate("3", "alice", "Alice"),
+            ]),
+        };
+        let stale = fresh_hits("bot-r", "bot", &[UserId(2), UserId(3)]);
+        assert_eq!(ids(&order_visible(&candidates, "bot-r", &stale)), ["2"]);
     }
 }

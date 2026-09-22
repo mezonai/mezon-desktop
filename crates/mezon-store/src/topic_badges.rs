@@ -12,7 +12,7 @@ use prost::Message;
 use crate::AuthState;
 use crate::channel::{ChannelList, ChannelType};
 use crate::clan_members::ClanMembersStore;
-use crate::ids::{ChannelId, ClanId, RoleId, UserId};
+use crate::ids::{ChannelId, ClanId, UserId};
 use crate::inbox::{InboxStore, skip_inbox_mention_code};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
@@ -20,7 +20,6 @@ const USER_MENTIONED: i32 = -9;
 const USER_REPLIED: i32 = -11;
 const CHAT_UPDATE: i32 = 1;
 const CHAT_REMOVE: i32 = 2;
-const ID_MENTION_HERE: i64 = 1_775_731_111_020_111_321;
 const MAX_PROCESSED_KEYS: usize = 500;
 
 #[derive(Debug, Clone)]
@@ -196,7 +195,9 @@ impl TopicBadgeStore {
             Some(&message_id),
             &dedupe_key,
         ) {
-            let inbox = if skip_inbox_mention_code(m.code) {
+            let inbox = if skip_inbox_mention_code(m.code)
+                || !is_message_inbox_mention_or_reply(&topic_message, user_id, cx)
+            {
                 Vec::new()
             } else {
                 vec![inbox_notification_from_channel_mention(m)]
@@ -379,92 +380,34 @@ fn notification_message_time(n: &api::Notification) -> u32 {
     n.create_time_seconds
 }
 
-fn is_message_mention_or_reply(msg: &api::ChannelMessage, user_id: UserId, cx: &App) -> bool {
-    let mentions = parse_message_mentions(&msg.mentions);
-    let member_roles = ClanMembersStore::global(cx)
+fn is_message_inbox_mention_or_reply(msg: &api::ChannelMessage, user_id: UserId, cx: &App) -> bool {
+    let member_roles: Vec<i64> = ClanMembersStore::global(cx)
         .read(cx)
         .member(ClanId(msg.clan_id), user_id)
-        .map(|m| m.role_ids.clone())
+        .map(|member| member.role_ids.iter().map(|role| role.get()).collect())
         .unwrap_or_default();
-    let includes_here = mentions
-        .iter()
-        .any(|m| m.user_id == Some(UserId(ID_MENTION_HERE)));
-    let includes_user = mentions.iter().any(|m| m.user_id == Some(user_id));
-    let includes_role = mentions.iter().any(|m| {
-        m.role_id
-            .map(|role| member_roles.contains(&role))
-            .unwrap_or(false)
-    });
-    let is_reply = parse_message_refs(&msg.references)
-        .iter()
-        .any(|r| r.message_sender_id == user_id);
-    includes_here || includes_user || includes_role || is_reply
+    mezon_client::transport::is_inbox_mention_or_reply(
+        &msg.content,
+        &msg.references,
+        &msg.mentions,
+        user_id.get(),
+        &member_roles,
+    )
 }
 
-struct ParsedMention {
-    user_id: Option<UserId>,
-    role_id: Option<RoleId>,
-}
-
-struct ParsedRef {
-    message_sender_id: UserId,
-}
-
-fn parse_message_mentions(bytes: &[u8]) -> Vec<ParsedMention> {
-    if bytes.is_empty() {
-        return Vec::new();
-    }
-    if let Ok(list) = api::MessageMentionList::decode(bytes) {
-        return list
-            .mentions
-            .into_iter()
-            .map(|m| ParsedMention {
-                user_id: (m.user_id != 0).then_some(UserId(m.user_id)),
-                role_id: (m.role_id != 0).then_some(RoleId(m.role_id)),
-            })
-            .collect();
-    }
-    if let Ok(values) = serde_json::from_slice::<Vec<serde_json::Value>>(bytes) {
-        return values
-            .into_iter()
-            .map(|value| {
-                let user_id = value
-                    .get("user_id")
-                    .and_then(|v| {
-                        v.as_str()
-                            .map(str::to_string)
-                            .or_else(|| v.as_i64().map(|n| n.to_string()))
-                    })
-                    .and_then(|s| s.parse().ok());
-                let role_id = value
-                    .get("role_id")
-                    .and_then(|v| {
-                        v.as_str()
-                            .map(str::to_string)
-                            .or_else(|| v.as_i64().map(|n| n.to_string()))
-                    })
-                    .and_then(|s| s.parse().ok());
-                ParsedMention { user_id, role_id }
-            })
-            .collect();
-    }
-    Vec::new()
-}
-
-fn parse_message_refs(bytes: &[u8]) -> Vec<ParsedRef> {
-    if bytes.is_empty() {
-        return Vec::new();
-    }
-    if let Ok(list) = api::MessageRefList::decode(bytes) {
-        return list
-            .refs
-            .into_iter()
-            .map(|r| ParsedRef {
-                message_sender_id: UserId(r.message_sender_id),
-            })
-            .collect();
-    }
-    Vec::new()
+fn is_message_mention_or_reply(msg: &api::ChannelMessage, user_id: UserId, cx: &App) -> bool {
+    let member_roles: Vec<i64> = ClanMembersStore::global(cx)
+        .read(cx)
+        .member(ClanId(msg.clan_id), user_id)
+        .map(|member| member.role_ids.iter().map(|role| role.get()).collect())
+        .unwrap_or_default();
+    mezon_client::transport::is_mention_or_reply(
+        &msg.content,
+        &msg.references,
+        &msg.mentions,
+        user_id.get(),
+        &member_roles,
+    )
 }
 
 #[cfg(test)]

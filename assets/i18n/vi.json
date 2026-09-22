@@ -2348,6 +2348,7 @@
   "createChannel.labels.isPrivate": "Kênh riêng tư?",
   "createChannel.labels.placeholder": "Nhập tên kênh",
   "createChannel.privacy.description": "Chỉ những thành viên và vai trò được chọn mới có thể xem kênh này.",
+  "createChannel.privacy.descriptionVoice": "Chỉ những thành viên và vai trò được chọn mới có thể xem và tham gia kênh này.",
   "createChannel.privacy.private": "Kênh riêng tư",
   "createChannel.validation.duplicateName": "Tên kênh đã tồn tại trong danh mục. Vui lòng nhập tên khác.",
   "createChannel.validation.invalidName": "Vui lòng nhập tên kênh (tối đa 64 ký tự, chỉ từ, số, _ hoặc -).",
@@ -2709,6 +2710,7 @@
   "eventCreator.fields.eventName.title": "Chủ đề sự kiện",
   "eventCreator.fields.startDate.errorMessage": "Vui lòng chọn ngày hiện tại hoặc ngày trong tương lai",
   "eventCreator.fields.startDate.title": "Ngày bắt đầu",
+  "eventCreator.fields.date.title": "Ngày",
   "eventCreator.fields.startTime.errorMessage": "Vui lòng chọn giờ bắt đầu hợp lệ",
   "eventCreator.fields.startTime.title": "Giờ bắt đầu",
   "eventCreator.notify.locationBlank": "Cần có một địa điểm",
@@ -3173,6 +3175,7 @@
   "media.video.error.title": "Video không khả dụng",
   "memberPage.addedBy": "Được thêm bởi {{name}}",
   "memberPage.inVoice": "Trong kênh thoại",
+  "memberPage.shareScreen": "Đang chia sẻ màn hình",
   "memberPage.membersOf": "Tổng thành viên {{count}}",
   "memberPage.noSearchResults": "Không có thành viên nào khớp với kết quả tìm kiếm",
   "memberPage.offlineCount": "Ngoại tuyến - {{count}}",
@@ -4104,6 +4107,7 @@
   "setting.logOut": "Đăng xuất",
   "setting.logOutPopup.description": "Bạn có chắc chắn muốn đăng xuất không?",
   "setting.logOutPopup.noConfirm": "Không",
+  "setting.logOutPopup.title": "Đăng xuất",
   "setting.logOutPopup.yesConfirm": "Có",
   "setting.notifications.hideContent": "Ẩn nội dung thông báo",
   "setting.notifications.hideContentDesc": "Khi bật, nội dung tin nhắn sẽ bị ẩn khỏi popup thông báo và màn hình khóa.",
@@ -4727,5 +4731,9 @@
   "userProfile.userInfoDM.menu.removeSuccess": "Đã xóa thành viên khỏi nhóm",
   "userProfile.userInfoDM.mezonMemberSince": "Thành viên Mezon từ",
   "userProfile.voiceInfo.inVoice": "Trong kênh thoại",
-  "userProfile.voiceInfo.joinVoice": "Tham gia thoại"
+  "userProfile.voiceInfo.joinVoice": "Tham gia thoại",
+  "screenShare.modeText": "Văn bản",
+  "screenShare.modeTextDescription": "Văn bản và slide rõ nét, ít tốn tài nguyên hơn.",
+  "screenShare.modeVideo": "Video",
+  "screenShare.modeVideoDescription": "Video mượt hơn; có thể giảm độ nét khi mạng chậm."
 }

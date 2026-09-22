@@ -43,9 +43,9 @@ pub fn download_url_with_dialog(
     let directory = downloads
         .clone()
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let suggested = filename.to_string();
-    let receiver = cx.prompt_for_new_path(&directory, Some(suggested.as_str()));
     let url = url.to_string();
+    let suggested = mezon_client::resolve_download_filename(&filename, &url);
+    let receiver = cx.prompt_for_new_path(&directory, Some(suggested.as_str()));
     cx.spawn(async move |cx| {
         let mut asked = true;
         let path = match classify_dialog(receiver.await) {
@@ -534,6 +534,43 @@ mod tests {
         assert!(
             reserved.iter().all(|name| name == "x.desktop"),
             "the wire name must be reduced to a plain file inside the folder, got {reserved:?}"
+        );
+
+        TEST_DOWNLOAD_DIR.with(|slot| *slot.borrow_mut() = None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    async fn a_sound_named_by_its_label_is_saved_with_the_extension_of_its_object(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = scratch_dir("dl-sound");
+        TEST_DOWNLOAD_DIR.with(|slot| *slot.borrow_mut() = Some(dir.clone()));
+
+        let seen: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        let on_event = record(&seen);
+        cx.update(|cx| {
+            download_url_with_dialog(
+                "https://cdn.example/1840673171137630208/2097582928409137152.wav".into(),
+                // A pick from the sound panel is named after the sound, not the file.
+                "u need to leave".into(),
+                on_event,
+                cx,
+            );
+        });
+
+        cx.simulate_new_path_failure(anyhow::anyhow!(PORTAL_MISSING));
+        cx.run_until_parked();
+
+        let reserved: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read scratch dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            reserved,
+            vec!["u need to leave.wav".to_string()],
+            "a bare label saves as a typeless file the OS opens as text"
         );
 
         TEST_DOWNLOAD_DIR.with(|slot| *slot.borrow_mut() = None);

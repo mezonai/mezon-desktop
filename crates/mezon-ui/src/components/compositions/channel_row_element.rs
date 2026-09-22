@@ -485,12 +485,15 @@ impl Element for ChannelRowElement {
                     window.set_cursor_style(CursorStyle::PointingHand, hitbox);
                 }
 
-                if self.on_click.is_some() || self.on_right_click.is_some() {
+                // A row that shows voice occupants leaves navigation to the
+                // column wrapping it and sets no `on_click` here; the gear
+                // still needs its own listener, or it paints but never fires.
+                let has_trailing = self.trailing_action.is_some() && !is_thread;
+                if self.on_click.is_some() || self.on_right_click.is_some() || has_trailing {
                     let hitbox_down = hitbox.clone();
                     let mouse_down = state.mouse_down.clone();
                     let on_right_click = self.on_right_click.clone();
                     let trailing_action = self.trailing_action.clone();
-                    let has_trailing = trailing_action.is_some() && !is_thread;
                     window.on_mouse_event(
                         move |event: &MouseDownEvent, phase, window: &mut Window, cx: &mut App| {
                             if phase != DispatchPhase::Bubble || !hitbox_down.is_hovered(window) {
@@ -527,6 +530,10 @@ impl Element for ChannelRowElement {
                                     && gear_bounds(hitbox_up.bounds).contains(&event.position)
                                     && let Some(action) = trailing_action.as_ref()
                                 {
+                                    // The wrapping column would otherwise take
+                                    // the same release as a row click and
+                                    // navigate away from the page just opened.
+                                    cx.stop_propagation();
                                     (action.on_click)(window, cx);
                                     return;
                                 }

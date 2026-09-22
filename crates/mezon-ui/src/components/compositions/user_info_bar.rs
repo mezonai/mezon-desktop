@@ -21,7 +21,7 @@ pub struct UserInfoBar {
     auth_state: Entity<AuthState>,
     account_store: Entity<AccountStore>,
     settings: Option<Entity<Settings>>,
-    username: SharedString,
+    display_name: SharedString,
     status: UserPresence,
     user_status: SharedString,
     avatar_src: SharedString,
@@ -35,25 +35,25 @@ impl UserInfoBar {
         let account_store = AccountStore::global(cx);
         let settings = Settings::try_global(cx);
         cx.observe(&auth_state, |this, _, cx| {
-            if this.sync_username(cx) {
+            if this.sync_display_name(cx) {
                 cx.notify();
             }
         })
         .detach();
         cx.observe(&account_store, |this, _, cx| {
-            let changed = this.sync_avatar(cx) | this.sync_status(cx);
+            let changed = this.sync_avatar(cx) | this.sync_status(cx) | this.sync_display_name(cx);
             if changed {
                 cx.notify();
             }
         })
         .detach();
         account_store.update(cx, |store, cx| store.ensure_account(cx));
-        let username = Self::read_username(&auth_state, cx);
+        let display_name = Self::read_display_name(&account_store, &auth_state, cx);
         let mut bar = Self {
             auth_state,
             account_store,
             settings,
-            username,
+            display_name,
             status: UserPresence::default(),
             user_status: SharedString::default(),
             avatar_src: SharedString::default(),
@@ -79,14 +79,14 @@ impl UserInfoBar {
         true
     }
 
-    fn toggle_profile_popup(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_profile_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.profile_popup.is_some() {
             self.profile_popup = None;
             self._popup_sub = None;
             cx.notify();
             return;
         }
-        let popup = cx.new(FooterProfilePopup::new);
+        let popup = cx.new(|cx| FooterProfilePopup::new(window, cx));
         self._popup_sub = Some(cx.subscribe(&popup, |this, _, _: &DismissEvent, cx| {
             this.profile_popup = None;
             cx.notify();
@@ -114,19 +114,33 @@ impl UserInfoBar {
         self.avatar_src != prev_src || self.avatar_raw != prev_raw
     }
 
-    fn read_username(auth_state: &Entity<AuthState>, cx: &App) -> SharedString {
+    fn read_display_name(
+        account_store: &Entity<AccountStore>,
+        auth_state: &Entity<AuthState>,
+        cx: &App,
+    ) -> SharedString {
+        if let Some(account) = account_store.read(cx).account.as_ref() {
+            let name = if account.display_name.is_empty() {
+                account.username.clone()
+            } else {
+                account.display_name.clone()
+            };
+            if !name.is_empty() {
+                return SharedString::from(name);
+            }
+        }
         match auth_state.read(cx) {
             AuthState::Authenticated(session) => SharedString::from(session.username.clone()),
             _ => SharedString::from("Unknown"),
         }
     }
 
-    fn sync_username(&mut self, cx: &App) -> bool {
-        let username = Self::read_username(&self.auth_state, cx);
-        if self.username == username {
+    fn sync_display_name(&mut self, cx: &App) -> bool {
+        let display_name = Self::read_display_name(&self.account_store, &self.auth_state, cx);
+        if self.display_name == display_name {
             return false;
         }
-        self.username = username;
+        self.display_name = display_name;
         true
     }
 }
@@ -158,7 +172,9 @@ impl Render for UserInfoBar {
             );
         settings_btn.interactivity().on_click(on_settings_click());
 
-        let mut avatar = Avatar::new().name(self.username.clone()).size_px(px(32.0));
+        let mut avatar = Avatar::new()
+            .name(self.display_name.clone())
+            .size_px(px(32.0));
         if !self.avatar_src.is_empty() {
             avatar = avatar.src(self.avatar_src.clone());
             if !self.avatar_raw.is_empty() && self.avatar_raw != self.avatar_src {
@@ -242,7 +258,7 @@ impl Render for UserInfoBar {
                                             .text_sm()
                                             .font_weight(gpui::FontWeight::MEDIUM)
                                             .text_color(theme.text_primary)
-                                            .child(self.username.clone()),
+                                            .child(self.display_name.clone()),
                                     )
                                     .child(
                                         div()

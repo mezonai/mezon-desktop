@@ -154,6 +154,20 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             }),
             &["clan_id", "name"],
         )),
+        "sidebar_channels" => Arc::new(object(
+            json!({ "clan_id": id("Clan snowflake id from list_clans.") }),
+            &["clan_id"],
+        )),
+        "create_channel" => Arc::new(object(
+            json!({
+                "clan_id": id("Clan snowflake id from list_clans."),
+                "category_id": id("Category snowflake id from list_categories."),
+                "name": { "type": "string", "description": "Channel name (same rules as the Create Channel modal)." },
+                "channel_type": { "type": "string", "enum": ["text", "voice", "stream"], "description": "Channel type. Default text." },
+                "private": { "type": "boolean", "description": "Create the channel private (text and voice only). Default false." },
+            }),
+            &["clan_id", "category_id", "name"],
+        )),
         "tour_start" => Arc::new(object(
             json!({
                 "track": { "type": "string", "description": "Track id. Omit to start the one matching the current route." },
@@ -319,6 +333,12 @@ pub fn input_schema(name: &str) -> Arc<Map<String, Value>> {
             json!({
                 "query": string("Search text."),
                 "size": integer("Max hits to return (default 20).", Some(20)),
+            }),
+            &["query"],
+        )),
+        "search_users" => Arc::new(object(
+            json!({
+                "query": string("Search text."),
             }),
             &["query"],
         )),

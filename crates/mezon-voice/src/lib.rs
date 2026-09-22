@@ -9,6 +9,7 @@ mod record;
 mod runtime;
 mod screen;
 mod screen_audio;
+mod screen_mode;
 mod screen_picker;
 mod screen_previews;
 mod screen_targets;
@@ -64,6 +65,7 @@ pub fn record_file_extension() -> &'static str {
     mezon_record::file_extension()
 }
 
+pub use screen_mode::ScreenShareMode;
 pub use screen_picker::{PickedScreen, system_screen_share_pick};
 pub use screen_previews::{ScreenSharePreview, capture_screen_share_preview};
 pub use screen_targets::{
@@ -77,6 +79,7 @@ pub use video::{VideoFrameData, VideoFrameStore, i420_to_bgra_into, local_camera
 use crate::screen::ScreenStopper;
 use crate::video::local_screen_key;
 
+const FRAME_PATH_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_REMOTE_VIDEO_WIDTH: u32 = 1920;
 const MAX_REMOTE_VIDEO_HEIGHT: u32 = 1080;
 
@@ -167,7 +170,8 @@ enum Command {
     SetInputDevice(Option<String>),
     SetOutputDevice(Option<String>),
     SetCameraDevice(Option<String>),
-    StartScreenShare(PickedScreen, bool),
+    StartScreenShare(PickedScreen, bool, ScreenShareMode),
+    SetScreenShareMode(ScreenShareMode),
     StopScreenShare,
     PushToTalk(bool),
     ParticipantAction(String),
@@ -191,6 +195,7 @@ pub struct VoiceConnectOptions {
     pub room: String,
     pub role: SfuRole,
     pub local_user_id: String,
+    pub mic_enabled: bool,
     pub input_device_id: Option<String>,
     pub output_device_id: Option<String>,
     pub camera_device_id: Option<String>,
@@ -206,12 +211,14 @@ impl VoiceSession {
             room,
             role,
             local_user_id,
+            mic_enabled,
             input_device_id,
             output_device_id,
             camera_device_id,
             ice_servers,
             refresh_token,
         } = options;
+        let start_unmuted = mic_enabled && !role.is_audience();
         let (cmd_tx, cmd_rx) = flume::unbounded();
         let (evt_tx, evt_rx) = flume::unbounded();
         let frame_store = Arc::new(VideoFrameStore::default());
@@ -229,10 +236,12 @@ impl VoiceSession {
                     token,
                     room,
                     role,
+                    muted: !start_unmuted,
                     fallback_ice_servers: ice_servers,
                     refresh_token,
                 },
                 local_user_id,
+                start_unmuted,
                 input_device_id,
                 output_device_id,
                 camera_device_id,
@@ -325,10 +334,19 @@ impl VoiceSession {
         let _ = self.cmd_tx.send(Command::SetCameraDevice(device_id));
     }
 
-    pub fn start_screen_share(&self, pick: PickedScreen, share_audio: bool) {
+    pub fn start_screen_share(
+        &self,
+        pick: PickedScreen,
+        share_audio: bool,
+        mode: ScreenShareMode,
+    ) {
         let _ = self
             .cmd_tx
-            .send(Command::StartScreenShare(pick, share_audio));
+            .send(Command::StartScreenShare(pick, share_audio, mode));
+    }
+
+    pub fn set_screen_share_mode(&self, mode: ScreenShareMode) {
+        let _ = self.cmd_tx.send(Command::SetScreenShareMode(mode));
     }
 
     pub fn stop_screen_share(&self) {
@@ -397,6 +415,7 @@ const SPEAKING_POLL_INTERVAL: Duration = Duration::from_millis(150);
 async fn session_main(
     sfu_config: SfuConfig,
     local_user_id: String,
+    start_unmuted: bool,
     input_device_id: Option<String>,
     output_device_id: Option<String>,
     camera_device_id: Option<String>,
@@ -412,66 +431,42 @@ async fn session_main(
     let (sfu_tx, sfu_rx) = flume::unbounded::<SfuEvent>();
     let (engine, engine_task) = SfuEngine::spawn(sfu_config, factory.clone(), sfu_tx);
 
-    let mic_enabled = Arc::new(AtomicBool::new(false));
+    let mic_enabled = Arc::new(AtomicBool::new(start_unmuted));
     let speaking = Arc::new(audio::SpeakingLevels::default());
     let screen_audio_bus: ScreenAudioBus = Arc::new(Mutex::new(std::collections::VecDeque::new()));
-    let mut audio_mixer = None;
+    let mut audio_mixer: Option<Arc<audio::PlaybackMixer>> = None;
     let mut record_taps: Option<record::RecordTaps> = None;
-    let mut out_fmt = None;
+    let mut out_fmt: Option<AudioFormat> = None;
     let mut audio_io: Option<audio::AudioIo> = None;
     let mut out_change_rx: Option<flume::Receiver<AudioFormat>> = None;
     let mut device_reset_rx: Option<flume::Receiver<audio::DeviceResetKind>> = None;
     let mut microphone_task: Option<tokio::task::JoinHandle<()>> = None;
 
-    let audio = tokio::task::spawn_blocking(move || {
-        audio::AudioIo::start(input_device_id, output_device_id, session_record_taps)
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("audio init task failed: {e}"))?;
+    let opening_input_device = input_device_id.clone();
+    let opening_output_device = output_device_id.clone();
+    let mut wanted_input_device = opening_input_device.clone();
+    let mut wanted_output_device = opening_output_device.clone();
 
-    match audio {
-        Ok(audio) => {
-            audio_mixer = Some(audio.mixer.clone());
-            out_fmt = Some(audio.output_format);
-            out_change_rx = Some(audio.output_format_rx.clone());
-            device_reset_rx = Some(audio.device_reset_rx.clone());
-            record_taps = Some(audio.mixer.record_taps());
-
-            let uplink_source = NativeAudioSource::new(
-                AudioSourceOptions::default(),
-                UPLINK_SAMPLE_RATE,
-                UPLINK_CHANNELS,
-                AUDIO_SOURCE_QUEUE_SIZE_MS,
-            );
-            let uplink_track = factory.create_audio_track("microphone", uplink_source.clone());
-            engine.set_local_audio(Some(uplink_track));
-
-            microphone_task = Some(runtime::runtime().spawn(uplink_pump(
-                audio.mic_rx.clone(),
-                audio.input_format_rx.clone(),
-                uplink_source,
-                mic_enabled.clone(),
-                audio.mixer.record_taps(),
-                screen_audio_bus.clone(),
-                speaking.clone(),
-            )));
-
-            audio_io = Some(audio);
+    let (audio_ready_tx, audio_ready_rx) = flume::bounded::<Result<audio::AudioIo>>(1);
+    let mut audio_ready_rx = Some(audio_ready_rx);
+    runtime::runtime().spawn(async move {
+        let started = tokio::task::spawn_blocking(move || {
+            audio::AudioIo::start(input_device_id, output_device_id, session_record_taps)
+        })
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("audio init task failed: {e}")));
+        if let Err(flume::SendError(Ok(io))) = audio_ready_tx.send_async(started).await {
+            let _ = tokio::task::spawn_blocking(move || drop(io)).await;
         }
-        Err(e) => {
-            tracing::error!("voice audio unavailable: {e:#}");
-            let _ = evt_tx.send(VoiceEvent::Error(format!(
-                "audio unavailable (no microphone or playback): {e}"
-            )));
-        }
-    }
+    });
 
-    let mut mic_on = false;
+    let mut mic_on = start_unmuted;
     let mut ptt_on = false;
     let mut camera_device_id = camera_device_id;
     let mut camera_switch_pending = false;
     let mut camera_session: Option<CameraSession> = None;
     let mut screen_session: Option<ScreenSession> = None;
+    let mut screen_mode = ScreenShareMode::default();
     let (cam_tx, cam_rx) = flume::bounded::<(u64, Result<CameraSession>)>(1);
     let (screen_tx, screen_rx) = flume::bounded::<(u64, Result<ScreenSession>)>(1);
     let mut camera_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -486,6 +481,8 @@ async fn session_main(
     let mut last_participants: Vec<VoiceParticipant> = Vec::new();
     let mut speaking_tick = tokio::time::interval(SPEAKING_POLL_INTERVAL);
     speaking_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut frame_path_tick = tokio::time::interval(FRAME_PATH_LOG_INTERVAL);
+    frame_path_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     macro_rules! emit {
         () => {
@@ -662,11 +659,13 @@ async fn session_main(
                         }
                     }
                     Ok(Command::SetInputDevice(id)) => {
+                        wanted_input_device = id.clone();
                         if let Some(io) = &audio_io {
                             io.set_input_device(id);
                         }
                     }
                     Ok(Command::SetOutputDevice(id)) => {
+                        wanted_output_device = id.clone();
                         if let Some(io) = &audio_io {
                             io.set_output_device(id);
                         }
@@ -700,10 +699,11 @@ async fn session_main(
                             emit!();
                         }
                     }
-                    Ok(Command::StartScreenShare(pick, share_audio)) => {
+                    Ok(Command::StartScreenShare(pick, share_audio, mode)) => {
                         if role.is_audience() {
                             continue;
                         }
+                        screen_mode = mode;
                         if screen_session.is_none() && screen_task.is_none() {
                             screen_full_res.store(false, Ordering::Relaxed);
                             let factory = factory.clone();
@@ -717,11 +717,18 @@ async fn session_main(
                             let bus = screen_audio_bus.clone();
                             screen_task = Some(runtime::runtime().spawn(async move {
                                 let result = start_screen_track(
-                                    &factory, &identity, store, full_res, pick, share_audio, taps, events, bus,
+                                    &factory, &identity, store, full_res, pick, share_audio, mode, taps, events,
+                                    bus,
                                 )
                                 .await;
                                 let _ = tx.send_async((generation, result)).await;
                             }));
+                        }
+                    }
+                    Ok(Command::SetScreenShareMode(mode)) => {
+                        screen_mode = mode;
+                        if let Some(session) = screen_session.as_mut() {
+                            apply_screen_share_mode(session, mode, &engine);
                         }
                     }
                     Ok(Command::StopScreenShare) => {
@@ -796,8 +803,11 @@ async fn session_main(
             }
             result = screen_rx.recv_async() => {
                 match result {
-                    Ok((generation, Ok(session))) if generation == screen_gen => {
+                    Ok((generation, Ok(mut session))) if generation == screen_gen => {
                         screen_task = None;
+                        if session.track.mode != screen_mode {
+                            apply_screen_share_mode(&mut session, screen_mode, &engine);
+                        }
                         engine.set_local_screen(Some(session.track.clone()));
                         engine.set_screen_audio(session.audio.is_some());
                         engine.set_screen_active(true);
@@ -819,6 +829,61 @@ async fn session_main(
                     Err(_) => {}
                 }
             }
+            ready = recv_audio_ready(&audio_ready_rx) => {
+                audio_ready_rx = None;
+                match ready {
+                    Some(Ok(audio)) => {
+                        audio_mixer = Some(audio.mixer.clone());
+                        out_fmt = Some(audio.output_format);
+                        out_change_rx = Some(audio.output_format_rx.clone());
+                        device_reset_rx = Some(audio.device_reset_rx.clone());
+                        record_taps = Some(audio.mixer.record_taps());
+
+                        let uplink_source = NativeAudioSource::new(
+                            AudioSourceOptions::default(),
+                            UPLINK_SAMPLE_RATE,
+                            UPLINK_CHANNELS,
+                            AUDIO_SOURCE_QUEUE_SIZE_MS,
+                        );
+                        let uplink_track =
+                            factory.create_audio_track("microphone", uplink_source.clone());
+                        engine.set_local_audio(Some(uplink_track));
+
+                        microphone_task = Some(runtime::runtime().spawn(uplink_pump(
+                            audio.mic_rx.clone(),
+                            audio.input_format_rx.clone(),
+                            uplink_source,
+                            mic_enabled.clone(),
+                            audio.mixer.record_taps(),
+                            screen_audio_bus.clone(),
+                            speaking.clone(),
+                        )));
+
+                        if wanted_input_device != opening_input_device {
+                            audio.set_input_device(wanted_input_device.clone());
+                        }
+                        if wanted_output_device != opening_output_device {
+                            audio.set_output_device(wanted_output_device.clone());
+                        }
+                        audio.set_input_active(mic_on);
+                        respawn_audio_playback(
+                            &remote_audio,
+                            &audio.mixer,
+                            audio.output_format,
+                            &mut audio_tracks,
+                            &speaking,
+                        );
+                        audio_io = Some(audio);
+                    }
+                    Some(Err(e)) => {
+                        tracing::error!("voice audio unavailable: {e:#}");
+                        let _ = evt_tx.send(VoiceEvent::Error(format!(
+                            "audio unavailable (no microphone or playback): {e}"
+                        )));
+                    }
+                    None => {}
+                }
+            }
             change = recv_output_change(&out_change_rx) => {
                 if let (Some(new_fmt), Some(mixer)) = (change, &audio_mixer) {
                     out_fmt = Some(new_fmt);
@@ -833,6 +898,9 @@ async fn session_main(
             }
             _ = speaking_tick.tick() => {
                 emit!();
+            }
+            _ = frame_path_tick.tick() => {
+                frame_store.log_frame_path();
             }
             reset = recv_device_reset(&device_reset_rx) => {
                 if let Some(kind) = reset {
@@ -852,6 +920,11 @@ async fn session_main(
     }
     abort_task(&mut microphone_task).await;
     shutdown_audio_io(&mut audio_io).await;
+    if let Some(rx) = audio_ready_rx.take()
+        && let Ok(Ok(io)) = rx.try_recv()
+    {
+        let _ = tokio::task::spawn_blocking(move || drop(io)).await;
+    }
     engine.close();
     engine_task.abort();
 
@@ -1031,28 +1104,30 @@ async fn start_screen_track(
     full_res: Arc<AtomicBool>,
     pick: PickedScreen,
     share_audio: bool,
+    mode: ScreenShareMode,
     record_taps: Option<record::RecordTaps>,
     evt_tx: flume::Sender<VoiceEvent>,
     screen_audio_bus: ScreenAudioBus,
 ) -> Result<ScreenSession> {
-    // Whether the switch in the picker was on is the first thing to know when a
-    // recording comes out silent, and it left no trace anywhere before.
-    tracing::info!("starting screen share (share system audio: {share_audio})");
-    let (stopper, source_rx) =
-        screen::start_screen(identity.to_string(), frame_store, full_res, pick);
+    tracing::info!(?mode, "starting screen share (share system audio: {share_audio})");
+    let (stopper, source_rx) = screen::start_screen(
+        identity.to_string(),
+        frame_store,
+        full_res,
+        pick,
+        mode.capture_fps(),
+    );
     let (source, width, _height) = source_rx
         .recv_async()
         .await
         .map_err(|_| anyhow::anyhow!("screen thread exited"))?
         .map_err(|e| anyhow::anyhow!(e))?;
     let screen_track = factory.create_video_track("screen", source);
-    screen_track.set_content_hint(ContentHint::Text);
-    if screen_track.content_hint() != ContentHint::Text {
-        screen_track.set_content_hint(ContentHint::Detailed);
-    }
+    apply_screen_content_hint(&screen_track, mode);
     let track = sfu::ScreenTrack {
         track: screen_track,
         width,
+        mode,
     };
 
     let audio = if share_audio {
@@ -1062,9 +1137,6 @@ async fn start_screen_track(
                 Some(audio)
             }
             Err(e) => {
-                // The screen keeps sharing without it, so a log line was the
-                // only sign — nobody in the call hears the shared sound and the
-                // recording has none either, with nothing to explain why.
                 tracing::warn!("system audio share unavailable: {e:#}");
                 let _ = evt_tx.send(VoiceEvent::Error(format!("screen audio: {e}")));
                 None
@@ -1079,6 +1151,25 @@ async fn start_screen_track(
         stopper,
         audio,
     })
+}
+
+fn apply_screen_content_hint(track: &RtcVideoTrack, mode: ScreenShareMode) {
+    let wanted: ContentHint = mode.content_hint();
+    track.set_content_hint(wanted);
+    if track.content_hint() != wanted {
+        track.set_content_hint(mode.fallback_content_hint());
+    }
+}
+
+fn apply_screen_share_mode(session: &mut ScreenSession, mode: ScreenShareMode, engine: &SfuEngine) {
+    if session.track.mode == mode {
+        return;
+    }
+    session.track.mode = mode;
+    session.stopper.set_capture_fps(mode.capture_fps());
+    apply_screen_content_hint(&session.track.track, mode);
+    engine.set_screen_share_mode(mode);
+    tracing::info!(?mode, "screen share mode changed");
 }
 
 async fn start_screen_audio(
@@ -1161,6 +1252,15 @@ fn spawn_playback(
             tokio::time::sleep(delay).await;
         }
     })
+}
+
+async fn recv_audio_ready(
+    rx: &Option<flume::Receiver<Result<audio::AudioIo>>>,
+) -> Option<Result<audio::AudioIo>> {
+    match rx {
+        Some(rx) => rx.recv_async().await.ok(),
+        None => std::future::pending().await,
+    }
 }
 
 async fn recv_output_change(rx: &Option<flume::Receiver<AudioFormat>>) -> Option<AudioFormat> {
@@ -1254,6 +1354,7 @@ fn spawn_video(
     let slot = Arc::new(VideoConvertSlot::default());
 
     let convert_slot = slot.clone();
+    let received_store = frame_store.clone();
     let convert_store = frame_store;
     if let Err(e) = std::thread::Builder::new()
         .name("mezon-video-convert".into())
@@ -1309,6 +1410,7 @@ fn spawn_video(
     let task = runtime::runtime().spawn(async move {
         let mut stream = NativeVideoStream::new(rtc_track);
         while let Some(frame) = stream.next().await {
+            received_store.note_received(key);
             let mut buffer = frame.buffer.to_i420();
             let (width, height) = bounded_dimensions(
                 buffer.width(),

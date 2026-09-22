@@ -18,14 +18,14 @@ use gpui::{
 };
 use mezon_client::transport::QUICK_MENU_TYPE_FLASH;
 use mezon_store::{
-    AccountEvent, AccountStore, AppConfig, AudioStore, BadgeService, Channel, ChannelEvent,
-    ChannelId, ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanId, ClanList,
-    ClanMembersEvent, ClanMembersStore, ComposeDraft, ComposeStore, ComposeToken, ComposeTokenKind,
-    DirectEvent, DirectMessageStore, Emoji, EmojiEvent, EmojiStore, GroupMembersEvent,
-    GroupMembersStore, MENTION_HERE_USER_ID, MessageSpan, MessagesStore, OgpResult,
-    OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention,
-    OutgoingOgp, QuickMenuStore, RolesEvent, RolesStore, Settings, UserId, fetch_invite_preview,
-    fetch_ogp, first_previewable_url, internal_invite_id, is_clan_invite_url,
+    AccountEvent, AccountStore, AppConfig, AudioStore, AuthState, BadgeService, Channel,
+    ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent, ChannelMembersStore, ChannelType,
+    ClanId, ClanList, ClanMembersEvent, ClanMembersStore, ComposeDraft, ComposeStore, ComposeToken,
+    ComposeTokenKind, DirectEvent, DirectMessageStore, Emoji, EmojiEvent, EmojiStore,
+    GroupMembersEvent, GroupMembersStore, LoginStore, MENTION_HERE_USER_ID, MessageSpan,
+    MessagesStore, OgpResult, OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag,
+    OutgoingMention, OutgoingOgp, QuickMenuStore, RolesEvent, RolesStore, Settings, UserId,
+    fetch_invite_preview, fetch_ogp, first_previewable_url, internal_invite_id, is_clan_invite_url,
 };
 use std::time::Duration;
 
@@ -45,7 +45,7 @@ use crate::chat::message::CreatePollModal;
 use crate::chat::message::MessageBuzzModal;
 use crate::chat::message::ShareLocationModal;
 use crate::chat::role_style::role_fallback_color;
-use crate::components::compositions::channel_row::voice_busy_tag;
+use crate::components::compositions::channel_row::{channel_type_icon, voice_busy_tag};
 use crate::components::primitives::{Avatar, Icon, IconName, ToastKind};
 use crate::image_cache::{
     AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
@@ -269,6 +269,12 @@ struct ChannelSuggestRaw {
     /// typed `#` in this channel.
     id: ChannelId,
     clan_id: ClanId,
+    /// Drives the row glyph: a voice channel gets the speaker, a stream its
+    /// icon, a private channel the padlock — the same icon the sidebar and
+    /// the rendered mention use, so a `#` next to every name does not pass a
+    /// voice channel off as a text one.
+    channel_type: ChannelType,
+    private: bool,
     name: String,
     name_lc: String,
     name_norm: String,
@@ -504,6 +510,7 @@ pub struct MentionInput {
     converting_to_file: bool,
     last_content: SharedString,
     draft_channel: Option<ChannelId>,
+    bind_generation: u64,
     suppress_typing: bool,
     ogp_preview: Option<OgpResult>,
     ogp_url: Option<String>,
@@ -713,7 +720,17 @@ impl MentionInput {
                 }
             },
         );
-        let store_subs = Self::subscribe_pool_sources(cx);
+        let mut store_subs = Self::subscribe_pool_sources(cx);
+        if let Some(login) = LoginStore::try_global(cx) {
+            let auth_state = login.read(cx).auth_state();
+            store_subs.push(
+                cx.observe_in(&auth_state, window, |this, auth_state, window, cx| {
+                    if matches!(*auth_state.read(cx), AuthState::NotAuthenticated) {
+                        this.forget_draft(window, cx);
+                    }
+                }),
+            );
+        }
         let avatar_cache = crate::image_cache::shared_avatar_cache(cx);
         let emoji_cache = crate::image_cache::shared_emoji_cache(cx);
         let preview_cache = cx.new(|cx| {
@@ -766,6 +783,7 @@ impl MentionInput {
             converting_to_file: false,
             last_content: SharedString::default(),
             draft_channel: None,
+            bind_generation: 0,
             suppress_typing: false,
             ogp_preview: None,
             ogp_url: None,
@@ -802,9 +820,10 @@ impl MentionInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.draft_channel == channel_id {
+        if channel_id.is_some() && self.draft_channel == channel_id {
             return;
         }
+        self.bind_generation = self.bind_generation.wrapping_add(1);
         let Some(store) = ComposeStore::try_global(cx) else {
             self.draft_channel = channel_id;
             self.apply_draft(ComposeDraft::default(), window, cx);
@@ -835,12 +854,42 @@ impl MentionInput {
         self.apply_draft(incoming.unwrap_or_default(), window, cx);
     }
 
+    pub fn adopt_channel(
+        &mut self,
+        channel_id: ChannelId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.draft_channel = Some(channel_id);
+        if self.has_content(cx) {
+            return;
+        }
+        let stored = ComposeStore::try_global(cx)
+            .and_then(|store| store.update(cx, |store, _| store.take_draft(channel_id)));
+        if let Some(draft) = stored {
+            self.apply_draft(draft, window, cx);
+        }
+    }
+
+    fn forget_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.draft_channel.is_none() && !self.has_content(cx) {
+            return;
+        }
+        self.draft_channel = None;
+        self.bind_generation = self.bind_generation.wrapping_add(1);
+        self.apply_draft(ComposeDraft::default(), window, cx);
+    }
+
+    fn has_content(&self, cx: &App) -> bool {
+        !self.input.read(cx).value().trim().is_empty() || !self.pending_attachments.is_empty()
+    }
+
     fn take_draft(&mut self, cx: &mut Context<Self>) -> Option<ComposeDraft> {
-        let text = self.input.read(cx).value().to_string();
-        let attachments = std::mem::take(&mut self.pending_attachments);
-        if text.trim().is_empty() && attachments.is_empty() {
+        if !self.has_content(cx) {
             return None;
         }
+        let text = self.input.read(cx).value().to_string();
+        let attachments = std::mem::take(&mut self.pending_attachments);
         let tokens = self
             .committed
             .iter()
@@ -1191,7 +1240,7 @@ impl MentionInput {
         cx: &mut Context<Self>,
     ) {
         self.converting_to_file = send_when_ready;
-        let channel = self.draft_channel;
+        let generation = self.bind_generation;
         cx.spawn_in(window, async move |this, cx| {
             let pending = cx
                 .background_spawn(async move { write_text_as_pending_attachment(&text) })
@@ -1205,7 +1254,9 @@ impl MentionInput {
                 let path = pending.path.clone();
                 // The composer moved to another channel while the file was being written: the
                 // text is still in that channel's draft, so drop the file rather than misfile it.
-                if this.draft_channel != channel || !this.add_pending(vec![pending], window, cx) {
+                if this.bind_generation != generation
+                    || !this.add_pending(vec![pending], window, cx)
+                {
                     let _ = std::fs::remove_file(&path);
                     return;
                 }
@@ -1854,7 +1905,7 @@ impl MentionInput {
                         this.invalidate_pool(Sigil::Hash, cx);
                     }
                     ChannelEvent::Unread(_) | ChannelEvent::InVoiceChanged => {}
-                    ChannelEvent::ArchivedByAdministrator { .. } => {}
+                    ChannelEvent::ArchivedByAdministrator { .. } | ChannelEvent::AccessLost(_) => {}
                 },
             ),
             cx.subscribe(
@@ -2588,10 +2639,12 @@ impl MentionInput {
                             .items_center()
                             .justify_center()
                             .size(px(20.))
-                            .text_size(px(16.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(text_muted)
-                            .child("#")
+                            .flex_shrink_0()
+                            .child(
+                                Icon::new(channel_type_icon(channel.channel_type, channel.private))
+                                    .size(px(16.))
+                                    .text_color(text_muted),
+                            )
                             .into_any_element(),
                     ),
                     channel.name.clone().into(),
@@ -2826,6 +2879,8 @@ fn channel_suggest_raw(channel: &Channel) -> ChannelSuggestRaw {
         channel_id: channel.id.to_string(),
         id: channel.id,
         clan_id: channel.clan_id,
+        channel_type: channel.channel_type,
+        private: channel.private,
         name: channel.name.clone(),
         name_lc: channel.name.to_lowercase(),
         name_norm: normalize_search_string(&channel.name),
@@ -3306,6 +3361,75 @@ mod flash_command_tests {
         let cmd = command("*daily ");
         assert!(cmd.still_prefixes("*daily"));
         assert!(!command("   ").still_prefixes("anything"));
+    }
+}
+
+#[cfg(test)]
+mod channel_suggest_tests {
+    use mezon_store::{Channel, ChannelId, ChannelType, ClanId};
+
+    use super::channel_suggest_raw;
+    use crate::components::compositions::channel_row::channel_type_icon;
+    use crate::components::primitives::IconName;
+
+    fn channel(channel_type: ChannelType, private: bool) -> Channel {
+        Channel {
+            id: ChannelId(7),
+            name: "test voice".into(),
+            channel_type,
+            private,
+            clan_id: ClanId(1),
+            clan_name: "clan".into(),
+            category_name: "PUBLIC CHANNELS".into(),
+            category_id: None,
+            member_count: 0,
+            badge_count: 0,
+            muted: false,
+            parent_id: None,
+            last_seen_message_id: mezon_store::MessageId(0),
+            last_seen_timestamp: 0,
+            last_sent_message_id: mezon_store::MessageId(0),
+            last_sent_timestamp: 0,
+            voice_members: Vec::new(),
+            is_favorite: false,
+            creator_id: mezon_store::UserId(0),
+            active: 1,
+            avatar_url: String::new(),
+            topic: String::new(),
+            age_restricted: 0,
+            e2ee: 0,
+            app_id: 0,
+        }
+    }
+
+    /// The `#` popup lists voice and stream channels on purpose, so the row
+    /// glyph is the only thing telling them apart from text channels — it has
+    /// to come from the channel type, never a fixed `#`.
+    #[test]
+    fn pool_entry_keeps_the_type_that_picks_the_row_icon() {
+        for (channel_type, private, icon) in [
+            (ChannelType::Text, false, IconName::Hashtag),
+            (ChannelType::Text, true, IconName::HashtagLocked),
+            (ChannelType::Voice, false, IconName::Speaker),
+            (ChannelType::Voice, true, IconName::SpeakerLocked),
+            (ChannelType::Stream, false, IconName::Stream),
+            (ChannelType::Thread, false, IconName::ThreadIcon),
+            (ChannelType::App, false, IconName::AppChannelIcon),
+        ] {
+            let raw = channel_suggest_raw(&channel(channel_type, private));
+            assert_eq!(raw.channel_type, channel_type);
+            assert_eq!(raw.private, private);
+            assert_eq!(channel_type_icon(raw.channel_type, raw.private), icon);
+        }
+    }
+
+    #[test]
+    fn sub_text_prefers_category_over_clan() {
+        let raw = channel_suggest_raw(&channel(ChannelType::Voice, false));
+        assert_eq!(raw.sub_text, "PUBLIC CHANNELS");
+        let mut bare = channel(ChannelType::Voice, false);
+        bare.category_name.clear();
+        assert_eq!(channel_suggest_raw(&bare).sub_text, "clan");
     }
 }
 

@@ -13,10 +13,11 @@ use mezon_store::{
 use ui::{Clickable, PopoverMenu, Toggleable};
 
 use crate::app::shell::{FriendRemovalKind, Shell};
+use crate::chat::friends_page::{open_created_dm_if_route_unchanged, toast_send_failed};
 use crate::chat::message::{SendTokenModal, ShareContactModal, share_contact_subject};
 use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, InputState};
 use crate::image_cache::LruImageCache;
-use crate::router::{Route, navigate};
+use crate::router::{Route, Router, navigate};
 use crate::theme::{ActiveTheme, Theme};
 
 const BANNER_HEIGHT: f32 = 105.;
@@ -611,6 +612,9 @@ impl UserProfilePopover {
         let label = profile.display_name.clone();
         let avatar = profile.avatar_url.clone();
         let username = profile.username.clone();
+        let origin = Router::global(cx).read(cx).route();
+        let error_message =
+            mezon_i18n::t(&self.settings.read(cx).language, "message.toast.sendFailed");
         let task = DirectMessageStore::global(cx).update(cx, |store, cx| {
             store.create_dm_and_send_text(
                 user_id,
@@ -628,13 +632,7 @@ impl UserProfilePopover {
                     cx.emit(DismissEvent);
                 });
                 cx.update(|cx| {
-                    navigate(
-                        cx,
-                        Route::DirectMessage {
-                            direct_id: channel_id,
-                            message_type: channel_type.to_string(),
-                        },
-                    );
+                    open_created_dm_if_route_unchanged(channel_id, channel_type, &origin, cx);
                 });
             }
             Err(err) => {
@@ -642,6 +640,9 @@ impl UserProfilePopover {
                 let _ = this.update(cx, |this, cx| {
                     this.sending_message = false;
                     cx.notify();
+                });
+                cx.update(|cx| {
+                    toast_send_failed(error_message, cx);
                 });
             }
         })

@@ -21,7 +21,7 @@ use crate::chat::add_members_to_group_modal::AddMembersToGroupModal;
 use crate::chat::edit_group_modal::EditGroupModal;
 use crate::chat::user_profile_modal::UserProfileModal;
 use crate::command_palette::CommandPaletteModal;
-use crate::components::compositions::{DM_ROW_HEIGHT, DmRow};
+use crate::components::compositions::{DM_ROW_HEIGHT, DmRow, DmVoiceBadge};
 use crate::components::primitives::{ContextMenu, Icon, IconName, context_menu_at};
 use crate::router::{Route, Router, navigate};
 use crate::theme::{ActiveTheme, Theme};
@@ -51,7 +51,7 @@ struct DmItem {
     kind: DirectKind,
     unread: bool,
     presence_badge: DmAvatarPresence,
-    in_voice: bool,
+    voice_badge: Option<DmVoiceBadge>,
     muted: bool,
     avatar_src: SharedString,
     avatar_raw: SharedString,
@@ -130,11 +130,17 @@ fn is_dm_route(cx: &App) -> bool {
     )
 }
 
-fn dm_in_voice(ch: &DirectChannel, channels: &ChannelList) -> bool {
-    ch.kind == DirectKind::Dm
-        && ch
-            .peer_user_id
-            .is_some_and(|user_id| channels.in_voice_status(user_id).is_some())
+fn dm_voice_badge(ch: &DirectChannel, channels: &ChannelList) -> Option<DmVoiceBadge> {
+    if ch.kind != DirectKind::Dm {
+        return None;
+    }
+    let user_id = ch.peer_user_id?;
+    let info = channels.in_voice_status(user_id)?;
+    Some(if info.sharing_screen {
+        DmVoiceBadge::SharingScreen
+    } else {
+        DmVoiceBadge::InVoice
+    })
 }
 
 fn dm_presence_badge(
@@ -172,7 +178,10 @@ fn dm_items_fingerprint(store: &DirectMessageStore, cx: &App) -> u64 {
                 ch.kind as u8,
                 u8::from(ch.is_unread()),
                 dm_presence_badge(ch, presence, own_presence) as u8,
-                u8::from(dm_in_voice(ch, channels)),
+                dm_voice_badge(ch, channels).map_or(0, |badge| match badge {
+                    DmVoiceBadge::InVoice => 1,
+                    DmVoiceBadge::SharingScreen => 2,
+                }),
                 u8::from(notifications.is_some_and(|store| store.is_time_muted(ch.id))),
                 u8::from(store.is_pinned(ch.id)),
             ],
@@ -213,6 +222,7 @@ fn render_dm_row(
     suppress_hover: bool,
     image_cache: &Entity<crate::image_cache::LruImageCache>,
     in_voice_label: &SharedString,
+    share_screen_label: &SharedString,
     sidebar: WeakEntity<DirectSidebar>,
 ) -> gpui::AnyElement {
     let mut row = DmRow::with_ids(
@@ -231,8 +241,12 @@ fn render_dm_row(
     .suppress_hover(suppress_hover)
     .image_cache(image_cache.clone())
     .on_close(item.channel_id, request_dm_close);
-    if item.in_voice {
-        row = row.in_voice_label(in_voice_label.clone());
+    if let Some(badge) = item.voice_badge {
+        let label = match badge {
+            DmVoiceBadge::InVoice => in_voice_label.clone(),
+            DmVoiceBadge::SharingScreen => share_screen_label.clone(),
+        };
+        row = row.voice_badge(badge, label);
     }
     let channel_id = item.channel_id;
     div()
@@ -287,7 +301,7 @@ fn build_dm_items(
             let pinned = store.is_pinned(ch.id);
             let unread = ch.is_unread();
             let presence_badge = dm_presence_badge(ch, presence, own_presence);
-            let in_voice = dm_in_voice(ch, channels);
+            let voice_badge = dm_voice_badge(ch, channels);
             let muted = notifications.is_some_and(|store| store.is_time_muted(ch.id));
             let cached = caches.entry(ch, cx);
             DmItem {
@@ -300,7 +314,7 @@ fn build_dm_items(
                 kind: ch.kind,
                 unread,
                 presence_badge,
-                in_voice,
+                voice_badge,
                 muted,
                 avatar_src: cached.avatar_src.clone(),
                 avatar_raw: cached.avatar_raw.clone(),
@@ -826,6 +840,8 @@ impl Render for DirectSidebar {
         let suppress_hover = self.list_scroll.is_scroll_hover_suppressed();
         let image_cache = self.image_cache.clone();
         let in_voice_label: SharedString = mezon_i18n::t(&locale, "memberPage.inVoice").into();
+        let share_screen_label: SharedString =
+            mezon_i18n::t(&locale, "memberPage.shareScreen").into();
         let menu_sidebar = cx.entity().downgrade();
 
         let pinned_rows = (pinned_count > 0).then(|| {
@@ -833,6 +849,7 @@ impl Render for DirectSidebar {
             let items = self.dm_items.clone();
             let image_cache = self.image_cache.clone();
             let in_voice_label = in_voice_label.clone();
+            let share_screen_label = share_screen_label.clone();
             let sidebar = menu_sidebar.clone();
             let pinned_scroll_inner = pinned_scroll.clone();
             div()
@@ -853,6 +870,7 @@ impl Render for DirectSidebar {
                             suppress_hover,
                             &image_cache,
                             &in_voice_label,
+                            &share_screen_label,
                             sidebar.clone(),
                         )
                     })
@@ -862,6 +880,7 @@ impl Render for DirectSidebar {
         let list = uniform_list("dm-list", count, move |range, _window, cx| {
             let theme = cx.theme().clone();
             let active_id = active_id;
+            let share_screen_label = share_screen_label.clone();
             range
                 .map(|ix| match items.get(pinned_count + ix) {
                     Some(item) => render_dm_row(
@@ -871,6 +890,7 @@ impl Render for DirectSidebar {
                         suppress_hover,
                         &image_cache,
                         &in_voice_label,
+                        &share_screen_label,
                         menu_sidebar.clone(),
                     ),
                     None => div().into_any_element(),

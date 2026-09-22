@@ -4903,9 +4903,8 @@ impl MessagesStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn send_message_to_bots(
+    pub fn send_message_to_bot(
         &mut self,
-        bot_id: i64,
         content: String,
         sender_id: String,
         sender_name: String,
@@ -4978,8 +4977,6 @@ impl MessagesStore {
         });
         let (display_name, avatar_url, _) =
             outgoing_sender_profile(&sender_id, &sender_name, clan_id, cx);
-        let bot_ids: Vec<i64> = (bot_id != 0).then_some(bot_id).into_iter().collect();
-
         let api = self.api.clone();
         let clan_num = clan_id.get();
         let channel_num = channel_id.get();
@@ -4987,7 +4984,7 @@ impl MessagesStore {
             let proto_attachments = match upload_attachments_now(&api, attachments).await {
                 Ok(attachments) => attachments,
                 Err(e) => {
-                    tracing::error!("send_message_to_bots attachments failed: {e}");
+                    tracing::error!("send_message_to_bot attachments failed: {e}");
                     this.update(cx, |_, cx| cx.emit(MessagesEvent::SendFailedWithoutRow))
                         .ok();
                     return;
@@ -5006,12 +5003,9 @@ impl MessagesStore {
                     size: att.size,
                 })
                 .collect();
-            tracing::info!(
-                "send_message_to_bots: channel={channel_num} bots={bot_ids:?} (empty = every bot in the channel)"
-            );
+            tracing::info!("send_message_to_bot: channel={channel_num}");
             let ack = match api
-                .send_ephemeral_message_to_bots(
-                    bot_ids,
+                .send_ephemeral_message_to_bot(
                     clan_num,
                     channel_num,
                     &content,
@@ -5028,7 +5022,7 @@ impl MessagesStore {
             {
                 Ok(ack) => ack,
                 Err(e) => {
-                    tracing::error!("send_message_to_bots failed: {e}");
+                    tracing::error!("send_message_to_bot failed: {e}");
                     this.update(cx, |_, cx| cx.emit(MessagesEvent::SendFailedWithoutRow))
                         .ok();
                     return;

@@ -11,7 +11,8 @@ use gpui::{
     Subscription, Task, Window, div, prelude::*, px,
 };
 use mezon_store::{
-    ChannelList, ChannelType, ClanId, CreateChannelError, Settings, validate_channel_name,
+    ChannelList, ChannelType, ClanId, CreateChannelError, Settings, channel_supports_private,
+    validate_channel_name,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -136,7 +137,7 @@ impl CreateChannelModal {
 
         let clan_id = self.clan_id;
         let channel_type = self.channel_type;
-        let private = self.is_private && channel_type == ChannelType::Text;
+        let private = self.is_private && channel_supports_private(channel_type);
         let category_id = self.category_id.clone();
         let channel_list = self.channel_list.clone();
         let task = self.channel_list.update(cx, |store, cx| {
@@ -262,10 +263,16 @@ impl Render for CreateChannelModal {
         let private_label: SharedString = mezon_i18n::t(&locale, "createChannel.privacy.private")
             .to_string()
             .into();
-        let private_desc: SharedString =
-            mezon_i18n::t(&locale, "createChannel.privacy.description")
-                .to_string()
-                .into();
+        let private_desc: SharedString = mezon_i18n::t(
+            &locale,
+            if self.channel_type == ChannelType::Voice {
+                "createChannel.privacy.descriptionVoice"
+            } else {
+                "createChannel.privacy.description"
+            },
+        )
+        .to_string()
+        .into();
         let cancel_label: SharedString = mezon_i18n::t(&locale, "createChannel.buttons.cancel")
             .to_string()
             .into();
@@ -418,7 +425,7 @@ impl Render for CreateChannelModal {
                             .when(show_channel_limit, |el| el.child(channel_limit_msg)),
                     ),
             )
-            .when(selected_type == ChannelType::Text, |el| {
+            .when(channel_supports_private(selected_type), |el| {
                 let switch_entity = entity.clone();
                 el.child(
                     v_flex()

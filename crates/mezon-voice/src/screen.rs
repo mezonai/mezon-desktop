@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use libwebrtc::video_frame::{I420Buffer, VideoFrame, VideoRotation};
@@ -28,7 +28,6 @@ use crate::video::i420_to_bgra_into;
 use crate::video::nv12_full_to_i420;
 use crate::video::{VideoFrameStore, local_screen_key};
 
-pub(crate) const CAPTURE_FPS: u32 = 10;
 #[cfg(target_os = "macos")]
 const PREVIEW_MIN_INTERVAL: Duration = Duration::from_millis(100);
 #[cfg(not(target_os = "macos"))]
@@ -101,13 +100,46 @@ impl LatestFrameSlot {
     }
 }
 
+pub struct ScreenCaptureControl {
+    fps: AtomicU32,
+    restart: AtomicBool,
+}
+
+impl ScreenCaptureControl {
+    fn new(fps: u32) -> Self {
+        Self {
+            fps: AtomicU32::new(fps),
+            restart: AtomicBool::new(false),
+        }
+    }
+
+    fn set_fps(&self, fps: u32) {
+        if self.fps.swap(fps, Ordering::Relaxed) != fps {
+            self.restart.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn fps(&self) -> u32 {
+        self.fps.load(Ordering::Relaxed)
+    }
+
+    fn take_restart(&self) -> bool {
+        self.restart.swap(false, Ordering::Relaxed)
+    }
+}
+
 pub struct ScreenStopper {
     stop: Arc<AtomicBool>,
+    control: Arc<ScreenCaptureControl>,
 }
 
 impl ScreenStopper {
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+
+    pub fn set_capture_fps(&self, fps: u32) {
+        self.control.set_fps(fps);
     }
 }
 
@@ -122,14 +154,17 @@ pub fn start_screen(
     frame_store: Arc<VideoFrameStore>,
     _full_res: Arc<AtomicBool>,
     pick: PickedScreen,
+    capture_fps: u32,
 ) -> (
     ScreenStopper,
     flume::Receiver<Result<(NativeVideoSource, u32, u32), String>>,
 ) {
     let stop = Arc::new(AtomicBool::new(false));
+    let control = Arc::new(ScreenCaptureControl::new(capture_fps));
     let (track_tx, track_rx) = flume::bounded(1);
 
     let thread_stop = stop.clone();
+    let thread_control = control.clone();
     let spawned = std::thread::Builder::new()
         .name("mezon-screen".into())
         .spawn(move || {
@@ -176,8 +211,8 @@ pub fn start_screen(
                 "starting screen capture"
             );
 
-            let options = Options {
-                fps: CAPTURE_FPS,
+            let mut options = Options {
+                fps: thread_control.fps(),
                 target: capture_target,
                 show_cursor: true,
                 show_highlight: false,
@@ -195,6 +230,8 @@ pub fn start_screen(
             let slot = Arc::new(LatestFrameSlot::default());
             let pump_slot = slot.clone();
             let pump_stop = thread_stop.clone();
+            let pump_control = thread_control.clone();
+            let restartable = !use_portal;
             let pump = std::thread::Builder::new()
                 .name("mezon-screen-pump".into())
                 .spawn(move || {
@@ -205,6 +242,7 @@ pub fn start_screen(
                             if pump_stop.load(Ordering::Relaxed) {
                                 break;
                             }
+                            options.fps = pump_control.fps();
                             let mut capturer = match Capturer::build(options.clone()) {
                                 Ok(capturer) => capturer,
                                 Err(e) => {
@@ -215,12 +253,18 @@ pub fn start_screen(
                             capturer.start_capture();
                             let mut errored = false;
                             let mut produced = false;
+                            let mut reconfigure = false;
                             while !pump_stop.load(Ordering::Relaxed) {
-                                match capturer.raw().get_next_pixel_buffer() {
-                                    Ok(frame) => {
+                                if restartable && pump_control.take_restart() {
+                                    reconfigure = true;
+                                    break;
+                                }
+                                match capturer.raw().get_next_pixel_buffer_timeout(SLOT_WAIT) {
+                                    Ok(Some(frame)) => {
                                         produced = true;
                                         pump_slot.publish(frame);
                                     }
+                                    Ok(None) => {}
                                     Err(_) => {
                                         errored = true;
                                         break;
@@ -232,6 +276,14 @@ pub fn start_screen(
                                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                         capturer.stop_capture()
                                     }));
+                                if reconfigure {
+                                    drop(capturer);
+                                    tracing::info!(
+                                        fps = pump_control.fps(),
+                                        "screen capture restarting with a new frame rate"
+                                    );
+                                    continue;
+                                }
                                 break;
                             }
                             drop(capturer);
@@ -257,31 +309,51 @@ pub fn start_screen(
 
                     #[cfg(not(target_os = "macos"))]
                     {
-                        let mut capturer = match Capturer::build(options) {
-                            Ok(capturer) => capturer,
-                            Err(e) => {
-                                pump_slot.fail(format!("screen capture init failed: {e:#}"));
-                                return;
+                        loop {
+                            if pump_stop.load(Ordering::Relaxed) {
+                                break;
                             }
-                        };
-                        capturer.start_capture();
-                        while !pump_stop.load(Ordering::Relaxed) {
-                            match capturer.get_next_frame_timeout(SLOT_WAIT) {
-                                Ok(Some(frame)) => {
-                                    if let Some(bgra) = frame_to_bgra(frame)
-                                        && !bgra.data.is_empty()
-                                    {
-                                        pump_slot.publish(bgra);
-                                    }
-                                }
-                                Ok(None) => continue,
+                            options.fps = pump_control.fps();
+                            let mut capturer = match Capturer::build(options.clone()) {
+                                Ok(capturer) => capturer,
                                 Err(e) => {
-                                    pump_slot.fail(format!("screen capture failed: {e:#}"));
+                                    pump_slot.fail(format!("screen capture init failed: {e:#}"));
+                                    return;
+                                }
+                            };
+                            capturer.start_capture();
+                            let mut reconfigure = false;
+                            while !pump_stop.load(Ordering::Relaxed) {
+                                if restartable && pump_control.take_restart() {
+                                    reconfigure = true;
                                     break;
                                 }
+                                match capturer.get_next_frame_timeout(SLOT_WAIT) {
+                                    Ok(Some(frame)) => {
+                                        if let Some(bgra) = frame_to_bgra(frame)
+                                            && !bgra.data.is_empty()
+                                        {
+                                            pump_slot.publish(bgra);
+                                        }
+                                    }
+                                    Ok(None) => continue,
+                                    Err(e) => {
+                                        pump_slot.fail(format!("screen capture failed: {e:#}"));
+                                        break;
+                                    }
+                                }
                             }
+                            capturer.stop_capture();
+                            if reconfigure && !pump_stop.load(Ordering::Relaxed) {
+                                drop(capturer);
+                                tracing::info!(
+                                    fps = pump_control.fps(),
+                                    "screen capture restarting with a new frame rate"
+                                );
+                                continue;
+                            }
+                            break;
                         }
-                        capturer.stop_capture();
                         pump_slot.close();
                     }
                 });
@@ -526,7 +598,7 @@ pub fn start_screen(
         tracing::error!("failed to spawn screen capture thread: {e}");
     }
 
-    (ScreenStopper { stop }, track_rx)
+    (ScreenStopper { stop, control }, track_rx)
 }
 
 #[cfg(any(not(target_os = "macos"), test))]

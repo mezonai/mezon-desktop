@@ -100,6 +100,7 @@ pub struct VoiceMember {
 pub struct InVoiceInfo {
     pub clan_id: ClanId,
     pub channel_id: ChannelId,
+    pub sharing_screen: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +195,14 @@ impl Channel {
     pub fn voice_busy(&self) -> bool {
         self.channel_type == ChannelType::Voice && self.voice_members.len() >= 2
     }
+}
+
+/// Which channel types may be private. The server accepts `channel_private`
+/// on anything but an app channel; the product exposes it for text and voice
+/// — a private voice room is listed for, and hands a meet token to, its
+/// members and roles only. Stream stays public.
+pub fn channel_supports_private(channel_type: ChannelType) -> bool {
+    matches!(channel_type, ChannelType::Text | ChannelType::Voice)
 }
 
 pub fn archive_menu_hidden(channel_type: ChannelType, is_welcome_channel: bool) -> bool {
@@ -469,7 +478,14 @@ pub enum ChannelEvent {
     InVoiceChanged,
     ClanChannelsLoaded(ClanId),
     UserChannelsLoaded,
-    ArchivedByAdministrator { is_thread: bool },
+    ArchivedByAdministrator {
+        is_thread: bool,
+    },
+    /// A channel the store used to hold is no longer listed for this user:
+    /// a refetch of the clan dropped it (removed from a private channel, the
+    /// channel turned private without us, or it was deleted while we were
+    /// away). The voice store leaves a call running in that channel.
+    AccessLost(ChannelId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -530,6 +546,7 @@ pub enum UpdateChannelOverviewError {
 }
 
 pub const MAX_CHANNEL_TOPIC_CHARS: usize = 1024;
+pub const MAX_STREAM_THUMBNAIL_BYTES: u64 = 10 * 1024 * 1024;
 
 pub fn validate_channel_name(name: &str) -> Result<String, CreateChannelError> {
     validate_category_name(name).map_err(|err| match err {
@@ -1613,7 +1630,7 @@ impl ChannelList {
         self.invalidate_channel_index(clan_id);
     }
 
-    fn apply_clan_structure(
+    pub(crate) fn apply_clan_structure(
         &mut self,
         clan_id: ClanId,
         mut categories: Vec<Category>,
@@ -1652,7 +1669,18 @@ impl ChannelList {
             cx.emit(ChannelEvent::InVoiceChanged);
         }
         self.sync_user_channels_from_clan_structure(&categories, cx);
+        // An empty listing for a clan we are in is a glitch, not a clan
+        // with no channels (the welcome channel cannot be deleted), so it
+        // must not read as every channel being lost.
+        let lost = if categories.iter().all(|cat| cat.channels.is_empty()) {
+            Vec::new()
+        } else {
+            channels_dropped_by_refetch(self.categories_for_clan(clan_id), &categories)
+        };
         self.cache.insert(clan_id, categories, None);
+        for channel_id in lost {
+            cx.emit(ChannelEvent::AccessLost(channel_id));
+        }
         if favorites_missing {
             self.cache.mark_stale(&clan_id);
         }
@@ -2003,22 +2031,10 @@ impl ChannelList {
             users
                 .into_iter()
                 .map(|v| {
-                    let sharing: HashSet<UserId> =
-                        v.share_screen_ids.into_iter().map(UserId).collect();
-                    let members = v
-                        .user_ids
-                        .into_iter()
-                        .map(|uid| {
-                            let user_id = UserId(uid);
-                            VoiceMember {
-                                user_id,
-                                display_name: user_id.to_string(),
-                                avatar_url: String::new(),
-                                sharing_screen: sharing.contains(&user_id),
-                            }
-                        })
-                        .collect();
-                    (ChannelId(v.channel_id), members)
+                    (
+                        ChannelId(v.channel_id),
+                        voice_members_from(v.user_ids, v.share_screen_ids),
+                    )
                 })
                 .collect()
         });
@@ -3033,7 +3049,7 @@ impl ChannelList {
         if self.channel_name_exists_in_category(clan_id, &category_id, &label) {
             return Task::ready(Err(CreateChannelError::DuplicateName));
         }
-        let channel_private = if private && channel_type == ChannelType::Text {
+        let channel_private = if private && channel_supports_private(channel_type) {
             1
         } else {
             0
@@ -3132,6 +3148,93 @@ impl ChannelList {
 
             Ok(())
         })
+    }
+
+    pub fn update_stream_thumbnail(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        avatar: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let Some(channel) = self.channel(clan_id, channel_id) else {
+            return Task::ready(Err("Channel not found".into()));
+        };
+        if channel.channel_type != ChannelType::Stream
+            || !self.can_manage_channel_for(clan_id, channel_id, cx)
+        {
+            return Task::ready(Err("Cannot manage stream thumbnail".into()));
+        }
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let current = api
+                .list_channel_detail(channel_id.get())
+                .await
+                .map_err(|error| error.to_string())?;
+            if current.clan_id != clan_id.get()
+                || ChannelType::from_raw(current.channel_type) != ChannelType::Stream
+            {
+                return Err("Channel is no longer a stream".into());
+            }
+            api.update_channel_desc(
+                clan_id.get(),
+                channel_id.get(),
+                mezon_client::UpdateChannelDescParams {
+                    channel_label: None,
+                    category_id: current.category_id,
+                    topic: current.topic,
+                    age_restricted: current.age_restricted,
+                    e2ee: current.e2ee,
+                    app_id: current.app_id,
+                    channel_avatar: Some(avatar.clone()),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            this.update(cx, |this, cx| {
+                this.apply_channel_avatar(clan_id, channel_id, &avatar, cx);
+            })
+            .map_err(|_| "Store dropped".to_string())?;
+            Ok(())
+        })
+    }
+
+    fn apply_channel_avatar(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        avatar: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = false;
+        if let Some(categories) = self.cache.get_mut(&clan_id) {
+            for channel in categories
+                .iter_mut()
+                .flat_map(|category| category.channels.iter_mut())
+                .filter(|channel| channel.id == channel_id)
+            {
+                changed |= channel.avatar_url != avatar;
+                channel.avatar_url = avatar.to_string();
+            }
+        }
+        if let Some(channel) = self
+            .detached_channel_details
+            .get_mut(&(clan_id, channel_id))
+        {
+            changed |= channel.avatar_url != avatar;
+            channel.avatar_url = avatar.to_string();
+        }
+        if let Some(channel) = self
+            .user_channels
+            .get_mut(&channel_id)
+            .filter(|channel| channel.clan_id == clan_id)
+        {
+            changed |= channel.avatar_url != avatar;
+            channel.avatar_url = avatar.to_string();
+        }
+        if changed {
+            cx.notify();
+        }
     }
 
     pub fn update_channel_overview(
@@ -3494,51 +3597,26 @@ impl ChannelList {
                     return;
                 }
                 if self.cache.contains(&clan_id) {
-                    let channel = Channel {
-                        id: ChannelId(e.channel_id),
-                        name: e.channel_label.clone(),
-                        channel_type: ChannelType::from_raw(e.channel_type as u32),
-                        private: e.channel_private != 0,
+                    let channel = channel_from_realtime(
                         clan_id,
-                        clan_name: String::new(),
-                        category_name: String::new(),
-                        category_id: Some(e.category_id.to_string())
-                            .filter(|s| !s.is_empty() && s != "0"),
-                        member_count: 0,
-                        badge_count: 0,
-                        muted: false,
-                        parent_id: None,
-                        last_seen_message_id: MessageId(0),
-                        last_seen_timestamp: 0,
-                        last_sent_message_id: MessageId(0),
-                        last_sent_timestamp: 0,
-                        voice_members: Vec::new(),
-                        is_favorite: false,
-                        creator_id: UserId(e.creator_id),
-                        active: CHANNEL_ACTIVE_JOINED,
-                        avatar_url: String::new(),
-                        topic: String::new(),
-                        age_restricted: 0,
-                        e2ee: 0,
-                        app_id: 0,
-                    };
-                    let inserted = if let Some(cats) = self.cache.get_mut(&clan_id) {
-                        insert_channel(cats, channel)
-                    } else {
-                        false
-                    };
-                    if inserted {
-                        self.invalidate_channel_index(clan_id);
-                        cx.notify();
-                    }
+                        e.channel_id,
+                        &e.channel_label,
+                        e.channel_type,
+                        e.channel_private != 0,
+                        e.category_id,
+                        e.creator_id,
+                    );
+                    self.insert_channel_locally(clan_id, channel, cx);
                 }
             }
             RealtimeEvent::ChannelUpdated(e) => {
                 let id = ChannelId(e.channel_id);
+                let clan_id = ClanId(e.clan_id);
                 let label = (!e.channel_label.is_empty()).then_some(e.channel_label.clone());
                 let topic = (!e.topic.is_empty()).then_some(e.topic.clone());
                 let carries_full_channel_state = e.channel_type != 0;
                 let age_restricted = carries_full_channel_state.then_some(e.age_restricted);
+                let was_private = self.channel(clan_id, id).map(|channel| channel.private);
                 let mut changed = false;
                 for cats in self.cache.values_mut() {
                     if update_channel(
@@ -3555,6 +3633,93 @@ impl ChannelList {
                 }
                 if changed {
                     cx.notify();
+                }
+                // The event goes to the whole clan, and a channel that just
+                // turned private carries the complete access list it was
+                // given — the server clears the member set when a channel
+                // goes public and fills it from this request on the way
+                // back. So the decision is local: we keep the channel if we
+                // are named, flipped it, or hold one of the roles; otherwise
+                // it is gone for us right now. Only when our own roles are
+                // not loaded for this clan do we ask the server, since a
+                // clan-wide refetch from every client at once is the one
+                // thing this must not turn into.
+                match (was_private, e.channel_private) {
+                    (Some(false), true) => match self.private_flip_keeps_us(clan_id, e, cx) {
+                        Some(true) => {}
+                        Some(false) => {
+                            self.apply_self_removed_from_channel(id, cx);
+                            cx.emit(ChannelEvent::AccessLost(id));
+                        }
+                        None => self.refresh_clan(clan_id, cx),
+                    },
+                    // A channel we do not hold. Turned public (or we were
+                    // granted a private one): it is ours now, and the event
+                    // carries enough to show it without a refetch, like
+                    // `ChannelCreated` does. Turned private without us: we
+                    // may still be sitting in its voice room.
+                    (None, _)
+                        if carries_full_channel_state
+                            && e.parent_id == 0
+                            && self.cache.contains(&clan_id) =>
+                    {
+                        let granted = if e.channel_private {
+                            self.private_flip_keeps_us(clan_id, e, cx)
+                        } else {
+                            Some(true)
+                        };
+                        match granted {
+                            Some(true) => {
+                                let channel = channel_from_realtime(
+                                    clan_id,
+                                    e.channel_id,
+                                    &e.channel_label,
+                                    e.channel_type,
+                                    e.channel_private,
+                                    e.category_id,
+                                    e.creator_id,
+                                );
+                                self.insert_channel_locally(clan_id, channel, cx);
+                            }
+                            Some(false) => cx.emit(ChannelEvent::AccessLost(id)),
+                            None => {}
+                        }
+                    }
+                    _ => {}
+                }
+                if !e.channel_avatar.is_empty() {
+                    self.apply_channel_avatar(ClanId(e.clan_id), id, &e.channel_avatar, cx);
+                } else {
+                    let api = self.api.clone();
+                    let clan_id = ClanId(e.clan_id);
+                    let previous_avatar = self
+                        .channel(clan_id, id)
+                        .filter(|channel| {
+                            channel.channel_type == ChannelType::Stream
+                                && !channel.avatar_url.is_empty()
+                        })
+                        .map(|channel| channel.avatar_url.clone());
+                    if let Some(previous_avatar) = previous_avatar {
+                        cx.spawn(async move |this, cx| {
+                            if let Ok(detail) = api.list_channel_detail(id.get()).await
+                                && detail.clan_id == clan_id.get()
+                            {
+                                let _ = this.update(cx, |this, cx| {
+                                    if this.channel(clan_id, id).is_some_and(|channel| {
+                                        channel.avatar_url == previous_avatar
+                                    }) {
+                                        this.apply_channel_avatar(
+                                            clan_id,
+                                            id,
+                                            &detail.channel_avatar,
+                                            cx,
+                                        );
+                                    }
+                                });
+                            }
+                        })
+                        .detach();
+                    }
                 }
             }
             RealtimeEvent::ChannelDeleted(e) => {
@@ -3604,6 +3769,7 @@ impl ChannelList {
                     InVoiceInfo {
                         clan_id,
                         channel_id,
+                        sharing_screen: false,
                     },
                 );
                 notify_in_voice_change(changed, in_voice_changed, cx);
@@ -3663,17 +3829,25 @@ impl ChannelList {
                         }
                     }
                 }
+                let in_voice_changed = self.in_voice.get_mut(&user_id).is_some_and(|info| {
+                    info.clan_id == clan_id
+                        && info.channel_id == channel_id
+                        && info.sharing_screen != is_sharing
+                        && {
+                            info.sharing_screen = is_sharing;
+                            true
+                        }
+                });
                 tracing::debug!(
                     %clan_id,
                     %channel_id,
                     %user_id,
                     is_sharing,
                     updated = changed,
+                    in_voice_changed,
                     "realtime ScreenShare"
                 );
-                if changed {
-                    cx.notify();
-                }
+                notify_in_voice_change(changed, in_voice_changed, cx);
             }
             RealtimeEvent::UserChannelAdded(e) => {
                 let Some(ref desc) = e.channel_desc else {
@@ -3745,6 +3919,8 @@ impl ChannelList {
                     e2ee: desc.e2ee,
                     app_id: desc.app_id,
                 };
+                let mut channel = channel;
+                let voice_room = self.seed_voice_occupancy(&mut channel);
                 let inserted = self
                     .cache
                     .get_mut(&clan_id)
@@ -3756,6 +3932,9 @@ impl ChannelList {
                 );
                 if inserted {
                     self.invalidate_channel_index(clan_id);
+                    if voice_room {
+                        self.refresh_extras(clan_id, cx);
+                    }
                 }
                 if inserted || listed {
                     cx.notify();
@@ -4659,6 +4838,91 @@ impl ChannelList {
         cx.notify();
     }
 
+    fn insert_channel_locally(
+        &mut self,
+        clan_id: ClanId,
+        mut channel: Channel,
+        cx: &mut Context<Self>,
+    ) {
+        let voice_room = self.seed_voice_occupancy(&mut channel);
+        let inserted = if let Some(cats) = self.cache.get_mut(&clan_id) {
+            insert_channel(cats, channel)
+        } else {
+            false
+        };
+        if inserted {
+            self.invalidate_channel_index(clan_id);
+            if voice_room {
+                self.refresh_extras(clan_id, cx);
+            }
+            cx.notify();
+        }
+    }
+
+    /// A voice room that enters the listing through a realtime grant (we were
+    /// added to a private room, or a flip let us in) arrives with no
+    /// occupancy: the `VoiceJoined` events for it were dropped while we did
+    /// not hold the channel, and the listing only learns who sits in a room
+    /// from `ListChannelVoiceUsers` at clan load. Seed it from `in_voice`,
+    /// which kept those events, so the row and the pre-join screen are right
+    /// on the next frame. Returns whether this is a voice room at all, in
+    /// which case the caller also refreshes the clan's occupancy from the
+    /// server — the seed cannot know about joins that happened while we were
+    /// away or before the room was visible to us.
+    fn seed_voice_occupancy(&self, channel: &mut Channel) -> bool {
+        if !matches!(
+            channel.channel_type,
+            ChannelType::Voice | ChannelType::Stream
+        ) {
+            return false;
+        }
+        let mut members: Vec<VoiceMember> = self
+            .in_voice
+            .iter()
+            .filter(|(_, info)| info.channel_id == channel.id)
+            .map(|(user_id, _)| VoiceMember {
+                user_id: *user_id,
+                display_name: user_id.to_string(),
+                avatar_url: String::new(),
+                sharing_screen: false,
+            })
+            .collect();
+        members.sort_by_key(|m| m.user_id);
+        channel.voice_members = members;
+        true
+    }
+
+    /// Re-read the clan's voice occupancy and app channels; both are served
+    /// from the socket's cache, so this is cheap and only runs on a realtime
+    /// grant of a room that already has people in it.
+    fn refresh_extras(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.extras_loaded.remove(&clan_id);
+        self.ensure_extras(clan_id, cx);
+    }
+
+    /// Whether a public→private flip announced by `event` still lets us in:
+    /// `Some(true)` when we are the one who flipped it, are granted by user
+    /// id, or hold one of the granted roles; `Some(false)` when we are not;
+    /// `None` when our roles in this clan are not loaded, so nothing local
+    /// can answer.
+    fn private_flip_keeps_us(
+        &self,
+        clan_id: ClanId,
+        event: &mezon_proto::realtime::ChannelUpdatedEvent,
+        cx: &App,
+    ) -> Option<bool> {
+        let me = BadgeService::try_global(cx)
+            .and_then(|badges| badges.read(cx).current_user_id(cx))?
+            .get();
+        if event.creator_id == me || event.user_ids.contains(&me) {
+            return Some(true);
+        }
+        let members = crate::clan_members::ClanMembersStore::try_global(cx)?;
+        let members = members.read(cx);
+        let roles = members.self_role_ids(clan_id)?;
+        Some(roles.iter().any(|role| event.role_ids.contains(role)))
+    }
+
     pub fn apply_self_removed_from_channel(
         &mut self,
         channel_id: ChannelId,
@@ -5392,6 +5656,22 @@ fn thread_channel_from_context(
     }
 }
 
+fn voice_members_from(user_ids: Vec<i64>, share_screen_ids: Vec<i64>) -> Vec<VoiceMember> {
+    let sharing: HashSet<UserId> = share_screen_ids.into_iter().map(UserId).collect();
+    let mut seen: HashSet<UserId> = HashSet::new();
+    user_ids
+        .into_iter()
+        .map(UserId)
+        .filter(|user_id| seen.insert(*user_id))
+        .map(|user_id| VoiceMember {
+            user_id,
+            display_name: user_id.to_string(),
+            avatar_url: String::new(),
+            sharing_screen: sharing.contains(&user_id),
+        })
+        .collect()
+}
+
 fn channel_from_desc(
     c: ApiChannelDesc,
     badge_count: u32,
@@ -5770,11 +6050,8 @@ fn apply_in_voice_leaved(
 }
 
 fn should_sync_channel_to_user_list(channel: &Channel) -> bool {
-    if channel.clan_id.is_zero() {
-        let raw = channel.channel_type.as_raw();
-        return raw != 2 && raw != 3;
-    }
-    !matches!(channel.channel_type, ChannelType::App | ChannelType::Voice)
+    let raw = channel.channel_type.as_raw();
+    raw != 2 && raw != 3
 }
 
 fn upsert_user_channel(
@@ -6062,6 +6339,7 @@ fn seed_in_voice_from_categories(
                 InVoiceInfo {
                     clan_id,
                     channel_id: channel.id,
+                    sharing_screen: member.sharing_screen,
                 },
             );
         }
@@ -6078,6 +6356,61 @@ fn clan_in_voice_snapshot(
         .iter()
         .filter(|(_, info)| info.clan_id == clan_id)
         .map(|(user, info)| (*user, *info))
+        .collect()
+}
+
+/// A channel as a realtime event describes it: enough for a sidebar row
+/// until the next full listing fills in the rest.
+fn channel_from_realtime(
+    clan_id: ClanId,
+    channel_id: i64,
+    label: &str,
+    channel_type: i32,
+    private: bool,
+    category_id: i64,
+    creator_id: i64,
+) -> Channel {
+    Channel {
+        id: ChannelId(channel_id),
+        name: label.to_owned(),
+        channel_type: ChannelType::from_raw(channel_type as u32),
+        private,
+        clan_id,
+        clan_name: String::new(),
+        category_name: String::new(),
+        category_id: Some(category_id.to_string()).filter(|s| !s.is_empty() && s != "0"),
+        member_count: 0,
+        badge_count: 0,
+        muted: false,
+        parent_id: None,
+        last_seen_message_id: MessageId(0),
+        last_seen_timestamp: 0,
+        last_sent_message_id: MessageId(0),
+        last_sent_timestamp: 0,
+        voice_members: Vec::new(),
+        is_favorite: false,
+        creator_id: UserId(creator_id),
+        active: CHANNEL_ACTIVE_JOINED,
+        avatar_url: String::new(),
+        topic: String::new(),
+        age_restricted: 0,
+        e2ee: 0,
+        app_id: 0,
+    }
+}
+
+/// Channel ids the previous listing had that the fresh one does not — what
+/// the server stopped showing us between two fetches.
+fn channels_dropped_by_refetch(previous: &[Category], next: &[Category]) -> Vec<ChannelId> {
+    let next_ids: HashSet<ChannelId> = next
+        .iter()
+        .flat_map(|cat| cat.channels.iter().map(|ch| ch.id))
+        .collect();
+    let mut seen = HashSet::new();
+    previous
+        .iter()
+        .flat_map(|cat| cat.channels.iter().map(|ch| ch.id))
+        .filter(|id| !next_ids.contains(id) && seen.insert(*id))
         .collect()
 }
 
@@ -6533,6 +6866,36 @@ fn effective_category_id(desc_category_id: i64, requested: Option<i64>) -> i64 {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    fn cats() -> Vec<ApiCategoryDesc> {
+        vec![ApiCategoryDesc {
+            category_id: 1,
+            category_name: "General".into(),
+            clan_id: 1,
+            category_order: 0,
+        }]
+    }
+
+    fn channel(id: i64, name: &str) -> Channel {
+        let mut ch = tests::make_channel(id, name, "1");
+        ch.clan_id = ClanId(1);
+        ch
+    }
+
+    pub(crate) fn two_channels() -> Vec<Category> {
+        let mut channels = vec![channel(1, "normal"), channel(2, "fav-ch")];
+        build_categories(cats(), &mut channels)
+    }
+
+    pub(crate) fn one_channel() -> Vec<Category> {
+        let mut channels = vec![channel(1, "normal")];
+        build_categories(cats(), &mut channels)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -6601,7 +6964,7 @@ mod tests {
         assert!(!is_collapsed("clan1", "cat1"));
     }
 
-    fn make_channel(id: i64, name: &str, cat_id: &str) -> Channel {
+    pub(crate) fn make_channel(id: i64, name: &str, cat_id: &str) -> Channel {
         Channel {
             id: ChannelId(id),
             name: name.into(),
@@ -6689,6 +7052,15 @@ mod tests {
                 assert_eq!(targets.len(), 1);
                 assert_eq!(targets[0].id, ChannelId(1));
                 assert_eq!(targets[0].category_name, "General");
+
+                assert!(
+                    channels.user_channel(ChannelId(4)).is_some(),
+                    "DM hashtag suggestions read user_channels, which must keep voice"
+                );
+                assert_eq!(
+                    channels.user_channel(ChannelId(4)).unwrap().channel_type,
+                    ChannelType::Voice
+                );
             });
         });
     }
@@ -7154,6 +7526,31 @@ mod tests {
     }
 
     #[test]
+    fn user_channel_sync_keeps_voice_and_app_drops_dm_group() {
+        let mut voice = make_channel(4, "voice", "1");
+        voice.channel_type = ChannelType::Voice;
+        let mut app = make_channel(5, "app", "1");
+        app.channel_type = ChannelType::App;
+        let mut stream = make_channel(6, "stream", "1");
+        stream.channel_type = ChannelType::Stream;
+        let mut dm = make_channel(7, "dm", "1");
+        dm.clan_id = ClanId(0);
+        dm.channel_type = ChannelType::Unknown(3);
+        let mut group = make_channel(8, "group", "1");
+        group.clan_id = ClanId(0);
+        group.channel_type = ChannelType::Unknown(2);
+
+        assert!(should_sync_channel_to_user_list(&voice));
+        assert!(should_sync_channel_to_user_list(&app));
+        assert!(should_sync_channel_to_user_list(&stream));
+        assert!(should_sync_channel_to_user_list(&make_channel(
+            1, "text", "1"
+        )));
+        assert!(!should_sync_channel_to_user_list(&dm));
+        assert!(!should_sync_channel_to_user_list(&group));
+    }
+
+    #[test]
     fn channel_is_unread_uses_badge_count_and_timestamps() {
         let mut ch = make_channel(1, "test", "cat1");
         assert!(!ch.is_unread());
@@ -7341,6 +7738,77 @@ mod tests {
         })
     }
 
+    #[gpui::test]
+    fn stream_thumbnail_remote_changes_and_partial_events(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                for (avatar, channel_type, expected) in [
+                    ("thumbnail.png", 6, "thumbnail.png"),
+                    ("", 0, "thumbnail.png"),
+                    ("replacement.webp", 6, "replacement.webp"),
+                    ("", 6, "replacement.webp"),
+                ] {
+                    channels.handle_event(
+                        &RealtimeEvent::ChannelUpdated(
+                            mezon_proto::realtime::ChannelUpdatedEvent {
+                                clan_id: 1,
+                                channel_id: 1,
+                                channel_type,
+                                channel_avatar: avatar.into(),
+                                ..Default::default()
+                            },
+                        ),
+                        cx,
+                    );
+                    assert_eq!(
+                        channels
+                            .channel(ClanId(1), ChannelId(1))
+                            .unwrap()
+                            .avatar_url,
+                        expected
+                    );
+                }
+                channels.apply_channel_avatar(ClanId(1), ChannelId(1), "", cx);
+                assert!(
+                    channels
+                        .channel(ClanId(1), ChannelId(1))
+                        .unwrap()
+                        .avatar_url
+                        .is_empty()
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn stream_thumbnail_save_does_not_reborrow_channel_list(cx: &mut gpui::TestAppContext) {
+        let channels = cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            cx.set_global(GlobalChannelList(channels.clone()));
+            channels
+        });
+        for creator_id in [REMOVED_SELF + 1, REMOVED_SELF] {
+            channels.update(cx, |channels, cx| {
+                let mut structure = structure_with_two_channels();
+                let channel = &mut structure[0].channels[0];
+                channel.channel_type = ChannelType::Stream;
+                channel.creator_id = UserId(creator_id);
+                channels.apply_clan_structure(ClanId(1), structure, None, cx);
+            });
+            for avatar in ["thumbnail.png", ""] {
+                let task = channels.update(cx, |channels, cx| {
+                    channels.update_stream_thumbnail(ClanId(1), ChannelId(1), avatar.into(), cx)
+                });
+                if creator_id != REMOVED_SELF {
+                    assert_eq!(task.await, Err("Cannot manage stream thumbnail".into()));
+                } else {
+                    drop(task);
+                }
+            }
+        }
+    }
     fn voice_creation_channel_updated_event(channel_id: i64) -> RealtimeEvent {
         RealtimeEvent::ChannelUpdated(mezon_proto::realtime::ChannelUpdatedEvent {
             clan_id: 1,
@@ -8118,6 +8586,17 @@ mod tests {
         .collect()
     }
 
+    #[test]
+    fn a_user_present_on_two_devices_keeps_one_row_in_the_channel_list() {
+        let members = voice_members_from(vec![7, 9, 7], vec![9]);
+        assert_eq!(
+            members.iter().map(|m| m.user_id).collect::<Vec<_>>(),
+            vec![UserId(7), UserId(9)]
+        );
+        assert!(!members[0].sharing_screen);
+        assert!(members[1].sharing_screen);
+    }
+
     fn voice_members_of(channels: &ChannelList, category_ix: usize) -> Vec<UserId> {
         channels.categories_for_clan(ClanId(1))[category_ix]
             .channels
@@ -8265,6 +8744,14 @@ mod tests {
                 };
 
                 assert_eq!(sharing(channels), Some(false));
+                assert_eq!(
+                    channels.in_voice_status(VOICE_USER),
+                    Some(InVoiceInfo {
+                        clan_id: ClanId(1),
+                        channel_id: VOICE_CHANNEL,
+                        sharing_screen: false,
+                    })
+                );
 
                 channels.handle_event(
                     &RealtimeEvent::ScreenShare(mezon_proto::realtime::ScreenShareEvent {
@@ -8276,6 +8763,14 @@ mod tests {
                     cx,
                 );
                 assert_eq!(sharing(channels), Some(true));
+                assert_eq!(
+                    channels.in_voice_status(VOICE_USER),
+                    Some(InVoiceInfo {
+                        clan_id: ClanId(1),
+                        channel_id: VOICE_CHANNEL,
+                        sharing_screen: true,
+                    })
+                );
 
                 channels.handle_event(
                     &RealtimeEvent::ScreenShare(mezon_proto::realtime::ScreenShareEvent {
@@ -8287,6 +8782,14 @@ mod tests {
                     cx,
                 );
                 assert_eq!(sharing(channels), Some(false));
+                assert_eq!(
+                    channels.in_voice_status(VOICE_USER),
+                    Some(InVoiceInfo {
+                        clan_id: ClanId(1),
+                        channel_id: VOICE_CHANNEL,
+                        sharing_screen: false,
+                    })
+                );
             });
         });
     }
@@ -8766,6 +9269,77 @@ mod tests {
                 .collect(),
             ..Default::default()
         })
+    }
+
+    fn added_to_voice_room(channel_id: i64, category_id: i64, user_ids: &[i64]) -> RealtimeEvent {
+        RealtimeEvent::UserChannelAdded(mezon_proto::realtime::UserChannelAdded {
+            channel_desc: Some(mezon_proto::api::ChannelDescription {
+                channel_id,
+                clan_id: 1,
+                category_id,
+                channel_label: "room".into(),
+                r#type: 10,
+                channel_private: 1,
+                ..Default::default()
+            }),
+            clan_id: 1,
+            users: user_ids
+                .iter()
+                .map(|id| mezon_proto::realtime::UserProfileRedis {
+                    user_id: *id,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        })
+    }
+
+    /// Being added to a private voice room somebody already sits in must show
+    /// that occupant at once: the `VoiceJoined` that announced them arrived
+    /// while we did not hold the room, so the grant has to pick it up from
+    /// `in_voice` instead of listing an empty room until the next clan load.
+    #[gpui::test]
+    fn a_room_granted_while_occupied_lists_its_occupants(cx: &mut gpui::TestAppContext) {
+        const ROOM: i64 = 555;
+        const OCCUPANT: i64 = 4242;
+        cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.handle_event(
+                    &RealtimeEvent::VoiceJoined(mezon_proto::realtime::VoiceJoinedEvent {
+                        clan_id: 1,
+                        user_id: OCCUPANT,
+                        voice_channel_id: ROOM,
+                        participant: "someone".into(),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                assert!(
+                    !channels.channel_in_clan(ClanId(1), ChannelId(ROOM)),
+                    "the room is not listed before the grant"
+                );
+
+                channels.handle_event(&added_to_voice_room(ROOM, 1, &[REMOVED_SELF]), cx);
+
+                let room = channels
+                    .categories_for_clan(ClanId(1))
+                    .iter()
+                    .flat_map(|category| category.channels.iter())
+                    .find(|ch| ch.id == ChannelId(ROOM))
+                    .cloned()
+                    .expect("the grant lists the room");
+                assert_eq!(
+                    room.voice_members
+                        .iter()
+                        .map(|m| m.user_id)
+                        .collect::<Vec<_>>(),
+                    vec![UserId(OCCUPANT)],
+                    "the occupant announced before the grant is listed"
+                );
+            });
+        });
     }
 
     #[gpui::test]
@@ -9375,6 +9949,278 @@ mod tests {
             });
         });
         assert!(!seen.get());
+    }
+
+    fn structure_with_one_channel() -> Vec<Category> {
+        let api_cats = vec![ApiCategoryDesc {
+            category_id: 1,
+            category_name: "General".into(),
+            clan_id: 1,
+            category_order: 0,
+        }];
+        let mut channels = vec![{
+            let mut ch = make_channel(1, "normal", "1");
+            ch.clan_id = ClanId(1);
+            ch
+        }];
+        build_categories(api_cats, &mut channels)
+    }
+
+    /// A refetch that no longer lists a channel is the server telling us we
+    /// lost it — the voice store hangs up on that, so it must be announced.
+    #[gpui::test]
+    fn a_refetch_that_drops_a_channel_announces_access_lost(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let lost: Rc<RefCell<Vec<ChannelId>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = lost.clone();
+        // Events flush after the outermost update, so the entity has to
+        // outlive the closure or its subscribers go with it.
+        let channels = cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            cx.subscribe(&channels, move |_, event, _| {
+                if let ChannelEvent::AccessLost(id) = event {
+                    sink.borrow_mut().push(*id);
+                }
+            })
+            .detach();
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+            });
+            channels
+        });
+        assert!(lost.borrow().is_empty(), "the first listing loses nothing");
+        cx.update(|cx| {
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_one_channel(), None, cx);
+            });
+        });
+        assert_eq!(*lost.borrow(), vec![ChannelId(2)]);
+
+        // A listing that comes back empty is a glitch, not a wipe.
+        cx.update(|cx| {
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), Vec::new(), None, cx);
+            });
+        });
+        assert_eq!(
+            *lost.borrow(),
+            vec![ChannelId(2)],
+            "an empty listing announces nothing"
+        );
+        drop(channels);
+    }
+
+    fn private_flip_event(channel_id: i64, user_ids: Vec<i64>, creator_id: i64) -> RealtimeEvent {
+        private_flip_event_with_roles(channel_id, user_ids, vec![], creator_id)
+    }
+
+    fn private_flip_event_with_roles(
+        channel_id: i64,
+        user_ids: Vec<i64>,
+        role_ids: Vec<i64>,
+        creator_id: i64,
+    ) -> RealtimeEvent {
+        RealtimeEvent::ChannelUpdated(mezon_proto::realtime::ChannelUpdatedEvent {
+            clan_id: 1,
+            channel_id,
+            channel_label: "normal".into(),
+            channel_type: 10,
+            channel_private: true,
+            creator_id,
+            user_ids,
+            role_ids,
+            status: 1,
+            ..Default::default()
+        })
+    }
+
+    /// Without our roles for the clan nothing local can tell whether a role
+    /// still lets us in, so the listing is asked again.
+    #[gpui::test]
+    fn a_private_flip_with_unknown_roles_refetches_the_clan(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                assert!(!channels.loading.contains_key(&ClanId(1)));
+
+                channels.handle_event(&private_flip_event(1, vec![5, 6], 9), cx);
+                assert!(
+                    channels.loading.contains_key(&ClanId(1)),
+                    "a flip to private that leaves us out must go back to the server"
+                );
+                assert!(
+                    channels
+                        .channel(ClanId(1), ChannelId(1))
+                        .is_some_and(|channel| channel.private),
+                    "and the flag is applied meanwhile"
+                );
+            });
+        });
+    }
+
+    /// With our roles known the flip is settled locally: no refetch, and a
+    /// channel we lost is dropped right away so the voice store can hang up.
+    #[gpui::test]
+    fn a_private_flip_is_settled_locally_when_our_roles_are_known(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let lost: Rc<RefCell<Vec<ChannelId>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = lost.clone();
+        let channels = cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            let members = crate::clan_members::ClanMembersStore::init(api, cx);
+            members.update(cx, |members, _| {
+                members.seed_self_roles_for_test(ClanId(1), vec![40, 41]);
+            });
+            cx.subscribe(&channels, move |_, event, _| {
+                if let ChannelEvent::AccessLost(id) = event {
+                    sink.borrow_mut().push(*id);
+                }
+            })
+            .detach();
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+
+                channels.handle_event(&private_flip_event_with_roles(1, vec![], vec![41], 9), cx);
+                assert!(
+                    channels.channel_in_clan(ClanId(1), ChannelId(1)),
+                    "granted by role"
+                );
+                assert!(
+                    !channels.loading.contains_key(&ClanId(1)),
+                    "settled without the server"
+                );
+
+                channels.handle_event(&private_flip_event_with_roles(2, vec![5], vec![42], 9), cx);
+                assert!(
+                    !channels.channel_in_clan(ClanId(1), ChannelId(2)),
+                    "neither named nor holding a granted role: gone now, not after a refetch"
+                );
+                assert!(!channels.loading.contains_key(&ClanId(1)));
+            });
+            channels
+        });
+        assert_eq!(*lost.borrow(), vec![ChannelId(2)]);
+        drop(channels);
+    }
+
+    #[gpui::test]
+    fn a_private_flip_that_names_us_keeps_the_listing(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+
+                channels.handle_event(&private_flip_event(1, vec![REMOVED_SELF], 9), cx);
+                assert!(
+                    !channels.loading.contains_key(&ClanId(1)),
+                    "granted by user id"
+                );
+
+                channels.handle_event(&private_flip_event(2, vec![], REMOVED_SELF), cx);
+                assert!(
+                    !channels.loading.contains_key(&ClanId(1)),
+                    "the one who flipped it keeps it"
+                );
+
+                channels.handle_event(&private_flip_event(2, vec![], 9), cx);
+                assert!(
+                    !channels.loading.contains_key(&ClanId(1)),
+                    "a repeat of an already-private channel is not a flip"
+                );
+            });
+        });
+    }
+
+    fn flip_event(channel_id: i64, private: bool, user_ids: Vec<i64>) -> RealtimeEvent {
+        RealtimeEvent::ChannelUpdated(mezon_proto::realtime::ChannelUpdatedEvent {
+            clan_id: 1,
+            channel_id,
+            channel_label: "late".into(),
+            channel_type: 10,
+            channel_private: private,
+            creator_id: 9,
+            user_ids,
+            category_id: 1,
+            status: 1,
+            ..Default::default()
+        })
+    }
+
+    /// A channel the client never held: turning public makes it ours and the
+    /// event carries enough to show it; turning private without us only
+    /// matters to a voice session that may be inside it.
+    #[gpui::test]
+    fn an_update_for_a_channel_we_do_not_hold_is_settled_from_the_event(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let lost: Rc<RefCell<Vec<ChannelId>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = lost.clone();
+        let channels = cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            let members = crate::clan_members::ClanMembersStore::init(api, cx);
+            members.update(cx, |members, _| {
+                members.seed_self_roles_for_test(ClanId(1), vec![40]);
+            });
+            cx.subscribe(&channels, move |_, event, _| {
+                if let ChannelEvent::AccessLost(id) = event {
+                    sink.borrow_mut().push(*id);
+                }
+            })
+            .detach();
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+
+                channels.handle_event(&flip_event(30, false, vec![]), cx);
+                assert!(
+                    channels
+                        .channel(ClanId(1), ChannelId(30))
+                        .is_some_and(|ch| !ch.private && ch.name == "late"),
+                    "a channel turned public shows up from the event itself"
+                );
+                assert!(
+                    !channels.loading.contains_key(&ClanId(1)),
+                    "and needs no refetch"
+                );
+
+                channels.handle_event(&flip_event(31, true, vec![REMOVED_SELF]), cx);
+                assert!(
+                    channels
+                        .channel(ClanId(1), ChannelId(31))
+                        .is_some_and(|ch| ch.private),
+                    "a private channel we are granted by user id shows up too"
+                );
+
+                channels.handle_event(&flip_event(32, true, vec![5]), cx);
+                assert!(
+                    !channels.channel_in_clan(ClanId(1), ChannelId(32)),
+                    "one we are not granted stays out"
+                );
+                assert!(!channels.loading.contains_key(&ClanId(1)));
+            });
+            channels
+        });
+        assert_eq!(
+            *lost.borrow(),
+            vec![ChannelId(32)],
+            "and only that one is announced lost"
+        );
+        drop(channels);
     }
 
     #[gpui::test]
@@ -11126,6 +11972,7 @@ mod tests {
         InVoiceInfo {
             clan_id: ClanId(clan),
             channel_id: ChannelId(channel),
+            sharing_screen: false,
         }
     }
 
@@ -11548,6 +12395,24 @@ mod tests {
         assert!(archive_menu_hidden(ChannelType::Voice, false));
         assert!(archive_menu_hidden(ChannelType::Text, true));
         assert!(!archive_menu_hidden(ChannelType::Text, false));
+    }
+
+    /// Text and voice may be private; stream, app and the rest stay public
+    /// no matter what the modal or a tool asks for.
+    #[test]
+    fn private_is_offered_for_text_and_voice_only() {
+        assert!(channel_supports_private(ChannelType::Text));
+        assert!(channel_supports_private(ChannelType::Voice));
+        for channel_type in [
+            ChannelType::Stream,
+            ChannelType::App,
+            ChannelType::Thread,
+            ChannelType::Forum,
+            ChannelType::Announcement,
+            ChannelType::Unknown(42),
+        ] {
+            assert!(!channel_supports_private(channel_type), "{channel_type:?}");
+        }
     }
 
     #[gpui::test]

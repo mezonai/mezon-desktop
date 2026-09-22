@@ -1464,6 +1464,27 @@ impl Shell {
         self.show_modal(view.into(), cx);
     }
 
+    pub fn confirm_logout(&mut self, locale: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_destructive(
+            ConfirmDestructive {
+                id: "confirm-logout",
+                title: mezon_i18n::t(locale, "setting.logOutPopup.title").into(),
+                description: mezon_i18n::t(locale, "setting.logOutPopup.description").into(),
+                cancel_label: mezon_i18n::t(locale, "common.cancel").into(),
+                confirm_label: mezon_i18n::t(locale, "common.logOut").into(),
+                failed_message: mezon_i18n::t(locale, "common.somethingWentWrong").into(),
+                action: Rc::new(|cx: &mut App| {
+                    mezon_store::LoginStore::global(cx).update(cx, |store, cx| {
+                        store.logout(cx);
+                    });
+                    Task::ready(Ok(()))
+                }),
+            },
+            window,
+            cx,
+        );
+    }
+
     pub fn confirm_disable_clan_community(
         &mut self,
         on_confirm: impl Fn(&mut App) + 'static,

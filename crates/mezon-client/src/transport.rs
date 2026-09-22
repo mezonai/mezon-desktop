@@ -781,6 +781,17 @@ impl MezonTransport {
         Ok(result)
     }
 
+    async fn send_realtime_control(
+        &self,
+        cid: u16,
+        action: &'static str,
+        envelope: realtime::Envelope,
+    ) -> Result<Vec<u8>> {
+        let (code, response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        complete_realtime_control_request(action, code, &response)?;
+        Ok(response)
+    }
+
     /// Check if the adapter is connected.
     pub async fn is_open(&self) -> bool {
         self.adapter.is_open()
@@ -1843,6 +1854,72 @@ pub fn is_mention_or_reply(
     parse_message_references(references)
         .iter()
         .any(|reference| reference.message_sender_id == user_id)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MessageTargetClassification {
+    pub has_here: bool,
+    pub direct_user: bool,
+    pub matching_role: bool,
+    pub reply_to_user: bool,
+}
+
+impl MessageTargetClassification {
+    pub fn is_badge_mention(self) -> bool {
+        self.has_here || self.is_inbox_mention()
+    }
+
+    pub fn is_inbox_mention(self) -> bool {
+        self.direct_user || self.matching_role || self.reply_to_user
+    }
+
+    pub fn is_here_only(self) -> bool {
+        self.has_here && !self.is_inbox_mention()
+    }
+}
+
+pub fn classify_message_targets(
+    content: &str,
+    references: &[u8],
+    mention_bytes: &[u8],
+    user_id: i64,
+    role_ids: &[i64],
+) -> MessageTargetClassification {
+    let mut classification = MessageTargetClassification::default();
+    for mention in parse_message_mentions(mention_bytes) {
+        classification.has_here |= is_here_user_id(&mention.user_id.to_string());
+        classification.direct_user |= mention.user_id != 0 && mention.user_id == user_id;
+        classification.matching_role |= mention.role_id != 0 && role_ids.contains(&mention.role_id);
+    }
+    if let Ok(parsed) = serde_json::from_str::<ApiMessageContent>(content) {
+        for token in parsed.mentions {
+            if let Some(id) = token.user_id.as_deref() {
+                classification.has_here |= is_here_user_id(id);
+                classification.direct_user |=
+                    !is_here_user_id(id) && id.parse::<i64>() == Ok(user_id);
+            }
+            classification.matching_role |= token
+                .role_id
+                .as_deref()
+                .and_then(|id| id.parse::<i64>().ok())
+                .is_some_and(|id| role_ids.contains(&id));
+        }
+    }
+    classification.reply_to_user = parse_message_references(references)
+        .iter()
+        .any(|reference| reference.message_sender_id == user_id);
+    classification
+}
+
+pub fn is_inbox_mention_or_reply(
+    content: &str,
+    references: &[u8],
+    mention_bytes: &[u8],
+    user_id: i64,
+    role_ids: &[i64],
+) -> bool {
+    classify_message_targets(content, references, mention_bytes, user_id, role_ids)
+        .is_inbox_mention()
 }
 
 fn mention_targets_user(token: &ContentToken, user_id: i64, role_ids: &[i64]) -> bool {
@@ -4880,11 +4957,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("join_chat error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "join_chat", envelope)
+            .await
+            .map(|_| ())
     }
 
     pub async fn write_voice_reaction(&self, emojis: Vec<String>, channel_id: i64) -> Result<()> {
@@ -4901,11 +4976,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("write_voice_reaction error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "write_voice_reaction", envelope)
+            .await
+            .map(|_| ())
     }
 
     pub async fn forward_webrtc_signaling(
@@ -4930,11 +5003,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("forward_webrtc_signaling error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "forward_webrtc_signaling", envelope)
+            .await
+            .map(|_| ())
     }
 
     pub async fn write_voice_interactive_event(
@@ -4973,16 +5044,14 @@ impl MezonTransport {
             event_type,
             "sending VoiceInteractiveEvent"
         );
-        let (code, response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        let response = self
+            .send_realtime_control(cid, "write_voice_interactive_event", envelope)
+            .await?;
         tracing::info!(
             target: "socket",
             cid = i32::from(cid),
-            code,
             "received VoiceInteractiveEvent CID response"
         );
-        if code != 0 {
-            anyhow::bail!("write_voice_interactive_event error: code={code}");
-        }
         decode_voice_interactive_response(&response)
     }
 
@@ -5006,11 +5075,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("make_call_push error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "make_call_push", envelope)
+            .await
+            .map(|_| ())
     }
 
     /// Report the user's read position (cf. React `writeLastSeenMessage`).
@@ -5042,11 +5109,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("write_last_seen_message error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "write_last_seen_message", envelope)
+            .await
+            .map(|_| ())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5093,11 +5158,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("write_last_pin_message error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "write_last_pin_message", envelope)
+            .await
+            .map(|_| ())
     }
 
     pub async fn join_clan_chat(&self, clan_id: i64) -> Result<()> {
@@ -5110,11 +5173,9 @@ impl MezonTransport {
                 is_last_field: false,
             })),
         };
-        let (code, _response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            anyhow::bail!("join_clan_chat error: code={code}");
-        }
-        Ok(())
+        self.send_realtime_control(cid, "join_clan_chat", envelope)
+            .await
+            .map(|_| ())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -8288,17 +8349,14 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(())
+        self.send_realtime_control(cid, "write_ephemeral_message", envelope)
+            .await
+            .map(|_| ())
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn send_ephemeral_message_to_bots(
+    pub async fn send_ephemeral_message_to_bot(
         &self,
-        receiver_ids: Vec<i64>,
         clan_id: i64,
         channel_id: i64,
         content: &str,
@@ -8326,11 +8384,11 @@ impl MezonTransport {
         );
         let body = realtime::EphemeralMessageSend {
             message: Some(message),
-            receiver_ids,
+            receiver_ids: Vec::new(),
         }
         .encode_to_vec();
         let response = self
-            .send_api_request_over_http("SendEphemeralMessageToBots", body)
+            .send_api_request_over_http("SendEphemeralMessageToBot", body)
             .await?;
         Ok(realtime::ChannelMessageAck::decode(response.as_slice())?)
     }
@@ -8359,11 +8417,9 @@ impl MezonTransport {
                 },
             )),
         };
-        let (code, _) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(())
+        self.send_realtime_control(cid, "write_message_typing", envelope)
+            .await
+            .map(|_| ())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -8415,11 +8471,9 @@ impl MezonTransport {
             cid: i32::from(cid),
             message: Some(realtime::envelope::Message::QuickMenuEvent(event)),
         };
-        let (code, _) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(())
+        self.send_realtime_control(cid, "write_quick_menu_event", envelope)
+            .await
+            .map(|_| ())
     }
 
     /// Dropdown box selected.
@@ -10156,6 +10210,20 @@ fn realtime_error_from_body(body: &[u8]) -> Option<realtime::Error> {
     }
 }
 
+fn complete_realtime_control_request(action: &str, code: u32, response: &[u8]) -> Result<()> {
+    if let Some(error) = realtime_error_from_body(response) {
+        anyhow::bail!(
+            "{action} error: code={} {}",
+            error.code,
+            error.message.trim()
+        );
+    }
+    if code != 0 {
+        anyhow::bail!("{action} error: code={code}");
+    }
+    Ok(())
+}
+
 fn api_response_or_realtime_error(code: u32, api_name: &str) -> Result<()> {
     if code != 0 {
         tracing::error!(target: "socket", "{api_name} failed: code={code}");
@@ -11182,6 +11250,47 @@ mod tests {
         .encode_to_vec();
         let content = build_message_content_json("@here", &[], &[], &[], &[]);
         assert!(is_mention_or_reply(&content, &[], &bytes, 7, &[]));
+        assert!(!is_inbox_mention_or_reply(&content, &[], &bytes, 7, &[]));
+    }
+
+    #[test]
+    fn target_classification_keeps_direct_mentions_mixed_with_here() {
+        let here_user_id = MENTION_HERE_USER_ID.parse::<i64>().unwrap();
+        let bytes = api::MessageMentionList {
+            mentions: vec![
+                api::MessageMention {
+                    user_id: here_user_id,
+                    username: "@here".into(),
+                    ..Default::default()
+                },
+                api::MessageMention {
+                    user_id: 7,
+                    username: "@alice".into(),
+                    ..Default::default()
+                },
+            ],
+        }
+        .encode_to_vec();
+
+        let targets = classify_message_targets("", &[], &bytes, 7, &[]);
+        assert!(targets.has_here);
+        assert!(targets.direct_user);
+        assert!(targets.is_inbox_mention());
+        assert!(!targets.is_here_only());
+    }
+
+    #[test]
+    fn inbox_mention_or_reply_keeps_replies() {
+        let refs = api::MessageRefList {
+            refs: vec![api::MessageRef {
+                message_sender_id: 42,
+                ..Default::default()
+            }],
+        }
+        .encode_to_vec();
+        let content = build_message_content_json("reply", &[], &[], &[], &[]);
+
+        assert!(is_inbox_mention_or_reply(&content, &refs, &[], 42, &[]));
     }
 
     #[test]
@@ -12069,6 +12178,40 @@ mod tests {
     fn meet_token_raw_jwt_is_accepted() {
         let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
         assert_eq!(meet_token_from_raw_body(0, jwt.as_bytes()).unwrap(), jwt);
+    }
+
+    #[test]
+    fn realtime_control_accepts_a_successful_ack() {
+        complete_realtime_control_request("join_clan_chat", 0, &[]).unwrap();
+    }
+
+    #[test]
+    fn realtime_control_rejects_a_nonzero_frame_code() {
+        let err = complete_realtime_control_request("join_clan_chat", 13, &[]).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("join_clan_chat error: code=13"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn realtime_control_rejects_an_error_envelope_when_frame_code_is_zero() {
+        let body = realtime::Envelope {
+            cid: 7,
+            message: Some(realtime::envelope::Message::Error(realtime::Error {
+                code: 403,
+                message: "Not allowed".into(),
+                context: Default::default(),
+            })),
+        }
+        .encode_to_vec();
+        let err = complete_realtime_control_request("join_clan_chat", 0, &body).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("join_clan_chat error: code=403 Not allowed"),
+            "{message}"
+        );
     }
 
     #[test]

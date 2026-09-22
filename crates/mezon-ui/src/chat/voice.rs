@@ -10,8 +10,8 @@ use gpui::{
 };
 use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, DeviceKind, DeviceMenuKind, DisplayedFlower,
-    DisplayedReaction, PERMISSION_MANAGE_CHANNEL, PermissionStore, RecordingState, Settings,
-    SfuRole, UserId, VoiceCallStatus, VoiceConnection, VoiceInteractiveApp, VoiceMember,
+    DisplayedReaction, PERMISSION_MANAGE_CHANNEL, PermissionStore, RecordingState, ScreenShareMode,
+    Settings, SfuRole, UserId, VoiceCallStatus, VoiceConnection, VoiceInteractiveApp, VoiceMember,
     VoiceParticipant, VoiceRenderFrame, VoiceStore, WalletStore, flower_menu_blocked,
 };
 
@@ -3201,6 +3201,17 @@ fn control_bar(
         })
     };
 
+    let screen_button = device_control(
+        screen_button.into_any_element(),
+        theme,
+        locale,
+        voice,
+        settings,
+        store,
+        DeviceMenuKind::ScreenShare,
+        cx,
+    );
+
     let ptt_button = is_audience.then(|| {
         let (bg, hover, color): (Hsla, Hsla, Hsla) = if ptt_active {
             (
@@ -3972,6 +3983,7 @@ fn device_control(
     let arrow_id = match menu_kind {
         DeviceMenuKind::Microphone => "voice-mic-devices-btn",
         DeviceMenuKind::Camera => "voice-camera-devices-btn",
+        DeviceMenuKind::ScreenShare => "voice-screen-mode-btn",
     };
     let arrow_hover = theme.bg_hover;
     let arrow = {
@@ -4024,9 +4036,13 @@ fn device_flyout(
     menu_kind: DeviceMenuKind,
     cx: &App,
 ) -> AnyElement {
+    if menu_kind == DeviceMenuKind::ScreenShare {
+        return screen_mode_flyout(theme, locale, voice, store);
+    }
     let kinds: &[DeviceKind] = match menu_kind {
         DeviceMenuKind::Microphone => &[DeviceKind::AudioInput, DeviceKind::AudioOutput],
         DeviceMenuKind::Camera => &[DeviceKind::VideoInput],
+        DeviceMenuKind::ScreenShare => &[],
     };
     let settings = settings.read(cx);
     let input_id = settings.input_device_id.clone();
@@ -4101,6 +4117,141 @@ fn device_flyout(
             .children(list_panel),
     )
     .into_any_element()
+}
+
+fn screen_mode_flyout(
+    theme: &Theme,
+    locale: &str,
+    voice: &Entity<VoiceStore>,
+    store: &VoiceStore,
+) -> AnyElement {
+    let active = store.screen_share_mode();
+    let rows = [
+        (
+            ScreenShareMode::Text,
+            "voice-screen-mode-text",
+            "screenShare.modeText",
+            "screenShare.modeTextDescription",
+        ),
+        (
+            ScreenShareMode::Video,
+            "voice-screen-mode-video",
+            "screenShare.modeVideo",
+            "screenShare.modeVideoDescription",
+        ),
+    ]
+    .into_iter()
+    .map(|(mode, row_id, title_key, description_key)| {
+        screen_mode_row(
+            theme,
+            voice,
+            mode,
+            mode == active,
+            row_id,
+            mezon_i18n::t(locale, title_key),
+            mezon_i18n::t(locale, description_key),
+        )
+    });
+
+    deferred(
+        div()
+            .id("voice-screen-mode-flyout")
+            .absolute()
+            .bottom(px(56.))
+            .left(px(-6.))
+            .occlude()
+            .on_mouse_down_out({
+                let voice = voice.clone();
+                move |_: &MouseDownEvent, _, cx: &mut App| {
+                    voice.update(cx, |store, cx| store.close_device_menu(cx));
+                }
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .w(px(260.))
+                    .p_2()
+                    .rounded_md()
+                    .bg(theme.tokens.bg_theme_contexify)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow_lg()
+                    .children(rows),
+            ),
+    )
+    .into_any_element()
+}
+
+fn screen_mode_row(
+    theme: &Theme,
+    voice: &Entity<VoiceStore>,
+    mode: ScreenShareMode,
+    selected: bool,
+    row_id: &'static str,
+    title: &'static str,
+    description: &'static str,
+) -> AnyElement {
+    let voice = voice.clone();
+    let hover_bg = theme.bg_hover;
+    let base_bg = if selected {
+        theme.bg_hover
+    } else {
+        theme.bg_secondary
+    };
+    let accent: Hsla = gpui::rgb(ACCENT_BLUE).into();
+    let muted: Hsla = theme.text_muted.into();
+    let radio = div()
+        .mt(px(3.))
+        .flex_none()
+        .size(px(16.))
+        .rounded_full()
+        .border_2()
+        .border_color(if selected { accent } else { muted })
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(selected, |radio| {
+            radio.child(div().size(px(8.)).rounded_full().bg(accent))
+        });
+    div()
+        .id(row_id)
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap_2()
+        .px_3()
+        .py_2()
+        .rounded(px(6.))
+        .bg(base_bg)
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover_bg))
+        .child(radio)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .min_w(px(0.))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text_primary)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .mt(px(2.))
+                        .text_xs()
+                        .text_color(theme.text_muted)
+                        .child(description),
+                ),
+        )
+        .on_click(move |_, _, cx| {
+            voice.update(cx, |store, cx| store.set_screen_share_mode(mode, cx));
+        })
+        .into_any_element()
 }
 
 fn device_row(

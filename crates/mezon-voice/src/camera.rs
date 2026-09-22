@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use libwebrtc::prelude::VideoBuffer;
@@ -22,6 +23,11 @@ const TARGET_FPS: u32 = 24;
 const MAX_CAMERA_WIDTH: u32 = 640;
 const MAX_CAMERA_HEIGHT: u32 = 360;
 const CAMERA_ENUM_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn camera_format_cache() -> &'static Mutex<HashMap<String, CameraFormat>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, CameraFormat>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 #[derive(Debug, Clone)]
 pub struct CameraDeviceInfo {
@@ -261,6 +267,7 @@ fn capture_loop(
     let mut preview = Vec::new();
     let frame_interval = Duration::from_secs_f64(1.0 / TARGET_FPS as f64);
     let mut last_capture: Option<Instant> = None;
+    let mut waiting_for_frame = Instant::now();
 
     'outer: loop {
         let switch_to = 'capture: loop {
@@ -283,6 +290,12 @@ fn capture_loop(
                     continue;
                 }
             };
+            if last_capture.is_none() {
+                tracing::info!(
+                    elapsed_ms = waiting_for_frame.elapsed().as_millis() as u64,
+                    "camera first frame received"
+                );
+            }
             if let Some(last) = last_capture
                 && last.elapsed() < frame_interval
             {
@@ -319,6 +332,7 @@ fn capture_loop(
             }
         };
         last_capture = None;
+        waiting_for_frame = Instant::now();
     }
 
     frame_store.remove(key);
@@ -471,6 +485,7 @@ fn fit_dimensions(width: u32, height: u32) -> (u32, u32) {
 }
 
 fn open_camera(device_id: Option<&str>) -> Result<Camera, String> {
+    let started = Instant::now();
     let indices = camera_indices_preferring(device_id);
     let target = Resolution::new(TARGET_WIDTH, TARGET_HEIGHT);
     let attempts: [RequestedFormat<'static>; 5] = [
@@ -491,12 +506,28 @@ fn open_camera(device_id: Option<&str>) -> Result<Camera, String> {
 
     let mut last_err = String::from("no camera formats attempted");
     for index in &indices {
-        for requested in &attempts {
-            match try_open_camera(index, *requested) {
+        let cache_key = index.as_string();
+        // Copy out the format before touching hardware; never hold the cache
+        // mutex while AVFoundation opens the device or starts its stream.
+        let cached = camera_format_cache()
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&cache_key).copied());
+        let cached_request = cached
+            .map(|format| RequestedFormat::new::<RgbFormat>(RequestedFormatType::Exact(format)));
+        for (attempt, requested) in cached_request.into_iter().chain(attempts).enumerate() {
+            let using_cache = cached.is_some() && attempt == 0;
+            match try_open_camera(index, requested) {
                 Ok(camera) => {
                     let format = camera.camera_format();
+                    if let Ok(mut cache) = camera_format_cache().lock() {
+                        cache.insert(cache_key.clone(), format);
+                    }
                     let resolution = camera.resolution();
                     tracing::info!(
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        cached_format = using_cache,
+                        attempt = attempt + 1,
                         "camera opened: {}x{} {:?} @ {}fps",
                         resolution.width(),
                         resolution.height(),
@@ -505,7 +536,20 @@ fn open_camera(device_id: Option<&str>) -> Result<Camera, String> {
                     );
                     return Ok(camera);
                 }
-                Err(e) => last_err = e,
+                Err(e) => {
+                    // A changed device or capture mode must still be able to
+                    // use the normal negotiation path after a stale cache hit.
+                    if using_cache && let Ok(mut cache) = camera_format_cache().lock() {
+                        cache.remove(&cache_key);
+                    }
+                    tracing::debug!(
+                        camera = %index.as_string(),
+                        format = ?requested,
+                        error = %e,
+                        "camera open attempt failed"
+                    );
+                    last_err = e;
+                }
             }
         }
     }

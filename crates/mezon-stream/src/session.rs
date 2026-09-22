@@ -8,7 +8,7 @@ use libwebrtc::ice_candidate::IceCandidate;
 use libwebrtc::media_stream_track::MediaStreamTrack;
 use libwebrtc::peer_connection::OfferOptions;
 use libwebrtc::peer_connection_factory::{
-    ContinualGatheringPolicy, IceServer, IceTransportsType, PeerConnectionFactory, RtcConfiguration,
+    ContinualGatheringPolicy, IceTransportsType, PeerConnectionFactory, RtcConfiguration,
 };
 use libwebrtc::prelude::MediaType;
 use libwebrtc::prelude::VideoBuffer;
@@ -162,11 +162,7 @@ async fn run_session_inner(
 
     let factory = PeerConnectionFactory::default();
     let rtc_config = RtcConfiguration {
-        ice_servers: vec![IceServer {
-            urls: vec!["stun:stun.l.google.com:19302".into()],
-            username: String::new(),
-            password: String::new(),
-        }],
+        ice_servers: Vec::new(),
         continual_gathering_policy: ContinualGatheringPolicy::GatherContinually,
         ice_transport_type: IceTransportsType::All,
     };

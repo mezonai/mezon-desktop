@@ -2349,6 +2349,7 @@
   "createChannel.labels.isPrivate": "Is private channel?",
   "createChannel.labels.placeholder": "Enter the channel's name",
   "createChannel.privacy.description": "Only selected members and roles will be able to view this channel.",
+  "createChannel.privacy.descriptionVoice": "Only selected members and roles will be able to view and join this channel.",
   "createChannel.privacy.private": "Private Channel",
   "createChannel.validation.duplicateName": "The channel name already exists in the category. Please enter another name.",
   "createChannel.validation.invalidName": "Please enter a channel name (max 64 characters, only words, numbers, _ or -).",
@@ -2707,6 +2708,7 @@
   "eventCreator.fields.eventName.title": "Event Topic",
   "eventCreator.fields.startDate.errorMessage": "Please choose a date on or after",
   "eventCreator.fields.startDate.title": "Start Date",
+  "eventCreator.fields.date.title": "Date",
   "eventCreator.fields.startTime.errorMessage": "Please choose a date on or after",
   "eventCreator.fields.startTime.title": "Start Time",
   "eventCreator.notify.locationBlank": "A location is required",
@@ -3171,6 +3173,7 @@
   "media.video.error.title": "Video unavailable",
   "memberPage.addedBy": "Added by {{name}}",
   "memberPage.inVoice": "In voice",
+  "memberPage.shareScreen": "Sharing screen",
   "memberPage.membersOf": "members of {{count}}",
   "memberPage.offlineCount": "Offline - {{count}}",
   "memberPage.onlineCount": "Online - {{count}}",
@@ -4101,6 +4104,7 @@
   "setting.logOut": "Logout",
   "setting.logOutPopup.description": "Please confirm if you would like to log out?",
   "setting.logOutPopup.noConfirm": "No",
+  "setting.logOutPopup.title": "Log Out",
   "setting.logOutPopup.yesConfirm": "Yes",
   "setting.notifications.hideContent": "Hide Notification Content",
   "setting.notifications.hideContentDesc": "When enabled, message content will be hidden from notification popups and the lock screen.",
@@ -4726,5 +4730,9 @@
   "token.history.all": "All",
   "token.history.sent": "Sent",
   "token.history.received": "Received",
-  "token.history.walletUnavailable": "Wallet is not available"
+  "token.history.walletUnavailable": "Wallet is not available",
+  "screenShare.modeText": "Text",
+  "screenShare.modeTextDescription": "Sharper text and slides, lower resource use.",
+  "screenShare.modeVideo": "Video",
+  "screenShare.modeVideoDescription": "Smoother video; may reduce sharpness on a slow connection."
 }

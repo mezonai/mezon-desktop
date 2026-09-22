@@ -869,6 +869,9 @@ impl TopicsStore {
 
         self.compose_generation = self.compose_generation.wrapping_add(1);
         self.init_topic_message_id = Some(origin.id);
+        if self.compose.origin_message_id != Some(origin.id) && self.reply_target.take().is_some() {
+            cx.emit(TopicsEvent::ReplyTargetChanged);
+        }
         self.compose = TopicCompose {
             origin_message_id: Some(origin.id),
             origin_message: Some(origin),

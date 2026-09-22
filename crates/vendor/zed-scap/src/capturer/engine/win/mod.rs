@@ -5,7 +5,7 @@ use crate::{
 };
 use std::cmp;
 use std::sync::mpsc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
     D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
@@ -252,6 +252,15 @@ pub fn create_capturer(options: &Options, tx: mpsc::Sender<anyhow::Result<Frame>
         CursorCaptureSettings::Default
     };
 
+    let minimum_update_interval = if options.fps > 0
+        && GraphicsCaptureApi::is_minimum_update_interval_supported().unwrap_or(false)
+    {
+        let frame_interval = Duration::from_secs_f64(1.0 / f64::from(options.fps));
+        MinimumUpdateIntervalSettings::Custom(frame_interval)
+    } else {
+        MinimumUpdateIntervalSettings::Default
+    };
+
     let error_tx = tx.clone();
 
     let settings = match target.clone() {
@@ -260,7 +269,7 @@ pub fn create_capturer(options: &Options, tx: mpsc::Sender<anyhow::Result<Frame>
             show_cursor,
             DrawBorderSettings::Default,
             SecondaryWindowSettings::Default,
-            MinimumUpdateIntervalSettings::Default,
+            minimum_update_interval,
             DirtyRegionSettings::Default,
             color_format,
             FlagStruct {
@@ -273,7 +282,7 @@ pub fn create_capturer(options: &Options, tx: mpsc::Sender<anyhow::Result<Frame>
             show_cursor,
             DrawBorderSettings::Default,
             SecondaryWindowSettings::Default,
-            MinimumUpdateIntervalSettings::Default,
+            minimum_update_interval,
             DirtyRegionSettings::Default,
             color_format,
             FlagStruct {

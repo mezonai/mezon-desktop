@@ -200,8 +200,21 @@ impl PermissionsTab {
             .map(|channel| (channel.private, channel.creator_id, channel.channel_type))
     }
 
+    /// Voice channels get the private card and its member/role lists, not
+    /// the override table: every override the server knows is a text
+    /// permission (send message, manage threads, …) and would only invite
+    /// toggles that do nothing in a voice room.
+    fn shows_overrides(&self, cx: &App) -> bool {
+        // Unknown yet means wait: the channel-list observer calls
+        // `sync_overrides` again once the channel arrives.
+        ChannelList::global(cx)
+            .read(cx)
+            .channel(self.clan_id, self.channel_id)
+            .is_some_and(|channel| channel.channel_type != ChannelType::Voice)
+    }
+
     fn sync_overrides(&mut self, cx: &mut Context<Self>) {
-        if self.overrides.is_some() {
+        if self.overrides.is_some() || !self.shows_overrides(cx) {
             return;
         }
         let clan_id = self.clan_id;
@@ -1023,14 +1036,16 @@ impl Render for PermissionsTab {
                         el.child(self.render_access_panel(&locale, &theme, cx))
                     }),
             )
-            .child(
-                div()
-                    .mt_10()
-                    .mb(px(30.0))
-                    .h(px(1.0))
-                    .w_full()
-                    .bg(theme.tokens.border_primary),
-            )
+            .when(self.overrides.is_some(), |el| {
+                el.child(
+                    div()
+                        .mt_10()
+                        .mb(px(30.0))
+                        .h(px(1.0))
+                        .w_full()
+                        .bg(theme.tokens.border_primary),
+                )
+            })
             .children(self.overrides.clone())
             .when(dirty, |el| el.child(self.render_save_bar(&locale, cx)))
     }

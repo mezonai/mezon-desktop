@@ -814,6 +814,36 @@ impl InboxNotification {
             .filter(|ts| *ts > 0)
             .unwrap_or(self.create_time_seconds)
     }
+
+    pub fn contains_here_mention(&self) -> bool {
+        self.message.as_ref().is_some_and(|message| {
+            message
+                .mention_spans
+                .iter()
+                .any(|span| crate::transport::is_here_user_id(&span.user_id))
+        })
+    }
+
+    pub fn is_here_only_for_user(&self, user_id: i64, role_ids: &[i64]) -> bool {
+        if self.code == INBOX_USER_REPLIED_CODE {
+            return false;
+        }
+        let Some(message) = &self.message else {
+            return false;
+        };
+        let mut has_here = false;
+        let mut targets_user = false;
+        for span in message.mention_spans_for_render() {
+            has_here |= crate::transport::is_here_user_id(&span.user_id);
+            targets_user |= !crate::transport::is_here_user_id(&span.user_id)
+                && span.user_id.parse::<i64>() == Ok(user_id);
+            targets_user |= span
+                .role_id
+                .parse::<i64>()
+                .is_ok_and(|role_id| role_ids.contains(&role_id));
+        }
+        has_here && !targets_user
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1089,6 +1119,135 @@ mod tests {
             inbox_category_from_notification(&n),
             Some(InboxCategory::Mentions)
         );
+    }
+
+    #[test]
+    fn inbox_notification_detects_here_mention_span() {
+        let mut message = InboxMessagePreview::empty_content("@here".into());
+        message.mention_spans.push(InboxMentionSpan {
+            start: 0,
+            end: 5,
+            user_id: crate::transport::MENTION_HERE_USER_ID.into(),
+            role_id: String::new(),
+            is_role: false,
+        });
+        let notification = InboxNotification {
+            id: "1".into(),
+            category: InboxCategory::Mentions,
+            subject: String::new(),
+            sender_id: String::new(),
+            clan_id: "1".into(),
+            channel_id: "1".into(),
+            topic_id: None,
+            channel_type: 1,
+            avatar_url: String::new(),
+            create_time_seconds: 1,
+            code: INBOX_USER_MENTIONED_CODE,
+            message: Some(message),
+        };
+
+        assert!(notification.contains_here_mention());
+        assert!(notification.is_here_only_for_user(7, &[]));
+    }
+
+    #[test]
+    fn mixed_here_and_direct_mention_is_not_here_only() {
+        let mut message = InboxMessagePreview::empty_content("@here @alice".into());
+        message.mention_spans.extend([
+            InboxMentionSpan {
+                start: 0,
+                end: 5,
+                user_id: crate::transport::MENTION_HERE_USER_ID.into(),
+                role_id: String::new(),
+                is_role: false,
+            },
+            InboxMentionSpan {
+                start: 6,
+                end: 12,
+                user_id: "7".into(),
+                role_id: String::new(),
+                is_role: false,
+            },
+        ]);
+        let notification = InboxNotification {
+            id: "1".into(),
+            category: InboxCategory::Mentions,
+            subject: String::new(),
+            sender_id: String::new(),
+            clan_id: "1".into(),
+            channel_id: "1".into(),
+            topic_id: None,
+            channel_type: 1,
+            avatar_url: String::new(),
+            create_time_seconds: 1,
+            code: INBOX_USER_MENTIONED_CODE,
+            message: Some(message),
+        };
+        assert!(!notification.is_here_only_for_user(7, &[]));
+    }
+
+    #[test]
+    fn mixed_here_and_matching_role_is_not_here_only() {
+        let mut message = InboxMessagePreview::empty_content("@here @mods".into());
+        message.mention_spans.extend([
+            InboxMentionSpan {
+                start: 0,
+                end: 5,
+                user_id: crate::transport::MENTION_HERE_USER_ID.into(),
+                role_id: String::new(),
+                is_role: false,
+            },
+            InboxMentionSpan {
+                start: 6,
+                end: 11,
+                user_id: String::new(),
+                role_id: "99".into(),
+                is_role: true,
+            },
+        ]);
+        let notification = InboxNotification {
+            id: "1".into(),
+            category: InboxCategory::Mentions,
+            subject: String::new(),
+            sender_id: String::new(),
+            clan_id: "1".into(),
+            channel_id: "1".into(),
+            topic_id: None,
+            channel_type: 1,
+            avatar_url: String::new(),
+            create_time_seconds: 1,
+            code: INBOX_USER_MENTIONED_CODE,
+            message: Some(message),
+        };
+        assert!(!notification.is_here_only_for_user(7, &[99]));
+        assert!(notification.is_here_only_for_user(7, &[100]));
+    }
+
+    #[test]
+    fn reply_notification_is_never_filtered_as_here_only() {
+        let mut message = InboxMessagePreview::empty_content("@here reply".into());
+        message.mention_spans.push(InboxMentionSpan {
+            start: 0,
+            end: 5,
+            user_id: crate::transport::MENTION_HERE_USER_ID.into(),
+            role_id: String::new(),
+            is_role: false,
+        });
+        let notification = InboxNotification {
+            id: "1".into(),
+            category: InboxCategory::Mentions,
+            subject: String::new(),
+            sender_id: String::new(),
+            clan_id: "1".into(),
+            channel_id: "1".into(),
+            topic_id: None,
+            channel_type: 1,
+            avatar_url: String::new(),
+            create_time_seconds: 1,
+            code: INBOX_USER_REPLIED_CODE,
+            message: Some(message),
+        };
+        assert!(!notification.is_here_only_for_user(7, &[]));
     }
 
     #[test]

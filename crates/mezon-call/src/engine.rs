@@ -483,7 +483,7 @@ fn sendrecv_init() -> RtpTransceiverInit {
 }
 
 fn build_rtc_config(servers: &[IceServerConfig]) -> RtcConfiguration {
-    let mut ice_servers: Vec<IceServer> = servers
+    let ice_servers: Vec<IceServer> = servers
         .iter()
         .filter(|server| !server.urls.is_empty())
         .map(|server| IceServer {
@@ -492,13 +492,6 @@ fn build_rtc_config(servers: &[IceServerConfig]) -> RtcConfiguration {
             password: server.credential.clone(),
         })
         .collect();
-    if ice_servers.is_empty() {
-        ice_servers.push(IceServer {
-            urls: vec!["stun:stun.l.google.com:19302".into()],
-            username: String::new(),
-            password: String::new(),
-        });
-    }
     RtcConfiguration {
         ice_servers,
         continual_gathering_policy: ContinualGatheringPolicy::GatherContinually,

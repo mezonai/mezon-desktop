@@ -13,28 +13,42 @@ pub fn clean_download_url(url: &str) -> Option<String> {
     }
 }
 
+/// The name a download is saved under.
+///
+/// A sound picked from the panel is sent as its label — `u need to leave` — while
+/// the object itself is `…/2097582928409137152.wav`; the file box shows the label,
+/// so the label is what the save dialog must suggest. Saved bare, though, the file
+/// has no type: Windows and most Linux desktops open it as text. Keep the label
+/// and borrow the extension from the URL; with no label at all, the URL's own
+/// name is the best there is.
 pub fn resolve_download_filename(filename: &str, url: &str) -> String {
     let from_name = sanitize_filename(filename);
-    if from_name != "download" || !filename.trim().is_empty() {
-        let has_ext = Path::new(&from_name)
-            .extension()
-            .is_some_and(|e| !e.to_str().unwrap_or("").is_empty());
-        if has_ext {
-            return from_name;
-        }
+    let has_name = !filename.trim().is_empty();
+    if has_name && extension_of(&from_name).is_some() {
+        return from_name;
     }
-    if let Some(segment) = url
+    let from_url = url
         .split(['?', '#'])
         .next()
         .and_then(|path| path.rsplit('/').next())
-        .filter(|s| !s.is_empty())
-    {
-        let from_url = sanitize_filename(segment);
-        if from_url != "download" {
-            return from_url;
-        }
+        .filter(|segment| !segment.is_empty())
+        .map(sanitize_filename)
+        .filter(|segment| segment != "download");
+    match from_url {
+        Some(from_url) if !has_name => from_url,
+        Some(from_url) => match extension_of(&from_url) {
+            Some(ext) => format!("{from_name}.{ext}"),
+            None => from_name,
+        },
+        None => from_name,
     }
-    from_name
+}
+
+fn extension_of(name: &str) -> Option<&str> {
+    Path::new(name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .filter(|ext| !ext.is_empty())
 }
 
 pub fn sanitize_filename(name: &str) -> String {
@@ -180,6 +194,46 @@ mod tests {
         assert_eq!(
             resolve_download_filename("", "https://cdn.example.com/photo.jpg?token=1"),
             "photo.jpg"
+        );
+    }
+
+    #[test]
+    fn a_bare_label_borrows_the_extension_from_the_url() {
+        // A sound from the picker: the attachment is named after the sound, the
+        // object on the CDN after its id.
+        assert_eq!(
+            resolve_download_filename(
+                "u need to leave",
+                "https://cdn.komu.vn/1840673171137630208/2097582928409137152.wav"
+            ),
+            "u need to leave.wav"
+        );
+        assert_eq!(
+            resolve_download_filename(
+                "ngu-ngoc",
+                "https://cdn.komu.vn/1785968850517364736/2085204327911133184.mp3?x=1"
+            ),
+            "ngu-ngoc.mp3"
+        );
+    }
+
+    #[test]
+    fn a_named_file_keeps_its_own_extension() {
+        assert_eq!(
+            resolve_download_filename("report.pdf", "https://cdn.example.com/abc.bin"),
+            "report.pdf"
+        );
+    }
+
+    #[test]
+    fn a_bare_label_stays_bare_when_the_url_has_no_extension_either() {
+        assert_eq!(
+            resolve_download_filename("notes", "https://cdn.example.com/objects/abc"),
+            "notes"
+        );
+        assert_eq!(
+            resolve_download_filename("notes", "https://cdn.example.com/"),
+            "notes"
         );
     }
 
