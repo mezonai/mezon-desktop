@@ -41,6 +41,7 @@ pub mod message;
 pub mod message_search;
 pub mod message_time;
 pub mod messages;
+pub mod name_validation;
 pub mod notification_push;
 pub mod notification_setting;
 pub mod ogp;
@@ -63,6 +64,7 @@ pub mod topics;
 pub mod ui_state;
 pub mod user_profile;
 pub mod users_by_user;
+mod voice_presence;
 pub mod voice;
 pub mod wallet;
 mod wallet_persist;
@@ -72,6 +74,7 @@ pub mod winstore_update;
 use anyhow::{Context, Result};
 use dirs::config_dir;
 pub use mezon_client::Session;
+pub use mezon_client::data_image;
 pub use mezon_client::transport::{MENTION_HERE_ID, MENTION_HERE_USER_ID, is_here_user_id};
 pub use mezon_client::{
     clean_download_url, download_url_to_downloads, resolve_download_filename, sanitize_filename,
@@ -121,14 +124,14 @@ pub use channel_role_permissions::{
     OVERRIDE_TYPE_DENY, OVERRIDE_TYPE_NEUTRAL, PermissionEntity,
 };
 pub use channel_settings::{ChannelSetting, ChannelSettingsEvent, ChannelSettingsStore};
-pub use channel_users::{ChannelUsersEvent, ChannelUsersStore};
+pub use channel_users::{ChannelUserProfile, ChannelUsersEvent, ChannelUsersStore};
 pub use clan::*;
 pub use clan_load::ClanLoadScheduler;
 pub use clan_members::{
     ClanMember, ClanMembersEvent, ClanMembersStore, User, split_members_by_status,
 };
 pub use compose::{ComposeDraft, ComposeStore, ComposeToken, ComposeTokenKind, PendingAttachment};
-pub use config::AppConfig;
+pub use config::{AppConfig, sticker_display_dimensions, sticker_search_display_dimensions};
 pub use connection::{ConnectionStore, resolve_initial_auth_state};
 pub use ctrlk_search::{
     CtrlKChannel, CtrlKSearchEvent, CtrlKSearchState, CtrlKSearchStore, CtrlKSearchType, CtrlKUser,
@@ -195,6 +198,10 @@ pub use mezon_client::{
     search_page_count, search_page_numbers, should_show_search_dropdown,
 };
 pub use mmn_client::{DECIMAL_FACTOR as TOKEN_DECIMAL_FACTOR, DECIMALS as TOKEN_DECIMALS};
+pub use name_validation::{
+    CLAN_NAME_MAX_CHARS, DISPLAY_NAME_MAX_BYTES, DisplayNameError, is_valid_clan_name,
+    is_valid_name_content, prepare_display_name_for_update,
+};
 pub use notification_push::NotificationPushStore;
 pub use notification_setting::{NotificationSettingEvent, NotificationSettingStore};
 pub use ogp::{

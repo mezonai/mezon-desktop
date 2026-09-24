@@ -134,6 +134,7 @@ pub fn render_mini_bar(
     clan_id: &str,
     voice: &Entity<VoiceStore>,
     settings: &Entity<Settings>,
+    connecting: bool,
     mic_enabled: bool,
     camera_enabled: bool,
     screen_enabled: bool,
@@ -145,10 +146,17 @@ pub fn render_mini_bar(
     let neutral_bg = theme.bg_secondary;
     let neutral_hover = darken(theme.bg_secondary, 0.1);
 
-    let header_key = if camera_enabled {
+    let header_key = if connecting {
+        "channelVoice.connecting"
+    } else if camera_enabled {
         "channelVoice.videoConnected"
     } else {
         "channelVoice.voiceConnected"
+    };
+    let header_color = if connecting {
+        theme.status_idle
+    } else {
+        theme.status_online
     };
 
     let address = format!("{channel_label} / {clan_name}");
@@ -241,13 +249,13 @@ pub fn render_mini_bar(
                         .child(
                             Icon::new(IconName::Speaker)
                                 .size(px(16.))
-                                .text_color(theme.status_online),
+                                .text_color(header_color),
                         )
                         .child(
                             div()
                                 .text_sm()
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.status_online)
+                                .text_color(header_color)
                                 .child(mezon_i18n::t(locale, header_key).to_string()),
                         ),
                 )
@@ -1291,6 +1299,66 @@ fn resolve_voice_member(cx: &App, clan_id: ClanId, m: &VoiceMember) -> (String, 
     (resolved.name, resolved.avatar_src, resolved.avatar_raw)
 }
 
+fn recording_indicator(
+    cx: &App,
+    theme: &Theme,
+    locale: &str,
+    clan_id: ClanId,
+    voice_members: &[VoiceMember],
+    store: &VoiceStore,
+) -> Option<AnyElement> {
+    let (first, others) = store.recording_users().split_first()?;
+    let fallback = store
+        .participants()
+        .iter()
+        .find(|p| &p.identity == first)
+        .map(|p| p.name.as_str())
+        .unwrap_or_default();
+    let (name, _, _) = resolve_voice_identity(cx, clan_id, voice_members, first, fallback);
+    let label = if others.is_empty() {
+        mezon_i18n::t(locale, "channelVoice.recordingBy").replace("{{name}}", &name)
+    } else {
+        mezon_i18n::t(locale, "channelVoice.recordingByMany")
+            .replace("{{name}}", &name)
+            .replace("{{count}}", &others.len().to_string())
+    };
+    Some(
+        div()
+            .absolute()
+            .top(px(60.))
+            .left(px(12.))
+            .max_w(px(360.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py(px(6.))
+            .rounded_full()
+            .bg(theme.bg_floating)
+            .border_1()
+            .border_color(theme.border)
+            .shadow_lg()
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(8.))
+                    .rounded_full()
+                    .bg(gpui::rgb(LEAVE_RED)),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text_primary)
+                    .child(label),
+            )
+            .into_any_element(),
+    )
+}
+
 fn raised_hands_overlay(
     cx: &App,
     clan_id: ClanId,
@@ -1745,6 +1813,14 @@ fn render_in_call(
             ))
         })
         .children(connection_toast)
+        .children(recording_indicator(
+            cx,
+            theme,
+            locale,
+            channel.clan_id,
+            &channel.voice_members,
+            voice.read(cx),
+        ))
         .children(reactions)
         .children(flowers)
         .children(raised_hands_overlay(

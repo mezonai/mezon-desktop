@@ -480,7 +480,7 @@ fn first_attachment_from_json(value: &serde_json::Value) -> Option<ParsedInboxAt
         .and_then(|v| v.as_str())
         .filter(|name| !name.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| filename_from_url(&url));
+        .unwrap_or_default();
     let size = item.get("size").map(json_u64).unwrap_or(0);
     let thumbnail = item
         .get("thumbnail")
@@ -735,11 +735,11 @@ fn parse_message_preview_json(bytes: &[u8]) -> Option<InboxMessagePreview> {
     if preview.content.is_empty() && !preview.raw_content.is_empty() {
         preview.content = display_text_from_message_content(&preview.raw_content);
     }
-    apply_preview_attachments(&mut preview);
     apply_first_attachment(
         &mut preview,
         &serde_json::json!({ "attachments": raw.attachments }),
     );
+    apply_preview_attachments(&mut preview);
     Some(preview)
 }
 
@@ -1337,12 +1337,43 @@ mod tests {
     }
 
     #[test]
+    fn saved_inbox_fcm_restores_original_attachment_metadata() {
+        let fcm = api::DirectFcmProto {
+            message_id: 42,
+            attachment_link: "https://cdn/2100167210931589120.txt".into(),
+            attachment_type: "text/plain".into(),
+            has_more_attachment: true,
+            content: serde_json::json!({
+                "t": "",
+                "attachments": [
+                    {"url": "https://cdn/2100167210931589120.txt", "filename": "2 - Copy.txt", "size": 57651, "filetype": "text/plain"},
+                    {"url": "https://cdn/other.txt", "filename": "2.txt", "size": 57651}
+                ]
+            }).to_string(),
+            ..Default::default()
+        };
+        let preview = parse_notification_content(&fcm.encode_to_vec()).unwrap();
+        assert_eq!(preview.attachment_filename, "2 - Copy.txt");
+        assert_eq!(preview.attachment_size, 57651);
+        assert_eq!(preview.attachment_link, fcm.attachment_link);
+        assert!(preview.has_more_attachment);
+    }
+
+    #[test]
     fn parse_message_preview_json_reads_sibling_attachments() {
         let bytes = br#"{"message_id":"42","sender_id":"9","content":"{\"t\":\"\"}","attachments":[{"url":"https://cdn/b.pdf","filetype":"application/pdf","filename":"b.pdf","size":512}],"display_name":"KOMU"}"#;
         let preview = parse_notification_content(bytes).expect("preview");
         assert_eq!(preview.attachment_link, "https://cdn/b.pdf");
         assert_eq!(preview.attachment_type, "application/pdf");
         assert_eq!(preview.attachment_filename, "b.pdf");
+        assert_eq!(preview.attachment_size, 512);
+    }
+
+    #[test]
+    fn content_filename_wins_when_sibling_attachment_has_only_url() {
+        let bytes = br#"{"message_id":"42","content":"{\"attachments\":[{\"url\":\"https://cdn/2100.txt\",\"filename\":\"original.txt\",\"size\":512}]}","attachments":[{"url":"https://cdn/2100.txt"}]}"#;
+        let preview = parse_message_preview_json(bytes).unwrap();
+        assert_eq!(preview.attachment_filename, "original.txt");
         assert_eq!(preview.attachment_size, 512);
     }
 

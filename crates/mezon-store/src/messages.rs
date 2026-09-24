@@ -729,12 +729,35 @@ fn attachment_to_api(a: &MessageAttachment) -> mezon_client::transport::ApiAttac
         url: a.url.clone(),
         filename: a.filename.clone(),
         filetype: a.filetype.clone(),
-        width: i32::try_from(a.width).unwrap_or(i32::MAX),
-        height: i32::try_from(a.height).unwrap_or(i32::MAX),
+        width: i32::try_from(a.width).unwrap_or(0),
+        height: i32::try_from(a.height).unwrap_or(0),
         thumbnail: a.thumbnail.clone(),
         duration: a.duration,
-        size: i32::try_from(a.size).unwrap_or(i32::MAX),
+        size: i32::try_from(a.size).unwrap_or(0),
     }
+}
+
+fn inbox_content_with_attachment_preview(
+    content_json: &str,
+    fallback_text: &str,
+    attachments: &[mezon_client::transport::ApiAttachment],
+) -> String {
+    let Some(first) = attachments.first() else {
+        return content_json.to_string();
+    };
+    let parsed = serde_json::from_str::<serde_json::Value>(content_json).ok();
+    let mut content = match parsed {
+        Some(value) if value.is_object() => value,
+        Some(serde_json::Value::String(inner)) => serde_json::from_str(&inner)
+            .ok()
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({ "t": fallback_text })),
+        _ => serde_json::json!({ "t": fallback_text }),
+    };
+    // The desktop inbox renders only the first attachment. Keep its metadata in
+    // content because persisted notifications otherwise retain only URL/type.
+    content["attachments"] = serde_json::json!([first]);
+    content.to_string()
 }
 
 /// Mentions carried by the source message. The server delivers them in the binary
@@ -3349,18 +3372,21 @@ impl MessagesStore {
                 })
             })
             .collect();
-        let attachments: Vec<mezon_proto::api::MessageAttachment> = msg
-            .attachments
+        let inbox_attachments: Vec<mezon_client::transport::ApiAttachment> =
+            msg.attachments.iter().map(attachment_to_api).collect();
+        let content_json =
+            inbox_content_with_attachment_preview(&content_json, &msg.content, &inbox_attachments);
+        let attachments: Vec<mezon_proto::api::MessageAttachment> = inbox_attachments
             .iter()
             .map(|att| mezon_proto::api::MessageAttachment {
                 url: att.url.clone(),
                 filename: att.filename.clone(),
                 filetype: att.filetype.clone(),
-                width: i32::try_from(att.width).unwrap_or(0),
-                height: i32::try_from(att.height).unwrap_or(0),
+                width: att.width,
+                height: att.height,
                 thumbnail: att.thumbnail.clone(),
                 duration: att.duration,
-                size: i32::try_from(att.size).unwrap_or(0),
+                size: att.size,
             })
             .collect();
         let first_attachment = attachments.first();
@@ -9694,17 +9720,26 @@ impl MessageAttachment {
         }
         let width = a.width.max(0) as u32;
         let height = a.height.max(0) as u32;
+        let tenor_mp4 = crate::message::tenor_mp4_url(&a.url);
+        let is_sticker = a.filetype == STICKER_FILETYPE && tenor_mp4.is_none();
         let is_video = MessageAttachment::media_is_video(&a.filetype, &a.url);
-        let (proxied_src, display_width, display_height) = cfg
-            .map(|c| c.attachment_proxy(&a.url, width, height, is_video))
-            .unwrap_or_else(|| {
-                let (w, h) = if is_video {
-                    crate::config::video_attachment_display_dimensions(width, height)
-                } else {
-                    crate::config::attachment_display_dimensions(width, height)
-                };
-                (a.url.clone(), w, h)
-            });
+        let (proxied_src, display_width, display_height) = if is_sticker {
+            cfg.map(|c| c.sticker_attachment_proxy(&a.url, width, height))
+                .unwrap_or_else(|| {
+                    let (w, h) = crate::config::sticker_display_dimensions(width, height);
+                    (a.url.clone(), w, h)
+                })
+        } else {
+            cfg.map(|c| c.attachment_proxy(&a.url, width, height, is_video))
+                .unwrap_or_else(|| {
+                    let (w, h) = if is_video {
+                        crate::config::video_attachment_display_dimensions(width, height)
+                    } else {
+                        crate::config::attachment_display_dimensions(width, height)
+                    };
+                    (a.url.clone(), w, h)
+                })
+        };
         let thumbnail_proxied: SharedString = if a.thumbnail.is_empty() {
             SharedString::default()
         } else {
@@ -9719,7 +9754,7 @@ impl MessageAttachment {
             .unwrap_or_else(|| a.thumbnail.clone())
             .into()
         };
-        let tenor_mp4 = crate::message::tenor_mp4_url(&a.url).map(SharedString::from);
+        let tenor_mp4 = tenor_mp4.map(SharedString::from);
         let size = a.size.max(0) as u64;
         Self {
             url: a.url,
@@ -9779,6 +9814,49 @@ impl MessageAttachment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn inbox_test_attachment(name: &str) -> mezon_client::transport::ApiAttachment {
+        mezon_client::transport::ApiAttachment {
+            url: format!("https://cdn/{name}"),
+            filename: name.into(),
+            filetype: "text/plain".into(),
+            size: 512,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn inbox_content_embeds_only_first_attachment_preview() {
+        let attachments = [
+            inbox_test_attachment("one.txt"),
+            inbox_test_attachment("two.txt"),
+        ];
+        let content = inbox_content_with_attachment_preview(
+            r#"{"t":"hello","mk":[{"s":0,"e":5,"type":"b"}]}"#,
+            "fallback",
+            &attachments,
+        );
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(value["t"], "hello");
+        assert!(value["mk"].is_array());
+        assert_eq!(value["attachments"].as_array().unwrap().len(), 1);
+        assert_eq!(value["attachments"][0]["filename"], "one.txt");
+    }
+
+    #[test]
+    fn inbox_content_unwraps_double_encoded_message_tokens() {
+        let inner = r#"{"t":"hello","lk":[{"s":0,"e":5}]}"#;
+        let encoded = serde_json::to_string(inner).unwrap();
+        let content = inbox_content_with_attachment_preview(
+            &encoded,
+            "fallback",
+            &[inbox_test_attachment("one.txt")],
+        );
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(value["t"], "hello");
+        assert!(value["lk"].is_array());
+        assert_eq!(value["attachments"][0]["filename"], "one.txt");
+    }
     use crate::ids::UserId;
     use crate::message::MessageSpan;
 
@@ -11763,8 +11841,106 @@ mod tests {
         assert!(attachment.is_image());
         assert_eq!(
             (attachment.display_width, attachment.display_height),
+            (140.0, 140.0)
+        );
+    }
+
+    #[test]
+    fn sticker_attachment_keeps_aspect_with_fit_proxy() {
+        let cfg = AppConfig {
+            imgproxy_base_url: "https://imgproxy.example".into(),
+            imgproxy_key: "sig".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let url = format!("{}/stickers/1.webp", cfg.base_img_url);
+        let thumb = format!("{}/stickers/1-thumb.webp", cfg.base_img_url);
+        let unknown = MessageAttachment::from_api(
+            mezon_client::transport::ApiAttachment {
+                url: url.clone(),
+                filename: "1".into(),
+                filetype: STICKER_FILETYPE.into(),
+                width: 0,
+                height: 0,
+                thumbnail: thumb,
+                duration: 0,
+                size: 0,
+            },
+            Some(&cfg),
+        );
+        assert!(
+            unknown.proxied_src.contains("rs:fit:200:220:0/"),
+            "unknown sticker must fit inside 200x220 without enlarging: {}",
+            unknown.proxied_src
+        );
+        assert!(
+            unknown.thumbnail_proxied.contains("rs:fit:140:140:1/"),
+            "thumbnail must use the loading box, not rs:fit:0:0: {}",
+            unknown.thumbnail_proxied
+        );
+        assert_eq!(
+            (unknown.display_width, unknown.display_height),
+            (140.0, 140.0)
+        );
+
+        let wide = MessageAttachment::from_api(
+            mezon_client::transport::ApiAttachment {
+                url,
+                filename: "1".into(),
+                filetype: STICKER_FILETYPE.into(),
+                width: 640,
+                height: 200,
+                thumbnail: String::new(),
+                duration: 0,
+                size: 0,
+            },
+            Some(&cfg),
+        );
+        assert!(wide.display_width > wide.display_height);
+        assert!(wide.proxied_src.contains("rs:fit:"));
+        assert!(!wide.proxied_src.contains("rs:fill:"));
+    }
+
+    #[test]
+    fn tenor_gif_keeps_attachment_sizing() {
+        let cfg = AppConfig {
+            imgproxy_base_url: "https://imgproxy.example".into(),
+            imgproxy_key: "sig".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let url = "https://media.tenor.com/lfDATg4Bhc0AAAAM/happy-cat.gif";
+        let unknown = MessageAttachment::from_api(
+            mezon_client::transport::ApiAttachment {
+                url: url.into(),
+                filename: String::new(),
+                filetype: STICKER_FILETYPE.into(),
+                width: 0,
+                height: 0,
+                thumbnail: String::new(),
+                duration: 0,
+                size: 0,
+            },
+            Some(&cfg),
+        );
+        assert!(unknown.tenor_mp4.is_some());
+        assert_eq!(
+            (unknown.display_width, unknown.display_height),
             (100.0, 100.0)
         );
+
+        let sized = MessageAttachment::from_api(
+            mezon_client::transport::ApiAttachment {
+                url: url.into(),
+                filename: String::new(),
+                filetype: STICKER_FILETYPE.into(),
+                width: 498,
+                height: 280,
+                thumbnail: String::new(),
+                duration: 0,
+                size: 0,
+            },
+            Some(&cfg),
+        );
+        assert_eq!((sized.display_width, sized.display_height), (464.0, 261.0));
     }
 
     #[test]

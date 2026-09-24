@@ -11,13 +11,14 @@ use mezon_store::{
     AccountStore, AlbumLayout, AppConfig, AttachmentSeedInput, BadgeService, ChannelId,
     ChannelType, ClanId, ClanList, ClanMembersStore, Emoji, Message, MessageAttachment,
     MessageCode, MessageId, MessageReference, MessageSpan, MessagesStore, ProfileContext, Reaction,
-    ThreadsStore, TopicsStore, UserId, UsersByUserStore, ViewerMedia, resolve_avatar_url,
-    resolve_user_profile,
+    STICKER_FILETYPE, ThreadsStore, TopicsStore, UserId, UsersByUserStore, ViewerMedia,
+    resolve_avatar_url, resolve_user_profile,
 };
 use smallvec::SmallVec;
 
 use super::audio_player::{
     AudioActivation, audio_failed_pill, audio_pill, audio_sending_pill, audio_time_label,
+    preview_seek_track,
 };
 use super::content::{
     INLINE_ICON_RESERVE, SELECTION_BG, SelectableTextContext, hashtag_chip, profile_popover_trigger,
@@ -939,7 +940,7 @@ fn render_audio(
     ctx: &RowCtx,
     sending: bool,
 ) -> AnyElement {
-    let duration = att.duration.max(0) as f64;
+    let duration = super::audio_meta::display_audio_duration(att, ctx.app);
     // `uploading` only ever covers OUR OWN outgoing message. A recipient sees
     // the message the moment it is posted, with `presign_pending` set until the
     // sender's upload lands — play it then and the player fetches an object the
@@ -968,11 +969,41 @@ fn render_audio(
     let activate_download_name = download_name.clone();
     let activate_selection = ctx.selection.clone();
     let download_selection = ctx.selection.clone();
+    let seek_host = host.clone();
+    let seek_url = url.clone();
+    let seek_download_url = download_url.clone();
+    let seek_download_name = download_name.clone();
+    let seek_selection = ctx.selection.clone();
+    let seek = preview_seek_track(
+        ("audio-seek", index),
+        (msg_id.get(), index),
+        move |fraction, _, cx| {
+            if seek_selection.borrow().has_selection() {
+                return;
+            }
+            let start_secs = if duration > 0.0 {
+                f64::from(fraction) * duration
+            } else {
+                0.0
+            };
+            let activation = AudioActivation {
+                url: seek_url.clone(),
+                duration,
+                start_secs,
+                download_url: seek_download_url.clone(),
+                download_name: seek_download_name.clone(),
+            };
+            let _ = seek_host.update(cx, |this, cx| {
+                this.activate_audio((msg_id, index), activation, cx);
+            });
+        },
+    );
     audio_pill(
         ("audio-play", index),
         ("audio-dl", index),
         IconName::AudioPlay,
         audio_time_label(0.0, duration),
+        seek,
         move |_, _, cx| {
             if activate_selection.borrow().has_selection() {
                 return;
@@ -980,6 +1011,7 @@ fn render_audio(
             let activation = AudioActivation {
                 url: url.clone(),
                 duration,
+                start_secs: 0.0,
                 download_url: activate_download_url.clone(),
                 download_name: activate_download_name.clone(),
             };
@@ -1315,14 +1347,19 @@ fn render_photo(
     if src.is_empty() {
         return attachment_box(att.filename.clone(), theme);
     }
-    let object_fit = if is_gif(&att.url) {
+    let is_sticker = att.filetype == STICKER_FILETYPE && att.tenor_mp4.is_none();
+    let (box_w, box_h) = if is_sticker {
+        sticker_layout_size(att, ctx)
+    } else {
+        (att.display_width, att.display_height)
+    };
+    let object_fit = if is_sticker || is_gif(&att.url) {
         ObjectFit::Contain
     } else {
         ObjectFit::Cover
     };
     let fallback_bg = theme.bg_tertiary;
     let fallback_fg = theme.text_muted;
-    let is_sticker = att.filetype == "sticker";
     let settings = ctx.settings.clone();
     let viewer_att = AttachmentSeedInput::from_message(att);
     let message_id = msg.id;
@@ -1332,8 +1369,8 @@ fn render_photo(
     let mut el = div()
         .id(("msg-img", index))
         .relative()
-        .w(px(att.display_width))
-        .h(px(att.display_height))
+        .w(px(box_w))
+        .h(px(box_h))
         .rounded_md()
         .overflow_hidden();
     // `render_album` already refuses to open a tile that is still uploading;
@@ -1773,6 +1810,17 @@ fn render_file_box(
             )
         })
         .into_any_element()
+}
+
+fn sticker_layout_size(att: &MessageAttachment, ctx: &RowCtx) -> (f32, f32) {
+    if att.width > 0 && att.height > 0 {
+        return (att.display_width, att.display_height);
+    }
+    ctx.attachment_cache
+        .read(ctx.app)
+        .cached_bitmap_size(att.proxied_src.as_ref())
+        .map(|(width, height)| mezon_store::sticker_display_dimensions(width, height))
+        .unwrap_or((att.display_width, att.display_height))
 }
 
 fn is_gif(url: &str) -> bool {

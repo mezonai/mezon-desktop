@@ -78,8 +78,8 @@ pub struct ChatLayout {
     dm_view_fingerprint: Option<(ChannelId, DirectKind, String)>,
     inbox_context_ids: Option<(Option<ClanId>, Option<ChannelId>)>,
     _voice_frame_pump: Option<Task<()>>,
-    _stream_frame_pump: Option<Task<()>>,
     show_member_list: bool,
+    show_profile_dm: bool,
     ui_state: UiState,
     media_channel_view_mode: bool,
     message_search_expanded: bool,
@@ -175,6 +175,7 @@ impl ActiveChannelSlice {
 struct VoiceMiniSlice {
     channel_id: String,
     clan_id: String,
+    connecting: bool,
     label: String,
     clan_name: String,
     mic_enabled: bool,
@@ -289,7 +290,6 @@ impl ChatLayout {
             }
             let mini_changed = this.voice_mini_display_changed(cx);
             this.sync_voice_frame_pump(cx);
-            this.sync_stream_frame_pump(cx);
             if mini_changed || this.is_voice_frame_relevant(cx) {
                 cx.notify();
             }
@@ -312,7 +312,6 @@ impl ChatLayout {
             if !fullscreen {
                 this.stream_fullscreen_focused = false;
             }
-            this.sync_stream_frame_pump(cx);
             cx.notify();
         })
         .detach();
@@ -366,7 +365,6 @@ impl ChatLayout {
             this.sync_inbox_context(cx);
             this.sync_stream_session(cx);
             this.sync_voice_frame_pump(cx);
-            this.sync_stream_frame_pump(cx);
             if this.active_channel_display_changed(cx) {
                 this.media_channel_view_mode = false;
                 this.dismiss_topic_panel(cx);
@@ -398,6 +396,9 @@ impl ChatLayout {
         cx.observe(&Router::global(cx), |this, _, cx| {
             let next_route = Router::global(cx).read(cx).route().clone();
             if next_route != this.last_route {
+                if next_route.is_clan_space() {
+                    this.show_profile_dm = false;
+                }
                 if matches!(this.last_route, Route::Thread { .. }) {
                     this.focused_channel_id = None;
                 }
@@ -429,7 +430,6 @@ impl ChatLayout {
             this.ensure_active_channel_for_clan(cx);
             this.sync_stream_session(cx);
             this.sync_voice_frame_pump(cx);
-            this.sync_stream_frame_pump(cx);
             this.dismiss_inbox_popover(cx);
             cx.notify();
         })
@@ -549,8 +549,8 @@ impl ChatLayout {
             dm_view_fingerprint: None,
             inbox_context_ids: None,
             _voice_frame_pump: None,
-            _stream_frame_pump: None,
             show_member_list,
+            show_profile_dm: false,
             ui_state,
             media_channel_view_mode: false,
             message_search_expanded: false,
@@ -603,7 +603,6 @@ impl ChatLayout {
         this.sync_member_list_visibility(cx);
         this.sync_inbox_context(cx);
         this.sync_voice_frame_pump(cx);
-        this.sync_stream_frame_pump(cx);
         register_chat_layout(cx.weak_entity(), cx);
         this
     }
@@ -968,12 +967,21 @@ impl ChatLayout {
             self.chat_area.ensure_dm_profile_panel(window, cx);
         }
         self.show_member_list = !self.show_member_list;
-        if dm {
-            self.ui_state.show_member_list_dm = self.show_member_list;
+        let persist = if dm {
+            if self.is_group_dm_route(cx) {
+                self.ui_state.show_member_list_dm = self.show_member_list;
+                true
+            } else {
+                self.show_profile_dm = self.show_member_list;
+                false
+            }
         } else {
             self.ui_state.show_member_list = self.show_member_list;
+            true
+        };
+        if persist {
+            self.persist_ui_state(cx);
         }
-        self.persist_ui_state(cx);
         cx.notify();
     }
 
@@ -998,7 +1006,11 @@ impl ChatLayout {
 
     fn sync_member_list_visibility(&mut self, cx: &Context<Self>) {
         self.show_member_list = if self.is_dm_route(cx) {
-            self.ui_state.show_member_list_dm
+            if self.is_group_dm_route(cx) {
+                self.ui_state.show_member_list_dm
+            } else {
+                self.show_profile_dm
+            }
         } else {
             self.ui_state.show_member_list
         };
@@ -1404,9 +1416,16 @@ impl ChatLayout {
         self.prefetched_voice_channel = active_voice_channel;
 
         if let Some(channel_id) = active_voice_channel {
-            self.voice_store.update(cx, |store, cx| {
-                store.prefetch_meet_token(channel_id.to_string(), cx);
-            });
+            let clan_id = self
+                .channel_list
+                .read(cx)
+                .active_channel()
+                .map(|ch| ch.clan_id);
+            if let Some(clan_id) = clan_id {
+                self.voice_store.update(cx, |store, cx| {
+                    store.prefetch_meet_token(channel_id.to_string(), clan_id.to_string(), cx);
+                });
+            }
         }
     }
 
@@ -1544,55 +1563,6 @@ impl ChatLayout {
         });
     }
 
-    fn sync_stream_frame_pump(&mut self, cx: &mut Context<Self>) {
-        const STREAM_FRAME_FALLBACK: std::time::Duration = std::time::Duration::from_millis(200);
-        let stream = self.stream_store.read(cx);
-        let on_stream = self
-            .channel_list
-            .read(cx)
-            .active_channel()
-            .is_some_and(|ch| {
-                ch.channel_type == ChannelType::Stream && stream.is_session_channel(ch.id)
-            });
-        let want_pump =
-            stream.is_joined() && stream.remote_video() && (on_stream || stream.fullscreen());
-        if !want_pump {
-            self._stream_frame_pump = None;
-            return;
-        }
-        if self._stream_frame_pump.is_some() {
-            return;
-        }
-        let frame_store = stream.frame_store().clone();
-        self._stream_frame_pump = Some(cx.spawn(async move |this, cx| {
-            let mut last_seq = 0u64;
-            loop {
-                let mut rx = frame_store.frame_watch();
-                loop {
-                    let seq = frame_store.publish_seq();
-                    if seq != last_seq {
-                        last_seq = seq;
-                        if this.update(cx, |_, cx| cx.notify()).is_err() {
-                            return;
-                        }
-                    }
-                    let frame_published = {
-                        let changed = std::pin::pin!(rx.changed());
-                        let fallback =
-                            std::pin::pin!(cx.background_executor().timer(STREAM_FRAME_FALLBACK));
-                        matches!(
-                            futures::future::select(changed, fallback).await,
-                            futures::future::Either::Left((Ok(()), _))
-                        )
-                    };
-                    if !frame_published {
-                        break;
-                    }
-                }
-            }
-        }));
-    }
-
     fn is_voice_frame_relevant(&self, cx: &Context<Self>) -> bool {
         if self.is_dm_route(cx) {
             return false;
@@ -1643,9 +1613,10 @@ impl ChatLayout {
 
     fn voice_mini_display_changed(&mut self, cx: &Context<Self>) -> bool {
         let store = self.voice_store.read(cx);
-        let Some((channel_id, clan_id)) = store.connection().connected_channel() else {
+        let Some((channel_id, clan_id)) = store.connection().active_channel() else {
             return self.displayed_voice_mini.take().is_some();
         };
+        let connecting = store.connection().is_connecting();
 
         if let Some(prev) = self.displayed_voice_mini.as_mut()
             && prev.channel_id == channel_id
@@ -1658,7 +1629,8 @@ impl ChatLayout {
             let link_copied = store.link_copied();
             let noise_suppression_enabled = store.noise_suppression_enabled();
             let noise_suppression_level = store.noise_suppression_level();
-            let changed = prev.label != label
+            let changed = prev.connecting != connecting
+                || prev.label != label
                 || prev.mic_enabled != mic_enabled
                 || prev.camera_enabled != camera_enabled
                 || prev.screen_enabled != screen_enabled
@@ -1669,6 +1641,7 @@ impl ChatLayout {
                 if prev.label != label {
                     prev.label = label.to_string();
                 }
+                prev.connecting = connecting;
                 prev.mic_enabled = mic_enabled;
                 prev.camera_enabled = camera_enabled;
                 prev.screen_enabled = screen_enabled;
@@ -1687,6 +1660,7 @@ impl ChatLayout {
         self.displayed_voice_mini = Some(VoiceMiniSlice {
             channel_id: channel_id.to_string(),
             clan_id: clan_id.to_string(),
+            connecting,
             label: store.channel_label().to_string(),
             clan_name,
             mic_enabled: store.mic_enabled(),
@@ -1712,9 +1686,6 @@ impl Render for ChatLayout {
         self.maybe_prefetch_voice_token(cx);
         self.voice_store
             .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
-        self.stream_store
-            .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
-
         if std::mem::take(&mut self.pending_open_threads_popover) {
             let handle = self.thread_popover_handle.clone();
             window.defer(cx, move |window, cx| handle.show(window, cx));
@@ -2437,9 +2408,28 @@ impl ChatLayout {
         )
     }
 
+    fn is_group_dm_route(&self, cx: &Context<Self>) -> bool {
+        let Route::DirectMessage {
+            direct_id,
+            message_type,
+        } = Router::global(cx).read(cx).route()
+        else {
+            return false;
+        };
+        self.direct_store
+            .read(cx)
+            .current()
+            .filter(|(id, _)| *id == direct_id)
+            .map(|(_, channel_type)| channel_type == DirectKind::Group.channel_type())
+            .unwrap_or_else(|| {
+                message_type.parse::<i32>().ok() == Some(DirectKind::Group.channel_type())
+            })
+    }
+
     fn render_voice_mini_bar(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         let store = self.voice_store.read(cx);
-        let (channel_id, clan_id) = store.connection().connected_channel()?;
+        let (channel_id, clan_id) = store.connection().active_channel()?;
+        let connecting = store.connection().is_connecting();
         let channel_id = channel_id.to_string();
         let clan_id = clan_id.to_string();
         let clan_name = clan_id
@@ -2466,6 +2456,7 @@ impl ChatLayout {
             &clan_id,
             &self.voice_store,
             &self.settings,
+            connecting,
             mic_enabled,
             camera_enabled,
             screen_enabled,

@@ -392,10 +392,15 @@ enum AudioCmd {
     Shutdown,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum DeviceResetKind {
     Input,
     Output,
+    InputChangeFailed {
+        requested: Option<String>,
+        retained: Option<String>,
+        error: String,
+    },
 }
 
 pub struct AudioIo {
@@ -548,7 +553,7 @@ impl AudioIo {
                                 ),
                                 None => {}
                             }
-                            if capture_started && input_running {
+                            if capture_started && (input_active || input_running) {
                                 match input_stall_recovery.poll(&input_heartbeat) {
                                     Some(StallAction::Recover(attempt)) => {
                                         tracing::warn!(
@@ -661,37 +666,60 @@ impl AudioIo {
                             {
                                 continue;
                             }
-                            current_input_id = device_id;
                             input_absent_streak = 0;
                             input_stall_recovery.reset(&input_heartbeat);
                             if !capture_started {
+                                current_input_id = device_id;
                                 continue;
                             }
                             request_macos_microphone_permission();
+                            let running = input_active || bluetooth_release_at.is_some();
+                            let open = |id: Option<&str>, alive: Arc<AtomicBool>| {
+                                let opened = build_input(
+                                    &host,
+                                    id,
+                                    capture_tx.clone(),
+                                    out_latency_ms.clone(),
+                                    input_heartbeat.clone(),
+                                    InputErrorHook {
+                                        ctrl_tx: rebuild_tx.clone(),
+                                        rebuild_pending: in_rebuild_pending.clone(),
+                                        stream_alive: alive,
+                                    },
+                                )?;
+                                if running {
+                                    opened.0.play()?;
+                                }
+                                Ok::<_, anyhow::Error>(opened)
+                            };
                             let new_alive = Arc::new(AtomicBool::new(true));
-                            match build_input(
-                                &host,
-                                current_input_id.as_deref(),
-                                capture_tx.clone(),
-                                out_latency_ms.clone(),
-                                input_heartbeat.clone(),
-                                InputErrorHook {
-                                    ctrl_tx: rebuild_tx.clone(),
-                                    rebuild_pending: in_rebuild_pending.clone(),
-                                    stream_alive: new_alive.clone(),
+                            let replacement = crate::input_switch::open_replacement(
+                                &mut in_stream,
+                                || open(device_id.as_deref(), new_alive.clone()),
+                                |old| {
+                                    in_alive.store(false, Ordering::Relaxed);
+                                    drop(old);
                                 },
-                            ) {
+                                |e| cfg!(target_os = "linux") && (
+                                    matches!(e.downcast_ref::<cpal::BuildStreamError>(),
+                                        Some(cpal::BuildStreamError::DeviceNotAvailable))
+                                    || matches!(e.downcast_ref::<cpal::DefaultStreamConfigError>(),
+                                        Some(cpal::DefaultStreamConfigError::DeviceNotAvailable))
+                                ),
+                            );
+                            if in_stream.is_none() {
+                                input_running = false;
+                            }
+                            match replacement {
                                 Ok((stream, in_fmt, bluetooth)) => {
                                     in_alive.store(false, Ordering::Relaxed);
                                     in_alive = new_alive;
+                                    current_input_id = device_id;
                                     input_bluetooth = bluetooth;
                                     if let Some(old) = in_stream.take() {
                                         drop_stream_detached(old);
                                     }
-                                    input_running = input_active || bluetooth_release_at.is_some();
-                                    if input_running && let Err(e) = stream.play() {
-                                        tracing::warn!("voice mic stream play failed: {e}");
-                                    }
+                                    input_running = running;
                                     in_stream = Some(stream);
                                     input_healthy = true;
                                     in_rebuild_pending.store(false, Ordering::Relaxed);
@@ -701,8 +729,35 @@ impl AudioIo {
                                     current_in_fmt = Some(in_fmt);
                                 }
                                 Err(e) => {
-                                    input_healthy = false;
-                                    tracing::warn!("voice mic stream rebuild failed: {e}")
+                                    new_alive.store(false, Ordering::Relaxed);
+                                    if in_stream.is_none() {
+                                        let restored_alive = Arc::new(AtomicBool::new(true));
+                                        match open(current_input_id.as_deref(), restored_alive.clone()) {
+                                            Ok((stream, fmt, bluetooth)) => {
+                                                in_alive = restored_alive;
+                                                in_stream = Some(stream);
+                                                input_bluetooth = bluetooth;
+                                                input_running = running;
+                                                input_healthy = true;
+                                                if input_format_changed(current_in_fmt, fmt) {
+                                                    let _ = in_fmt_tx.send(fmt);
+                                                }
+                                                current_in_fmt = Some(fmt);
+                                            }
+                                            Err(restore_error) => {
+                                                restored_alive.store(false, Ordering::Relaxed);
+                                                input_healthy = false;
+                                                tracing::warn!("voice previous mic restore failed: {restore_error}");
+                                            }
+                                        }
+                                    }
+                                    tracing::warn!(requested = ?device_id, retained = ?current_input_id,
+                                        "voice mic change rejected: {e}");
+                                    let _ = device_reset_tx.send(DeviceResetKind::InputChangeFailed {
+                                        requested: device_id,
+                                        retained: current_input_id.clone(),
+                                        error: e.to_string(),
+                                    });
                                 }
                             }
                         }
@@ -772,6 +827,13 @@ impl AudioIo {
                             }
                             last_in_rebuild = Some(Instant::now());
                             request_macos_microphone_permission();
+                            #[cfg(target_os = "linux")]
+                            {
+                                in_alive.store(false, Ordering::Relaxed);
+                                drop(in_stream.take());
+                                input_running = false;
+                                input_healthy = false;
+                            }
                             let new_alive = Arc::new(AtomicBool::new(true));
                             let rebuild = rebuild_input_stream(
                                 &host,
@@ -1485,9 +1547,13 @@ where
     let mut converter = CaptureConverter::new(device_fmt);
     let mut scratch: Vec<i16> = Vec::new();
     let mut acc: Vec<i16> = Vec::new();
+    let alive = err_hook.stream_alive.clone();
     device.build_input_stream(
         config,
         move |data: &[T], info: &cpal::InputCallbackInfo| {
+            if !alive.load(Ordering::Relaxed) {
+                return;
+            }
             heartbeat.mark();
             let delay = capture_delay_ms(info, &out_latency_ms);
             scratch.clear();
@@ -1520,8 +1586,7 @@ fn transport_type(device: &cpal::Device) -> Option<u32> {
     use objc2_core_audio::{
         AudioObjectGetPropertyData, AudioObjectID, AudioObjectPropertyAddress,
         kAudioDevicePropertyTransportType, kAudioHardwarePropertyTranslateUIDToDevice,
-        kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal,
-        kAudioObjectSystemObject,
+        kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
     };
     use objc2_core_foundation::CFString;
 

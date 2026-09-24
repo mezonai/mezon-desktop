@@ -771,8 +771,7 @@ fn render_profile_actions(
                     cx.notify();
                 });
             }
-            Some(FriendState::InviteSent) => {}
-            None => {
+            Some(FriendState::InviteSent) | None => {
                 FriendStore::global(cx).update(cx, |store, cx| {
                     store.add_friend(
                         user_id,

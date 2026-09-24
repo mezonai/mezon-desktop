@@ -8,6 +8,8 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use futures::StreamExt;
+
 use gpui::{
     App, AppContext, Context, Entity, EventEmitter, Global, RenderImage, SharedString,
     Subscription, Task, Window,
@@ -27,9 +29,8 @@ pub use mezon_voice::record_wayland_session;
 pub use mezon_voice::{
     CameraDeviceInfo, NetworkQuality, PickedScreen, RemovalCause, ScreenShareKind,
     ScreenShareListError, ScreenShareMode, ScreenShareOption, ScreenSharePreview, SfuRole,
-    VideoFrameData,
-    VideoFrameStore, VoiceParticipant, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options, system_screen_share_pick,
+    VideoFrameData, VideoFrameStore, VoiceParticipant, capture_screen_share_preview,
+    list_screen_share_options, peek_screen_share_options, system_screen_share_pick,
 };
 
 use crate::AppConfig;
@@ -65,6 +66,8 @@ pub enum DeviceMenuKind {
 
 const MEET_TOKEN_CACHE_TTL: Duration = Duration::from_secs(45);
 const RAISE_HAND_TTL: Duration = Duration::from_secs(10);
+const RECORDING_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(20);
+const RECORDING_INDICATOR_TTL: Duration = Duration::from_secs(50);
 const REACTION_THROTTLE: Duration = Duration::from_millis(150);
 const RECORDING_TICK_INTERVAL: Duration = Duration::from_secs(1);
 const SOUND_REACTION_VOLUME: f32 = 0.3;
@@ -147,6 +150,55 @@ fn parse_raise_token(token: &str) -> Option<bool> {
     }
 }
 
+#[derive(Clone, PartialEq)]
+struct RecordingAnnouncement {
+    clan_id: i64,
+    channel_id: i64,
+    user_id: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordingParams {
+    is_recording: bool,
+}
+
+fn recording_params(recording: bool) -> String {
+    serde_json::to_string(&RecordingParams {
+        is_recording: recording,
+    })
+    .unwrap_or_default()
+}
+
+fn recording_from_params(params: &str) -> Option<bool> {
+    serde_json::from_str::<RecordingParams>(params)
+        .ok()
+        .map(|params| params.is_recording)
+}
+
+async fn write_recording_state(
+    api: &AppApi,
+    announcement: &RecordingAnnouncement,
+    recording: bool,
+) {
+    let Ok(sender_id) = announcement.user_id.parse::<i64>() else {
+        return;
+    };
+    if let Err(e) = api
+        .write_voice_interactive_event(
+            announcement.clan_id,
+            announcement.channel_id,
+            sender_id,
+            sender_id,
+            VoiceInteractiveEventType::Recording as i32,
+            recording_params(recording),
+        )
+        .await
+    {
+        tracing::warn!("recording state broadcast failed: {e:#}");
+    }
+}
+
 fn reaction_scatter(seq: u64, salt: u64) -> f32 {
     let h = seq.wrapping_add(salt).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     (h >> 40) as f32 / (1u64 << 24) as f32
@@ -165,8 +217,23 @@ fn voice_join_error_message(err: &anyhow::Error, locale: &str) -> String {
     }
 }
 
+fn meet_token_metadata_from_candidates(names: &[&str], avatars: &[&str]) -> String {
+    let username = names
+        .iter()
+        .map(|value| value.trim())
+        .find(|value| !value.is_empty())
+        .unwrap_or_default();
+    let avatar = avatars
+        .iter()
+        .map(|value| value.trim())
+        .find(|value| !value.is_empty())
+        .unwrap_or_default();
+    serde_json::json!({ "username": username, "avatar": avatar }).to_string()
+}
+
 struct CachedMeetToken {
     channel_id: String,
+    metadata: String,
     token: String,
     fetched_at: Instant,
 }
@@ -239,6 +306,24 @@ impl VoiceConnection {
         }
     }
 
+    pub fn active_channel(&self) -> Option<(&str, &str)> {
+        match self {
+            VoiceConnection::Connecting {
+                channel_id,
+                clan_id,
+            }
+            | VoiceConnection::Connected {
+                channel_id,
+                clan_id,
+            } => Some((channel_id, clan_id)),
+            _ => None,
+        }
+    }
+
+    pub fn is_connecting(&self) -> bool {
+        matches!(self, VoiceConnection::Connecting { .. })
+    }
+
     fn mark_connected(&mut self) -> bool {
         let VoiceConnection::Connecting {
             channel_id,
@@ -279,13 +364,16 @@ pub struct VoiceStore {
     moderation_error: Option<VoiceModerationError>,
     muted_by_moderator: bool,
     agent_pending: bool,
-    agent_channels: HashSet<String>,
     participants: Vec<VoiceParticipant>,
     join_ranks: Vec<String>,
     speak_ranks: HashMap<String, u64>,
     speak_seq: u64,
     raised_hands: Vec<String>,
     raised_hand_timers: HashMap<String, Task<()>>,
+    recording_users: Vec<String>,
+    recording_user_timers: HashMap<String, Task<()>>,
+    recording_announced: Option<RecordingAnnouncement>,
+    _recording_announce: Option<Task<()>>,
     raising_hand_player: Option<AudioPlayer>,
     raising_hand_sound_loading: bool,
     join_voice_player: Option<AudioPlayer>,
@@ -350,11 +438,13 @@ pub struct VoiceStore {
     _link_copied_reset: Option<Task<()>>,
     _app_quit_subscription: Subscription,
     _channel_list_subscription: Option<Subscription>,
+    _recording_announcement: Subscription,
 }
 
 #[derive(Clone)]
 struct VoiceReconnectSnapshot {
     channel_id: String,
+    metadata: String,
     clan_id: String,
     ws_url: String,
     input_device_id: Option<String>,
@@ -631,6 +721,8 @@ impl VoiceStore {
         });
         // The channel store announces a channel the server stopped listing
         // for us (refetch after a private flip, removal while we were away).
+        let recording_announcement =
+            cx.observe_self(|this, cx| this.sync_recording_announcement(cx));
         let channel_list_subscription = crate::ChannelList::try_global(cx).map(|channels| {
             cx.subscribe(&channels, |this, _, event, cx| {
                 if let crate::ChannelEvent::AccessLost(channel_id) = event {
@@ -660,13 +752,16 @@ impl VoiceStore {
             moderation_error: None,
             muted_by_moderator: false,
             agent_pending: false,
-            agent_channels: HashSet::new(),
             participants: Vec::new(),
             join_ranks: Vec::new(),
             speak_ranks: HashMap::new(),
             speak_seq: 0,
             raised_hands: Vec::new(),
             raised_hand_timers: HashMap::new(),
+            recording_users: Vec::new(),
+            recording_user_timers: HashMap::new(),
+            recording_announced: None,
+            _recording_announce: None,
             raising_hand_player: None,
             raising_hand_sound_loading: false,
             join_voice_player: None,
@@ -731,19 +826,79 @@ impl VoiceStore {
             _link_copied_reset: None,
             _app_quit_subscription: app_quit_subscription,
             _channel_list_subscription: channel_list_subscription,
+            _recording_announcement: recording_announcement,
         }
     }
 
-    fn cached_token_for(&self, channel_id: &str) -> Option<String> {
+    fn meet_token_metadata(clan_id: &str, cx: &App) -> String {
+        let Some(account_store) = AccountStore::try_global(cx) else {
+            return meet_token_metadata_from_candidates(&[], &[]);
+        };
+        let account = account_store.read(cx);
+        let me = account.account.as_ref();
+        let clan_id = clan_id.parse::<i64>().ok().map(ClanId);
+        let profile = account
+            .clan_profile
+            .as_ref()
+            .filter(|p| Some(p.clan_id) == clan_id);
+        let member = clan_id.zip(me).and_then(|(clan_id, me)| {
+            ClanMembersStore::try_global(cx)
+                .and_then(|store| store.read(cx).member(clan_id, UserId(me.user_id)).cloned())
+        });
+        meet_token_metadata_from_candidates(
+            &[
+                profile.map(|p| p.nick_name.as_str()).unwrap_or_default(),
+                member
+                    .as_ref()
+                    .map(|m| m.clan_nick.as_str())
+                    .unwrap_or_default(),
+                member
+                    .as_ref()
+                    .map(|m| m.user.display_name.as_str())
+                    .unwrap_or_default(),
+                me.map(|m| m.display_name.as_str()).unwrap_or_default(),
+                member
+                    .as_ref()
+                    .map(|m| m.user.username.as_str())
+                    .unwrap_or_default(),
+                me.map(|m| m.username.as_str()).unwrap_or_default(),
+            ],
+            &[
+                profile
+                    .and_then(|p| p.avatar_url.as_deref())
+                    .unwrap_or_default(),
+                member
+                    .as_ref()
+                    .map(|m| m.clan_avatar.as_str())
+                    .unwrap_or_default(),
+                member
+                    .as_ref()
+                    .map(|m| m.user.avatar_url.as_str())
+                    .unwrap_or_default(),
+                me.and_then(|m| m.avatar_url.as_deref()).unwrap_or_default(),
+            ],
+        )
+    }
+
+    fn cached_token_for(&self, channel_id: &str, metadata: &str) -> Option<String> {
         let cached = self.cached_meet_token.as_ref()?;
-        if cached.channel_id == channel_id && cached.fetched_at.elapsed() < MEET_TOKEN_CACHE_TTL {
+        if cached.channel_id == channel_id
+            && cached.metadata == metadata
+            && cached.fetched_at.elapsed() < MEET_TOKEN_CACHE_TTL
+        {
             return Some(cached.token.clone());
         }
         None
     }
 
-    pub fn prefetch_meet_token(&mut self, channel_id: String, cx: &mut Context<Self>) {
-        if self.cached_token_for(&channel_id).is_some() {
+    pub fn prefetch_meet_token(
+        &mut self,
+        channel_id: String,
+        clan_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let metadata = Self::meet_token_metadata(&clan_id, cx);
+        if self.cached_token_for(&channel_id, &metadata).is_some() {
             return;
         }
         if self.meet_token_prefetching.as_deref() == Some(channel_id.as_str()) {
@@ -752,7 +907,9 @@ impl VoiceStore {
         self.meet_token_prefetching = Some(channel_id.clone());
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let token = api.generate_meet_token(&channel_id, "").await;
+            let token = api
+                .generate_meet_token(&channel_id, &channel_id, &metadata)
+                .await;
             let _ = this.update(cx, |this, _| {
                 if this.meet_token_prefetching.as_deref() == Some(channel_id.as_str()) {
                     this.meet_token_prefetching = None;
@@ -760,6 +917,7 @@ impl VoiceStore {
                 if let Ok(token) = token {
                     this.cached_meet_token = Some(CachedMeetToken {
                         channel_id: channel_id.clone(),
+                        metadata: metadata.clone(),
                         token,
                         fetched_at: Instant::now(),
                     });
@@ -1081,9 +1239,6 @@ impl VoiceStore {
                 &entity,
                 |this, event, cx| this.handle_voice_interactive(event, cx),
             );
-            dispatch.on(RealtimeKind::AiAgentEnabled, &entity, |this, event, cx| {
-                this.handle_agent_enabled(event, cx)
-            });
             dispatch.on(
                 RealtimeKind::UserChannelRemoved,
                 &entity,
@@ -1150,19 +1305,6 @@ impl VoiceStore {
         cx.notify();
     }
 
-    fn handle_agent_enabled(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
-        let RealtimeEvent::AiAgentEnabled(event) = event else {
-            return;
-        };
-        let channel_key = event.channel_id.to_string();
-        if event.enabled {
-            self.agent_channels.insert(channel_key);
-        } else {
-            self.agent_channels.remove(&channel_key);
-        }
-        cx.notify();
-    }
-
     fn handle_voice_interactive(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         let RealtimeEvent::VoiceInteractive(event) = event else {
             return;
@@ -1185,6 +1327,10 @@ impl VoiceStore {
                 return;
             };
             self.show_flower_effect(giver_id, receiver_id, cx);
+            return;
+        }
+        if event.event_type == VoiceInteractiveEventType::Recording as i32 {
+            self.handle_recording_signal(event, cx);
             return;
         }
         let Some(app) = VoiceInteractiveApp::from_event_type(event.event_type) else {
@@ -1416,6 +1562,138 @@ impl VoiceStore {
         if self.raised_hands.len() != before {
             cx.notify();
         }
+    }
+
+    pub fn recording_users(&self) -> &[String] {
+        &self.recording_users
+    }
+
+    fn add_recording_user(&mut self, user_id: String, cx: &mut Context<Self>) {
+        let inserted = if self.recording_users.contains(&user_id) {
+            false
+        } else {
+            self.recording_users.push(user_id.clone());
+            true
+        };
+        let key = user_id.clone();
+        let timer = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(RECORDING_INDICATOR_TTL)
+                .await;
+            this.update(cx, |this, cx| this.remove_recording_user(&key, cx))
+                .ok();
+        });
+        self.recording_user_timers.insert(user_id, timer);
+        if inserted {
+            cx.notify();
+        }
+    }
+
+    fn remove_recording_user(&mut self, user_id: &str, cx: &mut Context<Self>) {
+        let before = self.recording_users.len();
+        self.recording_users.retain(|id| id != user_id);
+        self.recording_user_timers.remove(user_id);
+        if self.recording_users.len() != before {
+            cx.notify();
+        }
+    }
+
+    fn prune_recording_users(&mut self, cx: &mut Context<Self>) {
+        if self.awaiting_room_snapshot || self.participants.is_empty() {
+            return;
+        }
+        let gone: Vec<String> = self
+            .recording_users
+            .iter()
+            .filter(|id| !self.participants.iter().any(|p| &p.identity == *id))
+            .cloned()
+            .collect();
+        for user_id in gone {
+            self.remove_recording_user(&user_id, cx);
+        }
+    }
+
+    fn handle_recording_signal(
+        &mut self,
+        event: &mezon_proto::realtime::VoiceInteractiveEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .connection
+            .active_channel_id()
+            .and_then(|id| id.parse::<i64>().ok())
+            != Some(event.voice_channel_id)
+        {
+            return;
+        }
+        let Some(recording) = recording_from_params(&event.params) else {
+            return;
+        };
+        tracing::debug!(
+            sender_id = event.sender_id,
+            recording,
+            "voice recording signal"
+        );
+        let sender_id = event.sender_id.to_string();
+        if !recording {
+            self.remove_recording_user(&sender_id, cx);
+        } else if self.local_user_id().as_deref() != Some(sender_id.as_str())
+            || self.recording_announced.is_some()
+        {
+            self.add_recording_user(sender_id, cx);
+        }
+    }
+
+    fn sync_recording_announcement(&mut self, cx: &mut Context<Self>) {
+        let wanted = if self.recording == RecordingState::Recording {
+            self.connection
+                .connected_channel()
+                .and_then(|(channel_id, clan_id)| {
+                    Some((
+                        clan_id.parse::<i64>().ok()?,
+                        channel_id.parse::<i64>().ok()?,
+                    ))
+                })
+                .zip(self.local_user_id())
+                .map(|((clan_id, channel_id), user_id)| RecordingAnnouncement {
+                    clan_id,
+                    channel_id,
+                    user_id,
+                })
+        } else {
+            None
+        };
+        if wanted == self.recording_announced {
+            return;
+        }
+        if let Some(stopped) = self.recording_announced.take() {
+            self._recording_announce = None;
+            self.remove_recording_user(&stopped.user_id, cx);
+            let api = self.api.clone();
+            cx.spawn(async move |_this, _cx| {
+                write_recording_state(&api, &stopped, false).await;
+            })
+            .detach();
+        }
+        let Some(started) = wanted else {
+            return;
+        };
+        self.recording_announced = Some(started.clone());
+        let api = self.api.clone();
+        self._recording_announce = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let refreshed = this.update(cx, |this, cx| {
+                    this.add_recording_user(started.user_id.clone(), cx);
+                });
+                if refreshed.is_err() {
+                    break;
+                }
+                write_recording_state(&api, &started, true).await;
+                cx.background_executor()
+                    .timer(RECORDING_ANNOUNCE_INTERVAL)
+                    .await;
+            }
+        }));
     }
 
     pub fn send_raising_hand(&mut self, cx: &mut Context<Self>) {
@@ -2457,11 +2735,10 @@ impl VoiceStore {
     }
 
     pub fn agent_active(&self) -> bool {
-        let Some((channel_id, _)) = self.connection.connected_channel() else {
+        if self.connection.connected_channel().is_none() {
             return false;
-        };
-        self.agent_channels.contains(channel_id)
-            || self.participants.iter().any(|p| p.is_agent && !p.is_local)
+        }
+        self.participants.iter().any(|p| p.is_agent && !p.is_local)
     }
 
     pub fn toggle_agent(&mut self, cx: &mut Context<Self>) {
@@ -2471,7 +2748,6 @@ impl VoiceStore {
         let Some((channel_key, _clan_id)) = self.connection.connected_channel() else {
             return;
         };
-        let channel_key = channel_key.to_string();
         let Ok(channel_id) = channel_key.parse::<i64>() else {
             return;
         };
@@ -2493,16 +2769,8 @@ impl VoiceStore {
             }
             let _ = this.update(cx, |this, cx| {
                 this.agent_pending = false;
-                match result {
-                    Ok(()) if on_agent => {
-                        this.agent_channels.remove(&channel_key);
-                    }
-                    Ok(()) => {
-                        this.agent_channels.insert(channel_key);
-                    }
-                    Err(_) => {
-                        this.moderation_error = Some(VoiceModerationError::AgentFailed);
-                    }
+                if result.is_err() {
+                    this.moderation_error = Some(VoiceModerationError::AgentFailed);
                 }
                 cx.notify();
             });
@@ -2641,7 +2909,8 @@ impl VoiceStore {
         cx.notify();
 
         let api = self.api.clone();
-        let cached_token = self.cached_token_for(&channel_id);
+        let metadata = Self::meet_token_metadata(&clan_id, cx);
+        let cached_token = self.cached_token_for(&channel_id, &metadata);
         if let Some(token) = cached_token {
             self.start_session(
                 ws_url,
@@ -2656,11 +2925,14 @@ impl VoiceStore {
             return;
         }
         cx.spawn(async move |this, cx| {
-            let token = api.generate_meet_token(&channel_id, "").await;
+            let token = api
+                .generate_meet_token(&channel_id, &channel_id, &metadata)
+                .await;
             let _ = this.update(cx, |this, cx| match token {
                 Ok(token) => {
                     this.cached_meet_token = Some(CachedMeetToken {
                         channel_id: channel_id.clone(),
+                        metadata: metadata.clone(),
                         token: token.clone(),
                         fetched_at: Instant::now(),
                     });
@@ -2728,6 +3000,23 @@ impl VoiceStore {
                     .map(|me| me.user_id.to_string())
             })
             .unwrap_or_default();
+        let refresh_clan = self
+            .active_connection_ids()
+            .map(|(_, clan)| clan)
+            .unwrap_or_default();
+        let (metadata_tx, mut metadata_rx) =
+            futures::channel::mpsc::unbounded::<futures::channel::oneshot::Sender<String>>();
+        cx.spawn(async move |this, cx| {
+            while let Some(reply) = metadata_rx.next().await {
+                let Ok(metadata) =
+                    this.update(cx, |_, cx| Self::meet_token_metadata(&refresh_clan, cx))
+                else {
+                    break;
+                };
+                let _ = reply.send(metadata);
+            }
+        })
+        .detach();
         let refresh_api = self.api.clone();
         let refresh_channel = channel_id.clone();
         let session = VoiceSession::connect(VoiceConnectOptions {
@@ -2744,8 +3033,15 @@ impl VoiceStore {
             refresh_token: Some(TokenRefresher::new(move || {
                 let api = refresh_api.clone();
                 let channel_id = refresh_channel.clone();
+                let metadata_tx = metadata_tx.clone();
                 async move {
-                    match api.generate_meet_token(&channel_id, "").await {
+                    let (reply, receiver) = futures::channel::oneshot::channel();
+                    metadata_tx.unbounded_send(reply).ok()?;
+                    let metadata = receiver.await.ok()?;
+                    match api
+                        .generate_meet_token(&channel_id, &channel_id, &metadata)
+                        .await
+                    {
                         Ok(token) => Some(token),
                         Err(e) => {
                             tracing::warn!("voice token refresh failed: {e:#}");
@@ -2867,6 +3163,7 @@ impl VoiceStore {
             tracing::warn!("voice reconnect cannot restore screen share without a saved target");
         }
         Some(VoiceReconnectSnapshot {
+            metadata: Self::meet_token_metadata(&clan_id, cx),
             channel_id,
             clan_id,
             ws_url,
@@ -2931,7 +3228,13 @@ impl VoiceStore {
                 return;
             };
 
-            let token = api.generate_meet_token(&snapshot.channel_id, "").await;
+            let token = api
+                .generate_meet_token(
+                    &snapshot.channel_id,
+                    &snapshot.channel_id,
+                    &snapshot.metadata,
+                )
+                .await;
             let _ = this.update(cx, |this, cx| {
                 if !this.reconnect_still_pending(generation) {
                     return;
@@ -2944,6 +3247,7 @@ impl VoiceStore {
                         );
                         this.cached_meet_token = Some(CachedMeetToken {
                             channel_id: snapshot.channel_id.clone(),
+                            metadata: snapshot.metadata.clone(),
                             token: token.clone(),
                             fetched_at: Instant::now(),
                         });
@@ -3147,6 +3451,18 @@ impl VoiceStore {
                 Self::persist_device(kind, None, cx);
                 cx.notify();
             }
+            VoiceEvent::InputDeviceChangeFailed {
+                requested,
+                retained,
+                error,
+            } => {
+                tracing::warn!(?requested, ?retained, "microphone change failed: {error}");
+                let selected = crate::Settings::try_global(cx)
+                    .map(|settings| settings.read(cx).input_device_id.clone());
+                if selected == Some(requested) {
+                    Self::persist_device(DeviceKind::AudioInput, retained, cx);
+                }
+            }
             VoiceEvent::Participants(mut list) => {
                 if let Some(config) = AppConfig::try_global(cx) {
                     for participant in &mut list {
@@ -3189,6 +3505,7 @@ impl VoiceStore {
                 self.join_sound_baseline_set = true;
                 self.track_visual_ranks(&list);
                 self.participants = list;
+                self.prune_recording_users(cx);
                 if refresh_scene {
                     self.publish_recording_scene(cx);
                 }
@@ -4207,12 +4524,13 @@ impl VoiceStore {
         self.pending_removals.clear();
         self.moderation_error = None;
         self.agent_pending = false;
-        self.agent_channels.clear();
         self.participants.clear();
         self.join_ranks.clear();
         self.speak_ranks.clear();
         self.raised_hands.clear();
         self.raised_hand_timers.clear();
+        self.recording_users.clear();
+        self.recording_user_timers.clear();
         self.active_sounds.clear();
         self.sound_throttle.clear();
         self.sound_cache.clear();
@@ -4390,6 +4708,84 @@ mod tests {
             channel_id,
             ..Default::default()
         })
+    }
+
+    fn recording_event(
+        channel_id: i64,
+        sender_id: i64,
+        recording: bool,
+    ) -> mezon_client::RealtimeEvent {
+        mezon_client::RealtimeEvent::VoiceInteractive(
+            mezon_proto::realtime::VoiceInteractiveEvent {
+                clan_id: 1,
+                voice_channel_id: channel_id,
+                sender_id,
+                receiver_id: sender_id,
+                event_type: crate::gifts::VoiceInteractiveEventType::Recording as i32,
+                params: super::recording_params(recording),
+            },
+        )
+    }
+
+    #[test]
+    fn recording_params_round_trip() {
+        assert_eq!(super::recording_params(true), r#"{"isRecording":true}"#);
+        assert_eq!(
+            super::recording_from_params(&super::recording_params(true)),
+            Some(true)
+        );
+        assert_eq!(
+            super::recording_from_params(&super::recording_params(false)),
+            Some(false)
+        );
+        assert_eq!(super::recording_from_params(""), None);
+        assert_eq!(super::recording_from_params("userId=8"), None);
+    }
+
+    #[gpui::test]
+    fn someone_recording_the_room_shows_until_they_stop(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let voice = init_voice_store(cx);
+            voice.update(cx, |voice, cx| {
+                voice.connection = connected("5");
+                let mut me = voice_participant(&ME.to_string(), None);
+                me.is_local = true;
+                voice.participants = vec![me, voice_participant("8", None)];
+
+                voice.handle_voice_interactive(&recording_event(5, 8, true), cx);
+                assert_eq!(voice.recording_users(), ["8".to_string()]);
+
+                voice.handle_voice_interactive(&recording_event(6, 9, true), cx);
+                assert_eq!(voice.recording_users(), ["8".to_string()], "another room");
+
+                voice.handle_voice_interactive(&recording_event(5, ME, true), cx);
+                assert_eq!(
+                    voice.recording_users(),
+                    ["8".to_string()],
+                    "a late echo of our own recording, which has stopped"
+                );
+
+                voice.handle_voice_interactive(&recording_event(5, 8, false), cx);
+                assert!(voice.recording_users().is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_recorder_who_leaves_the_room_stops_showing(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let voice = init_voice_store(cx);
+            voice.update(cx, |voice, cx| {
+                voice.connection = connected("5");
+                voice.participants = vec![voice_participant("8", None)];
+                voice.handle_voice_interactive(&recording_event(5, 8, true), cx);
+                assert_eq!(voice.recording_users(), ["8".to_string()]);
+
+                voice.participants = vec![voice_participant("9", None)];
+                voice.prune_recording_users(cx);
+                assert!(voice.recording_users().is_empty());
+            });
+        });
     }
 
     /// Losing the channel the call runs in ends the call; anything about
@@ -4924,6 +5320,29 @@ mod tests {
         };
         assert!(!failed.mark_connected());
         assert_eq!(failed.active_channel_id(), None);
+    }
+
+    #[test]
+    fn a_call_still_connecting_already_has_its_channel() {
+        let mut connection = VoiceConnection::Connecting {
+            channel_id: "a".into(),
+            clan_id: "1".into(),
+        };
+        assert_eq!(connection.active_channel(), Some(("a", "1")));
+        assert!(connection.is_connecting());
+        assert_eq!(connection.connected_channel(), None);
+
+        assert!(connection.mark_connected());
+        assert_eq!(connection.active_channel(), Some(("a", "1")));
+        assert!(!connection.is_connecting());
+
+        let failed = VoiceConnection::Failed {
+            channel_id: "a".into(),
+            message: "boom".into(),
+        };
+        assert_eq!(failed.active_channel(), None);
+        assert!(!failed.is_connecting());
+        assert_eq!(VoiceConnection::Idle.active_channel(), None);
     }
 
     #[test]

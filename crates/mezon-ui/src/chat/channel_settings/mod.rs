@@ -23,7 +23,7 @@ use crate::theme::{ActiveTheme, Theme};
 use category_tab::CategoryTab;
 use integrations_tab::{IntegrationsTab, render_channel_integrations_save_bar};
 use overview_tab::{OverviewTab, render_channel_overview_save_bar};
-use permissions_tab::PermissionsTab;
+use permissions_tab::{PermissionsTab, render_channel_permissions_save_bar};
 use quick_actions_tab::QuickActionsTab;
 use stream_thumbnail_tab::StreamThumbnailTab;
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
@@ -649,6 +649,15 @@ impl Render for ChannelSettingScreen {
             .integrations_tab
             .clone()
             .filter(|_| show_integrations_save);
+        let show_permissions_save = self.current_tab == ChannelSettingsTab::Permissions
+            && self
+                .permissions_tab
+                .as_ref()
+                .is_some_and(|tab| tab.read(cx).should_show_save_bar(cx));
+        let permissions_save_bar = self
+            .permissions_tab
+            .clone()
+            .filter(|_| show_permissions_save);
 
         let body = match self.current_tab {
             ChannelSettingsTab::Permissions => self
@@ -717,6 +726,10 @@ impl Render for ChannelSettingScreen {
                                     .size_full()
                                     .overflow_y_scroll()
                                     .track_scroll(&self.content_scroll)
+                                    .when(
+                                        self.current_tab == ChannelSettingsTab::Permissions,
+                                        |el| el.suppress_hover_while_scrolling(),
+                                    )
                                     .child(
                                         h_flex()
                                             .w_full()
@@ -728,7 +741,15 @@ impl Render for ChannelSettingScreen {
                                                     .pl(px(40.0))
                                                     .pr(px(10.0))
                                                     .pt(px(94.0))
-                                                    .pb(px(28.0))
+                                                    .pb(px(
+                                                        if self.current_tab
+                                                            == ChannelSettingsTab::Permissions
+                                                        {
+                                                            108.0
+                                                        } else {
+                                                            28.0
+                                                        },
+                                                    ))
                                                     .child(
                                                         div()
                                                             .w_full()
@@ -759,6 +780,11 @@ impl Render for ChannelSettingScreen {
                         panel.child(deferred(render_channel_integrations_save_bar(
                             tab, &locale, &theme, cx,
                         )))
+                    })
+                    .when_some(permissions_save_bar, |panel, tab| {
+                        panel.child(deferred(render_channel_permissions_save_bar(
+                            tab, &locale, &theme, cx,
+                        )))
                     }),
             )
     }
@@ -768,6 +794,86 @@ impl Render for ChannelSettingScreen {
 mod tests {
     use super::*;
     use mezon_store::Channel;
+
+    #[gpui::test]
+    fn permissions_scroll_blocks_hover_during_gesture_and_restores_after_idle(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::time::Duration;
+
+        use gpui::{HitboxBehavior, MouseMoveEvent, ScrollDelta, ScrollWheelEvent, canvas, size};
+
+        struct ScrollTestView {
+            scroll: ScrollHandle,
+            hitbox: Rc<Cell<Option<gpui::HitboxId>>>,
+        }
+
+        impl Render for ScrollTestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let hitbox = self.hitbox.clone();
+                div()
+                    .id("permissions-scroll-hover-test")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .suppress_hover_while_scrolling()
+                    .child(
+                        canvas(
+                            move |bounds, window, _| {
+                                hitbox.set(Some(
+                                    window.insert_hitbox(bounds, HitboxBehavior::Normal).id,
+                                ));
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .h(px(800.))
+                        .w_full(),
+                    )
+            }
+        }
+
+        let cx = cx.add_empty_window();
+        let scroll = ScrollHandle::new();
+        let hitbox = Rc::new(Cell::new(None));
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, cx| {
+                cx.new(|_| ScrollTestView {
+                    scroll: scroll.clone(),
+                    hitbox: hitbox.clone(),
+                })
+                .into_any_element()
+            });
+        };
+        draw(cx);
+        let pointer = point(px(50.), px(100.));
+        cx.simulate_event(MouseMoveEvent {
+            position: pointer,
+            ..Default::default()
+        });
+        assert!(cx.update(|window, _| hitbox.get().unwrap().is_hovered(window)));
+        cx.simulate_event(ScrollWheelEvent {
+            position: pointer,
+            delta: ScrollDelta::Pixels(point(px(0.), px(-48.))),
+            ..Default::default()
+        });
+        draw(cx);
+        cx.simulate_event(MouseMoveEvent {
+            position: pointer,
+            ..Default::default()
+        });
+        assert!(scroll.offset().y < px(0.));
+        assert!(!cx.update(|window, _| hitbox.get().unwrap().is_hovered(window)));
+        cx.executor().advance_clock(Duration::from_millis(350));
+        cx.run_until_parked();
+        draw(cx);
+        cx.simulate_event(MouseMoveEvent {
+            position: point(px(51.), px(100.)),
+            ..Default::default()
+        });
+        assert!(cx.update(|window, _| hitbox.get().unwrap().is_hovered(window)));
+    }
 
     fn ctx(
         channel_type: ChannelType,

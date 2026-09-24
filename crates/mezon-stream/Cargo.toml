@@ -13,7 +13,6 @@ libwebrtc = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

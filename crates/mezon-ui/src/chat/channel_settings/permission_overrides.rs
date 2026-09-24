@@ -4,32 +4,42 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    App, Context, ElementId, Entity, FontWeight, Hsla, ListSizingBehavior, MouseButton,
-    MouseDownEvent, SharedString, Subscription, Task, Transformation, UniformListScrollHandle,
-    Window, deferred, div, prelude::*, px, radians, relative, rgb, size, uniform_list, white,
+    App, Context, ElementId, Entity, FontWeight, Hsla, ListSizingBehavior, MouseDownEvent,
+    SharedString, Subscription, Task, Transformation, UniformListScrollHandle, Window, deferred,
+    div, prelude::*, px, radians, rgb, size, uniform_list, white,
 };
 use mezon_store::{
-    ChannelId, ChannelRolePermissionsEvent, ChannelRolePermissionsStore, ChannelUsersStore, ClanId,
-    ClanMembersStore, OVERRIDE_TYPE_ALLOW, OVERRIDE_TYPE_DENY, OVERRIDE_TYPE_NEUTRAL,
-    PermissionDefinition, PermissionEntity, PermissionStore, RoleId, RolesStore, Settings, UserId,
+    ChannelId, ChannelRolePermissionsEvent, ChannelRolePermissionsStore, ChannelUsersEvent,
+    ChannelUsersStore, ClanId, ClanMembersEvent, ClanMembersStore, OVERRIDE_TYPE_ALLOW,
+    OVERRIDE_TYPE_DENY, OVERRIDE_TYPE_NEUTRAL, PermissionDefinition, PermissionEntity,
+    PermissionStore, RoleId, RolesStore, Settings, UserId,
 };
 
-use super::channel_acl::{self, member_matches, role_matches};
-use super::permissions_tab::{member_avatar, member_row};
+use super::channel_acl::{self, member_matches, parse_search, role_matches};
+use super::permissions_tab::{
+    MemberRow, RoleRow, channel_member_row, member_avatar, member_row, page_count, page_slice,
+    role_glyph, role_row_from,
+};
 use crate::app::shell::Shell;
 use crate::components::primitives::{
-    Icon, IconName, Input, InputEvent, InputState, h_flex, v_flex,
+    Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, PaginationButton,
+    Tooltip, h_flex, pagination_button, v_flex,
 };
 use crate::theme::{ActiveTheme, Theme};
 
 const ADD_SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
-const ENTITY_ROW_HEIGHT: f32 = 34.0;
+const ENTITY_ROW_HEIGHT: f32 = 48.0;
+const ENTITY_PAGE_SIZE: usize = 8;
+/// How long a load may run before the permission table admits to loading. A load
+/// that lands sooner never shows a loading state at all, so a fast answer cannot flash.
+const LOADING_REVEAL_DELAY: Duration = Duration::from_millis(250);
+const ENTITY_SEARCH_HEIGHT: f32 = 28.0;
 const ADD_PANEL_WIDTH: f32 = 256.0;
 const ADD_LIST_HEIGHT: f32 = 256.0;
-const ADD_ROLE_ROW_HEIGHT: f32 = 38.0;
+const ADD_ROLE_ROW_HEIGHT: f32 = 48.0;
 const ADD_MEMBER_ROW_HEIGHT: f32 = 48.0;
-const PILL_HEIGHT: f32 = 26.0;
-const PILL_BUTTON_WIDTH: f32 = 32.0;
+const PILL_HEIGHT: f32 = 32.0;
+const PILL_BUTTON_WIDTH: f32 = 36.0;
 const DENY_ACTIVE: u32 = 0xda_37_3c;
 const ALLOW_ACTIVE: u32 = 0x16_a3_4a;
 
@@ -102,9 +112,19 @@ fn entity_element_id(entity: PermissionEntity) -> ElementId {
 }
 
 #[derive(Clone)]
+enum EntityVisual {
+    Role(RoleRow),
+    Member(MemberRow),
+}
+
+#[derive(Clone)]
 struct EntityRow {
     entity: PermissionEntity,
+    /// Name shown in the row and echoed in the permission column's header.
     title: SharedString,
+    /// Second line for a member row: the username the roster/listing carries.
+    subtitle: SharedString,
+    visual: EntityVisual,
 }
 
 #[derive(Clone)]
@@ -125,16 +145,24 @@ pub struct PermissionOverrides {
     settings: Entity<Settings>,
     expanded: bool,
     selected: Option<PermissionEntity>,
+    selected_index: Option<usize>,
+    /// Whether the selected entity's load has outlasted [`LOADING_REVEAL_DELAY`].
+    loading_revealed: bool,
+    _loading_reveal: Task<()>,
+    saving: bool,
     pending: HashMap<i64, i32>,
     entities: Rc<Vec<EntityRow>>,
+    visible_entities: Rc<Vec<EntityRow>>,
+    entity_query: String,
+    entity_page: usize,
+    entity_search: Option<Entity<InputState>>,
+    entity_search_sub: Option<Subscription>,
     permissions: Rc<Vec<PermissionRow>>,
     add_open: bool,
-    add_label: SharedString,
     add_input: Option<Entity<InputState>>,
     add_query: String,
     add_roles: Rc<Vec<AddRoleRow>>,
     add_members: Rc<Vec<UserId>>,
-    entity_scroll: UniformListScrollHandle,
     add_member_scroll: UniformListScrollHandle,
     add_input_sub: Option<Subscription>,
     add_search_debounce: Task<()>,
@@ -164,28 +192,43 @@ impl PermissionOverrides {
         let mut subs = vec![
             cx.observe(&settings, |this, _, cx| this.refresh(cx)),
             cx.observe(&RolesStore::global(cx), |this, _, cx| this.refresh(cx)),
-            cx.observe(&ChannelUsersStore::global(cx), |this, _, cx| {
-                this.refresh(cx)
-            }),
-            cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
-                this.refresh(cx)
-            }),
+            cx.subscribe(
+                &ChannelUsersStore::global(cx),
+                |this, _, event: &ChannelUsersEvent, cx| {
+                    let ChannelUsersEvent::Changed { channel_id } = event;
+                    if *channel_id == this.channel_id {
+                        this.refresh(cx);
+                    }
+                },
+            ),
+            cx.subscribe(
+                &ClanMembersStore::global(cx),
+                |this, _, event: &ClanMembersEvent, cx| {
+                    if event.clan_id() == this.clan_id {
+                        this.refresh(cx);
+                    }
+                },
+            ),
             cx.observe(&PermissionStore::global(cx), |this, _, cx| this.refresh(cx)),
         ];
         if let Some(store) = ChannelRolePermissionsStore::try_global(cx) {
             subs.push(cx.observe(&store, |_, _, cx| cx.notify()));
             subs.push(cx.subscribe(
                 &store,
-                |this, _, event: &ChannelRolePermissionsEvent, cx| match event {
+                |this, store, event: &ChannelRolePermissionsEvent, cx| match event {
                     ChannelRolePermissionsEvent::Changed { channel_id, entity }
                         if *channel_id == this.channel_id && Some(*entity) == this.selected =>
                     {
-                        this.pending.clear();
+                        if this.saving && !store.read(cx).is_saving(*channel_id, *entity) {
+                            this.pending.clear();
+                            this.saving = false;
+                        }
                         cx.notify();
                     }
                     ChannelRolePermissionsEvent::SaveFailed { channel_id, entity }
                         if *channel_id == this.channel_id && Some(*entity) == this.selected =>
                     {
+                        this.saving = false;
                         let locale = this.settings.read(cx).language.clone();
                         let message = mezon_i18n::t(&locale, "clanOverviewSetting.toast.saveError")
                             .to_string();
@@ -203,16 +246,23 @@ impl PermissionOverrides {
             settings,
             expanded: true,
             selected: None,
+            selected_index: None,
+            loading_revealed: false,
+            _loading_reveal: Task::ready(()),
+            saving: false,
             pending: HashMap::new(),
             entities: Rc::new(Vec::new()),
+            visible_entities: Rc::new(Vec::new()),
+            entity_query: String::new(),
+            entity_page: 0,
+            entity_search: None,
+            entity_search_sub: None,
             permissions: Rc::new(Vec::new()),
             add_open: false,
-            add_label: SharedString::default(),
             add_input: None,
             add_query: String::new(),
             add_roles: Rc::new(Vec::new()),
             add_members: Rc::new(Vec::new()),
-            entity_scroll: UniformListScrollHandle::new(),
             add_member_scroll: UniformListScrollHandle::new(),
             add_input_sub: None,
             add_search_debounce: Task::ready(()),
@@ -222,12 +272,16 @@ impl PermissionOverrides {
         this
     }
 
+    pub fn is_saving(&self) -> bool {
+        self.saving
+    }
+
     pub fn has_pending(&self) -> bool {
         !self.pending.is_empty()
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
-        if self.pending.is_empty() {
+        if self.pending.is_empty() || self.saving {
             return;
         }
         self.pending.clear();
@@ -235,7 +289,7 @@ impl PermissionOverrides {
     }
 
     pub fn save(&mut self, cx: &mut Context<Self>) {
-        if self.pending.is_empty() {
+        if self.pending.is_empty() || self.saving {
             return;
         }
         let Some(entity) = self.selected else {
@@ -247,6 +301,7 @@ impl PermissionOverrides {
         if store.read(cx).is_saving(self.channel_id, entity) {
             return;
         }
+        self.saving = true;
         let pending = self.pending.clone();
         let clan_id = self.clan_id;
         let channel_id = self.channel_id;
@@ -263,11 +318,8 @@ impl PermissionOverrides {
 
     fn rebuild(&mut self, cx: &mut Context<Self>) {
         let locale = self.settings.read(cx).language.clone();
-        self.add_label = SharedString::from(format!(
-            "{}:",
-            mezon_i18n::t(&locale, "channelSetting.channelPermission.bottomSheet.add")
-        ));
         self.entities = Rc::new(self.compute_entities(cx));
+        self.apply_entity_filter();
         self.permissions = Rc::new(self.compute_permissions(&locale, cx));
         self.rebuild_add_candidates(cx);
         self.ensure_selection(cx);
@@ -280,25 +332,99 @@ impl PermissionOverrides {
             .read(cx)
             .roles_for_channel(self.clan_id, self.channel_id)
         {
+            let visual = role_row_from(role_id, role);
             rows.push(EntityRow {
                 entity: PermissionEntity::Role(role_id),
-                title: role.name.clone().into(),
+                title: visual.title.clone(),
+                subtitle: SharedString::default(),
+                visual: EntityVisual::Role(visual),
             });
         }
-        let channel_users = ChannelUsersStore::global(cx);
-        let clan_members = ClanMembersStore::global(cx);
-        let clan_members = clan_members.read(cx);
-        for user_id in channel_users.read(cx).user_ids(self.channel_id) {
-            let title = clan_members
-                .member(self.clan_id, *user_id)
-                .map(|member| member.user.username.clone())
-                .unwrap_or_default();
+        let users = ChannelUsersStore::global(cx);
+        for &user_id in users.read(cx).user_ids(self.channel_id) {
+            // The same row the member list draws, identity fallback included: the clan
+            // roster is capped server-side and drops anyone who left the clan, so this
+            // row would otherwise be untitled.
+            let member = channel_member_row(self.clan_id, self.channel_id, user_id, cx);
             rows.push(EntityRow {
-                entity: PermissionEntity::User(*user_id),
-                title: title.into(),
+                entity: PermissionEntity::User(user_id),
+                title: if member.name.is_empty() {
+                    member.username.clone()
+                } else {
+                    member.name.clone()
+                },
+                subtitle: member.username.clone(),
+                visual: EntityVisual::Member(member),
             });
         }
         rows
+    }
+
+    /// Entities matching the column's own search box, page-clamped like the member list.
+    fn apply_entity_filter(&mut self) {
+        let needle = parse_search(&self.entity_query).needle;
+        let visible = if needle.is_empty() {
+            self.entities.clone()
+        } else {
+            Rc::new(
+                self.entities
+                    .iter()
+                    .filter(|row| {
+                        member_matches(&row.title, "", &row.subtitle, &needle)
+                            || role_matches(&row.title, &needle)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+        };
+        self.entity_page = self
+            .entity_page
+            .min(page_count(visible.len(), ENTITY_PAGE_SIZE).saturating_sub(1));
+        self.visible_entities = visible;
+    }
+
+    fn ensure_entity_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.entity_search.is_some() {
+            return;
+        }
+        let locale = self.settings.read(cx).language.clone();
+        // This column lists roles as well, so it borrows the add panel's wording.
+        let placeholder: SharedString =
+            mezon_i18n::t(&locale, "channelSetting.addMembersRoles.searchPlaceholder").into();
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(placeholder)
+                .height(px(ENTITY_SEARCH_HEIGHT))
+                .text_size(px(13.0))
+                .embedded(true)
+        });
+        self.entity_search_sub =
+            Some(cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
+                if *event != InputEvent::Change {
+                    return;
+                }
+                this.entity_query = input.read(cx).value().to_string();
+                this.entity_page = 0;
+                this.apply_entity_filter();
+                cx.notify();
+            }));
+        self.entity_search = Some(input);
+    }
+
+    fn go_to_entity_page(&mut self, pick: impl FnOnce(usize) -> usize, cx: &mut Context<Self>) {
+        let pages = page_count(self.visible_entities.len(), ENTITY_PAGE_SIZE);
+        let next = pick(self.entity_page).min(pages.saturating_sub(1));
+        if next == self.entity_page {
+            return;
+        }
+        self.entity_page = next;
+        cx.notify();
+    }
+
+    fn selected_title(&self) -> Option<SharedString> {
+        self.entities
+            .get(self.selected_index?)
+            .map(|row| row.title.clone())
     }
 
     fn compute_permissions(&self, locale: &str, cx: &App) -> Vec<PermissionRow> {
@@ -322,6 +448,12 @@ impl PermissionOverrides {
             return;
         }
         let needle = self.add_query.trim().to_lowercase();
+        let on_channel_members: std::collections::HashSet<_> = ChannelUsersStore::global(cx)
+            .read(cx)
+            .user_ids(self.channel_id)
+            .iter()
+            .copied()
+            .collect();
         let roles_store = RolesStore::global(cx);
         let roles_store = roles_store.read(cx);
         let on_channel: Vec<RoleId> = roles_store
@@ -349,12 +481,13 @@ impl PermissionOverrides {
                 .members(self.clan_id)
                 .into_iter()
                 .filter(|member| {
-                    member_matches(
-                        &member.clan_nick,
-                        &member.user.display_name,
-                        &member.user.username,
-                        &needle,
-                    )
+                    !on_channel_members.contains(&member.id())
+                        && member_matches(
+                            &member.clan_nick,
+                            &member.user.display_name,
+                            &member.user.username,
+                            &needle,
+                        )
                 })
                 .map(|member| member.id())
                 .collect(),
@@ -363,9 +496,11 @@ impl PermissionOverrides {
 
     fn ensure_selection(&mut self, cx: &mut Context<Self>) {
         if let Some(selected) = self.selected {
-            if !self.entities.iter().any(|row| row.entity == selected) {
+            self.selected_index = self.entities.iter().position(|row| row.entity == selected);
+            if self.selected_index.is_none() {
                 self.selected = None;
                 self.pending.clear();
+                self.saving = false;
             } else {
                 self.ensure_selected_loaded(selected, cx);
                 return;
@@ -392,7 +527,9 @@ impl PermissionOverrides {
 
     fn select_entity(&mut self, entity: PermissionEntity, cx: &mut Context<Self>) {
         self.selected = Some(entity);
+        self.selected_index = self.entities.iter().position(|row| row.entity == entity);
         self.pending.clear();
+        self.arm_loading_reveal(entity, cx);
         let channel_id = self.channel_id;
         if let Some(store) = ChannelRolePermissionsStore::try_global(cx) {
             store.update(cx, |store, cx| {
@@ -402,8 +539,41 @@ impl PermissionOverrides {
         cx.notify();
     }
 
+    fn arm_loading_reveal(&mut self, entity: PermissionEntity, cx: &mut Context<Self>) {
+        self.loading_revealed = false;
+        let loaded = ChannelRolePermissionsStore::try_global(cx)
+            .is_some_and(|store| store.read(cx).is_loaded(self.channel_id, entity));
+        if loaded {
+            self._loading_reveal = Task::ready(());
+            return;
+        }
+        self._loading_reveal = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(LOADING_REVEAL_DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                this.loading_revealed = true;
+                cx.notify();
+            });
+        });
+    }
+
+    /// Start loading an entity the pointer is resting on. The click usually follows
+    /// well after the answer does, so selecting it has nothing left to wait for.
+    fn prefetch_entity(&self, entity: PermissionEntity, cx: &mut Context<Self>) {
+        self.ensure_selected_loaded(entity, cx);
+    }
+
+    /// The first moments of a load, before [`LOADING_REVEAL_DELAY`] runs out: the table
+    /// keeps its resting look instead of blanking and dimming for a few frames.
+    fn loading_in_grace(&self, cx: &App) -> bool {
+        !self.loading_revealed
+            && self.selected.is_some_and(|entity| {
+                ChannelRolePermissionsStore::try_global(cx)
+                    .is_some_and(|store| store.read(cx).is_loading(self.channel_id, entity))
+            })
+    }
+
     fn request_select(&mut self, entity: PermissionEntity, cx: &mut Context<Self>) {
-        if !self.pending.is_empty() {
+        if !self.pending.is_empty() || self.selected == Some(entity) {
             return;
         }
         self.select_entity(entity, cx);
@@ -417,9 +587,20 @@ impl PermissionOverrides {
     }
 
     fn set_choice(&mut self, permission_id: i64, choice: i32, cx: &mut Context<Self>) {
+        if !self.can_edit(cx) {
+            return;
+        }
         let active = self.persisted_active(permission_id, cx);
         apply_choice(&mut self.pending, permission_id, choice, active);
         cx.notify();
+    }
+
+    fn can_edit(&self, cx: &App) -> bool {
+        !self.saving
+            && self.selected.is_some_and(|entity| {
+                ChannelRolePermissionsStore::try_global(cx)
+                    .is_some_and(|store| store.read(cx).is_loaded(self.channel_id, entity))
+            })
     }
 
     fn toggle_expanded(&mut self, cx: &mut Context<Self>) {
@@ -441,6 +622,7 @@ impl PermissionOverrides {
             return;
         }
         self.add_open = false;
+        self.add_search_debounce = Task::ready(());
         self.rebuild_add_candidates(cx);
         cx.notify();
     }
@@ -586,9 +768,11 @@ impl PermissionOverrides {
             .w_full()
             .items_center()
             .justify_between()
-            .cursor_pointer()
             .child(
-                div()
+                h_flex()
+                    .min_w_0()
+                    .gap_x_2()
+                    .items_center()
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
                     .text_color(theme.tokens.text_secondary)
@@ -598,18 +782,31 @@ impl PermissionOverrides {
                             "channelSetting.channelPermission.bottomSheet.rolesMembers",
                         )
                         .to_uppercase(),
-                    ),
+                    )
+                    .when(!self.entities.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .flex_shrink_0()
+                                .px_2()
+                                .rounded_full()
+                                .bg(theme.tokens.bg_tertiary)
+                                .child(self.entity_count_label()),
+                        )
+                    }),
             )
+            // Only the button toggles the panel now: the header row used to swallow every
+            // click, so tapping the label alone opened the add popup.
             .child(
-                Icon::new(IconName::PlusIcon)
-                    .size(px(16.0))
-                    .text_color(theme.tokens.text_theme_primary),
+                Button::new("permission-overrides-add")
+                    .label(mezon_i18n::t(
+                        locale,
+                        "channelSetting.channelPermission.bottomSheet.add",
+                    ))
+                    .ghost()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_add_popup(window, cx);
+                    })),
             )
-            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                if event.button == MouseButton::Left {
-                    this.toggle_add_popup(window, cx);
-                }
-            }))
             .when(self.add_open, |el| {
                 el.child(deferred(self.render_add_panel(locale, theme, cx)))
             })
@@ -621,11 +818,14 @@ impl PermissionOverrides {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let has_roles = !self.add_roles.is_empty();
-        let has_members = !self.add_members.is_empty();
+        let roles = self.add_roles.clone();
+        let members = self.add_members.clone();
+        let count = roles.len() + members.len();
+        let clan_id = self.clan_id;
+        let view = cx.entity();
         div()
             .absolute()
-            .bottom(px(20.0))
+            .top(px(36.0))
             .left_0()
             .w(px(ADD_PANEL_WIDTH))
             .rounded_lg()
@@ -633,149 +833,195 @@ impl PermissionOverrides {
             .border_1()
             .border_color(theme.tokens.border_primary)
             .bg(theme.tokens.theme_setting_primary)
+            .shadow_lg()
             .occlude()
             .on_mouse_down_out(
-                cx.listener(|this, _: &MouseDownEvent, _window, cx| this.close_add_popup(cx)),
+                cx.listener(|this, _: &MouseDownEvent, _, cx| this.close_add_popup(cx)),
             )
             .child(
                 h_flex()
-                    .gap_x_1()
-                    .p_4()
-                    .text_sm()
-                    .bg(theme.tokens.theme_setting_nav)
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(theme.tokens.text_secondary)
-                            .child(self.add_label.clone()),
-                    )
+                    .gap_2()
+                    .p_2()
+                    .child(Icon::new(IconName::Search).size(px(16.0)))
                     .when_some(self.add_input.clone(), |el, input| {
                         el.child(div().flex_1().min_w_0().child(Input::new(&input)))
                     }),
             )
-            .child(
-                div()
-                    .id("permission-overrides-add-list")
-                    .p_2()
+            .when(count == 0, |el| {
+                el.child(
+                    div()
+                        .p_4()
+                        .text_sm()
+                        .text_color(theme.tokens.text_theme_primary)
+                        .child(mezon_i18n::t(
+                            locale,
+                            "channelSetting.channelPermission.noMembersFound",
+                        )),
+                )
+            })
+            .when(count > 0, |el| {
+                el.child(
+                    uniform_list(
+                        "permission-overrides-add-list",
+                        count,
+                        move |range, _, cx| {
+                            let theme = cx.theme().clone();
+                            range
+                                .map(|ix| {
+                                    if let Some(role) = roles.get(ix) {
+                                        render_add_role_row(role, &theme, view.clone())
+                                            .into_any_element()
+                                    } else {
+                                        let member =
+                                            member_row(clan_id, members[ix - roles.len()], cx);
+                                        render_add_member_row(&member, &theme, view.clone())
+                                            .into_any_element()
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                        },
+                    )
+                    .with_item_size(size(px(0.0), px(ADD_MEMBER_ROW_HEIGHT)))
+                    .with_sizing_behavior(ListSizingBehavior::Auto)
+                    .track_scroll(&self.add_member_scroll)
+                    .suppress_hover_while_scrolling()
                     .h(px(ADD_LIST_HEIGHT))
-                    .overflow_y_scroll()
-                    .text_color(theme.tokens.text_theme_primary)
-                    .when(has_roles, |el| el.child(self.render_add_roles(locale, cx)))
-                    .when(has_members, |el| {
-                        el.child(self.render_add_members(locale, cx))
-                    }),
-            )
-    }
-
-    fn render_add_roles(&self, locale: &str, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = self.add_roles.clone();
-        let view = cx.entity();
-        let count = rows.len();
-        v_flex()
-            .w_full()
-            .child(add_section_label(mezon_i18n::t(
-                locale,
-                "channelSetting.channelPermission.bottomSheet.roles",
-            )))
-            .child(
-                uniform_list(
-                    "permission-overrides-add-roles",
-                    count,
-                    move |range, _window, cx| {
-                        let theme = cx.theme().clone();
-                        range
-                            .map(|ix| match rows.get(ix) {
-                                Some(row) => render_add_role_row(row, &theme, view.clone())
-                                    .into_any_element(),
-                                None => div().h(px(ADD_ROLE_ROW_HEIGHT)).into_any_element(),
-                            })
-                            .collect::<Vec<_>>()
-                    },
+                    .w_full(),
                 )
-                .with_item_size(size(px(0.0), px(ADD_ROLE_ROW_HEIGHT)))
-                .with_sizing_behavior(ListSizingBehavior::Infer)
-                .w_full(),
-            )
+            })
     }
 
-    fn render_add_members(&self, locale: &str, cx: &mut Context<Self>) -> impl IntoElement {
-        let ids = self.add_members.clone();
-        let clan_id = self.clan_id;
-        let view = cx.entity();
-        let count = ids.len();
-        v_flex()
-            .w_full()
-            .child(add_section_label(mezon_i18n::t(
-                locale,
-                "channelSetting.channelPermission.bottomSheet.members",
-            )))
-            .child(
-                uniform_list(
-                    "permission-overrides-add-members",
-                    count,
-                    move |range, _window, cx| {
-                        let theme = cx.theme().clone();
-                        range
-                            .map(|ix| match ids.get(ix) {
-                                Some(user_id) => {
-                                    let row = member_row(clan_id, *user_id, cx);
-                                    render_add_member_row(&row, &theme, view.clone())
-                                        .into_any_element()
-                                }
-                                None => div().h(px(ADD_MEMBER_ROW_HEIGHT)).into_any_element(),
-                            })
-                            .collect::<Vec<_>>()
-                    },
-                )
-                .with_item_size(size(px(0.0), px(ADD_MEMBER_ROW_HEIGHT)))
-                .with_sizing_behavior(ListSizingBehavior::Infer)
-                .track_scroll(&self.add_member_scroll)
-                .w_full(),
-            )
-    }
-
-    fn render_entity_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = self.entities.clone();
-        let selected = self.selected;
-        let view = cx.entity();
-        let count = rows.len();
-        uniform_list(
-            "permission-overrides-entities",
-            count,
-            move |range, _window, cx| {
-                let theme = cx.theme().clone();
-                range
-                    .map(|ix| match rows.get(ix) {
-                        Some(row) => render_entity_row(
-                            row,
-                            selected == Some(row.entity),
-                            &theme,
-                            view.clone(),
-                        )
-                        .into_any_element(),
-                        None => div().h(px(ENTITY_ROW_HEIGHT)).into_any_element(),
-                    })
-                    .collect::<Vec<_>>()
-            },
-        )
-        .with_item_size(size(px(0.0), px(ENTITY_ROW_HEIGHT)))
-        .with_sizing_behavior(ListSizingBehavior::Infer)
-        .track_scroll(&self.entity_scroll)
-        .w_full()
-    }
-
-    fn render_entity_column(
+    fn render_entity_list(
         &self,
         locale: &str,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> gpui::AnyElement {
+        if self.entities.is_empty() {
+            return div().into_any_element();
+        }
+        if self.visible_entities.is_empty() {
+            return div()
+                .py_2()
+                .text_sm()
+                .text_color(theme.tokens.text_theme_primary)
+                .child(mezon_i18n::t(
+                    locale,
+                    "channelSetting.channelPermission.noMembersFound",
+                ))
+                .into_any_element();
+        }
+        let view = cx.entity();
         v_flex()
-            .flex_basis(relative(1.0 / 3.0))
+            .w_full()
+            .children(
+                page_slice(&self.visible_entities, self.entity_page, ENTITY_PAGE_SIZE)
+                    .iter()
+                    .map(|row| {
+                        render_entity_row(
+                            row,
+                            self.selected == Some(row.entity),
+                            theme,
+                            view.clone(),
+                            cx,
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn render_entity_column(
+        &mut self,
+        locale: &str,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        self.ensure_entity_search(window, cx);
+        v_flex()
+            .w(px(260.0))
+            .flex_shrink_0()
             .min_w_0()
             .child(self.render_entity_header(locale, theme, cx))
-            .child(div().mt_2().w_full().child(self.render_entity_list(cx)))
+            .when_some(self.entity_search.clone(), |col, input| {
+                col.child(
+                    h_flex()
+                        .mt_2()
+                        .w_full()
+                        .px_2()
+                        .gap_2()
+                        .rounded_lg()
+                        .bg(theme.tokens.bg_input_secondary)
+                        .child(Icon::new(IconName::Search).size(px(16.0)))
+                        .child(div().flex_1().min_w_0().child(Input::new(&input))),
+                )
+            })
+            .child(
+                div()
+                    .mt_2()
+                    .w_full()
+                    .min_h(px(ENTITY_ROW_HEIGHT * ENTITY_PAGE_SIZE as f32))
+                    .child(self.render_entity_list(locale, theme, cx)),
+            )
+            .child(self.render_entity_pagination(cx))
+    }
+
+    fn entity_count_label(&self) -> SharedString {
+        let total = self.entities.len();
+        let matched = self.visible_entities.len();
+        if matched == total {
+            total.to_string().into()
+        } else {
+            format!("{matched}/{total}").into()
+        }
+    }
+
+    fn render_entity_pagination(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let pages = page_count(self.visible_entities.len(), ENTITY_PAGE_SIZE);
+        if pages <= 1 {
+            return div().into_any_element();
+        }
+        let current = self.entity_page.min(pages - 1);
+        let theme = cx.theme().clone();
+        let mut bar = h_flex()
+            .w_full()
+            .pt_2()
+            .gap_1()
+            .items_center()
+            .justify_center();
+        bar = bar.child(
+            pagination_button(
+                "permission-overrides-entities",
+                PaginationButton::Previous,
+                current == 0,
+                false,
+                &theme,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.go_to_entity_page(|page| page.saturating_sub(1), cx)
+            })),
+        );
+        bar = bar.child(
+            div()
+                .w(px(88.0))
+                .flex_shrink_0()
+                .text_center()
+                .text_sm()
+                .child(format!("{} / {}", current + 1, pages)),
+        );
+        bar.child(
+            pagination_button(
+                "permission-overrides-entities",
+                PaginationButton::Next,
+                current + 1 >= pages,
+                false,
+                &theme,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.go_to_entity_page(|page| page.saturating_add(1), cx)
+            })),
+        )
+        .into_any_element()
     }
 
     fn render_permission_column(
@@ -784,36 +1030,124 @@ impl PermissionOverrides {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let (loaded, loading) = self
+            .selected
+            .and_then(|entity| {
+                let store = ChannelRolePermissionsStore::try_global(cx)?;
+                let store = store.read(cx);
+                Some((
+                    store.is_loaded(self.channel_id, entity),
+                    store.is_loading(self.channel_id, entity),
+                ))
+            })
+            .unwrap_or_default();
+        let show_loading = loading && self.loading_revealed;
         let mut list = v_flex().w_full().gap_2();
         for row in self.permissions.iter() {
-            let choice = effective_choice(&self.pending, row.id, self.persisted_active(row.id, cx));
+            let choice = if loaded {
+                Some(effective_choice(
+                    &self.pending,
+                    row.id,
+                    self.persisted_active(row.id, cx),
+                ))
+            } else if loading && !show_loading {
+                // Most entities carry no override, so the resting state is what a fast
+                // load lands on anyway; editing stays off until the real answer is in.
+                Some(effective_choice(&self.pending, row.id, None))
+            } else {
+                None
+            };
             list = list.child(self.render_permission_row(row, choice, theme, cx));
         }
+        let status = h_flex()
+            .h(px(PILL_HEIGHT))
+            .flex_shrink_0()
+            .items_center()
+            .text_xs()
+            .text_color(theme.tokens.text_secondary)
+            .when(show_loading, |el| {
+                el.child(mezon_i18n::t(locale, "root.loading"))
+            })
+            .when(self.selected.is_some() && !loaded && !loading, |el| {
+                el.child(
+                    Button::new("permission-overrides-retry")
+                        .label(mezon_i18n::t(
+                            locale,
+                            "channelSetting.channelPermission.loadPermissions",
+                        ))
+                        .ghost()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(entity) = this.selected {
+                                this.ensure_selected_loaded(entity, cx);
+                            }
+                        })),
+                )
+            });
         v_flex()
-            .flex_basis(relative(2.0 / 3.0))
+            .flex_1()
             .min_w_0()
             .text_color(theme.tokens.text_theme_primary)
             .child(
-                div()
-                    .mb_2()
-                    .text_xs()
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(theme.tokens.text_secondary)
+                v_flex()
+                    .mb_4()
+                    .w_full()
+                    .gap_2()
+                    .text_color(theme.tokens.text_theme_primary)
                     .child(
-                        mezon_i18n::t(
-                            locale,
-                            "channelSetting.channelPermission.generalChannelPermission",
+                        h_flex()
+                            .w_full()
+                            .h(px(PILL_HEIGHT))
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .child(mezon_i18n::t(
+                                        locale,
+                                        "channelSetting.channelPermission.generalChannelPermission",
+                                    )),
+                            )
+                            .child(status),
+                    )
+                    .when_some(self.selected_title(), |el, title| {
+                        el.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_base()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(title),
                         )
-                        .to_uppercase(),
-                    ),
+                    })
+                    .child(div().text_xs().child(mezon_i18n::t(
+                        locale,
+                        "channelSetting.channelPermission.choiceLegend",
+                    ))),
             )
             .child(list)
+            .when(!self.pending.is_empty(), |el| {
+                el.child(
+                    div()
+                        .p_2()
+                        .rounded_md()
+                        .bg(theme.tokens.bg_input_secondary)
+                        .text_sm()
+                        .child(mezon_i18n::t(
+                            locale,
+                            "channelSetting.channelPermission.saveBeforeSwitch",
+                        )),
+                )
+            })
     }
 
     fn render_permission_row(
         &self,
         row: &PermissionRow,
-        choice: i32,
+        choice: Option<i32>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -821,11 +1155,14 @@ impl PermissionOverrides {
             .w_full()
             .items_center()
             .justify_between()
+            .gap_3()
+            .py_2()
+            .border_b_1()
+            .border_color(theme.tokens.border_primary)
             .child(
                 div()
                     .min_w_0()
-                    .truncate()
-                    .text_base()
+                    .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(row.title.clone()),
             )
@@ -854,11 +1191,21 @@ impl PermissionOverrides {
         &self,
         permission_id: i64,
         option: i32,
-        choice: i32,
+        choice: Option<i32>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let active = choice == option;
+        let active = choice == Some(option);
+        let can_edit = self.can_edit(cx);
+        let locale = &self.settings.read(cx).language;
+        let label = mezon_i18n::t(
+            locale,
+            match option {
+                OVERRIDE_TYPE_DENY => "channelSetting.channelPermission.deny",
+                OVERRIDE_TYPE_ALLOW => "channelSetting.channelPermission.allow",
+                _ => "channelSetting.channelPermission.inherit",
+            },
+        );
         let (element_id, icon) = match option {
             OVERRIDE_TYPE_DENY => ("permission-overrides-deny", IconName::Close),
             OVERRIDE_TYPE_ALLOW => ("permission-overrides-allow", IconName::IconTick),
@@ -871,6 +1218,10 @@ impl PermissionOverrides {
         };
         div()
             .id((element_id, permission_id as u64))
+            .tooltip(move |_, cx| Tooltip::build(label, cx))
+            .when(!can_edit && !self.loading_in_grace(cx), |el| {
+                el.opacity(0.5)
+            })
             .w(px(PILL_BUTTON_WIDTH))
             .h_full()
             .flex()
@@ -878,7 +1229,7 @@ impl PermissionOverrides {
             .justify_center()
             .border_1()
             .border_color(theme.tokens.border_primary)
-            .cursor_pointer()
+            .when(can_edit, |el| el.cursor_pointer())
             .when(active && option == OVERRIDE_TYPE_DENY, |el| {
                 el.bg(rgb(DENY_ACTIVE))
             })
@@ -889,17 +1240,12 @@ impl PermissionOverrides {
                 el.bg(theme.tokens.bg_active_member_channel)
             })
             .child(Icon::new(icon).size(px(16.0)).text_color(icon_color))
-            .on_click(cx.listener(move |this, _, _, cx| this.set_choice(permission_id, option, cx)))
+            .when(can_edit, |el| {
+                el.on_click(
+                    cx.listener(move |this, _, _, cx| this.set_choice(permission_id, option, cx)),
+                )
+            })
     }
-}
-
-fn add_section_label(label: &'static str) -> impl IntoElement {
-    div()
-        .px_3()
-        .py_2()
-        .text_size(px(11.0))
-        .font_weight(FontWeight::BOLD)
-        .child(label.to_uppercase())
 }
 
 fn render_entity_row(
@@ -907,10 +1253,22 @@ fn render_entity_row(
     selected: bool,
     theme: &Theme,
     view: Entity<PermissionOverrides>,
-) -> impl IntoElement {
+    cx: &mut App,
+) -> impl IntoElement + use<> {
     let entity = row.entity;
+    // Same shape as the member list above, so a name means the same thing in both places.
+    let glyph = match &row.visual {
+        EntityVisual::Role(role) => role_glyph(role, cx),
+        EntityVisual::Member(member) => member_avatar(member, px(24.0)).into_any_element(),
+    };
+    let prefetch_view = view.clone();
     h_flex()
         .id(entity_element_id(entity))
+        .on_hover(move |hovered, _, cx| {
+            if *hovered {
+                prefetch_view.update(cx, |this, cx| this.prefetch_entity(entity, cx));
+            }
+        })
         .h(px(ENTITY_ROW_HEIGHT))
         .w_full()
         .py(px(6.0))
@@ -918,11 +1276,30 @@ fn render_entity_row(
         .gap_x_2()
         .items_center()
         .rounded(px(4.0))
+        .cursor_pointer()
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme.tokens.text_theme_primary)
         .hover(|style| style.bg(theme.tokens.bg_item_hover))
         .when(selected, |el| el.bg(theme.tokens.bg_active_member_channel))
-        .child(div().min_w_0().truncate().child(row.title.clone()))
+        .child(glyph)
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(div().truncate().text_sm().child(row.title.clone()))
+                .when(
+                    !row.subtitle.is_empty() && row.subtitle != row.title,
+                    |el| {
+                        el.child(
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(theme.tokens.text_secondary)
+                                .child(row.subtitle.clone()),
+                        )
+                    },
+                ),
+        )
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| this.request_select(entity, cx));
         })
@@ -949,7 +1326,7 @@ fn render_add_role_row(
                 .bg(theme.tokens.bg_item_hover)
                 .text_color(theme.tokens.text_secondary)
         })
-        .child(div().min_w_0().truncate().child(row.title.clone()))
+        .child(div().flex_1().min_w_0().truncate().child(row.title.clone()))
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| this.add_role(role_id, cx));
         })
@@ -980,6 +1357,7 @@ fn render_add_member_row(
         .child(member_avatar(row, px(32.0)))
         .child(
             div()
+                .flex_1()
                 .min_w_0()
                 .truncate()
                 .font_weight(FontWeight::MEDIUM)
@@ -991,10 +1369,10 @@ fn render_add_member_row(
 }
 
 impl Render for PermissionOverrides {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
-        let show_main = self.expanded && !self.entities.is_empty();
+        let show_main = self.expanded;
 
         v_flex()
             .w_full()
@@ -1006,7 +1384,7 @@ impl Render for PermissionOverrides {
                         .w_full()
                         .gap_x_4()
                         .items_start()
-                        .child(self.render_entity_column(&locale, &theme, cx))
+                        .child(self.render_entity_column(&locale, &theme, window, cx))
                         .child(self.render_permission_column(&locale, &theme, cx)),
                 )
             })

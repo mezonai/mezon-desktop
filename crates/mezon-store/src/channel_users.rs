@@ -1,23 +1,45 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::{AppApi, ConnectionStatus};
+use mezon_proto::api;
 
 use crate::ids::{ChannelId, UserId};
 use crate::{CACHE_TTL, KeyedCache};
 
 const MAX_CACHED_CHANNELS: usize = 64;
 
-const CHANNEL_USER_FETCH_LIMIT: i32 = 500;
+/// `mezon-api` caps this at `2 * MAX_USER_CHANNEL` and defaults to `MAX_USER_CHANNEL`
+/// (1000) when the request leaves it at 0, so 1000 is the largest limit every caller
+/// agrees on — the server caches the response under `(channel_id)` alone, ignoring the
+/// limit, so a smaller number here silently truncates the list for everyone that hits
+/// the same cache entry afterwards.
+const CHANNEL_USER_FETCH_LIMIT: i32 = 1000;
 
 #[derive(Debug, Clone)]
 pub enum ChannelUsersEvent {
     Changed { channel_id: ChannelId },
 }
 
+/// Identity the channel-user listing carries for each member. The clan roster is the
+/// richer source (nickname, clan avatar), but it is capped server-side and drops anyone
+/// who left the clan, so these fields are what keeps such a row from rendering blank.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelUserProfile {
+    pub username: String,
+    pub display_name: String,
+    pub avatar: String,
+}
+
+#[derive(Debug, Default)]
+struct ChannelUsers {
+    ids: Vec<UserId>,
+    profiles: HashMap<UserId, ChannelUserProfile>,
+}
+
 pub struct ChannelUsersStore {
-    cache: KeyedCache<ChannelId, Vec<UserId>>,
+    cache: KeyedCache<ChannelId, ChannelUsers>,
     loading: HashSet<ChannelId>,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
@@ -88,8 +110,14 @@ impl ChannelUsersStore {
     pub fn user_ids(&self, channel_id: ChannelId) -> &[UserId] {
         self.cache
             .get(&channel_id)
-            .map(Vec::as_slice)
+            .map(|users| users.ids.as_slice())
             .unwrap_or_default()
+    }
+
+    /// Name/avatar the listing shipped for `user_id`, for rows the clan roster cannot
+    /// resolve.
+    pub fn profile(&self, channel_id: ChannelId, user_id: UserId) -> Option<&ChannelUserProfile> {
+        self.cache.get(&channel_id)?.profiles.get(&user_id)
     }
 
     pub fn is_loaded(&self, channel_id: ChannelId) -> bool {
@@ -116,12 +144,8 @@ impl ChannelUsersStore {
                 this.loading.remove(&channel_id);
                 match result {
                     Ok(response) => {
-                        let user_ids = response
-                            .user_ids
-                            .into_iter()
-                            .map(UserId)
-                            .collect::<Vec<_>>();
-                        this.cache.insert(channel_id, user_ids, None);
+                        this.cache
+                            .insert(channel_id, channel_users_from(response), None);
                         cx.emit(ChannelUsersEvent::Changed { channel_id });
                         cx.notify();
                     }
@@ -165,42 +189,148 @@ impl ChannelUsersStore {
     }
 }
 
-fn apply_add(existing: &mut Vec<UserId>, user_ids: &[UserId]) -> bool {
+/// The listing ships identity as parallel arrays; anything the server left short just
+/// falls back to the clan roster at render time.
+fn channel_users_from(response: api::AllUsersAddChannelResponse) -> ChannelUsers {
+    let mut users = ChannelUsers {
+        ids: Vec::with_capacity(response.user_ids.len()),
+        profiles: HashMap::with_capacity(response.user_ids.len()),
+    };
+    let mut usernames = response.usernames.into_iter();
+    let mut display_names = response.display_names.into_iter();
+    let mut avatars = response.avatars.into_iter();
+    for raw_id in response.user_ids {
+        let user_id = UserId(raw_id);
+        users.ids.push(user_id);
+        let profile = ChannelUserProfile {
+            username: usernames.next().unwrap_or_default(),
+            display_name: display_names.next().unwrap_or_default(),
+            avatar: avatars.next().unwrap_or_default(),
+        };
+        if profile != ChannelUserProfile::default() {
+            users.profiles.insert(user_id, profile);
+        }
+    }
+    users
+}
+
+fn apply_add(existing: &mut ChannelUsers, user_ids: &[UserId]) -> bool {
     let mut changed = false;
     for user_id in user_ids {
-        if !existing.contains(user_id) {
-            existing.push(*user_id);
+        if !existing.ids.contains(user_id) {
+            existing.ids.push(*user_id);
             changed = true;
         }
     }
     changed
 }
 
-fn apply_remove(existing: &mut Vec<UserId>, user_ids: &[UserId]) -> bool {
-    let before = existing.len();
-    existing.retain(|id| !user_ids.contains(id));
-    existing.len() != before
+fn apply_remove(existing: &mut ChannelUsers, user_ids: &[UserId]) -> bool {
+    let before = existing.ids.len();
+    existing.ids.retain(|id| !user_ids.contains(id));
+    if existing.ids.len() == before {
+        return false;
+    }
+    for user_id in user_ids {
+        existing.profiles.remove(user_id);
+    }
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn users(ids: &[i64]) -> ChannelUsers {
+        ChannelUsers {
+            ids: ids.iter().copied().map(UserId).collect(),
+            profiles: HashMap::new(),
+        }
+    }
+
     #[test]
     fn add_users_skips_duplicates_and_reports_change() {
-        let mut existing = vec![UserId(1), UserId(2)];
+        let mut existing = users(&[1, 2]);
         assert!(apply_add(&mut existing, &[UserId(3)]));
-        assert_eq!(existing, vec![UserId(1), UserId(2), UserId(3)]);
+        assert_eq!(existing.ids, vec![UserId(1), UserId(2), UserId(3)]);
         assert!(!apply_add(&mut existing, &[UserId(2), UserId(3)]));
-        assert_eq!(existing, vec![UserId(1), UserId(2), UserId(3)]);
+        assert_eq!(existing.ids, vec![UserId(1), UserId(2), UserId(3)]);
     }
 
     #[test]
     fn remove_users_reports_change_only_when_present() {
-        let mut existing = vec![UserId(1), UserId(2), UserId(3)];
+        let mut existing = users(&[1, 2, 3]);
         assert!(apply_remove(&mut existing, &[UserId(2)]));
-        assert_eq!(existing, vec![UserId(1), UserId(3)]);
+        assert_eq!(existing.ids, vec![UserId(1), UserId(3)]);
         assert!(!apply_remove(&mut existing, &[UserId(99)]));
-        assert_eq!(existing, vec![UserId(1), UserId(3)]);
+        assert_eq!(existing.ids, vec![UserId(1), UserId(3)]);
+    }
+
+    #[test]
+    fn identity_arrays_are_kept_per_user_and_dropped_on_removal() {
+        let response = api::AllUsersAddChannelResponse {
+            channel_id: 7,
+            user_ids: vec![1, 2, 3],
+            limit: 1000,
+            usernames: vec!["one".into(), "two".into(), "three".into()],
+            display_names: vec!["One".into(), "Two".into()],
+            avatars: vec!["a1".into()],
+            onlines: Vec::new(),
+        };
+        let mut users = channel_users_from(response);
+        assert_eq!(users.ids, vec![UserId(1), UserId(2), UserId(3)]);
+        assert_eq!(
+            users.profiles.get(&UserId(1)),
+            Some(&ChannelUserProfile {
+                username: "one".into(),
+                display_name: "One".into(),
+                avatar: "a1".into(),
+            })
+        );
+        assert_eq!(
+            users.profiles.get(&UserId(3)),
+            Some(&ChannelUserProfile {
+                username: "three".into(),
+                display_name: String::new(),
+                avatar: String::new(),
+            })
+        );
+        assert!(apply_remove(&mut users, &[UserId(1)]));
+        assert!(!users.profiles.contains_key(&UserId(1)));
+    }
+
+    #[test]
+    fn profile_fields_reuse_response_allocations() {
+        let response = api::AllUsersAddChannelResponse {
+            user_ids: vec![9],
+            usernames: vec!["qa_member".into()],
+            display_names: vec!["QA Member".into()],
+            avatars: vec!["https://example.test/avatar.png".into()],
+            ..Default::default()
+        };
+        let username = response.usernames[0].as_ptr();
+        let display_name = response.display_names[0].as_ptr();
+        let avatar = response.avatars[0].as_ptr();
+        let users = channel_users_from(response);
+        let profile = &users.profiles[&UserId(9)];
+        assert_eq!(profile.username.as_ptr(), username);
+        assert_eq!(profile.display_name.as_ptr(), display_name);
+        assert_eq!(profile.avatar.as_ptr(), avatar);
+    }
+
+    #[test]
+    fn a_listing_without_identity_columns_keeps_every_id() {
+        let response = api::AllUsersAddChannelResponse {
+            channel_id: 7,
+            user_ids: vec![4, 5],
+            limit: 1000,
+            usernames: Vec::new(),
+            display_names: Vec::new(),
+            avatars: Vec::new(),
+            onlines: Vec::new(),
+        };
+        let users = channel_users_from(response);
+        assert_eq!(users.ids, vec![UserId(4), UserId(5)]);
+        assert!(users.profiles.is_empty());
     }
 }

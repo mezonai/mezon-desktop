@@ -1211,16 +1211,7 @@ mod tests {
         );
         assert_eq!(
             pagination_items(9, 10),
-            vec![
-                Some(0),
-                None,
-                Some(4),
-                Some(5),
-                Some(6),
-                Some(7),
-                Some(8),
-                Some(9)
-            ]
+            vec![Some(0), None, Some(5), Some(6), Some(7), Some(8), Some(9)]
         );
     }
 

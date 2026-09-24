@@ -44,7 +44,11 @@ pub fn list_screen_share_options() -> Result<Vec<ScreenShareOption>, ScreenShare
     }
 
     let options = fetch_screen_share_options()?;
-    *CACHE.lock() = Some((Instant::now(), options.clone()));
+    // Do not keep a transient display-only result after a permission/Space change.
+    *CACHE.lock() = options
+        .iter()
+        .any(|option| option.kind == ScreenShareKind::Window)
+        .then(|| (Instant::now(), options.clone()));
     Ok(options)
 }
 
@@ -131,12 +135,19 @@ fn list_macos_options() -> Result<Vec<ScreenShareOption>, String> {
     use core_graphics_helmer_fork::display::{CGDirectDisplayID, CGDisplay};
     use core_graphics_helmer_fork::window::CGWindowID;
     use scap::{Display, Window};
-    use screencapturekit::sc_shareable_content::SCShareableContent;
+    use screencapturekit::{sc_display::SCDisplay, sc_window::SCWindow};
+    use screencapturekit_sys::shareable_content::{
+        ExcludingDesktopWindowsConfig, UnsafeSCShareableContent,
+    };
 
-    let content = SCShareableContent::current();
+    // The default config requests on-screen windows directly from macOS.
+    // Avoid the wrapper's additional BOOL == 1 conversion for is_on_screen.
+    // Propagate errors instead of panicking inside the picker worker thread.
+    let content =
+        UnsafeSCShareableContent::get_with_config(&ExcludingDesktopWindowsConfig::default())?;
     let mut options = Vec::new();
 
-    for display in content.displays {
+    for display in content.displays().into_iter().map(SCDisplay::from) {
         let id: CGDirectDisplayID = display.display_id;
         let title = macos_display_name(id);
         options.push(ScreenShareOption {
@@ -151,20 +162,18 @@ fn list_macos_options() -> Result<Vec<ScreenShareOption>, String> {
         });
     }
 
-    for window in content.windows {
+    for window in content.windows().into_iter().map(SCWindow::from) {
         if !is_shareable_macos_window(&window) {
             continue;
         }
-        let Some(title) = window
-            .title
-            .as_ref()
-            .map(|title| title.trim())
-            .filter(|title| !title.is_empty())
-            .map(str::to_owned)
-        else {
-            continue;
-        };
         let id = window.window_id;
+        let app = window.owning_application.as_ref();
+        let title = macos_window_title(
+            window.title.as_deref(),
+            app.and_then(|app| app.application_name.as_deref()),
+            app.and_then(|app| app.bundle_identifier.as_deref()),
+            id,
+        );
         options.push(ScreenShareOption {
             id,
             title: title.clone(),
@@ -182,9 +191,6 @@ fn list_macos_options() -> Result<Vec<ScreenShareOption>, String> {
 
 #[cfg(target_os = "macos")]
 fn is_shareable_macos_window(window: &screencapturekit::sc_window::SCWindow) -> bool {
-    if !window.is_on_screen {
-        return false;
-    }
     if window.window_layer != 0 {
         return false;
     }
@@ -195,14 +201,6 @@ fn is_shareable_macos_window(window: &screencapturekit::sc_window::SCWindow) -> 
         Some(app) => app,
         None => return false,
     };
-    let app_name = app
-        .application_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|name| !name.is_empty());
-    if app_name.is_none() {
-        return false;
-    }
     let bundle_id = app
         .bundle_identifier
         .as_deref()
@@ -216,6 +214,22 @@ fn is_shareable_macos_window(window: &screencapturekit::sc_window::SCWindow) -> 
             | "com.apple.WindowManager"
             | "com.apple.notificationcenterui"
     )
+}
+
+#[cfg(target_os = "macos")]
+fn macos_window_title(
+    title: Option<&str>,
+    app_name: Option<&str>,
+    bundle_id: Option<&str>,
+    window_id: u32,
+) -> String {
+    [title, app_name, bundle_id]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("Window {window_id}"))
 }
 
 #[cfg(target_os = "macos")]

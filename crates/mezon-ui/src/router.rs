@@ -71,7 +71,7 @@ pub enum Route {
 }
 
 impl Route {
-    pub fn targets_clan(&self, clan: ClanId) -> bool {
+    pub fn clan_id(&self) -> Option<ClanId> {
         match self {
             Route::ClanMembers { clan_id }
             | Route::ClanChannels { clan_id }
@@ -81,9 +81,17 @@ impl Route {
             | Route::Canvas { clan_id, .. }
             | Route::SettingsClanProfile { clan_id }
             | Route::ClanSettings { clan_id, .. }
-            | Route::ChannelSettings { clan_id, .. } => *clan_id == clan,
-            _ => false,
+            | Route::ChannelSettings { clan_id, .. } => Some(*clan_id),
+            _ => None,
         }
+    }
+
+    pub fn is_clan_space(&self) -> bool {
+        matches!(self, Route::Chat) || self.clan_id().is_some()
+    }
+
+    pub fn targets_clan(&self, clan: ClanId) -> bool {
+        self.clan_id() == Some(clan)
     }
 
     pub fn to_path(&self) -> String {
@@ -497,6 +505,29 @@ mod tests {
             Route::from_path("/chat/clans/abc/guide"),
             Route::NotFound { .. }
         ));
+    }
+
+    #[test]
+    fn clan_space_covers_clan_settings_and_chat_landing() {
+        assert!(Route::Chat.is_clan_space());
+        assert!(Route::SettingsClanProfile { clan_id: ClanId(1) }.is_clan_space());
+        assert!(
+            Route::ClanSettings {
+                clan_id: ClanId(1),
+                page: ClanSettingsPage::Overview,
+            }
+            .is_clan_space()
+        );
+        assert!(
+            Route::ChannelSettings {
+                clan_id: ClanId(1),
+                channel_id: ChannelId(2),
+                tab: ChannelSettingsTab::Overview,
+            }
+            .is_clan_space()
+        );
+        assert!(!Route::Direct.is_clan_space());
+        assert!(!Route::Friends.is_clan_space());
     }
 
     #[test]

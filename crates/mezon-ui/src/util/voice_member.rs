@@ -11,6 +11,7 @@ pub(crate) struct ResolvedMemberDisplay {
 }
 
 pub(crate) const VOICE_AGENT_AVATAR_URL: &str = "https://cdn.mezon.vn/0/0/1779484387973271600/1737423959329_undefined173740153013517374015248704886401586613166392.png";
+pub(crate) const VOICE_AGENT_NAME: &str = "KOMU Agent";
 
 pub(crate) fn is_voice_agent(cx: &App, user_id: UserId) -> bool {
     AppConfig::try_global(cx).is_some_and(|config| config.is_voice_agent(&user_id.to_string()))
@@ -21,15 +22,7 @@ pub(crate) fn resolve_display(
     clan_id: Option<ClanId>,
     m: &VoiceMember,
 ) -> ResolvedMemberDisplay {
-    let resolved = resolve_user_display(cx, clan_id, m.user_id, &m.display_name, &m.avatar_url);
-    if is_voice_agent(cx, m.user_id) {
-        return ResolvedMemberDisplay {
-            name: resolved.name,
-            avatar_src: crate::util::imgproxy::avatar_url(cx, VOICE_AGENT_AVATAR_URL),
-            avatar_raw: VOICE_AGENT_AVATAR_URL.to_string(),
-        };
-    }
-    resolved
+    resolve_user_display(cx, clan_id, m.user_id, &m.display_name, &m.avatar_url)
 }
 
 pub(crate) fn resolve_stream_display(
@@ -47,6 +40,14 @@ pub(crate) fn resolve_user_display(
     fallback_name: &str,
     fallback_avatar: &str,
 ) -> ResolvedMemberDisplay {
+    if is_voice_agent(cx, user_id) {
+        return ResolvedMemberDisplay {
+            name: VOICE_AGENT_NAME.to_string(),
+            avatar_src: crate::util::imgproxy::avatar_url(cx, VOICE_AGENT_AVATAR_URL),
+            avatar_raw: VOICE_AGENT_AVATAR_URL.to_string(),
+        };
+    }
+
     let mut name = fallback_name.to_string();
     let mut avatar_raw = fallback_avatar.to_string();
 

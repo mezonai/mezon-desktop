@@ -1441,6 +1441,8 @@ impl ChannelMessages {
             memo.selection_text_pieces.clear();
             cx.notify();
         }));
+        let audio_meta = super::audio_meta::AudioMetaCache::global(cx);
+        subs.push(cx.observe(&audio_meta, |_, _, cx| cx.notify()));
 
         let channel_list = ChannelList::global(cx);
         let channel_list_observe = cx.observe(&channel_list, |this, _, cx| {
@@ -4849,6 +4851,7 @@ impl ChannelMessages {
         let social_image_cache = self.social_image_cache.clone();
         let sprite_image_cache = self.sprite_image_cache.clone();
         let icon_image_cache = self.icon_image_cache.clone();
+        let attachment_cache = self.image_cache.clone();
         let highlight_id = self.highlight_id;
         let reply_highlight_id = TopicsStore::global(cx)
             .read(cx)
@@ -4896,6 +4899,16 @@ impl ChannelMessages {
                             .into_any_element();
                     }
                     let row_ix = ix - usize::from(header_shown);
+                    let probe_urls = {
+                        let topic = entity.read(cx);
+                        match topic.topic_messages.get(row_ix) {
+                            Some(message) => {
+                                super::audio_meta::urls_needing_probe(&message.attachments, cx)
+                            }
+                            None => Vec::new(),
+                        }
+                    };
+                    super::audio_meta::defer_audio_probe(probe_urls, cx);
                     let ctx = RowCtx {
                         app: cx,
                         theme: cx.theme(),
@@ -4915,6 +4928,7 @@ impl ChannelMessages {
                         ogp_cache: ogp_image_cache.clone(),
                         social_cache: social_image_cache.clone(),
                         sprite_cache: sprite_image_cache.clone(),
+                        attachment_cache: attachment_cache.clone(),
                         unread_boundary_id: None,
                         highlight_id,
                         reply_highlight_id,
@@ -5227,6 +5241,7 @@ impl Render for ChannelMessages {
         let social_image_cache = self.social_image_cache.clone();
         let sprite_image_cache = self.sprite_image_cache.clone();
         let icon_image_cache = self.icon_image_cache.clone();
+        let attachment_cache = self.image_cache.clone();
         let unread_boundary_id = self.cached_unread_boundary;
         let highlight_id = self.highlight_id;
         let reply_highlight_id = store.read(cx).reply_target().map(|d| d.message_ref_id);
@@ -5283,6 +5298,16 @@ impl Render for ChannelMessages {
                             .into_any_element();
                     }
                     let msg_ix = ix - usize::from(header_shown);
+                    let probe_urls = {
+                        let messages = store.read(cx);
+                        match messages.viewport_messages().get(msg_ix) {
+                            Some(message) => {
+                                super::audio_meta::urls_needing_probe(&message.attachments, cx)
+                            }
+                            None => Vec::new(),
+                        }
+                    };
+                    super::audio_meta::defer_audio_probe(probe_urls, cx);
                     let ctx = RowCtx {
                         app: cx,
                         theme: cx.theme(),
@@ -5302,6 +5327,7 @@ impl Render for ChannelMessages {
                         ogp_cache: ogp_image_cache.clone(),
                         social_cache: social_image_cache.clone(),
                         sprite_cache: sprite_image_cache.clone(),
+                        attachment_cache: attachment_cache.clone(),
                         unread_boundary_id,
                         highlight_id,
                         reply_highlight_id,

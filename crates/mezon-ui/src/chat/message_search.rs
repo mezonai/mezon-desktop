@@ -811,8 +811,24 @@ fn render_search_row(
         if image.proxied_src.is_empty() {
             return None;
         }
-        let width = image.display_width.clamp(1., 280.);
-        let height = image.display_height.clamp(1., 200.);
+        let (width, height) = if image.contain && image.unmeasured {
+            attachment_image_cache
+                .read(cx)
+                .cached_bitmap_size(image.proxied_src.as_ref())
+                .map(|(width, height)| {
+                    mezon_store::sticker_search_display_dimensions(width, height)
+                })
+                .unwrap_or((image.display_width, image.display_height))
+        } else {
+            (image.display_width, image.display_height)
+        };
+        let width = width.clamp(1., 280.);
+        let height = height.clamp(1., 200.);
+        let fit = if image.contain {
+            ObjectFit::Contain
+        } else {
+            ObjectFit::Cover
+        };
         Some(
             div()
                 .mt_1()
@@ -823,11 +839,7 @@ fn render_search_row(
                 .overflow_hidden()
                 .rounded_md()
                 .image_cache(attachment_image_cache.clone())
-                .child(
-                    img(image.proxied_src.clone())
-                        .size_full()
-                        .object_fit(ObjectFit::Cover),
-                )
+                .child(img(image.proxied_src.clone()).size_full().object_fit(fit))
                 .into_any_element(),
         )
     });

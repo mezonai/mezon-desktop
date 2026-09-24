@@ -618,7 +618,21 @@ fn retryable_failure(error: &ImageCacheError) -> bool {
 
 fn resource_source(resource: &Resource) -> String {
     match resource {
-        Resource::Uri(uri) => uri.to_string(),
+        Resource::Uri(uri) => {
+            let uri = uri.as_ref();
+            if uri
+                .get(..5)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+            {
+                let metadata = uri[5..]
+                    .split_once(',')
+                    .map_or("unknown", |(metadata, _)| metadata);
+                let metadata = metadata.get(..metadata.len().min(80)).unwrap_or("unknown");
+                format!("data:{metadata},<redacted> (length={})", uri.len())
+            } else {
+                uri.to_string()
+            }
+        }
         Resource::Path(path) => path.display().to_string(),
         Resource::Embedded(path) => path.to_string(),
     }
@@ -717,6 +731,24 @@ impl LruImageCache {
                 ImageCacheItem::Loaded(Ok(image)) => Some(image.clone()),
                 _ => None,
             })
+    }
+
+    pub fn cached_bitmap_size(&self, src: &str) -> Option<(u32, u32)> {
+        if src.is_empty() {
+            return None;
+        }
+        let resource = Resource::Uri(src.into());
+        let image = self
+            .cache
+            .get(&hash(&resource))
+            .and_then(|entry| match &entry.item {
+                ImageCacheItem::Loaded(Ok(image)) => Some(image),
+                _ => None,
+            })?;
+        let size = image.size(0);
+        let width = u32::try_from(size.width.0).unwrap_or(0);
+        let height = u32::try_from(size.height.0).unwrap_or(0);
+        (width > 0 && height > 0).then_some((width, height))
     }
 
     pub fn new(max_items: usize, max_bytes: u64, cx: &mut Context<Self>) -> Self {
@@ -3310,6 +3342,14 @@ mod tests {
         );
         assert!(retryable_failure(&bad_status(503)));
         assert!(!retryable_failure(&ImageCacheError::Asset("decode".into())));
+    }
+
+    #[test]
+    fn inline_image_source_is_redacted_from_logs() {
+        let resource = Resource::Uri("data:image/png;base64,secret-qr-token".to_string().into());
+        let source = resource_source(&resource);
+        assert!(source.starts_with("data:image/png;base64,<redacted>"));
+        assert!(!source.contains("secret-qr-token"));
     }
 
     #[test]

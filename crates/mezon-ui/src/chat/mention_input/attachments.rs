@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub use mezon_store::PendingAttachment;
@@ -71,6 +72,11 @@ pub fn build_pending(path: PathBuf) -> Option<PendingAttachment> {
     } else {
         (0, 0, None)
     };
+    let duration = if filetype.starts_with("audio/") {
+        audio_file_duration(&path, meta.len())
+    } else {
+        0
+    };
     Some(PendingAttachment {
         path,
         filename,
@@ -80,9 +86,30 @@ pub fn build_pending(path: PathBuf) -> Option<PendingAttachment> {
         is_video,
         width,
         height,
-        duration: 0,
+        duration,
         poster_jpeg,
     })
+}
+
+fn audio_file_duration(path: &Path, file_len: u64) -> i32 {
+    const PREFIX: u64 = 256 * 1024;
+    let read_len = usize::try_from(file_len.min(PREFIX)).unwrap_or(0);
+    if read_len == 0 {
+        return 0;
+    }
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return 0,
+    };
+    let mut buf = vec![0u8; read_len];
+    let Ok(read) = file.read(&mut buf) else {
+        return 0;
+    };
+    buf.truncate(read);
+    mezon_audio::audio_duration_secs_with_len(&buf, file_len)
+        .map(|secs| secs.floor() as i32)
+        .filter(|secs| *secs > 0)
+        .unwrap_or(0)
 }
 
 pub fn size_limit_for(is_image: bool) -> u64 {
@@ -136,6 +163,33 @@ mod tests {
         assert_eq!(pending.filename, "Báo cáo tháng 8.pdf");
         assert_eq!(pending.filetype, "application/pdf");
 
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn build_pending_reads_audio_duration() {
+        let frames = 8_000u32;
+        let data_len = frames * 2;
+        let mut wav = Vec::with_capacity(44 + data_len as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&8_000u32.to_le_bytes());
+        wav.extend_from_slice(&16_000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_len.to_le_bytes());
+        wav.extend(std::iter::repeat_n(0u8, data_len as usize));
+        let path = std::env::temp_dir().join(format!("mezon-sound-{}.wav", std::process::id()));
+        std::fs::write(&path, &wav).unwrap();
+        let pending = build_pending(path.clone()).expect("wav builds");
+        assert_eq!(pending.filetype, "audio/wav");
+        assert_eq!(pending.duration, 1);
+        assert_eq!(pending.size, wav.len() as u64);
         std::fs::remove_file(&path).ok();
     }
 

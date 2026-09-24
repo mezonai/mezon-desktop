@@ -467,9 +467,7 @@ impl Element for Img {
                                                 Some(window.spawn(cx, async move |cx| {
                                                     let remaining = wake_at
                                                         .saturating_duration_since(Instant::now());
-                                                    cx.background_executor()
-                                                        .timer(remaining)
-                                                        .await;
+                                                    cx.background_executor().timer(remaining).await;
                                                     cx.update(move |_, cx| {
                                                         cx.notify(current_view);
                                                     })
@@ -744,7 +742,7 @@ impl Asset for ImageAssetLoader {
                         let first_line = body.lines().next().unwrap_or("").trim_end();
                         body.truncate(first_line.len());
                         return Err(ImageCacheError::BadStatus {
-                            uri,
+                            uri: redact_data_uri(&uri),
                             status: response.status(),
                             body,
                         });
@@ -842,6 +840,18 @@ impl Asset for ImageAssetLoader {
     }
 }
 
+fn redact_data_uri(uri: &SharedUri) -> SharedUri {
+    let value = uri.as_ref();
+    if value
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+    {
+        format!("data:<redacted> (length={})", value.len()).into()
+    } else {
+        uri.clone()
+    }
+}
+
 /// An error that can occur when interacting with the image cache.
 #[derive(Debug, Error, Clone)]
 pub enum ImageCacheError {
@@ -909,6 +919,19 @@ mod tests {
         Arc::new(RenderImage::new(SmallVec::from_iter(
             (0..frame_count).map(|_| frame.clone()),
         )))
+    }
+
+    #[test]
+    fn bad_status_data_uri_is_redacted() {
+        let uri: SharedUri = "data:image/png;base64,secret-qr-token".to_string().into();
+        let error = ImageCacheError::BadStatus {
+            uri: redact_data_uri(&uri),
+            status: http_client::StatusCode::BAD_REQUEST,
+            body: "invalid inline image".to_string(),
+        };
+        let message = error.to_string();
+        assert!(message.contains("data:<redacted>"));
+        assert!(!message.contains("secret-qr-token"));
     }
 
     /// Overwrites the cached `frame_index` of the sibling `img` during paint.

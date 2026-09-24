@@ -4,6 +4,7 @@ use mezon_store::{ChannelId, DirectKind, DmAvatarPresence};
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::router::{Route, navigate};
 use crate::theme::Theme;
+use crate::util::user_status::{in_voice_icon_color, in_voice_status_label_color};
 
 pub type CloseHandler = fn(ChannelId, &mut Window, &mut App);
 
@@ -201,15 +202,17 @@ impl DmRow {
                     .child(self.label.clone());
                 match self.voice_badge.clone() {
                     Some((badge, label)) => {
+                        let voice_icon_color = in_voice_icon_color(theme);
+                        let voice_label_color = in_voice_status_label_color(theme);
                         let icon = match badge {
                             DmVoiceBadge::InVoice => Icon::new(IconName::Speaker)
                                 .size(px(10.))
-                                .text_color(gpui::rgb(0x22c55e))
+                                .text_color(voice_icon_color)
                                 .into_any_element(),
                             DmVoiceBadge::SharingScreen => {
                                 Icon::new(IconName::VoiceScreenShareIcon)
                                     .size(px(10.))
-                                    .text_color(gpui::rgb(0x22c55e))
+                                    .text_color(voice_icon_color)
                                     .into_any_element()
                             }
                         };
@@ -228,13 +231,9 @@ impl DmRow {
                                     .items_center()
                                     .gap(px(2.))
                                     .h(px(16.))
-                                    .opacity(0.6)
                                     .child(icon)
                                     .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.tokens.text_theme_primary)
-                                            .child(label),
+                                        div().text_xs().text_color(voice_label_color).child(label),
                                     ),
                             )
                             .into_any_element()

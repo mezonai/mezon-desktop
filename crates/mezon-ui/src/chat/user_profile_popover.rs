@@ -1138,13 +1138,24 @@ fn render_banner_actions(
             );
         }
         Some(FriendState::InviteSent) => {
+            let user_id = this.user_id;
             buttons.push(
                 banner_icon_button(
                     "profile-pending",
                     IconName::PendingFriend,
                     true,
                     false,
-                    |_: &ClickEvent, _, _| {},
+                    move |_: &ClickEvent, _, cx| {
+                        FriendStore::global(cx).update(cx, |store, cx| {
+                            store.add_friend(
+                                user_id,
+                                String::new(),
+                                String::new(),
+                                String::new(),
+                                cx,
+                            );
+                        });
+                    },
                 )
                 .into_any_element(),
             );
@@ -1382,7 +1393,7 @@ fn render_voice_button(
         .child(
             Icon::new(IconName::Speaker)
                 .size(px(14.))
-                .text_color(theme.status_online),
+                .text_color(crate::util::user_status::in_voice_icon_color(theme)),
         )
         .into_any_element()
 }

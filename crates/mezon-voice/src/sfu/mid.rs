@@ -26,6 +26,62 @@ pub struct MsidOccupant {
     pub peer_id: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackBinding {
+    pub track_id: String,
+    pub peer_id: Option<u32>,
+    pub user_id: Option<String>,
+}
+
+pub fn mids_to_release(
+    peer_id: u32,
+    signaled: [u32; 3],
+    owners: &HashMap<String, u32>,
+    users: &HashMap<String, String>,
+    leaving_user: Option<&str>,
+) -> Vec<String> {
+    let mut candidates: Vec<String> = owners
+        .iter()
+        .filter(|(_, owner)| **owner == peer_id)
+        .map(|(mid, _)| mid.clone())
+        .chain(
+            signaled
+                .into_iter()
+                .filter(|mid| *mid >= FIRST_REMOTE_MID)
+                .map(|mid| mid.to_string()),
+        )
+        .collect();
+    candidates.sort();
+    candidates.dedup();
+    candidates.retain(|mid| {
+        if users
+            .get(mid)
+            .is_some_and(|user| leaving_user.is_some_and(|leaving| user != leaving))
+        {
+            return false;
+        }
+        match owners.get(mid) {
+            Some(owner) => *owner == peer_id,
+            None => users
+                .get(mid)
+                .is_some_and(|user| Some(user.as_str()) == leaving_user),
+        }
+    });
+    candidates
+}
+
+impl MsidOccupant {
+    pub fn blocks_reactivation(&self, other: &Self, current_peer: Option<u32>) -> bool {
+        let same_source = if self.peer_id != 0 && other.peer_id != 0 {
+            self.peer_id == other.peer_id
+        } else {
+            self.user_id == other.user_id
+        };
+        same_source
+            && !(other.peer_id == 0 && current_peer.is_some_and(|peer| peer != self.peer_id))
+    }
+}
+
 pub fn is_local_mid(mid: &str) -> bool {
     matches!(mid, MID_AUDIO | MID_CAMERA | MID_SCREEN)
 }

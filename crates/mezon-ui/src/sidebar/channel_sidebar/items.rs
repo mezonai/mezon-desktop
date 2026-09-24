@@ -74,3 +74,12 @@ pub(super) enum SidebarItem {
         reorder: Option<ChannelReorderDrag>,
     },
 }
+
+impl SidebarItem {
+    pub(super) fn anchor_id(&self) -> SharedString {
+        match self {
+            Self::BannerAndEvents { .. } => SharedString::new_static("banner-and-events"),
+            Self::Category { elem_id, .. } | Self::Channel { elem_id, .. } => elem_id.clone(),
+        }
+    }
+}

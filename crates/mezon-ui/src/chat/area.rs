@@ -450,6 +450,7 @@ impl ChatArea {
         source: Option<MemberSource>,
         cx: &mut Context<crate::ChatLayout>,
     ) {
+        self.dm_profile_panel = None;
         if self.member_source == source {
             return;
         }
@@ -1046,13 +1047,13 @@ impl ChatArea {
 
         let has_search_panel = show_results_panel && message_search_panel.is_some();
         let member_visible = show_member_panel && !has_search_panel && !media_channel_view;
-        let dm_profile_panel = is_dm
-            .then(|| {
-                self.dm_profile_panel
-                    .as_ref()
-                    .map(|(_, panel)| panel.clone())
-            })
-            .flatten();
+        let dm_profile_panel = self.dm_profile_panel.as_ref().and_then(|(id, panel)| {
+            matches!(
+                Router::global(cx).read(cx).route_ref(),
+                Route::DirectMessage { direct_id, .. } if *direct_id == *id
+            )
+            .then(|| panel.clone())
+        });
         let body = div()
             .flex()
             .flex_row()

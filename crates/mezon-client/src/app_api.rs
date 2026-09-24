@@ -2971,9 +2971,14 @@ impl AppApi {
             .await
     }
 
-    pub async fn generate_meet_token(&self, channel_id: &str, room_name: &str) -> Result<String> {
+    pub async fn generate_meet_token(
+        &self,
+        channel_id: &str,
+        room_name: &str,
+        metadata: &str,
+    ) -> Result<String> {
         self.transport
-            .generate_meet_token(channel_id, room_name)
+            .generate_meet_token(channel_id, room_name, metadata)
             .await
     }
 

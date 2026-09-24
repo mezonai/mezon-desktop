@@ -5495,7 +5495,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-active-windows"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -5508,7 +5508,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-app"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -5539,7 +5539,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-audio"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "flume",
@@ -5554,7 +5554,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-call"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "base64",
@@ -5572,7 +5572,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-canvas"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "base64",
@@ -5594,7 +5594,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-cli"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -5610,7 +5610,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-client"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5647,14 +5647,14 @@ dependencies = [
 
 [[package]]
 name = "mezon-i18n"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "mezon-mcp"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "axum",
@@ -5675,7 +5675,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-native"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "auto-launch",
@@ -5702,7 +5702,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-pdf"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "core-graphics 0.24.0",
@@ -5715,7 +5715,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-proto"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "prost",
  "prost-build",
@@ -5726,7 +5726,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-record"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -5749,7 +5749,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-store"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5783,7 +5783,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-stream"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "flume",
@@ -5791,7 +5791,6 @@ dependencies = [
  "libwebrtc",
  "mezon-voice",
  "parking_lot",
- "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite",
@@ -5801,7 +5800,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-theme"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "gpui",
  "theme",
@@ -5809,7 +5808,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-ui"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "base64",
@@ -5854,7 +5853,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-updater"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "base64",
@@ -5875,7 +5874,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-video"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -5899,7 +5898,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-voice"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "base64",
@@ -5941,7 +5940,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-widgets"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "gpui",
  "mezon-store",
@@ -6006,7 +6005,7 @@ dependencies = [
 
 [[package]]
 name = "mmn-client"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "base64",
  "bs58",

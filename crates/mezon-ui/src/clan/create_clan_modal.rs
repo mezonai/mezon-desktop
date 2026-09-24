@@ -2,7 +2,9 @@ use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable, PathPromptOptions, SharedString,
     Subscription, Task, Window, div, img, prelude::*, px, rgb,
 };
-use mezon_store::{ClanImageMimeType, ClanList, CreateClanError, MAX_CLAN_LOGO_BYTES, Settings};
+use mezon_store::{
+    ClanImageMimeType, ClanList, CreateClanError, MAX_CLAN_LOGO_BYTES, Settings, is_valid_clan_name,
+};
 
 use crate::app::shell::Shell;
 use crate::clan::templates::{TEMPLATES, TemplateId};
@@ -41,21 +43,6 @@ pub struct CreateClanModal {
     _name_sub: Subscription,
     _logo_task: Option<Task<()>>,
     _create_task: Option<Task<()>>,
-}
-
-fn is_valid_clan_name_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_' || c == '-' || c == ' '
-}
-
-fn is_valid_clan_name(s: &str) -> bool {
-    if s.is_empty() || s.chars().count() > 64 {
-        return false;
-    }
-    let first = s.chars().next().unwrap();
-    if first == '_' || first == '-' || first == ' ' {
-        return false;
-    }
-    s.chars().all(|c| is_valid_clan_name_char(c) && c != '\'')
 }
 
 impl Focusable for CreateClanModal {

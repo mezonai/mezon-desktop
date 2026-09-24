@@ -10,6 +10,7 @@ use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent, RegistrationPassword
 use serde::{Deserialize, Serialize};
 
 use crate::Freshness;
+use crate::name_validation::prepare_display_name_for_update;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 #[derive(Debug, Clone)]
@@ -373,17 +374,27 @@ impl AccountStore {
 
     pub fn save_account(
         &mut self,
-        display_name: String,
+        display_name: Option<String>,
         avatar_url: Option<String>,
         about_me: String,
         logo_url: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let display_name_update = match display_name {
+            None => None,
+            Some(raw) => match prepare_display_name_for_update(&raw) {
+                Ok(update) => update,
+                Err(error) => {
+                    tracing::warn!("unexpected display name validation failure: {error:?}");
+                    return;
+                }
+            },
+        };
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             match api
                 .update_account(
-                    Some(&display_name),
+                    display_name_update.as_deref(),
                     Some(avatar_url.as_deref().unwrap_or_default()),
                     Some(&about_me),
                     logo_url.as_deref(),
@@ -394,7 +405,9 @@ impl AccountStore {
                 Ok(()) => {
                     let _ = this.update(cx, |this, cx| {
                         if let Some(account) = &mut this.account {
-                            account.display_name = display_name;
+                            if let Some(display_name) = display_name_update {
+                                account.display_name = display_name;
+                            }
                             account.avatar_url = avatar_url;
                             account.about_me = Some(about_me);
                             account.logo = logo_url.filter(|url| !url.is_empty());

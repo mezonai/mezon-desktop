@@ -1,10 +1,12 @@
 mod audio;
 mod camera;
 pub mod compose;
+mod input_switch;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod linux_session;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod pipewire_init;
+mod playback_health;
 mod record;
 mod runtime;
 mod screen;
@@ -50,6 +52,7 @@ pub use mezon_record::{RecordError, RecordStats};
 pub use record::{
     RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter, RecordTaps,
 };
+pub use sfu::sdp::stabilize_inactive_video_sections;
 pub use sfu::{RemovalCause, SfuRole};
 pub use stream_playback::StreamAudioOutput;
 
@@ -149,17 +152,31 @@ pub struct VoiceParticipant {
 
 #[derive(Clone, Debug)]
 pub enum VoiceEvent {
-    Connected { room_name: String },
+    Connected {
+        room_name: String,
+    },
     RoomSnapshot,
     Reconnecting,
     Reconnected,
     NetworkWeak,
     NetworkRecovered,
-    DeviceResetToDefault { input: bool },
-    Disconnected { reason: String },
+    DeviceResetToDefault {
+        input: bool,
+    },
+    InputDeviceChangeFailed {
+        requested: Option<String>,
+        retained: Option<String>,
+        error: String,
+    },
+    Disconnected {
+        reason: String,
+    },
     Participants(Vec<VoiceParticipant>),
     PushToTalkActive(bool),
-    RemovedFromChannel { cause: RemovalCause, reason: String },
+    RemovedFromChannel {
+        cause: RemovalCause,
+        reason: String,
+    },
     MutedByModerator,
     Error(String),
 }
@@ -334,12 +351,7 @@ impl VoiceSession {
         let _ = self.cmd_tx.send(Command::SetCameraDevice(device_id));
     }
 
-    pub fn start_screen_share(
-        &self,
-        pick: PickedScreen,
-        share_audio: bool,
-        mode: ScreenShareMode,
-    ) {
+    pub fn start_screen_share(&self, pick: PickedScreen, share_audio: bool, mode: ScreenShareMode) {
         let _ = self
             .cmd_tx
             .send(Command::StartScreenShare(pick, share_audio, mode));
@@ -473,12 +485,14 @@ async fn session_main(
     let mut screen_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut camera_gen: u64 = 0;
     let mut screen_gen: u64 = 0;
-    let mut audio_tracks: HashMap<u64, tokio::task::JoinHandle<()>> = HashMap::new();
+    let mut audio_tracks: HashMap<u64, PlaybackTask> = HashMap::new();
     let mut video_tracks: HashMap<u64, VideoTrackHandle> = HashMap::new();
     let mut remote_audio: HashMap<u64, RtcAudioTrack> = HashMap::new();
 
     let mut peers: Vec<SfuPeer> = Vec::new();
     let mut last_participants: Vec<VoiceParticipant> = Vec::new();
+    let mut playback_health_tick = tokio::time::interval(Duration::from_secs(5));
+    playback_health_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut speaking_tick = tokio::time::interval(SPEAKING_POLL_INTERVAL);
     speaking_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut frame_path_tick = tokio::time::interval(FRAME_PATH_LOG_INTERVAL);
@@ -527,32 +541,37 @@ async fn session_main(
                     SfuEvent::RoomSnapshot => {
                         let _ = evt_tx.send(VoiceEvent::RoomSnapshot);
                     }
-                    SfuEvent::RemoteAudio { key, track } => {
+                    SfuEvent::RemoteAudio { key, track, recovery } => {
                         remote_audio.insert(key, track.clone());
                         if let (Some(mixer), Some(out_fmt)) = (&audio_mixer, out_fmt) {
-                            if let Some(handle) = audio_tracks.remove(&key) {
-                                handle.abort();
-                                let _ = handle.await;
-                            }
+                            let health = if let Some(task) = audio_tracks.remove(&key) {
+                                task.handle.abort();
+                                let _ = task.handle.await;
+                                recovery.then_some(task.health)
+                            } else {
+                                None
+                            };
                             mixer.remove(key);
+                            speaking.forget(key);
                             let handle =
-                                spawn_playback(track, key, mixer.clone(), out_fmt, speaking.clone());
+                                spawn_playback(track, key, mixer.clone(), out_fmt, speaking.clone(), health);
                             audio_tracks.insert(key, handle);
                         }
                     }
-                    SfuEvent::RemoteVideo { key, track } => {
+                    SfuEvent::RemoteVideo { key, stream } => {
                         if let Some(handle) = video_tracks.remove(&key) {
                             handle.stop();
                         }
-                        let handle = spawn_video(track, key, frame_store.clone());
+                        let handle = spawn_video(stream, key, frame_store.clone());
                         video_tracks.insert(key, handle);
                     }
                     SfuEvent::RemoteGone { key } => {
                         remote_audio.remove(&key);
-                        speaking.forget(key);
-                        if let Some(handle) = audio_tracks.remove(&key) {
-                            handle.abort();
+                        if let Some(task) = audio_tracks.remove(&key) {
+                            task.handle.abort();
+                            let _ = task.handle.await;
                         }
+                        speaking.forget(key);
                         if let Some(handle) = video_tracks.remove(&key) {
                             handle.stop();
                         }
@@ -572,9 +591,9 @@ async fn session_main(
                         emit!();
                     }
                     SfuEvent::Reconnecting => {
-                        for (key, handle) in audio_tracks.drain() {
-                            handle.abort();
-                            let _ = handle.await;
+                        for (key, task) in audio_tracks.drain() {
+                            task.handle.abort();
+                            let _ = task.handle.await;
                             if let Some(mixer) = &audio_mixer {
                                 mixer.remove(key);
                             }
@@ -872,7 +891,7 @@ async fn session_main(
                             audio.output_format,
                             &mut audio_tracks,
                             &speaking,
-                        );
+                        ).await;
                         audio_io = Some(audio);
                     }
                     Some(Err(e)) => {
@@ -893,7 +912,17 @@ async fn session_main(
                         new_fmt,
                         &mut audio_tracks,
                         &speaking,
-                    );
+                    ).await;
+                }
+            }
+            _ = playback_health_tick.tick() => {
+                let now = Instant::now();
+                for (&key, task) in audio_tracks.iter_mut() {
+                    if let Some(attempt) = task.health.poll(now) {
+                        tracing::warn!(key, attempt,
+                            "remote audio has no decoded callbacks; requesting current receiver track");
+                        engine.refresh_remote_audio(key);
+                    }
                 }
             }
             _ = speaking_tick.tick() => {
@@ -904,16 +933,30 @@ async fn session_main(
             }
             reset = recv_device_reset(&device_reset_rx) => {
                 if let Some(kind) = reset {
-                    let _ = evt_tx.send(VoiceEvent::DeviceResetToDefault {
-                        input: matches!(kind, audio::DeviceResetKind::Input),
-                    });
+                    match kind {
+                        DeviceResetKind::InputChangeFailed { requested, retained, error } => {
+                            if wanted_input_device == requested {
+                                wanted_input_device = retained.clone();
+                            }
+                            let _ = evt_tx.send(VoiceEvent::InputDeviceChangeFailed {
+                                requested, retained, error,
+                            });
+                        }
+                        DeviceResetKind::Input => {
+                            wanted_input_device = None;
+                            let _ = evt_tx.send(VoiceEvent::DeviceResetToDefault { input: true });
+                        }
+                        DeviceResetKind::Output => {
+                            let _ = evt_tx.send(VoiceEvent::DeviceResetToDefault { input: false });
+                        }
+                    }
                 }
             }
         }
     }
 
-    for handle in audio_tracks.into_values() {
-        handle.abort();
+    for task in audio_tracks.into_values() {
+        task.handle.abort();
     }
     for handle in video_tracks.into_values() {
         handle.stop();
@@ -1109,7 +1152,10 @@ async fn start_screen_track(
     evt_tx: flume::Sender<VoiceEvent>,
     screen_audio_bus: ScreenAudioBus,
 ) -> Result<ScreenSession> {
-    tracing::info!(?mode, "starting screen share (share system audio: {share_audio})");
+    tracing::info!(
+        ?mode,
+        "starting screen share (share system audio: {share_audio})"
+    );
     let (stopper, source_rx) = screen::start_screen(
         identity.to_string(),
         frame_store,
@@ -1213,14 +1259,22 @@ async fn start_screen_audio(
     })
 }
 
+struct PlaybackTask {
+    handle: tokio::task::JoinHandle<()>,
+    health: playback_health::PlaybackHealth,
+}
+
 fn spawn_playback(
     track: RtcAudioTrack,
     key: u64,
     mixer: Arc<audio::PlaybackMixer>,
     out_fmt: AudioFormat,
     speaking: Arc<audio::SpeakingLevels>,
-) -> tokio::task::JoinHandle<()> {
-    runtime::runtime().spawn(async move {
+    health: Option<playback_health::PlaybackHealth>,
+) -> PlaybackTask {
+    let health = health.unwrap_or_else(|| playback_health::PlaybackHealth::new(Instant::now()));
+    let frame_counter = health.frame_counter();
+    let handle = runtime::runtime().spawn(async move {
         let mut restart_attempts = 0;
         loop {
             let mut stream = NativeAudioStream::new(
@@ -1230,6 +1284,7 @@ fn spawn_playback(
             );
             let mut saw_frame = false;
             while let Some(frame) = stream.next().await {
+                frame_counter.fetch_add(1, Ordering::Relaxed);
                 saw_frame = true;
                 speaking.observe(key, &frame.data);
                 mixer.push(key, &frame.data);
@@ -1251,7 +1306,8 @@ fn spawn_playback(
             );
             tokio::time::sleep(delay).await;
         }
-    })
+    });
+    PlaybackTask { handle, health }
 }
 
 async fn recv_audio_ready(
@@ -1279,19 +1335,27 @@ async fn recv_device_reset(
     }
 }
 
-fn respawn_audio_playback(
+async fn respawn_audio_playback(
     remote_audio: &HashMap<u64, RtcAudioTrack>,
     mixer: &Arc<audio::PlaybackMixer>,
     out_fmt: AudioFormat,
-    audio_tracks: &mut HashMap<u64, tokio::task::JoinHandle<()>>,
+    audio_tracks: &mut HashMap<u64, PlaybackTask>,
     speaking: &Arc<audio::SpeakingLevels>,
 ) {
-    for (_, handle) in audio_tracks.drain() {
-        handle.abort();
+    for (_, task) in audio_tracks.drain() {
+        task.handle.abort();
+        let _ = task.handle.await;
     }
     for (&key, track) in remote_audio {
         mixer.remove(key);
-        let handle = spawn_playback(track.clone(), key, mixer.clone(), out_fmt, speaking.clone());
+        let handle = spawn_playback(
+            track.clone(),
+            key,
+            mixer.clone(),
+            out_fmt,
+            speaking.clone(),
+            None,
+        );
         audio_tracks.insert(key, handle);
     }
 }
@@ -1346,11 +1410,10 @@ impl VideoTrackHandle {
 }
 
 fn spawn_video(
-    track: RtcVideoTrack,
+    mut stream: NativeVideoStream,
     key: u64,
     frame_store: Arc<VideoFrameStore>,
 ) -> VideoTrackHandle {
-    let rtc_track = track;
     let slot = Arc::new(VideoConvertSlot::default());
 
     let convert_slot = slot.clone();
@@ -1408,7 +1471,6 @@ fn spawn_video(
 
     let task_slot = slot.clone();
     let task = runtime::runtime().spawn(async move {
-        let mut stream = NativeVideoStream::new(rtc_track);
         while let Some(frame) = stream.next().await {
             received_store.note_received(key);
             let mut buffer = frame.buffer.to_i420();

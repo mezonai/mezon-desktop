@@ -959,16 +959,22 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    pub async fn generate_meet_token(&self, channel_id: &str, room_name: &str) -> Result<String> {
+    pub async fn generate_meet_token(
+        &self,
+        channel_id: &str,
+        room_name: &str,
+        metadata: &str,
+    ) -> Result<String> {
         let transport = self.inner.clone();
         let channel_id = channel_id
             .parse::<i64>()
             .map_err(|e| anyhow::anyhow!("invalid channel_id: {e}"))?;
         let room_name = room_name.to_string();
+        let metadata = metadata.to_string();
         runtime()
             .spawn(async move {
                 transport
-                    .generate_meet_token(channel_id, &room_name)
+                    .generate_meet_token(channel_id, &room_name, &metadata)
                     .await
                     .map(|resp| resp.token)
             })

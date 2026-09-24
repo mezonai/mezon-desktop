@@ -183,6 +183,10 @@ impl ChannelRolePermissionsStore {
         self.cache.contains(&EntityKey { channel_id, entity })
     }
 
+    pub fn is_loading(&self, channel_id: ChannelId, entity: PermissionEntity) -> bool {
+        self.loading.contains(&EntityKey { channel_id, entity })
+    }
+
     pub fn is_saving(&self, channel_id: ChannelId, entity: PermissionEntity) -> bool {
         self.saving.contains(&EntityKey { channel_id, entity })
     }
@@ -208,6 +212,7 @@ impl ChannelRolePermissionsStore {
         if self.cache.contains(&key) || !self.loading.insert(key) {
             return;
         }
+        cx.notify();
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let result = api
@@ -217,22 +222,33 @@ impl ChannelRolePermissionsStore {
                     entity.user_id(),
                 )
                 .await;
-            let _ = this.update(cx, |this, cx| {
-                this.loading.remove(&key);
-                match result {
-                    Ok(response) => {
-                        this.cache
-                            .insert(key, overrides_from_response(&response), None);
-                        cx.emit(ChannelRolePermissionsEvent::Changed { channel_id, entity });
-                        cx.notify();
-                    }
-                    Err(error) => tracing::error!(
-                        "get_permission_by_role_id_channel_id failed for {channel_id}: {error}"
-                    ),
-                }
-            });
+            let _ = this.update(cx, |this, cx| this.finish_load(key, result, cx));
         })
         .detach();
+    }
+
+    fn finish_load(
+        &mut self,
+        key: EntityKey,
+        result: anyhow::Result<api::PermissionRoleChannelListEventResponse>,
+        cx: &mut Context<Self>,
+    ) {
+        self.loading.remove(&key);
+        match result {
+            Ok(response) => {
+                self.cache
+                    .insert(key, overrides_from_response(&response), None);
+                cx.emit(ChannelRolePermissionsEvent::Changed {
+                    channel_id: key.channel_id,
+                    entity: key.entity,
+                });
+            }
+            Err(error) => tracing::error!(
+                "get_permission_by_role_id_channel_id failed for {}: {error}",
+                key.channel_id
+            ),
+        }
+        cx.notify();
     }
 
     pub fn save(
@@ -380,6 +396,39 @@ mod tests {
         });
         BadgeService::init(auth_state, cx);
         cx.new(|cx| ChannelRolePermissionsStore::new(api, cx))
+    }
+
+    #[gpui::test]
+    fn failed_permission_load_notifies_observers_and_successful_retry_is_loaded(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let store = cx.update(init_role_permissions_store);
+        let key = EntityKey {
+            channel_id: TEST_CHANNEL,
+            entity: PermissionEntity::Role(TEST_ROLE),
+        };
+        let observed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let observer = observed.clone();
+        let _subscription = cx.update(|cx| cx.observe(&store, move |_, _| observer.set(true)));
+        store.update(cx, |store, cx| {
+            store.loading.insert(key);
+            assert!(store.is_loading(key.channel_id, key.entity));
+            assert!(!store.is_loaded(key.channel_id, key.entity));
+            store.finish_load(key, Err(anyhow::anyhow!("test load failure")), cx);
+            assert!(!store.is_loading(key.channel_id, key.entity));
+            assert!(!store.is_loaded(key.channel_id, key.entity));
+        });
+        cx.run_until_parked();
+        assert!(observed.replace(false));
+        store.update(cx, |store, cx| {
+            store.loading.insert(key);
+            store.finish_load(key, Ok(Default::default()), cx);
+            assert!(!store.is_loading(key.channel_id, key.entity));
+            assert!(store.is_loaded(key.channel_id, key.entity));
+            assert_eq!(store.permission_active(key.channel_id, key.entity, 1), None);
+        });
+        cx.run_until_parked();
+        assert!(observed.get());
     }
 
     fn permission_set(caller: i64) -> RealtimeEvent {

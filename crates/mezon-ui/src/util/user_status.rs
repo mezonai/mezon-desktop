@@ -1,4 +1,4 @@
-use gpui::{AnyElement, Pixels, Rgba, div, prelude::*, px, rgba};
+use gpui::{AnyElement, Hsla, Pixels, Rgba, div, prelude::*, px, rgba};
 use mezon_store::{DmAvatarPresence, UserPresence};
 
 use crate::components::primitives::{Icon, IconName};
@@ -6,6 +6,16 @@ use crate::theme::Theme;
 
 pub const PRESENCE_DOT_SIZE: Pixels = px(12.);
 const PRESENCE_IDLE_ICON_SIZE: Pixels = px(10.);
+
+pub fn in_voice_icon_color(theme: &Theme) -> Rgba {
+    theme.status_online
+}
+
+pub fn in_voice_status_label_color(theme: &Theme) -> Hsla {
+    let mut color: Hsla = theme.text_primary.into();
+    color.a *= 0.6;
+    color
+}
 
 pub fn presence_badge_color(presence: DmAvatarPresence) -> Option<Rgba> {
     match presence {
@@ -154,6 +164,16 @@ mod tests {
 
     fn rgba_bits(c: Rgba) -> (u32, u32, u32, u32) {
         (c.r.to_bits(), c.g.to_bits(), c.b.to_bits(), c.a.to_bits())
+    }
+
+    #[test]
+    fn in_voice_icon_tracks_status_online_in_every_theme() {
+        for theme in themes() {
+            assert_eq!(
+                rgba_bits(in_voice_icon_color(&theme)),
+                rgba_bits(theme.status_online),
+            );
+        }
     }
 
     #[test]

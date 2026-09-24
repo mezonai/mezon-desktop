@@ -67,7 +67,9 @@ pub use dropdown::{Dropdown, DropdownPlacement, DropdownTriggerStyle};
 pub use label::Label;
 pub use mention_count_badge::{mention_count_badge, mention_count_badge_on_channel_row};
 pub use modal::Modal;
-pub use pagination::{PaginationButton, pagination_button, pagination_items};
+pub use pagination::{
+    PaginationButton, pagination_button, pagination_items, pagination_slot_count,
+};
 pub use progress::Progress;
 pub use select::{Select, SelectEvent};
 pub use slider::{Slider, SliderEvent, SliderState, SliderValue};

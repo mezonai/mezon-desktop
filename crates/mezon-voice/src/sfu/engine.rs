@@ -17,6 +17,7 @@ use libwebrtc::rtp_parameters::{DegradationPreference, Priority};
 use libwebrtc::rtp_transceiver::RtpTransceiverDirection;
 use libwebrtc::session_description::{SdpType, SessionDescription};
 use libwebrtc::stats::RtcStats;
+use libwebrtc::video_stream::native::NativeVideoStream;
 use libwebrtc::video_track::RtcVideoTrack;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -27,7 +28,9 @@ use crate::{IceServerConfig, MEET_TOKEN_RETRY_LIMIT, ScreenShareMode, TokenRefre
 
 use super::messages::{ClientMessage, IceServerSpec, ServerMessage, SnapshotMember};
 use super::mid::{self, MID_AUDIO, MID_CAMERA, MID_SCREEN, RemoteKind};
-use super::screen_adaptation::{ScreenAdaptation, ScreenProfile, ScreenStats, TEXT_TIERS, VIDEO_TIERS};
+use super::screen_adaptation::{
+    ScreenAdaptation, ScreenProfile, ScreenStats, TEXT_TIERS, VIDEO_TIERS,
+};
 use super::sdp;
 
 struct CameraTier {
@@ -101,7 +104,11 @@ fn schedule_camera_tier(
     if matches!(pending, Some((tier, _)) if tier == next) {
         return pending;
     }
-    let delay = if next > current { CAMERA_TIER_DOWNGRADE } else { CAMERA_TIER_UPGRADE };
+    let delay = if next > current {
+        CAMERA_TIER_DOWNGRADE
+    } else {
+        CAMERA_TIER_UPGRADE
+    };
     Some((next, tokio::time::Instant::now() + delay))
 }
 const SCREEN_SCALABILITY_MODE: &str = "L1T1";
@@ -197,23 +204,40 @@ pub enum RemovalCause {
 }
 
 pub enum SfuEvent {
-    Connected { room: String },
+    Connected {
+        room: String,
+    },
     Peers(Vec<SfuPeer>),
     RoomSnapshot,
-    RemoteAudio { key: u64, track: RtcAudioTrack },
-    RemoteVideo { key: u64, track: RtcVideoTrack },
-    RemoteGone { key: u64 },
+    RemoteAudio {
+        key: u64,
+        track: RtcAudioTrack,
+        recovery: bool,
+    },
+    RemoteVideo {
+        key: u64,
+        stream: NativeVideoStream,
+    },
+    RemoteGone {
+        key: u64,
+    },
     PttActive(bool),
     Reconnecting,
     Reconnected,
-    Disconnected { reason: String },
-    Removed { cause: RemovalCause, reason: String },
+    Disconnected {
+        reason: String,
+    },
+    Removed {
+        cause: RemovalCause,
+        reason: String,
+    },
     MutedByModerator,
     Error(String),
 }
 
 enum EngineCommand {
     SetLocalAudio(Option<RtcAudioTrack>),
+    RefreshRemoteAudio(u64),
     SetLocalCamera(Option<RtcVideoTrack>),
     SetLocalScreen(Option<ScreenTrack>),
     SetMute(bool),
@@ -288,6 +312,10 @@ impl SfuEngine {
         let _ = self.cmd_tx.send(EngineCommand::ParticipantAction(token));
     }
 
+    pub(crate) fn refresh_remote_audio(&self, key: u64) {
+        let _ = self.cmd_tx.send(EngineCommand::RefreshRemoteAudio(key));
+    }
+
     pub fn close(&self) {
         let _ = self.cmd_tx.send(EngineCommand::Close);
     }
@@ -303,7 +331,8 @@ struct Membership {
     by_peer: HashMap<u32, SnapshotMember>,
     peer_by_mid: HashMap<String, u32>,
     user_by_mid: HashMap<String, String>,
-    live_tracks: HashMap<u64, String>,
+    live_tracks: HashMap<u64, mid::TrackBinding>,
+    retired_mids: HashMap<String, mid::MsidOccupant>,
 }
 
 impl Membership {
@@ -369,19 +398,20 @@ impl Membership {
     }
 
     fn remove_peer(&mut self, peer_id: u32, mids: [u32; 3]) -> Vec<String> {
-        self.by_peer.remove(&peer_id);
-        let mut released = Vec::new();
-        for mid in mids.iter().filter(|m| **m != 0).map(u32::to_string) {
-            if self
-                .peer_by_mid
-                .get(&mid)
-                .is_some_and(|owner| *owner != peer_id)
-            {
-                continue;
-            }
-            self.peer_by_mid.remove(&mid);
-            self.user_by_mid.remove(&mid);
-            released.push(mid);
+        let departed = self.by_peer.remove(&peer_id);
+        let leaving_user = departed.as_ref().map(|member| member.user_id.as_str());
+        let released = mid::mids_to_release(
+            peer_id,
+            mids,
+            &self.peer_by_mid,
+            &self.user_by_mid,
+            leaving_user,
+        );
+        for mid in &released {
+            self.peer_by_mid.remove(mid);
+            let user_id = self.user_by_mid.remove(mid).unwrap_or_default();
+            self.retired_mids
+                .insert(mid.clone(), mid::MsidOccupant { peer_id, user_id });
         }
         self.peer_by_mid.retain(|_, id| *id != peer_id);
         released
@@ -389,6 +419,12 @@ impl Membership {
 
     fn absorb_msids(&mut self, sdp: &str) {
         for (mid, occupant) in mid::parse_msid_occupants(sdp) {
+            if self.retired_mids.get(&mid).is_some_and(|retired| {
+                retired.blocks_reactivation(&occupant, self.peer_by_mid.get(&mid).copied())
+            }) {
+                continue;
+            }
+            self.retired_mids.remove(&mid);
             if occupant.peer_id != 0 {
                 self.claim(occupant.peer_id, &mid);
             }
@@ -754,6 +790,7 @@ fn apply_offline_command(
         EngineCommand::SetCameraActive(_)
         | EngineCommand::SetScreenActive(_)
         | EngineCommand::ParticipantAction(_)
+        | EngineCommand::RefreshRemoteAudio(_)
         | EngineCommand::Close => {}
     }
     local.apply_audio_gate(None, role);
@@ -954,6 +991,8 @@ async fn session_loop(
     let mut membership = Membership::default();
     let (transport_state_tx, transport_state_rx) = flume::unbounded::<PeerConnectionState>();
     let (ice_state_tx, ice_state_rx) = flume::unbounded::<IceConnectionState>();
+    // Coalesce track notifications without blocking WebRTC's callback thread.
+    let (remote_media_tx, remote_media_rx) = flume::bounded::<()>(1);
     let mut stats_timer = tokio::time::interval(MEDIA_STATS_INTERVAL);
     stats_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pending_offer: Option<(u64, String)> = None;
@@ -1044,6 +1083,10 @@ async fn session_loop(
                         match create_peer_connection(factory, &ice_servers, &config.fallback_ice_servers) {
                             Ok(created) => {
                                 let attempt = *attempts;
+                                let media_tx = remote_media_tx.clone();
+                                created.on_track(Some(Box::new(move |_| {
+                                    let _ = media_tx.try_send(());
+                                })));
                                 let state_tx = transport_state_tx.clone();
                                 created.on_connection_state_change(Some(Box::new(move |state| {
                                     tracing::info!(attempt, ?state, "sfu transport state");
@@ -1077,7 +1120,6 @@ async fn session_loop(
                     }
                     ServerMessage::Offer { offer_generation, sdp } => {
                         tracing::debug!(generation = offer_generation, bytes = sdp.len(), "sfu offer");
-                        membership.absorb_msids(&sdp);
                         pending_offer = Some((offer_generation, sdp));
                         offer_reissue_deadline = None;
                     }
@@ -1122,7 +1164,10 @@ async fn session_loop(
                         }
                     }
                     ServerMessage::PeerLeft { peer_id, mid_audio, mid_video, mid_screen } => {
-                        for mid in membership.remove_peer(peer_id, [mid_audio, mid_video, mid_screen]) {
+                        let released = membership.remove_peer(peer_id, [mid_audio, mid_video, mid_screen]);
+                        tracing::info!(peer_id, ?released, remaining_peers = membership.by_peer.len(),
+                            "sfu peer left; retiring only its remote media");
+                        for mid in released {
                             let key = remote_frame_key(&mid);
                             if membership.live_tracks.remove(&key).is_some() {
                                 let _ = evt_tx.send(SfuEvent::RemoteGone { key });
@@ -1198,6 +1243,11 @@ async fn session_loop(
                         }
                         let _ = ws_tx.send(Message::Close(None)).await;
                         return SessionOutcome::Closed;
+                    }
+                    EngineCommand::RefreshRemoteAudio(key) => {
+                        if let Some(peer_connection) = pc.as_ref() {
+                            sync_remote_media(peer_connection, &mut membership, evt_tx, Some(key));
+                        }
                     }
                     EngineCommand::SetLocalAudio(track) => {
                         local.audio = track;
@@ -1280,6 +1330,16 @@ async fn session_loop(
                                 return SessionOutcome::Dropped { joined, reason: "push_to_talk send failed".into() };
                             }
                         }
+                    }
+                }
+            }
+            _ = remote_media_rx.recv_async() => {
+                if let Some(peer_connection) = pc.as_ref() {
+                    sync_remote_media(peer_connection, &mut membership, evt_tx, None);
+                    if !membership.live_tracks.is_empty()
+                        && let Some(previous) = retiring.take()
+                    {
+                        previous.close();
                     }
                 }
             }
@@ -1375,6 +1435,7 @@ async fn session_loop(
             }
             _ = stats_timer.tick() => {
                 if let Some(peer_connection) = pc.clone() {
+                    sync_remote_media(&peer_connection, &mut membership, evt_tx, None);
                     match peer_connection.connection_state() {
                         PeerConnectionState::Failed => {
                             return SessionOutcome::Dropped {
@@ -1503,12 +1564,14 @@ async fn session_loop(
                     config.role,
                     tiers,
                     &mut ws_tx,
+                    &mut membership,
+                    evt_tx,
                 )
                 .await
                 {
                     Ok(()) => {
                         tracing::debug!(generation, "sfu answer sent");
-                        sync_remote_media(&peer_connection, &mut membership, evt_tx);
+                        sync_remote_media(&peer_connection, &mut membership, evt_tx, None);
                         if !membership.live_tracks.is_empty()
                             && let Some(previous) = retiring.take()
                         {
@@ -1943,6 +2006,7 @@ fn transceiver_summary(pc: &PeerConnection) -> String {
         .join(" ")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn negotiate(
     pc: &PeerConnection,
     generation: u64,
@@ -1951,6 +2015,8 @@ async fn negotiate(
     role: SfuRole,
     tiers: PublishTiers,
     ws_tx: &mut WsSink,
+    membership: &mut Membership,
+    evt_tx: &flume::Sender<SfuEvent>,
 ) -> Result<()> {
     let previous = pc.current_remote_description().map(|d| d.to_string());
     let stabilized = sdp::stabilize_inactive_video_sections(offer_sdp, previous.as_deref());
@@ -2022,6 +2088,14 @@ async fn negotiate(
         setup = %sdp::setup_roles(&local_sdp),
         "answer m-lines"
     );
+
+    membership.absorb_msids(offer_sdp);
+    tracing::info!(generation, directions = %sdp::direction_summary(&local_sdp),
+        "sfu media renegotiated");
+
+    // Attach receive sinks before the answer lets the SFU start forwarding media.
+    // Static screen shares may not produce another decoded frame immediately.
+    sync_remote_media(pc, membership, evt_tx, None);
 
     send(
         ws_tx,
@@ -2204,6 +2278,7 @@ fn sync_remote_media(
     pc: &PeerConnection,
     membership: &mut Membership,
     evt_tx: &flume::Sender<SfuEvent>,
+    refresh_audio: Option<u64>,
 ) {
     for transceiver in pc.transceivers() {
         let Some(mid) = transceiver.mid() else {
@@ -2224,10 +2299,11 @@ fn sync_remote_media(
             negotiated,
             RtpTransceiverDirection::Inactive | RtpTransceiverDirection::Stopped
         );
-        let live = transceiver
-            .receiver()
-            .track()
-            .filter(|track| !idle && track.state() == RtcTrackState::Live);
+        let live = transceiver.receiver().track().filter(|track| {
+            !idle
+                && !membership.retired_mids.contains_key(&mid)
+                && track.state() == RtcTrackState::Live
+        });
 
         let Some(track) = live else {
             if membership.live_tracks.remove(&key).is_some() {
@@ -2237,21 +2313,33 @@ fn sync_remote_media(
             continue;
         };
 
-        let track_id = track.id();
-        if membership.live_tracks.get(&key) == Some(&track_id) {
+        let binding = mid::TrackBinding {
+            track_id: track.id(),
+            peer_id: membership.peer_by_mid.get(&mid).copied(),
+            user_id: membership.user_by_mid.get(&mid).cloned(),
+        };
+        let unchanged = membership.live_tracks.get(&key) == Some(&binding);
+        let recovery = unchanged && refresh_audio == Some(key) && remote.kind == RemoteKind::Audio;
+        if unchanged && !recovery {
             continue;
         }
 
         match (track, remote.kind) {
             (MediaStreamTrack::Audio(track), RemoteKind::Audio) => {
-                membership.live_tracks.insert(key, track_id);
-                tracing::info!(mid = %mid, key, "remote audio attached");
-                let _ = evt_tx.send(SfuEvent::RemoteAudio { key, track });
+                membership.live_tracks.insert(key, binding);
+                tracing::info!(mid = %mid, key, recovery, "remote audio attached");
+                let _ = evt_tx.send(SfuEvent::RemoteAudio {
+                    key,
+                    track,
+                    recovery,
+                });
             }
             (MediaStreamTrack::Video(track), RemoteKind::Camera | RemoteKind::Screen) => {
-                membership.live_tracks.insert(key, track_id);
+                membership.live_tracks.insert(key, binding);
                 tracing::info!(mid = %mid, key, "remote video attached");
-                let _ = evt_tx.send(SfuEvent::RemoteVideo { key, track });
+                // Preserve the latest frame even before the consumer task is scheduled.
+                let stream = NativeVideoStream::new(track);
+                let _ = evt_tx.send(SfuEvent::RemoteVideo { key, stream });
             }
             (_, kind) => {
                 tracing::warn!("mid {mid} carries a track of the wrong media type for {kind:?}");
@@ -2387,10 +2475,7 @@ mod tests {
             SfuEvent::Peers(_)
         ));
         assert!(
-            matches!(
-                evt_rx.recv_async().await.unwrap(),
-                SfuEvent::RoomSnapshot
-            ),
+            matches!(evt_rx.recv_async().await.unwrap(), SfuEvent::RoomSnapshot),
             "the room snapshot must be announced right after its peer list"
         );
         if !held {

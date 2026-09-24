@@ -91,21 +91,25 @@ fn modal_preview_image_cache(cx: &mut App, label: &'static str) -> Entity<LruIma
 }
 
 fn member_subscriptions(cx: &mut Context<ConfirmPinMessageModal>) -> Vec<Subscription> {
+    let audio_meta = super::audio_meta::AudioMetaCache::global(cx);
     vec![
         cx.observe(&ClanMembersStore::global(cx), |_, _, cx| cx.notify()),
         cx.observe(&UsersByUserStore::global(cx), |_, _, cx| cx.notify()),
         cx.observe(&AccountStore::global(cx), |_, _, cx| cx.notify()),
         cx.observe(&DirectMessageStore::global(cx), |_, _, cx| cx.notify()),
+        cx.observe(&audio_meta, |_, _, cx| cx.notify()),
     ]
 }
 
 fn member_subscriptions_unpin(cx: &mut Context<ConfirmUnpinMessageModal>) -> Vec<Subscription> {
+    let audio_meta = super::audio_meta::AudioMetaCache::global(cx);
     vec![
         cx.observe(&ClanMembersStore::global(cx), |_, _, cx| cx.notify()),
         cx.observe(&UsersByUserStore::global(cx), |_, _, cx| cx.notify()),
         cx.observe(&AccountStore::global(cx), |_, _, cx| cx.notify()),
         cx.observe(&DirectMessageStore::global(cx), |_, _, cx| cx.notify()),
         cx.observe(&PinnedMessagesStore::global(cx), |_, _, cx| cx.notify()),
+        cx.observe(&audio_meta, |_, _, cx| cx.notify()),
     ]
 }
 
@@ -160,6 +164,10 @@ impl ConfirmPinMessageModal {
         };
 
         let locale_for_view = locale.clone();
+        crate::chat::message::audio_meta::AudioMetaCache::ensure_attachments(
+            &message.attachments,
+            cx,
+        );
         let view = cx.new(|cx| Self {
             focus_handle: cx.focus_handle(),
             message_id,
@@ -227,6 +235,17 @@ impl ConfirmUnpinMessageModal {
             ClanMembersStore::global(cx).update(cx, |members, cx| {
                 members.ensure_loaded(clan_id, cx);
             });
+        }
+        let attachments = {
+            let store = PinnedMessagesStore::global(cx).read(cx);
+            store
+                .pinned()
+                .iter()
+                .find(|pin| pin.id == pin_id.as_ref())
+                .map(|pin| pin.attachments.clone())
+        };
+        if let Some(attachments) = attachments {
+            crate::chat::message::audio_meta::AudioMetaCache::ensure_attachments(&attachments, cx);
         }
 
         let view = cx.new(|cx| Self {
@@ -348,7 +367,7 @@ fn preview_from_message(
         sender_label,
         avatar_src,
         avatar_fallback,
-        body: render_pin_message_preview(msg, theme, locale, image_cache, ogp_cache),
+        body: render_pin_message_preview(msg, theme, locale, image_cache, ogp_cache, cx),
         timestamp,
     }
 }
@@ -398,7 +417,7 @@ fn preview_from_pin(
         sender_label,
         avatar_src,
         avatar_fallback,
-        body: render_pinned_message_preview(pin, theme, locale, image_cache, ogp_cache),
+        body: render_pinned_message_preview(pin, theme, locale, image_cache, ogp_cache, cx),
         timestamp: None,
     }
 }

@@ -264,7 +264,7 @@ impl ChannelHeader {
         } else {
             IconName::Bell
         };
-        let channel_only_actions: &[(&str, IconName)] = &[
+        let channel_only_actions = [
             ("hdr-canvas", IconName::CanvasIcon),
             ("hdr-timeline", IconName::History),
             ("hdr-thread", IconName::ThreadIcon),
@@ -274,29 +274,10 @@ impl ChannelHeader {
             ("hdr-gallery", IconName::ImageThumbnail),
             ("hdr-files", IconName::FileIcon),
         ];
-        let dm_one_to_one = self.dm_header.as_ref().is_some_and(|info| !info.is_group);
-        let dm_one_to_one_blocked = self
-            .dm_header
-            .as_ref()
-            .is_some_and(|info| !info.is_group && info.blocked_by_me);
-        let actions: Vec<(&str, IconName)> = if self.dm {
-            let mut items: Vec<(&str, IconName)> = Vec::with_capacity(4);
-            if dm_one_to_one && !dm_one_to_one_blocked {
-                items.push(("hdr-call", IconName::IconPhoneDM));
-                items.push(("hdr-video-call", IconName::IconMeetDM));
-                items.push(("hdr-pin", IconName::PinRight));
-                items.push(("hdr-add-members", IconName::IconAddFriendDM));
-                items.push(("hdr-members", IconName::IconUserProfileDM));
-            } else if !dm_one_to_one_blocked {
-                items.push(("hdr-add-members", IconName::IconAddFriendDM));
-                items.push(("hdr-members", IconName::MemberList));
-                items.push(("hdr-pin", IconName::PinRight));
-            } else {
-                items.push(("hdr-pin", IconName::PinRight));
-            }
-            items
+        let actions: &[(&str, IconName)] = if self.dm {
+            dm_header_actions(DmHeaderState::from_info(self.dm_header.as_ref()))
         } else {
-            channel_only_actions.to_vec()
+            &channel_only_actions
         };
         let ChannelHeader {
             name,
@@ -508,7 +489,11 @@ impl ChannelHeader {
                                             .child(
                                                 Icon::new(IconName::Speaker)
                                                     .size(px(12.))
-                                                    .text_color(gpui::rgb(0x22c55e)),
+                                                    .text_color(
+                                                    crate::util::user_status::in_voice_icon_color(
+                                                        theme,
+                                                    ),
+                                                ),
                                             )
                                             .child(
                                                 div()
@@ -671,7 +656,7 @@ impl ChannelHeader {
     }
 
     fn build_action_buttons(
-        actions: Vec<(&'static str, IconName)>,
+        actions: &[(&'static str, IconName)],
         add_members_button: Option<AnyElement>,
         theme: &Theme,
         icon_color: gpui::Rgba,
@@ -740,7 +725,7 @@ impl ChannelHeader {
 
     fn action_buttons(
         self,
-        actions: Vec<(&'static str, IconName)>,
+        actions: &[(&'static str, IconName)],
         mut add_members_button: Option<AnyElement>,
         theme: &Theme,
         icon_color: gpui::Rgba,
@@ -766,7 +751,7 @@ impl ChannelHeader {
         let on_toggle_timeline = self.on_toggle_timeline;
         let mut notification_trigger = self.notification_trigger;
         let mut buttons: Vec<AnyElement> = Vec::new();
-        for (id, icon) in actions {
+        for &(id, icon) in actions {
             if id == "hdr-add-members" {
                 if let Some(button) = add_members_button.take() {
                     buttons.push(button);
@@ -1041,6 +1026,53 @@ impl ChannelHeader {
                 badge_color,
             ))
             .into_any_element()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DmHeaderState {
+    Unresolved,
+    OneToOne,
+    OneToOneBlocked,
+    Group,
+}
+
+impl DmHeaderState {
+    fn from_info(info: Option<&DmHeaderInfo>) -> Self {
+        match info {
+            None => Self::Unresolved,
+            Some(info) if info.is_group => Self::Group,
+            Some(info) if info.blocked_by_me => Self::OneToOneBlocked,
+            Some(_) => Self::OneToOne,
+        }
+    }
+}
+
+fn dm_header_actions(state: DmHeaderState) -> &'static [(&'static str, IconName)] {
+    match state {
+        DmHeaderState::Unresolved => &[
+            ("hdr-add-members", IconName::IconAddFriendDM),
+            ("hdr-members", IconName::MemberList),
+            ("hdr-pin", IconName::PinRight),
+        ],
+        DmHeaderState::OneToOne => &[
+            ("hdr-call", IconName::IconPhoneDM),
+            ("hdr-video-call", IconName::IconMeetDM),
+            ("hdr-pin", IconName::PinRight),
+            ("hdr-add-members", IconName::IconAddFriendDM),
+            ("hdr-members", IconName::IconUserProfileDM),
+            ("hdr-gallery", IconName::ImageThumbnail),
+        ],
+        DmHeaderState::OneToOneBlocked => &[
+            ("hdr-pin", IconName::PinRight),
+            ("hdr-gallery", IconName::ImageThumbnail),
+        ],
+        DmHeaderState::Group => &[
+            ("hdr-add-members", IconName::IconAddFriendDM),
+            ("hdr-members", IconName::MemberList),
+            ("hdr-pin", IconName::PinRight),
+            ("hdr-gallery", IconName::ImageThumbnail),
+        ],
     }
 }
 
@@ -1474,11 +1506,13 @@ impl Render for ChatHeader {
             )
         };
 
+        let gallery_tooltip: SharedString =
+            mezon_i18n::t(&locale, "channelTopbar.tooltips.gallery").into();
         let gallery_trigger = PopoverMenu::new("hdr-gallery-popover")
             .anchor(Anchor::TopRight)
             .attach(Anchor::BottomRight)
             .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
-            .trigger(GalleryTrigger::new(&theme))
+            .trigger(GalleryTrigger::new(&theme, gallery_tooltip))
             .menu({
                 let settings = settings.clone();
                 move |window, cx| build_gallery_modal(settings.clone(), window, cx)
@@ -2074,18 +2108,20 @@ struct GalleryTrigger {
     bg_hover: gpui::Rgba,
     bg_active: gpui::Rgba,
     selected: bool,
+    tooltip: SharedString,
     on_click: Option<ClickHandler>,
     cursor: Option<CursorStyle>,
 }
 
 impl GalleryTrigger {
-    fn new(theme: &Theme) -> Self {
+    fn new(theme: &Theme, tooltip: SharedString) -> Self {
         Self {
             icon_idle: theme.tokens.bg_icon_theme,
             icon_active: theme.text_primary,
             bg_hover: theme.bg_hover,
             bg_active: theme.bg_tertiary,
             selected: false,
+            tooltip,
             on_click: None,
             cursor: None,
         }
@@ -2131,6 +2167,7 @@ impl IntoElement for GalleryTrigger {
             .rounded_md()
             .cursor_pointer()
             .hover(move |s| s.bg(bg_hover))
+            .tooltip(Tooltip::text(self.tooltip))
             .occlude()
             .child(
                 Icon::new(IconName::ImageThumbnail)
@@ -2309,5 +2346,44 @@ impl IntoElement for NotificationSettingTrigger {
             button = button.on_click(handler);
         }
         button
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DmHeaderState, dm_header_actions};
+
+    fn action_ids(state: DmHeaderState) -> Vec<&'static str> {
+        dm_header_actions(state).iter().map(|(id, _)| *id).collect()
+    }
+
+    #[test]
+    fn dm_header_actions_match_each_resolved_state() {
+        assert_eq!(
+            action_ids(DmHeaderState::OneToOne),
+            [
+                "hdr-call",
+                "hdr-video-call",
+                "hdr-pin",
+                "hdr-add-members",
+                "hdr-members",
+                "hdr-gallery",
+            ]
+        );
+        assert_eq!(
+            action_ids(DmHeaderState::Group),
+            ["hdr-add-members", "hdr-members", "hdr-pin", "hdr-gallery",]
+        );
+        assert_eq!(
+            action_ids(DmHeaderState::OneToOneBlocked),
+            ["hdr-pin", "hdr-gallery"]
+        );
+    }
+
+    #[test]
+    fn unresolved_dm_does_not_expose_gallery() {
+        let actions = action_ids(DmHeaderState::Unresolved);
+        assert_eq!(actions, ["hdr-add-members", "hdr-members", "hdr-pin"]);
+        assert!(!actions.contains(&"hdr-gallery"));
     }
 }

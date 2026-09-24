@@ -1162,9 +1162,10 @@ fn render_member(
         (!member.user_status.is_empty()).then(|| (member.user_status.clone(), dim(status_color)))
     };
     let status_icon = member.in_voice.then(|| {
-        let mut green: Hsla = rgb(0x22c55e).into();
-        green.a *= 0.6;
-        (IconName::Speaker, green)
+        (
+            IconName::Speaker,
+            crate::util::user_status::in_voice_icon_color(theme).into(),
+        )
     });
 
     let user_id = member.user_id;

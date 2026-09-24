@@ -1,24 +1,21 @@
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Context, Entity, Global, SharedString, Subscription, Task};
 pub use mezon_client::transport::{QUICK_MENU_TYPE_FLASH, QUICK_MENU_TYPE_QUICK};
 use mezon_client::{AppApi, ConnectionStatus};
-use regex::Regex;
 
 use crate::channel::{ChannelEvent, ChannelList};
 use crate::emoji::generate_snowflake_id;
 use crate::ids::{ChannelId, ClanId};
 use crate::messages::{MessagesEvent, MessagesStore};
+pub use crate::name_validation::{
+    QUICK_MENU_NAME_MAX_RUNES, is_valid_menu_name, is_valid_name_content,
+};
 
 const CACHE_TTL: Duration = Duration::from_secs(300);
-pub const QUICK_MENU_NAME_MAX_RUNES: usize = 64;
 pub const QUICK_MENU_ACTION_MSG_MAX_BYTES: usize = 512;
-
-static MENU_NAME_CHAR: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^[\p{L}\p{N}\p{So}_\ \-\.\+]$").expect("quick menu name char regex")
-});
 
 #[derive(Debug, Clone)]
 pub struct QuickMenuItem {
@@ -43,22 +40,6 @@ pub struct QuickMenuStore {
 struct GlobalQuickMenuStore(Entity<QuickMenuStore>);
 impl Global for GlobalQuickMenuStore {}
 
-pub fn is_valid_menu_name(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-    let Some(first) = name.chars().next() else {
-        return false;
-    };
-    if first == '_' || first == '-' {
-        return false;
-    }
-    if name.chars().count() > QUICK_MENU_NAME_MAX_RUNES {
-        return false;
-    }
-    name.chars().all(is_valid_menu_name_char)
-}
-
 pub fn is_valid_action_msg(action_msg: &str) -> bool {
     !action_msg.is_empty() && action_msg.len() <= QUICK_MENU_ACTION_MSG_MAX_BYTES
 }
@@ -67,29 +48,6 @@ pub fn name_exists(items: &[QuickMenuItem], name: &str, exclude_id: Option<i64>)
     items
         .iter()
         .any(|item| exclude_id.is_none_or(|id| item.id != id) && item.menu_name.as_ref() == name)
-}
-
-fn is_valid_menu_name_char(c: char) -> bool {
-    if is_quick_menu_emoji(c) {
-        return true;
-    }
-    let mut buf = [0u8; 4];
-    MENU_NAME_CHAR.is_match(c.encode_utf8(&mut buf))
-}
-
-fn is_quick_menu_emoji(c: char) -> bool {
-    matches!(
-        c as u32,
-        0x1F600..=0x1F64F
-            | 0x1F300..=0x1F5FF
-            | 0x1F680..=0x1F6FF
-            | 0x1F700..=0x1F77F
-            | 0x1F780..=0x1F7FF
-            | 0x1F800..=0x1F8FF
-            | 0x1F900..=0x1F9FF
-            | 0x1FA00..=0x1FA6F
-            | 0x1FA70..=0x1FAFF
-    )
 }
 
 fn apply_add(
@@ -424,34 +382,6 @@ mod tests {
             action_msg: action.into(),
             menu_type,
         }
-    }
-
-    #[test]
-    fn menu_name_rejects_empty_leading_underscore_dash_and_over_64() {
-        assert!(!is_valid_menu_name(""));
-        assert!(!is_valid_menu_name("_hello"));
-        assert!(!is_valid_menu_name("-hello"));
-        assert!(is_valid_menu_name("hello"));
-        assert!(is_valid_menu_name(&"a".repeat(64)));
-        assert!(!is_valid_menu_name(&"a".repeat(65)));
-    }
-
-    #[test]
-    fn menu_name_allows_letters_numbers_space_underscore_dash_dot_plus() {
-        assert!(is_valid_menu_name("hello world"));
-        assert!(is_valid_menu_name("hello_world"));
-        assert!(is_valid_menu_name("hello-world"));
-        assert!(is_valid_menu_name("hello.world"));
-        assert!(is_valid_menu_name("hello+world"));
-        assert!(is_valid_menu_name("hello2"));
-        assert!(!is_valid_menu_name("hello!"));
-        assert!(!is_valid_menu_name("hello/"));
-    }
-
-    #[test]
-    fn menu_name_allows_emoji_in_server_ranges() {
-        assert!(is_valid_menu_name("hello😀"));
-        assert!(is_valid_menu_name("😀hello"));
     }
 
     #[test]

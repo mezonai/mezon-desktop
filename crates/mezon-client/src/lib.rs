@@ -6,6 +6,7 @@ pub mod app_api;
 pub mod attachment_download;
 pub mod auth;
 pub mod channel_app_launch;
+pub mod data_image;
 pub mod endpoint_health;
 pub mod gotify;
 pub mod image_disk_cache;

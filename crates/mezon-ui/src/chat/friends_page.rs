@@ -150,6 +150,13 @@ impl FriendsPage {
                 FriendEvent::AddSucceeded => {
                     this.toast(ToastKind::Success, "friends.toast.sendAddFriendSuccess", cx);
                 }
+                FriendEvent::AddAlreadySent => {
+                    this.toast(
+                        ToastKind::Info,
+                        "friends.toast.friendRequestAlreadySent",
+                        cx,
+                    );
+                }
                 FriendEvent::AcceptSucceeded => {
                     this.toast(
                         ToastKind::Success,

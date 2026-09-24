@@ -11,8 +11,9 @@ use gpui::{
     prelude::*, px, uniform_list,
 };
 use mezon_store::{
-    AuthState, ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, CtrlKSearchStore,
-    DirectKind, DirectMessageStore, LoginStore, Settings, UserId, UsersByUserStore,
+    AccountStore, AuthState, ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore,
+    CtrlKSearchStore, DirectKind, DirectMessageStore, LoginStore, Settings, UserId,
+    UsersByUserStore,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -69,6 +70,7 @@ pub struct CommandPaletteModal {
     _members_observe: Subscription,
     _router_observe: Subscription,
     _ctrlk_observe: Subscription,
+    _account_observe: Subscription,
 }
 
 impl Focusable for CommandPaletteModal {
@@ -154,6 +156,7 @@ impl CommandPaletteModal {
                 _members_observe: Subscription::new(|| ()),
                 _router_observe: Subscription::new(|| ()),
                 _ctrlk_observe: Subscription::new(|| ()),
+                _account_observe: Subscription::new(|| ()),
             }
         });
 
@@ -192,6 +195,11 @@ impl CommandPaletteModal {
                     this.recompute_filtered(cx);
                     cx.notify();
                 });
+                if let Some(store) = AccountStore::try_global(cx) {
+                    this._account_observe = cx.observe(&store, |this, _, cx| {
+                        this.mark_items_dirty(cx);
+                    });
+                }
             });
         });
 
@@ -300,7 +308,7 @@ impl CommandPaletteModal {
         let (items, in_flight) = {
             let store = ctrlk.read(cx);
             (
-                build_palette_items_from_ctrlk(store.state(), cx),
+                build_palette_items_from_ctrlk(store.state(), query, cx),
                 store.state().is_searching,
             )
         };

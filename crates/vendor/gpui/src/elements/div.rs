@@ -1347,6 +1347,12 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Hold hover still under the pointer while a scroll gesture is running.
+    fn suppress_hover_while_scrolling(mut self) -> Self {
+        self.interactivity().suppress_hover_while_scrolling = true;
+        self
+    }
+
     /// Track the scroll state of this element with the given handle.
     fn anchor_scroll(mut self, scroll_anchor: Option<ScrollAnchor>) -> Self {
         self.interactivity().scroll_anchor = scroll_anchor;
