@@ -57,6 +57,7 @@ pub(super) enum SidebarItem {
         channel_type: ChannelType,
         unread: bool,
         private: bool,
+        age_restricted: i32,
         selected: bool,
         badge_count: u32,
         badge_label: SharedString,

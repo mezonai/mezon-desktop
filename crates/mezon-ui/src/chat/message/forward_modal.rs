@@ -62,19 +62,19 @@ fn upper(locale: &str, key: &'static str) -> SharedString {
 /// the *active* icon shade (`--bg-icon-theme-active`) on top of a glyph drawn in
 /// the dimmer `--bg-icon-theme` — two shades of one colour. GPUI tints a whole
 /// SVG a single colour, so the lock has to be a second, stacked element.
-fn channel_icon(channel_type: ChannelType, private: bool) -> (IconName, Option<IconName>) {
-    let is_thread = matches!(channel_type, ChannelType::Thread);
-    let base = if is_thread {
-        IconName::ThreadIcon
-    } else {
-        IconName::Hashtag
+fn channel_icon(
+    channel_type: ChannelType,
+    private: bool,
+    age_restricted: i32,
+) -> (IconName, Option<IconName>) {
+    use crate::components::compositions::channel_row::{
+        channel_icon as compose_channel_icon, is_age_restricted,
     };
-    let lock = private.then_some(if is_thread {
-        IconName::ThreadLock
-    } else {
-        IconName::HashtagLock
-    });
-    (base, lock)
+    if matches!(channel_type, ChannelType::Text) && is_age_restricted(age_restricted) {
+        return (IconName::HashtagWarning, None);
+    }
+    let composed = compose_channel_icon(channel_type, private, age_restricted);
+    (composed.base, composed.lock)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -310,7 +310,11 @@ fn build_options(cx: &App) -> Vec<ForwardOption> {
             .clan(channel.clan_id)
             .map(|clan| clan.name.as_str())
             .unwrap_or(channel.clan_name.as_str());
-        let (icon, lock) = channel_icon(channel.channel_type, channel.private);
+        let (icon, lock) = channel_icon(
+            channel.channel_type,
+            channel.private,
+            channel.age_restricted,
+        );
         options.push(ForwardOption {
             key: TargetKey::Channel(channel.id),
             label: SharedString::from(channel.name.clone()),

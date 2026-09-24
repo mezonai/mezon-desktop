@@ -859,7 +859,7 @@ pub fn render_welcome(_msg: &Message, ctx: &RowCtx) -> AnyElement {
             col = col
                 .child(welcome_icon_circle(
                     render_channel_icon(
-                        channel_icon(ChannelType::Thread, private),
+                        channel_icon(ChannelType::Thread, private, 0),
                         px(40.),
                         icon_fill.into(),
                         theme.tokens.bg_icon_theme_active.into(),

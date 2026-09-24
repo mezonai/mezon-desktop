@@ -9,9 +9,9 @@ use gpui::{
     prelude::*, px, relative, rems, rgb, rgba, size,
 };
 use mezon_store::{
-    AppConfig, ChannelId, ChannelList, ChannelType, ClanId, Embed, LinkKind, Message, MessageCode,
-    MessageId, MessageSpan, PlatformStore, ProfileContext, RichClick, RichLayout, RichRunKind,
-    RichToken, UserId, invite_id_from_url, is_clan_invite_url, is_here_user_id,
+    AppConfig, ChannelId, ChannelList, ClanId, Embed, LinkKind, Message, MessageCode, MessageId,
+    MessageSpan, PlatformStore, ProfileContext, RichClick, RichLayout, RichRunKind, RichToken,
+    UserId, invite_id_from_url, is_clan_invite_url, is_here_user_id,
 };
 
 use ui::Clickable;
@@ -2471,42 +2471,12 @@ fn hashtag_channel(channel_id: ChannelId, cx: &App) -> Option<ResolvedHashtag> {
         .or_else(|| store.user_channel(channel_id))
         .map(|channel| ResolvedHashtag {
             name: (!channel.name.is_empty()).then(|| SharedString::from(channel.name.as_str())),
-            icon: channel_type_icon(channel.channel_type, channel.private),
+            icon: crate::components::compositions::channel_row::channel_type_icon(
+                channel.channel_type,
+                channel.private,
+                channel.age_restricted,
+            ),
         })
-}
-
-fn channel_type_icon(kind: ChannelType, private: bool) -> IconName {
-    match kind {
-        ChannelType::Voice => {
-            if private {
-                IconName::SpeakerLocked
-            } else {
-                IconName::Speaker
-            }
-        }
-        ChannelType::Stream => IconName::Stream,
-        ChannelType::App => {
-            if private {
-                IconName::PrivateAppChannelIcon
-            } else {
-                IconName::AppChannelIcon
-            }
-        }
-        ChannelType::Thread => {
-            if private {
-                IconName::ThreadIconLocker
-            } else {
-                IconName::ThreadIcon
-            }
-        }
-        _ => {
-            if private {
-                IconName::HashtagLocked
-            } else {
-                IconName::Hashtag
-            }
-        }
-    }
 }
 
 fn parse_channel_id(raw: &str) -> Option<ChannelId> {

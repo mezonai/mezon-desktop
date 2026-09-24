@@ -481,7 +481,12 @@ impl ClanChannelsPage {
                 )
                 .into_any_element()
         } else {
-            Icon::new(channel_type_icon(channel_type, row.private))
+            let age_restricted = ChannelList::global(cx)
+                .read(cx)
+                .channel(self.clan_id, row.id)
+                .map(|channel| channel.age_restricted)
+                .unwrap_or(0);
+            Icon::new(channel_type_icon(channel_type, row.private, age_restricted))
                 .size(px(if is_thread { 20. } else { 22. }))
                 .text_color(cx.theme().text_secondary)
                 .into_any_element()

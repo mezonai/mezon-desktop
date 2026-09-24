@@ -275,6 +275,7 @@ struct ChannelSuggestRaw {
     /// voice channel off as a text one.
     channel_type: ChannelType,
     private: bool,
+    age_restricted: i32,
     name: String,
     name_lc: String,
     name_norm: String,
@@ -2641,9 +2642,13 @@ impl MentionInput {
                             .size(px(20.))
                             .flex_shrink_0()
                             .child(
-                                Icon::new(channel_type_icon(channel.channel_type, channel.private))
-                                    .size(px(16.))
-                                    .text_color(text_muted),
+                                Icon::new(channel_type_icon(
+                                    channel.channel_type,
+                                    channel.private,
+                                    channel.age_restricted,
+                                ))
+                                .size(px(16.))
+                                .text_color(text_muted),
                             )
                             .into_any_element(),
                     ),
@@ -2881,6 +2886,7 @@ fn channel_suggest_raw(channel: &Channel) -> ChannelSuggestRaw {
         clan_id: channel.clan_id,
         channel_type: channel.channel_type,
         private: channel.private,
+        age_restricted: channel.age_restricted,
         name: channel.name.clone(),
         name_lc: channel.name.to_lowercase(),
         name_norm: normalize_search_string(&channel.name),
@@ -3407,19 +3413,25 @@ mod channel_suggest_tests {
     /// to come from the channel type, never a fixed `#`.
     #[test]
     fn pool_entry_keeps_the_type_that_picks_the_row_icon() {
-        for (channel_type, private, icon) in [
-            (ChannelType::Text, false, IconName::Hashtag),
-            (ChannelType::Text, true, IconName::HashtagLocked),
-            (ChannelType::Voice, false, IconName::Speaker),
-            (ChannelType::Voice, true, IconName::SpeakerLocked),
-            (ChannelType::Stream, false, IconName::Stream),
-            (ChannelType::Thread, false, IconName::ThreadIcon),
-            (ChannelType::App, false, IconName::AppChannelIcon),
+        for (channel_type, private, age_restricted, icon) in [
+            (ChannelType::Text, false, 0, IconName::Hashtag),
+            (ChannelType::Text, true, 0, IconName::HashtagLocked),
+            (ChannelType::Text, false, 1, IconName::HashtagWarning),
+            (ChannelType::Voice, false, 0, IconName::Speaker),
+            (ChannelType::Voice, true, 0, IconName::SpeakerLocked),
+            (ChannelType::Stream, false, 0, IconName::Stream),
+            (ChannelType::Thread, false, 0, IconName::ThreadIcon),
+            (ChannelType::App, false, 0, IconName::AppChannelIcon),
         ] {
-            let raw = channel_suggest_raw(&channel(channel_type, private));
+            let mut ch = channel(channel_type, private);
+            ch.age_restricted = age_restricted;
+            let raw = channel_suggest_raw(&ch);
             assert_eq!(raw.channel_type, channel_type);
             assert_eq!(raw.private, private);
-            assert_eq!(channel_type_icon(raw.channel_type, raw.private), icon);
+            assert_eq!(
+                channel_type_icon(raw.channel_type, raw.private, raw.age_restricted),
+                icon
+            );
         }
     }
 

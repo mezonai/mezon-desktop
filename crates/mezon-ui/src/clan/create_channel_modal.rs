@@ -407,7 +407,7 @@ impl Render for CreateChannelModal {
                             })
                             .bg(theme.tokens.bg_active_member_channel)
                             .child(
-                                Icon::new(channel_type_icon(selected_type, false))
+                                Icon::new(channel_type_icon(selected_type, false, 0))
                                     .size(px(20.))
                                     .text_color(theme.text_secondary),
                             )
@@ -536,7 +536,7 @@ fn render_type_row(
             entity.update(cx, |this, cx| this.set_channel_type(channel_type, cx));
         })
         .child(
-            Icon::new(channel_type_icon(channel_type, false))
+            Icon::new(channel_type_icon(channel_type, false, 0))
                 .size(px(24.))
                 .text_color(theme.tokens.text_theme_primary),
         )

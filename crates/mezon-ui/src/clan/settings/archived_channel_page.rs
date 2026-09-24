@@ -524,7 +524,9 @@ impl ArchivedChannelPage {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let channel_id = row.channel_id;
-        let icon = if row.channel_private {
+        let icon = if row.age_restricted {
+            IconName::HashtagWarning
+        } else if row.channel_private {
             IconName::HashtagLocked
         } else {
             IconName::Hashtag

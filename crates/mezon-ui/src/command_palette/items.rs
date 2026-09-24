@@ -43,6 +43,7 @@ pub struct PaletteItem {
     pub user_id: Option<UserId>,
     pub channel_type: Option<ChannelType>,
     pub private: bool,
+    pub age_restricted: i32,
     pub dm_kind: Option<DirectKind>,
     pub dm_channel_type: Option<i32>,
     pub(crate) filter_prioritize: String,
@@ -209,6 +210,7 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
             user_id: None,
             channel_type: Some(channel.channel_type),
             private: channel.private,
+            age_restricted: channel.age_restricted,
             dm_kind: None,
             dm_channel_type: None,
             filter_prioritize: normalize_search_string(&name),
@@ -264,6 +266,7 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
                 user_id: Some(user.id),
                 channel_type: None,
                 private: false,
+                age_restricted: 0,
                 dm_kind: None,
                 dm_channel_type: None,
                 filter_prioritize: normalize_search_string(&prioritize),
@@ -355,6 +358,7 @@ fn palette_item_from_direct(
         user_id: dm.peer_user_id,
         channel_type: None,
         private: false,
+        age_restricted: 0,
         dm_kind: Some(dm.kind),
         dm_channel_type: Some(dm.kind.channel_type()),
         filter_prioritize: normalize_search_string(&label),
@@ -387,6 +391,7 @@ fn palette_item_from_dm_channel(
         user_id: None,
         channel_type: None,
         private: false,
+        age_restricted: 0,
         dm_kind: Some(kind),
         dm_channel_type: Some(kind.channel_type()),
         filter_prioritize: normalize_search_string(&name),
@@ -629,6 +634,7 @@ fn self_chat_member_item(cx: &App) -> Option<PaletteItem> {
         user_id: Some(user.id),
         channel_type: None,
         private: false,
+        age_restricted: 0,
         dm_kind: None,
         dm_channel_type: None,
         filter_prioritize: normalize_search_string(&prioritize),
@@ -693,6 +699,7 @@ fn ctrlk_channel_as_direct(
         user_id: peer_user_id,
         channel_type: None,
         private: false,
+        age_restricted: 0,
         dm_kind: Some(kind),
         dm_channel_type: Some(kind.channel_type()),
         filter_prioritize: normalize_search_string(&label),
@@ -726,6 +733,7 @@ fn ctrlk_channel_as_clan_channel(
         .map(|ch| channel_list.palette_channel_unread(ch))
         .unwrap_or((0, 0, 0));
     let private = stored.map(|ch| ch.private).unwrap_or(channel.private);
+    let age_restricted = stored.map(|ch| ch.age_restricted).unwrap_or(0);
     let voice_busy = channel_voice_busy(
         channel_list,
         channel.clan_id,
@@ -746,6 +754,7 @@ fn ctrlk_channel_as_clan_channel(
         user_id: None,
         channel_type: Some(channel_type),
         private,
+        age_restricted,
         dm_kind: None,
         dm_channel_type: None,
         filter_prioritize: normalize_search_string(&name),
@@ -809,6 +818,7 @@ fn ctrlk_user_as_member(
         user_id: Some(user.id),
         channel_type: None,
         private: false,
+        age_restricted: 0,
         dm_kind: None,
         dm_channel_type: None,
         filter_prioritize: normalize_search_string(&prioritize),
@@ -902,6 +912,7 @@ pub fn render_palette_row(
                 crate::components::primitives::Icon::new(palette_channel_icon(
                     item.channel_type,
                     item.private,
+                    item.age_restricted,
                 ))
                 .size(px(14.))
                 .text_color(icon_color),
@@ -1083,20 +1094,13 @@ fn highlight_query(raw_query: &str, kind: PaletteItemKind) -> &str {
 fn palette_channel_icon(
     channel_type: Option<ChannelType>,
     private: bool,
+    age_restricted: i32,
 ) -> crate::components::primitives::IconName {
-    match (channel_type.unwrap_or(ChannelType::Text), private) {
-        (ChannelType::Thread, true) => crate::components::primitives::IconName::ThreadIconLocker,
-        (ChannelType::Thread, false) => crate::components::primitives::IconName::ThreadIcon,
-        (ChannelType::Voice, true) => crate::components::primitives::IconName::SpeakerLocked,
-        (ChannelType::Voice, false) => crate::components::primitives::IconName::Speaker,
-        (ChannelType::Stream, _) => crate::components::primitives::IconName::Stream,
-        (ChannelType::App, true) => crate::components::primitives::IconName::PrivateAppChannelIcon,
-        (ChannelType::App, false) => crate::components::primitives::IconName::AppChannelIcon,
-        (ChannelType::Forum, _) => crate::components::primitives::IconName::Forum,
-        (ChannelType::Announcement, _) => crate::components::primitives::IconName::Announcement,
-        (_, true) => crate::components::primitives::IconName::HashtagLocked,
-        (_, false) => crate::components::primitives::IconName::Hashtag,
-    }
+    crate::components::compositions::channel_row::channel_type_icon(
+        channel_type.unwrap_or(ChannelType::Text),
+        private,
+        age_restricted,
+    )
 }
 
 fn render_highlighted_text(
@@ -1264,6 +1268,7 @@ mod tests {
             user_id: None,
             channel_type: None,
             private: false,
+            age_restricted: 0,
             dm_kind: Some(DirectKind::Dm),
             dm_channel_type: Some(3),
             filter_prioritize: normalize_search_string("Gia Chu"),
@@ -1297,6 +1302,7 @@ mod tests {
             user_id: Some(UserId(7)),
             channel_type: None,
             private: false,
+            age_restricted: 0,
             dm_kind: Some(DirectKind::Dm),
             dm_channel_type: Some(3),
             filter_prioritize: normalize_search_string("Gia Chu"),
@@ -1332,6 +1338,7 @@ mod tests {
             user_id,
             channel_type: None,
             private: false,
+            age_restricted: 0,
             dm_kind: (kind == PaletteItemKind::Direct).then_some(DirectKind::Dm),
             dm_channel_type: None,
             filter_prioritize: normalize_search_string(name),

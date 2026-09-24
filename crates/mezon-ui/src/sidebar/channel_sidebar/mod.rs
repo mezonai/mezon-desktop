@@ -817,6 +817,7 @@ impl ChannelSidebar {
                                 channel_type: ch.channel_type,
                                 unread: ch.is_unread(),
                                 private: ch.private,
+                                age_restricted: ch.age_restricted,
                                 selected: active_channel_id == Some(ch.id),
                                 badge_count,
                                 badge_label,
@@ -917,6 +918,7 @@ impl ChannelSidebar {
                                 channel_type: ch.channel_type,
                                 unread: ch.is_unread(),
                                 private: ch.private,
+                                age_restricted: ch.age_restricted,
                                 selected: active_channel_id == Some(ch.id),
                                 badge_count,
                                 badge_label,
@@ -2697,6 +2699,7 @@ fn render_sidebar_item(
             channel_type,
             unread,
             private,
+            age_restricted,
             selected,
             badge_count,
             badge_label: _badge_label,
@@ -2719,7 +2722,7 @@ fn render_sidebar_item(
             let settings_channel_id = menu_channel_id;
 
             let make_channel_element = || {
-                let icon = channel_type_icon(*channel_type, *private);
+                let icon = channel_type_icon(*channel_type, *private, *age_restricted);
                 let highlight_type = shows_left_unread_nub(*channel_type);
                 let text_bright = *selected || ((*unread || *badge_count > 0) && highlight_type);
                 let bold = (*selected || *unread) && highlight_type;
