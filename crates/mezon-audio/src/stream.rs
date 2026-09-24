@@ -60,6 +60,37 @@ impl PcmStream {
         frames as f64 / self.sample_rate as f64
     }
 
+    pub(crate) fn buffered_samples(&self) -> usize {
+        self.ready_samples.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn is_complete(&self) -> bool {
+        self.buffer.lock().complete
+    }
+
+    pub(crate) fn locate(&self, target: usize) -> Option<(usize, usize, Arc<[f32]>)> {
+        let buffer = self.buffer.lock();
+        if buffer.chunks.is_empty() {
+            return None;
+        }
+        let last = buffer.chunks.len() - 1;
+        let mut cursor = 0usize;
+        for (index, chunk) in buffer.chunks.iter().enumerate() {
+            let end = cursor + chunk.len();
+            if target < end {
+                return Some((index, target - cursor, Arc::clone(chunk)));
+            }
+            if index == last {
+                if buffer.complete && target >= end {
+                    return Some((index, chunk.len(), Arc::clone(chunk)));
+                }
+                return None;
+            }
+            cursor = end;
+        }
+        None
+    }
+
     pub(crate) fn chunk_at(&self, index: usize) -> ChunkState {
         let buffer = self.buffer.lock();
         match buffer.chunks.get(index) {

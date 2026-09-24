@@ -94,6 +94,23 @@ impl MessageAttachment {
         Self::media_is_video(&self.filetype, &self.url)
     }
 
+    /// A Matroska video (`.webm`, and the `video/matroska` MIME a browser
+    /// recorder writes) rides on whatever demuxer the platform player has:
+    /// GStreamer reads it, AVFoundation (macOS) and Media Foundation (Windows)
+    /// do not. There the inline player can only mount, fail, and sit on a play
+    /// button that never does anything, so hand the file to the download box
+    /// instead. Audio `.webm` (voice messages) is decoded in-app by symphonia
+    /// and is deliberately left alone.
+    fn is_undecodable_matroska(&self, ext: Option<&str>) -> bool {
+        if cfg!(target_os = "linux") || self.filetype.contains("audio") {
+            return false;
+        }
+        matches!(
+            self.filetype.as_str(),
+            "video/webm" | "video/matroska" | "video/x-matroska"
+        ) || ext == Some("webm")
+    }
+
     pub fn is_unsupported_media(&self) -> bool {
         if matches!(
             self.filetype.as_str(),
@@ -113,6 +130,9 @@ impl MessageAttachment {
             return true;
         }
         let ext = url_extension(&self.filename).or_else(|| url_extension(&self.url));
+        if self.is_undecodable_matroska(ext.as_deref()) {
+            return true;
+        }
         matches!(
             ext.as_deref(),
             Some(
@@ -233,6 +253,7 @@ pub struct MessageReference {
     pub sender_avatar: String,
     pub content: String,
     pub content_preview: SharedString,
+    pub preview_spans: Vec<MessageSpan>,
     pub has_attachment: bool,
     pub has_embed: bool,
     pub is_poll: bool,
@@ -423,6 +444,7 @@ pub struct EmbedAuthor {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbedImage {
+    pub url: SharedString,
     pub url_proxied: SharedString,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -442,12 +464,75 @@ pub struct EmbedTextInput {
     pub multiline: bool,
     pub required: bool,
     pub disabled: bool,
+    pub numeric: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbedDatePicker {
+    pub id: SharedString,
+    pub value: SharedString,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbedRadioOption {
+    pub label: SharedString,
+    pub value: SharedString,
+    pub description: SharedString,
+    pub name: SharedString,
+    pub style: Option<i32>,
+    pub disabled: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbedRadio {
+    pub id: SharedString,
+    pub options: Vec<EmbedRadioOption>,
+    pub max_options: Option<i32>,
+}
+
+impl EmbedRadio {
+    pub fn allows_multiple(&self) -> bool {
+        match (self.options.first(), self.options.get(1)) {
+            (Some(first), Some(second)) => !first.name.is_empty() && first.name != second.name,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbedAnimation {
+    pub id: SharedString,
+    pub url_image: SharedString,
+    pub url_position: SharedString,
+    pub pool: Vec<Vec<SharedString>>,
+    pub duration_seconds: f32,
+    pub repeat: Option<u32>,
+    pub vertical: bool,
+    pub is_result: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum EmbedInput {
     Text(EmbedTextInput),
     Select(MessageSelect),
+    DatePicker(EmbedDatePicker),
+    Radio(EmbedRadio),
+    Animation(EmbedAnimation),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EmbedGridItem {
+    pub start_col: u32,
+    pub start_row: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbedGrid {
+    pub columns: u32,
+    pub rows: u32,
+    pub items: Vec<EmbedGridItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -456,6 +541,8 @@ pub struct EmbedField {
     pub value: SharedString,
     pub inline: bool,
     pub input: Option<EmbedInput>,
+    pub shape: Option<EmbedGrid>,
+    pub buttons: Vec<MessageButton>,
 }
 
 #[derive(Debug, Clone)]
@@ -465,6 +552,7 @@ pub struct Embed {
     pub url: Option<SharedString>,
     pub author: Option<EmbedAuthor>,
     pub description_spans: Vec<MessageSpan>,
+    pub thumbnail_url: SharedString,
     pub thumbnail_proxied: SharedString,
     pub image: Option<EmbedImage>,
     pub footer: Option<EmbedFooter>,
@@ -631,6 +719,14 @@ pub struct TokenTransaction {
 #[derive(Debug, Clone)]
 pub struct Message {
     pub id: MessageId,
+    /// The bucket this row lives in: a topic's id for a topic reply, the
+    /// channel's id otherwise — mirroring mezon-react's
+    /// `channelMessages[topicId || channelId]` entity state. A message id is only
+    /// unique *inside* one bucket, because the server mints it from a per-channel
+    /// sequence with no channel component (`(seq << shift) | node | year`), so
+    /// this is the other half of a row's identity. `MessageList` stamps it when
+    /// the row enters a bucket; it is `ChannelId(0)` until then.
+    pub channel_id: ChannelId,
     pub sort_id: i64,
     pub row_anchor_id: MessageId,
     pub content: String,
@@ -1040,7 +1136,26 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
     if last < total {
         spans.push(MessageSpan::Text(slice(last, total).into()));
     }
+    drop_hanging_line_break(&mut spans);
     apply_headings(spans)
+}
+
+fn drop_hanging_line_break(spans: &mut Vec<MessageSpan>) {
+    let Some(MessageSpan::Text(text)) = spans.last() else {
+        return;
+    };
+    let trimmed = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
+        .map(str::to_string);
+    let Some(trimmed) = trimmed else {
+        return;
+    };
+    if trimmed.is_empty() {
+        spans.pop();
+    } else {
+        *spans.last_mut().expect("checked above") = MessageSpan::Text(trimmed.into());
+    }
 }
 
 pub fn inbox_spans_from_raw(raw_content: &str) -> Option<Vec<MessageSpan>> {
@@ -1322,8 +1437,104 @@ pub(crate) fn split_token_transaction(content: &str) -> TokenTransaction {
     }
 }
 
+const REPLY_PREVIEW_MAX_CHARS: usize = 120;
+
+pub(crate) fn reply_preview_spans(spans: &[MessageSpan]) -> Vec<MessageSpan> {
+    if !spans
+        .iter()
+        .any(|span| matches!(span, MessageSpan::Hashtag { .. }))
+    {
+        return Vec::new();
+    }
+    let mut builder = ReplyPreviewBuilder::default();
+    for span in spans {
+        if builder.full {
+            break;
+        }
+        match span {
+            MessageSpan::Hashtag {
+                display,
+                channel_id,
+            } => builder.push_hashtag(display, channel_id.clone()),
+            MessageSpan::Text(text)
+            | MessageSpan::Bold(text)
+            | MessageSpan::Code(text)
+            | MessageSpan::CodeBlock { text, .. }
+            | MessageSpan::Link { text, .. }
+            | MessageSpan::Mention { display: text, .. }
+            | MessageSpan::Emoji { name: text, .. }
+            | MessageSpan::Canvas { title: text, .. }
+            | MessageSpan::Heading { text, .. } => builder.push_text(text),
+        }
+    }
+    builder.finish()
+}
+
+#[derive(Default)]
+struct ReplyPreviewBuilder {
+    out: Vec<MessageSpan>,
+    text: String,
+    chars: usize,
+    needs_space: bool,
+    full: bool,
+}
+
+impl ReplyPreviewBuilder {
+    fn push_char(&mut self, ch: char) {
+        if self.chars >= REPLY_PREVIEW_MAX_CHARS {
+            self.full = true;
+            return;
+        }
+        self.text.push(ch);
+        self.chars += 1;
+    }
+
+    fn push_text(&mut self, text: &str) {
+        for word in text.split_whitespace() {
+            if self.full {
+                return;
+            }
+            if self.needs_space {
+                self.push_char(' ');
+            }
+            for ch in word.chars() {
+                self.push_char(ch);
+            }
+            self.needs_space = true;
+        }
+    }
+
+    fn push_hashtag(&mut self, display: &str, channel_id: Option<String>) {
+        let label: String = display.split_whitespace().collect::<Vec<_>>().join(" ");
+        if self.chars + label.chars().count() > REPLY_PREVIEW_MAX_CHARS {
+            self.full = true;
+            return;
+        }
+        self.flush_text();
+        self.chars += label.chars().count();
+        self.out.push(MessageSpan::Hashtag {
+            display: label.into(),
+            channel_id,
+        });
+        self.needs_space = false;
+    }
+
+    fn flush_text(&mut self) {
+        if self.text.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut self.text);
+        self.out.push(MessageSpan::Text(text.into()));
+    }
+
+    fn finish(mut self) -> Vec<MessageSpan> {
+        self.flush_text();
+        self.out
+    }
+}
+
 pub(crate) fn reply_preview_line(content: &str) -> String {
-    const MAX_CHARS: usize = 120;
+    const MAX_CHARS: usize = REPLY_PREVIEW_MAX_CHARS;
     let mut out = String::new();
     let mut chars = 0usize;
     let mut first = true;
@@ -1562,6 +1773,7 @@ impl Message {
         let rich_layout = build_rich_layout(&spans);
         Self {
             id,
+            channel_id: ChannelId(0),
             sort_id: id.get(),
             row_anchor_id: id,
             content,
@@ -1774,6 +1986,112 @@ mod tests {
 
     fn forwarded(id: i64, sender: &str, time: i64) -> Message {
         Message::new(MessageId(id), "m", sender, "U", time).with_forwarded(true)
+    }
+
+    fn hashtag(display: &str, channel_id: &str) -> MessageSpan {
+        MessageSpan::Hashtag {
+            display: display.into(),
+            channel_id: Some(channel_id.into()),
+        }
+    }
+
+    #[test]
+    fn parse_spans_drops_a_single_hanging_line_break() {
+        let content = ApiMessageContent {
+            t: "line one\n".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![MessageSpan::Text("line one".into())]
+        );
+        let content = ApiMessageContent {
+            t: "keep\n\n".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![MessageSpan::Text("keep\n".into())],
+            "only the hanging break goes; an intentional blank line stays"
+        );
+        let content = ApiMessageContent {
+            t: "\n".into(),
+            ..Default::default()
+        };
+        assert!(parse_spans(&content).is_empty());
+    }
+
+    #[test]
+    fn parse_spans_keeps_a_trailing_mention_when_only_the_break_follows_it() {
+        let content = ApiMessageContent {
+            t: "hi @bob\n".into(),
+            mentions: vec![ContentToken {
+                user_id: Some("1".into()),
+                ..token(3, 7)
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![
+                MessageSpan::Text("hi ".into()),
+                MessageSpan::Mention {
+                    display: "@bob".into(),
+                    user_id: Some("1".into()),
+                    role_id: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn reply_preview_spans_is_empty_without_a_hashtag() {
+        let spans = vec![
+            MessageSpan::Text("hello ".into()),
+            MessageSpan::Mention {
+                display: "@bob".into(),
+                user_id: Some("1".into()),
+                role_id: None,
+            },
+        ];
+        assert!(reply_preview_spans(&spans).is_empty());
+    }
+
+    #[test]
+    fn reply_preview_spans_keeps_hashtags_and_collapses_the_text_around_them() {
+        let spans = vec![
+            MessageSpan::Text("see   ".into()),
+            hashtag("#general", "10"),
+            MessageSpan::Text("\n and ".into()),
+            MessageSpan::Mention {
+                display: "@bob".into(),
+                user_id: Some("1".into()),
+                role_id: None,
+            },
+            MessageSpan::Text(" in ".into()),
+            hashtag("#voice room", "11"),
+        ];
+        assert_eq!(
+            reply_preview_spans(&spans),
+            vec![
+                MessageSpan::Text("see".into()),
+                hashtag("#general", "10"),
+                MessageSpan::Text("and @bob in".into()),
+                hashtag("#voice room", "11"),
+            ]
+        );
+    }
+
+    #[test]
+    fn reply_preview_spans_stops_at_the_preview_cap() {
+        let long = "x".repeat(REPLY_PREVIEW_MAX_CHARS + 5);
+        let spans = vec![MessageSpan::Text(long.into()), hashtag("#late", "10")];
+        let preview = reply_preview_spans(&spans);
+        assert_eq!(preview.len(), 1);
+        match &preview[0] {
+            MessageSpan::Text(text) => assert_eq!(text.chars().count(), REPLY_PREVIEW_MAX_CHARS),
+            other => panic!("expected text, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2628,6 +2946,32 @@ mod tests {
         let png = attachment("image/png", "https://cdn.example/x.png");
         assert!(!png.is_unsupported_media());
         assert!(png.is_image());
+    }
+
+    #[test]
+    fn matroska_video_is_unsupported_where_the_platform_cannot_demux_it() {
+        // GStreamer reads Matroska; AVFoundation and Media Foundation do not.
+        let expected = !cfg!(target_os = "linux");
+
+        let webm = attachment("video/webm", "https://cdn.example/x.webm");
+        assert_eq!(webm.is_unsupported_media(), expected);
+
+        // A browser recorder writes `video/matroska`, and the web client uploads
+        // the bare "video" category instead of a MIME, so the extension has to
+        // carry the decision on its own.
+        let matroska = attachment("video/matroska", "https://cdn.example/1234.webm");
+        assert_eq!(matroska.is_unsupported_media(), expected);
+        let uploaded = attachment("video", "https://cdn.example/1234.webm");
+        assert_eq!(uploaded.is_unsupported_media(), expected);
+    }
+
+    #[test]
+    fn webm_voice_messages_stay_playable_audio() {
+        // Voice messages are WebM/Opus decoded in-app by symphonia, not by the
+        // platform video player, so the container gate must not swallow them.
+        let voice = attachment("audio/webm", "https://cdn.example/1234.webm");
+        assert!(!voice.is_unsupported_media());
+        assert!(voice.is_audio());
     }
 
     #[test]

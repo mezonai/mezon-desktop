@@ -15,7 +15,7 @@ use crate::app::shell::Shell;
 use crate::components::primitives::{
     Avatar, Button, ButtonVariants, Icon, IconName, Sizable, Size, h_flex, v_flex,
 };
-use crate::image_cache::{AVATAR_ENTRY_MAX_BYTES, LruImageCache};
+use crate::image_cache::{LruImageCache, STICKER_ENTRY_MAX_BYTES};
 use crate::theme::{ActiveTheme, Theme};
 
 const MAX_STICKER_SLOTS: usize = 250;
@@ -153,11 +153,11 @@ impl StickerSettingPage {
             }
         });
         let image_cache = cx.new(|cx| {
-            LruImageCache::avatar_thumbnail(
+            LruImageCache::sticker_thumbnail(
                 "clan-sticker-settings-thumbs",
                 STICKER_LIST_CACHE_CAPACITY,
                 STICKER_LIST_CACHE_BYTES,
-                AVATAR_ENTRY_MAX_BYTES,
+                STICKER_ENTRY_MAX_BYTES,
                 cx,
             )
         });
@@ -425,8 +425,7 @@ fn render_sticker_card(
                 .child(
                     img(sticker.src.clone())
                         .id(SharedString::from(format!("sticker-thumb-{}", sticker.id)))
-                        .h(px(STICKER_IMAGE_SIZE))
-                        .max_w(px(STICKER_IMAGE_SIZE))
+                        .size(px(STICKER_IMAGE_SIZE))
                         .object_fit(gpui::ObjectFit::Contain),
                 ),
         )

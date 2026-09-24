@@ -10,7 +10,10 @@ use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, SharedString,
     Subscription, Task, Window, div, prelude::*, px,
 };
-use mezon_store::{ChannelList, ChannelType, ClanId, CreateChannelError, validate_channel_name};
+use mezon_store::{
+    ChannelList, ChannelType, ClanId, CreateChannelError, Settings, channel_supports_private,
+    validate_channel_name,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Validation {
@@ -134,7 +137,7 @@ impl CreateChannelModal {
 
         let clan_id = self.clan_id;
         let channel_type = self.channel_type;
-        let private = self.is_private && channel_type == ChannelType::Text;
+        let private = self.is_private && channel_supports_private(channel_type);
         let category_id = self.category_id.clone();
         let channel_list = self.channel_list.clone();
         let task = self.channel_list.update(cx, |store, cx| {
@@ -178,6 +181,20 @@ impl CreateChannelModal {
                     this.validation_visible = true;
                     this.creating = false;
                     cx.notify();
+                });
+            }
+            Err(CreateChannelError::Api(code)) => {
+                tracing::error!("create channel failed: API code {code}");
+                let _ = this.update(cx, |this, cx| {
+                    this.creating = false;
+                    cx.notify();
+                });
+                cx.update(|cx| {
+                    let locale = Settings::try_global(cx)
+                        .map(|settings| settings.read(cx).language.clone())
+                        .unwrap_or_else(|| "en".to_string());
+                    let message = mezon_i18n::api_error(&locale, code).to_string();
+                    Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
                 });
             }
             Err(CreateChannelError::Other(msg)) => {
@@ -246,10 +263,16 @@ impl Render for CreateChannelModal {
         let private_label: SharedString = mezon_i18n::t(&locale, "createChannel.privacy.private")
             .to_string()
             .into();
-        let private_desc: SharedString =
-            mezon_i18n::t(&locale, "createChannel.privacy.description")
-                .to_string()
-                .into();
+        let private_desc: SharedString = mezon_i18n::t(
+            &locale,
+            if self.channel_type == ChannelType::Voice {
+                "createChannel.privacy.descriptionVoice"
+            } else {
+                "createChannel.privacy.description"
+            },
+        )
+        .to_string()
+        .into();
         let cancel_label: SharedString = mezon_i18n::t(&locale, "createChannel.buttons.cancel")
             .to_string()
             .into();
@@ -402,7 +425,7 @@ impl Render for CreateChannelModal {
                             .when(show_channel_limit, |el| el.child(channel_limit_msg)),
                     ),
             )
-            .when(selected_type == ChannelType::Text, |el| {
+            .when(channel_supports_private(selected_type), |el| {
                 let switch_entity = entity.clone();
                 el.child(
                     v_flex()

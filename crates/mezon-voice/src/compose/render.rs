@@ -7,23 +7,36 @@ use super::layout::{RADIUS, TileRect, TileShape, layout_tiles};
 use super::text::TextPainter;
 use cosmic_text::Weight;
 
-const BACKGROUND: u32 = 0x0b0d10;
-const TILE_BACKGROUND: u32 = 0x1e2124;
-const SPEAKING: u32 = 0x3ba55d;
-const SPEAKING_WIDTH: f32 = 3.0;
-const AVATAR_RATIO: f32 = 0.34;
-const AVATAR_MIN: f32 = 32.0;
+const BACKGROUND: u32 = 0x1e1f22;
+const TILE_BACKGROUND: u32 = 0x5c5e66;
+const SPEAKING: u32 = 0x1f8cf9;
+const SPEAKING_WIDTH: f32 = 2.5;
 
-const ACCENTS: [u32; 8] = [
-    0x5865f2, 0x3ba55d, 0xfaa61a, 0xed4245, 0xeb459e, 0x00a8fc, 0x9b59b6, 0x1abc9c,
+const AVATAR_RATIO: f32 = 0.33;
+const AVATAR_MIN: f32 = 44.0;
+const AVATAR_MAX: f32 = 80.0;
+const AVATAR_INITIAL_RATIO: f32 = 0.4;
+const STRIP_AVATAR_RATIO: f32 = 0.6;
+const STRIP_AVATAR_MIN: f32 = 24.0;
+
+const LABEL_INSET: f32 = 8.0;
+const LABEL_PADDING: f32 = 5.0;
+const LABEL_RADIUS: f32 = 6.0;
+const LABEL_TEXT: f32 = 16.0;
+const LABEL_LINE_HEIGHT: f32 = 16.0;
+const LABEL_SCRIM_ALPHA: u8 = 0x80;
+
+const ACCENTS: [u32; 7] = [
+    0xade603, 0x00b2cc, 0xfda63c, 0xe16dcc, 0xe8467b, 0x9c7cfd, 0x22e2b3,
 ];
 
-pub fn accent_for(seed: &str) -> u32 {
-    let mut hash: u32 = 0;
-    for byte in seed.bytes() {
-        hash = hash.wrapping_mul(31).wrapping_add(byte as u32);
-    }
-    ACCENTS[(hash % ACCENTS.len() as u32) as usize]
+pub fn accent_for(name: &str) -> u32 {
+    let code = first_upper_char(name).map(|c| c as u32).unwrap_or(0);
+    ACCENTS[(code % ACCENTS.len() as u32) as usize]
+}
+
+fn first_upper_char(name: &str) -> Option<char> {
+    name.chars().next().and_then(|c| c.to_uppercase().next())
 }
 
 pub struct SourceImage<'a> {
@@ -40,6 +53,7 @@ pub struct DrawTile<'a> {
     pub accent: u32,
     pub shape: TileShape,
     pub speaking: bool,
+    pub muted: bool,
 }
 
 pub struct Renderer {
@@ -75,27 +89,16 @@ impl Renderer {
         let shapes: Vec<TileShape> = tiles.iter().map(|tile| tile.shape).collect();
         let width = self.pixmap.width() as f32;
         let height = self.pixmap.height() as f32;
-        let rects = layout_tiles(width, height, &shapes);
 
-        if let Some(focus) = shapes.iter().position(|shape| shape.focused)
-            && let Some(Some(rect)) = rects.get(focus)
-        {
-            self.draw_tile(&tiles[focus], *rect);
-        }
-        for (index, rect) in rects.iter().enumerate() {
-            if shapes.get(index).is_some_and(|shape| shape.focused) {
-                continue;
-            }
-            if let Some(rect) = rect {
-                self.draw_tile(&tiles[index], *rect);
-            }
+        for placement in layout_tiles(width, height, &shapes) {
+            self.draw_tile(&tiles[placement.tile], placement.rect, placement.thumbnail);
         }
 
         bgra_from_pixmap(self.pixmap.as_ref(), &mut self.output);
         &self.output
     }
 
-    fn draw_tile(&mut self, tile: &DrawTile<'_>, rect: TileRect) {
+    fn draw_tile(&mut self, tile: &DrawTile<'_>, rect: TileRect, thumbnail: bool) {
         let x = rect.x.round();
         let y = rect.y.round();
         let w = rect.w.round();
@@ -125,15 +128,20 @@ impl Renderer {
             Some(image) if image.width > 0 && image.height > 0 && !image.bgra.is_empty() => {
                 self.draw_image(image, x, y, w, h, tile.shape.contain, &path);
             }
-            _ => match &tile.avatar {
-                Some(avatar) => self.draw_avatar(avatar, x, y, w, h),
-                None => self.draw_avatar_placeholder(tile.accent, tile.initial, x, y, w, h),
-            },
+            _ => {
+                let size = avatar_size(h, thumbnail);
+                match &tile.avatar {
+                    Some(avatar) => self.draw_avatar(avatar, size, x, y, w, h),
+                    None => {
+                        self.draw_avatar_placeholder(tile.accent, tile.initial, size, x, y, w, h)
+                    }
+                }
+            }
         }
 
         self.draw_label(tile.label, x, y, w, h);
 
-        if tile.speaking {
+        if tile.speaking && !tile.muted && !tile.shape.contain {
             let Some(border) = rounded_rect(
                 x + SPEAKING_WIDTH / 2.0,
                 y + SPEAKING_WIDTH / 2.0,
@@ -209,8 +217,7 @@ impl Renderer {
             .fill_path(clip, &paint, FillRule::Winding, Transform::identity(), None);
     }
 
-    fn draw_avatar(&mut self, avatar: &SourceImage<'_>, x: f32, y: f32, w: f32, h: f32) {
-        let size = AVATAR_MIN.max(w.min(h) * AVATAR_RATIO);
+    fn draw_avatar(&mut self, avatar: &SourceImage<'_>, size: f32, x: f32, y: f32, w: f32, h: f32) {
         let cx = x + w / 2.0;
         let cy = y + h / 2.0;
         let mut builder = PathBuilder::new();
@@ -233,12 +240,12 @@ impl Renderer {
         &mut self,
         accent: u32,
         initial: &str,
+        size: f32,
         x: f32,
         y: f32,
         w: f32,
         h: f32,
     ) {
-        let size = AVATAR_MIN.max(w.min(h) * AVATAR_RATIO);
         let cx = x + w / 2.0;
         let cy = y + h / 2.0;
         let mut builder = PathBuilder::new();
@@ -262,7 +269,7 @@ impl Renderer {
         if initial.is_empty() {
             return;
         }
-        let font_size = (size * 0.42).round();
+        let font_size = (size * AVATAR_INITIAL_RATIO).round();
         let text_width = self.text.measure(initial, font_size, Weight::SEMIBOLD);
         self.text.draw(
             &mut self.pixmap,
@@ -279,34 +286,32 @@ impl Renderer {
         if label.is_empty() {
             return;
         }
-        let font_size = (h * 0.075).round().clamp(11.0, 20.0);
-        let pad = (font_size * 0.55).round();
-        let max_text_width = w - pad * 4.0;
+        let max_text_width = w - LABEL_INSET * 2.0 - LABEL_PADDING * 2.0;
         if max_text_width <= 0.0 {
             return;
         }
         let text = self
             .text
-            .truncate(label, font_size, Weight::MEDIUM, max_text_width);
-        let text_width = self.text.measure(&text, font_size, Weight::MEDIUM);
-        let pill_height = font_size + pad;
-        let pill_y = y + h - pill_height - (pad * 0.7).round();
-        let pill_x = x + (pad * 0.7).round();
+            .truncate(label, LABEL_TEXT, Weight::NORMAL, max_text_width);
+        let text_width = self.text.measure(&text, LABEL_TEXT, Weight::NORMAL);
+        let chip_height = LABEL_LINE_HEIGHT + LABEL_PADDING * 2.0;
+        let chip_width = text_width + LABEL_PADDING * 2.0;
+        let chip_x = x + LABEL_INSET;
+        let chip_y = y + h - LABEL_INSET - chip_height;
 
-        if let Some(pill) = rounded_rect(
-            pill_x,
-            pill_y,
-            text_width + pad * 2.0,
-            pill_height,
-            pill_height / 2.0,
-        ) {
+        if let Some(chip) = rounded_rect(chip_x, chip_y, chip_width, chip_height, LABEL_RADIUS) {
             let paint = Paint {
                 anti_alias: true,
-                shader: tiny_skia::Shader::SolidColor(Color::from_rgba8(0, 0, 0, 140)),
+                shader: tiny_skia::Shader::SolidColor(Color::from_rgba8(
+                    0,
+                    0,
+                    0,
+                    LABEL_SCRIM_ALPHA,
+                )),
                 ..Paint::default()
             };
             self.pixmap.fill_path(
-                &pill,
+                &chip,
                 &paint,
                 FillRule::Winding,
                 Transform::identity(),
@@ -317,12 +322,20 @@ impl Renderer {
         self.text.draw(
             &mut self.pixmap,
             &text,
-            font_size,
-            Weight::MEDIUM,
-            x + (pad * 1.7).round(),
-            pill_y + pill_height / 2.0,
+            LABEL_TEXT,
+            Weight::NORMAL,
+            chip_x + LABEL_PADDING,
+            chip_y + chip_height / 2.0,
             0xffffff,
         );
+    }
+}
+
+fn avatar_size(tile_height: f32, thumbnail: bool) -> f32 {
+    if thumbnail {
+        (tile_height * STRIP_AVATAR_RATIO).clamp(STRIP_AVATAR_MIN, AVATAR_MAX)
+    } else {
+        (tile_height * AVATAR_RATIO).clamp(AVATAR_MIN, AVATAR_MAX)
     }
 }
 
@@ -405,11 +418,11 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_scene_renders_the_background() {
+    fn an_empty_scene_renders_the_live_grid_background() {
         let mut renderer = Renderer::new(320, 180).expect("renderer");
         let frame = renderer.render(&[]).to_vec();
         assert_eq!(frame.len(), 320 * 180 * 4);
-        assert_eq!(pixel(&frame, 320, 5, 5), [0x10, 0x0d, 0x0b, 255]);
+        assert_eq!(pixel(&frame, 320, 2, 2), [0x22, 0x1f, 0x1e, 255]);
     }
 
     #[test]
@@ -422,11 +435,9 @@ mod tests {
                 label: "",
                 initial: "",
                 accent: 0xff0000,
-                shape: TileShape {
-                    focused: false,
-                    contain: false,
-                },
+                shape: TileShape::default(),
                 speaking: false,
+                muted: false,
             }])
             .to_vec();
         let centre = pixel(&frame, 320, 160, 90);
@@ -451,11 +462,9 @@ mod tests {
                     height: 36,
                 }),
                 accent: 0x000000,
-                shape: TileShape {
-                    focused: false,
-                    contain: false,
-                },
+                shape: TileShape::default(),
                 speaking: false,
+                muted: false,
             }])
             .to_vec();
         let centre = pixel(&frame, 320, 160, 90);
@@ -463,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn a_speaking_tile_draws_a_green_border() {
+    fn a_speaking_tile_draws_the_speaking_border() {
         let mut renderer = Renderer::new(320, 180).expect("renderer");
         let quiet = renderer
             .render(&[DrawTile {
@@ -474,9 +483,10 @@ mod tests {
                 accent: 0x000000,
                 shape: TileShape {
                     focused: true,
-                    contain: false,
+                    ..TileShape::default()
                 },
                 speaking: false,
+                muted: false,
             }])
             .to_vec();
         let loud = renderer
@@ -488,18 +498,49 @@ mod tests {
                 accent: 0x000000,
                 shape: TileShape {
                     focused: true,
-                    contain: false,
+                    ..TileShape::default()
                 },
                 speaking: true,
+                muted: false,
             }])
             .to_vec();
         assert_ne!(quiet, loud, "the speaking border changes the frame");
     }
 
     #[test]
-    fn an_accent_is_stable_per_seed() {
+    fn an_accent_matches_the_avatar_primitives_palette() {
         assert_eq!(accent_for("alice"), accent_for("alice"));
         assert!(ACCENTS.contains(&accent_for("bob")));
+        assert_eq!(accent_for("lich.duongthanh"), accent_for("Lam"));
+        assert_ne!(accent_for("lich.duongthanh"), accent_for("ha.lehong"));
+        assert_eq!(accent_for(""), ACCENTS[0]);
+    }
+
+    #[test]
+    fn a_muted_speaker_gets_no_border() {
+        let mut renderer = Renderer::new(320, 180).expect("renderer");
+        let tile = |muted| DrawTile {
+            image: None,
+            avatar: None,
+            label: "",
+            initial: "",
+            accent: 0x000000,
+            shape: TileShape::default(),
+            speaking: true,
+            muted,
+        };
+        let quiet = renderer.render(&[tile(true)]).to_vec();
+        let loud = renderer.render(&[tile(false)]).to_vec();
+        assert_ne!(quiet, loud, "only the unmuted speaker lights up");
+    }
+
+    #[test]
+    fn an_avatar_never_outgrows_the_live_grids_cap() {
+        assert_eq!(avatar_size(704.0, false), AVATAR_MAX);
+        assert_eq!(avatar_size(60.0, false), AVATAR_MIN);
+        assert_eq!(avatar_size(200.0, false), 66.0);
+        assert_eq!(avatar_size(93.0, true), 93.0 * STRIP_AVATAR_RATIO);
+        assert_eq!(avatar_size(20.0, true), STRIP_AVATAR_MIN);
     }
 
     #[test]
@@ -512,11 +553,9 @@ mod tests {
                 label: "",
                 initial: "",
                 accent: accent_for(&index.to_string()),
-                shape: TileShape {
-                    focused: false,
-                    contain: false,
-                },
+                shape: TileShape::default(),
                 speaking: index % 3 == 0,
+                muted: false,
             })
             .collect();
         assert_eq!(renderer.render(&tiles).len(), 1280 * 720 * 4);
@@ -534,8 +573,13 @@ mod tests {
             label: "Nguyen Van Long",
             initial: "N",
             accent: 0x3ba55d,
-            shape: TileShape { focused, contain },
+            shape: TileShape {
+                focused,
+                contain,
+                fullscreen: false,
+            },
             speaking: true,
+            muted: false,
         }
     }
 

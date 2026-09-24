@@ -1,10 +1,7 @@
 use crate::components::primitives::{Avatar, Icon, IconName, Label, h_flex, v_flex};
 use crate::image_cache::LruImageCache;
-use crate::theme::{ActiveTheme, Theme, resolve_theme, set_theme};
-use gpui::{
-    AnyElement, Context, Entity, FontWeight, Rgba, Window, div, linear_color_stop, linear_gradient,
-    prelude::*, px, rgb,
-};
+use crate::theme::{ActiveTheme, Theme, preview_surface, resolve_theme, set_theme};
+use gpui::{Context, Entity, FontWeight, Rgba, Window, div, prelude::*, px};
 use mezon_store::{AccountStore, Settings};
 use ui::Tooltip;
 
@@ -94,62 +91,12 @@ fn message_row(
         )
 }
 
-fn swatch_background(key: &str) -> AnyElement {
-    let base = div().absolute().inset_0().rounded_full();
-    match key {
-        "dark" => base.bg(rgb(0x26272b)).into_any_element(),
-        "light" => base.bg(rgb(0xffffff)).into_any_element(),
-        "sunrise" => base
-            .bg(linear_gradient(
-                135.,
-                linear_color_stop(rgb(0xe0c3fc), 0.),
-                linear_color_stop(rgb(0xfff1eb), 1.),
-            ))
-            .into_any_element(),
-        "purple_haze" => base
-            .bg(linear_gradient(
-                135.,
-                linear_color_stop(rgb(0xa78bfa), 0.),
-                linear_color_stop(rgb(0x60a5fa), 1.),
-            ))
-            .into_any_element(),
-        "redDark" => base
-            .bg(linear_gradient(
-                135.,
-                linear_color_stop(rgb(0x3b0a0a), 0.),
-                linear_color_stop(rgb(0xe11d48), 1.),
-            ))
-            .into_any_element(),
-        "abyss_dark" => base
-            .bg(linear_gradient(
-                135.,
-                linear_color_stop(rgb(0x0f172a), 0.),
-                linear_color_stop(rgb(0x6d28d9), 1.),
-            ))
-            .into_any_element(),
-        "berrynade" => base
-            .bg(linear_gradient(
-                161.,
-                linear_color_stop(rgb(0x52122f), 0.),
-                linear_color_stop(rgb(0x6f5018), 1.),
-            ))
-            .into_any_element(),
-        "cisher" => base
-            .bg(linear_gradient(
-                135.,
-                linear_color_stop(rgb(0xf8dfaf), 0.),
-                linear_color_stop(rgb(0xf4c7b3), 1.),
-            ))
-            .into_any_element(),
-        "sunset" => base
-            .bg(linear_gradient(
-                142.,
-                linear_color_stop(rgb(0x22132f), 0.),
-                linear_color_stop(rgb(0x513423), 1.),
-            ))
-            .into_any_element(),
-        _ => base.bg(resolve_theme(key).bg_primary).into_any_element(),
-    }
+fn swatch_background(key: &str) -> impl IntoElement {
+    div()
+        .absolute()
+        .inset_0()
+        .rounded_full()
+        .bg(preview_surface(key).ramp())
 }
 
 fn theme_swatch(
@@ -248,7 +195,7 @@ impl Render for AppearancePage {
                 v_flex()
                     .h(px(150.0))
                     .rounded_lg()
-                    .bg(theme.bg_secondary)
+                    .bg(theme.surfaces.secondary.ramp())
                     .border_1()
                     .border_color(theme.border)
                     .pb_5()

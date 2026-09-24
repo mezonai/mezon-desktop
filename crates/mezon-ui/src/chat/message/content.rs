@@ -4,14 +4,14 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Bounds, FontWeight, HighlightStyle, Hsla, InteractiveText, ObjectFit, Pixels,
-    SharedString, StyledText, TextLayout, UnderlineStyle, canvas, div, fill, img, point,
+    AnyElement, App, Bounds, Entity, FontWeight, HighlightStyle, Hsla, InteractiveText, ObjectFit,
+    Pixels, SharedString, StyledText, TextLayout, UnderlineStyle, canvas, div, fill, img, point,
     prelude::*, px, relative, rems, rgb, rgba, size,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanId, Embed, LinkKind, Message, MessageCode, MessageId,
-    MessageSpan, PlatformStore, ProfileContext, RichClick, RichLayout, RichRunKind, RichToken,
-    UserId, is_here_user_id,
+    AppConfig, ChannelId, ChannelList, ChannelType, ClanId, Embed, LinkKind, Message, MessageCode,
+    MessageId, MessageSpan, PlatformStore, ProfileContext, RichClick, RichLayout, RichRunKind,
+    RichToken, UserId, invite_id_from_url, is_clan_invite_url, is_here_user_id,
 };
 
 use ui::Clickable;
@@ -23,7 +23,8 @@ use super::selection::{
 };
 use crate::app::shell::Shell;
 use crate::chat::user_profile_popover::{ClickableContainer, UserProfilePopover};
-use crate::components::primitives::{Icon, IconName};
+use crate::components::primitives::{CopyButton, Icon, IconName};
+use crate::image_cache::LruImageCache;
 use crate::router::{Route, navigate};
 use crate::theme::Theme;
 
@@ -36,6 +37,9 @@ const YOUTUBE_ACCENT: u32 = 0xff_00_1f;
 const TIKTOK_ACCENT: u32 = 0xff_00_50;
 const FACEBOOK_ACCENT: u32 = 0x18_77_f2;
 const SOCIAL_CARD_BG: u32 = 0x2b_2d_31;
+const SOCIAL_POSTER_BG: u32 = 0x1e_1f_22;
+const SOCIAL_CARD_WIDTH: f32 = 400.;
+const SOCIAL_CARD_PADDING: f32 = 16.;
 const EMOJI_SIZE: f32 = 24.;
 const EMOJI_JUMBO_SIZE: f32 = 48.;
 
@@ -46,7 +50,22 @@ const EMOJI_JUMBO_SIZE: f32 = 48.;
 fn emoji_source_px(size: Pixels) -> u32 {
     (f32::from(size) * 2.0).round().max(1.0) as u32
 }
+/// Stands in for an inline channel icon in the string selection and copy work off.
+/// Braille blank is never typed, so stripping it out of a copied slice cannot eat a
+/// character someone meant to send.
 pub(crate) const INLINE_ICON_PLACEHOLDER: char = '\u{2800}';
+/// Reserves the box the icon is painted into, in the string that actually gets shaped.
+/// It has to be about one em wide, and nothing else about it is observable: the run is
+/// faded out. Braille blank cannot do this job — no bundled font carries it, so its
+/// advance came from whatever the platform fell back to (Apple Symbols, 0.684em on
+/// macOS), which drew the icon at 11px instead of 16 and moved with the OS. Per mille is
+/// the one glyph gg sans defines near an em (1.004em at Normal), and the run pins the
+/// weight because the glyph widens with it.
+///
+/// The two strings are indexed against each other, so this must stay the same number of
+/// UTF-8 bytes as [`INLINE_ICON_PLACEHOLDER`] — `placeholders_agree_on_utf8_length` holds
+/// that line.
+pub(crate) const INLINE_ICON_RESERVE: char = '\u{2030}';
 pub(crate) const ATTACHMENT_PLACEHOLDER: char = '\u{fffc}';
 const RICH_TEXT_PLAN_LIMIT: usize = 512;
 const SELECTABLE_LAYOUT_PLAN_LIMIT: usize = 128;
@@ -674,6 +693,11 @@ fn render_selectable_segmented_spans(
                         CachedSelectableTextPiece::LineBreak => {
                             row = row.child(div().w_full().h_0());
                         }
+                        CachedSelectableTextPiece::EmptyLine => {
+                            // An empty text still lays out one line tall, which is exactly
+                            // the gap wanted; `w_full` keeps it on a row of its own.
+                            row = row.child(div().w_full().child(SharedString::default()));
+                        }
                         CachedSelectableTextPiece::Text { text, range } => {
                             let chunk_base = base + range.start;
                             let styled = selectable_segment_shared(text.clone(), chunk_base, None);
@@ -757,7 +781,11 @@ fn render_selectable_segmented_spans(
                 );
                 base = end;
             }
-            MessageSpan::CodeBlock { text, .. } => {
+            MessageSpan::CodeBlock {
+                text,
+                fenced_source,
+                ..
+            } => {
                 let end = base + text.len();
                 let styled = selectable_segment(text, base, selected.as_ref());
                 segments.push(TextSegment::text(styled.layout().clone(), base..end));
@@ -774,7 +802,12 @@ fn render_selectable_segmented_spans(
                         .bg(ctx.theme.tokens.bg_markdown_code)
                         .text_size(px(14.))
                         .text_color(ctx.theme.tokens.text_theme_message)
-                        .child(styled),
+                        .child(styled)
+                        .child(code_block_copy_overlay(
+                            SharedString::from(format!("code-copy-{}-{base}", msg.row_anchor_id.0)),
+                            fenced_source.clone(),
+                            ctx.theme,
+                        )),
                 );
                 base = end;
             }
@@ -856,12 +889,15 @@ fn render_selectable_segmented_spans(
                 }
                 let card_key = link_part_index;
                 link_part_index += 1;
+                let poster = social_poster(*kind, resolved.as_ref())
+                    .map(|poster| (poster, ctx.social_cache.clone()));
                 row = row.child(render_social_link_card(
                     *kind,
                     &ctx.selection,
                     resolved,
                     card_key,
                     url_col,
+                    poster,
                 ));
                 base += text.len();
             }
@@ -1097,6 +1133,18 @@ pub(crate) fn selectable_spans_text(spans: &[MessageSpan], locale: &str, cx: &Ap
         }
     }
     text
+}
+
+pub(crate) fn code_block_copy_overlay(
+    id: impl Into<gpui::ElementId>,
+    text: SharedString,
+    theme: &Theme,
+) -> gpui::Div {
+    let overlay = div().absolute().top(px(8.)).right(px(8.));
+    if text.is_empty() {
+        return overlay;
+    }
+    overlay.child(CopyButton::new(id, text, theme.tokens.text_theme_message))
 }
 
 fn append_selectable_section(text: &mut String, section: &str) {
@@ -1406,6 +1454,9 @@ pub(crate) enum CachedSelectableTextPiece {
         range: Range<usize>,
     },
     LineBreak,
+    /// A line with nothing on it (`\n\n` in the source): a break alone is zero-height, so the
+    /// blank line the author typed with Shift+Enter has to reserve a line of its own.
+    EmptyLine,
 }
 
 fn memoized_selectable_text_pieces(
@@ -1422,11 +1473,32 @@ fn memoized_selectable_text_pieces(
         return pieces;
     }
 
+    let pieces: Rc<[CachedSelectableTextPiece]> = build_selectable_text_pieces(text).into();
+    let mut memo = ctx.row_memo.borrow_mut();
+    if memo.selection_text_pieces.len() >= SELECTABLE_TEXT_PIECE_LIMIT
+        && !memo.selection_text_pieces.contains_key(text)
+    {
+        memo.selection_text_pieces.clear();
+    }
+    memo.selection_text_pieces
+        .insert(text.clone(), pieces.clone());
+    pieces
+}
+
+fn build_selectable_text_pieces(text: &str) -> Vec<CachedSelectableTextPiece> {
     let mut pieces = Vec::new();
     let mut line_base = 0usize;
+    let line_count = text.split('\n').count();
     for (line_index, line) in text.split('\n').enumerate() {
         if line_index > 0 {
             pieces.push(CachedSelectableTextPiece::LineBreak);
+        }
+        // Only a line *between* two breaks is a blank line the author typed; a newline that
+        // merely ends the span (say, right before a code block) is just the break itself.
+        if line.trim().is_empty() && line_index > 0 && line_index + 1 < line_count {
+            pieces.push(CachedSelectableTextPiece::EmptyLine);
+            line_base += line.len() + 1;
+            continue;
         }
         for range in selectable_text_chunks(line) {
             let chunk = &line[range.clone()];
@@ -1456,15 +1528,6 @@ fn memoized_selectable_text_pieces(
         }
         line_base += line.len() + 1;
     }
-    let pieces: Rc<[CachedSelectableTextPiece]> = pieces.into();
-    let mut memo = ctx.row_memo.borrow_mut();
-    if memo.selection_text_pieces.len() >= SELECTABLE_TEXT_PIECE_LIMIT
-        && !memo.selection_text_pieces.contains_key(text)
-    {
-        memo.selection_text_pieces.clear();
-    }
-    memo.selection_text_pieces
-        .insert(text.clone(), pieces.clone());
     pieces
 }
 
@@ -1680,6 +1743,7 @@ fn append_span(
                 SharedString::from(resolve_link_url(url, text)),
                 key,
                 render_social_link_url_row(text, theme),
+                None,
             ))
         }
         MessageSpan::Link { text, url, .. } => {
@@ -1817,6 +1881,98 @@ fn render_social_link_url_row(text: &SharedString, theme: &Theme) -> AnyElement 
         .into_any_element()
 }
 
+struct SocialPoster {
+    source: SharedString,
+    width: f32,
+    height: f32,
+}
+
+fn social_poster(kind: LinkKind, url: &str) -> Option<SocialPoster> {
+    match kind {
+        LinkKind::YouTube => {
+            let video_id = mezon_client::social::youtube_video_id(url)?;
+            let (width, height) = if mezon_client::social::is_youtube_shorts(url) {
+                (169., 300.)
+            } else {
+                (400., 225.)
+            };
+            Some(SocialPoster {
+                source: mezon_client::social::youtube_poster_url(video_id).into(),
+                width,
+                height,
+            })
+        }
+        LinkKind::TikTok => Some(SocialPoster {
+            source: SharedString::from(url.to_string()),
+            width: 253.,
+            height: 450.,
+        }),
+        LinkKind::Facebook | LinkKind::Plain => None,
+    }
+}
+
+fn render_social_poster(poster: SocialPoster, cache: Entity<LruImageCache>) -> AnyElement {
+    div()
+        .relative()
+        .w_full()
+        .max_w(px(poster.width))
+        .h(px(poster.height))
+        .flex_shrink_0()
+        .mt_1()
+        .rounded(px(8.))
+        .overflow_hidden()
+        .bg(rgb(SOCIAL_POSTER_BG))
+        .image_cache(cache)
+        .child(
+            div().absolute().inset_0().overflow_hidden().child(
+                img(poster.source)
+                    .w_full()
+                    .h_full()
+                    .object_fit(ObjectFit::Cover)
+                    .with_fallback(|| div().w_full().h_full().into_any_element()),
+            ),
+        )
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(48.))
+                        .rounded_full()
+                        .bg(gpui::Rgba {
+                            r: 0.,
+                            g: 0.,
+                            b: 0.,
+                            a: 0.5,
+                        })
+                        .child(
+                            Icon::new(IconName::PlayButton)
+                                .size(px(20.))
+                                .text_color(gpui::white()),
+                        ),
+                ),
+        )
+        .into_any_element()
+}
+
+/// A YouTube card opens on the web client's own `/embed/youtube` player page — the
+/// point of the card is the video, not the site around it. Every other social link
+/// (and any URL we cannot read an id out of) opens as it always did.
+fn social_card_launch_url(url: &str, cx: &gpui::App) -> String {
+    AppConfig::try_global(cx)
+        .and_then(|config| {
+            mezon_client::social::build_youtube_embed_route_url(&config.domain_url, url)
+        })
+        .unwrap_or_else(|| url.to_string())
+}
+
 fn render_social_link_card(
     kind: LinkKind,
     selection: &SharedSelection,
@@ -1825,6 +1981,7 @@ fn render_social_link_card(
     // hash to one id and the two cards would share their interactive state.
     key: usize,
     url_row: impl IntoElement,
+    poster: Option<(SocialPoster, Entity<LruImageCache>)>,
 ) -> AnyElement {
     let (accent, label) = match kind {
         LinkKind::YouTube => (YOUTUBE_ACCENT, "YouTube"),
@@ -1834,6 +1991,9 @@ fn render_social_link_card(
     };
     let id = ("msg-social", key);
     let selection = selection.clone();
+    let card_width = poster.as_ref().map_or(SOCIAL_CARD_WIDTH, |(poster, _)| {
+        (poster.width + SOCIAL_CARD_PADDING * 2.).max(SOCIAL_CARD_WIDTH)
+    });
     div()
         .flex()
         .flex_row()
@@ -1848,9 +2008,9 @@ fn render_social_link_card(
                 .gap_1()
                 .w_full()
                 .min_w_0()
-                .max_w(px(400.))
+                .max_w(px(card_width))
                 .my_1()
-                .p(px(16.))
+                .p(px(SOCIAL_CARD_PADDING))
                 .rounded(px(4.))
                 .border_l_4()
                 .border_color(rgb(accent))
@@ -1859,7 +2019,7 @@ fn render_social_link_card(
                 .cursor_pointer()
                 .on_click(move |_, _, cx| {
                     if !selection.borrow().has_selection() {
-                        open_message_link(resolved.to_string(), cx);
+                        PlatformStore::open_app_window(social_card_launch_url(&resolved, cx), cx);
                     }
                 })
                 .child(
@@ -1869,7 +2029,10 @@ fn render_social_link_card(
                         .text_color(rgb(accent))
                         .child(label),
                 )
-                .child(url_row),
+                .child(url_row)
+                .when_some(poster, |card, (poster, cache)| {
+                    card.child(render_social_poster(poster, cache))
+                }),
         )
         .into_any_element()
 }
@@ -2070,9 +2233,9 @@ fn render_hashtag_chip(chip: HashtagChip, ctx: &RowCtx) -> AnyElement {
     }
 }
 
-struct HashtagChip {
-    label: SharedString,
-    icon: IconName,
+pub(super) struct HashtagChip {
+    pub(super) label: SharedString,
+    pub(super) icon: IconName,
     italic: bool,
     channel_id: Option<ChannelId>,
 }
@@ -2082,7 +2245,12 @@ struct ResolvedHashtag {
     icon: IconName,
 }
 
-fn hashtag_chip(display: &str, channel_id: Option<&str>, locale: &str, cx: &App) -> HashtagChip {
+pub(super) fn hashtag_chip(
+    display: &str,
+    channel_id: Option<&str>,
+    locale: &str,
+    cx: &App,
+) -> HashtagChip {
     let parsed_channel = channel_id.and_then(parse_channel_id);
     let resolved = parsed_channel.and_then(|cid| hashtag_channel(cid, cx));
     hashtag_chip_for(display, parsed_channel, resolved, locale)
@@ -2114,7 +2282,7 @@ fn hashtag_chip_for(
     }
     if parsed_channel.is_some() {
         return HashtagChip {
-            label: SharedString::new_static(mezon_i18n::t(locale, "message.noAccess")),
+            label: SharedString::new_static(mezon_i18n::t(locale, "message.privateChannel")),
             icon: IconName::LockedPrivate,
             italic: false,
             channel_id: None,
@@ -2133,13 +2301,18 @@ fn hashtag_display_label(display: &str) -> SharedString {
 }
 
 fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> Option<AnyElement> {
-    let all_supported = msg.spans.iter().all(|span| {
-        matches!(
-            span,
-            MessageSpan::Text(_) | MessageSpan::Mention { .. } | MessageSpan::Hashtag { .. }
-        )
-    });
-    if !all_supported {
+    // This path exists only to paint channel icons over a single shaped string, and it used
+    // to find that out at the end — after copying the whole body into a String and filling
+    // three vectors, which every chipless message then threw away. Ask the spans first.
+    let mut has_icon = false;
+    for span in &msg.spans {
+        match span {
+            MessageSpan::Hashtag { .. } => has_icon = true,
+            MessageSpan::Text(_) | MessageSpan::Mention { .. } => {}
+            _ => return None,
+        }
+    }
+    if !has_icon {
         return None;
     }
 
@@ -2171,6 +2344,8 @@ fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> 
                     range: start..end,
                     color: Some(if is_role { role_color } else { mention_color }),
                     background: Some(if is_role { role_bg } else { mention_bg }),
+                    font_weight: None,
+                    fade_out: None,
                 });
                 if is_role {
                     continue;
@@ -2215,24 +2390,23 @@ fn build_inline_content(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> 
             } => {
                 let chip = hashtag_chip(display, channel_id.as_deref(), ctx.locale, ctx.app);
                 let icon_index = text.len();
-                text.push(INLINE_ICON_PLACEHOLDER);
+                text.push(INLINE_ICON_RESERVE);
                 let label_index = text.len();
                 text.push_str(&chip.label);
                 let end = text.len();
                 runs.push(StyledRun {
                     range: icon_index..label_index,
-                    color: Some(Hsla {
-                        h: 0.,
-                        s: 0.,
-                        l: 0.,
-                        a: 0.,
-                    }),
+                    color: None,
                     background: Some(mention_bg),
+                    font_weight: Some(gpui::FontWeight::NORMAL),
+                    fade_out: Some(1.),
                 });
                 runs.push(StyledRun {
                     range: label_index..end,
                     color: Some(mention_color),
                     background: Some(mention_bg),
+                    font_weight: None,
+                    fade_out: None,
                 });
                 icons.push(IconOverlay {
                     byte_index: icon_index,
@@ -2429,9 +2603,20 @@ pub(crate) fn open_message_link(url: String, cx: &mut App) {
     if url.is_empty() {
         return;
     }
+    if let Some(invite_id) = clan_invite_id(&url, cx) {
+        crate::invite::join_clan_modal::JoinClanModal::open(invite_id, cx);
+        return;
+    }
     if let Some(store) = PlatformStore::try_global(cx) {
         let _ = store.read(cx).open_url_external(&url);
     }
+}
+
+fn clan_invite_id(url: &str, cx: &App) -> Option<String> {
+    let cfg = AppConfig::try_global(cx)?;
+    is_clan_invite_url(url, Some(&cfg.domain_url))
+        .then(|| invite_id_from_url(url))
+        .flatten()
 }
 
 pub(crate) fn resolve_message_link_url(url: &str, text: &str) -> String {
@@ -2717,14 +2902,61 @@ fn split_unbreakable(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::{CachedSelectableTextPiece, build_selectable_text_pieces};
     use super::{
-        RichRunPalette, RichTextRenderPlan, SelectableSectionCursor, parse_channel_id,
-        rich_highlights_with_link_hover, rich_run_highlight,
-        rich_run_highlight_with_link_underline, rich_text_plan_matches,
+        INLINE_ICON_PLACEHOLDER, INLINE_ICON_RESERVE, RichRunPalette, RichTextRenderPlan,
+        SelectableSectionCursor, parse_channel_id, rich_highlights_with_link_hover,
+        rich_run_highlight, rich_run_highlight_with_link_underline, rich_text_plan_matches,
         selectable_message_layout_identity, selectable_text_chunks,
     };
     use gpui::{Hsla, SharedString};
+
+    fn piece_shape(text: &str) -> String {
+        build_selectable_text_pieces(text)
+            .iter()
+            .map(|p| match p {
+                CachedSelectableTextPiece::Text { text, .. } => text.to_string(),
+                CachedSelectableTextPiece::LineBreak => "⏎".into(),
+                CachedSelectableTextPiece::EmptyLine => "▯".into(),
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    #[test]
+    fn a_blank_line_between_two_breaks_reserves_a_line() {
+        assert_eq!(piece_shape("a\nb"), "a|⏎|b");
+        assert_eq!(piece_shape("a\n\nb"), "a|⏎|▯|⏎|b");
+        assert_eq!(piece_shape("a\n\n\nb"), "a|⏎|▯|⏎|▯|⏎|b");
+        assert_eq!(piece_shape("a\n  \nb"), "a|⏎|▯|⏎|b");
+    }
+
+    #[test]
+    fn a_newline_that_merely_ends_or_starts_the_span_is_only_a_break() {
+        // The text before / after a code block carries the fence's newline.
+        assert_eq!(piece_shape("a\n"), "a|⏎");
+        assert_eq!(piece_shape("\nb"), "⏎|b");
+        assert_eq!(piece_shape("a\n\n"), "a|⏎|▯|⏎");
+    }
     use mezon_store::{ChannelId, Message, MessageId, MessageSpan, RichRunKind, build_rich_layout};
+
+    /// The shaped string and the string selection indexes into carry different characters
+    /// where a channel icon goes, and every offset is shared between them. Same byte width
+    /// or a selection that crosses a chip lands on the wrong character.
+    #[test]
+    fn placeholders_agree_on_utf8_length() {
+        assert_eq!(
+            INLINE_ICON_PLACEHOLDER.len_utf8(),
+            INLINE_ICON_RESERVE.len_utf8()
+        );
+    }
+
+    /// The reserve is only ever shaped, never read back, so it may be a character someone
+    /// could type. The placeholder is stripped out of copied text wholesale, so it must not.
+    #[test]
+    fn only_the_reserve_may_be_a_typeable_character() {
+        assert!(('\u{2800}'..='\u{28ff}').contains(&INLINE_ICON_PLACEHOLDER));
+    }
 
     #[test]
     fn parse_channel_id_rejects_zero() {
@@ -2921,10 +3153,10 @@ mod hashtag_label_tests {
     }
 
     #[test]
-    fn inaccessible_channel_shows_no_access() {
+    fn inaccessible_channel_shows_private_channel() {
         let chip = chip("#secret", Some(999), None);
 
-        assert_eq!(chip.label, "No Access");
+        assert_eq!(chip.label, "private-channel");
         assert!(!chip.italic);
         assert_eq!(chip.icon.path(), IconName::LockedPrivate.path());
     }
@@ -2941,5 +3173,34 @@ mod hashtag_label_tests {
             chip("#g", Some(2), resolved(Some("g"))).channel_id,
             Some(ChannelId(2))
         );
+    }
+}
+
+#[cfg(test)]
+mod social_card_tests {
+    use super::social_card_launch_url;
+
+    /// The card's whole job: a YouTube link goes to our player page, everything else
+    /// keeps opening what the reader actually clicked.
+    #[gpui::test]
+    fn a_youtube_card_opens_the_configured_embed_route(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            mezon_store::AppConfig::init_global(
+                std::sync::Arc::new(mezon_store::AppConfig {
+                    domain_url: "http://127.0.0.1:4207".into(),
+                    ..Default::default()
+                }),
+                cx,
+            );
+
+            assert_eq!(
+                social_card_launch_url("https://www.youtube.com/watch?v=jNQXAC9IVRw&t=1m30s", cx),
+                "http://127.0.0.1:4207/embed/youtube?v=jNQXAC9IVRw&t=90"
+            );
+            assert_eq!(
+                social_card_launch_url("https://www.tiktok.com/@user/video/123", cx),
+                "https://www.tiktok.com/@user/video/123"
+            );
+        });
     }
 }

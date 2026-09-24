@@ -16,9 +16,8 @@ tracing.workspace = true
 windows = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc = { workspace = true }
-cocoa = { workspace = true }
 core-foundation = { workspace = true }
 
 [target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
-x11rb = { version = "0.13", features = ["screensaver"] }
+x11rb = { workspace = true }
+libc.workspace = true

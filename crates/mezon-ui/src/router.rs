@@ -16,6 +16,9 @@ pub enum Route {
     ClanChannels {
         clan_id: ClanId,
     },
+    ClanGuide {
+        clan_id: ClanId,
+    },
     DirectMessage {
         direct_id: ChannelId,
         message_type: String,
@@ -36,6 +39,7 @@ pub enum Route {
     },
     AddFriend {
         username: String,
+        data: Option<String>,
     },
     Invite {
         invite_id: String,
@@ -67,18 +71,27 @@ pub enum Route {
 }
 
 impl Route {
-    pub fn targets_clan(&self, clan: ClanId) -> bool {
+    pub fn clan_id(&self) -> Option<ClanId> {
         match self {
             Route::ClanMembers { clan_id }
             | Route::ClanChannels { clan_id }
+            | Route::ClanGuide { clan_id }
             | Route::Channel { clan_id, .. }
             | Route::Thread { clan_id, .. }
             | Route::Canvas { clan_id, .. }
             | Route::SettingsClanProfile { clan_id }
             | Route::ClanSettings { clan_id, .. }
-            | Route::ChannelSettings { clan_id, .. } => *clan_id == clan,
-            _ => false,
+            | Route::ChannelSettings { clan_id, .. } => Some(*clan_id),
+            _ => None,
         }
+    }
+
+    pub fn is_clan_space(&self) -> bool {
+        matches!(self, Route::Chat) || self.clan_id().is_some()
+    }
+
+    pub fn targets_clan(&self, clan: ClanId) -> bool {
+        self.clan_id() == Some(clan)
     }
 
     pub fn to_path(&self) -> String {
@@ -88,6 +101,7 @@ impl Route {
             Route::Friends => "/chat/direct/friends".to_string(),
             Route::ClanMembers { clan_id } => format!("/chat/clans/{clan_id}/members"),
             Route::ClanChannels { clan_id } => format!("/chat/clans/{clan_id}/channel-setting"),
+            Route::ClanGuide { clan_id } => format!("/chat/clans/{clan_id}/guide"),
             Route::DirectMessage {
                 direct_id,
                 message_type,
@@ -106,7 +120,10 @@ impl Route {
                 channel_id,
                 canvas_id,
             } => format!("/chat/clans/{clan_id}/channels/{channel_id}/canvas/{canvas_id}"),
-            Route::AddFriend { username } => format!("/chat/{username}"),
+            Route::AddFriend { username, data } => match data {
+                Some(data) => format!("/chat/{username}?data={data}"),
+                None => format!("/chat/{username}"),
+            },
             Route::Invite { invite_id } => format!("/invite/{invite_id}"),
             Route::SettingsAccount => "/settings/account".to_string(),
             Route::SettingsProfile => "/settings/profile".to_string(),
@@ -138,6 +155,7 @@ impl Route {
     }
 
     pub fn from_path(path: &str) -> Route {
+        let (path, query) = split_query(path);
         let normalized = normalize_path(path);
         let segments = normalized
             .trim_start_matches('/')
@@ -145,7 +163,15 @@ impl Route {
             .filter(|segment| !segment.is_empty())
             .collect::<Vec<_>>();
 
-        Self::route_from_segments(&segments).unwrap_or(Route::NotFound { path: normalized })
+        let route =
+            Self::route_from_segments(&segments).unwrap_or(Route::NotFound { path: normalized });
+        match route {
+            Route::AddFriend { username, .. } => Route::AddFriend {
+                username,
+                data: query.and_then(query_param_data),
+            },
+            other => other,
+        }
     }
 
     /// Map URL segments to a [`Route`]. Snowflake ids are parsed with `.parse().ok()?`, so a
@@ -160,6 +186,9 @@ impl Route {
                 clan_id: ClanId(clan_id.parse().ok()?),
             },
             ["chat", "clans", clan_id, "channel-setting"] => Route::ClanChannels {
+                clan_id: ClanId(clan_id.parse().ok()?),
+            },
+            ["chat", "clans", clan_id, "guide"] => Route::ClanGuide {
                 clan_id: ClanId(clan_id.parse().ok()?),
             },
             ["chat", "direct", "message", direct_id, message_type] => Route::DirectMessage {
@@ -198,6 +227,7 @@ impl Route {
             },
             ["chat", username] if !matches!(username, "direct" | "clans") => Route::AddFriend {
                 username: username.to_string(),
+                data: None,
             },
             ["invite", invite_id] => Route::Invite {
                 invite_id: invite_id.to_string(),
@@ -275,6 +305,10 @@ impl Router {
         self.current.clone()
     }
 
+    pub fn route_ref(&self) -> &Route {
+        &self.current
+    }
+
     pub fn conversation_channel_id(&self) -> Option<ChannelId> {
         match &self.current {
             Route::Channel { channel_id, .. }
@@ -316,6 +350,14 @@ impl Router {
         self.forward.retain(|route| !route.targets_clan(clan_id));
     }
 
+    /// Drop a conversation the store no longer has, so Back cannot walk into a channel
+    /// with no sidebar row and no header.
+    pub fn forget_conversation(&mut self, channel_id: ChannelId) {
+        let targets = |route: &Route| matches!(route, Route::DirectMessage { direct_id, .. } if *direct_id == channel_id);
+        self.backward.retain(|route| !targets(route));
+        self.forward.retain(|route| !targets(route));
+    }
+
     pub fn go_back(&mut self) {
         if let Some(prev) = self.backward.pop_back() {
             self.forward
@@ -334,6 +376,10 @@ impl Router {
                 self.backward.pop_front();
             }
         }
+    }
+
+    pub fn recently_visited(&self) -> impl DoubleEndedIterator<Item = &Route> {
+        self.backward.iter().rev()
     }
 
     pub fn can_go_back(&self) -> bool {
@@ -399,6 +445,21 @@ pub fn go_forward(cx: &mut App) {
     });
 }
 
+fn split_query(path: &str) -> (&str, Option<&str>) {
+    match path.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (path, None),
+    }
+}
+
+fn query_param_data(query: &str) -> Option<String> {
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("data="))
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn normalize_path(path: &str) -> String {
     let trimmed = path.trim();
     if trimmed.is_empty() || trimmed == "/" {
@@ -427,6 +488,46 @@ mod tests {
                 channel_id: ChannelId(42),
             }
         );
+    }
+
+    #[test]
+    fn from_path_clan_guide_route() {
+        let route = Route::from_path("/chat/clans/1730/guide");
+        assert_eq!(
+            route,
+            Route::ClanGuide {
+                clan_id: ClanId(1730)
+            }
+        );
+        assert_eq!(route.to_path(), "/chat/clans/1730/guide");
+        assert!(route.targets_clan(ClanId(1730)));
+        assert!(matches!(
+            Route::from_path("/chat/clans/abc/guide"),
+            Route::NotFound { .. }
+        ));
+    }
+
+    #[test]
+    fn clan_space_covers_clan_settings_and_chat_landing() {
+        assert!(Route::Chat.is_clan_space());
+        assert!(Route::SettingsClanProfile { clan_id: ClanId(1) }.is_clan_space());
+        assert!(
+            Route::ClanSettings {
+                clan_id: ClanId(1),
+                page: ClanSettingsPage::Overview,
+            }
+            .is_clan_space()
+        );
+        assert!(
+            Route::ChannelSettings {
+                clan_id: ClanId(1),
+                channel_id: ChannelId(2),
+                tab: ChannelSettingsTab::Overview,
+            }
+            .is_clan_space()
+        );
+        assert!(!Route::Direct.is_clan_space());
+        assert!(!Route::Friends.is_clan_space());
     }
 
     #[test]
@@ -544,6 +645,7 @@ mod tests {
             route,
             Route::AddFriend {
                 username: "alice".into(),
+                data: None,
             }
         );
     }
@@ -552,9 +654,42 @@ mod tests {
     fn to_path_roundtrip_add_friend() {
         let route = Route::AddFriend {
             username: "alice".into(),
+            data: None,
         };
         assert_eq!(route.to_path(), "/chat/alice");
         assert_eq!(Route::from_path(&route.to_path()), route);
+    }
+
+    #[test]
+    fn from_path_add_friend_keeps_data_param() {
+        let route = Route::from_path("/chat/alice?data=eyJpZCI6IjEifQ%3D%3D");
+        assert_eq!(
+            route,
+            Route::AddFriend {
+                username: "alice".into(),
+                data: Some("eyJpZCI6IjEifQ%3D%3D".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn to_path_roundtrip_add_friend_with_data() {
+        let route = Route::AddFriend {
+            username: "alice".into(),
+            data: Some("abc".into()),
+        };
+        assert_eq!(route.to_path(), "/chat/alice?data=abc");
+        assert_eq!(Route::from_path(&route.to_path()), route);
+    }
+
+    #[test]
+    fn query_string_does_not_leak_into_other_routes() {
+        assert_eq!(
+            Route::from_path("/invite/abc123?ref=mail"),
+            Route::Invite {
+                invite_id: "abc123".into(),
+            }
+        );
     }
 
     #[test]

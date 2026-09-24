@@ -282,8 +282,11 @@ impl ClanSidebar {
                 let row_id = SharedString::from(format!("clan-{}", clan.id));
                 let group_name = SharedString::from(format!("clan-group-{}", clan.id));
                 let avatar_id = SharedString::from(format!("clan-avatar-{}", clan.id));
-                let proxied_avatar_url: Option<SharedString> =
-                    clan.avatar_url.as_deref().map(|url| {
+                let proxied_avatar_url: Option<SharedString> = clan
+                    .avatar_url
+                    .as_deref()
+                    .filter(|url| !url.is_empty())
+                    .map(|url| {
                         SharedString::from(crate::util::imgproxy::proxied(
                             cx,
                             url,
@@ -387,12 +390,13 @@ impl Render for ClanSidebar {
 
         div()
             .image_cache(avatar_cache)
+            .children(crate::tour::probe(crate::tour::TourAnchor::ClanRail))
             .flex()
             .flex_col()
             .w_full()
             .h_full()
             .items_center()
-            .bg(theme.surface_for(theme.bg_tertiary))
+            .bg(theme.surfaces.primary.ramp())
             .child(
                 div()
                     .flex()

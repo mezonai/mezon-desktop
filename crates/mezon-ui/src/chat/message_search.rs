@@ -10,10 +10,11 @@ use gpui::{
     deferred, div, img, list, prelude::*, px, radians,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanId, MessageSearchStore, MessageSpan, MessagesStore,
-    RichLayout, RichRunKind, SearchDropdownMode, SearchHit, SearchPageToken, autocomplete_needle,
-    has_filter_options, resolve_search_hit_ogp, search_content_highlight_terms,
-    search_dropdown_mode, search_page_count, search_page_numbers, should_show_search_dropdown,
+    ChannelId, ChannelList, ChannelType, ClanId, MessageId, MessageSearchStore, MessageSpan,
+    MessagesStore, RichLayout, RichRunKind, SearchDropdownMode, SearchHit, SearchPageToken,
+    autocomplete_needle, has_filter_options, resolve_search_hit_ogp,
+    search_content_highlight_terms, search_dropdown_mode, search_page_count, search_page_numbers,
+    should_show_search_dropdown,
 };
 use ui::ScrollAxes;
 use ui::Scrollbars;
@@ -23,8 +24,8 @@ use crate::chat::inbox::render_message_head;
 use crate::chat::layout::ChatLayout;
 use crate::chat::member_list::{MentionMemberRaw, mention_member_pool};
 use crate::chat::message::{
-    RichRunPalette, format_message_time, open_message_link, render_ogp_preview,
-    rich_run_highlight_with_link_underline,
+    RichRunPalette, code_block_copy_overlay, format_message_time, open_message_link,
+    render_ogp_preview, render_poll_card_readonly, rich_run_highlight_with_link_underline,
 };
 use crate::chat::role_style::message_sender_color;
 use crate::components::primitives::{Icon, IconName, Input, InputState, Sizable, Size, Spinner};
@@ -35,7 +36,12 @@ use crate::router::{Route, Router, navigate};
 use crate::theme::{ActiveTheme, Theme};
 
 pub const MESSAGE_SEARCH_PANEL_WIDTH: f32 = 420.;
-pub const SEARCH_BAR_WIDTH_COLLAPSED: f32 = 160.;
+// Derived, not chosen: the channel header packs `| inbox search` flush to the right edge,
+// so this width is what lands the divider exactly on the member list's left border —
+// MEMBER_LIST_WIDTH (245) less the header's 16px right padding, the 4px gap before the
+// search bar, the 32px inbox button, and the divider's own 8px gap and 1px rule.
+pub const SEARCH_BAR_WIDTH_COLLAPSED: f32 =
+    crate::chat::member_list::MEMBER_LIST_WIDTH - 16. - 4. - 32. - 8. - 1.;
 pub const SEARCH_BAR_WIDTH_EXPANDED: f32 = 320.;
 pub const SEARCH_OPTIONS_WIDTH: f32 = 400.;
 
@@ -805,8 +811,24 @@ fn render_search_row(
         if image.proxied_src.is_empty() {
             return None;
         }
-        let width = image.display_width.clamp(1., 280.);
-        let height = image.display_height.clamp(1., 200.);
+        let (width, height) = if image.contain && image.unmeasured {
+            attachment_image_cache
+                .read(cx)
+                .cached_bitmap_size(image.proxied_src.as_ref())
+                .map(|(width, height)| {
+                    mezon_store::sticker_search_display_dimensions(width, height)
+                })
+                .unwrap_or((image.display_width, image.display_height))
+        } else {
+            (image.display_width, image.display_height)
+        };
+        let width = width.clamp(1., 280.);
+        let height = height.clamp(1., 200.);
+        let fit = if image.contain {
+            ObjectFit::Contain
+        } else {
+            ObjectFit::Cover
+        };
         Some(
             div()
                 .mt_1()
@@ -817,15 +839,29 @@ fn render_search_row(
                 .overflow_hidden()
                 .rounded_md()
                 .image_cache(attachment_image_cache.clone())
-                .child(
-                    img(image.proxied_src.clone())
-                        .size_full()
-                        .object_fit(ObjectFit::Cover),
-                )
+                .child(img(image.proxied_src.clone()).size_full().object_fit(fit))
                 .into_any_element(),
         )
     });
     let ogp = resolve_search_hit_ogp(hit, cx);
+    let poll_card = hit.poll.as_deref().map(|poll| {
+        let voted = MessagesStore::try_global(cx)
+            .and_then(|store| {
+                store
+                    .read(cx)
+                    .poll_my_vote(hit.message_id)
+                    .map(<[i32]>::to_vec)
+            })
+            .unwrap_or_default();
+        render_poll_card_readonly(
+            poll,
+            &voted,
+            theme,
+            locale,
+            now.timestamp(),
+            &attachment_image_cache,
+        )
+    });
 
     let group_header =
         (show_channel_label && show_group_header && resolved_channel_label.is_some()).then(|| {
@@ -895,6 +931,7 @@ fn render_search_row(
                                             )),
                                     )
                                 })
+                                .children(poll_card)
                                 .children(ogp.as_ref().and_then(|ogp| {
                                     let preview = render_ogp_preview(
                                         ogp,
@@ -952,7 +989,7 @@ fn render_search_message_content(
         .iter()
         .any(|span| matches!(span, MessageSpan::CodeBlock { .. }))
     {
-        return render_search_spans(&hit.spans, theme);
+        return render_search_spans(&hit.spans, hit.message_id, theme);
     }
     if let Some(layout) = hit.rich_layout.as_ref()
         && !layout.text.is_empty()
@@ -965,7 +1002,11 @@ fn render_search_message_content(
     div().into_any_element()
 }
 
-fn render_search_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
+fn render_search_spans(
+    spans: &[MessageSpan],
+    message_id: MessageId,
+    theme: &Theme,
+) -> gpui::AnyElement {
     let link_color = theme.tokens.mention_color;
     let mention_bg = theme.tokens.mention_primary;
     let mention_color = theme.tokens.mention_color;
@@ -979,6 +1020,7 @@ fn render_search_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement
         .items_baseline()
         .gap_x(px(4.));
     let mut link_index = 0usize;
+    let mut code_key = 0usize;
     for span in spans {
         match span {
             MessageSpan::Text(text) => {
@@ -1034,7 +1076,14 @@ fn render_search_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement
             MessageSpan::Emoji { name, .. } => {
                 row = row.child(div().max_w_full().min_w_0().child(name.to_string()));
             }
-            MessageSpan::CodeBlock { text, .. } => {
+            MessageSpan::CodeBlock {
+                text,
+                fenced_source,
+                ..
+            } => {
+                let copy_id =
+                    SharedString::from(format!("search-code-copy-{}-{code_key}", message_id.get()));
+                code_key += 1;
                 row = row.child(
                     div()
                         .w_full()
@@ -1043,7 +1092,12 @@ fn render_search_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement
                         .p_2()
                         .rounded_md()
                         .bg(code_bg)
-                        .child(text.to_string()),
+                        .child(text.to_string())
+                        .child(code_block_copy_overlay(
+                            copy_id,
+                            fenced_source.clone(),
+                            theme,
+                        )),
                 );
             }
             MessageSpan::Canvas { title, .. } | MessageSpan::Heading { text: title, .. } => {
@@ -1470,6 +1524,9 @@ pub fn render_header_search_bar(
 
     div()
         .relative()
+        .children(crate::tour::probe(
+            crate::tour::TourAnchor::ChannelHeaderSearch,
+        ))
         .flex_shrink_0()
         .when(expanded, |el| {
             el.on_mouse_down_out(move |_: &MouseDownEvent, window, cx| {

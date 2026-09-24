@@ -39,7 +39,7 @@ use crate::{
     RenderSvgParams, Scene, ShapedGlyph, ShapedRun, SharedString, Size, SvgRenderer,
     SystemWindowTab, Task, Window, WindowControlArea, hash, point, px, size,
 };
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use anyhow::bail;
 use async_task::Runnable;
@@ -47,7 +47,7 @@ use futures::channel::oneshot;
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
 use image::codecs::gif::GifDecoder;
-use image::{AnimationDecoder as _, Frame};
+use image::{AnimationDecoder as _, DynamicImage, Frame};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use scheduler::Instant;
 pub use scheduler::RunnableMeta;
@@ -186,7 +186,7 @@ pub trait Platform: 'static {
     fn reveal_path(&self, path: &Path);
     fn open_with_system(&self, path: &Path);
 
-    fn on_quit(&self, callback: Box<dyn FnMut()>);
+    fn on_quit(&self, callback: Box<dyn FnMut() -> bool>);
     fn on_reopen(&self, callback: Box<dyn FnMut()>);
 
     fn set_menus(&self, menus: Vec<Menu>, keymap: &Keymap);
@@ -675,7 +675,7 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>);
     fn on_button_layout_changed(&self, _callback: Box<dyn FnMut()>) {}
     fn draw(&self, scene: &Scene);
-    fn completed_frame(&self) {}
+    fn schedule_frame(&self) {}
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
     fn is_subpixel_rendering_supported(&self) -> bool;
 
@@ -730,6 +730,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn gpu_specs(&self) -> Option<GpuSpecs>;
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>);
+
+    /// mezon vendor edit: one-shot surrounding snapshot for Linux IME position
+    /// sync while App is already borrowed. Default is a no-op on other platforms.
+    fn set_ime_surrounding_hint(&self, _surrounding: Option<ImeSurroundingText>) {}
+
+    fn reset_ime(&self) {}
 
     fn play_system_bell(&self) {}
 
@@ -1340,6 +1346,14 @@ impl PlatformInputHandler {
         })
     }
 
+    pub fn surrounding_text_in(
+        &mut self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<ImeSurroundingText> {
+        self.handler.surrounding_text(window, cx)
+    }
+
     pub fn ime_candidate_bounds(&mut self) -> Option<Bounds<Pixels>> {
         let marked_range = self.marked_text_range();
         let selection = self.selected_text_range(true)?;
@@ -1371,9 +1385,208 @@ impl PlatformInputHandler {
     #[allow(dead_code)]
     pub fn query_prefers_ime_for_printable_keys(&mut self) -> bool {
         self.cx
-            .update(|window, cx| self.handler.prefers_ime_for_printable_keys(window, cx))
+            .update(|window, cx| {
+                // Zed #61270: a printable key may complete a pending chord whose
+                // prefix already bypassed the IME.
+                !window.has_pending_keystrokes()
+                    && self.handler.prefers_ime_for_printable_keys(window, cx)
+            })
             .unwrap_or(false)
     }
+
+    #[allow(dead_code)]
+    pub fn surrounding_text(&mut self) -> Option<ImeSurroundingText> {
+        self.cx
+            .update(|window, cx| self.handler.surrounding_text(window, cx))
+            .ok()
+            .flatten()
+    }
+
+    #[allow(dead_code)]
+    pub fn delete_surrounding_text(&mut self, before_len: usize, after_len: usize) {
+        self.cx
+            .update(|window, cx| {
+                self.handler
+                    .delete_surrounding_text(before_len, after_len, window, cx);
+            })
+            .ok();
+    }
+}
+
+/// Plain text around the caret for Linux IME (`zwp_text_input_v3.set_surrounding_text`).
+///
+/// `cursor` and `anchor` are UTF-8 byte offsets into `text`. The string excludes any
+/// active preedit and is capped at [`ImeSurroundingText::MAX_LEN`] on a character boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImeSurroundingText {
+    /// Surrounding document text sent to the IME.
+    pub text: String,
+    /// Caret offset in UTF-8 bytes.
+    pub cursor: usize,
+    /// Selection anchor offset in UTF-8 bytes. Equal to `cursor` when there is no selection.
+    pub anchor: usize,
+}
+
+impl ImeSurroundingText {
+    /// Wayland text-input-v3 surrounding-text size limit.
+    pub const MAX_LEN: usize = 4000;
+
+    /// Build a surrounding-text window from the current selection.
+    ///
+    /// `exclude` is a preedit range in the document that must not be sent to the IME.
+    /// When `reversed` is true the caret is at `selected_range.start`.
+    pub fn from_selection(
+        document: &str,
+        selected_range: Range<usize>,
+        reversed: bool,
+        exclude: Option<Range<usize>>,
+    ) -> Self {
+        let (caret, anchor) = if reversed {
+            (selected_range.start, selected_range.end)
+        } else {
+            (selected_range.end, selected_range.start)
+        };
+        Self::from_document(document, caret, anchor, exclude)
+    }
+
+    /// Build a surrounding-text window from a UTF-8 document.
+    ///
+    /// `exclude` is a preedit range in the document that must not be sent to the IME.
+    pub fn from_document(
+        document: &str,
+        cursor: usize,
+        anchor: usize,
+        exclude: Option<Range<usize>>,
+    ) -> Self {
+        let cursor = cursor.min(document.len());
+        let anchor = anchor.min(document.len());
+        let exclude = exclude.filter(|range| {
+            range.start < range.end
+                && range.end <= document.len()
+                && document.is_char_boundary(range.start)
+                && document.is_char_boundary(range.end)
+        });
+        let slack = 4;
+        let raw_start = floor_char_boundary(
+            document,
+            cursor.saturating_sub(Self::MAX_LEN.saturating_add(slack)),
+        );
+        let raw_end = ceil_char_boundary(
+            document,
+            cursor
+                .saturating_add(Self::MAX_LEN)
+                .saturating_add(slack)
+                .min(document.len()),
+        );
+        let slice = &document[raw_start..raw_end];
+        let adj_cursor = cursor.saturating_sub(raw_start);
+        let adj_anchor = anchor.saturating_sub(raw_start).min(slice.len());
+        let adj_exclude = exclude.and_then(|range| {
+            if range.end <= raw_start || range.start >= raw_end {
+                return None;
+            }
+            let start = range.start.saturating_sub(raw_start).min(slice.len());
+            let end = range.end.saturating_sub(raw_start).min(slice.len());
+            (start < end).then_some(start..end)
+        });
+        let (text, cursor, anchor) = if let Some(exclude) = adj_exclude {
+            let removed = exclude.end - exclude.start;
+            let mut text = String::with_capacity(slice.len() - removed);
+            text.push_str(&slice[..exclude.start]);
+            text.push_str(&slice[exclude.end..]);
+            let map = |offset: usize| {
+                if offset >= exclude.end {
+                    offset - removed
+                } else if offset > exclude.start {
+                    exclude.start
+                } else {
+                    offset
+                }
+            };
+            (text, map(adj_cursor), map(adj_anchor))
+        } else {
+            (slice.to_owned(), adj_cursor, adj_anchor)
+        };
+        Self::window(text, cursor, anchor)
+    }
+
+    /// Caret offset in Unicode scalar values for IBus/Fcitx5 `SetSurroundingText`.
+    pub fn cursor_chars(&self) -> u32 {
+        self.text
+            .get(..self.cursor.min(self.text.len()))
+            .map(|text| text.chars().count() as u32)
+            .unwrap_or(0)
+    }
+
+    /// Selection-anchor offset in Unicode scalar values for IBus/Fcitx5 `SetSurroundingText`.
+    pub fn anchor_chars(&self) -> u32 {
+        self.text
+            .get(..self.anchor.min(self.text.len()))
+            .map(|text| text.chars().count() as u32)
+            .unwrap_or(0)
+    }
+
+    fn window(text: String, cursor: usize, anchor: usize) -> Self {
+        let cursor = cursor.min(text.len());
+        let anchor = anchor.min(text.len());
+        if text.len() <= Self::MAX_LEN {
+            return Self {
+                text,
+                cursor,
+                anchor,
+            };
+        }
+        let half = Self::MAX_LEN / 2;
+        let mut start = floor_char_boundary(&text, cursor.saturating_sub(half));
+        let mut end =
+            ceil_char_boundary(&text, start.saturating_add(Self::MAX_LEN).min(text.len()));
+        if end - start > Self::MAX_LEN {
+            end = floor_char_boundary(&text, start.saturating_add(Self::MAX_LEN));
+        }
+        if end - start < Self::MAX_LEN && start > 0 {
+            start = floor_char_boundary(&text, start.saturating_sub(Self::MAX_LEN - (end - start)));
+            if end - start > Self::MAX_LEN {
+                end = floor_char_boundary(&text, start.saturating_add(Self::MAX_LEN));
+            }
+        }
+        let cursor = cursor.saturating_sub(start).min(end - start);
+        let anchor = anchor.saturating_sub(start).min(end - start);
+        Self {
+            text: text[start..end].to_owned(),
+            cursor,
+            anchor,
+        }
+    }
+}
+
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let index = index.min(text.len());
+    if text.is_char_boundary(index) {
+        return index;
+    }
+    let mut i = index;
+    while i > 0 {
+        i -= 1;
+        if text.is_char_boundary(i) {
+            return i;
+        }
+    }
+    0
+}
+
+fn ceil_char_boundary(text: &str, index: usize) -> usize {
+    let index = index.min(text.len());
+    if text.is_char_boundary(index) {
+        return index;
+    }
+    let mut i = index + 1;
+    while i < text.len() {
+        if text.is_char_boundary(i) {
+            return i;
+        }
+        i += 1;
+    }
+    text.len()
 }
 
 /// A struct representing a selection in a text buffer, in UTF16 characters.
@@ -1499,6 +1712,28 @@ pub trait InputHandler: 'static {
     fn prefers_ime_for_printable_keys(&mut self, _window: &mut Window, _cx: &mut App) -> bool {
         false
     }
+
+    /// UTF-8 text around the caret for IME engines that rewrite already-committed
+    /// characters (Vietnamese Telex/VNI free-style, some CJK).
+    fn surrounding_text(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<ImeSurroundingText> {
+        None
+    }
+
+    /// Delete `before_len` UTF-8 bytes before and `after_len` bytes after the
+    /// caret (or around the preedit / selection). Offsets that land inside a
+    /// character are snapped to a character boundary.
+    fn delete_surrounding_text(
+        &mut self,
+        _before_len: usize,
+        _after_len: usize,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) {
+    }
 }
 
 /// The variables that can be configured when creating a new window
@@ -1523,6 +1758,10 @@ pub struct WindowOptions {
 
     /// Whether the window should be movable by the user
     pub is_movable: bool,
+
+    /// The minimum interval between animation frames while the window is inactive.
+    /// Set to `None` to disable inactive-window animation frame throttling.
+    pub inactive_frame_interval: Option<Duration>,
 
     /// Whether the window should be resizable by the user
     pub is_resizable: bool,
@@ -1662,6 +1901,7 @@ impl Default for WindowOptions {
             show: true,
             kind: WindowKind::Normal,
             is_movable: true,
+            inactive_frame_interval: Some(Duration::from_micros(33_333)),
             is_resizable: true,
             is_minimizable: true,
             display_id: None,
@@ -2168,6 +2408,33 @@ pub struct Image {
     pub id: u64,
 }
 
+pub(crate) fn decode_static_image(
+    bytes: &[u8],
+    format: image::ImageFormat,
+) -> Result<SmallVec<[Frame; 1]>> {
+    let decoder = image::ImageReader::with_format(Cursor::new(bytes), format)
+        .into_decoder()
+        .context("creating image decoder")?;
+    decode_static_image_from_decoder(decoder)
+}
+
+pub(crate) fn decode_static_image_from_decoder(
+    mut decoder: impl image::ImageDecoder,
+) -> Result<SmallVec<[Frame; 1]>> {
+    let orientation = decoder
+        .orientation()
+        .context("reading decoder's orientation")?;
+    let mut image = DynamicImage::from_decoder(decoder).context("decoding image")?;
+    image.apply_orientation(orientation);
+
+    let mut data = image.into_rgba8();
+    for pixel in data.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+
+    Ok(SmallVec::from_elem(Frame::new(data), 1))
+}
+
 impl Hash for Image {
     fn hash<H: Hasher>(&self, state: &mut H) {
         state.write_u64(self.id);
@@ -2223,20 +2490,6 @@ impl Image {
 
     /// Convert the clipboard image to an `ImageData` object.
     pub fn to_image_data(&self, svg_renderer: SvgRenderer) -> Result<Arc<RenderImage>> {
-        fn frames_for_image(
-            bytes: &[u8],
-            format: image::ImageFormat,
-        ) -> Result<SmallVec<[Frame; 1]>> {
-            let mut data = image::load_from_memory_with_format(bytes, format)?.into_rgba8();
-
-            // Convert from RGBA to BGRA.
-            for pixel in data.chunks_exact_mut(4) {
-                pixel.swap(0, 2);
-            }
-
-            Ok(SmallVec::from_elem(Frame::new(data), 1))
-        }
-
         let frames = match self.format {
             ImageFormat::Gif => {
                 let decoder = GifDecoder::new(Cursor::new(&self.bytes))?;
@@ -2263,18 +2516,18 @@ impl Image {
 
                 frames
             }
-            ImageFormat::Png => frames_for_image(&self.bytes, image::ImageFormat::Png)?,
-            ImageFormat::Jpeg => frames_for_image(&self.bytes, image::ImageFormat::Jpeg)?,
-            ImageFormat::Webp => frames_for_image(&self.bytes, image::ImageFormat::WebP)?,
-            ImageFormat::Bmp => frames_for_image(&self.bytes, image::ImageFormat::Bmp)?,
-            ImageFormat::Tiff => frames_for_image(&self.bytes, image::ImageFormat::Tiff)?,
-            ImageFormat::Ico => frames_for_image(&self.bytes, image::ImageFormat::Ico)?,
+            ImageFormat::Png => decode_static_image(&self.bytes, image::ImageFormat::Png)?,
+            ImageFormat::Jpeg => decode_static_image(&self.bytes, image::ImageFormat::Jpeg)?,
+            ImageFormat::Webp => decode_static_image(&self.bytes, image::ImageFormat::WebP)?,
+            ImageFormat::Bmp => decode_static_image(&self.bytes, image::ImageFormat::Bmp)?,
+            ImageFormat::Tiff => decode_static_image(&self.bytes, image::ImageFormat::Tiff)?,
+            ImageFormat::Ico => decode_static_image(&self.bytes, image::ImageFormat::Ico)?,
             ImageFormat::Svg => {
                 return svg_renderer
                     .render_single_frame(&self.bytes, 1.0)
                     .map_err(Into::into);
             }
-            ImageFormat::Pnm => frames_for_image(&self.bytes, image::ImageFormat::Pnm)?,
+            ImageFormat::Pnm => decode_static_image(&self.bytes, image::ImageFormat::Pnm)?,
         };
 
         Ok(Arc::new(RenderImage::new(frames)))
@@ -2557,5 +2810,60 @@ mod tests {
     #[test]
     fn test_window_button_layout_parse_all_invalid() {
         assert!(WindowButtonLayout::parse("asdfghjkl").is_err());
+    }
+
+    #[test]
+    fn ime_surrounding_excludes_preedit_and_maps_cursor() {
+        let surrounding = ImeSurroundingText::from_document("hoas", 4, 4, Some(3..4));
+        assert_eq!(surrounding.text, "hoa");
+        assert_eq!(surrounding.cursor, 3);
+        assert_eq!(surrounding.anchor, 3);
+    }
+
+    #[test]
+    fn ime_surrounding_keeps_vietnamese_bytes() {
+        let text = "hóa";
+        let surrounding = ImeSurroundingText::from_document(text, text.len(), text.len(), None);
+        assert_eq!(surrounding.text, text);
+        assert_eq!(surrounding.cursor, text.len());
+        assert_eq!(surrounding.cursor_chars(), 3);
+    }
+
+    #[test]
+    fn ime_surrounding_windows_a_long_document_without_the_whole_buffer() {
+        let prefix = "x".repeat(5000);
+        let mid = "hoa";
+        let suffix = "y".repeat(5000);
+        let text = format!("{prefix}{mid}{suffix}");
+        let cursor = prefix.len() + mid.len();
+        let surrounding = ImeSurroundingText::from_document(&text, cursor, cursor, None);
+        assert!(surrounding.text.len() <= ImeSurroundingText::MAX_LEN);
+        assert!(surrounding.text.contains("hoa"));
+        assert_eq!(
+            &surrounding.text.as_bytes()[surrounding.cursor - 3..surrounding.cursor],
+            b"hoa"
+        );
+    }
+
+    #[test]
+    fn ime_surrounding_window_never_exceeds_max_len_on_multibyte() {
+        let ch = "ế";
+        assert_eq!(ch.len(), 3);
+        let text = ch.repeat(2000);
+        let cursor = ch.len() * 1000;
+        let surrounding = ImeSurroundingText::from_document(&text, cursor, cursor, None);
+        assert!(surrounding.text.len() <= ImeSurroundingText::MAX_LEN);
+        assert!(surrounding.text.is_char_boundary(surrounding.cursor));
+        assert!(surrounding.text.is_char_boundary(surrounding.anchor));
+    }
+
+    #[test]
+    fn ime_surrounding_from_selection_uses_the_caret() {
+        let surrounding = ImeSurroundingText::from_selection("hoa", 1..3, false, None);
+        assert_eq!(surrounding.cursor, 3);
+        assert_eq!(surrounding.anchor, 1);
+        let reversed = ImeSurroundingText::from_selection("hoa", 1..3, true, None);
+        assert_eq!(reversed.cursor, 1);
+        assert_eq!(reversed.anchor, 3);
     }
 }

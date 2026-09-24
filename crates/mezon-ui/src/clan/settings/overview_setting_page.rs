@@ -5,6 +5,7 @@ use gpui::{
 use mezon_store::{
     AppConfig, ChannelId, ChannelList, ChannelType, ClanId, ClanImageMimeType, ClanList,
     ClanOverviewDraft, ClanSystemMessage, MAX_CLAN_BANNER_BYTES, MAX_CLAN_LOGO_BYTES, Settings,
+    is_valid_clan_name,
 };
 
 use crate::app::shell::Shell;
@@ -69,21 +70,6 @@ fn half_column() -> gpui::Div {
         .flex_shrink_0()
         .min_w(px(0.0))
         .overflow_hidden()
-}
-
-fn is_valid_clan_name_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_' || c == '-' || c == ' '
-}
-
-fn is_valid_clan_name(s: &str) -> bool {
-    if s.is_empty() || s.chars().count() > 64 {
-        return false;
-    }
-    let first = s.chars().next().unwrap();
-    if first == '_' || first == '-' || first == ' ' {
-        return false;
-    }
-    s.chars().all(|c| is_valid_clan_name_char(c) && c != '\'')
 }
 
 #[derive(Clone, PartialEq)]
@@ -507,15 +493,12 @@ impl OverviewSettingPage {
                 });
             };
 
-            let paths = match rx.await {
-                Ok(Ok(Some(p))) => p,
-                _ => {
-                    let _ = this.update(cx, |this, cx| {
-                        finish(this);
-                        cx.notify();
-                    });
-                    return;
-                }
+            let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
+                let _ = this.update(cx, |this, cx| {
+                    finish(this);
+                    cx.notify();
+                });
+                return;
             };
             let path = match paths.into_iter().next() {
                 Some(p) => p,

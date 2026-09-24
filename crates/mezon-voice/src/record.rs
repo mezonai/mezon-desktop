@@ -207,12 +207,14 @@ fn compose_pump(
                 }),
                 label: tile.label.as_str(),
                 initial: tile.initial.as_str(),
-                accent: accent_for(&tile.key),
+                accent: accent_for(&tile.label),
                 shape: TileShape {
                     focused: tile.focused,
                     contain: tile.is_screen_share,
+                    fullscreen: tile.fullscreen,
                 },
                 speaking: tile.speaking,
+                muted: tile.muted,
             })
             .collect();
 

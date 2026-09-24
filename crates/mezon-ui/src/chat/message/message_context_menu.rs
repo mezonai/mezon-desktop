@@ -1,7 +1,7 @@
 use gpui::{App, ClipboardItem, SharedString, WeakEntity, Window};
 use mezon_client::transport::QUICK_MENU_TYPE_QUICK;
 use mezon_store::{
-    AppConfig, BadgeService, ChannelPermissionsStore, DirectKind, DirectMessageStore, EmojiStore,
+    AppConfig, ChannelId, ChannelPermissionsStore, DirectKind, DirectMessageStore, EmojiStore,
     Message, MessageCode, MessageId, MessagesStore, PERMISSION_DELETE_MESSAGE, PinnedMessagesStore,
     QuickMenuStore, ThreadsStore, TopicsStore,
 };
@@ -47,21 +47,23 @@ fn append_quick_menus(
     menu: ContextMenu,
     message_id: MessageId,
     locale: &str,
+    quick_menu_submenu_open: bool,
+    host: WeakEntity<ChannelMessages>,
     cx: &App,
 ) -> ContextMenu {
     let Some(channel_id) = MessagesStore::global(cx).read(cx).active_channel_id() else {
         return menu;
     };
-    let items: Vec<_> = QuickMenuStore::global(cx)
+    let menu_names: Vec<_> = QuickMenuStore::global(cx)
         .read(cx)
         .items(channel_id, QUICK_MENU_TYPE_QUICK)
         .iter()
         .map(|item| item.menu_name.clone())
         .collect();
-    if items.is_empty() {
+    if menu_names.is_empty() {
         return menu;
     }
-    let options: Vec<crate::components::primitives::SubmenuOption> = items
+    let options: Vec<crate::components::primitives::SubmenuOption> = menu_names
         .iter()
         .enumerate()
         .map(
@@ -69,17 +71,22 @@ fn append_quick_menus(
                 value: index as i32,
                 label: label.clone(),
                 selected: false,
+                disabled: false,
             },
         )
         .collect();
-    let menu_names = items;
     let label: SharedString = mezon_i18n::t(locale, "contextMenu.quickMenus").into();
+    let host_open = host.clone();
     menu.submenu(
         label,
         None,
         options,
-        false,
-        |_window, _cx| {},
+        quick_menu_submenu_open,
+        move |_window, cx| {
+            if let Some(view) = host_open.upgrade() {
+                view.update(cx, |this, cx| this.set_quick_menu_submenu_open(true, cx));
+            }
+        },
         move |index, _window, cx| {
             let Some(name) = menu_names.get(index as usize) else {
                 return;
@@ -91,11 +98,27 @@ fn append_quick_menus(
     )
 }
 
-fn is_first_topic_message(message_id: MessageId, cx: &App) -> bool {
+fn close_quick_menu_submenu(
+    host: WeakEntity<ChannelMessages>,
+) -> impl Fn(&mut Window, &mut App) + 'static {
+    move |_window: &mut Window, cx: &mut App| {
+        if let Some(view) = host.upgrade() {
+            view.update(cx, |this, cx| this.set_quick_menu_submenu_open(false, cx));
+        }
+    }
+}
+
+fn is_first_topic_message(msg: &Message, cx: &App) -> bool {
     let topics = TopicsStore::global(cx).read(cx);
+    if topics
+        .active_topic_id()
+        .is_some_and(|topic_id| msg.channel_id == ChannelId(topic_id))
+    {
+        return false;
+    }
     topics
         .origin_message()
-        .is_some_and(|origin| origin.id == message_id)
+        .is_some_and(|origin| origin.id == msg.id)
 }
 
 fn channel_delete_blocked(msg: &Message, cx: &App) -> bool {
@@ -146,14 +169,14 @@ fn active_group_dm_owner(cx: &App) -> (bool, bool) {
     let Some(store) = DirectMessageStore::try_global(cx) else {
         return (false, false);
     };
-    let Some(direct) = store.read(cx).find(channel_id) else {
+    let store = store.read(cx);
+    let Some(direct) = store.find(channel_id) else {
         return (false, false);
     };
     if direct.kind != DirectKind::Group {
         return (false, false);
     }
-    let me = BadgeService::global(cx).read(cx).current_user_id(cx);
-    (true, me.is_some() && direct.creator_id == me)
+    (true, store.group_owned_by_me(channel_id, cx))
 }
 
 pub(crate) fn edit_message_allowed(
@@ -181,7 +204,7 @@ pub(crate) fn message_is_editable(msg: &Message, current_user_id: &str) -> bool 
 
 fn can_delete_message(msg: &Message, current_user_id: &str, is_topic_box: bool, cx: &App) -> bool {
     if is_topic_box {
-        if is_first_topic_message(msg.id, cx) {
+        if is_first_topic_message(msg, cx) {
             return false;
         }
     } else if channel_delete_blocked(msg, cx) {
@@ -214,6 +237,7 @@ pub(crate) fn build(
     show_forward_all: bool,
     is_topic_box: bool,
     reaction_submenu_open: bool,
+    quick_menu_submenu_open: bool,
     selected_text: Option<String>,
     host: WeakEntity<ChannelMessages>,
     cx: &App,
@@ -228,6 +252,7 @@ pub(crate) fn build(
             locale,
             show_forward_all,
             reaction_submenu_open,
+            quick_menu_submenu_open,
             selected_text,
             host,
             cx,
@@ -240,6 +265,7 @@ pub(crate) fn build(
         locale,
         show_forward_all,
         reaction_submenu_open,
+        quick_menu_submenu_open,
         selected_text,
         host,
         cx,
@@ -357,6 +383,7 @@ fn build_topic_menu(
     locale: &str,
     show_forward_all: bool,
     reaction_submenu_open: bool,
+    quick_menu_submenu_open: bool,
     selected_text: Option<String>,
     host: WeakEntity<ChannelMessages>,
     cx: &App,
@@ -496,14 +523,32 @@ fn build_topic_menu(
         );
     }
 
+    menu = append_quick_menus(
+        menu,
+        msg.id,
+        locale,
+        quick_menu_submenu_open,
+        host.clone(),
+        cx,
+    );
+
     if !is_own_message {
         let message_id = msg.id;
+        let sender_user_id = msg.sender_user_id;
+        let sender_name = msg.sender_name.clone();
         let locale_owned = locale.to_string();
         menu = menu.danger_item_trailing_icon(
             t("contextMenu.reportMessage"),
             IconName::ReportMessageRightClick,
             move |window, cx| {
-                ReportMessageModal::open(message_id, locale_owned.clone().into(), window, cx);
+                ReportMessageModal::open(
+                    message_id,
+                    sender_user_id,
+                    sender_name.clone(),
+                    locale_owned.clone().into(),
+                    window,
+                    cx,
+                );
             },
         );
     }
@@ -523,7 +568,7 @@ fn build_topic_menu(
         );
     }
 
-    menu
+    menu.on_submenu_close(close_quick_menu_submenu(host))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -534,6 +579,7 @@ fn build_channel_menu(
     locale: &str,
     show_forward_all: bool,
     reaction_submenu_open: bool,
+    quick_menu_submenu_open: bool,
     selected_text: Option<String>,
     host: WeakEntity<ChannelMessages>,
     cx: &App,
@@ -758,7 +804,14 @@ fn build_channel_menu(
             },
         );
     }
-    menu = append_quick_menus(menu, msg.id, locale, cx);
+    menu = append_quick_menus(
+        menu,
+        msg.id,
+        locale,
+        quick_menu_submenu_open,
+        host.clone(),
+        cx,
+    );
 
     let link = first_link(msg);
     let image = msg
@@ -780,12 +833,21 @@ fn build_channel_menu(
     }
     if !is_own_message {
         let message_id = msg.id;
+        let sender_user_id = msg.sender_user_id;
+        let sender_name = msg.sender_name.clone();
         let locale_owned = locale.to_string();
         menu = menu.danger_item_trailing_icon(
             t("contextMenu.reportMessage"),
             IconName::ReportMessageRightClick,
             move |window, cx| {
-                ReportMessageModal::open(message_id, locale_owned.clone().into(), window, cx);
+                ReportMessageModal::open(
+                    message_id,
+                    sender_user_id,
+                    sender_name.clone(),
+                    locale_owned.clone().into(),
+                    window,
+                    cx,
+                );
             },
         );
     }
@@ -838,7 +900,7 @@ fn build_channel_menu(
         );
     }
 
-    menu
+    menu.on_submenu_close(close_quick_menu_submenu(host))
 }
 
 #[cfg(test)]

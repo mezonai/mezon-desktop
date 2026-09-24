@@ -167,13 +167,11 @@ pub fn render_stream_fullscreen_overlay(
         return None;
     }
     let channel = stream_session_channel(cx, store)?;
-    let is_live = matches!(store.phase(), StreamPhase::Joined { is_live: true, .. });
     let player = render_stream_player(
         window,
         theme,
         &channel,
         store,
-        is_live,
         stream.clone(),
         volume_slider,
         cx,
@@ -631,7 +629,6 @@ fn render_joined(
     volume_slider: &Entity<SliderState>,
     cx: &App,
 ) -> AnyElement {
-    let is_live = matches!(store.phase(), StreamPhase::Joined { is_live: true, .. });
     let show_members = store.show_members();
     let has_members = !members.is_empty();
     let controls_visible = store.controls_visible();
@@ -650,7 +647,6 @@ fn render_joined(
         theme,
         channel,
         store,
-        is_live,
         stream.clone(),
         volume_slider,
         cx,
@@ -870,18 +866,12 @@ fn render_stream_player(
     _theme: &Theme,
     channel: &Channel,
     store: &StreamStore,
-    is_live: bool,
     stream: Entity<StreamStore>,
     volume_slider: &Entity<SliderState>,
     cx: &App,
     always_show_controls: bool,
 ) -> AnyElement {
-    let has_video_frame = store.has_video_frame();
-    let media = if is_live && store.remote_video() && has_video_frame {
-        render_stream_video(store, cx)
-    } else {
-        render_stream_thumbnail(channel, cx)
-    };
+    let media = render_stream_thumbnail(channel, cx);
 
     div()
         .id("stream-player")
@@ -999,11 +989,12 @@ fn volume_icon(volume: f32, muted: bool) -> IconName {
     }
 }
 
-fn render_stream_thumbnail(channel: &Channel, _cx: &App) -> AnyElement {
+fn render_stream_thumbnail(channel: &Channel, cx: &App) -> AnyElement {
     let raw = channel.avatar_url.trim();
     if !raw.is_empty() && raw != "0" {
-        let raw = SharedString::from(raw.to_string());
+        let raw = SharedString::from(crate::util::imgproxy::stream_cover_url(cx, raw));
         return img(raw)
+            .id("stream-offline-thumbnail-image")
             .size_full()
             .object_fit(ObjectFit::Cover)
             .with_fallback(stream_thumbnail_fallback)
@@ -1017,16 +1008,6 @@ fn stream_thumbnail_fallback() -> AnyElement {
         .size_full()
         .object_fit(ObjectFit::Cover)
         .into_any_element()
-}
-
-fn render_stream_video(store: &StreamStore, _cx: &App) -> AnyElement {
-    if let Some(image) = store.render_frame() {
-        return img(image)
-            .size_full()
-            .object_fit(ObjectFit::Contain)
-            .into_any_element();
-    }
-    div().size_full().bg(gpui::rgb(0x111111)).into_any_element()
 }
 
 fn member_row(

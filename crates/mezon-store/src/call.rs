@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -25,7 +25,9 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const NO_ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
 const ICE_DISCONNECT_GRACE: Duration = Duration::from_secs(12);
+const MAX_OFFER_AGE: Duration = Duration::from_secs(60);
 const MAX_PENDING_ICE: usize = 128;
+const MAX_KNOWN_OFFER_SESSIONS: usize = 8;
 const DM_STREAM_MODE: i32 = 4;
 
 static DIALTONE_SOUND: &[u8] = include_bytes!("../assets/audio/dialtone.mp3");
@@ -39,6 +41,11 @@ pub struct CallPeer {
     pub channel_id: i64,
     pub name: String,
     pub avatar: Option<String>,
+}
+
+struct KnownOfferSession {
+    peer_id: i64,
+    session_id: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +86,18 @@ enum EndReason {
     Busy,
 }
 
+impl EndReason {
+    fn label(self) -> &'static str {
+        match self {
+            Self::LocalHangup => "local hangup",
+            Self::RemoteQuit => "remote quit",
+            Self::Timeout => "timeout",
+            Self::Failed => "failed",
+            Self::Busy => "busy",
+        }
+    }
+}
+
 #[derive(Default)]
 struct CallTones {
     dial: Option<AudioPlayer>,
@@ -117,6 +136,7 @@ pub struct CallStore {
     incoming_offer: Option<String>,
     engine: Option<CallEngine>,
     frame_store: Option<Arc<VideoFrameStore>>,
+    started_at: Option<Instant>,
     connected_at: Option<Instant>,
     self_id: i64,
     self_name: String,
@@ -127,6 +147,7 @@ pub struct CallStore {
     generation: u64,
     pending_remote_ice: Vec<IcePayload>,
     pending_local_ice: Vec<IcePayload>,
+    known_offer_sessions: VecDeque<KnownOfferSession>,
     render_cache: Mutex<HashMap<u64, CachedRenderFrame>>,
     pending_texture_drops: Mutex<Vec<Arc<RenderImage>>>,
     pending_texture_replaces: Mutex<Vec<Arc<RenderImage>>>,
@@ -168,6 +189,7 @@ impl CallStore {
             incoming_offer: None,
             engine: None,
             frame_store: None,
+            started_at: None,
             connected_at: None,
             self_id: 0,
             self_name: String::new(),
@@ -177,6 +199,7 @@ impl CallStore {
             tones: CallTones::default(),
             pending_remote_ice: Vec::new(),
             pending_local_ice: Vec::new(),
+            known_offer_sessions: VecDeque::new(),
             generation: 0,
             render_cache: Mutex::new(HashMap::new()),
             pending_texture_drops: Mutex::new(Vec::new()),
@@ -192,6 +215,14 @@ impl CallStore {
         let entity = cx.entity();
         RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
             dispatch.on(RealtimeKind::WebrtcSignaling, &entity, |this, event, cx| {
+                this.handle_event(event, cx)
+            });
+            dispatch.on(
+                RealtimeKind::IncomingCallPush,
+                &entity,
+                |this, event, cx| this.handle_event(event, cx),
+            );
+            dispatch.on(RealtimeKind::ChannelMessage, &entity, |this, event, cx| {
                 this.handle_event(event, cx)
             });
         });
@@ -403,6 +434,11 @@ impl CallStore {
             tracing::warn!("cannot start call: no account");
             return;
         };
+        tracing::info!(
+            "call: start outgoing peer={} channel={} video={video}",
+            peer.user_id,
+            peer.channel_id
+        );
         self.generation += 1;
         self.self_id = self_id;
         self.self_name = self_name;
@@ -419,6 +455,7 @@ impl CallStore {
             cam_on: video,
         };
         self.remote = MediaFlags::default();
+        self.started_at = Some(Instant::now());
         self.connected_at = None;
         self.phase = CallPhase::Outgoing;
 
@@ -641,6 +678,7 @@ impl CallStore {
                     sdp,
                     caller_name: self.self_name.clone(),
                     caller_avatar: self.self_avatar.clone(),
+                    sent_at: now_ms().to_string(),
                 };
                 if let Some(compressed) = serde_json::to_string(&payload)
                     .ok()
@@ -693,9 +731,18 @@ impl CallStore {
                 cx.notify();
             }
             EngineEvent::Disconnected => {
+                tracing::info!(
+                    "call: ice disconnected -> {}s grace",
+                    ICE_DISCONNECT_GRACE.as_secs()
+                );
                 self.start_ice_grace(cx);
             }
-            EngineEvent::Failed | EngineEvent::Closed => {
+            EngineEvent::Failed => {
+                tracing::info!("call: engine reported failure -> ending");
+                self.end_call(EndReason::Failed, cx);
+            }
+            EngineEvent::Closed => {
+                tracing::info!("call: engine reported close -> ending");
                 self.end_call(EndReason::Failed, cx);
             }
             EngineEvent::MicUnavailable => {
@@ -715,22 +762,107 @@ impl CallStore {
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
-        let RealtimeEvent::WebrtcSignaling(fwd) = event else {
-            return;
+        let fwd = match event {
+            RealtimeEvent::WebrtcSignaling(fwd) => fwd,
+            RealtimeEvent::IncomingCallPush(push) => {
+                self.on_call_push(push.channel_id, &push.json_data, cx);
+                return;
+            }
+            RealtimeEvent::ChannelMessage(m) => {
+                self.on_call_log_end(m.channel_id, &m.content, cx);
+                return;
+            }
+            _ => return,
         };
         let caller_id = fwd.caller_id;
         let channel_id = fwd.channel_id;
+        if fwd.data_type != WEBRTC_ICE_CANDIDATE {
+            tracing::info!(
+                "call: signaling in type={} from={caller_id} channel={channel_id} phase={:?} peer={:?}",
+                fwd.data_type,
+                self.phase,
+                self.peer.as_ref().map(|p| p.user_id)
+            );
+        }
+        let from_peer = self.peer.as_ref().map(|p| p.user_id) == Some(caller_id);
+        if matches!(self.phase, CallPhase::Incoming)
+            && from_peer
+            && fwd.data_type == WEBRTC_SDP_INIT
+        {
+            tracing::info!("call: caller connected elsewhere (INIT while incoming) -> dismiss");
+            self.reset_state();
+            cx.notify();
+            return;
+        }
         match fwd.data_type {
             WEBRTC_SDP_OFFER => self.on_remote_offer(caller_id, channel_id, &fwd.json_data, cx),
             WEBRTC_SDP_ANSWER => self.on_remote_answer(caller_id, &fwd.json_data, cx),
             WEBRTC_ICE_CANDIDATE => self.on_remote_ice(caller_id, &fwd.json_data),
-            WEBRTC_SDP_QUIT | WEBRTC_CLEAR_CALL => {
-                self.on_remote_end(caller_id, EndReason::RemoteQuit, cx)
+            WEBRTC_SDP_QUIT => {
+                if !matches!(self.phase, CallPhase::Idle) {
+                    self.forward(caller_id, WEBRTC_CLEAR_CALL, String::new(), channel_id, cx);
+                }
+                self.on_remote_end(caller_id, EndReason::RemoteQuit, cx);
             }
-            WEBRTC_SDP_TIMEOUT => self.on_remote_end(caller_id, EndReason::Timeout, cx),
-            WEBRTC_SDP_JOINED_OTHER_CALL => self.on_remote_end(caller_id, EndReason::Busy, cx),
+            WEBRTC_CLEAR_CALL => self.on_remote_end(caller_id, EndReason::RemoteQuit, cx),
+            WEBRTC_SDP_TIMEOUT => {
+                if let Some(started) = self.started_at
+                    && started.elapsed() < NO_ANSWER_TIMEOUT
+                {
+                    tracing::info!(
+                        "call: remote TIMEOUT {}ms after start -> ignored (belongs to an earlier call)",
+                        started.elapsed().as_millis()
+                    );
+                } else {
+                    self.on_remote_end(caller_id, EndReason::Timeout, cx);
+                }
+            }
+            WEBRTC_SDP_JOINED_OTHER_CALL => {
+                if self.is_caller {
+                    tracing::info!(
+                        "call: a peer session reported busy while {:?} -> ignored (other sessions may still ring)",
+                        self.phase
+                    );
+                } else {
+                    self.on_remote_end(caller_id, EndReason::Busy, cx);
+                }
+            }
             WEBRTC_SDP_STATUS_REMOTE_MEDIA => self.on_remote_status(caller_id, &fwd.json_data, cx),
             _ => {}
+        }
+    }
+
+    fn on_call_log_end(&mut self, channel_id: i64, content: &str, cx: &mut Context<Self>) {
+        if !matches!(self.phase, CallPhase::Incoming) {
+            return;
+        }
+        if self.peer.as_ref().map(|p| p.channel_id) != Some(channel_id) {
+            return;
+        }
+        let terminal = serde_json::from_str::<serde_json::Value>(content)
+            .ok()
+            .and_then(|v| v.get("callLog")?.get("callLogType")?.as_i64())
+            .is_some_and(|t| t != CallLogType::StartCall.raw() as i64);
+        if terminal {
+            tracing::info!("call: incoming ended elsewhere (call-log terminal) -> dismiss");
+            self.reset_state();
+            cx.notify();
+        }
+    }
+
+    fn on_call_push(&mut self, channel_id: i64, json: &str, cx: &mut Context<Self>) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+            return;
+        };
+        if value.get("offer").and_then(|v| v.as_str()) != Some("CANCEL_CALL") {
+            return;
+        }
+        if matches!(self.phase, CallPhase::Incoming)
+            && self.peer.as_ref().map(|p| p.channel_id) == Some(channel_id)
+        {
+            tracing::info!("call: incoming cancelled/answered elsewhere -> dismiss");
+            self.reset_state();
+            cx.notify();
         }
     }
 
@@ -748,39 +880,30 @@ impl CallStore {
             tracing::warn!("call: failed to decompress/parse remote offer");
             return;
         };
-        if matches!(self.phase, CallPhase::Idle) {
-            self.generation += 1;
-            if let Some((self_id, self_name, self_avatar)) = self_identity(cx) {
-                self.self_id = self_id;
-                self.self_name = self_name;
-                self.self_avatar = self_avatar;
-            }
-            self.peer = Some(CallPeer {
-                user_id: caller_id,
-                channel_id,
-                name: offer.caller_name,
-                avatar: (!offer.caller_avatar.is_empty()).then_some(offer.caller_avatar),
-            });
-            self.is_caller = false;
-            self.incoming_offer = Some(offer.sdp);
-            self.media = MediaKind::Audio;
-            self.local = MediaFlags::default();
-            self.remote = MediaFlags {
-                mic_on: true,
-                cam_on: false,
-            };
-            self.connected_at = None;
-            self.phase = CallPhase::Incoming;
-            self.play_tone(ToneSlot::Ring, RINGING_SOUND, true, cx);
-            self.start_timeout(cx);
-            cx.notify();
-        } else if self.peer.as_ref().map(|p| p.user_id) == Some(caller_id) {
+        if let Some(age) = offer_age(&offer.sent_at)
+            && age > MAX_OFFER_AGE
+        {
+            tracing::info!(
+                "call: offer from {caller_id} sent {}s ago -> ignored as stale",
+                age.as_secs()
+            );
+            return;
+        }
+        let from_peer = self.peer.as_ref().map(|p| p.user_id) == Some(caller_id);
+        if from_peer && !matches!(self.phase, CallPhase::Idle) {
+            self.remember_offer_session(caller_id, &offer.sdp);
             if let Some(engine) = &self.engine {
                 engine.send(EngineCommand::ApplyRemoteOffer(offer.sdp));
             } else {
                 tracing::warn!("call: renegotiation offer but no engine");
             }
-        } else {
+            return;
+        }
+        if self.is_known_offer_session(caller_id, &offer.sdp) {
+            tracing::info!("call: re-offer from {caller_id} for a call live elsewhere -> ignored");
+            return;
+        }
+        if !matches!(self.phase, CallPhase::Idle) {
             tracing::info!("call: offer from a different peer -> reply JOINED_OTHER_CALL");
             self.forward(
                 caller_id,
@@ -789,7 +912,60 @@ impl CallStore {
                 channel_id,
                 cx,
             );
+            return;
         }
+        self.remember_offer_session(caller_id, &offer.sdp);
+        self.generation += 1;
+        if let Some((self_id, self_name, self_avatar)) = self_identity(cx) {
+            self.self_id = self_id;
+            self.self_name = self_name;
+            self.self_avatar = self_avatar;
+        }
+        self.peer = Some(CallPeer {
+            user_id: caller_id,
+            channel_id,
+            name: offer.caller_name,
+            avatar: (!offer.caller_avatar.is_empty()).then_some(offer.caller_avatar),
+        });
+        self.is_caller = false;
+        self.incoming_offer = Some(offer.sdp);
+        self.media = MediaKind::Audio;
+        self.local = MediaFlags::default();
+        self.remote = MediaFlags {
+            mic_on: true,
+            cam_on: false,
+        };
+        self.started_at = Some(Instant::now());
+        self.connected_at = None;
+        self.phase = CallPhase::Incoming;
+        self.play_tone(ToneSlot::Ring, RINGING_SOUND, true, cx);
+        self.start_timeout(cx);
+        cx.notify();
+    }
+
+    fn is_known_offer_session(&self, peer_id: i64, sdp: &str) -> bool {
+        let Some(session_id) = sdp_session_id(sdp) else {
+            return false;
+        };
+        self.known_offer_sessions
+            .iter()
+            .any(|known| known.peer_id == peer_id && known.session_id == session_id)
+    }
+
+    fn remember_offer_session(&mut self, peer_id: i64, sdp: &str) {
+        let Some(session_id) = sdp_session_id(sdp) else {
+            return;
+        };
+        if self.is_known_offer_session(peer_id, sdp) {
+            return;
+        }
+        if self.known_offer_sessions.len() >= MAX_KNOWN_OFFER_SESSIONS {
+            self.known_offer_sessions.pop_front();
+        }
+        self.known_offer_sessions.push_back(KnownOfferSession {
+            peer_id,
+            session_id: session_id.to_string(),
+        });
     }
 
     fn on_remote_answer(&mut self, caller_id: i64, json: &str, cx: &mut Context<Self>) {
@@ -839,8 +1015,18 @@ impl CallStore {
 
     fn on_remote_end(&mut self, caller_id: i64, reason: EndReason, cx: &mut Context<Self>) {
         if self.peer.as_ref().map(|p| p.user_id) != Some(caller_id) {
+            tracing::info!(
+                "call: {} signal from {caller_id} ignored (active peer {:?})",
+                reason.label(),
+                self.peer.as_ref().map(|p| p.user_id)
+            );
             return;
         }
+        tracing::info!(
+            "call: peer ended the call ({}) phase={:?}",
+            reason.label(),
+            self.phase
+        );
         self.terminate(reason, false, cx);
     }
 
@@ -876,6 +1062,13 @@ impl CallStore {
         if matches!(self.phase, CallPhase::Idle) {
             return;
         }
+        tracing::info!(
+            "call: terminate reason={} notify_peer={notify_peer} phase={:?} is_caller={} connected={}",
+            reason.label(),
+            self.phase,
+            self.is_caller,
+            self.connected_at.is_some()
+        );
         if notify_peer {
             self.send_to_peer(WEBRTC_SDP_QUIT, String::new(), cx);
         }
@@ -909,6 +1102,7 @@ impl CallStore {
         self.pending_local_ice.clear();
         self.engine = None;
         self.frame_store = None;
+        self.started_at = None;
         self.connected_at = None;
         self.call_message_id = None;
         self.call_create_time = 0;
@@ -941,6 +1135,10 @@ impl CallStore {
                         CallPhase::Outgoing | CallPhase::Connecting | CallPhase::Incoming
                     )
                 {
+                    tracing::info!(
+                        "call: no answer after {}s -> ending",
+                        NO_ANSWER_TIMEOUT.as_secs()
+                    );
                     this.end_call(EndReason::Timeout, cx);
                 }
             });
@@ -960,6 +1158,7 @@ impl CallStore {
             cx.background_executor().timer(ICE_DISCONNECT_GRACE).await;
             let _ = this.update(cx, |this, cx| {
                 if this.generation == generation && this._ice_grace_task.is_some() {
+                    tracing::info!("call: ice grace expired -> ending");
                     this.end_call(EndReason::Failed, cx);
                 }
             });
@@ -985,9 +1184,12 @@ impl CallStore {
                 if this.generation != generation {
                     return;
                 }
-                if let Ok(message) = result {
-                    this.call_message_id = Some(message.message_id);
-                    this.call_create_time = to_seconds_u32(message.create_time);
+                match result {
+                    Ok(message) => {
+                        this.call_message_id = Some(message.message_id);
+                        this.call_create_time = to_seconds_u32(message.create_time);
+                    }
+                    Err(e) => tracing::warn!("call: start-call log failed: {e:#}"),
                 }
             });
         })
@@ -1086,7 +1288,7 @@ impl CallStore {
         let caller_id = self.self_id;
         cx.background_executor()
             .spawn(async move {
-                let _ = api
+                if let Err(e) = api
                     .forward_webrtc_signaling(
                         receiver_id,
                         data_type,
@@ -1094,7 +1296,12 @@ impl CallStore {
                         channel_id,
                         caller_id,
                     )
-                    .await;
+                    .await
+                {
+                    tracing::warn!(
+                        "call: signaling send failed type={data_type} to={receiver_id}: {e:#}"
+                    );
+                }
             })
             .detach();
     }
@@ -1117,9 +1324,12 @@ impl CallStore {
         let caller_id = self.self_id;
         cx.background_executor()
             .spawn(async move {
-                let _ = api
+                if let Err(e) = api
                     .make_call_push(peer.user_id, body, peer.channel_id, caller_id)
-                    .await;
+                    .await
+                {
+                    tracing::warn!("call: offer push failed to {}: {e:#}", peer.user_id);
+                }
             })
             .detach();
     }
@@ -1128,19 +1338,37 @@ impl CallStore {
         let Some(peer) = self.peer.clone() else {
             return;
         };
+        let original_caller = if self.is_caller {
+            self.self_id
+        } else {
+            peer.user_id
+        };
+        let (caller_name, caller_avatar) = if self.is_caller {
+            (self.self_name.clone(), self.self_avatar.clone())
+        } else {
+            (peer.name.clone(), peer.avatar.clone().unwrap_or_default())
+        };
         let body = serde_json::json!({
             "offer": "CANCEL_CALL",
             "isConnected": is_connected,
+            "isVideo": self.media == MediaKind::Video,
+            "callerName": caller_name,
+            "callerAvatar": caller_avatar,
+            "callerId": original_caller.to_string(),
+            "channelId": peer.channel_id.to_string(),
             "sentAt": now_ms().to_string(),
         })
         .to_string();
         let api = self.api.clone();
-        let caller_id = self.self_id;
+        let channel_id = peer.channel_id;
         cx.background_executor()
             .spawn(async move {
-                let _ = api
-                    .make_call_push(peer.user_id, body, peer.channel_id, caller_id)
-                    .await;
+                if let Err(e) = api
+                    .make_call_push(peer.user_id, body, channel_id, original_caller)
+                    .await
+                {
+                    tracing::warn!("call: cancel push failed to {}: {e:#}", peer.user_id);
+                }
             })
             .detach();
     }
@@ -1205,20 +1433,17 @@ fn self_identity(cx: &App) -> Option<(i64, String, String)> {
 
 fn ice_servers(cx: &App) -> Vec<IceServerConfig> {
     let config = AppConfig::global(cx);
-    let mut servers = vec![IceServerConfig {
-        urls: vec!["stun:stun.l.google.com:19302".into()],
-        username: String::new(),
-        credential: String::new(),
-    }];
-    if !config.webrtc_ice_servers_url.is_empty() && !config.webrtc_ice_servers_credential.is_empty()
-    {
-        servers.push(IceServerConfig {
-            urls: vec![config.webrtc_ice_servers_url.clone()],
-            username: config.webrtc_ice_servers_username.clone(),
-            credential: config.webrtc_ice_servers_credential.clone(),
-        });
+    if config.webrtc_ice_servers_url.is_empty() || config.webrtc_ice_servers_credential.is_empty() {
+        tracing::warn!(
+            "no turn credentials in this build; calls can only use host candidates"
+        );
+        return Vec::new();
     }
-    servers
+    vec![IceServerConfig {
+        urls: vec![config.webrtc_ice_servers_url.clone()],
+        username: config.webrtc_ice_servers_username.clone(),
+        credential: config.webrtc_ice_servers_credential.clone(),
+    }]
 }
 
 fn to_seconds_u32(create_time: i64) -> u32 {
@@ -1235,4 +1460,21 @@ fn now_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or_default()
+}
+
+fn offer_age(sent_at: &str) -> Option<Duration> {
+    let stamp: u128 = sent_at.trim().parse().ok().filter(|stamp| *stamp > 0)?;
+    let sent_ms = if stamp < 10_000_000_000 {
+        stamp * 1000
+    } else {
+        stamp
+    };
+    let age_ms = now_ms().checked_sub(sent_ms)?;
+    Some(Duration::from_millis(u64::try_from(age_ms).ok()?))
+}
+
+fn sdp_session_id(sdp: &str) -> Option<&str> {
+    sdp.lines()
+        .find_map(|line| line.strip_prefix("o="))
+        .and_then(|origin| origin.split_whitespace().nth(1))
 }

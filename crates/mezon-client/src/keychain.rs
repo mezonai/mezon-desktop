@@ -12,7 +12,7 @@ fn parse_session(json: &str) -> Option<Session> {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "dev-session"))]
 mod dev_file {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
@@ -121,7 +121,10 @@ mod dev_file {
     }
 }
 
-#[cfg(all(not(debug_assertions), target_os = "windows"))]
+#[cfg(all(
+    not(any(debug_assertions, feature = "dev-session")),
+    target_os = "windows"
+))]
 mod dpapi_store {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
@@ -300,7 +303,10 @@ mod dpapi_store {
     }
 }
 
-#[cfg(all(not(debug_assertions), not(target_os = "windows")))]
+#[cfg(all(
+    not(any(debug_assertions, feature = "dev-session")),
+    not(target_os = "windows")
+))]
 mod keychain_store {
     use std::sync::Mutex;
 
@@ -338,11 +344,17 @@ mod keychain_store {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "dev-session"))]
 pub use dev_file::{clear_session, load_session, save_session};
 
-#[cfg(all(not(debug_assertions), target_os = "windows"))]
+#[cfg(all(
+    not(any(debug_assertions, feature = "dev-session")),
+    target_os = "windows"
+))]
 pub use dpapi_store::{clear_session, load_session, save_session};
 
-#[cfg(all(not(debug_assertions), not(target_os = "windows")))]
+#[cfg(all(
+    not(any(debug_assertions, feature = "dev-session")),
+    not(target_os = "windows")
+))]
 pub use keychain_store::{clear_session, load_session, save_session};

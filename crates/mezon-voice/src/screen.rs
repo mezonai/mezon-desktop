@@ -1,11 +1,10 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use livekit::track::LocalVideoTrack;
-use livekit::webrtc::video_frame::{I420Buffer, VideoFrame, VideoRotation};
-use livekit::webrtc::video_source::native::NativeVideoSource;
-use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
+use libwebrtc::video_frame::{I420Buffer, VideoFrame, VideoRotation};
+use libwebrtc::video_source::VideoResolution;
+use libwebrtc::video_source::native::NativeVideoSource;
 use parking_lot::{Condvar, Mutex};
 use scap::capturer::{Capturer, Options, Resolution};
 use scap::frame::FrameType;
@@ -29,12 +28,14 @@ use crate::video::i420_to_bgra_into;
 use crate::video::nv12_full_to_i420;
 use crate::video::{VideoFrameStore, local_screen_key};
 
-const CAPTURE_FPS: u32 = 30;
+#[cfg(target_os = "macos")]
+const PREVIEW_MIN_INTERVAL: Duration = Duration::from_millis(100);
 #[cfg(not(target_os = "macos"))]
 const PREVIEW_MAX_WIDTH: u32 = 1280;
 #[cfg(not(target_os = "macos"))]
 const PREVIEW_MAX_HEIGHT: u32 = 800;
 const SLOT_WAIT: Duration = Duration::from_millis(250);
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(target_os = "macos")]
 const MAX_SCREEN_RESTART_ATTEMPTS: u32 = 5;
 #[cfg(target_os = "macos")]
@@ -75,7 +76,11 @@ impl LatestFrameSlot {
         self.state.lock().error.take()
     }
 
-    fn take_latest(&self, stop: &AtomicBool) -> Option<CapturedScreenFrame> {
+    fn take_latest(
+        &self,
+        stop: &AtomicBool,
+        deadline: Option<Instant>,
+    ) -> Option<CapturedScreenFrame> {
         let mut state = self.state.lock();
         loop {
             if stop.load(Ordering::Relaxed) {
@@ -87,18 +92,54 @@ impl LatestFrameSlot {
             if state.closed {
                 return None;
             }
+            if deadline.is_some_and(|at| Instant::now() >= at) {
+                return None;
+            }
             self.cond.wait_for(&mut state, SLOT_WAIT);
         }
     }
 }
 
+pub struct ScreenCaptureControl {
+    fps: AtomicU32,
+    restart: AtomicBool,
+}
+
+impl ScreenCaptureControl {
+    fn new(fps: u32) -> Self {
+        Self {
+            fps: AtomicU32::new(fps),
+            restart: AtomicBool::new(false),
+        }
+    }
+
+    fn set_fps(&self, fps: u32) {
+        if self.fps.swap(fps, Ordering::Relaxed) != fps {
+            self.restart.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn fps(&self) -> u32 {
+        self.fps.load(Ordering::Relaxed)
+    }
+
+    fn take_restart(&self) -> bool {
+        self.restart.swap(false, Ordering::Relaxed)
+    }
+}
+
 pub struct ScreenStopper {
     stop: Arc<AtomicBool>,
+    control: Arc<ScreenCaptureControl>,
 }
 
 impl ScreenStopper {
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+
+    pub fn set_capture_fps(&self, fps: u32) {
+        self.control.set_fps(fps);
     }
 }
 
@@ -113,14 +154,17 @@ pub fn start_screen(
     frame_store: Arc<VideoFrameStore>,
     _full_res: Arc<AtomicBool>,
     pick: PickedScreen,
+    capture_fps: u32,
 ) -> (
     ScreenStopper,
-    flume::Receiver<Result<LocalVideoTrack, String>>,
+    flume::Receiver<Result<(NativeVideoSource, u32, u32), String>>,
 ) {
     let stop = Arc::new(AtomicBool::new(false));
+    let control = Arc::new(ScreenCaptureControl::new(capture_fps));
     let (track_tx, track_rx) = flume::bounded(1);
 
     let thread_stop = stop.clone();
+    let thread_control = control.clone();
     let spawned = std::thread::Builder::new()
         .name("mezon-screen".into())
         .spawn(move || {
@@ -160,9 +204,15 @@ pub fn start_screen(
                 target = ?capture_target,
                 "starting screen capture"
             );
+            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+            tracing::info!(
+                window = is_window_share,
+                target = ?capture_target,
+                "starting screen capture"
+            );
 
-            let options = Options {
-                fps: CAPTURE_FPS,
+            let mut options = Options {
+                fps: thread_control.fps(),
                 target: capture_target,
                 show_cursor: true,
                 show_highlight: false,
@@ -171,7 +221,7 @@ pub fn start_screen(
                 output_type: FrameType::YUVFrameFullRange,
                 #[cfg(not(target_os = "macos"))]
                 output_type: FrameType::BGRAFrame,
-                output_resolution: Resolution::_720p,
+                output_resolution: Resolution::_1080p,
                 portal_source_types,
                 use_portal,
                 ..Default::default()
@@ -180,6 +230,8 @@ pub fn start_screen(
             let slot = Arc::new(LatestFrameSlot::default());
             let pump_slot = slot.clone();
             let pump_stop = thread_stop.clone();
+            let pump_control = thread_control.clone();
+            let restartable = !use_portal;
             let pump = std::thread::Builder::new()
                 .name("mezon-screen-pump".into())
                 .spawn(move || {
@@ -190,6 +242,7 @@ pub fn start_screen(
                             if pump_stop.load(Ordering::Relaxed) {
                                 break;
                             }
+                            options.fps = pump_control.fps();
                             let mut capturer = match Capturer::build(options.clone()) {
                                 Ok(capturer) => capturer,
                                 Err(e) => {
@@ -200,12 +253,18 @@ pub fn start_screen(
                             capturer.start_capture();
                             let mut errored = false;
                             let mut produced = false;
+                            let mut reconfigure = false;
                             while !pump_stop.load(Ordering::Relaxed) {
-                                match capturer.raw().get_next_pixel_buffer() {
-                                    Ok(frame) => {
+                                if restartable && pump_control.take_restart() {
+                                    reconfigure = true;
+                                    break;
+                                }
+                                match capturer.raw().get_next_pixel_buffer_timeout(SLOT_WAIT) {
+                                    Ok(Some(frame)) => {
                                         produced = true;
                                         pump_slot.publish(frame);
                                     }
+                                    Ok(None) => {}
                                     Err(_) => {
                                         errored = true;
                                         break;
@@ -217,6 +276,14 @@ pub fn start_screen(
                                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                         capturer.stop_capture()
                                     }));
+                                if reconfigure {
+                                    drop(capturer);
+                                    tracing::info!(
+                                        fps = pump_control.fps(),
+                                        "screen capture restarting with a new frame rate"
+                                    );
+                                    continue;
+                                }
                                 break;
                             }
                             drop(capturer);
@@ -242,48 +309,51 @@ pub fn start_screen(
 
                     #[cfg(not(target_os = "macos"))]
                     {
-                        let mut capturer = match Capturer::build(options) {
-                            Ok(capturer) => capturer,
-                            Err(e) => {
-                                pump_slot.fail(format!("screen capture init failed: {e:#}"));
-                                return;
+                        loop {
+                            if pump_stop.load(Ordering::Relaxed) {
+                                break;
                             }
-                        };
-                        capturer.start_capture();
-                        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                        while !pump_stop.load(Ordering::Relaxed) {
-                            match capturer.get_next_frame_timeout(SLOT_WAIT) {
-                                Ok(Some(frame)) => {
-                                    if let Some(bgra) = frame_to_bgra(frame)
-                                        && !bgra.data.is_empty()
-                                    {
-                                        pump_slot.publish(bgra);
-                                    }
-                                }
-                                Ok(None) => continue,
+                            options.fps = pump_control.fps();
+                            let mut capturer = match Capturer::build(options.clone()) {
+                                Ok(capturer) => capturer,
                                 Err(e) => {
-                                    pump_slot.fail(format!("screen capture failed: {e:#}"));
+                                    pump_slot.fail(format!("screen capture init failed: {e:#}"));
+                                    return;
+                                }
+                            };
+                            capturer.start_capture();
+                            let mut reconfigure = false;
+                            while !pump_stop.load(Ordering::Relaxed) {
+                                if restartable && pump_control.take_restart() {
+                                    reconfigure = true;
                                     break;
                                 }
-                            }
-                        }
-                        #[cfg(target_os = "windows")]
-                        while !pump_stop.load(Ordering::Relaxed) {
-                            match capturer.get_next_frame() {
-                                Ok(frame) => {
-                                    if let Some(bgra) = frame_to_bgra(frame)
-                                        && !bgra.data.is_empty()
-                                    {
-                                        pump_slot.publish(bgra);
+                                match capturer.get_next_frame_timeout(SLOT_WAIT) {
+                                    Ok(Some(frame)) => {
+                                        if let Some(bgra) = frame_to_bgra(frame)
+                                            && !bgra.data.is_empty()
+                                        {
+                                            pump_slot.publish(bgra);
+                                        }
+                                    }
+                                    Ok(None) => continue,
+                                    Err(e) => {
+                                        pump_slot.fail(format!("screen capture failed: {e:#}"));
+                                        break;
                                     }
                                 }
-                                Err(e) => {
-                                    pump_slot.fail(format!("screen capture failed: {e:#}"));
-                                    break;
-                                }
                             }
+                            capturer.stop_capture();
+                            if reconfigure && !pump_stop.load(Ordering::Relaxed) {
+                                drop(capturer);
+                                tracing::info!(
+                                    fps = pump_control.fps(),
+                                    "screen capture restarting with a new frame rate"
+                                );
+                                continue;
+                            }
+                            break;
                         }
-                        capturer.stop_capture();
                         pump_slot.close();
                     }
                 });
@@ -294,13 +364,26 @@ pub fn start_screen(
 
             let key = local_screen_key(&identity);
             let started = Instant::now();
+            #[cfg(target_os = "macos")]
+            let mut last_preview: Option<Instant> = None;
             let mut source: Option<NativeVideoSource> = None;
             let mut src_w = 0u32;
             let mut src_h = 0u32;
             let mut sent_track = false;
+            #[cfg(not(target_os = "macos"))]
+            let mut invalid_frames = 0u64;
             let mut display_buf = Vec::new();
+            let first_frame_deadline = (!use_portal).then(|| Instant::now() + FIRST_FRAME_TIMEOUT);
 
-            while let Some(captured) = slot.take_latest(&thread_stop) {
+            loop {
+                let deadline = if sent_track {
+                    None
+                } else {
+                    first_frame_deadline
+                };
+                let Some(captured) = slot.take_latest(&thread_stop, deadline) else {
+                    break;
+                };
                 #[cfg(target_os = "macos")]
                 let (full_w, full_h) =
                     (captured.width() as u32 & !1, captured.height() as u32 & !1);
@@ -310,11 +393,23 @@ pub fn start_screen(
                     None => (full_w, full_h),
                 };
                 #[cfg(not(target_os = "macos"))]
-                let (width, height, row_stride) = (
-                    captured.width as u32 & !1,
-                    captured.height as u32 & !1,
-                    captured.data.len() / captured.height.max(1) as usize,
-                );
+                let Some(row_stride) =
+                    bgra_row_stride(captured.width, captured.height, captured.data.len())
+                else {
+                    invalid_frames += 1;
+                    if invalid_frames % 100 == 1 {
+                        tracing::warn!(
+                            invalid_frames,
+                            width = captured.width,
+                            height = captured.height,
+                            bytes = captured.data.len(),
+                            "dropping invalid screen capture buffer"
+                        );
+                    }
+                    continue;
+                };
+                #[cfg(not(target_os = "macos"))]
+                let (width, height) = (captured.width as u32 & !1, captured.height as u32 & !1);
                 if width < 2 || height < 2 {
                     continue;
                 }
@@ -352,12 +447,8 @@ pub fn start_screen(
                         },
                         true,
                     );
-                    let track = LocalVideoTrack::create_video_track(
-                        "screen",
-                        RtcVideoSource::Native(new_source.clone()),
-                    );
-                    source = Some(new_source);
-                    if track_tx.send(Ok(track)).is_err() {
+                    source = Some(new_source.clone());
+                    if track_tx.send(Ok((new_source, src_w, src_h))).is_err() {
                         return;
                     }
                     sent_track = true;
@@ -399,7 +490,7 @@ pub fn start_screen(
                     }
                     #[cfg(not(target_os = "macos"))]
                     {
-                        bgra_to_i420(
+                        if !bgra_to_i420(
                             &captured.data,
                             src_w as usize,
                             src_h as usize,
@@ -410,7 +501,19 @@ pub fn start_screen(
                             sy as usize,
                             su as usize,
                             sv as usize,
-                        );
+                        ) {
+                            invalid_frames += 1;
+                            if invalid_frames % 100 == 1 {
+                                tracing::warn!(
+                                    invalid_frames,
+                                    width = src_w,
+                                    height = src_h,
+                                    row_stride,
+                                    "dropping screen frame after BGRA conversion failed"
+                                );
+                            }
+                            continue;
+                        }
                     }
                 }
                 let frame = VideoFrame {
@@ -424,7 +527,8 @@ pub fn start_screen(
                 }
 
                 #[cfg(target_os = "macos")]
-                {
+                if last_preview.is_none_or(|at: Instant| at.elapsed() >= PREVIEW_MIN_INTERVAL) {
+                    last_preview = Some(Instant::now());
                     let i420 = &frame.buffer;
                     let (sy, su, sv) = i420.strides();
                     let (y, u, v) = i420.data();
@@ -475,9 +579,17 @@ pub fn start_screen(
 
             frame_store.remove(local_screen_key(&identity));
             if !sent_track {
-                let msg = slot
-                    .take_error()
-                    .unwrap_or_else(|| "screen capture produced no frames".into());
+                let timed_out = first_frame_deadline.is_some_and(|at| Instant::now() >= at);
+                let msg = slot.take_error().unwrap_or_else(|| {
+                    if timed_out {
+                        format!(
+                            "no frames from the selected source within {}s",
+                            FIRST_FRAME_TIMEOUT.as_secs()
+                        )
+                    } else {
+                        "screen capture produced no frames".into()
+                    }
+                });
                 let _ = track_tx.send(Err(msg));
             }
             tracing::info!("screen capture stopped");
@@ -486,7 +598,18 @@ pub fn start_screen(
         tracing::error!("failed to spawn screen capture thread: {e}");
     }
 
-    (ScreenStopper { stop }, track_rx)
+    (ScreenStopper { stop, control }, track_rx)
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+fn bgra_row_stride(width: i32, height: i32, len: usize) -> Option<usize> {
+    let width = usize::try_from(width).ok().filter(|&width| width > 0)?;
+    let height = usize::try_from(height).ok().filter(|&height| height > 0)?;
+    if !len.is_multiple_of(height) {
+        return None;
+    }
+    let stride = len / height;
+    (stride >= width.checked_mul(4)? && stride.is_multiple_of(4)).then_some(stride)
 }
 
 #[cfg(any(not(target_os = "macos"), test))]
@@ -690,5 +813,31 @@ mod tests {
             data: vec![10, 20, 30, 40, 50, 60],
         }));
         assert_eq!(data, vec![30, 20, 10, 255, 60, 50, 40, 255]);
+    }
+}
+
+#[cfg(test)]
+mod frame_layout_tests {
+    use super::bgra_row_stride;
+
+    #[test]
+    fn accepts_packed_and_padded_rows() {
+        assert_eq!(bgra_row_stride(2, 2, 16), Some(8));
+        assert_eq!(bgra_row_stride(2, 2, 24), Some(12));
+    }
+
+    #[test]
+    fn rejects_invalid_dimensions_and_incomplete_rows() {
+        for (width, height, len) in [
+            (0, 2, 16),
+            (-2, 2, 16),
+            (2, 0, 16),
+            (2, -2, 16),
+            (2, 2, 15),
+            (2, 2, 12),
+            (2, 2, 18),
+        ] {
+            assert_eq!(bgra_row_stride(width, height, len), None);
+        }
     }
 }

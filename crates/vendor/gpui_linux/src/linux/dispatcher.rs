@@ -127,9 +127,12 @@ impl PlatformDispatcher for LinuxDispatcher {
     }
 
     fn dispatch_after(&self, duration: Duration, runnable: RunnableVariant) {
-        self.timer_sender
-            .send(TimerAfter { duration, runnable })
-            .ok();
+        if let Err(error) = self.timer_sender.send(TimerAfter { duration, runnable }) {
+            // Zed #60693: the timer thread is already gone during shutdown. Dropping the
+            // runnable would cancel its task and make an awaiter panic on its next poll.
+            // Keeping it pending is preferable while the process is shutting down.
+            std::mem::forget(error);
+        }
     }
 
     fn spawn_realtime(&self, f: Box<dyn FnOnce() + Send>) {

@@ -2,7 +2,9 @@ use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable, PathPromptOptions, SharedString,
     Subscription, Task, Window, div, img, prelude::*, px, rgb,
 };
-use mezon_store::{ClanImageMimeType, ClanList, CreateClanError, MAX_CLAN_LOGO_BYTES, Settings};
+use mezon_store::{
+    ClanImageMimeType, ClanList, CreateClanError, MAX_CLAN_LOGO_BYTES, Settings, is_valid_clan_name,
+};
 
 use crate::app::shell::Shell;
 use crate::clan::templates::{TEMPLATES, TemplateId};
@@ -43,21 +45,6 @@ pub struct CreateClanModal {
     _create_task: Option<Task<()>>,
 }
 
-fn is_valid_clan_name_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_' || c == '-' || c == ' '
-}
-
-fn is_valid_clan_name(s: &str) -> bool {
-    if s.is_empty() || s.chars().count() > 64 {
-        return false;
-    }
-    let first = s.chars().next().unwrap();
-    if first == '_' || first == '-' || first == ' ' {
-        return false;
-    }
-    s.chars().all(|c| is_valid_clan_name_char(c) && c != '\'')
-}
-
 impl Focusable for CreateClanModal {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -65,6 +52,18 @@ impl Focusable for CreateClanModal {
 }
 
 impl CreateClanModal {
+    /// Open the modal on the app shell. Callers that only have an `App` (menus, other modals)
+    /// use this rather than wiring the two stores themselves.
+    pub fn open(window: &mut Window, cx: &mut App) {
+        let clan_list = ClanList::global(cx);
+        let Some(settings) = Settings::try_global(cx) else {
+            return;
+        };
+        let modal = cx.new(|cx| Self::new(clan_list, settings, window, cx));
+        crate::app::shell::Shell::global(cx)
+            .update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
+    }
+
     pub fn new(
         clan_list: Entity<ClanList>,
         settings: Entity<Settings>,
@@ -150,12 +149,9 @@ impl CreateClanModal {
                 this._logo_task = None;
             };
 
-            let paths = match rx.await {
-                Ok(Ok(Some(p))) => p,
-                _ => {
-                    let _ = this.update(cx, |this, _| finish(this));
-                    return;
-                }
+            let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
+                let _ = this.update(cx, |this, _| finish(this));
+                return;
             };
             let path = match paths.into_iter().next() {
                 Some(p) => p,

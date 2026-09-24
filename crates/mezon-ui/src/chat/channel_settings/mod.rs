@@ -1,25 +1,31 @@
 pub mod add_mem_role_modal;
 pub mod category_tab;
 pub mod channel_acl;
+pub mod integrations_tab;
 pub mod overview_tab;
 pub mod permission_overrides;
 pub mod permissions_tab;
+pub mod quick_actions_tab;
+pub mod stream_thumbnail_tab;
 
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, FontWeight, ScrollHandle, SharedString,
     Subscription, Window, deferred, div, point, prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanId, ClanList, PERMISSION_MANAGE_CHANNEL,
-    PERMISSION_MANAGE_CLAN, PermissionStore, Settings, can_delete_channel,
+    ChannelId, ChannelList, ChannelType, ClanId, ClanList, PermissionStore, Settings,
+    can_delete_channel, can_manage_channel,
 };
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{Icon, IconName, h_flex, v_flex};
 use crate::theme::{ActiveTheme, Theme};
 use category_tab::CategoryTab;
+use integrations_tab::{IntegrationsTab, render_channel_integrations_save_bar};
 use overview_tab::{OverviewTab, render_channel_overview_save_bar};
-use permissions_tab::PermissionsTab;
+use permissions_tab::{PermissionsTab, render_channel_permissions_save_bar};
+use quick_actions_tab::QuickActionsTab;
+use stream_thumbnail_tab::StreamThumbnailTab;
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 const SIDEBAR_WIDTH: f32 = 224.0;
@@ -112,9 +118,11 @@ impl ChannelSettingsTab {
         match self {
             Self::Overview => true,
             Self::Category => !ctx.is_thread,
+            // Voice gets the tab too: a private voice room is gated by the same
+            // member/role lists as a private text channel (the server hands a
+            // meet token to `chlu:` members only). Stream and app stay public.
             Self::Permissions => {
                 !ctx.is_thread
-                    && !is_voice
                     && !is_stream
                     && !is_app
                     && !ctx.is_welcome_channel
@@ -150,6 +158,11 @@ pub struct ChannelSettingScreen {
     overview_sub: Option<Subscription>,
     category_tab: Option<Entity<CategoryTab>>,
     category_sub: Option<Subscription>,
+    integrations_tab: Option<Entity<IntegrationsTab>>,
+    integrations_sub: Option<Subscription>,
+    quick_actions_tab: Option<Entity<QuickActionsTab>>,
+    quick_actions_sub: Option<Subscription>,
+    stream_thumbnail_tab: Option<Entity<StreamThumbnailTab>>,
     content_scroll: ScrollHandle,
     nav_scroll: ScrollHandle,
     focus_handle: FocusHandle,
@@ -177,6 +190,11 @@ impl ChannelSettingScreen {
             overview_sub: None,
             category_tab: None,
             category_sub: None,
+            integrations_tab: None,
+            integrations_sub: None,
+            quick_actions_tab: None,
+            quick_actions_sub: None,
+            stream_thumbnail_tab: None,
             content_scroll: ScrollHandle::new(),
             nav_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
@@ -185,18 +203,27 @@ impl ChannelSettingScreen {
     }
 
     pub fn release_active_tab(&mut self, cx: &mut Context<Self>) {
+        self.stream_thumbnail_tab = None;
         let had_permissions_tab = self.permissions_tab.take().is_some();
         let had_overview_tab = self.overview_tab.take().is_some();
         let had_category_tab = self.category_tab.take().is_some();
+        let had_integrations_tab = self.integrations_tab.take().is_some();
+        let had_quick_actions_tab = self.quick_actions_tab.take().is_some();
         let had_permissions_sub = self.permissions_sub.take().is_some();
         let had_overview_sub = self.overview_sub.take().is_some();
         let had_category_sub = self.category_sub.take().is_some();
+        let had_integrations_sub = self.integrations_sub.take().is_some();
+        let had_quick_actions_sub = self.quick_actions_sub.take().is_some();
         if had_permissions_tab
             || had_overview_tab
             || had_category_tab
+            || had_integrations_tab
+            || had_quick_actions_tab
             || had_permissions_sub
             || had_overview_sub
             || had_category_sub
+            || had_integrations_sub
+            || had_quick_actions_sub
             || !self.clan_id.is_zero()
         {
             cx.notify();
@@ -204,6 +231,8 @@ impl ChannelSettingScreen {
         self.permissions_sub = None;
         self.overview_sub = None;
         self.category_sub = None;
+        self.integrations_sub = None;
+        self.quick_actions_sub = None;
         self.clan_id = ClanId(0);
         self.channel_id = ChannelId(0);
         self.current_tab = ChannelSettingsTab::Overview;
@@ -240,13 +269,20 @@ impl ChannelSettingScreen {
             );
             return;
         }
-        if target_changed || resolved != self.current_tab {
+        if target_changed {
+            self.stream_thumbnail_tab = None;
             self.permissions_tab = None;
             self.permissions_sub = None;
             self.overview_tab = None;
             self.overview_sub = None;
             self.category_tab = None;
             self.category_sub = None;
+            self.integrations_tab = None;
+            self.integrations_sub = None;
+            self.quick_actions_tab = None;
+            self.quick_actions_sub = None;
+            self.content_scroll.set_offset(point(px(0.0), px(0.0)));
+        } else if resolved != self.current_tab {
             self.content_scroll.set_offset(point(px(0.0), px(0.0)));
         }
         self.current_tab = resolved;
@@ -290,12 +326,7 @@ impl ChannelSettingScreen {
         let welcome_channel_id = ClanList::global(cx)
             .read(cx)
             .welcome_channel_id(self.clan_id);
-        let has_manage_channel = {
-            let store = PermissionStore::global(cx);
-            let store = store.read(cx);
-            store.check(self.clan_id, None, PERMISSION_MANAGE_CHANNEL, cx)
-                || store.check(self.clan_id, None, PERMISSION_MANAGE_CLAN, cx)
-        };
+        let has_manage_channel = can_manage_channel(self.clan_id, self.channel_id, cx);
         ChannelTabContext {
             channel_type,
             is_thread: channel.is_thread(),
@@ -327,6 +358,35 @@ impl ChannelSettingScreen {
                 let tab = cx.new(|cx| CategoryTab::new(clan_id, channel_id, settings, cx));
                 self.category_sub = Some(cx.observe(&tab, |_, _, cx| cx.notify()));
                 self.category_tab = Some(tab);
+            }
+            ChannelSettingsTab::Integrations => {
+                if self.integrations_tab.is_some() {
+                    return;
+                }
+                let clan_id = self.clan_id;
+                let channel_id = self.channel_id;
+                let settings = self.settings.clone();
+                let tab = cx.new(|cx| IntegrationsTab::new(clan_id, channel_id, settings, cx));
+                self.integrations_sub = Some(cx.observe(&tab, |_, _, cx| cx.notify()));
+                self.integrations_tab = Some(tab);
+            }
+            ChannelSettingsTab::QuickMenu => {
+                if self.quick_actions_tab.is_some() {
+                    return;
+                }
+                let clan_id = self.clan_id;
+                let channel_id = self.channel_id;
+                let settings = self.settings.clone();
+                let tab = cx.new(|cx| QuickActionsTab::new(clan_id, channel_id, settings, cx));
+                self.quick_actions_sub = Some(cx.observe(&tab, |_, _, cx| cx.notify()));
+                self.quick_actions_tab = Some(tab);
+            }
+            ChannelSettingsTab::StreamThumbnail if self.stream_thumbnail_tab.is_none() => {
+                let clan_id = self.clan_id;
+                let channel_id = self.channel_id;
+                let settings = self.settings.clone();
+                self.stream_thumbnail_tab =
+                    Some(cx.new(|cx| StreamThumbnailTab::new(clan_id, channel_id, settings, cx)));
             }
             _ => {}
         }
@@ -580,6 +640,24 @@ impl Render for ChannelSettingScreen {
                 .as_ref()
                 .is_some_and(|tab| tab.read(cx).should_show_save_bar(cx));
         let overview_save_bar = self.overview_tab.clone().filter(|_| show_overview_save);
+        let show_integrations_save = self.current_tab == ChannelSettingsTab::Integrations
+            && self
+                .integrations_tab
+                .as_ref()
+                .is_some_and(|tab| tab.read(cx).should_show_save_bar(cx));
+        let integrations_save_bar = self
+            .integrations_tab
+            .clone()
+            .filter(|_| show_integrations_save);
+        let show_permissions_save = self.current_tab == ChannelSettingsTab::Permissions
+            && self
+                .permissions_tab
+                .as_ref()
+                .is_some_and(|tab| tab.read(cx).should_show_save_bar(cx));
+        let permissions_save_bar = self
+            .permissions_tab
+            .clone()
+            .filter(|_| show_permissions_save);
 
         let body = match self.current_tab {
             ChannelSettingsTab::Permissions => self
@@ -592,6 +670,18 @@ impl Render for ChannelSettingScreen {
                 .map(|tab| tab.clone().into_any_element()),
             ChannelSettingsTab::Category => self
                 .category_tab
+                .as_ref()
+                .map(|tab| tab.clone().into_any_element()),
+            ChannelSettingsTab::Integrations => self
+                .integrations_tab
+                .as_ref()
+                .map(|tab| tab.clone().into_any_element()),
+            ChannelSettingsTab::QuickMenu => self
+                .quick_actions_tab
+                .as_ref()
+                .map(|tab| tab.clone().into_any_element()),
+            ChannelSettingsTab::StreamThumbnail => self
+                .stream_thumbnail_tab
                 .as_ref()
                 .map(|tab| tab.clone().into_any_element()),
             _ => None,
@@ -636,6 +726,10 @@ impl Render for ChannelSettingScreen {
                                     .size_full()
                                     .overflow_y_scroll()
                                     .track_scroll(&self.content_scroll)
+                                    .when(
+                                        self.current_tab == ChannelSettingsTab::Permissions,
+                                        |el| el.suppress_hover_while_scrolling(),
+                                    )
                                     .child(
                                         h_flex()
                                             .w_full()
@@ -647,7 +741,15 @@ impl Render for ChannelSettingScreen {
                                                     .pl(px(40.0))
                                                     .pr(px(10.0))
                                                     .pt(px(94.0))
-                                                    .pb(px(28.0))
+                                                    .pb(px(
+                                                        if self.current_tab
+                                                            == ChannelSettingsTab::Permissions
+                                                        {
+                                                            108.0
+                                                        } else {
+                                                            28.0
+                                                        },
+                                                    ))
                                                     .child(
                                                         div()
                                                             .w_full()
@@ -673,6 +775,16 @@ impl Render for ChannelSettingScreen {
                         panel.child(deferred(render_channel_overview_save_bar(
                             overview, &locale, &theme, cx,
                         )))
+                    })
+                    .when_some(integrations_save_bar, |panel, tab| {
+                        panel.child(deferred(render_channel_integrations_save_bar(
+                            tab, &locale, &theme, cx,
+                        )))
+                    })
+                    .when_some(permissions_save_bar, |panel, tab| {
+                        panel.child(deferred(render_channel_permissions_save_bar(
+                            tab, &locale, &theme, cx,
+                        )))
                     }),
             )
     }
@@ -682,6 +794,86 @@ impl Render for ChannelSettingScreen {
 mod tests {
     use super::*;
     use mezon_store::Channel;
+
+    #[gpui::test]
+    fn permissions_scroll_blocks_hover_during_gesture_and_restores_after_idle(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::time::Duration;
+
+        use gpui::{HitboxBehavior, MouseMoveEvent, ScrollDelta, ScrollWheelEvent, canvas, size};
+
+        struct ScrollTestView {
+            scroll: ScrollHandle,
+            hitbox: Rc<Cell<Option<gpui::HitboxId>>>,
+        }
+
+        impl Render for ScrollTestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let hitbox = self.hitbox.clone();
+                div()
+                    .id("permissions-scroll-hover-test")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .suppress_hover_while_scrolling()
+                    .child(
+                        canvas(
+                            move |bounds, window, _| {
+                                hitbox.set(Some(
+                                    window.insert_hitbox(bounds, HitboxBehavior::Normal).id,
+                                ));
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .h(px(800.))
+                        .w_full(),
+                    )
+            }
+        }
+
+        let cx = cx.add_empty_window();
+        let scroll = ScrollHandle::new();
+        let hitbox = Rc::new(Cell::new(None));
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, cx| {
+                cx.new(|_| ScrollTestView {
+                    scroll: scroll.clone(),
+                    hitbox: hitbox.clone(),
+                })
+                .into_any_element()
+            });
+        };
+        draw(cx);
+        let pointer = point(px(50.), px(100.));
+        cx.simulate_event(MouseMoveEvent {
+            position: pointer,
+            ..Default::default()
+        });
+        assert!(cx.update(|window, _| hitbox.get().unwrap().is_hovered(window)));
+        cx.simulate_event(ScrollWheelEvent {
+            position: pointer,
+            delta: ScrollDelta::Pixels(point(px(0.), px(-48.))),
+            ..Default::default()
+        });
+        draw(cx);
+        cx.simulate_event(MouseMoveEvent {
+            position: pointer,
+            ..Default::default()
+        });
+        assert!(scroll.offset().y < px(0.));
+        assert!(!cx.update(|window, _| hitbox.get().unwrap().is_hovered(window)));
+        cx.executor().advance_clock(Duration::from_millis(350));
+        cx.run_until_parked();
+        draw(cx);
+        cx.simulate_event(MouseMoveEvent {
+            position: point(px(51.), px(100.)),
+            ..Default::default()
+        });
+        assert!(cx.update(|window, _| hitbox.get().unwrap().is_hovered(window)));
+    }
 
     fn ctx(
         channel_type: ChannelType,
@@ -714,8 +906,24 @@ mod tests {
     }
 
     #[test]
-    fn permissions_tab_hidden_for_thread_voice_stream_app_and_welcome() {
-        for channel_type in [ChannelType::Voice, ChannelType::Stream, ChannelType::App] {
+    fn permissions_tab_shown_for_voice_with_manage_channel() {
+        assert!(ChannelSettingsTab::Permissions.visible_in_sidebar(ctx(
+            ChannelType::Voice,
+            false,
+            false,
+            true
+        )));
+        assert!(!ChannelSettingsTab::Permissions.visible_in_sidebar(ctx(
+            ChannelType::Voice,
+            false,
+            false,
+            false
+        )));
+    }
+
+    #[test]
+    fn permissions_tab_hidden_for_thread_stream_app_and_welcome() {
+        for channel_type in [ChannelType::Stream, ChannelType::App] {
             assert!(!ChannelSettingsTab::Permissions.visible_in_sidebar(ctx(
                 channel_type,
                 false,
@@ -751,6 +959,64 @@ mod tests {
             false,
             true
         )));
+    }
+
+    #[test]
+    fn integrations_tab_requires_manage_and_hides_voice_stream() {
+        assert!(ChannelSettingsTab::Integrations.visible_in_sidebar(ctx(
+            ChannelType::Text,
+            false,
+            false,
+            true
+        )));
+        assert!(!ChannelSettingsTab::Integrations.visible_in_sidebar(ctx(
+            ChannelType::Text,
+            false,
+            false,
+            false
+        )));
+        assert!(!ChannelSettingsTab::Integrations.visible_in_sidebar(ctx(
+            ChannelType::Voice,
+            false,
+            false,
+            true
+        )));
+        assert!(!ChannelSettingsTab::Integrations.visible_in_sidebar(ctx(
+            ChannelType::Stream,
+            false,
+            false,
+            true
+        )));
+        assert!(ChannelSettingsTab::Integrations.visible_in_sidebar(ctx(
+            ChannelType::Thread,
+            true,
+            false,
+            true
+        )));
+    }
+
+    #[test]
+    fn quick_actions_tab_requires_manage_and_hides_voice_stream_app() {
+        assert!(ChannelSettingsTab::QuickMenu.visible_in_sidebar(ctx(
+            ChannelType::Text,
+            false,
+            false,
+            true
+        )));
+        assert!(!ChannelSettingsTab::QuickMenu.visible_in_sidebar(ctx(
+            ChannelType::Text,
+            false,
+            false,
+            false
+        )));
+        for channel_type in [ChannelType::Voice, ChannelType::Stream, ChannelType::App] {
+            assert!(!ChannelSettingsTab::QuickMenu.visible_in_sidebar(ctx(
+                channel_type,
+                false,
+                false,
+                true
+            )));
+        }
     }
 
     #[test]

@@ -50,8 +50,9 @@ impl Render for ActivityPage {
                 Switch::new("activity-tracking")
                     .checked(tracking)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.settings.update(cx, |s, _| {
+                        this.settings.update(cx, |s, cx| {
                             s.activity_tracking = !s.activity_tracking;
+                            cx.notify();
                         });
                         mezon_store::schedule_settings_save(&this.settings, cx);
                         cx.notify();

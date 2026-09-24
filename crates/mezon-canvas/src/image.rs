@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use base64::Engine as _;
 use futures::AsyncReadExt as _;
 use gpui::{
     AnyElement, App, EntityId, Global, InteractiveElement, ObjectFit, Pixels, RenderImage,
@@ -381,17 +380,11 @@ fn canvas_image_display_src_checked(src: &str, cx: Option<&App>) -> String {
 }
 
 pub fn is_data_image_url(src: &str) -> bool {
-    src.starts_with("data:image/")
+    mezon_store::data_image::is_data_image_uri(src)
 }
 
 fn decode_data_image(src: &str) -> Option<Vec<u8>> {
-    let payload = src.strip_prefix("data:")?;
-    let (_, data) = payload.split_once(',')?;
-    if src.contains(";base64,") {
-        base64::engine::general_purpose::STANDARD.decode(data).ok()
-    } else {
-        None
-    }
+    mezon_store::data_image::decode_data_image(src).ok()
 }
 
 fn image_pixel_size(src: &str) -> Option<(u32, u32)> {

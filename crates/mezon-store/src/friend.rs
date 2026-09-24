@@ -22,6 +22,23 @@ pub enum FriendState {
     Blocked,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddFriendAction {
+    Send,
+    AlreadySent,
+    Accept,
+    Ignore,
+}
+
+fn add_friend_action(state: Option<FriendState>) -> AddFriendAction {
+    match state {
+        Some(FriendState::InviteSent) => AddFriendAction::AlreadySent,
+        Some(FriendState::InviteReceived) => AddFriendAction::Accept,
+        Some(FriendState::Friend) => AddFriendAction::Ignore,
+        Some(FriendState::Blocked) | None => AddFriendAction::Send,
+    }
+}
+
 impl FriendState {
     pub fn from_i32(value: i32) -> Self {
         match value {
@@ -60,6 +77,7 @@ impl Friend {
 pub enum FriendEvent {
     Changed,
     AddSucceeded,
+    AddAlreadySent,
     AcceptSucceeded,
     /// A friend request could not be sent (server rejected the username or the RPC failed).
     AddFailed,
@@ -68,6 +86,10 @@ pub enum FriendEvent {
     BlockFailed,
     UnblockSucceeded,
     UnblockFailed,
+    FollowerChecked {
+        user: UserId,
+        is_follower: bool,
+    },
 }
 
 fn friend_from_api(f: ApiFriend) -> Friend {
@@ -264,6 +286,10 @@ impl FriendStore {
             .any(|f| f.state == FriendState::Blocked && f.source_id == me && f.username == username)
     }
 
+    pub fn is_user_blocked_by_me(&self, user_id: UserId, cx: &App) -> bool {
+        is_blocked_by(&self.friends, user_id, self.current_user_id(cx))
+    }
+
     /// Count of incoming friend requests awaiting the current user's response
     /// (React `quantityPendingRequest` = friends with state `MY_PENDING`).
     pub fn pending_incoming_count(&self) -> usize {
@@ -280,6 +306,12 @@ impl FriendStore {
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.fetch(cx);
+    }
+
+    /// Whether `ListFriends` has landed at least once. Callers that refuse an action for a
+    /// non-friend have to tell "not a friend" apart from "the list is not here yet".
+    pub fn has_loaded(&self) -> bool {
+        self.freshness.was_fetched()
     }
 
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
@@ -354,6 +386,28 @@ impl FriendStore {
 
     /// Send a friend request by username (React add-friend modal). Optimistically inserts
     /// an outgoing request on success so the Pending tab reflects it immediately.
+    pub fn check_is_follower(&mut self, user: UserId, cx: &mut Context<Self>) {
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        cx.spawn(async move |this, cx| {
+            let result = api.is_follower(user.0).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != generation {
+                    return;
+                }
+                let is_follower = match result {
+                    Ok(is_follower) => is_follower,
+                    Err(error) => {
+                        tracing::warn!("is_follower check failed: {error}");
+                        false
+                    }
+                };
+                cx.emit(FriendEvent::FollowerChecked { user, is_follower });
+            });
+        })
+        .detach();
+    }
+
     pub fn add_friend_by_username(&mut self, username: String, cx: &mut Context<Self>) {
         if self.adding || username.is_empty() {
             return;
@@ -413,14 +467,24 @@ impl FriendStore {
         avatar_url: String,
         cx: &mut Context<Self>,
     ) {
-        if username.is_empty() || self.adding {
-            return;
-        }
-        if self
+        let state = self
             .friends
             .iter()
-            .any(|f| f.id == user_id && f.state != FriendState::Blocked)
-        {
+            .find(|friend| friend.id == user_id)
+            .map(|friend| friend.state);
+        match add_friend_action(state) {
+            AddFriendAction::AlreadySent => {
+                cx.emit(FriendEvent::AddAlreadySent);
+                return;
+            }
+            AddFriendAction::Accept => {
+                self.accept_friend(user_id, cx);
+                return;
+            }
+            AddFriendAction::Ignore => return,
+            AddFriendAction::Send => {}
+        }
+        if username.is_empty() || self.adding {
             return;
         }
         self.adding = true;
@@ -635,6 +699,8 @@ mod tests {
             logo: None,
             status: String::new(),
             user_status: String::new(),
+            dob_seconds: 0,
+            create_time_seconds: 0,
         }
     }
 
@@ -645,6 +711,27 @@ mod tests {
         assert_eq!(FriendState::from_i32(2), FriendState::InviteReceived);
         assert_eq!(FriendState::from_i32(3), FriendState::Blocked);
         assert_eq!(FriendState::from_i32(99), FriendState::Friend);
+    }
+
+    #[test]
+    fn repeated_add_friend_action_matches_relationship_state() {
+        assert_eq!(
+            add_friend_action(Some(FriendState::InviteSent)),
+            AddFriendAction::AlreadySent
+        );
+        assert_eq!(
+            add_friend_action(Some(FriendState::InviteReceived)),
+            AddFriendAction::Accept
+        );
+        assert_eq!(
+            add_friend_action(Some(FriendState::Friend)),
+            AddFriendAction::Ignore
+        );
+        assert_eq!(
+            add_friend_action(Some(FriendState::Blocked)),
+            AddFriendAction::Send
+        );
+        assert_eq!(add_friend_action(None), AddFriendAction::Send);
     }
 
     #[test]

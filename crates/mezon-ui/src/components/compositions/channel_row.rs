@@ -1,7 +1,8 @@
-use gpui::{AnyElement, Hsla, IntoElement, ParentElement, Pixels, Styled, div};
+use gpui::{AnyElement, Hsla, IntoElement, ParentElement, Pixels, Styled, div, px};
 use mezon_store::ChannelType;
 
 use crate::components::primitives::{Icon, IconName};
+use crate::theme::Theme;
 
 pub(crate) fn shows_left_unread_nub(channel_type: ChannelType) -> bool {
     !matches!(
@@ -77,6 +78,15 @@ pub(crate) fn render_channel_icon(
                 .left_0()
                 .child(Icon::new(lock).size(size).text_color(lock_color)),
         )
+        .into_any_element()
+}
+
+pub(crate) fn voice_busy_tag(theme: &Theme) -> AnyElement {
+    div()
+        .flex_shrink_0()
+        .text_size(px(15.))
+        .text_color(theme.danger_text)
+        .child("(busy)")
         .into_any_element()
 }
 

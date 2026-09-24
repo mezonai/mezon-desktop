@@ -7,10 +7,11 @@ use mezon_client::ConnectionStatus;
 use mezon_client::MezonTransport;
 use mezon_client::RealtimeEvent;
 use mezon_client::is_channel_limit_api_error;
+use mezon_client::transport::api_status_from_error;
 use mezon_client::transport::{ApiThreadDesc, THREAD_LIST_LIMIT};
 use mezon_proto::{api, realtime};
 
-use crate::channel::{Channel, ChannelEvent, ChannelList, ChannelType};
+use crate::channel::{Channel, ChannelEvent, ChannelList, ChannelType, validate_channel_name};
 use crate::channel_members::ChannelMembersStore;
 use crate::channel_permissions::{ChannelPermissionsStore, PERMISSION_MANAGE_THREAD};
 use crate::clan::ClanList;
@@ -45,11 +46,29 @@ pub struct ThreadSummary {
     pub active: i32,
     pub creator_id: String,
     pub last_message_content: String,
+    pub last_message_preview: String,
     pub last_message_sender_id: String,
     pub last_message_sender_name: String,
     pub last_message_sender_avatar: String,
     pub last_sent_timestamp: i64,
     pub member_count: i32,
+}
+
+pub fn thread_preview_display(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut prev_space = false;
+    for ch in content.chars() {
+        if ch.is_whitespace() {
+            if !prev_space && !out.is_empty() {
+                out.push(' ');
+                prev_space = true;
+            }
+        } else {
+            out.push(ch);
+            prev_space = false;
+        }
+    }
+    out.trim().to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -63,8 +82,12 @@ pub enum ThreadsEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadCreateFailReason {
     ChannelLimitExceeded,
+    Api(u32),
     Other,
 }
+
+/// A thread name must be longer than this many characters (web `MINIMUM_CHAT_NAME_LENGTH`).
+const THREAD_NAME_MIN_CHARS: usize = 3;
 
 pub struct ThreadsStore {
     list_channel_id: Option<String>,
@@ -86,6 +109,9 @@ pub struct ThreadsStore {
     _create_task: Option<Task<()>>,
     create_private: i32,
     name_error: Option<String>,
+    /// The name currently in the form fails the character rule — shown under the field as the
+    /// user types, before any submit, the way web's `ThreadNameTextField` does.
+    name_live_invalid: bool,
     api: Arc<AppApi>,
     _channel_sub: Subscription,
     _conn_watch: Task<()>,
@@ -140,6 +166,7 @@ impl ThreadsStore {
             _create_task: None,
             create_private: 0,
             name_error: None,
+            name_live_invalid: false,
             api,
             _channel_sub: channel_sub,
             _conn_watch: conn_watch,
@@ -271,6 +298,7 @@ impl ThreadsStore {
             active: THREAD_STATUS_JOINED,
             creator_id: desc.creator_id.to_string(),
             last_message_content: String::new(),
+            last_message_preview: String::new(),
             last_message_sender_id: String::new(),
             last_message_sender_name: String::new(),
             last_message_sender_avatar: String::new(),
@@ -380,18 +408,31 @@ impl ThreadsStore {
         cx.notify();
     }
 
+    #[cfg(test)]
+    pub(crate) fn simulate_active_channel_changed_for_test(
+        &mut self,
+        channel_id: Option<ChannelId>,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_active_channel_changed(channel_id, cx);
+    }
+
     pub fn thread_active(&self, channel_id: &str) -> Option<i32> {
+        self.find_thread(channel_id).map(|t| t.active)
+    }
+
+    pub fn thread_channel_private(&self, channel_id: &str) -> Option<i32> {
+        self.find_thread(channel_id).map(|t| t.channel_private)
+    }
+
+    fn find_thread(&self, channel_id: &str) -> Option<&ThreadSummary> {
         self.threads
             .iter()
             .find(|t| t.channel_id == channel_id)
-            .map(|t| t.active)
             .or_else(|| {
-                self.search_results.as_ref().and_then(|results| {
-                    results
-                        .iter()
-                        .find(|t| t.channel_id == channel_id)
-                        .map(|t| t.active)
-                })
+                self.search_results
+                    .as_ref()
+                    .and_then(|results| results.iter().find(|t| t.channel_id == channel_id))
             })
     }
 
@@ -599,7 +640,26 @@ impl ThreadsStore {
     }
 
     pub fn name_error(&self) -> Option<&str> {
-        self.name_error.as_deref()
+        self.name_error
+            .as_deref()
+            .or(self.name_live_invalid.then_some("thread_name_invalid"))
+    }
+
+    /// The user is editing the form again: drop the last submit's inline error, the way
+    /// React's `ThreadNameTextField` resets `nameThreadError` on change.
+    pub fn clear_name_error(&mut self, cx: &mut Context<Self>) {
+        if self.name_error.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Live result of the character rule for the name in the form; only a change of verdict
+    /// repaints, so ordinary typing costs nothing here.
+    pub fn set_name_live_invalid(&mut self, invalid: bool, cx: &mut Context<Self>) {
+        if self.name_live_invalid != invalid {
+            self.name_live_invalid = invalid;
+            cx.notify();
+        }
     }
 
     pub fn show_threads_popover(&self, cx: &App) -> bool {
@@ -687,6 +747,7 @@ impl ThreadsStore {
         self.fetch_error = false;
         self.invalidate_create_request();
         self.name_error = None;
+        self.name_live_invalid = false;
         cx.notify();
     }
 
@@ -949,6 +1010,7 @@ impl ThreadsStore {
         self.submitting = false;
         self.create_private = 0;
         self.name_error = None;
+        self.name_live_invalid = false;
         cx.notify();
     }
 
@@ -965,6 +1027,7 @@ impl ThreadsStore {
         self.invalidate_create_request();
         self.create_private = 0;
         self.name_error = None;
+        self.name_live_invalid = false;
         cx.notify();
     }
 
@@ -980,8 +1043,17 @@ impl ThreadsStore {
             return;
         }
         let name = name.trim().to_string();
-        if name.is_empty() {
+        // Web's `ThreadBox` rejects `length <= MINIMUM_CHAT_NAME_LENGTH` (3), so the shortest
+        // accepted name is four characters — what the "longer than 3" message promises.
+        if name.chars().count() <= THREAD_NAME_MIN_CHARS {
             self.name_error = Some("thread_name_too_short".into());
+            cx.notify();
+            return;
+        }
+        // Same rule as the web client's `ValidateSpecialCharacters`; the server rejects such a
+        // name too, but with a bare error code that only ever surfaced as "Something went wrong".
+        if validate_channel_name(&name).is_err() {
+            self.name_error = Some("thread_name_invalid".into());
             cx.notify();
             return;
         }
@@ -1010,10 +1082,12 @@ impl ThreadsStore {
         let category_id = self.category_id.clone();
         let channel_private = self.create_private;
         let clan_id_i64 = clan_id_parsed.get();
-        let parent_channel_type = ChannelList::global(cx)
+        let parent_channel = ChannelList::global(cx)
             .read(cx)
             .channel(clan_id_parsed, parent_channel_id)
-            .map(|channel| channel.channel_type.as_raw() as i32);
+            .map(|channel| (channel.channel_type.as_raw() as i32, channel.private));
+        let parent_channel_type = parent_channel.map(|(channel_type, _)| channel_type);
+        let parent_is_public = parent_channel.is_some_and(|(_, private)| !private);
         let cached_parent_members = ChannelMembersStore::try_global(cx).and_then(|members| {
             let members = members.read(cx);
             members
@@ -1111,7 +1185,7 @@ impl ThreadsStore {
 
             let parent_members = match cached_parent_members {
                 Some(ids) => ids,
-                None => match parent_channel_type {
+                None if !parent_is_public => match parent_channel_type {
                     Some(channel_type) => {
                         match api
                             .list_channel_users(clan_id_i64, parent_channel_id.get(), channel_type)
@@ -1143,8 +1217,10 @@ impl ThreadsStore {
                     }
                     None => Vec::new(),
                 },
+                None => Vec::new(),
             };
-            let invite_ids = plan_thread_membership(None, &[], &parent_members, &mentioned);
+            let invite_ids =
+                plan_thread_membership(None, &[], &parent_members, parent_is_public, &mentioned);
 
             let mut invite_failed = false;
             if !invite_ids.is_empty() {
@@ -1234,9 +1310,11 @@ impl ThreadsStore {
 
 fn thread_create_fail_reason(err: &anyhow::Error) -> ThreadCreateFailReason {
     if is_channel_limit_api_error(err) {
-        ThreadCreateFailReason::ChannelLimitExceeded
-    } else {
-        ThreadCreateFailReason::Other
+        return ThreadCreateFailReason::ChannelLimitExceeded;
+    }
+    match api_status_from_error(err) {
+        Some(status) => ThreadCreateFailReason::Api(status.code),
+        None => ThreadCreateFailReason::Other,
     }
 }
 
@@ -1329,7 +1407,8 @@ fn thread_from_api(t: ApiThreadDesc) -> ThreadSummary {
         channel_private: t.channel_private,
         active: t.active,
         creator_id: t.creator_id,
-        last_message_content: t.last_message_content,
+        last_message_content: t.last_message_content.clone(),
+        last_message_preview: thread_preview_display(&t.last_message_content),
         last_message_sender_id: t.last_message_sender_id,
         last_message_sender_name: t.last_message_sender_name,
         last_message_sender_avatar: t.last_message_sender_avatar,
@@ -1348,6 +1427,7 @@ fn thread_from_created_event(ev: &realtime::ChannelCreatedEvent) -> ThreadSummar
         active: ev.status,
         creator_id: ev.creator_id.to_string(),
         last_message_content: String::new(),
+        last_message_preview: String::new(),
         last_message_sender_id: ev.creator_id.to_string(),
         last_message_sender_name: String::new(),
         last_message_sender_avatar: String::new(),
@@ -1368,7 +1448,8 @@ fn patch_thread_from_message(thread: &mut ThreadSummary, msg: &api::ChannelMessa
     thread.last_sent_timestamp = i64::from(msg.create_time_seconds);
     if msg.code == MESSAGE_CODE_CHAT || msg.code == MESSAGE_CODE_CHAT_UPDATE {
         let api_msg = MezonTransport::message_from_proto(msg);
-        thread.last_message_content = api_msg.content;
+        thread.last_message_content = api_msg.content.clone();
+        thread.last_message_preview = thread_preview_display(&api_msg.content);
         thread.last_message_sender_id = api_msg.sender_id.to_string();
         thread.last_message_sender_name = api_msg.sender_name;
         thread.last_message_sender_avatar = api_msg.avatar;
@@ -1472,6 +1553,7 @@ mod tests {
             active: THREAD_STATUS_JOINED,
             creator_id: String::new(),
             last_message_content: String::new(),
+            last_message_preview: String::new(),
             last_message_sender_id: String::new(),
             last_message_sender_name: String::new(),
             last_message_sender_avatar: String::new(),
@@ -1563,6 +1645,7 @@ mod tests {
             active: THREAD_STATUS_JOINED,
             creator_id: String::new(),
             last_message_content: String::new(),
+            last_message_preview: String::new(),
             last_message_sender_id: String::new(),
             last_message_sender_name: String::new(),
             last_message_sender_avatar: String::new(),
@@ -1581,6 +1664,7 @@ mod tests {
                     active: THREAD_STATUS_JOINED,
                     creator_id: String::new(),
                     last_message_content: String::new(),
+                    last_message_preview: String::new(),
                     last_message_sender_id: String::new(),
                     last_message_sender_name: String::new(),
                     last_message_sender_avatar: String::new(),
@@ -1596,6 +1680,7 @@ mod tests {
                     active: THREAD_STATUS_JOINED,
                     creator_id: String::new(),
                     last_message_content: String::new(),
+                    last_message_preview: String::new(),
                     last_message_sender_id: String::new(),
                     last_message_sender_name: String::new(),
                     last_message_sender_avatar: String::new(),
@@ -1619,6 +1704,7 @@ mod tests {
             active: THREAD_STATUS_JOINED,
             creator_id: String::new(),
             last_message_content: "old".into(),
+            last_message_preview: "old".into(),
             last_message_sender_id: "9".into(),
             last_message_sender_name: String::new(),
             last_message_sender_avatar: String::new(),
@@ -1636,6 +1722,7 @@ mod tests {
         patch_thread_from_message(&mut thread, &msg);
         assert_eq!(thread.last_sent_timestamp, 99);
         assert_eq!(thread.last_message_content, "hello");
+        assert_eq!(thread.last_message_preview, "hello");
         assert_eq!(thread.last_message_sender_id, "42");
     }
 
@@ -1650,6 +1737,7 @@ mod tests {
             active: THREAD_STATUS_JOINED,
             creator_id: String::new(),
             last_message_content: "keep".into(),
+            last_message_preview: "keep".into(),
             last_message_sender_id: "9".into(),
             last_message_sender_name: String::new(),
             last_message_sender_avatar: String::new(),
@@ -1680,6 +1768,7 @@ mod tests {
                 active: THREAD_STATUS_JOINED,
                 creator_id: String::new(),
                 last_message_content: String::new(),
+                last_message_preview: String::new(),
                 last_message_sender_id: String::new(),
                 last_message_sender_name: String::new(),
                 last_message_sender_avatar: String::new(),
@@ -1695,6 +1784,7 @@ mod tests {
                 active: THREAD_STATUS_ARCHIVED,
                 creator_id: String::new(),
                 last_message_content: String::new(),
+                last_message_preview: String::new(),
                 last_message_sender_id: String::new(),
                 last_message_sender_name: String::new(),
                 last_message_sender_avatar: String::new(),
@@ -1710,6 +1800,7 @@ mod tests {
                 active: THREAD_STATUS_ACTIVE_PUBLIC,
                 creator_id: String::new(),
                 last_message_content: String::new(),
+                last_message_preview: String::new(),
                 last_message_sender_id: String::new(),
                 last_message_sender_name: String::new(),
                 last_message_sender_avatar: String::new(),
@@ -1735,6 +1826,11 @@ mod tests {
             ThreadCreateFailReason::ChannelLimitExceeded
         );
         let err: anyhow::Error = ApiStatusError { code: 13 }.into();
+        assert_eq!(
+            thread_create_fail_reason(&err),
+            ThreadCreateFailReason::Api(13)
+        );
+        let err = anyhow::anyhow!("socket closed");
         assert_eq!(
             thread_create_fail_reason(&err),
             ThreadCreateFailReason::Other
@@ -1793,6 +1889,7 @@ mod tests {
                         active: THREAD_STATUS_JOINED,
                         creator_id: "1".into(),
                         last_message_content: String::new(),
+                        last_message_preview: String::new(),
                         last_message_sender_id: String::new(),
                         last_message_sender_name: String::new(),
                         last_message_sender_avatar: String::new(),
@@ -1808,6 +1905,7 @@ mod tests {
                         active: THREAD_STATUS_JOINED,
                         creator_id: "1".into(),
                         last_message_content: String::new(),
+                        last_message_preview: String::new(),
                         last_message_sender_id: String::new(),
                         last_message_sender_name: String::new(),
                         last_message_sender_avatar: String::new(),
@@ -1823,6 +1921,7 @@ mod tests {
                         active: THREAD_STATUS_JOINED,
                         creator_id: "1".into(),
                         last_message_content: String::new(),
+                        last_message_preview: String::new(),
                         last_message_sender_id: String::new(),
                         last_message_sender_name: String::new(),
                         last_message_sender_avatar: String::new(),
@@ -1859,5 +1958,35 @@ mod tests {
                 assert!(store.loaded_channel.is_none());
             });
         });
+    }
+
+    #[test]
+    fn thread_preview_display_collapses_decoded_newlines() {
+        assert_eq!(thread_preview_display("123\n123\n111"), "123 123 111");
+    }
+
+    #[test]
+    fn thread_preview_display_preserves_literal_backslash_n() {
+        assert_eq!(
+            thread_preview_display(r"\n123\n123\n111\n"),
+            r"\n123\n123\n111\n"
+        );
+    }
+
+    #[test]
+    fn thread_preview_display_preserves_windows_paths() {
+        assert_eq!(thread_preview_display(r"C:\temp\file"), r"C:\temp\file");
+    }
+
+    #[test]
+    fn thread_preview_display_does_not_parse_json_objects() {
+        assert_eq!(
+            thread_preview_display(r#"{"foo":"bar"}"#),
+            r#"{"foo":"bar"}"#
+        );
+        assert_eq!(
+            thread_preview_display(r#"{"t":"other"}"#),
+            r#"{"t":"other"}"#
+        );
     }
 }

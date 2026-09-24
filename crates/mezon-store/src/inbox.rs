@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -10,11 +10,48 @@ use mezon_client::{
 };
 
 use crate::CACHE_TTL;
+use crate::badge::BadgeService;
+use crate::channel::ChannelList;
+use crate::clan_members::ClanMembersStore;
+use crate::ids::{ChannelId, ClanId};
+use crate::message::MessageCode;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const REALTIME_BUCKET_CAP: usize = (INBOX_PAGE_LIMIT as usize) * 4;
 
 pub const GLOBAL_INBOX_BUCKET_CLAN_ID: &str = "0";
+
+fn topic_remember_key(channel_id: &str, message_id: &str) -> String {
+    format!("{channel_id}:{message_id}")
+}
+
+fn has_visible_inbox_badge(total_badges: u32, filtered_here_badges: u32) -> bool {
+    total_badges > 0 && total_badges != filtered_here_badges
+}
+
+fn filtered_page_follow_up_cursor(
+    visible_page_was_empty: bool,
+    page_has_more: bool,
+    next_cursor: Option<String>,
+    requested_cursor: Option<&str>,
+) -> Option<String> {
+    (visible_page_was_empty && page_has_more)
+        .then_some(next_cursor)
+        .flatten()
+        .filter(|cursor| requested_cursor != Some(cursor.as_str()))
+}
+
+fn message_key(notification: &InboxNotification) -> Option<(String, String)> {
+    Some((
+        notification.effective_channel_id()?,
+        notification.effective_message_id()?,
+    ))
+}
+
+fn remember_key(notification: &InboxNotification) -> Option<String> {
+    message_key(notification)
+        .map(|(channel_id, message_id)| topic_remember_key(&channel_id, &message_id))
+}
 
 #[derive(Debug, Clone)]
 pub enum InboxEvent {
@@ -52,10 +89,18 @@ struct BucketKey {
     category: InboxCategory,
 }
 
+#[derive(Debug, Clone)]
+struct FilteredHereBadge {
+    channel_id: String,
+    message_timestamp: u32,
+}
+
 pub struct InboxStore {
     buckets: HashMap<BucketKey, CategoryBucket>,
     active_clan_id: Option<String>,
     active_channel_id: Option<String>,
+    topic_by_message: HashMap<String, String>,
+    filtered_here_badges: HashMap<String, HashMap<String, FilteredHereBadge>>,
     api: Arc<AppApi>,
     reset_generation: u64,
     _conn_watch: Task<()>,
@@ -83,6 +128,8 @@ impl InboxStore {
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.buckets.clear();
+        self.topic_by_message.clear();
+        self.filtered_here_badges.clear();
         self.active_clan_id = None;
         self.active_channel_id = None;
         self.reset_generation = self.reset_generation.wrapping_add(1);
@@ -97,6 +144,8 @@ impl InboxStore {
             buckets: HashMap::new(),
             active_clan_id: None,
             active_channel_id: None,
+            topic_by_message: HashMap::new(),
+            filtered_here_badges: HashMap::new(),
             api,
             reset_generation: 0,
             _conn_watch: conn_watch,
@@ -108,6 +157,26 @@ impl InboxStore {
         RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
             dispatch.on(RealtimeKind::Notifications, &entity, |this, event, cx| {
                 this.handle_event(event, cx);
+            });
+            dispatch.on(RealtimeKind::MarkAsRead, &entity, |this, event, cx| {
+                if let RealtimeEvent::MarkAsRead(event) = event {
+                    this.clear_filtered_here_badges(
+                        &event.clan_id.to_string(),
+                        &event.channel_id.to_string(),
+                        event.category_id,
+                        cx,
+                    );
+                }
+            });
+            dispatch.on(RealtimeKind::LastSeenUpdated, &entity, |this, event, cx| {
+                if let RealtimeEvent::LastSeenUpdated(event) = event {
+                    this.clear_filtered_here_badges_through(
+                        &event.clan_id.to_string(),
+                        &event.channel_id.to_string(),
+                        event.timestamp_seconds,
+                        cx,
+                    );
+                }
             });
             dispatch.on_lagged(&entity, |this, cx| this.refresh_active(cx));
         });
@@ -183,6 +252,47 @@ impl InboxStore {
             .or_default()
     }
 
+    fn is_here_only_for_current_user(&self, notification: &InboxNotification, cx: &App) -> bool {
+        let Some(user_id) =
+            BadgeService::try_global(cx).and_then(|badges| badges.read(cx).current_user_id(cx))
+        else {
+            return false;
+        };
+        let clan_id = notification
+            .effective_clan_id()
+            .and_then(|id| id.parse::<ClanId>().ok());
+        let role_ids = clan_id
+            .and_then(|clan_id| {
+                ClanMembersStore::try_global(cx).and_then(|members| {
+                    members.read(cx).self_role_ids(clan_id).map(<[i64]>::to_vec)
+                })
+            })
+            .unwrap_or_default();
+        notification.is_here_only_for_user(user_id.get(), &role_ids)
+    }
+
+    fn notification_is_unread(notification: &InboxNotification, cx: &App) -> bool {
+        let Some(clan_id) = notification
+            .effective_clan_id()
+            .and_then(|id| id.parse::<ClanId>().ok())
+        else {
+            return false;
+        };
+        let Some(channel_id) = notification
+            .effective_channel_id()
+            .and_then(|id| id.parse::<ChannelId>().ok())
+        else {
+            return false;
+        };
+        ChannelList::global(cx)
+            .read(cx)
+            .channel(clan_id, channel_id)
+            .is_some_and(|channel| {
+                channel.badge_count > 0
+                    && i64::from(notification.message_timestamp()) > channel.last_seen_timestamp
+            })
+    }
+
     fn should_fetch_initial(bucket: Option<&CategoryBucket>) -> bool {
         let Some(bucket) = bucket else {
             return true;
@@ -193,10 +303,7 @@ impl InboxStore {
         if !bucket.server_loaded {
             return true;
         }
-        if bucket.fetched_at.is_some_and(|t| t.elapsed() < CACHE_TTL) {
-            return false;
-        }
-        bucket.items.is_empty()
+        bucket.fetched_at.is_none_or(|t| t.elapsed() >= CACHE_TTL)
     }
 
     pub fn fetch_if_empty(
@@ -235,9 +342,10 @@ impl InboxStore {
         bucket.loading = true;
         bucket.fetch_generation = bucket.fetch_generation.wrapping_add(1);
         let generation = bucket.fetch_generation;
+        let is_first_page = cursor.is_none();
+        let requested_cursor = cursor.clone();
         let notification_id = cursor.unwrap_or_else(|| "0".to_string());
         cx.notify();
-
         let api = self.api.clone();
         let api_clan_id = clan_id.to_string();
         let reset_gen = self.reset_generation;
@@ -255,7 +363,15 @@ impl InboxStore {
                 if this.reset_generation != reset_gen {
                     return;
                 }
-                this.apply_fetch_result(category, generation, result, cx);
+                this.apply_fetch_result(
+                    &api_clan_id,
+                    category,
+                    generation,
+                    result,
+                    is_first_page,
+                    requested_cursor,
+                    cx,
+                );
             });
         })
         .detach();
@@ -267,17 +383,76 @@ impl InboxStore {
         category: InboxCategory,
         notification: InboxNotification,
         cx: &mut Context<Self>,
-    ) {
-        let bucket = self.bucket_mut(category);
-        if bucket.items.iter().any(|n| n.id == notification.id) {
-            return;
-        }
-        if let Some(message_id) = notification.effective_message_id()
-            && bucket.items.iter().any(|existing| {
-                existing.effective_message_id().as_deref() == Some(message_id.as_str())
-            })
+    ) -> bool {
+        if category == InboxCategory::Mentions
+            && self.is_here_only_for_current_user(&notification, cx)
         {
-            return;
+            tracing::debug!(
+                target: "inbox_mentions",
+                notification_id = %notification.id,
+                "skip @here notification from Mentions inbox"
+            );
+            let key = notification
+                .effective_message_id()
+                .unwrap_or_else(|| notification.id.clone());
+            self.note_filtered_here_badge(
+                &notification.clan_id,
+                &notification.channel_id,
+                &key,
+                notification.message_timestamp(),
+                cx,
+            );
+            return false;
+        }
+        self.prepend_local_unfiltered(category, notification, cx)
+    }
+
+    fn prepend_local_unfiltered(
+        &mut self,
+        category: InboxCategory,
+        notification: InboxNotification,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.remember_topic_id(&notification);
+        let bucket = self.bucket_mut(category);
+        let incoming_key = message_key(&notification);
+        if let Some(pos) = bucket.items.iter().position(|existing| {
+            let same_id =
+                existing.id == notification.id && existing.channel_id == notification.channel_id;
+            same_id || (incoming_key.is_some() && message_key(existing) == incoming_key)
+        }) {
+            let existing = bucket.items.remove(pos);
+            let existing_topic_id = existing.topic_id.clone();
+            let existing_preview_topic_id =
+                existing.message.as_ref().and_then(|m| m.topic_id.clone());
+            let incoming_topic_id = notification.topic_id.clone();
+            let incoming_preview_topic_id = notification
+                .message
+                .as_ref()
+                .and_then(|m| m.topic_id.clone());
+            let mut merged = if is_pending_inbox_notification_id(&existing.id)
+                && !is_pending_inbox_notification_id(&notification.id)
+            {
+                notification
+            } else if is_pending_inbox_notification_id(&notification.id)
+                && !is_pending_inbox_notification_id(&existing.id)
+            {
+                existing
+            } else {
+                notification
+            };
+            if merged.topic_id.is_none() {
+                merged.topic_id = existing_topic_id.or(incoming_topic_id);
+            }
+            if let Some(preview) = merged.message.as_mut()
+                && preview.topic_id.is_none()
+            {
+                preview.topic_id = existing_preview_topic_id.or(incoming_preview_topic_id);
+            }
+            bucket.items.insert(0, merged);
+            self.emit_updated(cx);
+            cx.notify();
+            return false;
         }
         bucket.items.insert(0, notification);
         if bucket.items.len() > REALTIME_BUCKET_CAP {
@@ -285,65 +460,369 @@ impl InboxStore {
         }
         self.emit_updated(cx);
         cx.notify();
+        true
+    }
+
+    pub fn note_mention(&mut self, notification: InboxNotification, cx: &mut Context<Self>) {
+        if notification.category != InboxCategory::Mentions {
+            return;
+        }
+        // BadgeService already classified this ChannelMessage. Do not read it
+        // again while its entity update is still active.
+        self.prepend_local_unfiltered(InboxCategory::Mentions, notification, cx);
+    }
+
+    fn remember_topic_id(&mut self, notification: &InboxNotification) {
+        let Some(key) = remember_key(notification) else {
+            return;
+        };
+        let Some(topic_id) = notification.effective_topic_id() else {
+            return;
+        };
+        self.topic_by_message.insert(key, topic_id);
+    }
+
+    fn apply_remembered_topic_ids(
+        items: &mut [InboxNotification],
+        remembered: &HashMap<String, String>,
+    ) -> HashSet<String> {
+        let mut touched = HashSet::new();
+        for item in items {
+            let Some(key) = remember_key(item) else {
+                continue;
+            };
+            touched.insert(key.clone());
+            if has_concrete_topic_id(item) {
+                continue;
+            }
+            let Some(topic_id) = remembered.get(&key) else {
+                continue;
+            };
+            item.topic_id = Some(topic_id.clone());
+            if let Some(preview) = item.message.as_mut() {
+                preview.topic_id = Some(topic_id.clone());
+            }
+        }
+        touched
     }
 
     fn drop_pending_duplicates(items: &mut Vec<InboxNotification>, incoming: &[InboxNotification]) {
-        let incoming_message_ids: std::collections::HashSet<String> = incoming
-            .iter()
-            .filter_map(|n| n.effective_message_id())
-            .collect();
-        if incoming_message_ids.is_empty() {
+        let incoming_keys: HashSet<(String, String)> =
+            incoming.iter().filter_map(message_key).collect();
+        if incoming_keys.is_empty() {
             return;
         }
         items.retain(|existing| {
             if !is_pending_inbox_notification_id(&existing.id) {
                 return true;
             }
-            existing
-                .effective_message_id()
-                .is_none_or(|message_id| !incoming_message_ids.contains(&message_id))
+            message_key(existing).is_none_or(|key| !incoming_keys.contains(&key))
         });
+    }
+
+    fn merge_server_page(
+        local: Vec<InboxNotification>,
+        fetched: Vec<InboxNotification>,
+    ) -> Vec<InboxNotification> {
+        let fetched_ids: HashSet<String> = fetched.iter().map(|n| n.id.clone()).collect();
+        let fetched_keys: HashSet<(String, String)> =
+            fetched.iter().filter_map(message_key).collect();
+        let mut merged: Vec<InboxNotification> = local
+            .into_iter()
+            .filter(|item| {
+                if fetched_ids.contains(&item.id) {
+                    return false;
+                }
+                if is_pending_inbox_notification_id(&item.id) {
+                    return message_key(item).is_none_or(|key| !fetched_keys.contains(&key));
+                }
+                true
+            })
+            .collect();
+        merged.extend(fetched);
+        Self::sort_items(&mut merged);
+        merged
+    }
+
+    fn page_cursor(items: &[InboxNotification]) -> Option<String> {
+        items
+            .iter()
+            .filter(|item| !is_pending_inbox_notification_id(&item.id))
+            .filter_map(|item| item.id.parse::<i64>().ok().map(|id| (id, &item.id)))
+            .min_by_key(|(id, _)| *id)
+            .map(|(_, id)| id.clone())
+    }
+
+    fn sort_items(items: &mut [InboxNotification]) {
+        items.sort_by(|a, b| {
+            b.message_timestamp()
+                .cmp(&a.message_timestamp())
+                .then_with(|| {
+                    is_pending_inbox_notification_id(&b.id)
+                        .cmp(&is_pending_inbox_notification_id(&a.id))
+                })
+                .then_with(|| b.create_time_seconds.cmp(&a.create_time_seconds))
+                .then_with(|| b.id.cmp(&a.id))
+        });
+    }
+
+    pub fn note_filtered_here_badge(
+        &mut self,
+        clan_id: &str,
+        channel_id: &str,
+        message_id: &str,
+        message_timestamp: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let inserted = self
+            .filtered_here_badges
+            .entry(clan_id.to_string())
+            .or_default()
+            .insert(
+                message_id.to_string(),
+                FilteredHereBadge {
+                    channel_id: channel_id.to_string(),
+                    message_timestamp,
+                },
+            )
+            .is_none();
+        if inserted {
+            cx.notify();
+        }
+    }
+
+    pub fn has_visible_inbox_badge(&self, clan_id: &str, total_badges: u32, cx: &App) -> bool {
+        let clan = clan_id.parse::<ClanId>().ok();
+        let channels = ChannelList::global(cx);
+        let channels = channels.read(cx);
+        let filtered = self
+            .filtered_here_badges
+            .get(clan_id)
+            .map(|entries| {
+                entries
+                    .values()
+                    .filter(|entry| {
+                        let Some(clan) = clan else { return false };
+                        let Ok(channel_id) = entry.channel_id.parse::<ChannelId>() else {
+                            return false;
+                        };
+                        channels.channel(clan, channel_id).is_some_and(|channel| {
+                            !channel.muted
+                                && channel.badge_count > 0
+                                && i64::from(entry.message_timestamp) > channel.last_seen_timestamp
+                        })
+                    })
+                    .count()
+            })
+            .unwrap_or(0) as u32;
+        has_visible_inbox_badge(total_badges, filtered)
+    }
+
+    fn clear_filtered_here_badges(
+        &mut self,
+        clan_id: &str,
+        channel_id: &str,
+        category_id: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = if channel_id != "0" {
+            if let Some(entries) = self.filtered_here_badges.get_mut(clan_id) {
+                let before = entries.len();
+                entries.retain(|_, entry| entry.channel_id != channel_id);
+                entries.len() != before
+            } else {
+                false
+            }
+        } else if category_id != 0 {
+            let clan = clan_id.parse::<ClanId>().ok();
+            if let Some(entries) = self.filtered_here_badges.get_mut(clan_id) {
+                let before = entries.len();
+                entries.retain(|_, entry| {
+                    let Some(clan) = clan else { return true };
+                    let Ok(channel) = entry.channel_id.parse::<ChannelId>() else {
+                        return true;
+                    };
+                    ChannelList::global(cx)
+                        .read(cx)
+                        .channel(clan, channel)
+                        .is_none_or(|channel| {
+                            channel
+                                .category_id
+                                .as_deref()
+                                .and_then(|id| id.parse().ok())
+                                != Some(category_id)
+                        })
+                });
+                entries.len() != before
+            } else {
+                false
+            }
+        } else {
+            self.filtered_here_badges.remove(clan_id).is_some()
+        };
+        if self
+            .filtered_here_badges
+            .get(clan_id)
+            .is_some_and(HashMap::is_empty)
+        {
+            self.filtered_here_badges.remove(clan_id);
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn clear_filtered_here_badges_through(
+        &mut self,
+        clan_id: &str,
+        channel_id: &str,
+        timestamp_seconds: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entries) = self.filtered_here_badges.get_mut(clan_id) else {
+            return;
+        };
+        let before = entries.len();
+        entries.retain(|_, entry| {
+            entry.channel_id != channel_id || entry.message_timestamp > timestamp_seconds
+        });
+        let changed = entries.len() != before;
+        if entries.is_empty() {
+            self.filtered_here_badges.remove(clan_id);
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    pub fn remove_filtered_here_badge(
+        &mut self,
+        clan_id: &str,
+        message_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self
+            .filtered_here_badges
+            .get_mut(clan_id)
+            .is_some_and(|entries| entries.remove(message_id).is_some());
+        if changed {
+            cx.notify();
+        }
     }
 
     fn apply_fetch_result(
         &mut self,
+        clan_id: &str,
         category: InboxCategory,
         generation: u64,
         result: Result<Vec<InboxNotification>, anyhow::Error>,
+        is_first_page: bool,
+        requested_cursor: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let bucket = self.bucket_mut(category);
-        if bucket.fetch_generation != generation {
+        let result = result.map(|items| {
+            let page_has_more = items.len() >= INBOX_PAGE_LIMIT as usize;
+            let next_cursor = Self::page_cursor(&items);
+            let mut visible = Vec::with_capacity(items.len());
+            for item in items {
+                if category == InboxCategory::Mentions
+                    && self.is_here_only_for_current_user(&item, cx)
+                {
+                    let message_id = item
+                        .effective_message_id()
+                        .unwrap_or_else(|| item.id.clone());
+                    let item_clan_id = item
+                        .effective_clan_id()
+                        .unwrap_or_else(|| item.clan_id.clone());
+                    let item_channel_id = item
+                        .effective_channel_id()
+                        .unwrap_or_else(|| item.channel_id.clone());
+                    if Self::notification_is_unread(&item, cx) {
+                        self.note_filtered_here_badge(
+                            &item_clan_id,
+                            &item_channel_id,
+                            &message_id,
+                            item.message_timestamp(),
+                            cx,
+                        );
+                    }
+                } else {
+                    visible.push(item);
+                }
+            }
+            (visible, page_has_more, next_cursor)
+        });
+        let remembered = std::mem::take(&mut self.topic_by_message);
+        let outcome = {
+            let bucket = self.bucket_mut(category);
+            if bucket.fetch_generation != generation {
+                Err(remembered)
+            } else {
+                bucket.loading = false;
+                match result {
+                    Ok((mut items, page_has_more, next_cursor)) => {
+                        let visible_page_was_empty = items.is_empty();
+                        bucket.has_more = page_has_more;
+                        let touched = Self::apply_remembered_topic_ids(&mut items, &remembered);
+                        if is_first_page {
+                            let local = std::mem::take(&mut bucket.items);
+                            bucket.items = Self::merge_server_page(local, items);
+                        } else {
+                            Self::drop_pending_duplicates(&mut bucket.items, &items);
+                            let existing_ids: HashSet<String> =
+                                bucket.items.iter().map(|n| n.id.clone()).collect();
+                            bucket.items.extend(
+                                items.into_iter().filter(|n| !existing_ids.contains(&n.id)),
+                            );
+                            Self::sort_items(&mut bucket.items);
+                        }
+                        bucket.last_id = next_cursor.clone();
+                        bucket.fetched_at = Some(Instant::now());
+                        bucket.server_loaded = true;
+                        let follow_up = filtered_page_follow_up_cursor(
+                            visible_page_was_empty,
+                            page_has_more,
+                            next_cursor,
+                            requested_cursor.as_deref(),
+                        );
+                        Ok((remembered, touched, follow_up))
+                    }
+                    Err(e) => {
+                        tracing::error!("list_notifications failed: {e}");
+                        Ok((remembered, HashSet::new(), None))
+                    }
+                }
+            }
+        };
+        match outcome {
+            Err(remembered) => {
+                self.topic_by_message = remembered;
+            }
+            Ok((remembered, touched, follow_up)) => {
+                self.topic_by_message = remembered;
+                self.prune_topic_keys(category, &touched);
+                self.emit_updated(cx);
+                cx.notify();
+                if let Some(cursor) = follow_up {
+                    self.fetch_page(clan_id, category, Some(cursor), cx);
+                }
+            }
+        }
+    }
+
+    fn prune_topic_keys(&mut self, category: InboxCategory, touched: &HashSet<String>) {
+        if touched.is_empty() || self.topic_by_message.is_empty() {
             return;
         }
-        bucket.loading = false;
-        match result {
-            Ok(items) => {
-                bucket.has_more = items.len() >= INBOX_PAGE_LIMIT as usize;
-                if bucket.items.is_empty() {
-                    bucket.items = items;
-                } else {
-                    Self::drop_pending_duplicates(&mut bucket.items, &items);
-                    let existing: std::collections::HashSet<String> =
-                        bucket.items.iter().map(|n| n.id.clone()).collect();
-                    bucket
-                        .items
-                        .extend(items.into_iter().filter(|n| !existing.contains(&n.id)));
-                }
-                bucket
-                    .items
-                    .sort_by_key(|n| std::cmp::Reverse(n.create_time_seconds));
-                bucket.last_id = bucket.items.last().map(|n| n.id.clone());
-                bucket.fetched_at = Some(Instant::now());
-                bucket.server_loaded = true;
-                self.emit_updated(cx);
-                cx.notify();
+        let Some(bucket) = self.bucket(category) else {
+            for key in touched {
+                self.topic_by_message.remove(key);
             }
-            Err(e) => {
-                tracing::error!("list_notifications failed: {e}");
-                self.emit_updated(cx);
-                cx.notify();
-            }
+            return;
+        };
+        let present: HashSet<String> = bucket.items.iter().filter_map(remember_key).collect();
+        for key in touched.difference(&present) {
+            self.topic_by_message.remove(key);
         }
     }
 
@@ -400,45 +879,27 @@ impl InboxStore {
             return;
         }
         bucket.items.push(item);
-        bucket
-            .items
-            .sort_by_key(|n| std::cmp::Reverse(n.create_time_seconds));
+        Self::sort_items(&mut bucket.items);
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         let RealtimeEvent::Notifications(batch) = event else {
             return;
         };
-        let mut changed = false;
         for raw in &batch.notifications {
             let Ok(notification) = inbox_notification_from_api(raw.clone()) else {
                 continue;
             };
-            if self.should_skip_realtime(&notification) {
+            if !self.should_prepend_realtime(&notification) {
                 continue;
             }
-            let Some(bucket) = self
-                .buckets
-                .get_mut(&Self::bucket_key("", notification.category))
-            else {
-                continue;
-            };
-            if bucket.fetched_at.is_none() {
-                continue;
-            }
-            if bucket.items.iter().any(|n| n.id == notification.id) {
-                continue;
-            }
-            bucket.items.insert(0, notification);
-            if bucket.items.len() > REALTIME_BUCKET_CAP {
-                bucket.items.truncate(REALTIME_BUCKET_CAP);
-            }
-            changed = true;
+            let category = notification.category;
+            self.prepend_local(GLOBAL_INBOX_BUCKET_CLAN_ID, category, notification, cx);
         }
-        if changed {
-            self.emit_updated(cx);
-            cx.notify();
-        }
+    }
+
+    fn should_prepend_realtime(&self, notification: &InboxNotification) -> bool {
+        notification.category == InboxCategory::Mentions || !self.should_skip_realtime(notification)
     }
 
     fn should_skip_realtime(&self, notification: &InboxNotification) -> bool {
@@ -467,9 +928,26 @@ impl InboxStore {
             .map(|key| key.category)
             .collect();
         for category in categories {
-            self.fetch_page(GLOBAL_INBOX_BUCKET_CLAN_ID, category, None, cx);
+            if Self::should_fetch_initial(self.bucket(category)) {
+                self.fetch_page(GLOBAL_INBOX_BUCKET_CLAN_ID, category, None, cx);
+            }
         }
     }
+}
+
+pub(crate) fn skip_inbox_mention_code(code: i32) -> bool {
+    !MessageCode::from_raw(code).is_user_timeline()
+}
+
+fn has_concrete_topic_id(item: &InboxNotification) -> bool {
+    item.topic_id
+        .as_deref()
+        .is_some_and(|id| !id.is_empty() && id != "0")
+        || item
+            .message
+            .as_ref()
+            .and_then(|preview| preview.topic_id.as_deref())
+            .is_some_and(|id| !id.is_empty() && id != "0")
 }
 
 #[cfg(test)]
@@ -499,6 +977,8 @@ mod tests {
             buckets: HashMap::new(),
             active_clan_id: Some("1".into()),
             active_channel_id: Some("7".into()),
+            topic_by_message: HashMap::new(),
+            filtered_here_badges: HashMap::new(),
             api: Arc::new(AppApi::new(
                 Arc::new(mezon_client::TransportClient::new(String::new())),
                 String::new(),
@@ -511,9 +991,32 @@ mod tests {
     }
 
     #[test]
-    fn fetch_initial_after_local_prepend_without_server_page() {
+    fn mentions_prepend_even_when_viewing_same_channel() {
+        let store = InboxStore {
+            buckets: HashMap::new(),
+            active_clan_id: Some("1".into()),
+            active_channel_id: Some("7".into()),
+            topic_by_message: HashMap::new(),
+            filtered_here_badges: HashMap::new(),
+            api: Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            )),
+            reset_generation: 0,
+            _conn_watch: Task::ready(()),
+        };
+        let mention = sample_notification("7");
+        assert!(store.should_skip_realtime(&mention));
+        assert!(store.should_prepend_realtime(&mention));
+    }
+
+    #[test]
+    fn fetch_initial_when_realtime_items_exist_before_server_page() {
         let local_only = CategoryBucket {
-            items: vec![sample_notification("7")],
+            items: vec![InboxNotification {
+                id: "pending-42".into(),
+                ..sample_notification("7")
+            }],
             ..CategoryBucket::default()
         };
         assert!(InboxStore::should_fetch_initial(Some(&local_only)));
@@ -521,7 +1024,157 @@ mod tests {
     }
 
     #[test]
-    fn skip_initial_fetch_when_server_page_is_fresh() {
+    fn fetch_initial_when_socket_items_exist_before_server_page() {
+        let local_only = CategoryBucket {
+            items: vec![InboxNotification {
+                id: "99".into(),
+                ..sample_notification("7")
+            }],
+            ..CategoryBucket::default()
+        };
+        assert!(InboxStore::should_fetch_initial(Some(&local_only)));
+    }
+
+    #[test]
+    fn fetch_initial_when_bucket_is_empty_and_not_server_loaded() {
+        let empty = CategoryBucket::default();
+        assert!(InboxStore::should_fetch_initial(Some(&empty)));
+    }
+
+    #[test]
+    fn pending_inbox_items_follow_displayed_message_time() {
+        let mut items = vec![
+            InboxNotification {
+                id: "10".into(),
+                create_time_seconds: 50,
+                ..sample_notification("7")
+            },
+            InboxNotification {
+                id: "pending-42".into(),
+                create_time_seconds: 1,
+                ..sample_notification("7")
+            },
+        ];
+        InboxStore::sort_items(&mut items);
+        assert_eq!(items[0].id, "10");
+        assert_eq!(items[1].id, "pending-42");
+    }
+
+    #[test]
+    fn server_items_sort_by_the_timestamp_shown_in_the_inbox() {
+        let mut older_message = notification_with_message("10", "10", 100);
+        older_message.create_time_seconds = 300;
+        let mut newer_message = notification_with_message("20", "20", 200);
+        newer_message.create_time_seconds = 150;
+        let mut items = vec![older_message, newer_message];
+
+        InboxStore::sort_items(&mut items);
+
+        assert_eq!(items[0].id, "20");
+        assert_eq!(items[1].id, "10");
+    }
+
+    #[test]
+    fn invalidating_a_category_re_arms_the_initial_fetch() {
+        let mut loaded = CategoryBucket {
+            items: vec![sample_notification("7")],
+            last_id: Some("1".into()),
+            fetched_at: Some(Instant::now()),
+            server_loaded: true,
+            ..CategoryBucket::default()
+        };
+        assert!(!InboxStore::should_fetch_initial(Some(&loaded)));
+        loaded.fetched_at = None;
+        loaded.server_loaded = false;
+        assert!(InboxStore::should_fetch_initial(Some(&loaded)));
+        loaded.items.clear();
+        assert!(InboxStore::should_fetch_initial(Some(&loaded)));
+    }
+
+    #[test]
+    fn page_cursor_never_pages_from_an_optimistic_item() {
+        let items = vec![
+            InboxNotification {
+                id: "pending-42".into(),
+                ..sample_notification("7")
+            },
+            InboxNotification {
+                id: "20".into(),
+                ..sample_notification("7")
+            },
+            InboxNotification {
+                id: "10".into(),
+                ..sample_notification("7")
+            },
+        ];
+        assert_eq!(InboxStore::page_cursor(&items).as_deref(), Some("10"));
+        assert_eq!(InboxStore::page_cursor(&items[..1]), None);
+    }
+
+    #[test]
+    fn page_cursor_uses_minimum_server_id_independent_of_display_order() {
+        let items = vec![
+            InboxNotification {
+                id: "10".into(),
+                ..sample_notification("7")
+            },
+            InboxNotification {
+                id: "30".into(),
+                ..sample_notification("7")
+            },
+            InboxNotification {
+                id: "20".into(),
+                ..sample_notification("7")
+            },
+        ];
+        assert_eq!(InboxStore::page_cursor(&items).as_deref(), Some("10"));
+    }
+
+    #[test]
+    fn stale_filtered_count_never_hides_a_smaller_real_badge_count() {
+        assert!(has_visible_inbox_badge(1, 2));
+        assert!(!has_visible_inbox_badge(2, 2));
+        assert!(!has_visible_inbox_badge(0, 2));
+    }
+
+    #[test]
+    fn an_all_filtered_page_continues_from_the_raw_server_cursor() {
+        assert_eq!(
+            filtered_page_follow_up_cursor(true, true, Some("10".into()), None).as_deref(),
+            Some("10")
+        );
+        assert_eq!(
+            filtered_page_follow_up_cursor(true, true, Some("10".into()), Some("10")),
+            None
+        );
+        assert_eq!(
+            filtered_page_follow_up_cursor(false, true, Some("10".into()), None),
+            None
+        );
+    }
+
+    #[test]
+    fn refetch_when_server_loaded_but_bucket_empty() {
+        let empty_loaded = CategoryBucket {
+            fetched_at: Some(Instant::now()),
+            server_loaded: true,
+            ..CategoryBucket::default()
+        };
+        assert!(!InboxStore::should_fetch_initial(Some(&empty_loaded)));
+    }
+
+    #[test]
+    fn refetch_empty_bucket_when_cache_ttl_expired() {
+        let stale_empty = CategoryBucket {
+            fetched_at: Some(Instant::now() - CACHE_TTL - std::time::Duration::from_secs(1)),
+            server_loaded: true,
+            ..CategoryBucket::default()
+        };
+        assert!(InboxStore::should_fetch_initial(Some(&stale_empty)));
+    }
+
+    #[test]
+    fn skip_refetch_when_server_page_fresh_and_nonempty() {
         let loaded = CategoryBucket {
             items: vec![sample_notification("7")],
             last_id: Some("1".into()),
@@ -530,5 +1183,114 @@ mod tests {
             ..CategoryBucket::default()
         };
         assert!(!InboxStore::should_fetch_initial(Some(&loaded)));
+    }
+
+    fn notification_with_message(id: &str, message_id: &str, seconds: u32) -> InboxNotification {
+        InboxNotification {
+            id: id.into(),
+            create_time_seconds: seconds,
+            message: Some(mezon_client::InboxMessagePreview {
+                message_id: message_id.into(),
+                channel_id: "7".into(),
+                clan_id: "1".into(),
+                sender_id: String::new(),
+                content: String::new(),
+                raw_content: String::new(),
+                avatar: String::new(),
+                display_name: String::new(),
+                username: String::new(),
+                create_time_seconds: seconds,
+                attachment_link: String::new(),
+                attachment_type: String::new(),
+                attachment_filename: String::new(),
+                attachment_size: 0,
+                attachment_thumbnail: String::new(),
+                has_more_attachment: false,
+                mention_spans: Vec::new(),
+                topic_id: None,
+            }),
+            ..sample_notification("7")
+        }
+    }
+
+    #[test]
+    fn first_page_keeps_local_mention_when_server_page_is_stale() {
+        let pending = notification_with_message("pending-99", "99", 200);
+        let older = notification_with_message("10", "10", 50);
+        let merged = InboxStore::merge_server_page(vec![pending], vec![older]);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].id, "pending-99");
+        assert_eq!(merged[1].id, "10");
+    }
+
+    #[test]
+    fn first_page_replaces_pending_when_server_has_same_message() {
+        let pending = notification_with_message("pending-99", "99", 200);
+        let saved = notification_with_message("500", "99", 200);
+        let older = notification_with_message("10", "10", 50);
+        let merged = InboxStore::merge_server_page(vec![pending], vec![saved, older]);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].id, "500");
+        assert_eq!(merged[1].id, "10");
+    }
+
+    #[test]
+    fn first_page_drops_the_pending_copy_when_the_server_row_names_the_channel_only_in_its_preview()
+    {
+        let mut pending = notification_with_message("pending-7-99", "99", 100);
+        pending.channel_id = "7".into();
+        let mut fetched = notification_with_message("500", "99", 200);
+        fetched.channel_id = "0".into();
+        let merged = InboxStore::merge_server_page(vec![pending], vec![fetched]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, "500");
+    }
+
+    #[test]
+    fn first_page_keeps_local_mention_when_server_returns_empty() {
+        let pending = notification_with_message("pending-99", "99", 200);
+        let merged = InboxStore::merge_server_page(vec![pending], Vec::new());
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, "pending-99");
+    }
+
+    #[test]
+    fn pagination_keeps_same_message_id_in_different_channels() {
+        let mut bucket = CategoryBucket::default();
+        let mut first = notification_with_message("1", "99", 100);
+        first.channel_id = "7".into();
+        let mut second = notification_with_message("2", "99", 90);
+        second.channel_id = "8".into();
+        bucket.items = vec![first];
+        let incoming = vec![second];
+        let existing_ids: HashSet<String> = bucket.items.iter().map(|n| n.id.clone()).collect();
+        bucket.items.extend(
+            incoming
+                .into_iter()
+                .filter(|n| !existing_ids.contains(&n.id)),
+        );
+        assert_eq!(bucket.items.len(), 2);
+    }
+
+    #[test]
+    fn skip_inbox_mention_ignores_control_codes() {
+        assert!(skip_inbox_mention_code(3));
+        assert!(skip_inbox_mention_code(1));
+        assert!(skip_inbox_mention_code(6));
+        assert!(skip_inbox_mention_code(10));
+        assert!(!skip_inbox_mention_code(0));
+        assert!(!skip_inbox_mention_code(9));
+    }
+
+    #[test]
+    fn fetch_initial_when_cache_ttl_expired() {
+        let stale = CategoryBucket {
+            items: vec![sample_notification("7")],
+            last_id: Some("1".into()),
+            fetched_at: Some(Instant::now() - CACHE_TTL - std::time::Duration::from_secs(1)),
+            server_loaded: true,
+            ..CategoryBucket::default()
+        };
+        assert!(InboxStore::should_fetch_initial(Some(&stale)));
     }
 }

@@ -1,4 +1,4 @@
-use gpui::{AnyElement, Pixels, Rgba, div, prelude::*, px, rgba};
+use gpui::{AnyElement, Hsla, Pixels, Rgba, div, prelude::*, px, rgba};
 use mezon_store::{DmAvatarPresence, UserPresence};
 
 use crate::components::primitives::{Icon, IconName};
@@ -7,6 +7,16 @@ use crate::theme::Theme;
 pub const PRESENCE_DOT_SIZE: Pixels = px(12.);
 const PRESENCE_IDLE_ICON_SIZE: Pixels = px(10.);
 
+pub fn in_voice_icon_color(theme: &Theme) -> Rgba {
+    theme.status_online
+}
+
+pub fn in_voice_status_label_color(theme: &Theme) -> Hsla {
+    let mut color: Hsla = theme.text_primary.into();
+    color.a *= 0.6;
+    color
+}
+
 pub fn presence_badge_color(presence: DmAvatarPresence) -> Option<Rgba> {
     match presence {
         DmAvatarPresence::None => None,
@@ -14,6 +24,10 @@ pub fn presence_badge_color(presence: DmAvatarPresence) -> Option<Rgba> {
         DmAvatarPresence::Dnd => Some(rgba(0xef4444ff)),
         DmAvatarPresence::Idle => Some(rgba(0xf0b232ff)),
     }
+}
+
+pub fn avatar_status_color(presence: UserPresence) -> Option<Rgba> {
+    presence_badge_color(presence.into())
 }
 
 /// The presence dot drawn over a DM avatar: a filled circle for online/dnd and
@@ -76,18 +90,41 @@ pub fn status_icon(presence: UserPresence) -> IconName {
     }
 }
 
-pub fn status_color(presence: UserPresence, theme: &Theme) -> Rgba {
+pub fn status_glyph(
+    presence: UserPresence,
+    size: Pixels,
+    color: impl Into<gpui::Hsla>,
+) -> AnyElement {
+    let color = color.into();
+    let icon = Icon::new(status_icon(presence)).size(size);
     match presence {
-        UserPresence::Online => theme.status_online,
-        UserPresence::Idle => theme.status_idle,
-        UserPresence::Dnd => theme.status_dnd,
-        UserPresence::Invisible => theme.status_offline,
+        UserPresence::Idle => icon
+            .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                -std::f32::consts::FRAC_PI_2,
+            )))
+            .text_color(color)
+            .into_any_element(),
+        _ => icon.text_color(color).into_any_element(),
     }
 }
 
-pub fn status_icon_and_color(status: &str, theme: &Theme) -> (IconName, Rgba) {
-    let presence = UserPresence::from_status(status);
-    (status_icon(presence), status_color(presence, theme))
+pub fn avatar_status_mark(
+    presence: UserPresence,
+    size: Pixels,
+    color: impl Into<gpui::Hsla>,
+) -> AnyElement {
+    let color = color.into();
+    match presence {
+        UserPresence::Idle => status_glyph(UserPresence::Idle, size, color),
+        UserPresence::Online | UserPresence::Dnd => {
+            div().size(size).rounded_full().bg(color).into_any_element()
+        }
+        UserPresence::Invisible => div().size(size).into_any_element(),
+    }
+}
+
+pub fn status_color(presence: UserPresence, theme: &Theme) -> Rgba {
+    presence_badge_color(presence.into()).unwrap_or(theme.status_offline)
 }
 
 pub fn status_label_key(presence: UserPresence) -> &'static str {
@@ -110,8 +147,9 @@ mod tests {
         UserPresence::Invisible,
     ];
 
-    const LOCALES: [&str; 11] = [
-        "en", "vi", "ru", "es", "tt", "de", "it", "pt", "jpn", "kr", "swe",
+    const LOCALES: [&str; 16] = [
+        "en", "vi", "ru", "ukr", "es", "tt", "de", "it", "pt", "jpn", "pl", "kr", "swe", "blr",
+        "fr", "nl",
     ];
 
     fn themes() -> Vec<Theme> {
@@ -126,6 +164,16 @@ mod tests {
 
     fn rgba_bits(c: Rgba) -> (u32, u32, u32, u32) {
         (c.r.to_bits(), c.g.to_bits(), c.b.to_bits(), c.a.to_bits())
+    }
+
+    #[test]
+    fn in_voice_icon_tracks_status_online_in_every_theme() {
+        for theme in themes() {
+            assert_eq!(
+                rgba_bits(in_voice_icon_color(&theme)),
+                rgba_bits(theme.status_online),
+            );
+        }
     }
 
     #[test]

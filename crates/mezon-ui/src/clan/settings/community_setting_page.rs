@@ -1,6 +1,6 @@
 use gpui::{
-    App, ClipboardItem, Context, Entity, FontWeight, PathPromptOptions, SharedString, Subscription,
-    Task, Window, div, img, prelude::*, px,
+    App, ClipboardItem, Context, Entity, Focusable, FontWeight, PathPromptOptions, SharedString,
+    Subscription, Task, Window, div, img, prelude::*, px,
 };
 use mezon_store::{
     AppConfig, ClanId, ClanImageMimeType, ClanList, CommunityDraft, CommunityInfo,
@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{
-    Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, Sizable, Size, TextArea,
-    TextAreaEvent, TextAreaField, h_flex, v_flex,
+    Button, ButtonVariants, FocusCycle, Icon, IconName, Input, InputEvent, InputState, Sizable,
+    Size, TextArea, TextAreaEvent, TextAreaField, h_flex, v_flex,
 };
 use crate::theme::{ActiveTheme, Theme};
 use crate::util::assets::MEZON_COMMUNITY;
@@ -501,15 +501,12 @@ impl CommunitySettingPage {
                 });
             };
 
-            let paths = match rx.await {
-                Ok(Ok(Some(paths))) => paths,
-                _ => {
-                    let _ = this.update(cx, |this, cx| {
-                        this._banner_upload_task = None;
-                        cx.notify();
-                    });
-                    return;
-                }
+            let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
+                let _ = this.update(cx, |this, cx| {
+                    this._banner_upload_task = None;
+                    cx.notify();
+                });
+                return;
             };
             let path = match paths.into_iter().next() {
                 Some(path) => path,
@@ -805,7 +802,7 @@ impl CommunitySettingPage {
                         .w_full()
                         .h_full()
                         .rounded(radius)
-                        .object_fit(gpui::ObjectFit::Fill),
+                        .object_fit(gpui::ObjectFit::Cover),
                 )
             })
             .when(!has_banner, |el| {
@@ -975,6 +972,13 @@ impl CommunitySettingPage {
 
         v_flex()
             .w_full()
+            .focus_cycle(
+                self.description_input
+                    .iter()
+                    .chain(&self.about_input)
+                    .map(|input| input.focus_handle(cx))
+                    .chain(self.vanity_input.iter().map(|input| input.focus_handle(cx))),
+            )
             .min_w(px(0.0))
             .gap_8()
             .when(self.is_community && !setup_mode, |el| {

@@ -6,11 +6,13 @@ use gpui::{
     AnyElement, App, Context, Entity, FontWeight, Pixels, SharedString, div, img, prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore, DirectChannel,
-    DirectKind, DirectMessageStore, User, UserId, UsersByUserStore,
+    AccountStore, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
+    CtrlKChannel, CtrlKSearchState, CtrlKUser, DirectChannel, DirectKind, DirectMessageStore, User,
+    UserId, UsersByUserStore,
 };
 
 use crate::SHOW_UNREAD_BADGE_COUNT;
+use crate::components::compositions::channel_row::voice_busy_tag;
 use crate::components::primitives::Avatar;
 use crate::theme::Theme;
 use crate::util::assets::AVATAR_GROUP;
@@ -120,6 +122,9 @@ pub fn ensure_palette_sources_loaded(cx: &mut App) {
         ensure_palette_clans_loaded(store, cx);
     });
     DirectMessageStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
+    if let Some(store) = AccountStore::try_global(cx) {
+        store.update(cx, |store, cx| store.ensure_account(cx));
+    }
     if let Some(store) = UsersByUserStore::try_global(cx) {
         store.update(cx, |store, cx| store.ensure_loaded(cx));
     }
@@ -165,38 +170,12 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
         {
             dm_user_ids.insert(user_id);
         }
-        let avatar_raw = SharedString::from(dm.avatar.clone());
-        let avatar = avatar_url(cx, &dm.avatar);
-        let label = dm.label.clone();
-        let subtext = dm_username_subtext(dm, users_store.as_ref(), cx);
-        let filter_name = normalize_search_string(subtext.as_ref());
-        let filter_blob = normalize_search_string(&format!("{label} {}", subtext.as_ref()));
-        items.push(PaletteItem {
-            kind: PaletteItemKind::Direct,
-            label: SharedString::from(label.clone()),
-            subtext,
-            avatar,
-            avatar_raw,
-            unread_count: dm.unread_count,
-            last_sent_timestamp: dm.last_sent_timestamp,
-            last_seen_timestamp: dm.last_seen_timestamp,
-            channel_id: Some(dm.id),
-            clan_id: None,
-            user_id: dm.peer_user_id,
-            channel_type: None,
-            private: false,
-            dm_kind: Some(dm.kind),
-            dm_channel_type: Some(dm.kind.channel_type()),
-            filter_prioritize: normalize_search_string(&label),
-            filter_name,
-            filter_display: String::new(),
-            filter_blob,
-            voice_busy: false,
-        });
+        items.push(palette_item_from_direct(dm, users_store.as_ref(), cx));
     }
 
     let channel_list = ChannelList::global(cx);
     let clan_list = ClanList::global(cx);
+    let self_identity = signed_in_identity(cx);
     let channels = channel_list.read(cx);
     let clans = clan_list.read(cx);
     for channel in channels.user_channels() {
@@ -205,32 +184,9 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
             && (raw_type == 2 || raw_type == 3)
             && !dm_channel_ids.contains(&channel.id)
         {
-            let kind = DirectKind::from_raw(raw_type);
-            let (unread_count, last_sent_timestamp, last_seen_timestamp) =
-                channels.palette_channel_unread(channel);
-            let name = channel.name.clone();
-            items.push(PaletteItem {
-                kind: PaletteItemKind::Direct,
-                label: SharedString::from(name.clone()),
-                subtext: SharedString::default(),
-                avatar: SharedString::default(),
-                avatar_raw: SharedString::default(),
-                unread_count,
-                last_sent_timestamp,
-                last_seen_timestamp,
-                channel_id: Some(channel.id),
-                clan_id: None,
-                user_id: None,
-                channel_type: None,
-                private: false,
-                dm_kind: Some(kind),
-                dm_channel_type: Some(kind.channel_type()),
-                filter_prioritize: normalize_search_string(&name),
-                filter_name: normalize_search_string(&name),
-                filter_display: String::new(),
-                filter_blob: normalize_search_string(&name),
-                voice_busy: false,
-            });
+            let mut item = palette_item_from_dm_channel(channel, channels);
+            tag_self_direct(&mut item, self_identity.as_ref());
+            items.push(item);
             continue;
         }
         let subtext = palette_channel_subtext(channel, channels, clans);
@@ -263,67 +219,604 @@ pub fn build_palette_items(cx: &App) -> Vec<PaletteItem> {
         });
     }
 
-    let Some(users_store) = users_store else {
-        items.sort_by(cmp_items);
-        return items;
-    };
-
-    let active_clan_id = clan_list.read(cx).active_clan_id;
-    let members_store = ClanMembersStore::try_global(cx);
-    for user in users_store.read(cx).users() {
-        if dm_user_ids.contains(&user.id) {
-            continue;
+    if let Some(users_store) = users_store {
+        let active_clan_id = clan_list.read(cx).active_clan_id;
+        let members_store = ClanMembersStore::try_global(cx);
+        for user in users_store.read(cx).users() {
+            if dm_user_ids.contains(&user.id) {
+                continue;
+            }
+            let prioritize = member_label(user, active_clan_id, members_store.as_ref(), cx);
+            let username = user.username.clone();
+            let display_name = user.display_name.clone();
+            let label = if display_name.is_empty() {
+                username.clone()
+            } else {
+                display_name.clone()
+            };
+            let subtext = if username.is_empty() {
+                SharedString::default()
+            } else {
+                SharedString::from(username.clone())
+            };
+            let search_blob = [
+                username.as_str(),
+                display_name.as_str(),
+                prioritize.as_str(),
+            ]
+            .iter()
+            .filter(|part| !part.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join(".");
+            let avatar_raw = SharedString::from(user.avatar_url.clone());
+            items.push(PaletteItem {
+                kind: PaletteItemKind::Member,
+                label: SharedString::from(label.clone()),
+                subtext,
+                avatar: avatar_url(cx, &user.avatar_url),
+                avatar_raw,
+                unread_count: 0,
+                last_sent_timestamp: 0,
+                last_seen_timestamp: 0,
+                channel_id: None,
+                clan_id: None,
+                user_id: Some(user.id),
+                channel_type: None,
+                private: false,
+                dm_kind: None,
+                dm_channel_type: None,
+                filter_prioritize: normalize_search_string(&prioritize),
+                filter_name: normalize_search_string(&username),
+                filter_display: normalize_search_string(&display_name),
+                filter_blob: normalize_search_string(&search_blob),
+                voice_busy: false,
+            });
         }
-        let prioritize = member_label(user, active_clan_id, members_store.as_ref(), cx);
-        let username = user.username.clone();
-        let display_name = user.display_name.clone();
-        let label = if display_name.is_empty() {
-            username.clone()
-        } else {
-            display_name.clone()
-        };
-        let subtext = if username.is_empty() {
-            SharedString::default()
-        } else {
-            SharedString::from(username.clone())
-        };
-        let search_blob = [
-            username.as_str(),
-            display_name.as_str(),
-            prioritize.as_str(),
-        ]
-        .iter()
-        .filter(|part| !part.is_empty())
-        .copied()
-        .collect::<Vec<_>>()
-        .join(".");
-        let avatar_raw = SharedString::from(user.avatar_url.clone());
-        items.push(PaletteItem {
-            kind: PaletteItemKind::Member,
-            label: SharedString::from(label.clone()),
-            subtext,
-            avatar: avatar_url(cx, &user.avatar_url),
-            avatar_raw,
-            unread_count: 0,
-            last_sent_timestamp: 0,
-            last_seen_timestamp: 0,
-            channel_id: None,
-            clan_id: None,
-            user_id: Some(user.id),
-            channel_type: None,
-            private: false,
-            dm_kind: None,
-            dm_channel_type: None,
-            filter_prioritize: normalize_search_string(&prioritize),
-            filter_name: normalize_search_string(&username),
-            filter_display: normalize_search_string(&display_name),
-            filter_blob: normalize_search_string(&search_blob),
-            voice_busy: false,
-        });
     }
 
+    include_account_in_self_direct(&mut items, cx);
+    ensure_self_chat_member(&mut items, None, cx);
+    drop_members_shown_as_directs(&mut items);
     items.sort_by(cmp_items);
     items
+}
+
+const DM_GROUP_CHANNEL_TYPE: i32 = 2;
+const DM_PEER_CHANNEL_TYPE: i32 = 3;
+
+pub fn build_palette_items_from_ctrlk(
+    state: &CtrlKSearchState,
+    query: &str,
+    cx: &App,
+) -> Vec<PaletteItem> {
+    let mut items = Vec::new();
+    let dm_store = DirectMessageStore::global(cx);
+    let channel_list = ChannelList::global(cx);
+    let clan_list = ClanList::global(cx);
+    let channels = channel_list.read(cx);
+    let clans = clan_list.read(cx);
+    let members_store = ClanMembersStore::try_global(cx);
+    let active_clan_id = clan_list.read(cx).active_clan_id;
+
+    for channel in &state.channels {
+        if channel.clan_id.is_zero()
+            || channel.channel_type == DM_GROUP_CHANNEL_TYPE
+            || channel.channel_type == DM_PEER_CHANNEL_TYPE
+        {
+            if let Some(item) =
+                ctrlk_channel_as_direct(channel, channels, dm_store.read(cx).channels(), cx)
+            {
+                items.push(item);
+            }
+            continue;
+        }
+        items.push(ctrlk_channel_as_clan_channel(channel, channels, clans));
+    }
+
+    for user in &state.users {
+        if let Some(item) = ctrlk_user_as_member(user, active_clan_id, members_store.as_ref(), cx) {
+            items.push(item);
+        }
+    }
+
+    append_matching_local_directs(&mut items, query, cx);
+    include_account_in_self_direct(&mut items, cx);
+    if let Some(needle) = ctrlk_people_needle(query) {
+        ensure_self_chat_member(&mut items, Some(needle.as_str()), cx);
+    }
+    drop_members_shown_as_directs(&mut items);
+
+    items
+}
+
+fn palette_item_from_direct(
+    dm: &DirectChannel,
+    users_store: Option<&Entity<UsersByUserStore>>,
+    cx: &App,
+) -> PaletteItem {
+    let avatar_raw = SharedString::from(dm.avatar.clone());
+    let avatar = avatar_url(cx, &dm.avatar);
+    let label = dm.label.clone();
+    let subtext = dm_username_subtext(dm, users_store, cx);
+    let filter_name = normalize_search_string(subtext.as_ref());
+    let filter_blob = normalize_search_string(&format!("{label} {}", subtext.as_ref()));
+    PaletteItem {
+        kind: PaletteItemKind::Direct,
+        label: SharedString::from(label.clone()),
+        subtext,
+        avatar,
+        avatar_raw,
+        unread_count: dm.unread_count,
+        last_sent_timestamp: dm.last_sent_timestamp,
+        last_seen_timestamp: dm.last_seen_timestamp,
+        channel_id: Some(dm.id),
+        clan_id: None,
+        user_id: dm.peer_user_id,
+        channel_type: None,
+        private: false,
+        dm_kind: Some(dm.kind),
+        dm_channel_type: Some(dm.kind.channel_type()),
+        filter_prioritize: normalize_search_string(&label),
+        filter_name,
+        filter_display: String::new(),
+        filter_blob,
+        voice_busy: false,
+    }
+}
+
+fn palette_item_from_dm_channel(
+    channel: &mezon_store::Channel,
+    channels: &ChannelList,
+) -> PaletteItem {
+    let kind = DirectKind::from_raw(channel.channel_type.as_raw());
+    let (unread_count, last_sent_timestamp, last_seen_timestamp) =
+        channels.palette_channel_unread(channel);
+    let name = channel.name.clone();
+    PaletteItem {
+        kind: PaletteItemKind::Direct,
+        label: SharedString::from(name.clone()),
+        subtext: SharedString::default(),
+        avatar: SharedString::default(),
+        avatar_raw: SharedString::default(),
+        unread_count,
+        last_sent_timestamp,
+        last_seen_timestamp,
+        channel_id: Some(channel.id),
+        clan_id: None,
+        user_id: None,
+        channel_type: None,
+        private: false,
+        dm_kind: Some(kind),
+        dm_channel_type: Some(kind.channel_type()),
+        filter_prioritize: normalize_search_string(&name),
+        filter_name: normalize_search_string(&name),
+        filter_display: String::new(),
+        filter_blob: normalize_search_string(&name),
+        voice_busy: false,
+    }
+}
+
+fn ctrlk_people_needle(raw_query: &str) -> Option<String> {
+    let trimmed = raw_query.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    let body = if trimmed.starts_with('@') {
+        trimmed.get(1..).unwrap_or_default()
+    } else {
+        trimmed
+    };
+    let needle = normalize_search_string(body);
+    if needle.is_empty() {
+        None
+    } else {
+        Some(needle)
+    }
+}
+
+fn append_matching_local_directs(items: &mut Vec<PaletteItem>, raw_query: &str, cx: &App) {
+    let trimmed = raw_query.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('@') {
+        return;
+    }
+    let Some(needle) = ctrlk_people_needle(raw_query) else {
+        return;
+    };
+    let mut seen: HashSet<ChannelId> = items.iter().filter_map(|item| item.channel_id).collect();
+    let users_store = UsersByUserStore::try_global(cx);
+    let dm_store = DirectMessageStore::global(cx);
+    for dm in dm_store.read(cx).channels() {
+        if !seen.insert(dm.id) {
+            continue;
+        }
+        let item = palette_item_from_direct(dm, users_store.as_ref(), cx);
+        if item.matches_search(&needle) {
+            items.push(item);
+        }
+    }
+
+    let self_identity = signed_in_identity(cx);
+    let channel_list = ChannelList::global(cx);
+    let channels = channel_list.read(cx);
+    for channel in channels.user_channels() {
+        let raw_type = channel.channel_type.as_raw();
+        if !channel.clan_id.is_zero()
+            || (raw_type != 2 && raw_type != 3)
+            || !seen.insert(channel.id)
+        {
+            continue;
+        }
+        let mut item = palette_item_from_dm_channel(channel, channels);
+        tag_self_direct(&mut item, self_identity.as_ref());
+        if item.matches_search(&needle) {
+            items.push(item);
+        }
+    }
+}
+
+fn include_account_in_self_direct(items: &mut [PaletteItem], cx: &App) {
+    let Some(account) =
+        AccountStore::try_global(cx).and_then(|store| store.read(cx).account.clone())
+    else {
+        return;
+    };
+    if account.user_id == 0 {
+        return;
+    }
+    let self_id = UserId(account.user_id);
+    let username = normalize_search_string(&account.username);
+    let display = normalize_search_string(&account.display_name);
+    for item in items.iter_mut() {
+        if item.kind != PaletteItemKind::Direct || item.user_id != Some(self_id) {
+            continue;
+        }
+        if item.filter_name.is_empty() {
+            item.filter_name = username.clone();
+        }
+        if item.filter_display.is_empty() {
+            item.filter_display = display.clone();
+        }
+        append_search_term(&mut item.filter_blob, &username);
+        append_search_term(&mut item.filter_blob, &display);
+    }
+}
+
+fn append_search_term(blob: &mut String, term: &str) {
+    if term.is_empty() || blob.contains(term) {
+        return;
+    }
+    if !blob.is_empty() {
+        blob.push(' ');
+    }
+    blob.push_str(term);
+}
+
+struct SelfIdentity {
+    id: UserId,
+    username: String,
+    display_name: String,
+}
+
+fn signed_in_identity(cx: &App) -> Option<SelfIdentity> {
+    let account = AccountStore::try_global(cx).and_then(|store| store.read(cx).account.clone())?;
+    if account.user_id == 0 {
+        return None;
+    }
+    Some(SelfIdentity {
+        id: UserId(account.user_id),
+        username: normalize_search_string(&account.username),
+        display_name: normalize_search_string(&account.display_name),
+    })
+}
+
+fn tag_self_direct(item: &mut PaletteItem, identity: Option<&SelfIdentity>) {
+    if item.user_id.is_some() || item.dm_kind != Some(DirectKind::Dm) {
+        return;
+    }
+    let Some(identity) = identity else {
+        return;
+    };
+    if [&identity.username, &identity.display_name]
+        .into_iter()
+        .any(|name| !name.is_empty() && item.filter_prioritize == *name)
+    {
+        item.user_id = Some(identity.id);
+    }
+}
+
+fn drop_members_shown_as_directs(items: &mut Vec<PaletteItem>) {
+    let mut direct_users = HashSet::new();
+    let mut direct_names = HashSet::new();
+    for item in items.iter() {
+        if item.kind != PaletteItemKind::Direct {
+            continue;
+        }
+        if let Some(user_id) = item.user_id {
+            direct_users.insert(user_id);
+        }
+        if !item.filter_name.is_empty() {
+            direct_names.insert(item.filter_name.clone());
+        }
+    }
+    let mut seen_members = HashSet::new();
+    items.retain(|item| {
+        if item.kind != PaletteItemKind::Member {
+            return true;
+        }
+        if item
+            .user_id
+            .is_some_and(|user_id| direct_users.contains(&user_id))
+        {
+            return false;
+        }
+        if !item.filter_name.is_empty() && direct_names.contains(&item.filter_name) {
+            return false;
+        }
+        match item.user_id {
+            Some(user_id) => seen_members.insert(user_id),
+            None => true,
+        }
+    });
+}
+
+fn ensure_self_chat_member(items: &mut Vec<PaletteItem>, needle: Option<&str>, cx: &App) {
+    let Some(item) = self_chat_member_item(cx) else {
+        return;
+    };
+    if items
+        .iter()
+        .any(|existing| existing.user_id == item.user_id && item.user_id.is_some())
+    {
+        return;
+    }
+    if needle.is_some_and(|needle| !item.matches_search(needle)) {
+        return;
+    }
+    items.push(item);
+}
+
+fn self_chat_member_item(cx: &App) -> Option<PaletteItem> {
+    let account = AccountStore::try_global(cx).and_then(|store| store.read(cx).account.clone())?;
+    if account.user_id == 0 {
+        return None;
+    }
+    let user = User {
+        id: UserId(account.user_id),
+        username: account.username.clone(),
+        display_name: account.display_name.clone(),
+        avatar_url: account.avatar_url.clone().unwrap_or_default(),
+        about_me: String::new(),
+        create_time_seconds: 0,
+        join_time_seconds: 0,
+    };
+    let active_clan_id = ClanList::try_global(cx).and_then(|clans| clans.read(cx).active_clan_id);
+    let members_store = ClanMembersStore::try_global(cx);
+    let prioritize = member_label(&user, active_clan_id, members_store.as_ref(), cx);
+    let username = user.username.clone();
+    let display_name = user.display_name.clone();
+    let label = if display_name.is_empty() {
+        username.clone()
+    } else {
+        display_name.clone()
+    };
+    let subtext = if username.is_empty() {
+        SharedString::default()
+    } else {
+        SharedString::from(username.clone())
+    };
+    let search_blob = [
+        username.as_str(),
+        display_name.as_str(),
+        prioritize.as_str(),
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join(".");
+    let avatar_raw = SharedString::from(user.avatar_url.clone());
+    Some(PaletteItem {
+        kind: PaletteItemKind::Member,
+        label: SharedString::from(label.clone()),
+        subtext,
+        avatar: avatar_url(cx, &user.avatar_url),
+        avatar_raw,
+        unread_count: 0,
+        last_sent_timestamp: 0,
+        last_seen_timestamp: 0,
+        channel_id: None,
+        clan_id: None,
+        user_id: Some(user.id),
+        channel_type: None,
+        private: false,
+        dm_kind: None,
+        dm_channel_type: None,
+        filter_prioritize: normalize_search_string(&prioritize),
+        filter_name: normalize_search_string(&username),
+        filter_display: normalize_search_string(&display_name),
+        filter_blob: normalize_search_string(&search_blob),
+        voice_busy: false,
+    })
+}
+
+fn ctrlk_channel_as_direct(
+    channel: &CtrlKChannel,
+    channel_list: &ChannelList,
+    dms: &[DirectChannel],
+    cx: &App,
+) -> Option<PaletteItem> {
+    let kind = match channel.channel_type {
+        DM_GROUP_CHANNEL_TYPE => DirectKind::Group,
+        DM_PEER_CHANNEL_TYPE => DirectKind::Dm,
+        _ if channel.clan_id.is_zero() => DirectKind::Dm,
+        _ => return None,
+    };
+    let existing = dms.iter().find(|dm| dm.id == channel.channel_id);
+    if kind == DirectKind::Dm && existing.is_none() {
+        return None;
+    }
+    let (unread_count, last_sent_timestamp, last_seen_timestamp) = channel_list
+        .user_channel(channel.channel_id)
+        .map(|ch| channel_list.palette_channel_unread(ch))
+        .unwrap_or((0, 0, 0));
+    let label = existing
+        .map(|dm| dm.label.clone())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| channel.label.clone());
+    let avatar_raw = existing
+        .filter(|dm| !dm.avatar.is_empty())
+        .map(|dm| dm.avatar.clone())
+        .unwrap_or_else(|| channel.avatar.clone());
+    let avatar = avatar_url(cx, &avatar_raw);
+    let subtext = existing
+        .and_then(|dm| {
+            if dm.kind == DirectKind::Dm && !dm.peer_username.is_empty() {
+                Some(SharedString::from(dm.peer_username.clone()))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+    let peer_user_id = existing.and_then(|dm| dm.peer_user_id);
+    let filter_name = normalize_search_string(subtext.as_ref());
+    Some(PaletteItem {
+        kind: PaletteItemKind::Direct,
+        label: SharedString::from(label.clone()),
+        subtext,
+        avatar,
+        avatar_raw: SharedString::from(avatar_raw),
+        unread_count,
+        last_sent_timestamp,
+        last_seen_timestamp,
+        channel_id: Some(channel.channel_id),
+        clan_id: None,
+        user_id: peer_user_id,
+        channel_type: None,
+        private: false,
+        dm_kind: Some(kind),
+        dm_channel_type: Some(kind.channel_type()),
+        filter_prioritize: normalize_search_string(&label),
+        filter_name,
+        filter_display: String::new(),
+        filter_blob: normalize_search_string(&label),
+        voice_busy: false,
+    })
+}
+
+fn ctrlk_channel_as_clan_channel(
+    channel: &CtrlKChannel,
+    channel_list: &ChannelList,
+    clans: &ClanList,
+) -> PaletteItem {
+    let channel_type = ChannelType::from_raw(channel.channel_type as u32);
+    let stored = channel_list.channel(channel.clan_id, channel.channel_id);
+    let name = stored
+        .map(|ch| ch.name.clone())
+        .unwrap_or_else(|| channel.label.clone());
+    let subtext = stored
+        .map(|ch| palette_channel_subtext(ch, channel_list, clans))
+        .unwrap_or_else(|| {
+            clans
+                .clan(channel.clan_id)
+                .map(|clan| clan.name.clone())
+                .unwrap_or_default()
+                .to_uppercase()
+        });
+    let (unread_count, last_sent_timestamp, last_seen_timestamp) = stored
+        .map(|ch| channel_list.palette_channel_unread(ch))
+        .unwrap_or((0, 0, 0));
+    let private = stored.map(|ch| ch.private).unwrap_or(channel.private);
+    let voice_busy = channel_voice_busy(
+        channel_list,
+        channel.clan_id,
+        channel.channel_id,
+        channel_type,
+    );
+    PaletteItem {
+        kind: PaletteItemKind::Channel,
+        label: SharedString::from(name.clone()),
+        subtext: SharedString::from(subtext),
+        avatar: SharedString::default(),
+        avatar_raw: SharedString::default(),
+        unread_count,
+        last_sent_timestamp,
+        last_seen_timestamp,
+        channel_id: Some(channel.channel_id),
+        clan_id: Some(channel.clan_id),
+        user_id: None,
+        channel_type: Some(channel_type),
+        private,
+        dm_kind: None,
+        dm_channel_type: None,
+        filter_prioritize: normalize_search_string(&name),
+        filter_name: normalize_search_string(&name),
+        filter_display: String::new(),
+        filter_blob: normalize_search_string(&name),
+        voice_busy,
+    }
+}
+
+fn ctrlk_user_as_member(
+    user: &CtrlKUser,
+    active_clan_id: Option<ClanId>,
+    members_store: Option<&Entity<ClanMembersStore>>,
+    cx: &App,
+) -> Option<PaletteItem> {
+    let domain_user = User {
+        id: user.id,
+        username: user.username.clone(),
+        display_name: user.display_name.clone(),
+        avatar_url: user.avatar_url.clone(),
+        about_me: String::new(),
+        create_time_seconds: 0,
+        join_time_seconds: 0,
+    };
+    let prioritize = member_label(&domain_user, active_clan_id, members_store, cx);
+    let username = user.username.clone();
+    let display_name = user.display_name.clone();
+    let label = if display_name.is_empty() {
+        username.clone()
+    } else {
+        display_name.clone()
+    };
+    let subtext = if username.is_empty() {
+        SharedString::default()
+    } else {
+        SharedString::from(username.clone())
+    };
+    let search_blob = [
+        username.as_str(),
+        display_name.as_str(),
+        prioritize.as_str(),
+    ]
+    .into_iter()
+    .chain(user.nicknames.iter().map(String::as_str))
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join(".");
+    let avatar_raw = SharedString::from(user.avatar_url.clone());
+    Some(PaletteItem {
+        kind: PaletteItemKind::Member,
+        label: SharedString::from(label.clone()),
+        subtext,
+        avatar: avatar_url(cx, &user.avatar_url),
+        avatar_raw,
+        unread_count: 0,
+        last_sent_timestamp: 0,
+        last_seen_timestamp: 0,
+        channel_id: None,
+        clan_id: None,
+        user_id: Some(user.id),
+        channel_type: None,
+        private: false,
+        dm_kind: None,
+        dm_channel_type: None,
+        filter_prioritize: normalize_search_string(&prioritize),
+        filter_name: normalize_search_string(&username),
+        filter_display: normalize_search_string(&display_name),
+        filter_blob: normalize_search_string(&search_blob),
+        voice_busy: false,
+    })
 }
 
 fn member_label(
@@ -445,43 +938,28 @@ pub fn render_palette_row(
             ))
     });
 
-    let row_content = match item.kind {
-        PaletteItemKind::Channel => div()
-            .flex_1()
-            .min_w_0()
-            .w_full()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .child(leading)
-                    .child(label),
-            )
-            .children(subtext)
-            .into_any_element(),
-        PaletteItemKind::Direct | PaletteItemKind::Member => div()
-            .flex_1()
-            .min_w_0()
-            .w_full()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .overflow_hidden()
-            .child(leading)
-            .child(label)
-            .children(subtext)
-            .into_any_element(),
-    };
+    let row_content = div()
+        .flex_1()
+        .min_w_0()
+        .w_full()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .min_w_0()
+                .overflow_hidden()
+                .child(leading)
+                .child(label),
+        )
+        .children(subtext)
+        .into_any_element();
 
     let mut row = div()
         .id(format!(
@@ -564,14 +1042,7 @@ fn render_palette_label(
         .min_w_0()
         .overflow_hidden()
         .child(label)
-        .child(
-            div()
-                .flex_shrink_0()
-                .text_size(px(15.))
-                .italic()
-                .text_color(theme.danger_text)
-                .child("(busy)"),
-        )
+        .child(voice_busy_tag(theme))
         .into_any_element()
 }
 
@@ -761,5 +1232,131 @@ mod tests {
         assert_eq!(before, "");
         assert_eq!(matched, "café");
         assert_eq!(after, "");
+    }
+
+    #[test]
+    fn people_search_keeps_a_name_and_skips_channel_only_queries() {
+        assert_eq!(ctrlk_people_needle("  gia "), Some("GIA".to_string()));
+        assert_eq!(ctrlk_people_needle("@gia"), Some("GIA".to_string()));
+        assert_eq!(ctrlk_people_needle("#general"), None);
+        assert_eq!(ctrlk_people_needle("@"), None);
+        assert_eq!(ctrlk_people_needle("   "), None);
+    }
+
+    #[test]
+    fn an_unnamed_self_dm_is_tagged_when_its_label_is_the_account_name() {
+        let identity = SelfIdentity {
+            id: UserId(7),
+            username: "GIA".into(),
+            display_name: "GIA CHU".into(),
+        };
+        let mut item = PaletteItem {
+            kind: PaletteItemKind::Direct,
+            label: SharedString::from("Gia Chu"),
+            subtext: SharedString::default(),
+            avatar: SharedString::default(),
+            avatar_raw: SharedString::default(),
+            unread_count: 0,
+            last_sent_timestamp: 0,
+            last_seen_timestamp: 0,
+            channel_id: Some(ChannelId(3)),
+            clan_id: None,
+            user_id: None,
+            channel_type: None,
+            private: false,
+            dm_kind: Some(DirectKind::Dm),
+            dm_channel_type: Some(3),
+            filter_prioritize: normalize_search_string("Gia Chu"),
+            filter_name: normalize_search_string("Gia Chu"),
+            filter_display: String::new(),
+            filter_blob: normalize_search_string("Gia Chu"),
+            voice_busy: false,
+        };
+        tag_self_direct(&mut item, Some(&identity));
+        assert_eq!(item.user_id, Some(UserId(7)));
+
+        item.user_id = None;
+        item.filter_prioritize = normalize_search_string("Someone Else");
+        tag_self_direct(&mut item, Some(&identity));
+        assert_eq!(item.user_id, None);
+    }
+
+    #[test]
+    fn self_direct_search_includes_the_account_username() {
+        let mut item = PaletteItem {
+            kind: PaletteItemKind::Direct,
+            label: SharedString::from("Gia Chu"),
+            subtext: SharedString::default(),
+            avatar: SharedString::default(),
+            avatar_raw: SharedString::default(),
+            unread_count: 0,
+            last_sent_timestamp: 0,
+            last_seen_timestamp: 0,
+            channel_id: Some(ChannelId(3)),
+            clan_id: None,
+            user_id: Some(UserId(7)),
+            channel_type: None,
+            private: false,
+            dm_kind: Some(DirectKind::Dm),
+            dm_channel_type: Some(3),
+            filter_prioritize: normalize_search_string("Gia Chu"),
+            filter_name: String::new(),
+            filter_display: String::new(),
+            filter_blob: normalize_search_string("Gia Chu"),
+            voice_busy: false,
+        };
+        if item.filter_name.is_empty() {
+            item.filter_name = normalize_search_string("gia");
+        }
+        if item.filter_display.is_empty() {
+            item.filter_display = normalize_search_string("Gia Chu");
+        }
+        append_search_term(&mut item.filter_blob, "GIA");
+        append_search_term(&mut item.filter_blob, "GIA CHU");
+        assert!(item.matches_search("GIA"));
+        assert!(item.matches_search(&normalize_search_string("chu")));
+    }
+
+    fn search_row(kind: PaletteItemKind, user_id: Option<UserId>, name: &str) -> PaletteItem {
+        PaletteItem {
+            kind,
+            label: SharedString::from(name),
+            subtext: SharedString::from(name),
+            avatar: SharedString::default(),
+            avatar_raw: SharedString::default(),
+            unread_count: 0,
+            last_sent_timestamp: 0,
+            last_seen_timestamp: 0,
+            channel_id: user_id.map(|id| ChannelId(id.0)),
+            clan_id: None,
+            user_id,
+            channel_type: None,
+            private: false,
+            dm_kind: (kind == PaletteItemKind::Direct).then_some(DirectKind::Dm),
+            dm_channel_type: None,
+            filter_prioritize: normalize_search_string(name),
+            filter_name: normalize_search_string(name),
+            filter_display: String::new(),
+            filter_blob: normalize_search_string(name),
+            voice_busy: false,
+        }
+    }
+
+    #[test]
+    fn a_person_with_an_open_dm_is_listed_once() {
+        let mut items = vec![
+            search_row(PaletteItemKind::Member, Some(UserId(4)), "huyentrangbds"),
+            search_row(PaletteItemKind::Direct, Some(UserId(4)), "huyentrangbds"),
+            search_row(PaletteItemKind::Member, Some(UserId(4)), "huyentrangbds"),
+            search_row(PaletteItemKind::Member, Some(UserId(9)), "khuyennguyen0408"),
+            search_row(PaletteItemKind::Channel, None, "huyen-notes"),
+        ];
+        drop_members_shown_as_directs(&mut items);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].kind, PaletteItemKind::Direct);
+        assert_eq!(items[0].user_id, Some(UserId(4)));
+        assert_eq!(items[1].kind, PaletteItemKind::Member);
+        assert_eq!(items[1].user_id, Some(UserId(9)));
+        assert_eq!(items[2].kind, PaletteItemKind::Channel);
     }
 }

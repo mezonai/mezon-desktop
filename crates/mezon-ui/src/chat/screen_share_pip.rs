@@ -1,6 +1,7 @@
 use gpui::{
-    AnyWindowHandle, App, Bounds, Context, Entity, MouseButton, ObjectFit, Window, WindowBounds,
-    WindowControlArea, WindowKind, WindowOptions, div, img, prelude::*, px, rgb, rgba, size,
+    AnyWindowHandle, App, Bounds, Context, Div, Entity, MouseButton, ObjectFit, Window,
+    WindowBounds, WindowControlArea, WindowDecorations, WindowKind, WindowOptions, div, img,
+    prelude::*, px, rgb, rgba, size,
 };
 use mezon_store::{VoiceRenderFrame, VoiceStore};
 
@@ -60,6 +61,19 @@ impl ScreenSharePipView {
             }
         }));
     }
+
+    fn wire_move(&self, root: Div) -> Div {
+        #[cfg(target_os = "windows")]
+        {
+            root.window_control_area(WindowControlArea::Drag)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            root.on_mouse_down(MouseButton::Left, |_, window, _| {
+                window.start_window_move();
+            })
+        }
+    }
 }
 
 impl Render for ScreenSharePipView {
@@ -110,23 +124,41 @@ impl Render for ScreenSharePipView {
                 window.remove_window();
             });
 
-        div()
+        let root = div()
             .relative()
             .size_full()
             .flex()
             .items_center()
             .justify_center()
             .bg(rgb(0x000000))
-            .when(cfg!(target_os = "windows"), |el| {
-                el.window_control_area(WindowControlArea::Drag)
-            })
-            .when(cfg!(not(target_os = "windows")), |el| {
-                el.on_mouse_down(MouseButton::Left, |_, window, _| {
-                    window.start_window_move();
-                })
-            })
             .child(content)
-            .child(close)
+            .child(close);
+        let root = self.wire_move(root);
+        #[cfg(target_os = "linux")]
+        let root = root.child(crate::app::window_controls::render_resize_edges(window));
+        root.into_any_element()
+    }
+}
+
+fn pip_window_kind() -> WindowKind {
+    #[cfg(target_os = "linux")]
+    {
+        WindowKind::Normal
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        WindowKind::PopUp
+    }
+}
+
+fn pip_window_decorations() -> Option<WindowDecorations> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(WindowDecorations::Client)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
     }
 }
 
@@ -141,10 +173,11 @@ pub fn open_screen_share_pip(
             size(px(480.), px(290.)),
             cx,
         ))),
-        kind: WindowKind::PopUp,
+        kind: pip_window_kind(),
         is_movable: true,
         is_resizable: true,
         window_min_size: Some(size(px(240.), px(150.))),
+        window_decorations: pip_window_decorations(),
         focus: false,
         show: true,
         app_id: linux_app_id(),
@@ -152,7 +185,7 @@ pub fn open_screen_share_pip(
     };
 
     cx.open_window(options, |window, cx| {
-        keep_pip_above_other_windows(window);
+        configure_pip_window(window);
         cx.new(|cx| ScreenSharePipView::new(voice, key, cx))
     })
     .ok()
@@ -160,11 +193,12 @@ pub fn open_screen_share_pip(
 }
 
 #[cfg(target_os = "windows")]
-fn keep_pip_above_other_windows(window: &Window) {
+fn configure_pip_window(window: &Window) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
-        HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+        GWL_STYLE, GetWindowLongPtrW, HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, SetWindowLongPtrW, SetWindowPos, WS_THICKFRAME,
     };
 
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
@@ -175,6 +209,8 @@ fn keep_pip_above_other_windows(window: &Window) {
     };
     let hwnd = HWND(win32.hwnd.get() as *mut _);
     unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        SetWindowLongPtrW(hwnd, GWL_STYLE, style | WS_THICKFRAME.0 as isize);
         let _ = SetWindowPos(
             hwnd,
             Some(HWND_TOPMOST),
@@ -182,10 +218,77 @@ fn keep_pip_above_other_windows(window: &Window) {
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         );
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-fn keep_pip_above_other_windows(_window: &Window) {}
+#[cfg(target_os = "linux")]
+fn configure_pip_window(window: &Window) {
+    set_pip_window_hints_x11(window);
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn configure_pip_window(_window: &Window) {}
+
+#[cfg(target_os = "linux")]
+fn set_pip_window_hints_x11(window: &Window) {
+    use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{ClientMessageEvent, ConnectionExt, EventMask};
+    use x11rb::xcb_ffi::XCBConnection;
+
+    let Ok(display) = HasDisplayHandle::display_handle(window) else {
+        return;
+    };
+    let RawDisplayHandle::Xcb(display) = display.as_raw() else {
+        return;
+    };
+    let Some(connection) = display.connection else {
+        return;
+    };
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Xcb(handle) = handle.as_raw() else {
+        return;
+    };
+    let window_id = handle.window.get();
+
+    let Ok(conn) = (unsafe { XCBConnection::from_raw_xcb_connection(connection.as_ptr(), false) })
+    else {
+        return;
+    };
+    let Some(root) = conn
+        .setup()
+        .roots
+        .get(display.screen as usize)
+        .map(|screen| screen.root)
+    else {
+        return;
+    };
+
+    let Ok(Ok(state)) = conn.intern_atom(false, b"_NET_WM_STATE").map(|c| c.reply()) else {
+        return;
+    };
+    let state = state.atom;
+
+    let names: [&[u8]; 3] = [
+        b"_NET_WM_STATE_ABOVE",
+        b"_NET_WM_STATE_SKIP_TASKBAR",
+        b"_NET_WM_STATE_SKIP_PAGER",
+    ];
+    for name in names {
+        let Ok(Ok(reply)) = conn.intern_atom(false, name).map(|c| c.reply()) else {
+            continue;
+        };
+        let event = ClientMessageEvent::new(32, window_id, state, [1, reply.atom, 0, 1, 0]);
+        let _ = conn.send_event(
+            false,
+            root,
+            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+            event,
+        );
+    }
+    let _ = conn.flush();
+}

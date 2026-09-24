@@ -46,6 +46,10 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
             locale,
             "channelTopbar.createThread.toast.threadNameTooShort",
         ),
+        "thread_name_invalid" => mezon_i18n::t(
+            locale,
+            "channelTopbar.createThread.validation.invalidChannelName",
+        ),
         "thread_name_exists" => {
             mezon_i18n::t(locale, "channelTopbar.createThread.toast.threadNameExists")
         }

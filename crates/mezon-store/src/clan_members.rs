@@ -252,6 +252,11 @@ impl ClanMembersStore {
     }
 
     #[cfg(test)]
+    pub(crate) fn seed_self_roles_for_test(&mut self, clan_id: ClanId, roles: Vec<i64>) {
+        self.self_role_ids.insert(clan_id, roles);
+    }
+
+    #[cfg(test)]
     pub(crate) fn seed_members_for_test(&mut self, clan_id: ClanId, members: Vec<ClanMember>) {
         let mut bucket = ClanBucket::default();
         for member in members {

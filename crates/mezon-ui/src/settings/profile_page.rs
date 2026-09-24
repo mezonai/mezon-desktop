@@ -1,14 +1,16 @@
 use crate::components::compositions::CustomStatusBubble;
 use crate::components::primitives::{
-    Avatar, Button as GpuiButton, ButtonVariants, Icon, IconName, Input, InputEvent, InputState,
-    Label, TextArea, TextAreaEvent, TextAreaField, h_flex, v_flex,
+    Avatar, Button as GpuiButton, ButtonVariants, FocusCycle, Icon, IconName, Input, InputEvent,
+    InputState, Label, TextArea, TextAreaEvent, TextAreaField, h_flex, v_flex,
 };
 use gpui::{
-    Context, Entity, FontWeight, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point,
-    Rgba, SharedString, Subscription, Task, Window, anchored, deferred, div, img, prelude::*, px,
+    Context, Entity, Focusable, FontWeight, MouseButton, MouseDownEvent, PathPromptOptions, Pixels,
+    Point, Rgba, SharedString, Subscription, Task, Window, anchored, deferred, div, img,
+    prelude::*, px,
 };
 use mezon_store::{
     AccountEvent, AccountStore, AppConfig, ClanList, LoginStore, Settings, UserAccount,
+    prepare_display_name_for_update,
 };
 
 use super::clan_profile_section::ClanProfileSection;
@@ -115,6 +117,30 @@ impl ProfilePage {
                     this.profile = Some(ProfileState::from_account(account));
                     this.refresh_banner_color(cx);
                     cx.notify();
+                } else if !this.is_dirty() {
+                    let next = ProfileState::from_account(account);
+                    let text_changed = this.profile.as_ref().is_none_or(|prev| {
+                        prev.display_name != next.display_name || prev.about_me != next.about_me
+                    });
+                    let changed = this.profile.as_ref().is_none_or(|prev| {
+                        prev.avatar_url != next.avatar_url
+                            || prev.display_name != next.display_name
+                            || prev.about_me != next.about_me
+                            || prev.logo_url != next.logo_url
+                            || prev.username != next.username
+                            || prev.status != next.status
+                            || prev.custom_status != next.custom_status
+                    });
+                    if changed {
+                        this.profile = Some(next);
+                        if text_changed {
+                            this.display_name_input = None;
+                            this.about_me_input = None;
+                            this._subscriptions.clear();
+                        }
+                        this.refresh_banner_color(cx);
+                        cx.notify();
+                    }
                 } else if let Some(profile) = &mut this.profile
                     && (profile.status.as_ref() != account.status
                         || profile.custom_status.as_ref() != account.user_status)
@@ -432,21 +458,60 @@ impl ProfilePage {
         }
     }
 
-    fn save(&mut self, cx: &mut Context<Self>) {
-        self.save_user_profile(cx);
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_user_profile(window, cx);
     }
 
-    fn save_user_profile(&mut self, cx: &mut Context<Self>) {
+    fn save_user_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(state) = &mut self.profile else {
             return;
         };
         if state.saving {
             return;
         }
+        let display_name_raw = state.display_name.to_string();
+        let display_name_changed = display_name_raw != state.original_display_name.as_ref();
+        let display_name_for_store = if display_name_changed {
+            match prepare_display_name_for_update(&display_name_raw) {
+                Ok(Some(normalized)) => {
+                    state.display_name = normalized.clone().into();
+                    if let Some(input) = &self.display_name_input {
+                        input.update(cx, |input_state, input_cx| {
+                            input_state.set_value(normalized.clone(), window, input_cx);
+                        });
+                    }
+                    Some(normalized)
+                }
+                Ok(None) => {
+                    state.display_name = state.original_display_name.clone();
+                    if let Some(input) = &self.display_name_input {
+                        input.update(cx, |input_state, input_cx| {
+                            input_state.set_value(
+                                state.original_display_name.clone(),
+                                window,
+                                input_cx,
+                            );
+                        });
+                    }
+                    None
+                }
+                Err(_) => {
+                    let locale = self.settings.read(cx).language.clone();
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.error(
+                            mezon_i18n::t(&locale, "profileSetting.invalidDisplayName"),
+                            cx,
+                        )
+                    });
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         state.saving = true;
         cx.notify();
 
-        let display_name: String = state.display_name.to_string();
         let about_me: String = state.about_me.to_string();
         let avatar_url: Option<String> = state.avatar_url.as_ref().map(|s| s.to_string());
         let logo_url = Some(
@@ -458,16 +523,28 @@ impl ProfilePage {
         );
 
         AccountStore::global(cx).update(cx, |store, cx| {
-            store.save_account(display_name, avatar_url, about_me, logo_url, cx);
+            store.save_account(display_name_for_store, avatar_url, about_me, logo_url, cx);
         });
     }
 
     fn render_user_section(&mut self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let locale = self.settings.read(cx).language.clone();
-        let avatar_display = self
+        let avatar_raw = self
             .profile
             .as_ref()
-            .and_then(|p| p.avatar_url.as_ref())
+            .and_then(|p| p.avatar_url.clone())
+            .filter(|url| !url.is_empty())
+            .or_else(|| {
+                AccountStore::global(cx)
+                    .read(cx)
+                    .account
+                    .as_ref()
+                    .and_then(|account| account.avatar_url.clone())
+                    .filter(|url| !url.is_empty())
+                    .map(SharedString::from)
+            });
+        let avatar_display = avatar_raw
+            .as_ref()
             .map(|url| SharedString::from(crate::util::imgproxy::profile_url(cx, url.as_ref())));
         let custom_status = self
             .profile
@@ -491,6 +568,7 @@ impl ProfilePage {
             theme,
             &locale,
             avatar_display,
+            avatar_raw,
             self.avatar_local_preview.clone(),
         );
         v_flex().gap_6().child(
@@ -787,7 +865,7 @@ impl Render for ProfilePage {
                                 .on_click({
                                     let profile_entity = profile_entity.clone();
                                     let clan_section = clan_section.clone();
-                                    move |_, _, cx| {
+                                    move |_, window, cx| {
                                         if is_clan {
                                             if let Some(section) = &clan_section {
                                                 section.update(cx, |section, cx| {
@@ -795,7 +873,9 @@ impl Render for ProfilePage {
                                                 });
                                             }
                                         } else {
-                                            profile_entity.update(cx, |page, cx| page.save(cx));
+                                            profile_entity.update(cx, |page, cx| {
+                                                page.save(window, cx);
+                                            });
                                         }
                                     }
                                 }),
@@ -879,6 +959,16 @@ impl ProfilePage {
 
         v_flex()
             .gap_4()
+            .focus_cycle(
+                self.display_name_input
+                    .iter()
+                    .map(|input| input.focus_handle(cx))
+                    .chain(
+                        self.about_me_input
+                            .iter()
+                            .map(|input| input.focus_handle(cx)),
+                    ),
+            )
             .child(
                 v_flex()
                     .gap_2()
@@ -933,9 +1023,10 @@ impl ProfilePage {
                                             ),
                                         });
                                         cx.spawn(async move |_this, cx| {
-                                            let paths = match rx.await {
-                                                Ok(Ok(Some(paths))) => paths,
-                                                _ => return,
+                                            let Some(paths) =
+                                                crate::util::file_dialog::resolve(rx, cx).await
+                                            else {
+                                                return;
                                             };
                                             let Some(path) = paths.into_iter().next() else {
                                                 return;
@@ -1120,9 +1211,10 @@ impl ProfilePage {
                                             ),
                                         });
                                         cx.spawn(async move |_this, cx| {
-                                            let paths = match rx.await {
-                                                Ok(Ok(Some(paths))) => paths,
-                                                _ => return,
+                                            let Some(paths) =
+                                                crate::util::file_dialog::resolve(rx, cx).await
+                                            else {
+                                                return;
                                             };
                                             let Some(path) = paths.into_iter().next() else {
                                                 return;
@@ -1181,6 +1273,7 @@ impl ProfilePage {
         theme: &Theme,
         locale: &str,
         avatar_display: Option<SharedString>,
+        avatar_raw: Option<SharedString>,
         avatar_local_preview: Option<std::path::PathBuf>,
     ) -> impl IntoElement {
         let display_name: SharedString = self
@@ -1199,7 +1292,10 @@ impl ProfilePage {
             .profile
             .as_ref()
             .map_or_else(SharedString::default, |p| p.custom_status.clone());
-        let (status_icon, status_color) = profile_status(status, theme);
+        let status_presence = mezon_store::UserPresence::from_status(status);
+        let show_avatar_status = status_presence.is_visible();
+        let status_color = crate::util::user_status::avatar_status_color(status_presence)
+            .unwrap_or_else(|| crate::util::user_status::status_color(status_presence, theme));
         let banner_color = self
             .banner_color
             .map(gpui::Hsla::from)
@@ -1288,27 +1384,36 @@ impl ProfilePage {
                                     )
                                     .into_any_element()
                             } else {
-                                Avatar::new()
-                                    .when_some(avatar_display, |avatar, url| avatar.src(url))
+                                let mut avatar = Avatar::new()
                                     .name(display_name)
                                     .size_px(px(80.))
-                                    .image_cache(self.avatar_image_cache.clone())
-                                    .into_any_element()
+                                    .image_cache(self.avatar_image_cache.clone());
+                                if let Some(url) = avatar_display {
+                                    avatar = avatar.src(url.clone());
+                                    if let Some(raw) = avatar_raw
+                                        && raw != url
+                                    {
+                                        avatar = avatar.fallback_src(raw);
+                                    }
+                                }
+                                avatar.into_any_element()
                             })
-                            .child(
-                                div()
-                                    .absolute()
-                                    .right(px(5.))
-                                    .bottom(px(5.))
-                                    .p(px(2.))
-                                    .rounded_full()
-                                    .bg(theme.bg_secondary)
-                                    .child(
-                                        Icon::new(status_icon)
-                                            .size(px(15.))
-                                            .text_color(status_color),
-                                    ),
-                            )
+                            .when(show_avatar_status, |avatar| {
+                                avatar.child(
+                                    div()
+                                        .absolute()
+                                        .right(px(5.))
+                                        .bottom(px(5.))
+                                        .p(px(2.))
+                                        .rounded_full()
+                                        .bg(theme.bg_secondary)
+                                        .child(crate::util::user_status::avatar_status_mark(
+                                            status_presence,
+                                            px(15.),
+                                            status_color,
+                                        )),
+                                )
+                            })
                             .when(!custom_status.is_empty(), |avatar| {
                                 avatar.child(
                                     div()
@@ -1346,5 +1451,3 @@ impl ProfilePage {
             })
     }
 }
-
-pub(super) use crate::util::user_status::status_icon_and_color as profile_status;

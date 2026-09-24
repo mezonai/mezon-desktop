@@ -2,27 +2,35 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::{
-    App, Context, Entity, FontWeight, Hsla, ListSizingBehavior, SharedString, Subscription,
-    UniformListScrollHandle, Window, div, img, prelude::*, px, rgb, size, uniform_list,
+    App, Context, Entity, FontWeight, Hsla, ListSizingBehavior, SharedString, Subscription, Window,
+    div, img, prelude::*, px, rgb, size, uniform_list,
 };
 use mezon_store::{
-    BadgeService, ChannelId, ChannelList, ChannelType, ChannelUsersStore, ClanId, ClanMembersStore,
-    RoleId, RolesStore, Settings, UserId,
+    BadgeService, ChannelId, ChannelList, ChannelType, ChannelUserProfile, ChannelUsersEvent,
+    ChannelUsersStore, ClanId, ClanMembersEvent, ClanMembersStore, RoleId, RolesStore, Settings,
+    UserId,
 };
 
 use super::add_mem_role_modal::{AddMemRoleEvent, AddMemRoleModal};
-use super::channel_acl;
+use super::channel_acl::{self, member_matches, parse_search};
 use super::permission_overrides::PermissionOverrides;
 use crate::chat::role_style::role_fallback_color;
-use crate::components::primitives::{Avatar, Icon, IconName, h_flex, v_flex};
+use crate::components::primitives::{
+    Avatar, Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState,
+    PaginationButton, Tooltip, h_flex, pagination_button, pagination_items, pagination_slot_count,
+    v_flex,
+};
 use crate::theme::{ActiveTheme, Theme};
 
 const TOGGLE_TRACK_WIDTH: f32 = 32.0;
 const TOGGLE_TRACK_HEIGHT: f32 = 16.0;
 const TOGGLE_KNOB_SIZE: f32 = 16.0;
 pub(super) const ROLE_ROW_HEIGHT: f32 = 36.0;
-pub(super) const MEMBER_ROW_HEIGHT: f32 = 40.0;
+pub(super) const MEMBER_ROW_HEIGHT: f32 = 48.0;
 const REMOVE_ICON_SIZE: f32 = 15.0;
+const MEMBER_SEARCH_WIDTH: f32 = 220.0;
+const MEMBER_SEARCH_HEIGHT: f32 = 30.0;
+const MEMBER_PAGE_SIZE: usize = 8;
 
 const TOGGLE_ON: u32 = 0x52_65_ec;
 const TOGGLE_ON_HOVER: u32 = 0x46_54_c0;
@@ -33,8 +41,6 @@ const TOGGLE_OFF_KNOB_HOVER: u32 = 0x47_55_69;
 const TOGGLE_KNOB_ON: u32 = 0xff_ff_ff;
 const SYNC_ICON_COLOR: u32 = 0xf0_b0_33;
 const REMOVE_HOVER_COLOR: u32 = 0xef_44_44;
-const RESET_BUTTON_BG: u32 = 0x4b_55_63;
-const SAVE_BUTTON_BG: u32 = 0x25_63_eb;
 
 pub(super) fn role_tint(color: &str) -> Hsla {
     match mezon_store::parse_role_color(color) {
@@ -72,10 +78,52 @@ pub(super) fn member_row(clan_id: ClanId, user_id: UserId, cx: &App) -> MemberRo
         },
         None => MemberRow {
             user_id,
-            name: SharedString::default(),
+            name: user_id.to_string().into(),
             username: SharedString::default(),
             avatar: SharedString::default(),
         },
+    }
+}
+
+/// Same row, for a list that came from the channel's own user listing rather than the
+/// clan roster. `ListClanUsers` is capped server-side and drops anyone who has left the
+/// clan, so a channel user it cannot resolve would otherwise render as a nameless,
+/// avatar-less row; the listing ships a username/display name/avatar of its own for
+/// exactly that case.
+pub(super) fn channel_member_row(
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    user_id: UserId,
+    cx: &App,
+) -> MemberRow {
+    let row = member_row(clan_id, user_id, cx);
+    if ClanMembersStore::global(cx)
+        .read(cx)
+        .member(clan_id, user_id)
+        .is_some()
+    {
+        return row;
+    }
+    let store = ChannelUsersStore::global(cx);
+    let Some(profile) = store.read(cx).profile(channel_id, user_id) else {
+        return row;
+    };
+    member_row_from_profile(user_id, profile)
+}
+
+fn member_row_from_profile(user_id: UserId, profile: &ChannelUserProfile) -> MemberRow {
+    let name = if !profile.display_name.is_empty() {
+        profile.display_name.clone()
+    } else if !profile.username.is_empty() {
+        profile.username.clone()
+    } else {
+        user_id.to_string()
+    };
+    MemberRow {
+        user_id,
+        name: name.into(),
+        username: profile.username.clone().into(),
+        avatar: profile.avatar.clone().into(),
     }
 }
 
@@ -104,6 +152,20 @@ pub(super) fn role_glyph(row: &RoleRow, cx: &mut App) -> gpui::AnyElement {
     }
 }
 
+pub(super) fn page_count(len: usize, per_page: usize) -> usize {
+    len.div_ceil(per_page.max(1)).max(1)
+}
+
+/// The rows `page` shows, clamped to the last page so a shrinking list (a removal, a
+/// narrower search) can never leave the view pointing past the end.
+pub(super) fn page_slice<T>(items: &[T], page: usize, per_page: usize) -> &[T] {
+    let per_page = per_page.max(1);
+    let page = page.min(page_count(items.len(), per_page).saturating_sub(1));
+    let start = page * per_page;
+    let end = (start + per_page).min(items.len());
+    &items[start..end]
+}
+
 pub(super) fn role_row_from(role_id: RoleId, role: &mezon_store::ClanRoleDetail) -> RoleRow {
     RoleRow {
         role_id,
@@ -124,7 +186,11 @@ pub struct PermissionsTab {
     selected_role_ids: Vec<RoleId>,
     role_rows: Rc<Vec<RoleRow>>,
     member_ids: Rc<Vec<UserId>>,
-    member_scroll: UniformListScrollHandle,
+    visible_member_ids: Rc<Vec<UserId>>,
+    member_query: String,
+    member_page: usize,
+    member_search: Option<Entity<InputState>>,
+    member_search_sub: Option<Subscription>,
     overrides: Option<Entity<PermissionOverrides>>,
     overrides_sub: Option<Subscription>,
     modal_sub: Option<Subscription>,
@@ -161,11 +227,25 @@ impl PermissionsTab {
                 }
                 cx.notify();
             }),
-            cx.observe(&ChannelUsersStore::global(cx), |this, _, cx| {
-                this.refresh(cx);
-            }),
+            cx.subscribe(
+                &ChannelUsersStore::global(cx),
+                |this, _, event: &ChannelUsersEvent, cx| {
+                    let ChannelUsersEvent::Changed { channel_id } = event;
+                    if *channel_id == this.channel_id {
+                        this.refresh(cx);
+                    }
+                },
+            ),
             cx.observe(&RolesStore::global(cx), |this, _, cx| this.refresh(cx)),
-            cx.observe(&ClanMembersStore::global(cx), |_, _, cx| cx.notify()),
+            cx.subscribe(
+                &ClanMembersStore::global(cx),
+                |this, _, event: &ClanMembersEvent, cx| {
+                    if event.clan_id() == this.clan_id {
+                        this.apply_member_filter(cx);
+                        cx.notify();
+                    }
+                },
+            ),
         ];
 
         let mut this = Self {
@@ -179,7 +259,11 @@ impl PermissionsTab {
             selected_role_ids: Vec::new(),
             role_rows: Rc::new(Vec::new()),
             member_ids: Rc::new(Vec::new()),
-            member_scroll: UniformListScrollHandle::new(),
+            visible_member_ids: Rc::new(Vec::new()),
+            member_query: String::new(),
+            member_page: 0,
+            member_search: None,
+            member_search_sub: None,
             overrides: None,
             overrides_sub: None,
             modal_sub: None,
@@ -200,8 +284,21 @@ impl PermissionsTab {
             .map(|channel| (channel.private, channel.creator_id, channel.channel_type))
     }
 
+    /// Voice channels get the private card and its member/role lists, not
+    /// the override table: every override the server knows is a text
+    /// permission (send message, manage threads, …) and would only invite
+    /// toggles that do nothing in a voice room.
+    fn shows_overrides(&self, cx: &App) -> bool {
+        // Unknown yet means wait: the channel-list observer calls
+        // `sync_overrides` again once the channel arrives.
+        ChannelList::global(cx)
+            .read(cx)
+            .channel(self.clan_id, self.channel_id)
+            .is_some_and(|channel| channel.channel_type != ChannelType::Voice)
+    }
+
     fn sync_overrides(&mut self, cx: &mut Context<Self>) {
-        if self.overrides.is_some() {
+        if self.overrides.is_some() || !self.shows_overrides(cx) {
             return;
         }
         let clan_id = self.clan_id;
@@ -210,6 +307,13 @@ impl PermissionsTab {
         let overrides = cx.new(|cx| PermissionOverrides::new(clan_id, channel_id, settings, cx));
         self.overrides_sub = Some(cx.observe(&overrides, |_, _, cx| cx.notify()));
         self.overrides = Some(overrides);
+    }
+
+    /// The settings shell paints this tab's save bar as a floating panel outside the
+    /// scroll view, the same way the overview and integrations tabs do, so it stays put
+    /// while the member list pages and scrolls.
+    pub fn should_show_save_bar(&self, cx: &App) -> bool {
+        self.private_enabled != self.private_initial || self.overrides_dirty(cx)
     }
 
     fn overrides_dirty(&self, cx: &App) -> bool {
@@ -243,6 +347,78 @@ impl PermissionsTab {
     fn rebuild_rows(&mut self, cx: &App) {
         self.role_rows = Rc::new(self.compute_role_rows(cx));
         self.member_ids = Rc::new(self.compute_member_ids(cx));
+        self.apply_member_filter(cx);
+    }
+
+    fn apply_member_filter(&mut self, cx: &App) {
+        let needle = parse_search(&self.member_query).needle;
+        // An empty query shares the full list's allocation instead of copying it.
+        let visible = if needle.is_empty() {
+            self.member_ids.clone()
+        } else {
+            Rc::new(
+                self.member_ids
+                    .iter()
+                    .copied()
+                    .filter(|user_id| self.member_matches_needle(*user_id, &needle, cx))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        self.member_page = self
+            .member_page
+            .min(page_count(visible.len(), MEMBER_PAGE_SIZE).saturating_sub(1));
+        self.visible_member_ids = visible;
+    }
+
+    /// Matches against the clan roster when it knows the user (nickname included) and
+    /// against the channel listing's own identity otherwise, so a row that is only
+    /// renderable from the listing stays searchable too.
+    fn member_matches_needle(&self, user_id: UserId, needle: &str, cx: &App) -> bool {
+        let members = ClanMembersStore::global(cx);
+        if let Some(member) = members.read(cx).member(self.clan_id, user_id) {
+            return member_matches(
+                &member.clan_nick,
+                &member.user.display_name,
+                &member.user.username,
+                needle,
+            );
+        }
+        let channel_users = ChannelUsersStore::global(cx);
+        let channel_users = channel_users.read(cx);
+        match channel_users.profile(self.channel_id, user_id) {
+            Some(profile) => member_matches("", &profile.display_name, &profile.username, needle),
+            None => false,
+        }
+    }
+
+    fn ensure_member_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.member_search.is_some() {
+            return;
+        }
+        let locale = self.settings.read(cx).language.clone();
+        let placeholder: SharedString =
+            mezon_i18n::t(&locale, "channelSetting.channelPermission.searchMembers").into();
+        // Embedded: the field paints no chrome of its own, so the row around it keeps
+        // owning the background and it re-reads the theme on every frame instead of
+        // freezing whichever one was live when the field was built.
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(placeholder)
+                .height(px(MEMBER_SEARCH_HEIGHT))
+                .text_size(px(14.0))
+                .embedded(true)
+        });
+        self.member_search_sub =
+            Some(cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
+                if *event != InputEvent::Change {
+                    return;
+                }
+                this.member_query = input.read(cx).value().to_string();
+                this.member_page = 0;
+                this.apply_member_filter(cx);
+                cx.notify();
+            }));
+        self.member_search = Some(input);
     }
 
     fn persisted_private(&self, cx: &App) -> bool {
@@ -675,9 +851,10 @@ impl PermissionsTab {
     }
 
     fn render_access_panel(
-        &self,
+        &mut self,
         locale: &str,
         theme: &Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         v_flex()
@@ -737,15 +914,150 @@ impl PermissionsTab {
                     .child(self.render_role_list(locale, theme, cx)),
             )
             .child(Self::render_divider(theme))
+            .child(self.render_members_section(locale, theme, window, cx))
+    }
+
+    fn render_members_section(
+        &mut self,
+        locale: &str,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let total = self.member_ids.len();
+        self.ensure_member_search(window, cx);
+        let matched = self.visible_member_ids.len();
+        let count: SharedString = if matched == total {
+            total.to_string().into()
+        } else {
+            format!("{matched}/{total}").into()
+        };
+
+        v_flex()
+            .py_4()
             .child(
-                v_flex()
-                    .py_4()
-                    .child(Self::render_section_label(
-                        mezon_i18n::t(locale, "channelSetting.channelPermission.members"),
-                        theme,
-                    ))
-                    .child(self.render_member_list(locale, cx)),
+                h_flex()
+                    .pb_4()
+                    .w_full()
+                    .gap_x_3()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        h_flex()
+                            .min_w_0()
+                            .gap_x_2()
+                            .items_center()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(theme.tokens.text_theme_primary)
+                            .child(
+                                mezon_i18n::t(locale, "channelSetting.channelPermission.members")
+                                    .to_uppercase(),
+                            )
+                            .when(total > 0, |el| {
+                                el.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .px_2()
+                                        .rounded_full()
+                                        .bg(theme.tokens.bg_tertiary)
+                                        .child(count),
+                                )
+                            }),
+                    )
+                    .when_some(self.member_search.clone(), |el, input| {
+                        el.child(
+                            h_flex()
+                                .gap_2()
+                                .child(Icon::new(IconName::Search).size(px(16.0)))
+                                .child(div().flex_1().min_w_0().child(Input::new(&input)))
+                                .flex_shrink_0()
+                                .w(px(MEMBER_SEARCH_WIDTH))
+                                .px_2()
+                                .rounded_lg()
+                                .bg(theme.tokens.bg_input_secondary),
+                        )
+                    }),
             )
+            .child(self.render_member_list(locale, theme, cx))
+            .child(self.render_member_pagination(cx))
+    }
+
+    fn render_member_pagination(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let pages = page_count(self.visible_member_ids.len(), MEMBER_PAGE_SIZE);
+        if pages <= 1 {
+            return div().into_any_element();
+        }
+        let current = self.member_page.min(pages - 1);
+        let theme = cx.theme().clone();
+        let mut bar = h_flex()
+            .w_full()
+            .pt_3()
+            .gap_2()
+            .items_center()
+            .justify_center();
+        bar = bar.child(
+            pagination_button(
+                "channel-permission-members",
+                PaginationButton::Previous,
+                current == 0,
+                false,
+                &theme,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.go_to_member_page(|page| page.saturating_sub(1), cx)
+            })),
+        );
+        let mut numbers = h_flex()
+            // Every state fills the same number of fixed-width slots, so the strip keeps
+            // one width and prev/next or a page number never slides under the pointer.
+            .w(px((pagination_slot_count(pages) * 48 - 8) as f32))
+            .flex_shrink_0()
+            .gap_2()
+            .items_center()
+            .justify_center();
+        for page in pagination_items(current, pages) {
+            let Some(page) = page else {
+                numbers = numbers.child(div().w(px(40.0)).text_center().child("…"));
+                continue;
+            };
+            numbers = numbers.child(
+                pagination_button(
+                    "channel-permission-members",
+                    PaginationButton::Page(page + 1),
+                    false,
+                    page == current,
+                    &theme,
+                )
+                .on_click(
+                    cx.listener(move |this, _, _, cx| this.go_to_member_page(move |_| page, cx)),
+                ),
+            );
+        }
+        bar.child(numbers)
+            .child(
+                pagination_button(
+                    "channel-permission-members",
+                    PaginationButton::Next,
+                    current + 1 >= pages,
+                    false,
+                    &theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.go_to_member_page(|page| page.saturating_add(1), cx)
+                })),
+            )
+            .into_any_element()
+    }
+
+    fn go_to_member_page(&mut self, pick: impl FnOnce(usize) -> usize, cx: &mut Context<Self>) {
+        let pages = page_count(self.visible_member_ids.len(), MEMBER_PAGE_SIZE);
+        let next = pick(self.member_page).min(pages.saturating_sub(1));
+        if next == self.member_page {
+            return;
+        }
+        self.member_page = next;
+        cx.notify();
     }
 
     fn render_role_list(
@@ -798,77 +1110,52 @@ impl PermissionsTab {
         .into_any_element()
     }
 
-    fn render_member_list(&self, locale: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let ids = self.member_ids.clone();
-        if ids.is_empty() {
+    fn render_member_list(
+        &self,
+        locale: &str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        if self.member_ids.is_empty() {
             return div().into_any_element();
         }
-        let clan_id = self.clan_id;
+        if self.visible_member_ids.is_empty() {
+            return div()
+                .h(px(MEMBER_ROW_HEIGHT * MEMBER_PAGE_SIZE as f32))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(theme.tokens.text_theme_primary)
+                .child(mezon_i18n::t(
+                    locale,
+                    "channelSetting.channelPermission.noMembersFound",
+                ))
+                .into_any_element();
+        }
         let creator_id = self.channel_creator_id(cx);
         let creator_label =
             mezon_i18n::t(locale, "channelSetting.channelPermission.ChannelCreator");
         let tab = cx.entity();
-        let count = ids.len();
-        uniform_list(
-            "channel-permission-members",
-            count,
-            move |range, _window, cx| {
-                let theme = cx.theme().clone();
-                range
-                    .map(|ix| match ids.get(ix) {
-                        Some(user_id) => {
-                            let row = member_row(clan_id, *user_id, cx);
-                            let is_creator = !creator_id.is_zero() && creator_id == *user_id;
-                            render_member_row(&row, is_creator, creator_label, &theme, tab.clone())
-                                .into_any_element()
-                        }
-                        None => div().h(px(MEMBER_ROW_HEIGHT)).into_any_element(),
-                    })
-                    .collect::<Vec<_>>()
-            },
-        )
-        .with_item_size(size(px(0.0), px(MEMBER_ROW_HEIGHT)))
-        .with_sizing_behavior(ListSizingBehavior::Infer)
-        .track_scroll(&self.member_scroll)
-        .w_full()
-        .into_any_element()
-    }
-
-    fn render_save_bar(&self, locale: &str, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
-            .relative()
-            .mt_8()
+        v_flex()
             .w_full()
-            .max_w(px(815.0))
-            .gap_2()
-            .p_3()
-            .pr_0()
-            .rounded(px(4.0))
-            .justify_end()
-            .text_color(gpui::white())
-            .child(
-                div()
-                    .id("channel-permission-reset")
-                    .p(px(8.0))
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .bg(rgb(RESET_BUTTON_BG))
-                    .child(mezon_i18n::t(locale, "channelSetting.unsavedChanges.reset"))
-                    .on_click(cx.listener(|this, _, _, cx| this.reset(cx))),
+            .min_h(px(MEMBER_ROW_HEIGHT * MEMBER_PAGE_SIZE as f32))
+            .children(
+                page_slice(&self.visible_member_ids, self.member_page, MEMBER_PAGE_SIZE)
+                    .iter()
+                    .map(|user_id| {
+                        let row = channel_member_row(self.clan_id, self.channel_id, *user_id, cx);
+                        render_member_row(
+                            &row,
+                            creator_id == *user_id,
+                            creator_label,
+                            theme,
+                            tab.clone(),
+                            locale,
+                        )
+                    }),
             )
-            .child(
-                div()
-                    .id("channel-permission-save")
-                    .p(px(8.0))
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .bg(rgb(SAVE_BUTTON_BG))
-                    .child(mezon_i18n::t(
-                        locale,
-                        "channelSetting.unsavedChanges.saveChanges",
-                    ))
-                    .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
-            )
+            .into_any_element()
     }
 }
 
@@ -892,6 +1179,7 @@ fn render_role_row(
         .text_color(theme.tokens.text_theme_primary)
         .child(
             h_flex()
+                .flex_1()
                 .min_w_0()
                 .gap_x_2()
                 .items_center()
@@ -926,15 +1214,103 @@ fn render_role_row(
         )
 }
 
+/// Floating save bar for the permissions tab, rendered by the settings shell outside the
+/// scroll view so paging or scrolling the member list never moves it out of reach.
+pub fn render_channel_permissions_save_bar(
+    tab: Entity<PermissionsTab>,
+    locale: &str,
+    theme: &Theme,
+    cx: &App,
+) -> impl IntoElement {
+    let saving = tab
+        .read(cx)
+        .overrides
+        .as_ref()
+        .is_some_and(|overrides| overrides.read(cx).is_saving());
+    div()
+        .absolute()
+        .bottom(px(20.0))
+        .left_0()
+        .right_0()
+        .flex()
+        .justify_center()
+        .occlude()
+        .child(
+            div()
+                .w(px(700.0))
+                .max_w(gpui::relative(0.9))
+                .py(px(10.0))
+                .pl_4()
+                .pr(px(10.0))
+                .rounded(px(5.0))
+                .bg(theme.tokens.theme_setting_nav)
+                .border_1()
+                .border_color(theme.tokens.border_primary)
+                .shadow_lg()
+                .child(
+                    h_flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.tokens.text_theme_primary)
+                                .child(mezon_i18n::t(
+                                    locale,
+                                    "clanSettings.modalSaveChanges.title",
+                                )),
+                        )
+                        .child(
+                            h_flex()
+                                .gap(px(20.0))
+                                .items_center()
+                                .child(
+                                    Button::new("channel-permission-reset")
+                                        .disabled(saving)
+                                        .label(mezon_i18n::t(
+                                            locale,
+                                            "clanSettings.modalSaveChanges.reset",
+                                        ))
+                                        .ghost()
+                                        .on_click({
+                                            let tab = tab.clone();
+                                            move |_, _, cx| {
+                                                tab.update(cx, |this, cx| this.reset(cx));
+                                            }
+                                        }),
+                                )
+                                .child(
+                                    Button::new("channel-permission-save")
+                                        .disabled(saving)
+                                        .label(mezon_i18n::t(
+                                            locale,
+                                            "clanSettings.modalSaveChanges.saveChanges",
+                                        ))
+                                        .primary()
+                                        .on_click({
+                                            let tab = tab.clone();
+                                            move |_, _, cx| {
+                                                tab.update(cx, |this, cx| this.save(cx));
+                                            }
+                                        }),
+                                ),
+                        ),
+                ),
+        )
+}
+
 fn render_member_row(
     row: &MemberRow,
     is_creator: bool,
     creator_label: &'static str,
     theme: &Theme,
     tab: Entity<PermissionsTab>,
-) -> impl IntoElement {
+    locale: &str,
+) -> impl IntoElement + use<> {
     let user_id = row.user_id;
     let group_name = SharedString::from(format!("channel-permission-member-{}", user_id.get()));
+    let remove_label = mezon_i18n::t(locale, "channelSetting.channelPermission.removeMember");
     h_flex()
         .group(group_name.clone())
         .h(px(MEMBER_ROW_HEIGHT))
@@ -946,25 +1322,31 @@ fn render_member_row(
         .text_color(theme.tokens.text_theme_primary)
         .child(
             h_flex()
+                .flex_1()
                 .min_w_0()
                 .gap_x_2()
                 .items_center()
-                .child(member_avatar(row, px(24.0)))
+                .child(member_avatar(row, px(32.0)))
                 .child(
-                    div()
+                    v_flex()
+                        .flex_1()
                         .min_w_0()
-                        .truncate()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.tokens.text_secondary)
-                        .child(row.name.clone()),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .font_weight(FontWeight::LIGHT)
-                        .child(row.username.clone()),
+                        .child(
+                            div()
+                                .truncate()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(row.name.clone()),
+                        )
+                        .when(!row.username.is_empty() && row.username != row.name, |el| {
+                            el.child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(theme.tokens.text_secondary)
+                                    .child(row.username.clone()),
+                            )
+                        }),
                 ),
         )
         .child(
@@ -977,37 +1359,37 @@ fn render_member_row(
                         .text_xs()
                         .child(if is_creator { creator_label } else { "" }),
                 )
-                .child(
-                    div()
-                        .id(("channel-permission-member-remove", user_id.get() as u64))
-                        .when(!is_creator, |el| {
-                            el.cursor_pointer().on_click(move |_, _, cx| {
+                .when(!is_creator, |el| {
+                    el.child(
+                        div()
+                            .id(("channel-permission-member-remove", user_id.get() as u64))
+                            .size(px(32.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .tooltip(move |_, cx| Tooltip::build(remove_label, cx))
+                            .cursor_pointer()
+                            .on_click(move |_, _, cx| {
                                 tab.update(cx, |this, cx| this.remove_member(user_id, cx));
                             })
-                        })
-                        .child(
-                            Icon::new(IconName::EscIcon)
-                                .size(px(REMOVE_ICON_SIZE))
-                                .text_color(if is_creator {
-                                    theme.tokens.text_secondary
-                                } else {
-                                    theme.tokens.text_theme_primary
-                                })
-                                .when(!is_creator, |icon| {
-                                    icon.group_hover(group_name.clone(), |style| {
+                            .child(
+                                Icon::new(IconName::EscIcon)
+                                    .size(px(REMOVE_ICON_SIZE))
+                                    .text_color(theme.tokens.text_theme_primary)
+                                    .group_hover(group_name.clone(), |style| {
                                         style.text_color(rgb(REMOVE_HOVER_COLOR))
-                                    })
-                                }),
-                        ),
-                ),
+                                    }),
+                            ),
+                    )
+                }),
         )
 }
 
 impl Render for PermissionsTab {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
-        let dirty = self.private_enabled != self.private_initial || self.overrides_dirty(cx);
 
         v_flex()
             .w_full()
@@ -1020,25 +1402,113 @@ impl Render for PermissionsTab {
                     .overflow_hidden()
                     .child(self.render_private_card(&locale, &theme, cx))
                     .when(self.private_enabled, |el| {
-                        el.child(self.render_access_panel(&locale, &theme, cx))
+                        el.child(self.render_access_panel(&locale, &theme, window, cx))
                     }),
             )
-            .child(
-                div()
-                    .mt_10()
-                    .mb(px(30.0))
-                    .h(px(1.0))
-                    .w_full()
-                    .bg(theme.tokens.border_primary),
-            )
+            .when(self.overrides.is_some(), |el| {
+                el.child(
+                    div()
+                        .mt_10()
+                        .mb(px(30.0))
+                        .h(px(1.0))
+                        .w_full()
+                        .bg(theme.tokens.border_primary),
+                )
+            })
             .children(self.overrides.clone())
-            .when(dirty, |el| el.child(self.render_save_bar(&locale, cx)))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ids(count: usize) -> Vec<UserId> {
+        (0..count).map(|ix| UserId(ix as i64 + 1)).collect()
+    }
+
+    #[test]
+    fn an_empty_list_still_counts_as_one_page() {
+        assert_eq!(page_count(0, MEMBER_PAGE_SIZE), 1);
+        assert!(page_slice::<UserId>(&[], 3, MEMBER_PAGE_SIZE).is_empty());
+    }
+
+    #[test]
+    fn a_page_is_only_added_once_the_previous_one_is_full() {
+        assert_eq!(page_count(1, MEMBER_PAGE_SIZE), 1);
+        assert_eq!(page_count(MEMBER_PAGE_SIZE, MEMBER_PAGE_SIZE), 1);
+        assert_eq!(page_count(MEMBER_PAGE_SIZE + 1, MEMBER_PAGE_SIZE), 2);
+        assert_eq!(page_count(MEMBER_PAGE_SIZE * 3, MEMBER_PAGE_SIZE), 3);
+        assert_eq!(page_count(11, 10), 2);
+    }
+
+    #[test]
+    fn every_member_appears_on_exactly_one_page() {
+        let all = ids(MEMBER_PAGE_SIZE * 2 + 7);
+        let mut walked = Vec::new();
+        for page in 0..page_count(all.len(), MEMBER_PAGE_SIZE) {
+            walked.extend_from_slice(page_slice(&all, page, MEMBER_PAGE_SIZE));
+        }
+        assert_eq!(walked, all);
+    }
+
+    #[test]
+    fn the_last_page_holds_the_remainder() {
+        let all = ids(MEMBER_PAGE_SIZE + 3);
+        assert_eq!(page_slice(&all, 1, MEMBER_PAGE_SIZE).len(), 3);
+        assert_eq!(
+            page_slice(&all, 1, MEMBER_PAGE_SIZE),
+            &all[MEMBER_PAGE_SIZE..]
+        );
+    }
+
+    #[test]
+    fn a_page_past_the_end_falls_back_to_the_last_one() {
+        let all = ids(MEMBER_PAGE_SIZE + 1);
+        assert_eq!(
+            page_slice(&all, 99, MEMBER_PAGE_SIZE),
+            page_slice(&all, 1, MEMBER_PAGE_SIZE)
+        );
+        assert_eq!(page_slice(&ids(3), 7, MEMBER_PAGE_SIZE), ids(3).as_slice());
+    }
+
+    #[test]
+    fn a_listing_only_row_prefers_the_display_name_and_keeps_the_avatar() {
+        let row = member_row_from_profile(
+            UserId(9),
+            &ChannelUserProfile {
+                username: "wumpus".into(),
+                display_name: "Wumpus".into(),
+                avatar: "https://cdn/avatar.png".into(),
+            },
+        );
+        assert_eq!(row.user_id, UserId(9));
+        assert_eq!(row.name, "Wumpus");
+        assert_eq!(row.username, "wumpus");
+        assert_eq!(row.avatar, "https://cdn/avatar.png");
+    }
+
+    #[test]
+    fn a_listing_only_row_falls_back_to_the_username_for_its_label() {
+        let row = member_row_from_profile(
+            UserId(9),
+            &ChannelUserProfile {
+                username: "wumpus".into(),
+                display_name: String::new(),
+                avatar: String::new(),
+            },
+        );
+        assert_eq!(row.name, "wumpus");
+        assert_eq!(row.username, "wumpus");
+        assert!(row.avatar.is_empty());
+    }
+
+    #[test]
+    fn a_member_without_any_identity_still_has_a_distinguishable_label() {
+        let row = member_row_from_profile(UserId(9), &ChannelUserProfile::default());
+        assert_eq!(row.name, "9");
+        assert!(row.username.is_empty());
+    }
 
     #[test]
     fn six_digit_hex_is_parsed() {

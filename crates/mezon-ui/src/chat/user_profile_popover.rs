@@ -2,21 +2,22 @@ use gpui::{
     Anchor, AnyElement, App, ClickEvent, Context, CursorStyle, DismissEvent, Div, ElementId,
     EventEmitter, FocusHandle, Focusable, FontWeight, MouseButton, MouseDownEvent, ParentElement,
     Render, SharedString, Stateful, StyleRefinement, Styled, Window, deferred, div, img,
-    prelude::*, px, svg,
+    prelude::*, px,
 };
 use mezon_store::{
     BadgeService, ChannelList, ClanId, ClanMembersStore, DirectMessageBody, DirectMessageStore,
     FriendState, FriendStore, PERMISSION_CLAN_OWNER, PERMISSION_MANAGE_CLAN, PermissionStore,
-    PresenceStore, ProfileContext, RoleId, RolesStore, Settings, UserId, current_user_status,
-    resolve_user_profile,
+    PresenceStore, ProfileContext, RoleId, RolesStore, Settings, UserId, UsersByUserStore,
+    current_user_status, resolve_user_profile,
 };
 use ui::{Clickable, PopoverMenu, Toggleable};
 
 use crate::app::shell::{FriendRemovalKind, Shell};
+use crate::chat::friends_page::{open_created_dm_if_route_unchanged, toast_send_failed};
 use crate::chat::message::{SendTokenModal, ShareContactModal, share_contact_subject};
 use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, InputState};
 use crate::image_cache::LruImageCache;
-use crate::router::{Route, navigate};
+use crate::router::{Route, Router, navigate};
 use crate::theme::{ActiveTheme, Theme};
 
 const BANNER_HEIGHT: f32 = 105.;
@@ -65,11 +66,13 @@ pub struct UserProfilePopover {
     show_all_roles: bool,
     friend_menu_open: bool,
     sending_message: bool,
+    embedded: bool,
     _roles_sub: Option<gpui::Subscription>,
     _clan_members_sub: gpui::Subscription,
     _permissions_sub: Option<gpui::Subscription>,
     _friend_sub: gpui::Subscription,
     _presence_sub: gpui::Subscription,
+    _users_sub: gpui::Subscription,
     _channel_sub: Option<gpui::Subscription>,
     _input_sub: gpui::Subscription,
     _role_search_sub: gpui::Subscription,
@@ -81,6 +84,45 @@ impl UserProfilePopover {
         context: ProfileContext,
         settings: gpui::Entity<Settings>,
         avatar_image_cache: gpui::Entity<LruImageCache>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::build(
+            user_id,
+            context,
+            settings,
+            avatar_image_cache,
+            false,
+            window,
+            cx,
+        )
+    }
+
+    pub fn new_embedded(
+        user_id: UserId,
+        context: ProfileContext,
+        settings: gpui::Entity<Settings>,
+        avatar_image_cache: gpui::Entity<LruImageCache>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::build(
+            user_id,
+            context,
+            settings,
+            avatar_image_cache,
+            true,
+            window,
+            cx,
+        )
+    }
+
+    fn build(
+        user_id: UserId,
+        context: ProfileContext,
+        settings: gpui::Entity<Settings>,
+        avatar_image_cache: gpui::Entity<LruImageCache>,
+        embedded: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -138,6 +180,9 @@ impl UserProfilePopover {
         });
         let friend_sub = cx.observe(&FriendStore::global(cx), |_, _, cx| cx.notify());
         let presence_sub = cx.observe(&PresenceStore::global(cx), |_, _, cx| cx.notify());
+        let users = UsersByUserStore::global(cx);
+        users.update(cx, |store, cx| store.ensure_loaded(cx));
+        let users_sub = cx.observe(&users, |_, _, cx| cx.notify());
         let channel_sub = matches!(context, ProfileContext::Clan(_))
             .then(|| cx.observe(&ChannelList::global(cx), |_, _, cx| cx.notify()));
 
@@ -155,11 +200,13 @@ impl UserProfilePopover {
             show_all_roles: false,
             friend_menu_open: false,
             sending_message: false,
+            embedded,
             _roles_sub: roles_sub,
             _clan_members_sub: clan_members_sub,
             _permissions_sub: permissions_sub,
             _friend_sub: friend_sub,
             _presence_sub: presence_sub,
+            _users_sub: users_sub,
             _channel_sub: channel_sub,
             _input_sub: input_sub,
             _role_search_sub: role_search_sub,
@@ -565,6 +612,9 @@ impl UserProfilePopover {
         let label = profile.display_name.clone();
         let avatar = profile.avatar_url.clone();
         let username = profile.username.clone();
+        let origin = Router::global(cx).read(cx).route();
+        let error_message =
+            mezon_i18n::t(&self.settings.read(cx).language, "message.toast.sendFailed");
         let task = DirectMessageStore::global(cx).update(cx, |store, cx| {
             store.create_dm_and_send_text(
                 user_id,
@@ -582,13 +632,7 @@ impl UserProfilePopover {
                     cx.emit(DismissEvent);
                 });
                 cx.update(|cx| {
-                    navigate(
-                        cx,
-                        Route::DirectMessage {
-                            direct_id: channel_id,
-                            message_type: channel_type.to_string(),
-                        },
-                    );
+                    open_created_dm_if_route_unchanged(channel_id, channel_type, &origin, cx);
                 });
             }
             Err(err) => {
@@ -596,6 +640,9 @@ impl UserProfilePopover {
                 let _ = this.update(cx, |this, cx| {
                     this.sending_message = false;
                     cx.notify();
+                });
+                cx.update(|cx| {
+                    toast_send_failed(error_message, cx);
                 });
             }
         })
@@ -628,24 +675,29 @@ impl Render for UserProfilePopover {
             input.set_placeholder(message_placeholder, cx);
         });
 
-        let (display_name, username, avatar_raw, about_me, create_time, online) = match &profile {
-            Some(p) => (
-                SharedString::from(p.display_name.as_str()),
-                SharedString::from(p.username.as_str()),
-                p.avatar_url.clone(),
-                SharedString::from(p.about_me.as_str()),
-                p.create_time_seconds,
-                p.online,
-            ),
-            None => (
-                SharedString::default(),
-                SharedString::default(),
-                String::new(),
-                SharedString::default(),
-                0u32,
-                false,
-            ),
-        };
+        let (display_name, username, avatar_raw, about_me, member_since_time, online) =
+            match &profile {
+                Some(p) => (
+                    SharedString::from(p.display_name.as_str()),
+                    SharedString::from(p.username.as_str()),
+                    p.avatar_url.clone(),
+                    SharedString::from(p.about_me.as_str()),
+                    if matches!(self.context, ProfileContext::Direct(_)) {
+                        p.conversation_create_time_seconds
+                    } else {
+                        p.join_time_seconds
+                    },
+                    p.online,
+                ),
+                None => (
+                    SharedString::default(),
+                    SharedString::default(),
+                    String::new(),
+                    SharedString::default(),
+                    0u32,
+                    false,
+                ),
+            };
 
         let own_status = current_user_status(cx)
             .filter(|(id, _)| *id == self.user_id)
@@ -659,13 +711,12 @@ impl Render for UserProfilePopover {
                 .to_string(),
         };
 
-        let member_since = format_member_since(create_time);
+        let member_since = format_member_since(member_since_time);
         let status_presence = match &own_status {
             Some(status) => status.presence,
             None if online => mezon_store::UserPresence::Online,
             None => mezon_store::UserPresence::Invisible,
         };
-        let status_icon = crate::util::user_status::status_icon(status_presence);
 
         let avatar_proxied = if avatar_raw.is_empty() {
             SharedString::default()
@@ -703,8 +754,10 @@ impl Render for UserProfilePopover {
             friend_info.is_some_and(|f| f.state == FriendState::Blocked && Some(f.source_id) == me);
         let is_blocked = friend_state == Some(FriendState::Blocked);
         let show_share_contact = !is_self && is_friend && !did_i_block;
-        let show_message_input =
-            !username.is_empty() && !is_blocked && !is_self && !self.sending_message;
+        let show_message_input = !username.is_empty()
+            && !is_blocked
+            && !self.sending_message
+            && (!is_self || self.embedded);
 
         let voice_info = (!is_dm && !is_self)
             .then(|| {
@@ -734,9 +787,18 @@ impl Render for UserProfilePopover {
             .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
                 cx.emit(DismissEvent);
             }))
-            .on_mouse_down_out(cx.listener(|_, _: &MouseDownEvent, _window, cx| {
-                cx.emit(DismissEvent);
-            }))
+            .when(!self.embedded, |el| {
+                el.on_mouse_down_out(cx.listener(|_, _: &MouseDownEvent, _window, cx| {
+                    cx.emit(DismissEvent);
+                }))
+            })
+            .when(self.embedded, |el| {
+                el.w_full()
+                    .h_full()
+                    .rounded_none()
+                    .overflow_hidden()
+                    .bg(theme.surfaces.direct_message.ramp())
+            })
             .child(
                 div()
                     .h(px(BANNER_HEIGHT))
@@ -758,8 +820,12 @@ impl Render for UserProfilePopover {
             )
             .child(render_avatar_row(
                 avatar,
-                status_icon,
-                crate::util::user_status::status_color(status_presence, theme),
+                status_presence.is_visible().then_some((
+                    status_presence,
+                    crate::util::user_status::avatar_status_color(status_presence).unwrap_or_else(
+                        || crate::util::user_status::status_color(status_presence, theme),
+                    ),
+                )),
                 custom_status,
                 theme,
             ))
@@ -800,7 +866,7 @@ impl Render for UserProfilePopover {
                                 locale.as_ref(),
                             ))
                         })
-                        .when(!is_dm && !about_me.is_empty(), |d| {
+                        .when(!about_me.is_empty(), |d| {
                             d.child(section_divider(theme.tokens.theme_border_input))
                                 .child(section_label(
                                     mezon_i18n::t(&locale, "userProfile.labels.aboutMe"),
@@ -814,10 +880,17 @@ impl Render for UserProfilePopover {
                                         .child(about_me.clone()),
                                 )
                         })
-                        .when(!is_dm && create_time > 0, |d| {
+                        .when(member_since_time > 0, |d| {
                             d.child(section_divider(theme.tokens.theme_border_input))
                                 .child(section_label(
-                                    mezon_i18n::t(&locale, "userProfile.labels.memberSince"),
+                                    mezon_i18n::t(
+                                        &locale,
+                                        if is_dm {
+                                            "userProfile.labels.conversationSince"
+                                        } else {
+                                            "userProfile.labels.memberSince"
+                                        },
+                                    ),
                                     theme.tokens.text_theme_primary,
                                 ))
                                 .child(
@@ -903,30 +976,27 @@ impl Render for UserProfilePopover {
 const BANNER_ICON_BG: u32 = 0x272120;
 const BANNER_ICON_BG_HOVER: u32 = 0x1e1a19;
 const BANNER_ICON_PENDING_BG: u32 = 0x4e5058;
-const SHARE_CONTACT_BODY: u32 = 0x656369;
-const SHARE_CONTACT_CHECK: u32 = 0x549d5b;
+pub(crate) fn share_contact_icon(cache: gpui::Entity<LruImageCache>) -> gpui::AnyElement {
+    profile_asset_icon("icons/icon-share-contact.svg", cache)
+}
 
-pub(crate) fn share_contact_icon() -> gpui::AnyElement {
-    div()
-        .relative()
+pub(crate) fn friend_icon(cache: gpui::Entity<LruImageCache>) -> gpui::AnyElement {
+    profile_asset_icon("icons/icon-friend.svg", cache)
+}
+
+pub(crate) fn add_person_icon(cache: gpui::Entity<LruImageCache>) -> gpui::AnyElement {
+    profile_asset_icon("icons/add-person.svg", cache)
+}
+
+pub(crate) fn accept_friend_icon(cache: gpui::Entity<LruImageCache>) -> gpui::AnyElement {
+    profile_asset_icon("icons/i-con-accept-friend.svg", cache)
+}
+
+fn profile_asset_icon(path: &'static str, cache: gpui::Entity<LruImageCache>) -> gpui::AnyElement {
+    img(path)
+        .image_cache(&cache)
         .size(px(16.))
-        .child(
-            svg()
-                .path("icons/icon-share-contact-base.svg")
-                .size(px(16.))
-                .flex_none()
-                .text_color(gpui::rgb(SHARE_CONTACT_BODY)),
-        )
-        .child(
-            svg()
-                .path("icons/icon-share-contact-accent.svg")
-                .absolute()
-                .top_0()
-                .left_0()
-                .size(px(16.))
-                .flex_none()
-                .text_color(gpui::rgb(SHARE_CONTACT_CHECK)),
-        )
+        .flex_none()
         .into_any_element()
 }
 
@@ -1025,7 +1095,7 @@ fn render_banner_actions(
                 let locale = this.settings.read(cx).language.clone().into();
                 ShareContactModal::open(contact, locale, window, cx);
             }),
-            share_contact_icon(),
+            share_contact_icon(this.avatar_image_cache.clone()),
         ));
     }
 
@@ -1039,15 +1109,20 @@ fn render_banner_actions(
                 div()
                     .relative()
                     .child(
-                        banner_icon_button("profile-friend", IconName::IconFriend, false, false, {
-                            let entity = entity.clone();
-                            move |_: &ClickEvent, _window, cx| {
-                                entity.update(cx, |this, cx| {
-                                    this.friend_menu_open = !this.friend_menu_open;
-                                    cx.notify();
-                                });
-                            }
-                        })
+                        banner_icon_shell(
+                            "profile-friend",
+                            false,
+                            {
+                                let entity = entity.clone();
+                                move |_: &ClickEvent, _window, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.friend_menu_open = !this.friend_menu_open;
+                                        cx.notify();
+                                    });
+                                }
+                            },
+                            friend_icon(this.avatar_image_cache.clone()),
+                        )
                         .into_any_element(),
                     )
                     .when(this.friend_menu_open, |el| {
@@ -1063,26 +1138,42 @@ fn render_banner_actions(
             );
         }
         Some(FriendState::InviteSent) => {
+            let user_id = this.user_id;
             buttons.push(
                 banner_icon_button(
                     "profile-pending",
                     IconName::PendingFriend,
                     true,
                     false,
-                    |_: &ClickEvent, _, _| {},
+                    move |_: &ClickEvent, _, cx| {
+                        FriendStore::global(cx).update(cx, |store, cx| {
+                            store.add_friend(
+                                user_id,
+                                String::new(),
+                                String::new(),
+                                String::new(),
+                                cx,
+                            );
+                        });
+                    },
                 )
                 .into_any_element(),
             );
         }
         Some(FriendState::InviteReceived) => {
             buttons.push(
-                banner_icon_button("profile-accept", IconName::IConAcceptFriend, true, false, {
-                    let user_id = this.user_id;
-                    move |_: &ClickEvent, _window, cx| {
-                        FriendStore::global(cx)
-                            .update(cx, |store, cx| store.accept_friend(user_id, cx));
-                    }
-                })
+                banner_icon_shell(
+                    "profile-accept",
+                    true,
+                    {
+                        let user_id = this.user_id;
+                        move |_: &ClickEvent, _window, cx| {
+                            FriendStore::global(cx)
+                                .update(cx, |store, cx| store.accept_friend(user_id, cx));
+                        }
+                    },
+                    accept_friend_icon(this.avatar_image_cache.clone()),
+                )
                 .into_any_element(),
             );
             buttons.push(
@@ -1115,10 +1206,8 @@ fn render_banner_actions(
                 let display_name = profile.display_name.clone();
                 let avatar = profile.avatar_url.clone();
                 buttons.push(
-                    banner_icon_button(
+                    banner_icon_shell(
                         "profile-add-friend",
-                        IconName::AddPerson,
-                        false,
                         false,
                         move |_: &ClickEvent, _window, cx| {
                             FriendStore::global(cx).update(cx, |store, cx| {
@@ -1131,6 +1220,7 @@ fn render_banner_actions(
                                 );
                             });
                         },
+                        add_person_icon(this.avatar_image_cache.clone()),
                     )
                     .into_any_element(),
                 );
@@ -1152,50 +1242,57 @@ fn render_friend_menu(
     let locale_label = locale_str.clone();
     let theme = cx.theme();
 
-    div()
-        .absolute()
-        .top(px(36.))
-        .right_0()
-        .w(px(165.))
-        .p_2()
-        .rounded_lg()
-        .bg(theme.bg_floating)
-        .shadow_lg()
-        .child(
-            ClickableContainer::new("profile-remove-friend")
-                .cursor(CursorStyle::PointingHand)
-                .on_click({
-                    move |_: &ClickEvent, window, cx| {
-                        Shell::global(cx).update(cx, |shell, cx| {
-                            shell.confirm_remove_friend(
-                                user_id,
-                                &username,
-                                FriendRemovalKind::RemoveFriend,
-                                &locale_str,
-                                window,
-                                cx,
-                            );
-                        });
-                        entity.update(cx, |this, cx| {
-                            this.friend_menu_open = false;
-                            cx.notify();
-                        });
-                    }
-                })
-                .child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .rounded(px(4.))
-                        .text_sm()
-                        .text_color(theme.tokens.text_theme_primary)
-                        .child(mezon_i18n::t(
-                            locale_label.as_str(),
-                            "userProfile.pendingContent.removeFriend",
-                        )),
-                ),
-        )
-        .into_any_element()
+    deferred(
+        div()
+            .occlude()
+            .absolute()
+            .top_0()
+            .left(px(44.))
+            .w(px(150.))
+            .p_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surfaces.secondary)
+            .shadow_lg()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .child(
+                div()
+                    .id("profile-remove-friend")
+                    .cursor_pointer()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_sm()
+                    .text_color(theme.text_secondary)
+                    .hover(|style| style.bg(theme.bg_hover))
+                    .on_click({
+                        move |_: &ClickEvent, window, cx| {
+                            Shell::global(cx).update(cx, |shell, cx| {
+                                shell.confirm_remove_friend(
+                                    user_id,
+                                    &username,
+                                    FriendRemovalKind::RemoveFriend,
+                                    &locale_str,
+                                    window,
+                                    cx,
+                                );
+                            });
+                            entity.update(cx, |this, cx| {
+                                this.friend_menu_open = false;
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .child(mezon_i18n::t(
+                        locale_label.as_str(),
+                        "userProfile.pendingContent.removeFriend",
+                    )),
+            ),
+    )
+    .into_any_element()
 }
 
 fn render_pending_friend(user_id: UserId, username: &str, locale: &str) -> AnyElement {
@@ -1296,15 +1393,14 @@ fn render_voice_button(
         .child(
             Icon::new(IconName::Speaker)
                 .size(px(14.))
-                .text_color(theme.status_online),
+                .text_color(crate::util::user_status::in_voice_icon_color(theme)),
         )
         .into_any_element()
 }
 
 fn render_avatar_row(
     avatar: Avatar,
-    status_icon: IconName,
-    status_color: gpui::Rgba,
+    status: Option<(mezon_store::UserPresence, gpui::Rgba)>,
     custom_status: String,
     theme: &Theme,
 ) -> AnyElement {
@@ -1326,13 +1422,15 @@ fn render_avatar_row(
                         .rounded_full()
                         .child(avatar),
                 )
-                .child(
-                    div().absolute().bottom(px(4.)).right(px(8.)).child(
-                        Icon::new(status_icon)
-                            .size(px(16.))
-                            .text_color(status_color),
-                    ),
-                ),
+                .when_some(status, |el, (presence, status_color)| {
+                    el.child(div().absolute().bottom(px(4.)).right(px(8.)).child(
+                        crate::util::user_status::avatar_status_mark(
+                            presence,
+                            px(16.),
+                            status_color,
+                        ),
+                    ))
+                }),
         )
         .when(!custom_status.is_empty(), |row| {
             row.child(

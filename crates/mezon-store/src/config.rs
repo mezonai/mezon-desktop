@@ -36,9 +36,12 @@ pub struct AppConfig {
 
     // ── WebSocket / streaming ─────────────────────────────────────────────────
     pub tcp_port: Option<u16>,
-    pub stream_ws_url: String,
     pub meet_ws_url: String,
+    pub sfu_ws_url: String,
     pub notification_ws_url: String,
+    pub blackboard_url: String,
+    pub quiz_url: String,
+    pub interactive_url: String,
 
     // ── OAuth2 ────────────────────────────────────────────────────────────────
     pub oauth2_authorize_url: String,
@@ -81,6 +84,7 @@ pub struct AppConfig {
     pub webrtc_ice_servers_url: String,
     pub webrtc_ice_servers_username: String,
     pub webrtc_ice_servers_credential: String,
+    pub voice_agent_ids: Vec<String>,
 
     // ── Firebase / FCM ────────────────────────────────────────────────────────
     pub fcm_api_key: String,
@@ -118,9 +122,12 @@ impl AppConfig {
             api_gw_port: 8088,
 
             tcp_port: Some(7349),
-            stream_ws_url: "wss://stn.nccsoft.vn".into(),
             meet_ws_url: "wss://meet.nccsoft.vn".into(),
+            sfu_ws_url: "wss://test-sfu.nccsoft.vn/ws".into(),
             notification_ws_url: "wss://gotify.mezon.ai".into(),
+            blackboard_url: "https://blackboard.mezon.ai".into(),
+            quiz_url: "https://quiz.mezon.ai".into(),
+            interactive_url: "https://interactive.mezon.ai".into(),
 
             oauth2_authorize_url: "https://oauth2.mezon.ai/oauth2/auth".into(),
             oauth2_client_id: "f049f29e-12a9-464c-938f-0a2f60c3210b".into(),
@@ -158,6 +165,7 @@ impl AppConfig {
             webrtc_ice_servers_url: "turn:relay.mezon.vn:5349".into(),
             webrtc_ice_servers_username: "turnmezon".into(),
             webrtc_ice_servers_credential: String::new(),
+            voice_agent_ids: vec!["2037383744142184448".into()],
 
             fcm_api_key: String::new(),
             fcm_auth_domain: "mezon-772fa.firebaseapp.com".into(),
@@ -178,6 +186,16 @@ impl AppConfig {
 
     pub fn from_env() -> Self {
         let defaults = Self::dev_defaults();
+        let mmn_api_url = opt_str(baked_env::NX_CHAT_APP_MMN_API_URL, &defaults.mmn_api_url);
+        let indexer_api_url = opt_str(
+            baked_env::NX_CHAT_APP_INDEXER_API_URL,
+            &defaults.indexer_api_url,
+        );
+        let indexer_api_url = if indexer_api_url.is_empty() {
+            sibling_wallet_service_url(&mmn_api_url, "indexer-api").unwrap_or_default()
+        } else {
+            indexer_api_url
+        };
         Self {
             api_host: opt_str(baked_env::NX_CHAT_APP_API_HOST, &defaults.api_host),
             api_port: opt_u16(baked_env::NX_CHAT_APP_API_PORT, defaults.api_port),
@@ -187,14 +205,20 @@ impl AppConfig {
             api_gw_port: opt_u16(baked_env::NX_CHAT_APP_API_GW_PORT, defaults.api_gw_port),
 
             tcp_port: opt_tcp_port(baked_env::NX_CHAT_APP_TCP_PORT, defaults.tcp_port),
-            stream_ws_url: opt_str(
-                baked_env::NX_CHAT_APP_STREAM_WS_URL,
-                &defaults.stream_ws_url,
-            ),
             meet_ws_url: opt_str(baked_env::NX_CHAT_APP_MEET_WS_URL, &defaults.meet_ws_url),
+            sfu_ws_url: opt_str(baked_env::NX_CHAT_APP_SFU_WS_URL, &defaults.sfu_ws_url),
             notification_ws_url: opt_str(
                 baked_env::NX_CHAT_APP_NOTIFICATION_WS_URL,
                 &defaults.notification_ws_url,
+            ),
+            blackboard_url: opt_str(
+                baked_env::NX_CHAT_APP_BLACKBOARD_URL,
+                &defaults.blackboard_url,
+            ),
+            quiz_url: opt_str(baked_env::NX_CHAT_APP_QUIZ_URL, &defaults.quiz_url),
+            interactive_url: opt_str(
+                baked_env::NX_CHAT_APP_INTERACTIVE_URL,
+                &defaults.interactive_url,
             ),
 
             oauth2_authorize_url: opt_str(
@@ -266,11 +290,8 @@ impl AppConfig {
                 &defaults.mezon_treasury_url_network,
             ),
 
-            mmn_api_url: opt_str(baked_env::NX_CHAT_APP_MMN_API_URL, &defaults.mmn_api_url),
-            indexer_api_url: opt_str(
-                baked_env::NX_CHAT_APP_INDEXER_API_URL,
-                &defaults.indexer_api_url,
-            ),
+            mmn_api_url,
+            indexer_api_url,
             zk_api_url: opt_str(baked_env::NX_CHAT_APP_ZK_API_URL, &defaults.zk_api_url),
             dong_service_api_url: opt_str(
                 baked_env::NX_CHAT_APP_DONG_SERVICE_API_URL,
@@ -289,6 +310,7 @@ impl AppConfig {
                 baked_env::NX_WEBRTC_ICESERVERS_CREDENTIAL,
                 &defaults.webrtc_ice_servers_credential,
             ),
+            voice_agent_ids: opt_list(baked_env::NX_VOICE_AGENT_ID, &defaults.voice_agent_ids),
 
             fcm_api_key: opt_str(baked_env::NX_CHAT_APP_FCM_API_KEY, &defaults.fcm_api_key),
             fcm_auth_domain: opt_str(
@@ -341,6 +363,11 @@ impl AppConfig {
     /// (`NX_CHAT_APP_API_GW_HOST`, not `NX_CHAT_APP_API_HOST`).
     pub fn client_host(&self) -> &str {
         &self.api_gw_host
+    }
+
+    pub fn client_base_url(&self) -> String {
+        let scheme = if self.api_secure { "https" } else { "http" };
+        format!("{scheme}://{}:{}", self.api_gw_host, self.api_gw_port)
     }
 
     /// REST client bootstrap port — mirrors `getMezonConfig()` in the web app.
@@ -413,6 +440,17 @@ impl AppConfig {
         height: u32,
         resize_type: &str,
     ) -> String {
+        self.imgproxy_sized(source_image_url, width, height, resize_type, true)
+    }
+
+    fn imgproxy_sized(
+        &self,
+        source_image_url: &str,
+        width: u32,
+        height: u32,
+        resize_type: &str,
+        enlarge: bool,
+    ) -> String {
         if source_image_url.is_empty() {
             return String::new();
         }
@@ -420,10 +458,16 @@ impl AppConfig {
         if !self.is_own_media_origin(source_image_url.as_ref()) {
             return source_image_url.to_string();
         }
-        let processing_options = format!("rs:{}:{}:{}:1/mb:2097152", resize_type, width, height);
+        let enlarge_flag = u8::from(enlarge);
+        let processing_options =
+            format!("rs:{resize_type}:{width}:{height}:{enlarge_flag}/mb:2097152");
         let path = format!("/{}/plain/{}@webp", processing_options, source_image_url);
         let base = self.imgproxy_base_url.trim_end_matches('/');
         format!("{}/{}{}", base, self.imgproxy_key, path)
+    }
+
+    pub fn is_voice_agent(&self, user_id: &str) -> bool {
+        self.voice_agent_ids.iter().any(|id| id == user_id)
     }
 
     pub fn voice_link(&self, clan_id: &str, channel_id: &str) -> String {
@@ -496,6 +540,33 @@ impl AppConfig {
         };
         (
             self.imgproxy_url(source, proxy_w, proxy_h, resize),
+            display_w,
+            display_h,
+        )
+    }
+
+    pub fn sticker_attachment_proxy(
+        &self,
+        source: &str,
+        real_width: u32,
+        real_height: u32,
+    ) -> (String, f32, f32) {
+        let (display_w, display_h) = sticker_display_dimensions(real_width, real_height);
+        if source.is_empty() {
+            return (String::new(), display_w, display_h);
+        }
+        let unknown = real_width == 0 || real_height == 0;
+        let (proxy_w, proxy_h, enlarge) = if unknown {
+            (STICKER_MAX_WIDTH as u32, STICKER_MAX_HEIGHT as u32, false)
+        } else {
+            (
+                display_w.ceil().max(1.0) as u32,
+                display_h.ceil().max(1.0) as u32,
+                true,
+            )
+        };
+        (
+            self.imgproxy_sized(source, proxy_w, proxy_h, "fit", enlarge),
             display_w,
             display_h,
         )
@@ -683,6 +754,57 @@ pub fn attachment_display_dimensions(real_width: u32, real_height: u32) -> (f32,
     (dimensions.width, dimensions.height)
 }
 
+pub const STICKER_MAX_WIDTH: f32 = 200.0;
+pub const STICKER_MAX_HEIGHT: f32 = 220.0;
+pub const STICKER_STANDARD_SIZE: f32 = 150.0;
+pub const STICKER_LOADING_SIDE: f32 = 140.0;
+const STICKER_SEARCH_MAX: f32 = 120.0;
+const STICKER_SEARCH_STANDARD: f32 = 100.0;
+const STICKER_WIDE_RATIO: f32 = 0.85;
+const STICKER_TALL_RATIO: f32 = 1.15;
+
+pub fn sticker_display_dimensions(real_width: u32, real_height: u32) -> (f32, f32) {
+    sticker_bounds(
+        real_width,
+        real_height,
+        STICKER_MAX_WIDTH,
+        STICKER_MAX_HEIGHT,
+        STICKER_STANDARD_SIZE,
+    )
+}
+
+pub fn sticker_search_display_dimensions(real_width: u32, real_height: u32) -> (f32, f32) {
+    sticker_bounds(
+        real_width,
+        real_height,
+        STICKER_SEARCH_MAX,
+        STICKER_SEARCH_MAX,
+        STICKER_SEARCH_STANDARD,
+    )
+}
+
+fn sticker_bounds(
+    real_width: u32,
+    real_height: u32,
+    max_width: f32,
+    max_height: f32,
+    standard: f32,
+) -> (f32, f32) {
+    if real_width == 0 || real_height == 0 {
+        return (STICKER_LOADING_SIDE, STICKER_LOADING_SIDE);
+    }
+    let ratio = real_height as f32 / real_width as f32;
+    let (max_w, max_h) = if ratio > STICKER_TALL_RATIO {
+        (standard, max_height)
+    } else if ratio < STICKER_WIDE_RATIO {
+        (max_width, standard)
+    } else {
+        (standard, standard)
+    };
+    let (width, height) = fit_within_box(max_w, max_h, real_width as f32, real_height as f32);
+    (width.max(1.0), height.max(1.0))
+}
+
 pub fn video_attachment_display_dimensions(real_width: u32, real_height: u32) -> (f32, f32) {
     if real_width == 0 || real_height == 0 {
         return (DEFAULT_VIDEO_WIDTH, DEFAULT_VIDEO_HEIGHT);
@@ -712,10 +834,27 @@ fn normalize(value: Option<&'static str>) -> Option<&'static str> {
     value.map(str::trim).filter(|v| !v.is_empty())
 }
 
+fn sibling_wallet_service_url(mmn_api_url: &str, service: &str) -> Option<String> {
+    let base = mmn_api_url.trim_end_matches('/').strip_suffix("/mmn-api")?;
+    Some(format!("{base}/{service}/"))
+}
+
 fn opt_str(value: Option<&'static str>, default: &str) -> String {
     normalize(value)
         .map(str::to_owned)
         .unwrap_or_else(|| default.to_owned())
+}
+
+fn opt_list(value: Option<&'static str>, default: &[String]) -> Vec<String> {
+    match normalize(value) {
+        Some(raw) => raw
+            .split(',')
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        None => default.to_vec(),
+    }
 }
 
 fn opt_u16(value: Option<&'static str>, default: u16) -> u16 {
@@ -761,6 +900,24 @@ mod tests {
     #[test]
     fn media_dimensions_landscape_caps_to_available_width() {
         assert_eq!(dims(800, 600), (464.0, 348.0, false));
+    }
+
+    #[test]
+    fn indexer_url_is_derived_from_the_mmn_url_when_unset() {
+        assert_eq!(
+            sibling_wallet_service_url("https://dong.mezon.ai/mmn-api/", "indexer-api").as_deref(),
+            Some("https://dong.mezon.ai/indexer-api/")
+        );
+        assert_eq!(
+            sibling_wallet_service_url("https://dev-mmn.nccsoft.vn/mmn-api", "indexer-api")
+                .as_deref(),
+            Some("https://dev-mmn.nccsoft.vn/indexer-api/")
+        );
+        assert_eq!(sibling_wallet_service_url("", "indexer-api"), None);
+        assert_eq!(
+            sibling_wallet_service_url("https://dong.mezon.ai/wallet/", "indexer-api"),
+            None
+        );
     }
 
     #[test]
@@ -998,6 +1155,29 @@ mod tests {
     }
 
     #[test]
+    fn voice_agent_ids_match_only_the_configured_ids() {
+        let cfg = AppConfig {
+            voice_agent_ids: vec!["1".into(), "2".into()],
+            ..AppConfig::dev_defaults()
+        };
+        assert!(cfg.is_voice_agent("1"));
+        assert!(cfg.is_voice_agent("2"));
+        assert!(!cfg.is_voice_agent("3"));
+        assert!(!cfg.is_voice_agent(""));
+        assert_eq!(
+            AppConfig::dev_defaults().voice_agent_ids,
+            ["2037383744142184448"]
+        );
+    }
+
+    #[test]
+    fn opt_list_splits_comma_separated_ids_and_falls_back_to_defaults() {
+        assert_eq!(opt_list(Some(" 1, 2 ,,3 "), &[]), ["1", "2", "3"]);
+        assert_eq!(opt_list(Some("   "), &["9".to_string()]), ["9"]);
+        assert_eq!(opt_list(None, &["9".to_string()]), ["9"]);
+    }
+
+    #[test]
     fn avatar_proxy_matches_react_fit_100() {
         let cfg = AppConfig {
             imgproxy_base_url: "https://imgproxy.example".into(),
@@ -1009,6 +1189,41 @@ mod tests {
             out.contains("rs:fit:100:100:1/mb:2097152/plain/"),
             "avatar must be 100x100 fit like React MessageAvatar: {out}"
         );
+    }
+
+    #[test]
+    fn sticker_display_keeps_wide_tall_and_square_aspect() {
+        assert_eq!(sticker_display_dimensions(0, 0), (140.0, 140.0));
+        assert_eq!(sticker_display_dimensions(640, 200), (200.0, 63.0));
+        assert_eq!(sticker_display_dimensions(200, 640), (69.0, 220.0));
+        assert_eq!(sticker_display_dimensions(320, 320), (150.0, 150.0));
+        assert_eq!(sticker_display_dimensions(100, 40), (100.0, 40.0));
+        assert_eq!(sticker_display_dimensions(128, 128), (128.0, 128.0));
+        assert_eq!(sticker_display_dimensions(1000, 2), (200.0, 1.0));
+        assert_eq!(sticker_search_display_dimensions(640, 200), (120.0, 38.0));
+        assert_eq!(sticker_search_display_dimensions(320, 320), (100.0, 100.0));
+    }
+
+    #[test]
+    fn sticker_attachment_proxy_uses_fit() {
+        let cfg = AppConfig {
+            imgproxy_base_url: "https://imgproxy.example".into(),
+            imgproxy_key: "sig".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let src = format!("{}/stickers/wide.webp", cfg.base_img_url);
+        let (url, display_w, display_h) = cfg.sticker_attachment_proxy(&src, 0, 0);
+        assert!(
+            url.contains("rs:fit:200:220:0/mb:2097152/plain/"),
+            "unknown sticker must fit inside 200x220 without enlarging: {url}"
+        );
+        assert_eq!((display_w, display_h), (140.0, 140.0));
+        let (url, display_w, display_h) = cfg.sticker_attachment_proxy(&src, 640, 200);
+        assert!(url.contains("rs:fit:200:63:1/"));
+        assert_eq!((display_w, display_h), (200.0, 63.0));
+        let (url, display_w, display_h) = cfg.sticker_attachment_proxy(&src, 128, 128);
+        assert!(url.contains("rs:fit:128:128:1/"));
+        assert_eq!((display_w, display_h), (128.0, 128.0));
     }
 
     #[test]

@@ -60,6 +60,7 @@ pub struct SubmenuOption {
     pub value: i32,
     pub label: SharedString,
     pub selected: bool,
+    pub disabled: bool,
 }
 
 type SubmenuHandler = Rc<dyn Fn(i32, &mut Window, &mut App)>;
@@ -73,6 +74,7 @@ pub struct ContextMenu {
     on_submenu_close: Option<MenuHandler>,
     on_dismiss: Option<DismissHandler>,
     anchor: Point<Pixels>,
+    min_width: Pixels,
 }
 
 const SUBMENU_WIDTH: f32 = 240.;
@@ -82,7 +84,15 @@ const QUICK_REACTION_EMOJI_SOURCE_PX: u32 = 48;
 
 impl ContextMenu {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            min_width: px(220.),
+            ..Self::default()
+        }
+    }
+
+    pub fn min_width(mut self, width: Pixels) -> Self {
+        self.min_width = width;
+        self
     }
 
     pub fn item(
@@ -538,7 +548,7 @@ impl RenderOnce for ContextMenu {
             > window.viewport_size().width;
 
         let mut panel = v_flex()
-            .min_w(px(220.))
+            .min_w(self.min_width)
             .p(px(6.))
             .rounded_md()
             .border_1()
@@ -712,6 +722,7 @@ impl RenderOnce for ContextMenu {
                             .occlude();
                         for (oi, option) in options.iter().enumerate() {
                             let value = option.value;
+                            let disabled = option.disabled;
                             let on_select = on_select.clone();
                             let dismiss_o = dismiss.clone();
                             sub = sub.child(
@@ -723,8 +734,10 @@ impl RenderOnce for ContextMenu {
                                     .px(px(8.))
                                     .py(px(6.))
                                     .rounded(px(4.))
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(hover))
+                                    .when(disabled, |row| row.opacity(0.5).cursor_default())
+                                    .when(!disabled, |row| {
+                                        row.cursor_pointer().hover(|s| s.bg(hover))
+                                    })
                                     .child(
                                         div()
                                             .flex_1()
@@ -738,11 +751,13 @@ impl RenderOnce for ContextMenu {
                                             Icon::new(IconName::Check).size_4().text_color(text),
                                         )
                                     })
-                                    .on_click(move |_: &ClickEvent, window, cx| {
-                                        on_select(value, window, cx);
-                                        if let Some(dismiss) = &dismiss_o {
-                                            dismiss(window, cx);
-                                        }
+                                    .when(!disabled, |el| {
+                                        el.on_click(move |_: &ClickEvent, window, cx| {
+                                            on_select(value, window, cx);
+                                            if let Some(dismiss) = &dismiss_o {
+                                                dismiss(window, cx);
+                                            }
+                                        })
                                     }),
                             );
                         }
