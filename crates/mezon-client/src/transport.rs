@@ -2016,6 +2016,27 @@ pub struct ContentToken {
         deserialize_with = "string_or_number::deserialize"
     )]
     pub clan_id: Option<String>,
+    #[serde(
+        default,
+        rename = "channelLabel",
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "string_or_number::deserialize"
+    )]
+    pub channel_label: Option<String>,
+    #[serde(
+        default,
+        rename = "parentId",
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "string_or_number::deserialize"
+    )]
+    pub parent_id: Option<String>,
+    #[serde(
+        default,
+        rename = "channelType",
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "opt_i64_flex::deserialize"
+    )]
+    pub channel_type: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -3007,6 +3028,79 @@ impl OutgoingHashtag {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelLinkMeta {
+    pub channel_id: String,
+    pub channel_label: String,
+    pub clan_id: String,
+    pub parent_id: Option<String>,
+    pub channel_type: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OutgoingHashtags {
+    pub tokens: Vec<OutgoingHashtag>,
+    pub channels: Vec<ChannelLinkMeta>,
+}
+
+impl OutgoingHashtags {
+    pub fn new(tokens: Vec<OutgoingHashtag>, channels: Vec<ChannelLinkMeta>) -> Self {
+        Self { tokens, channels }
+    }
+
+    fn channel(&self, channel_id: &str) -> Option<&ChannelLinkMeta> {
+        self.channels
+            .iter()
+            .find(|channel| channel.channel_id == channel_id)
+    }
+}
+
+impl From<Vec<OutgoingHashtag>> for OutgoingHashtags {
+    fn from(tokens: Vec<OutgoingHashtag>) -> Self {
+        Self {
+            tokens,
+            channels: Vec::new(),
+        }
+    }
+}
+
+impl std::ops::Deref for OutgoingHashtags {
+    type Target = [OutgoingHashtag];
+
+    fn deref(&self) -> &Self::Target {
+        &self.tokens
+    }
+}
+
+pub fn channel_id_in_channel_url(url: &str) -> Option<&str> {
+    let marker = "/chat/clans/";
+    let rest = &url[url.find(marker)? + marker.len()..];
+    let mut parts = rest.split('/');
+    let clan_id = parts.next()?;
+    if clan_id.is_empty() || !clan_id.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if parts.next()? != "channels" {
+        return None;
+    }
+    let channel_id = parts.next()?;
+    let channel_id = channel_id.split(['?', '#']).next().unwrap_or(channel_id);
+    (!channel_id.is_empty() && channel_id.bytes().all(|b| b.is_ascii_digit())).then_some(channel_id)
+}
+
+fn insert_channel_link_meta(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    meta: &ChannelLinkMeta,
+) {
+    object.insert("clanId".into(), meta.clan_id.clone().into());
+    object.insert("channelLabel".into(), meta.channel_label.clone().into());
+    object.insert("channelId".into(), meta.channel_id.clone().into());
+    object.insert("channelType".into(), meta.channel_type.into());
+    if let Some(parent_id) = &meta.parent_id {
+        object.insert("parentId".into(), parent_id.clone().into());
+    }
+}
+
 pub fn hashtag_content_tokens(hashtags: &[OutgoingHashtag]) -> Vec<ContentToken> {
     hashtags
         .iter()
@@ -3350,7 +3444,7 @@ fn ephemeral_message_send(
     is_public: bool,
     mode: i32,
     mentions: Vec<OutgoingMention>,
-    hashtags: Vec<OutgoingHashtag>,
+    hashtags: OutgoingHashtags,
     emojis: Vec<OutgoingEmoji>,
     attachments: Vec<api::MessageAttachment>,
     reply: Option<OutgoingReply>,
@@ -3397,9 +3491,10 @@ fn ephemeral_message_send(
 pub fn build_send_content(
     text: &str,
     mentions: &[OutgoingMention],
-    hashtags: &[OutgoingHashtag],
+    hashtags: &OutgoingHashtags,
     emojis: &[OutgoingEmoji],
 ) -> SendContent {
+    let channels = hashtags;
     let stripped = strip_markdown(text);
     let mentions: Vec<OutgoingMention> = mentions
         .iter()
@@ -3431,6 +3526,7 @@ pub fn build_send_content(
         &hashtags,
         &emojis,
         &stripped.markdowns,
+        channels,
     );
     let cvtt = canvas_titles_for_text(&stripped.text);
     let json = if cvtt.is_empty() {
@@ -3451,7 +3547,7 @@ pub fn build_send_content(
 fn build_presign_finish_content(
     content: &str,
     mentions: &[OutgoingMention],
-    hashtags: &[OutgoingHashtag],
+    hashtags: &OutgoingHashtags,
     emojis: &[OutgoingEmoji],
     presign_finish: &[String],
     create_time_seconds: u32,
@@ -3651,6 +3747,7 @@ fn build_message_content_json(
     hashtags: &[OutgoingHashtag],
     emojis: &[OutgoingEmoji],
     markdowns: &[OutgoingMarkdown],
+    channels: &OutgoingHashtags,
 ) -> String {
     let mut obj = serde_json::Map::new();
     obj.insert("t".into(), text.into());
@@ -3684,6 +3781,9 @@ fn build_message_content_json(
                 if !h.channel_id.is_empty() {
                     o.insert("channelId".into(), h.channel_id.clone().into());
                 }
+                if let Some(meta) = channels.channel(&h.channel_id) {
+                    insert_channel_link_meta(&mut o, meta);
+                }
                 o.insert("s".into(), h.s.into());
                 o.insert("e".into(), h.e.into());
                 serde_json::Value::Object(o)
@@ -3707,12 +3807,29 @@ fn build_message_content_json(
         obj.insert("ej".into(), arr.into());
     }
     if !markdowns.is_empty() {
+        let utf16: Vec<u16> = if channels.channels.is_empty() {
+            Vec::new()
+        } else {
+            text.encode_utf16().collect()
+        };
         let arr: Vec<serde_json::Value> = markdowns
             .iter()
             .map(|m| {
                 let mut o = serde_json::Map::new();
                 if !m.kind.is_empty() {
                     o.insert("type".into(), m.kind.clone().into());
+                }
+                let linked = usize::try_from(m.s)
+                    .ok()
+                    .zip(usize::try_from(m.e).ok())
+                    .and_then(|(s, e)| utf16.get(s..e))
+                    .map(String::from_utf16_lossy);
+                if let Some(meta) = linked
+                    .as_deref()
+                    .and_then(channel_id_in_channel_url)
+                    .and_then(|channel_id| channels.channel(channel_id))
+                {
+                    insert_channel_link_meta(&mut o, meta);
                 }
                 o.insert("s".into(), m.s.into());
                 o.insert("e".into(), m.e.into());
@@ -5190,7 +5307,7 @@ impl MezonTransport {
         is_public: bool,
         mode: i32,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         ogp: Option<OutgoingOgp>,
     ) -> Result<ApiMessage> {
@@ -5242,7 +5359,7 @@ impl MezonTransport {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            Vec::new(),
+            OutgoingHashtags::default(),
             Vec::new(),
             None,
             true,
@@ -5267,7 +5384,7 @@ impl MezonTransport {
         mode: i32,
         topic_id: i64,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         reply: Option<OutgoingReply>,
         flags: OutgoingMessageFlags,
@@ -5318,7 +5435,7 @@ impl MezonTransport {
         topic_id: i64,
         attachments: Vec<api::MessageAttachment>,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
         reply: Option<OutgoingReply>,
@@ -5370,7 +5487,7 @@ impl MezonTransport {
         attachments: Vec<api::MessageAttachment>,
         reply: Option<OutgoingReply>,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
         flags: OutgoingMessageFlags,
@@ -5421,7 +5538,7 @@ impl MezonTransport {
         mode: i32,
         reply: OutgoingReply,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         ogp: Option<OutgoingOgp>,
         flags: OutgoingMessageFlags,
@@ -5477,7 +5594,7 @@ impl MezonTransport {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            Vec::new(),
+            OutgoingHashtags::default(),
             Vec::new(),
             None,
             true,
@@ -5497,7 +5614,7 @@ impl MezonTransport {
         is_public: bool,
         mode: i32,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         ogp: Option<OutgoingOgp>,
         flags: OutgoingMessageFlags,
@@ -5533,7 +5650,7 @@ impl MezonTransport {
         attachments: Vec<api::MessageAttachment>,
         references: Vec<api::MessageRef>,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
         content_is_json: bool,
@@ -5558,7 +5675,7 @@ impl MezonTransport {
                 json: content.to_string(),
                 text,
                 mentions,
-                hashtags,
+                hashtags: hashtags.tokens,
                 emojis,
                 markdowns: Vec::new(),
             }
@@ -6558,7 +6675,8 @@ impl MezonTransport {
         create_time_seconds: u32,
     ) -> Result<()> {
         let cid = self.generate_cid();
-        let mut content_json = build_send_content(content, &[], &[], &[]).json;
+        let mut content_json =
+            build_send_content(content, &[], &OutgoingHashtags::default(), &[]).json;
         if create_time_seconds > 0 {
             content_json = with_create_time_seconds(content_json, create_time_seconds);
         }
@@ -6594,7 +6712,7 @@ impl MezonTransport {
         message_id: i64,
         content: &str,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         presign_finish: Vec<String>,
         create_time_seconds: u32,
@@ -8332,7 +8450,7 @@ impl MezonTransport {
         is_public: bool,
         mode: i32,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         attachments: Vec<api::MessageAttachment>,
         reply: Option<OutgoingReply>,
@@ -8375,7 +8493,7 @@ impl MezonTransport {
         is_public: bool,
         mode: i32,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         attachments: Vec<api::MessageAttachment>,
         reply: Option<OutgoingReply>,
@@ -9624,7 +9742,7 @@ impl MezonTransport {
         message_id: i64,
         content: &str,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         mode: i32,
         is_public: bool,
@@ -10612,7 +10730,12 @@ mod tests {
             legacy.to_content_token().user_id.as_deref(),
             Some(MENTION_HERE_USER_ID)
         );
-        let sent = build_send_content("@here", std::slice::from_ref(&legacy), &[], &[]);
+        let sent = build_send_content(
+            "@here",
+            std::slice::from_ref(&legacy),
+            &OutgoingHashtags::default(),
+            &[],
+        );
         let parsed: ApiMessageContent =
             serde_json::from_str(&sent.json).expect("wire content json");
         assert_eq!(
@@ -10848,14 +10971,21 @@ mod tests {
 
     #[test]
     fn content_json_plain_has_no_mentions_key() {
-        let json = build_message_content_json("hello", &[], &[], &[], &[]);
+        let json =
+            build_message_content_json("hello", &[], &[], &[], &[], &OutgoingHashtags::default());
         assert_eq!(json, r#"{"t":"hello"}"#);
     }
 
     #[test]
     fn content_json_includes_mentions_with_utf16_offsets() {
-        let json =
-            build_message_content_json("@bob hi", &[user_mention("42", 0, 4)], &[], &[], &[]);
+        let json = build_message_content_json(
+            "@bob hi",
+            &[user_mention("42", 0, 4)],
+            &[],
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.t, "@bob hi");
         assert_eq!(parsed.mentions.len(), 1);
@@ -10913,7 +11043,14 @@ mod tests {
 
     #[test]
     fn content_json_keeps_here_mention_for_receive_colouring() {
-        let json = build_message_content_json("@here", &[here_mention(0, 5)], &[], &[], &[]);
+        let json = build_message_content_json(
+            "@here",
+            &[here_mention(0, 5)],
+            &[],
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.mentions.len(), 1);
         assert_eq!(
@@ -10939,7 +11076,14 @@ mod tests {
             s: 0,
             e: 8,
         }];
-        let json = build_message_content_json("#general hi", &[], &hashtags, &[], &[]);
+        let json = build_message_content_json(
+            "#general hi",
+            &[],
+            &hashtags,
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
         assert!(parsed.mentions.is_empty());
         assert_eq!(parsed.hg.len(), 1);
@@ -10955,12 +11099,107 @@ mod tests {
             s: 0,
             e: 7,
         }];
-        let json = build_message_content_json(":smile:", &[], &[], &emojis, &[]);
+        let json = build_message_content_json(
+            ":smile:",
+            &[],
+            &[],
+            &emojis,
+            &[],
+            &OutgoingHashtags::default(),
+        );
         let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.ej.len(), 1);
         assert_eq!(parsed.ej[0].emojiid.as_deref(), Some("55"));
         assert_eq!(parsed.ej[0].s, Some(0));
         assert_eq!(parsed.ej[0].e, Some(7));
+    }
+
+    fn voice_link_meta() -> ChannelLinkMeta {
+        ChannelLinkMeta {
+            channel_id: "900".into(),
+            channel_label: "voice elsewhere".into(),
+            clan_id: "5".into(),
+            parent_id: None,
+            channel_type: 10,
+        }
+    }
+
+    #[test]
+    fn channel_id_in_channel_url_reads_the_channel_segment() {
+        assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/clans/5/channels/900"),
+            Some("900")
+        );
+        assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/clans/5/channels/900?code=1"),
+            Some("900")
+        );
+        assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/clans/x/channels/900"),
+            None
+        );
+        assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/direct/message/900"),
+            None
+        );
+    }
+
+    #[test]
+    fn content_json_carries_channel_meta_on_hashtags_and_channel_links() {
+        let url = "https://mezon.ai/chat/clans/5/channels/900";
+        let text = format!("#vé 👋 {url} https://example.com/a");
+        let hashtags = OutgoingHashtags::new(
+            vec![OutgoingHashtag {
+                channel_id: "900".into(),
+                s: 0,
+                e: 3,
+            }],
+            vec![voice_link_meta()],
+        );
+        let sent = build_send_content(&text, &[], &hashtags, &[]);
+        let parsed: ApiMessageContent = serde_json::from_str(&sent.json).unwrap();
+        assert_eq!(
+            parsed.hg[0].channel_label.as_deref(),
+            Some("voice elsewhere")
+        );
+        assert_eq!(parsed.hg[0].clan_id.as_deref(), Some("5"));
+        assert_eq!(parsed.hg[0].channel_type, Some(10));
+        let utf16: Vec<u16> = parsed.t.encode_utf16().collect();
+        let slice = |token: &ContentToken| {
+            String::from_utf16_lossy(&utf16[token.s.unwrap() as usize..token.e.unwrap() as usize])
+        };
+        let links: Vec<&ContentToken> = parsed
+            .mk
+            .iter()
+            .filter(|token| token.kind.as_deref() == Some("lk"))
+            .collect();
+        assert_eq!(links.len(), 2);
+        let channel_link = links
+            .iter()
+            .find(|token| slice(token) == url)
+            .expect("channel link");
+        assert_eq!(
+            channel_link.channel_label.as_deref(),
+            Some("voice elsewhere")
+        );
+        assert_eq!(channel_link.channel_id.as_deref(), Some("900"));
+        let other_link = links
+            .iter()
+            .find(|token| slice(token) != url)
+            .expect("other link");
+        assert!(other_link.channel_label.is_none());
+        assert!(!sent.json.contains("parentId"));
+    }
+
+    #[test]
+    fn content_json_without_channel_meta_adds_no_channel_fields() {
+        let sent = build_send_content(
+            "https://mezon.ai/chat/clans/5/channels/900",
+            &[],
+            &OutgoingHashtags::default(),
+            &[],
+        );
+        assert!(!sent.json.contains("channelLabel"));
     }
 
     fn md(kind: &str, s: i32, e: i32) -> OutgoingMarkdown {
@@ -11031,7 +11270,7 @@ mod tests {
                 e: 8,
                 ..Default::default()
             }],
-            &[],
+            &OutgoingHashtags::default(),
             &[],
         );
         let value: serde_json::Value = serde_json::from_str(&sent.json).unwrap();
@@ -11138,7 +11377,14 @@ mod tests {
 
     #[test]
     fn content_json_includes_markdown_mk() {
-        let json = build_message_content_json("**hey**", &[], &[], &[], &[md("b", 0, 7)]);
+        let json = build_message_content_json(
+            "**hey**",
+            &[],
+            &[],
+            &[],
+            &[md("b", 0, 7)],
+            &OutgoingHashtags::default(),
+        );
         let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.t, "**hey**");
         assert_eq!(parsed.mk.len(), 1);
@@ -11155,6 +11401,7 @@ mod tests {
             &[],
             &[],
             &[md("b", 0, 6)],
+            &OutgoingHashtags::default(),
         );
         let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.t, "**hi** @bob");
@@ -11176,28 +11423,54 @@ mod tests {
 
     #[test]
     fn mention_or_reply_plain_message_is_false() {
-        let content = build_message_content_json("hello world", &[], &[], &[], &[]);
+        let content = build_message_content_json(
+            "hello world",
+            &[],
+            &[],
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         assert!(!is_mention_or_reply(&content, &[], &[], 42, &[]));
     }
 
     #[test]
     fn mention_or_reply_detects_here() {
-        let content = build_message_content_json("@here", &[here_mention(0, 5)], &[], &[], &[]);
+        let content = build_message_content_json(
+            "@here",
+            &[here_mention(0, 5)],
+            &[],
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         assert!(is_mention_or_reply(&content, &[], &[], 42, &[]));
     }
 
     #[test]
     fn mention_or_reply_detects_current_user_only() {
-        let content =
-            build_message_content_json("@bob", &[user_mention("42", 0, 4)], &[], &[], &[]);
+        let content = build_message_content_json(
+            "@bob",
+            &[user_mention("42", 0, 4)],
+            &[],
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         assert!(is_mention_or_reply(&content, &[], &[], 42, &[]));
         assert!(!is_mention_or_reply(&content, &[], &[], 7, &[]));
     }
 
     #[test]
     fn mention_or_reply_detects_matching_role_only() {
-        let content =
-            build_message_content_json("@mods", &[role_mention("99", 0, 5)], &[], &[], &[]);
+        let content = build_message_content_json(
+            "@mods",
+            &[role_mention("99", 0, 5)],
+            &[],
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         assert!(is_mention_or_reply(&content, &[], &[], 42, &[99]));
         assert!(!is_mention_or_reply(&content, &[], &[], 42, &[100]));
     }
@@ -11205,7 +11478,8 @@ mod tests {
     #[test]
     fn mention_or_reply_detects_reply_to_user() {
         let refs = reply_reference_bytes(42);
-        let content = build_message_content_json("re", &[], &[], &[], &[]);
+        let content =
+            build_message_content_json("re", &[], &[], &[], &[], &OutgoingHashtags::default());
         assert!(is_mention_or_reply(&content, &refs, &[], 42, &[]));
         assert!(!is_mention_or_reply(&content, &refs, &[], 7, &[]));
     }
@@ -11227,7 +11501,8 @@ mod tests {
             }],
         };
         let bytes = list.encode_to_vec();
-        let content = build_message_content_json("hello", &[], &[], &[], &[]);
+        let content =
+            build_message_content_json("hello", &[], &[], &[], &[], &OutgoingHashtags::default());
         assert!(is_mention_or_reply(&content, &[], &bytes, 42, &[]));
         assert!(!is_mention_or_reply(&content, &[], &bytes, 7, &[]));
     }
@@ -11244,7 +11519,8 @@ mod tests {
             }],
         }
         .encode_to_vec();
-        let content = build_message_content_json("hello", &[], &[], &[], &[]);
+        let content =
+            build_message_content_json("hello", &[], &[], &[], &[], &OutgoingHashtags::default());
         assert!(is_mention_or_reply(&content, &[], &bytes, 42, &[99]));
         assert!(!is_mention_or_reply(&content, &[], &bytes, 42, &[100]));
     }
@@ -11262,7 +11538,8 @@ mod tests {
             }],
         }
         .encode_to_vec();
-        let content = build_message_content_json("@here", &[], &[], &[], &[]);
+        let content =
+            build_message_content_json("@here", &[], &[], &[], &[], &OutgoingHashtags::default());
         assert!(is_mention_or_reply(&content, &[], &bytes, 7, &[]));
         assert!(!is_inbox_mention_or_reply(&content, &[], &bytes, 7, &[]));
     }
@@ -11302,14 +11579,16 @@ mod tests {
             }],
         }
         .encode_to_vec();
-        let content = build_message_content_json("reply", &[], &[], &[], &[]);
+        let content =
+            build_message_content_json("reply", &[], &[], &[], &[], &OutgoingHashtags::default());
 
         assert!(is_inbox_mention_or_reply(&content, &refs, &[], 42, &[]));
     }
 
     #[test]
     fn mention_or_reply_malformed_proto_mentions_is_false() {
-        let content = build_message_content_json("hello", &[], &[], &[], &[]);
+        let content =
+            build_message_content_json("hello", &[], &[], &[], &[], &OutgoingHashtags::default());
         assert!(!is_mention_or_reply(
             &content,
             &[],
@@ -12113,7 +12392,7 @@ mod tests {
         let (json, _) = build_presign_finish_content(
             "hi :joy: #gen @bob",
             &mentions,
-            &hashtags,
+            &OutgoingHashtags::from(hashtags),
             &emojis,
             &["key-1".to_string()],
             1700,

@@ -14,7 +14,7 @@ use mezon_client::transport::{
     ApiActionRow, ApiAnimationComponent, ApiComponentPayload, ApiEmbed, ApiEmbedInputWrapper,
     ApiEmbedShapeWrapper, ApiMessage, ApiMessageComponent, ApiMessageContent, ApiMessageInput,
     ApiRadioOption, ApiSelectComponent, EPHEMERAL_MESSAGE_CODE, LOCATION_CODE, MESSAGE_BUZZ_CODE,
-    OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag,
+    OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag, OutgoingHashtags,
     OutgoingMention as TransportMention, OutgoingMessageFlags, OutgoingOgp, OutgoingReply,
     SHARE_CONTACT_CODE, build_send_content, build_share_contact_content_json, detect_markdown,
     emoji_content_tokens, hashtag_content_tokens, is_here_user_id, markdown_content_tokens,
@@ -930,7 +930,7 @@ async fn send_forward(
                 dest.is_public,
                 dest.mode,
                 Vec::new(),
-                Vec::new(),
+                OutgoingHashtags::default(),
                 Vec::new(),
                 None,
             )
@@ -2506,6 +2506,7 @@ impl MessagesStore {
             .map(|msg| (!msg.attachments.is_empty(), msg.create_time.max(0) as u32));
         let (spans, transport_mentions, transport_hashtags, transport_emojis, raw_content) =
             edit_content_spans(&content, content_tokens);
+        let transport_hashtags = outgoing_hashtags(&content, transport_hashtags, cx);
         let Some(channel) = self.cache.get_mut(&storage_id) else {
             return;
         };
@@ -2633,10 +2634,14 @@ impl MessagesStore {
             .into_iter()
             .map(OutgoingMention::into_transport)
             .collect();
-        let transport_hashtags = hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect();
+        let transport_hashtags = outgoing_hashtags(
+            &content,
+            hashtags
+                .into_iter()
+                .map(OutgoingHashtag::into_transport)
+                .collect(),
+            cx,
+        );
         let transport_emojis = emojis
             .into_iter()
             .map(OutgoingEmoji::into_transport)
@@ -3081,7 +3086,9 @@ impl MessagesStore {
             .as_deref()
             .filter(|raw| !raw.is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| build_send_content(&msg.content, &[], &[], &[]).json);
+            .unwrap_or_else(|| {
+                build_send_content(&msg.content, &[], &OutgoingHashtags::default(), &[]).json
+            });
         let mentions: Vec<mezon_proto::api::MessageMention> = msg
             .mention_targets
             .iter()
@@ -4862,10 +4869,14 @@ impl MessagesStore {
             .into_iter()
             .map(OutgoingMention::into_transport)
             .collect();
-        let transport_hashtags: Vec<TransportHashtag> = hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect();
+        let transport_hashtags = outgoing_hashtags(
+            &content,
+            hashtags
+                .into_iter()
+                .map(OutgoingHashtag::into_transport)
+                .collect(),
+            cx,
+        );
         let transport_emojis: Vec<TransportEmoji> = emojis
             .into_iter()
             .map(OutgoingEmoji::into_transport)
@@ -4964,10 +4975,14 @@ impl MessagesStore {
             .into_iter()
             .map(OutgoingMention::into_transport)
             .collect();
-        let transport_hashtags: Vec<TransportHashtag> = hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect();
+        let transport_hashtags = outgoing_hashtags(
+            &content,
+            hashtags
+                .into_iter()
+                .map(OutgoingHashtag::into_transport)
+                .collect(),
+            cx,
+        );
         let transport_emojis: Vec<TransportEmoji> = emojis
             .into_iter()
             .map(OutgoingEmoji::into_transport)
@@ -5226,10 +5241,14 @@ impl MessagesStore {
             .into_iter()
             .map(OutgoingMention::into_transport)
             .collect();
-        let transport_hashtags: Vec<TransportHashtag> = hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect();
+        let transport_hashtags = outgoing_hashtags(
+            &content,
+            hashtags
+                .into_iter()
+                .map(OutgoingHashtag::into_transport)
+                .collect(),
+            cx,
+        );
         let transport_emojis: Vec<TransportEmoji> = emojis
             .into_iter()
             .map(OutgoingEmoji::into_transport)
@@ -8223,7 +8242,7 @@ struct AnonymousAttachmentSend<'a> {
     keys: Vec<String>,
     reply_ref: Option<OutgoingReply>,
     mentions: Vec<TransportMention>,
-    hashtags: Vec<TransportHashtag>,
+    hashtags: OutgoingHashtags,
     emojis: Vec<TransportEmoji>,
     flags: OutgoingMessageFlags,
 }
@@ -8990,6 +9009,17 @@ type EditTransportTokens = (
     Vec<TransportEmoji>,
     String,
 );
+
+pub(crate) fn outgoing_hashtags(
+    content: &str,
+    tokens: Vec<TransportHashtag>,
+    cx: &App,
+) -> OutgoingHashtags {
+    let channels = crate::ChannelList::try_global(cx)
+        .map(|channels| channels.read(cx).channel_link_metas(content, &tokens))
+        .unwrap_or_default();
+    OutgoingHashtags::new(tokens, channels)
+}
 
 fn edit_content_spans(content: &str, content_tokens: OutgoingContent) -> EditTransportTokens {
     let OutgoingContent {
@@ -12034,8 +12064,12 @@ mod tests {
         .into_iter()
         .map(OutgoingMention::into_transport)
         .collect();
-        let sent =
-            mezon_client::transport::build_send_content("@Everyone hi", &transport, &[], &[]);
+        let sent = mezon_client::transport::build_send_content(
+            "@Everyone hi",
+            &transport,
+            &Default::default(),
+            &[],
+        );
         let parsed: ApiMessageContent =
             serde_json::from_str(&sent.json).expect("wire content json");
         assert_eq!(parsed.mentions.len(), 1);
@@ -13052,7 +13086,7 @@ mod tests {
 
     #[test]
     fn optimistic_markdown_content_matches_stripped_echo() {
-        let optimistic_text = build_send_content("**bold**", &[], &[], &[]).text;
+        let optimistic_text = build_send_content("**bold**", &[], &Default::default(), &[]).text;
         assert_eq!(
             optimistic_text, "bold",
             "optimistic text must be stripped like the server-stored text"

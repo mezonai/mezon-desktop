@@ -1951,7 +1951,9 @@ impl MentionInput {
                         this.invalidate_pool(Sigil::Hash, cx);
                     }
                     ChannelEvent::Unread(_) | ChannelEvent::InVoiceChanged => {}
-                    ChannelEvent::ArchivedByAdministrator { .. } | ChannelEvent::AccessLost(_) => {}
+                    ChannelEvent::ArchivedByAdministrator { .. }
+                    | ChannelEvent::AccessLost(_)
+                    | ChannelEvent::LinkedChannelResolved(_) => {}
                 },
             ),
             cx.subscribe(
@@ -3144,6 +3146,7 @@ fn committed_from_spans(content: &str, spans: &[MessageSpan]) -> Vec<CommittedTo
             MessageSpan::Hashtag {
                 display,
                 channel_id,
+                ..
             } => (
                 display.to_string(),
                 TokenKind::Hashtag {

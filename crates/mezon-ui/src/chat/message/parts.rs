@@ -675,8 +675,15 @@ fn render_reply_preview_spans(
             MessageSpan::Hashtag {
                 display,
                 channel_id,
+                meta,
             } => {
-                let chip = hashtag_chip(display, channel_id.as_deref(), ctx.locale, ctx.app);
+                let chip = hashtag_chip(
+                    display,
+                    channel_id.as_deref(),
+                    meta.as_deref(),
+                    ctx.locale,
+                    ctx.app,
+                );
                 if !text.is_empty() && !text.ends_with(' ') {
                     text.push(' ');
                 }

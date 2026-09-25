@@ -17,13 +17,13 @@ use gpui::{
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use mezon_store::{
-    BadgeService, ChannelId, ChannelList, ChannelPermissionsEvent, ChannelPermissionsStore, ClanId,
-    ClanList, ClanMembersStore, DirectMessageStore, EmbedDatePicker, EmbedInput, EmbedTextInput,
-    Emoji, EmojiStore, GroupMembersStore, MessageCode, MessageId, MessagesEvent, MessagesStore,
-    PERMISSION_DELETE_MESSAGE, PERMISSION_MANAGE_THREAD, PERMISSION_SEND_MESSAGE, PermissionStore,
-    ProfileContext, QUICK_MENU_TYPE_QUICK, QuickMenuStore, RolesEvent, RolesStore, Settings,
-    SpriteAtlas, TopicBadgeEvent, TopicBadgeStore, TopicsEvent, TopicsStore, UserId,
-    UsersByUserStore,
+    BadgeService, ChannelEvent, ChannelId, ChannelList, ChannelPermissionsEvent,
+    ChannelPermissionsStore, ClanId, ClanList, ClanMembersStore, DirectMessageStore,
+    EmbedDatePicker, EmbedInput, EmbedTextInput, Emoji, EmojiStore, GroupMembersStore, MessageCode,
+    MessageId, MessagesEvent, MessagesStore, PERMISSION_DELETE_MESSAGE, PERMISSION_MANAGE_THREAD,
+    PERMISSION_SEND_MESSAGE, PermissionStore, ProfileContext, QUICK_MENU_TYPE_QUICK,
+    QuickMenuStore, RolesEvent, RolesStore, Settings, SpriteAtlas, TopicBadgeEvent,
+    TopicBadgeStore, TopicsEvent, TopicsStore, UserId, UsersByUserStore,
     message::{Message, markdown_edit_source},
 };
 
@@ -1445,6 +1445,14 @@ impl ChannelMessages {
         subs.push(cx.observe(&audio_meta, |_, _, cx| cx.notify()));
 
         let channel_list = ChannelList::global(cx);
+        subs.push(
+            cx.subscribe(&channel_list, |this, _, event: &ChannelEvent, cx| {
+                if let ChannelEvent::LinkedChannelResolved(_) = event {
+                    this.row_memo.borrow_mut().selection_layouts.clear();
+                    cx.notify();
+                }
+            }),
+        );
         let channel_list_observe = cx.observe(&channel_list, |this, _, cx| {
             this.row_memo.borrow_mut().selection_layouts.clear();
             this.reconcile_cold(cx);
@@ -4899,16 +4907,18 @@ impl ChannelMessages {
                             .into_any_element();
                     }
                     let row_ix = ix - usize::from(header_shown);
-                    let probe_urls = {
+                    let (probe_urls, linked_channels) = {
                         let topic = entity.read(cx);
                         match topic.topic_messages.get(row_ix) {
-                            Some(message) => {
-                                super::audio_meta::urls_needing_probe(&message.attachments, cx)
-                            }
-                            None => Vec::new(),
+                            Some(message) => (
+                                super::audio_meta::urls_needing_probe(&message.attachments, cx),
+                                super::content::channel_links_needing_detail(&message.spans, cx),
+                            ),
+                            None => (Vec::new(), Vec::new()),
                         }
                     };
                     super::audio_meta::defer_audio_probe(probe_urls, cx);
+                    super::content::defer_linked_channel_resolve(linked_channels, cx);
                     let ctx = RowCtx {
                         app: cx,
                         theme: cx.theme(),
@@ -5298,16 +5308,18 @@ impl Render for ChannelMessages {
                             .into_any_element();
                     }
                     let msg_ix = ix - usize::from(header_shown);
-                    let probe_urls = {
+                    let (probe_urls, linked_channels) = {
                         let messages = store.read(cx);
                         match messages.viewport_messages().get(msg_ix) {
-                            Some(message) => {
-                                super::audio_meta::urls_needing_probe(&message.attachments, cx)
-                            }
-                            None => Vec::new(),
+                            Some(message) => (
+                                super::audio_meta::urls_needing_probe(&message.attachments, cx),
+                                super::content::channel_links_needing_detail(&message.spans, cx),
+                            ),
+                            None => (Vec::new(), Vec::new()),
                         }
                     };
                     super::audio_meta::defer_audio_probe(probe_urls, cx);
+                    super::content::defer_linked_channel_resolve(linked_channels, cx);
                     let ctx = RowCtx {
                         app: cx,
                         theme: cx.theme(),

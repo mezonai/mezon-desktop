@@ -770,6 +770,7 @@ fn rebuild_pin_content_json(msg: &Message) -> String {
             MessageSpan::Hashtag {
                 display,
                 channel_id,
+                meta,
             } => {
                 let start = pin_utf16_len(&t);
                 t.push_str(display);
@@ -778,6 +779,14 @@ fn rebuild_pin_content_json(msg: &Message) -> String {
                 item.insert("e".into(), pin_utf16_len(&t).into());
                 if let Some(channel_id) = channel_id.as_ref().filter(|id| !id.is_empty()) {
                     item.insert("channelId".into(), channel_id.clone().into());
+                }
+                if let Some(meta) = meta {
+                    item.insert("clanId".into(), meta.clan_id.get().to_string().into());
+                    item.insert("channelLabel".into(), meta.label.to_string().into());
+                    item.insert("channelType".into(), meta.channel_type.as_raw().into());
+                    if let Some(parent_id) = meta.parent_id {
+                        item.insert("parentId".into(), parent_id.get().to_string().into());
+                    }
                 }
                 hg.push(serde_json::Value::Object(item));
             }

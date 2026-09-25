@@ -1188,7 +1188,7 @@ pub enum DirectMessageBody {
 impl DirectMessageBody {
     fn into_content_json(self) -> String {
         match self {
-            Self::Text(text) => build_send_content(&text, &[], &[], &[]).json,
+            Self::Text(text) => build_send_content(&text, &[], &Default::default(), &[]).json,
             Self::ContentJson(json) => json,
         }
     }
@@ -2444,7 +2444,7 @@ mod tests {
 
     #[test]
     fn direct_body_content_json_passes_through() {
-        let structured = build_send_content("hello", &[], &[], &[]).json;
+        let structured = build_send_content("hello", &[], &Default::default(), &[]).json;
         assert_eq!(
             DirectMessageBody::ContentJson(structured.clone()).into_content_json(),
             structured
