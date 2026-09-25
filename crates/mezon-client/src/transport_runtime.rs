@@ -2435,43 +2435,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn update_channel_message_with_attachments(
-        &self,
-        clan_id: i64,
-        channel_id: i64,
-        message_id: i64,
-        content: &str,
-        attachments: Vec<mezon_proto::api::MessageAttachment>,
-        mode: i32,
-        is_public: bool,
-        topic_id: i64,
-        is_update_msg_topic: bool,
-        create_time_seconds: u32,
-    ) -> Result<()> {
-        let transport = self.inner.clone();
-        let content = content.to_string();
-        runtime()
-            .spawn(async move {
-                transport
-                    .update_channel_message_with_attachments(
-                        clan_id,
-                        channel_id,
-                        message_id,
-                        &content,
-                        attachments,
-                        mode,
-                        is_public,
-                        topic_id,
-                        is_update_msg_topic,
-                        create_time_seconds,
-                    )
-                    .await
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
-    }
-
     pub async fn list_clan_users_status(
         &self,
         clan_id: i64,
