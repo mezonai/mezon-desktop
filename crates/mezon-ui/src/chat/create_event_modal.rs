@@ -10,6 +10,7 @@ use mezon_store::{
 use std::rc::Rc;
 
 use crate::app::shell::Shell;
+use crate::components::compositions::channel_row::channel_type_icon;
 use crate::components::primitives::{
     Button, ButtonVariants, DatePicker, DatePickerEvent, Dropdown, DropdownPlacement,
     DropdownTriggerStyle, FocusCycle, Icon, IconName, Input, InputEvent, InputState, TextArea,
@@ -305,7 +306,7 @@ pub struct CreateEventModal {
     step: Step,
     location_kind: Option<LocationKind>,
     voice_channels: Vec<(ChannelId, String)>,
-    audience_channels: Vec<(ChannelId, String, ChannelType, bool)>,
+    audience_channels: Vec<(ChannelId, String, ChannelType, bool, i32)>,
     voice_select: Entity<EventSelect>,
     audience_select: Entity<EventSelect>,
     repeat_select: Entity<EventSelect>,
@@ -373,6 +374,7 @@ impl CreateEventModal {
                     channel.name.clone(),
                     channel.channel_type,
                     channel.private,
+                    channel.age_restricted,
                 ));
             }
         }
@@ -396,7 +398,7 @@ impl CreateEventModal {
                 "event-audience",
                 audience_channels
                     .iter()
-                    .map(|(_, name, _, _)| name.clone().into())
+                    .map(|(_, name, _, _, _)| name.clone().into())
                     .collect(),
             )
             .placeholder(t("eventCreator.fields.channel.title"))
@@ -405,13 +407,8 @@ impl CreateEventModal {
             .icons(
                 audience_channels
                     .iter()
-                    .map(|(_, _, ty, private)| {
-                        Some(match (ty, private) {
-                            (ChannelType::Thread, true) => IconName::ThreadIconLocker,
-                            (ChannelType::Thread, false) => IconName::ThreadIcon,
-                            (_, true) => IconName::HashtagLocked,
-                            _ => IconName::Hashtag,
-                        })
+                    .map(|(_, _, ty, private, age_restricted)| {
+                        Some(channel_type_icon(*ty, *private, *age_restricted))
                     })
                     .collect(),
             )
@@ -620,7 +617,7 @@ impl CreateEventModal {
                     modal
                         .audience_channels
                         .iter()
-                        .position(|(channel_id, _, _, _)| *channel_id == id)
+                        .position(|(channel_id, _, _, _, _)| *channel_id == id)
                 }),
                 cx,
             )
@@ -722,6 +719,7 @@ impl CreateEventModal {
                     channel.name.clone(),
                     channel.channel_type,
                     channel.private,
+                    channel.age_restricted,
                 ));
             }
         }
@@ -741,17 +739,12 @@ impl CreateEventModal {
             select.set_items(
                 self.audience_channels
                     .iter()
-                    .map(|(_, name, _, _)| name.clone().into())
+                    .map(|(_, name, _, _, _)| name.clone().into())
                     .collect(),
                 self.audience_channels
                     .iter()
-                    .map(|(_, _, ty, private)| {
-                        Some(match (ty, private) {
-                            (ChannelType::Thread, true) => IconName::ThreadIconLocker,
-                            (ChannelType::Thread, false) => IconName::ThreadIcon,
-                            (_, true) => IconName::HashtagLocked,
-                            _ => IconName::Hashtag,
-                        })
+                    .map(|(_, _, ty, private, age_restricted)| {
+                        Some(channel_type_icon(*ty, *private, *age_restricted))
                     })
                     .collect(),
                 cx,
@@ -1521,7 +1514,7 @@ impl CreateEventModal {
         let audience_note = if self.location_kind == Some(LocationKind::External) {
             self.tr("eventCreator.eventDetail.onlyInvitedMembers", cx)
         } else if let Some(index) = self.audience_select.read(cx).selected() {
-            let (_, name, ty, _) = &self.audience_channels[index];
+            let (_, name, ty, _, _) = &self.audience_channels[index];
             format!(
                 "{} {}{}",
                 self.tr("eventCreator.eventDetail.audienceConsists", cx),

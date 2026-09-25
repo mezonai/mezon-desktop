@@ -256,12 +256,8 @@ impl OverviewTab {
         self.draft_topic(cx) != self.saved_topic
     }
 
-    pub fn is_age_restricted_dirty(&self, _cx: &App) -> bool {
+    fn is_age_restricted_dirty(&self, _cx: &App) -> bool {
         self.draft_age_restricted != self.saved_age_restricted
-    }
-
-    pub fn draft_age_restricted(&self) -> i32 {
-        self.draft_age_restricted
     }
 
     fn is_dirty(&self, cx: &App) -> bool {

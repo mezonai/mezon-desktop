@@ -9,7 +9,7 @@ use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelType, ClanId, ClanList, DirectKind,
     DirectMessageStore, ForwardTarget, FriendState, FriendStore, MAX_FORWARD_MESSAGE_LENGTH,
     Message, MessageId, MessagesEvent, MessagesStore, ProfileContext, ShareContactSubject, UserId,
-    UsersByUserStore, resolve_avatar_url, resolve_user_profile,
+    UsersByUserStore, is_age_restricted, resolve_avatar_url, resolve_user_profile,
 };
 
 use crate::app::shell::Shell;
@@ -67,9 +67,7 @@ fn channel_icon(
     private: bool,
     age_restricted: i32,
 ) -> (IconName, Option<IconName>) {
-    use crate::components::compositions::channel_row::{
-        channel_icon as compose_channel_icon, is_age_restricted,
-    };
+    use crate::components::compositions::channel_row::channel_icon as compose_channel_icon;
     if matches!(channel_type, ChannelType::Text) && is_age_restricted(age_restricted) {
         return (IconName::HashtagWarning, None);
     }

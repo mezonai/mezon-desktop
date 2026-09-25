@@ -14,11 +14,10 @@ use gpui::{
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, ClanList, PermissionStore, Settings,
-    can_delete_channel, can_manage_channel,
+    can_delete_channel, can_manage_channel, is_age_restricted,
 };
 
 use crate::app::shell::Shell;
-use crate::components::compositions::channel_row::channel_type_icon;
 use crate::components::primitives::{Icon, IconName, h_flex, v_flex};
 use crate::theme::{ActiveTheme, Theme};
 use category_tab::CategoryTab;
@@ -52,7 +51,6 @@ pub struct ChannelTabContext {
     pub is_thread: bool,
     pub is_welcome_channel: bool,
     pub has_manage_channel: bool,
-    pub private: bool,
     pub age_restricted: i32,
 }
 
@@ -63,7 +61,6 @@ impl ChannelTabContext {
             is_thread: false,
             is_welcome_channel: false,
             has_manage_channel: false,
-            private: false,
             age_restricted: 0,
         }
     }
@@ -337,7 +334,6 @@ impl ChannelSettingScreen {
             is_thread: channel.is_thread(),
             is_welcome_channel: welcome_channel_id == Some(self.channel_id),
             has_manage_channel,
-            private: channel.private,
             age_restricted: channel.age_restricted,
         }
     }
@@ -439,16 +435,6 @@ impl ChannelSettingScreen {
         ctx: ChannelTabContext,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let age_restricted = self
-            .overview_tab
-            .as_ref()
-            .filter(|_| self.current_tab == ChannelSettingsTab::Overview)
-            .and_then(|tab| {
-                let tab = tab.read(cx);
-                tab.is_age_restricted_dirty(cx)
-                    .then_some(tab.draft_age_restricted())
-            })
-            .unwrap_or(ctx.age_restricted);
         let mut nav = v_flex().w(px(SIDEBAR_ITEM_WIDTH));
         nav = nav.child(
             h_flex()
@@ -456,7 +442,7 @@ impl ChannelSettingScreen {
                 .items_start()
                 .gap_1()
                 .child(
-                    Icon::new(channel_tab_icon(ctx, age_restricted))
+                    Icon::new(channel_tab_icon(ctx))
                         .size(px(20.0))
                         .flex_shrink_0()
                         .text_color(theme.tokens.bg_icon_theme),
@@ -621,13 +607,16 @@ impl ChannelSettingScreen {
     }
 }
 
-fn channel_tab_icon(ctx: ChannelTabContext, age_restricted: i32) -> IconName {
-    let channel_type = if ctx.is_thread {
-        ChannelType::Thread
-    } else {
-        ctx.channel_type
-    };
-    channel_type_icon(channel_type, ctx.private, age_restricted)
+fn channel_tab_icon(ctx: ChannelTabContext) -> IconName {
+    if ctx.is_thread {
+        return IconName::ThreadIcon;
+    }
+    match ctx.channel_type {
+        ChannelType::Voice => IconName::Speaker,
+        ChannelType::Stream => IconName::Stream,
+        ChannelType::Text if is_age_restricted(ctx.age_restricted) => IconName::HashtagWarning,
+        _ => IconName::Hashtag,
+    }
 }
 
 impl Focusable for ChannelSettingScreen {
@@ -901,25 +890,38 @@ mod tests {
             is_thread,
             is_welcome_channel: welcome,
             has_manage_channel: manage,
-            private: false,
             age_restricted: 0,
         }
     }
 
     #[test]
-    fn settings_sidebar_uses_the_age_restricted_glyph() {
-        let ctx = ChannelTabContext {
+    fn settings_sidebar_icon_keeps_the_old_glyphs() {
+        let restricted = ChannelTabContext {
             channel_type: ChannelType::Text,
             is_thread: false,
             is_welcome_channel: false,
             has_manage_channel: true,
-            private: false,
             age_restricted: 1,
         };
         assert_eq!(
-            channel_tab_icon(ctx, ctx.age_restricted).path(),
+            channel_tab_icon(restricted).path(),
             IconName::HashtagWarning.path()
         );
+        let voice = ChannelTabContext {
+            channel_type: ChannelType::Voice,
+            ..restricted
+        };
+        assert_eq!(channel_tab_icon(voice).path(), IconName::Speaker.path());
+        let thread = ChannelTabContext {
+            is_thread: true,
+            ..restricted
+        };
+        assert_eq!(channel_tab_icon(thread).path(), IconName::ThreadIcon.path());
+        let forum = ChannelTabContext {
+            channel_type: ChannelType::Forum,
+            ..restricted
+        };
+        assert_eq!(channel_tab_icon(forum).path(), IconName::Hashtag.path());
     }
 
     #[test]
@@ -1149,7 +1151,7 @@ mod tests {
         let detected = ctx(channel.channel_type, channel.is_thread(), false, true);
         assert!(!ChannelSettingsTab::Category.visible_in_sidebar(detected));
         assert!(!ChannelSettingsTab::Permissions.visible_in_sidebar(detected));
-        assert_eq!(channel_tab_icon(detected, 0), IconName::ThreadIcon);
+        assert_eq!(channel_tab_icon(detected), IconName::ThreadIcon);
     }
 
     #[test]

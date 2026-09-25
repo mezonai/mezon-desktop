@@ -7,8 +7,8 @@ use gpui::{
     ListState, SharedString, Subscription, Task, Window, div, list, prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelUsersStore, ClanId, ClanMembersStore, RoleId, RolesStore,
-    Settings, UserId,
+    ChannelId, ChannelList, ChannelType, ChannelUsersStore, ClanId, ClanMembersStore, RoleId,
+    RolesStore, Settings, UserId,
 };
 
 use super::channel_acl::{
@@ -391,11 +391,16 @@ impl AddMemRoleModal {
         else {
             return IconName::Hashtag;
         };
-        crate::components::compositions::channel_row::channel_type_icon(
-            channel.channel_type,
-            channel.private,
-            channel.age_restricted,
-        )
+        if channel.channel_type == ChannelType::Text && channel.is_age_restricted() {
+            return IconName::HashtagWarning;
+        }
+        match (channel.private, channel.channel_type) {
+            (true, ChannelType::Voice) => IconName::SpeakerLocked,
+            (true, _) => IconName::HashtagLocked,
+            (false, ChannelType::Voice) => IconName::Speaker,
+            (false, ChannelType::Stream) => IconName::Stream,
+            (false, _) => IconName::Hashtag,
+        }
     }
 
     fn channel_label(&self, cx: &App) -> SharedString {

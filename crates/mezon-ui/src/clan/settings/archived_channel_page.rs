@@ -2,10 +2,11 @@ use gpui::{
     AnyElement, Context, Entity, FontWeight, MouseButton, Render, ScrollHandle, SharedString,
     Subscription, Task, Window, deferred, div, point, prelude::*, px,
 };
-use mezon_store::{ChannelList, ClanId, ClanMembersStore, Settings, UserId};
+use mezon_store::{ChannelList, ChannelType, ClanId, ClanMembersStore, Settings, UserId};
 use ui::utils::{DateTimeType, format_distance_from_now};
 
 use crate::app::shell::Shell;
+use crate::components::compositions::channel_row::channel_type_icon;
 use crate::components::primitives::{
     Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, PaginationButton,
     Sizable, Size, h_flex, pagination_button, pagination_items, v_flex,
@@ -18,6 +19,7 @@ struct ArchivedChannelRow {
     channel_id: i64,
     channel_label: SharedString,
     channel_private: bool,
+    channel_type: ChannelType,
     category_id: i64,
     creator_id: i64,
     age_restricted: bool,
@@ -115,6 +117,7 @@ impl ArchivedChannelPage {
                                 channel_id: desc.channel_id,
                                 channel_label: desc.channel_label.into(),
                                 channel_private: desc.channel_private,
+                                channel_type: desc.channel_type,
                                 category_id: desc.category_id,
                                 creator_id: desc.creator_id,
                                 age_restricted: desc.age_restricted,
@@ -524,13 +527,11 @@ impl ArchivedChannelPage {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let channel_id = row.channel_id;
-        let icon = if row.age_restricted {
-            IconName::HashtagWarning
-        } else if row.channel_private {
-            IconName::HashtagLocked
-        } else {
-            IconName::Hashtag
-        };
+        let icon = channel_type_icon(
+            row.channel_type,
+            row.channel_private,
+            i32::from(row.age_restricted),
+        );
         let subtitle = Self::format_active_subtitle(row.last_active_timestamp, locale);
         let category_name = self.category_name(row.category_id, cx);
         let creator_name = self.creator_name(row.creator_id, cx);

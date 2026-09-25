@@ -1,14 +1,8 @@
 use gpui::{AnyElement, Hsla, IntoElement, ParentElement, Pixels, Styled, div, px};
-use mezon_store::ChannelType;
+use mezon_store::{ChannelType, is_age_restricted};
 
 use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
-
-const AGE_RESTRICTED_ON: i32 = 1;
-
-pub(crate) fn is_age_restricted(age_restricted: i32) -> bool {
-    age_restricted == AGE_RESTRICTED_ON
-}
 
 pub(crate) fn shows_left_unread_nub(channel_type: ChannelType) -> bool {
     !matches!(

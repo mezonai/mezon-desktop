@@ -733,7 +733,9 @@ fn ctrlk_channel_as_clan_channel(
         .map(|ch| channel_list.palette_channel_unread(ch))
         .unwrap_or((0, 0, 0));
     let private = stored.map(|ch| ch.private).unwrap_or(channel.private);
-    let age_restricted = stored.map(|ch| ch.age_restricted).unwrap_or(0);
+    let age_restricted = stored
+        .map(|ch| ch.age_restricted)
+        .unwrap_or(channel.age_restricted);
     let voice_busy = channel_voice_busy(
         channel_list,
         channel.clan_id,
@@ -1096,11 +1098,23 @@ fn palette_channel_icon(
     private: bool,
     age_restricted: i32,
 ) -> crate::components::primitives::IconName {
-    crate::components::compositions::channel_row::channel_type_icon(
-        channel_type.unwrap_or(ChannelType::Text),
-        private,
-        age_restricted,
-    )
+    use crate::components::primitives::IconName;
+    use mezon_store::is_age_restricted;
+
+    match (channel_type.unwrap_or(ChannelType::Text), private) {
+        (ChannelType::Text, _) if is_age_restricted(age_restricted) => IconName::HashtagWarning,
+        (ChannelType::Thread, true) => IconName::ThreadIconLocker,
+        (ChannelType::Thread, false) => IconName::ThreadIcon,
+        (ChannelType::Voice, true) => IconName::SpeakerLocked,
+        (ChannelType::Voice, false) => IconName::Speaker,
+        (ChannelType::Stream, _) => IconName::Stream,
+        (ChannelType::App, true) => IconName::PrivateAppChannelIcon,
+        (ChannelType::App, false) => IconName::AppChannelIcon,
+        (ChannelType::Forum, _) => IconName::Forum,
+        (ChannelType::Announcement, _) => IconName::Announcement,
+        (_, true) => IconName::HashtagLocked,
+        (_, false) => IconName::Hashtag,
+    }
 }
 
 fn render_highlighted_text(

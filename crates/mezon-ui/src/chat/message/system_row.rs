@@ -805,11 +805,16 @@ pub fn render_welcome(_msg: &Message, ctx: &RowCtx) -> AnyElement {
             name,
             private,
             is_stream,
+            age_restricted,
         } => {
             col = col
                 .child(welcome_icon_circle(
                     if is_stream {
                         Icon::new(IconName::Stream).size_10().text_color(icon_fill)
+                    } else if mezon_store::is_age_restricted(age_restricted) {
+                        Icon::new(IconName::HashtagWarning)
+                            .size_10()
+                            .text_color(icon_fill)
                     } else if private {
                         Icon::new(IconName::HashtagLocked)
                             .size_10()
@@ -1076,5 +1081,6 @@ pub fn build_welcome_context(
         name,
         private: channel.private,
         is_stream: channel.channel_type == ChannelType::Stream,
+        age_restricted: channel.age_restricted,
     })
 }
