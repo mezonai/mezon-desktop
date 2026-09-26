@@ -43,7 +43,7 @@ actions!(
     ]
 );
 
-fn text_input_bindings() -> Vec<KeyBinding> {
+pub fn text_input_bindings() -> Vec<KeyBinding> {
     let mut bindings = vec![
         KeyBinding::new("backspace", Backspace, Some(TEXT_INPUT_CONTEXT)),
         KeyBinding::new("delete", Delete, Some(TEXT_INPUT_CONTEXT)),

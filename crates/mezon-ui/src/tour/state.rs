@@ -756,7 +756,7 @@ impl Render for TourState {
                     .size_full()
                     .occlude()
                     .track_focus(&self.focus_handle)
-                    .key_context("tour")
+                    .key_context(super::KEY_CONTEXT)
                     .on_action(
                         cx.listener(|this, _: &::menu::Cancel, window, cx| this.finish(window, cx)),
                     )

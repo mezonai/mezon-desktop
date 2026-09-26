@@ -52,6 +52,8 @@ pub struct ClanSidebar {
     direct_unread: DirectUnreadListState,
     direct_unread_fingerprint: Option<u64>,
     list_state: ListState,
+    pending_reveal_ix: Option<usize>,
+    reveal_wait_queued: bool,
     dm_active: bool,
     can_go_back: bool,
     can_go_forward: bool,
@@ -165,6 +167,8 @@ impl ClanSidebar {
             )),
             direct_unread_fingerprint: Some(direct_unread_fingerprint(direct_store.read(cx), cx)),
             list_state,
+            pending_reveal_ix: None,
+            reveal_wait_queued: false,
             dm_active: initial_dm_active,
             can_go_back: initial_can_go_back,
             can_go_forward: initial_can_go_forward,
@@ -313,6 +317,16 @@ impl ClanSidebar {
         if *self.rows == rows {
             return false;
         }
+        let old_active_id = self
+            .rows
+            .iter()
+            .find(|row| row.active)
+            .map(|row| row.id_num);
+        let new_active = rows
+            .iter()
+            .enumerate()
+            .find(|(_, row)| row.active)
+            .map(|(ix, row)| (ix, row.id_num));
         let count = rows.len();
         let item_count = count + 1;
         let needs_reset = self.list_state.item_count() != item_count;
@@ -325,7 +339,50 @@ impl ClanSidebar {
                 size(px(0.), px(CLAN_ROW_HEIGHT)),
             );
         }
+        if let Some((ix, id)) = new_active
+            && Some(id) != old_active_id
+        {
+            self.reveal_clan_row(ix);
+        }
         true
+    }
+
+    fn reveal_clan_row(&mut self, ix: usize) {
+        if self.list_state.viewport_bounds().size.height > px(0.) {
+            self.list_state.scroll_to_reveal_item(ix);
+            self.pending_reveal_ix = None;
+        } else {
+            self.pending_reveal_ix = Some(ix);
+        }
+    }
+
+    fn flush_clan_reveal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.pending_reveal_ix else {
+            return;
+        };
+        if self.list_state.viewport_bounds().size.height > px(0.) {
+            self.list_state.scroll_to_reveal_item(ix);
+            self.pending_reveal_ix = None;
+            return;
+        }
+        if self.reveal_wait_queued {
+            return;
+        }
+        self.reveal_wait_queued = true;
+        let view = cx.entity().downgrade();
+        window.on_next_frame(move |_, cx| {
+            let _ = view.update(cx, |this, cx| {
+                this.reveal_wait_queued = false;
+                let Some(ix) = this.pending_reveal_ix else {
+                    return;
+                };
+                if this.list_state.viewport_bounds().size.height > px(0.) {
+                    this.list_state.scroll_to_reveal_item(ix);
+                    this.pending_reveal_ix = None;
+                    cx.notify();
+                }
+            });
+        });
     }
 
     fn refresh_direct_unread(&mut self, cx: &mut Context<Self>) {
@@ -341,7 +398,8 @@ impl ClanSidebar {
 }
 
 impl Render for ClanSidebar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.flush_clan_reveal(window, cx);
         let avatar_cache = self.image_cache.clone();
         let theme = cx.theme();
         let dm_active = self.dm_active;

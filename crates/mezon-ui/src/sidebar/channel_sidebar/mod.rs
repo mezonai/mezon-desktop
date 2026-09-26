@@ -138,6 +138,8 @@ pub struct ChannelSidebar {
     _skeleton_timer: Option<Task<()>>,
     last_locale: String,
     last_route_channel: Option<ChannelId>,
+    pending_route_channel: Option<ChannelId>,
+    route_reveal_queued: bool,
     last_clan_inputs: (Option<ClanId>, u64),
     _clan_observe: Subscription,
     _channel_observe: Subscription,
@@ -314,7 +316,9 @@ impl ChannelSidebar {
                 return;
             }
             this.last_route_channel = active;
-            if this.rebuild_items(cx) {
+            let changed = this.rebuild_items(cx);
+            this.pending_route_channel = active.filter(|id| !this.reveal_route_channel(*id));
+            if changed || this.pending_route_channel.is_some() {
                 cx.notify();
             }
         });
@@ -399,6 +403,8 @@ impl ChannelSidebar {
             _skeleton_timer: None,
             last_locale: initial_locale,
             last_route_channel: initial_route_channel,
+            pending_route_channel: None,
+            route_reveal_queued: false,
             last_clan_inputs: initial_clan_inputs,
             _clan_observe: clan_observe,
             _channel_observe: channel_observe,
@@ -1005,6 +1011,44 @@ impl ChannelSidebar {
         })
     }
 
+    fn reveal_route_channel(&self, channel_id: ChannelId) -> bool {
+        let Some(ix) = self.channel_row_index(channel_id, false) else {
+            return false;
+        };
+        if self.list_state.viewport_bounds().size.height <= px(0.) {
+            return false;
+        }
+        self.list_state.scroll_to_reveal_item(ix);
+        true
+    }
+
+    fn flush_route_reveal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(channel_id) = self.pending_route_channel else {
+            return;
+        };
+        if self.reveal_route_channel(channel_id) {
+            self.pending_route_channel = None;
+            return;
+        }
+        if self.route_reveal_queued || self.channel_row_index(channel_id, false).is_none() {
+            return;
+        }
+        self.route_reveal_queued = true;
+        let view = cx.entity().downgrade();
+        window.on_next_frame(move |_, cx| {
+            let _ = view.update(cx, |this, cx| {
+                this.route_reveal_queued = false;
+                let Some(channel_id) = this.pending_route_channel else {
+                    return;
+                };
+                if this.reveal_route_channel(channel_id) {
+                    this.pending_route_channel = None;
+                    cx.notify();
+                }
+            });
+        });
+    }
+
     fn scroll_to_channel_row(
         &mut self,
         channel_id: ChannelId,
@@ -1213,6 +1257,7 @@ impl ChannelSidebar {
 impl Render for ChannelSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("ChannelSidebar");
+        self.flush_route_reveal(window, cx);
         if self.pending_ctrlk_scroll {
             self.try_scroll_ctrlk_focus(cx);
         }
