@@ -3301,8 +3301,6 @@
   "message.deleteMessageModal.delete": "Xóa",
   "message.deleteMessageModal.deleteMessageDescription": "Bạn có muốn xóa tin nhắn này không?",
   "message.deleteMessageModal.remove": "Xóa bỏ",
-  "message.deleteMessageModal.removeAttachmentDescription": "Bạn có muốn xóa tệp đính kèm trong tin nhắn này không?",
-  "message.deleteMessageModal.removeAttachmentTitle": "Xóa tệp đính kèm",
   "message.deleteMessageModal.title": "Xóa tin nhắn",
   "message.directMessage.groupCreated": "Nhóm đã được tạo",
   "message.directMessage.you": "Bạn",

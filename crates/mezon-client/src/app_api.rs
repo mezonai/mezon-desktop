@@ -1354,50 +1354,6 @@ impl AppApi {
             .await
     }
 
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
-    pub async fn update_channel_message_with_attachments(
-        &self,
-        clan_id: i64,
-        channel_id: i64,
-        message_id: i64,
-        content: &str,
-        attachments: Vec<ApiAttachment>,
-        mode: i32,
-        is_public: bool,
-        topic_id: i64,
-        is_update_msg_topic: bool,
-        create_time_seconds: u32,
-    ) -> Result<()> {
-        let proto = attachments
-            .into_iter()
-            .map(|a| mezon_proto::api::MessageAttachment {
-                filename: a.filename,
-                size: a.size,
-                url: a.url,
-                filetype: a.filetype,
-                width: a.width,
-                height: a.height,
-                thumbnail: a.thumbnail,
-                duration: a.duration,
-            })
-            .collect();
-        self.transport
-            .update_channel_message_with_attachments(
-                clan_id,
-                channel_id,
-                message_id,
-                content,
-                proto,
-                mode,
-                is_public,
-                topic_id,
-                is_update_msg_topic,
-                create_time_seconds,
-            )
-            .await
-    }
-
     pub async fn list_emojis_by_user_id(&self) -> Result<Vec<mezon_proto::api::ClanEmoji>> {
         let resp = self.transport.list_emojis_by_user_id().await?;
         Ok(resp.emoji_list)

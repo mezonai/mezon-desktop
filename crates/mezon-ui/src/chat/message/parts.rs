@@ -1615,7 +1615,6 @@ fn render_file_box(
     // list; the spinner state already disables all of them.
     let sending = att.uploading || att.presign_pending;
     let failed = att.upload_failed;
-    let is_owner = ctx.current_user_id == msg.sender_id.as_str();
     let filename = if att.filename.is_empty() {
         SharedString::from("Attachment")
     } else {
@@ -1643,7 +1642,6 @@ fn render_file_box(
     let body_settings = ctx.settings.clone();
     let body_selection = ctx.selection.clone();
     let download_selection = ctx.selection.clone();
-    let remove_selection = ctx.selection.clone();
     let pdf_selection = ctx.selection.clone();
 
     div()
@@ -1770,22 +1768,6 @@ fn render_file_box(
                             )
                         },
                     ))
-                    .when(is_owner, |d| {
-                        let remove_msg_id = msg.id;
-                        d.child(file_box_action(
-                            ("file-rm", index),
-                            IconName::TrashIcon,
-                            theme,
-                            move |_, _, cx| {
-                                if remove_selection.borrow().has_selection() {
-                                    return;
-                                }
-                                mezon_store::MessagesStore::global(cx).update(cx, |store, cx| {
-                                    store.remove_attachment(remove_msg_id, index, cx);
-                                });
-                            },
-                        ))
-                    })
                     .when(is_pdf, |d| {
                         d.child(file_box_action(
                             ("file-pdf", index),

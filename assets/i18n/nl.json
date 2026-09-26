@@ -3301,8 +3301,6 @@
   "message.deleteMessageModal.delete": "Verwijderen",
   "message.deleteMessageModal.deleteMessageDescription": "Wil je dit bericht verwijderen?",
   "message.deleteMessageModal.remove": "Verwijderen",
-  "message.deleteMessageModal.removeAttachmentDescription": "Wil je de bijlage in dit bericht verwijderen?",
-  "message.deleteMessageModal.removeAttachmentTitle": "Bijlage verwijderen",
   "message.deleteMessageModal.title": "Bericht verwijderen",
   "message.directMessage.groupCreated": "Groep is aangemaakt",
   "message.directMessage.you": "Jij",

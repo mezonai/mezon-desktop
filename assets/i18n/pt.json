@@ -3302,8 +3302,6 @@
   "message.deleteMessageModal.delete": "Excluir",
   "message.deleteMessageModal.deleteMessageDescription": "Tem certeza de que deseja excluir esta mensagem?",
   "message.deleteMessageModal.remove": "Remover",
-  "message.deleteMessageModal.removeAttachmentDescription": "Tem certeza de que deseja remover o anexo desta mensagem?",
-  "message.deleteMessageModal.removeAttachmentTitle": "Remover anexo",
   "message.deleteMessageModal.title": "Excluir mensagem",
   "message.directMessage.groupCreated": "Grupo criado",
   "message.directMessage.you": "Você",

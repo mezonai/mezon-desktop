@@ -3302,8 +3302,6 @@
   "message.deleteMessageModal.delete": "Ta bort",
   "message.deleteMessageModal.deleteMessageDescription": "Vill du ta bort detta meddelande?",
   "message.deleteMessageModal.remove": "Ta bort",
-  "message.deleteMessageModal.removeAttachmentDescription": "Vill du ta bort bilaga i detta meddelande?",
-  "message.deleteMessageModal.removeAttachmentTitle": "Ta bort bilaga",
   "message.deleteMessageModal.title": "Ta bort meddelande",
   "message.directMessage.groupCreated": "Grupp skapad",
   "message.directMessage.you": "Du",

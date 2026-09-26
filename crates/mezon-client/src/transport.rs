@@ -6531,50 +6531,6 @@ impl MezonTransport {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
-    pub async fn update_channel_message_with_attachments(
-        &self,
-        clan_id: i64,
-        channel_id: i64,
-        message_id: i64,
-        content: &str,
-        attachments: Vec<api::MessageAttachment>,
-        mode: i32,
-        is_public: bool,
-        topic_id: i64,
-        is_update_msg_topic: bool,
-        create_time_seconds: u32,
-    ) -> Result<()> {
-        let cid = self.generate_cid();
-        let mut content_json = build_send_content(content, &[], &[], &[]).json;
-        if create_time_seconds > 0 {
-            content_json = with_create_time_seconds(content_json, create_time_seconds);
-        }
-        let body = realtime::ChannelMessageUpdate {
-            clan_id,
-            channel_id,
-            message_id,
-            content: content_json,
-            attachments,
-            mode,
-            is_public,
-            hide_editted: true,
-            create_time_seconds,
-            topic_id,
-            is_update_msg_topic,
-            ..Default::default()
-        }
-        .encode_to_vec();
-        let (code, _) = self
-            .send_api_request(cid, "UpdateChannelMessage", body)
-            .await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub async fn patch_message_presign_finish(
         &self,
         clan_id: i64,

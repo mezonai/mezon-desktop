@@ -3301,8 +3301,6 @@
   "message.deleteMessageModal.delete": "Выдаліць",
   "message.deleteMessageModal.deleteMessageDescription": "Вы хочаце выдаліць гэта паведамленне?",
   "message.deleteMessageModal.remove": "Выдаліць",
-  "message.deleteMessageModal.removeAttachmentDescription": "Вы хочаце выдаліць укладанне ў гэтым паведамленні?",
-  "message.deleteMessageModal.removeAttachmentTitle": "Выдаліць укладанне",
   "message.deleteMessageModal.title": "Выдаліць паведамленне",
   "message.directMessage.groupCreated": "Група створана",
   "message.directMessage.you": "Вы",

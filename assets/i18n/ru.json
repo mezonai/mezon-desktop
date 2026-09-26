@@ -3540,8 +3540,6 @@
   "message.deleteMessageModal.delete": "Удалить",
   "message.deleteMessageModal.deleteMessageDescription": "Пожалуйста, подтвердите, хотите ли Вы удалить это сообщение?",
   "message.deleteMessageModal.remove": "Убрать",
-  "message.deleteMessageModal.removeAttachmentDescription": "Пожалуйста, подтвердите, хотите ли Вы удалить вложение из этого сообщения?",
-  "message.deleteMessageModal.removeAttachmentTitle": "Убрать вложение",
   "message.deleteMessageModal.title": "Удалить сообщение",
   "message.directMessage.groupCreated": "Группа создана",
   "message.directMessage.you": "Вы",

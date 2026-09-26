@@ -3335,8 +3335,6 @@
   "message.deleteMessageModal.delete": "Borrar",
   "message.deleteMessageModal.deleteMessageDescription": "¿Confirmas que quieres borrar este mensaje?",
   "message.deleteMessageModal.remove": "Quitar",
-  "message.deleteMessageModal.removeAttachmentDescription": "¿Confirmas que quieres quitar el adjunto de este mensaje?",
-  "message.deleteMessageModal.removeAttachmentTitle": "Quitar adjunto",
   "message.deleteMessageModal.title": "Borrar mensaje",
   "message.directMessage.groupCreated": "Grupo creado",
   "message.directMessage.you": "Tú",
