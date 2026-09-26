@@ -75,6 +75,27 @@ fn locate_span(spans: &[(usize, usize)], off: usize) -> (usize, usize) {
     }
 }
 
+fn copied_paths(item: &ClipboardItem) -> Vec<PathBuf> {
+    item.entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            ClipboardEntry::ExternalPaths(paths) => Some(paths.paths().to_vec()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+fn copied_images(item: &ClipboardItem) -> Vec<Image> {
+    item.entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            ClipboardEntry::Image(image) => Some(image.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn normalize_pasted(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
@@ -177,7 +198,7 @@ pub(crate) enum MentionFieldEvent {
     NavDown,
     Paste(String),
     PasteImages(Vec<Image>),
-    PastePaths(Vec<PathBuf>),
+    PastePaths(Vec<PathBuf>, ClipboardItem),
 }
 
 pub(crate) struct MentionInputState {
@@ -202,6 +223,7 @@ pub(crate) struct MentionInputState {
     select_anchor: Range<usize>,
     masked: bool,
     compact: bool,
+    accepts_files: bool,
     mention_spans: Vec<MentionSpan>,
     caret_blink: CaretBlink,
     undo_stack: Vec<HistoryEntry>,
@@ -251,6 +273,7 @@ impl MentionInputState {
             select_anchor: 0..0,
             masked: false,
             compact: false,
+            accepts_files: true,
             mention_spans: Vec::new(),
             caret_blink: CaretBlink::new(window.is_window_active()),
             undo_stack: Vec::new(),
@@ -293,6 +316,10 @@ impl MentionInputState {
     pub(crate) fn compact(mut self) -> Self {
         self.compact = true;
         self
+    }
+
+    pub(crate) fn set_accepts_files(&mut self, accepts_files: bool) {
+        self.accepts_files = accepts_files;
     }
 
     pub fn value(&self) -> &str {
@@ -803,32 +830,33 @@ impl MentionInputState {
     }
 
     fn apply_paste(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
-        let images: Vec<Image> = item
-            .entries()
-            .iter()
-            .filter_map(|entry| match entry {
-                ClipboardEntry::Image(image) => Some(image.clone()),
-                _ => None,
-            })
-            .collect();
+        let paths = if self.accepts_files {
+            copied_paths(&item)
+        } else {
+            Vec::new()
+        };
+        if paths.is_empty() {
+            self.paste_images_or_text(item, cx);
+        } else {
+            cx.emit(MentionFieldEvent::PastePaths(paths, item));
+        }
+    }
+
+    pub(crate) fn paste_images_or_text(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
+        let images = if self.accepts_files {
+            copied_images(&item)
+        } else {
+            Vec::new()
+        };
         if !images.is_empty() {
             cx.emit(MentionFieldEvent::PasteImages(images));
             return;
         }
-        let paths: Vec<PathBuf> = item
+        let has_text = item
             .entries()
             .iter()
-            .filter_map(|entry| match entry {
-                ClipboardEntry::ExternalPaths(paths) => Some(paths.paths().to_vec()),
-                _ => None,
-            })
-            .flatten()
-            .collect();
-        if !paths.is_empty() {
-            cx.emit(MentionFieldEvent::PastePaths(paths));
-            return;
-        }
-        if let Some(text) = item.text() {
+            .any(|entry| matches!(entry, ClipboardEntry::String(_)));
+        if has_text && let Some(text) = item.text() {
             cx.emit(MentionFieldEvent::Paste(normalize_pasted(&text)));
         }
     }
@@ -1986,5 +2014,119 @@ mod tests {
         let spans = line_spans("a\n\nb");
         assert_eq!(spans, vec![(0, 1), (2, 0), (3, 1)]);
         assert_eq!(locate_span(&spans, 2), (1, 0));
+    }
+
+    fn field_events(
+        cx: &mut gpui::TestAppContext,
+        accepts_files: bool,
+        act: impl FnOnce(&mut MentionInputState, &mut Window, &mut Context<MentionInputState>),
+    ) -> Vec<MentionFieldEvent> {
+        let cx = cx.add_empty_window();
+        let field = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut field = MentionInputState::new(window, cx);
+                field.set_accepts_files(accepts_files);
+                field
+            })
+        });
+        let events = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&field, move |_, event: &MentionFieldEvent, _| {
+                sink.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+        field.update_in(cx, act);
+        cx.run_until_parked();
+        events.take()
+    }
+
+    fn paste_events(
+        cx: &mut gpui::TestAppContext,
+        accepts_files: bool,
+        item: ClipboardItem,
+    ) -> Vec<MentionFieldEvent> {
+        cx.update(|cx| cx.write_to_clipboard(item));
+        field_events(cx, accepts_files, |field, window, cx| {
+            field.paste(&Paste, window, cx)
+        })
+    }
+
+    fn bitmap() -> Image {
+        Image::from_bytes(gpui::ImageFormat::Png, vec![1, 2, 3])
+    }
+
+    fn clipboard(entries: Vec<ClipboardEntry>) -> ClipboardItem {
+        ClipboardItem { entries }
+    }
+
+    fn files(paths: &[&str]) -> ClipboardEntry {
+        let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        ClipboardEntry::ExternalPaths(gpui::ExternalPaths(paths.into()))
+    }
+
+    fn text(text: &str) -> ClipboardEntry {
+        ClipboardEntry::String(gpui::ClipboardString::new(text.into()))
+    }
+
+    #[gpui::test]
+    fn paste_sends_every_copied_file_ahead_of_its_bitmap(cx: &mut gpui::TestAppContext) {
+        let item = clipboard(vec![
+            files(&["/tmp/Báo cáo.pdf", "/tmp/a.zip"]),
+            ClipboardEntry::Image(bitmap()),
+            text("Báo cáo.pdf"),
+        ]);
+        let paths = vec![
+            PathBuf::from("/tmp/Báo cáo.pdf"),
+            PathBuf::from("/tmp/a.zip"),
+        ];
+        assert!(
+            paste_events(cx, true, item.clone())
+                == vec![MentionFieldEvent::PastePaths(paths, item)]
+        );
+    }
+
+    #[gpui::test]
+    fn paste_without_files_still_sends_the_bitmap(cx: &mut gpui::TestAppContext) {
+        let item = ClipboardItem::new_image(&bitmap());
+        assert!(
+            paste_events(cx, true, item) == vec![MentionFieldEvent::PasteImages(vec![bitmap()])]
+        );
+    }
+
+    #[gpui::test]
+    fn unusable_files_fall_back_to_the_bitmap_or_the_text(cx: &mut gpui::TestAppContext) {
+        let with_bitmap = clipboard(vec![
+            files(&["/tmp/folder"]),
+            ClipboardEntry::Image(bitmap()),
+            text("folder"),
+        ]);
+        assert!(
+            field_events(cx, true, |field, _, cx| field
+                .paste_images_or_text(with_bitmap, cx))
+                == vec![MentionFieldEvent::PasteImages(vec![bitmap()])]
+        );
+        let with_text = clipboard(vec![files(&["/tmp/folder"]), text("/tmp/folder")]);
+        assert!(
+            field_events(cx, true, |field, _, cx| field
+                .paste_images_or_text(with_text, cx))
+                == vec![MentionFieldEvent::Paste("/tmp/folder".into())]
+        );
+        let files_only = clipboard(vec![files(&["/tmp/folder"])]);
+        assert!(
+            field_events(cx, true, |field, _, cx| field
+                .paste_images_or_text(files_only, cx))
+            .is_empty()
+        );
+    }
+
+    #[gpui::test]
+    fn a_field_without_attachments_pastes_only_real_text(cx: &mut gpui::TestAppContext) {
+        let finder = clipboard(vec![files(&["/tmp/a.pdf"]), text("a.pdf")]);
+        assert!(paste_events(cx, false, finder) == vec![MentionFieldEvent::Paste("a.pdf".into())]);
+        let explorer = clipboard(vec![files(&["/tmp/a.pdf"])]);
+        assert!(paste_events(cx, false, explorer).is_empty());
+        assert!(paste_events(cx, false, ClipboardItem::new_image(&bitmap())).is_empty());
     }
 }

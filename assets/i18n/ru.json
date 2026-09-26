@@ -1112,6 +1112,8 @@
   "channelVoice.pushToTalk.holdingSpace": "Вы говорите — отпустите Пробел, чтобы выключить микрофон",
   "channelVoice.removedFromChannel": "Вас удалили из голосового канала.",
   "channelVoice.disconnectedAlone": "Вы были отключены от голосового канала, потому что слишком долго находились в нём одни.",
+  "channelVoice.disconnectedOtherDevice": "Вы вошли в голосовой канал на другом устройстве, поэтому этот сеанс был отключён.",
+  "channelVoice.disconnectedRejoin": "Вы были отключены от голосового канала.",
   "channelVoice.kickMemberFailed": "Не удалось удалить участника",
   "channelVoice.kickModal.content": "Пожалуйста, подтвердите, если Вы хотите выгнать \"{{userName}}\"?",
   "channelVoice.kickModal.kick": "Выгнать",
@@ -4989,5 +4991,8 @@
   "screenShare.modeText": "Текст",
   "screenShare.modeTextDescription": "Более чёткий текст и слайды, меньше нагрузка на ресурсы.",
   "screenShare.modeVideo": "Видео",
-  "screenShare.modeVideoDescription": "Более плавное видео; при медленном соединении чёткость может снизиться."
+  "screenShare.modeVideoDescription": "Более плавное видео; при медленном соединении чёткость может снизиться.",
+  "chat.activityStrip.latestPin": "Последнее закрепление",
+  "chat.activityStrip.latestTopicMessage": "Последнее сообщение в теме",
+  "chat.activityStrip.messageFrom": "Сообщение от {{name}}: {{message}}"
 }

@@ -1106,6 +1106,8 @@
   "channelVoice.pushToTalk.holdingSpace": "Hablando — suelta la barra espaciadora para silenciar",
   "channelVoice.removedFromChannel": "Se te ha eliminado del canal de voz.",
   "channelVoice.disconnectedAlone": "Se te desconectó del canal de voz porque estuviste solo en él demasiado tiempo.",
+  "channelVoice.disconnectedOtherDevice": "Te uniste al canal de voz en otro dispositivo, por lo que se desconectó esta sesión.",
+  "channelVoice.disconnectedRejoin": "Se te desconectó del canal de voz.",
   "channelVoice.kickMemberFailed": "Error al eliminar al miembro",
   "channelVoice.kickModal.content": "¿Confirmas que deseas expulsar a \"{{userName}}\"?",
   "channelVoice.kickModal.kick": "Expulsar",
@@ -4785,5 +4787,8 @@
   "screenShare.modeText": "Texto",
   "screenShare.modeTextDescription": "Texto y diapositivas más nítidos, menor consumo de recursos.",
   "screenShare.modeVideo": "Vídeo",
-  "screenShare.modeVideoDescription": "Vídeo más fluido; puede perder nitidez con una conexión lenta."
+  "screenShare.modeVideoDescription": "Vídeo más fluido; puede perder nitidez con una conexión lenta.",
+  "chat.activityStrip.latestPin": "Último mensaje fijado",
+  "chat.activityStrip.latestTopicMessage": "Último mensaje del tema",
+  "chat.activityStrip.messageFrom": "Mensaje de {{name}}: {{message}}"
 }

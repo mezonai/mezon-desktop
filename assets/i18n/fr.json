@@ -1103,6 +1103,8 @@
   "channelVoice.pushToTalk.holdingSpace": "Vous parlez — relâchez Espace pour couper le micro",
   "channelVoice.removedFromChannel": "Vous avez été retiré du salon vocal.",
   "channelVoice.disconnectedAlone": "Vous avez été déconnecté du salon vocal car vous y êtes resté seul trop longtemps.",
+  "channelVoice.disconnectedOtherDevice": "Vous avez rejoint le salon vocal sur un autre appareil. Cette session a donc été déconnectée.",
+  "channelVoice.disconnectedRejoin": "Vous avez été déconnecté du salon vocal.",
   "channelVoice.kickMemberFailed": "Impossible de supprimer le membre",
   "channelVoice.kickModal.content": "Êtes-vous sûr de vouloir supprimer « {{userName}} » du canal vocal ?",
   "channelVoice.kickModal.kick": "Supprimer",
@@ -4746,5 +4748,8 @@
   "screenShare.modeText": "Texte",
   "screenShare.modeTextDescription": "Texte et diapositives plus nets, consommation de ressources réduite.",
   "screenShare.modeVideo": "Vidéo",
-  "screenShare.modeVideoDescription": "Vidéo plus fluide ; la netteté peut baisser sur une connexion lente."
+  "screenShare.modeVideoDescription": "Vidéo plus fluide ; la netteté peut baisser sur une connexion lente.",
+  "chat.activityStrip.latestPin": "Dernier épinglage",
+  "chat.activityStrip.latestTopicMessage": "Dernier message du sujet",
+  "chat.activityStrip.messageFrom": "Message de {{name}} : {{message}}"
 }

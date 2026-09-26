@@ -3,13 +3,15 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    AnyView, App, Context, Entity, ExternalPaths, FontWeight, SharedString, StyleRefinement,
-    Subscription, Task, Window, div, prelude::*, px, rgb, rgba,
+    AnyView, App, Context, Entity, ExternalPaths, FontWeight, ObjectFit, SharedString,
+    StyleRefinement, Subscription, Task, Window, div, img, prelude::*, px, rgb, rgba,
 };
 use mezon_store::{
     BannedUsersStore, ChannelId, ChannelList, ChannelPermissionsStore, ClanId, ClanList,
-    DirectEvent, DirectKind, DirectMessageStore, FriendEvent, FriendStore, InVoiceInfo,
-    MessagesEvent, MessagesStore, OnboardingStore, PERMISSION_SEND_MESSAGE, Settings,
+    DirectEvent, DirectKind, DirectMessageStore, FriendEvent, FriendStore, InVoiceInfo, MessageId,
+    MessagesEvent, MessagesStore, OnboardingStore, PERMISSION_SEND_MESSAGE, PinnedMessagesStore,
+    ProfileContext, Settings, TopicBadgeStore, TopicDiscussion, TopicsEvent, TopicsStore, UserId,
+    resolve_user_profile,
 };
 use ui::PopoverMenuHandle;
 
@@ -18,6 +20,7 @@ use crate::chat::ReplyTarget;
 use crate::chat::channel_app_bar::{ChannelAppBarTarget, render_channel_app_bar};
 use crate::chat::channel_header::ChatHeader;
 use crate::chat::channel_typing::ChannelTyping;
+use crate::chat::file_type_icon::file_type_icon_for;
 use crate::chat::inbox::InboxPopoverPanel;
 use crate::chat::input_bar::{InputBar, ReplyClearSource};
 use crate::chat::media_channel::MediaChannelPanel;
@@ -28,7 +31,7 @@ use crate::chat::message_search::{MESSAGE_SEARCH_PANEL_WIDTH, MessageSearchPanel
 use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::chat::user_profile_popover::UserProfilePopover;
 use crate::components::compositions::channel_row::ChannelIcon;
-use crate::components::primitives::{Icon, IconName, InputState};
+use crate::components::primitives::{Avatar, Icon, IconName, InputState};
 use crate::image_cache::LruImageCache;
 use crate::router::{Route, Router, navigate};
 use crate::theme::ActiveTheme;
@@ -44,6 +47,7 @@ pub struct ChatArea {
     settings: Entity<Settings>,
     header: Entity<ChatHeader>,
     typing: Entity<ChannelTyping>,
+    activity_strip: Entity<LatestActivityStripView>,
     media_channel_panel: Option<Entity<MediaChannelPanel>>,
     media_channel_context: Option<(ClanId, ChannelId)>,
     replying_to: Option<ReplyTarget>,
@@ -218,6 +222,763 @@ fn onboarding_mission_banner(locale: &str, cx: &mut App) -> Option<gpui::AnyElem
     )
 }
 
+/// Compact activity rail owned by the message column (never the member/topic sidebars).
+fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::AnyElement {
+    let topics_store = TopicsStore::global(cx);
+    let messages_store = MessagesStore::global(cx);
+    let topics = topics_store.read(cx);
+    let messages = messages_store.read(cx);
+    let topic_syncing = topics.is_loading();
+    let active_channel_id = messages.active_channel_id();
+    let active_channel_key = active_channel_id.map(|channel_id| channel_id.to_string());
+
+    // The list endpoint is the richest source. While it is still loading (or when an older topic
+    // only exists in the current channel buffer), synthesize the same row from the origin message
+    // and its realtime topic metadata so an existing topic never renders as "empty".
+    let latest_topic = (!topic_syncing)
+        .then(|| {
+            active_channel_key
+                .as_deref()
+                .and_then(|channel_id| topics.latest_topic_for_channel(clan_id, channel_id))
+                .cloned()
+                .or_else(|| {
+                    let clan_id = messages.active_clan_id()?;
+                    let channel_id = messages.active_channel_id()?;
+                    messages
+                        .messages()
+                        .iter()
+                        .filter_map(|origin| {
+                            let topic_id = origin.topic_id?;
+                            let meta = topics.topic_meta_for_topic(topic_id)?;
+                            Some((meta.lsnt, origin, topic_id))
+                        })
+                        .max_by_key(|(timestamp, _, _)| *timestamp)
+                        .map(|(timestamp, origin, topic_id)| {
+                            let last_visible_message =
+                                messages.messages_in_channel(topic_id).iter().rev().find(
+                                    |message| {
+                                        !message.content.trim().is_empty()
+                                            || !message.attachments.is_empty()
+                                    },
+                                );
+                            TopicDiscussion {
+                                id: topic_id.to_string(),
+                                message_id: origin.id.to_string(),
+                                clan_id: clan_id.to_string(),
+                                channel_id: channel_id.to_string(),
+                                creator_id: origin.sender_id.clone(),
+                                last_sender_id: origin.sender_id.clone(),
+                                content: origin.content.clone(),
+                                last_message_content: last_visible_message
+                                    .map(|message| message.content.clone())
+                                    .unwrap_or_default(),
+                                last_message_attachments: last_visible_message
+                                    .map(|message| {
+                                        message
+                                            .attachments
+                                            .iter()
+                                            .map(|attachment| {
+                                                mezon_client::transport::ApiAttachment {
+                                                    url: attachment.url.clone(),
+                                                    filename: attachment.filename.clone(),
+                                                    filetype: attachment.filetype.clone(),
+                                                    width: attachment.width as i32,
+                                                    height: attachment.height as i32,
+                                                    thumbnail: attachment.thumbnail.clone(),
+                                                    duration: attachment.duration,
+                                                    size: attachment.size.min(i32::MAX as u64)
+                                                        as i32,
+                                                }
+                                            })
+                                            .collect()
+                                    })
+                                    .unwrap_or_default(),
+                                last_message_timestamp: timestamp.clamp(0, i64::from(u32::MAX))
+                                    as u32,
+                            }
+                        })
+                })
+        })
+        .flatten();
+    let plain_topic_content = |content: &str| match mezon_client::topic_reply_preview(content) {
+        mezon_client::TopicReplyPreview::Text(text) => Some(text),
+        _ => None,
+    };
+    let topic_content_kind = |content: &str| match mezon_client::topic_reply_preview(content) {
+        mezon_client::TopicReplyPreview::Contact => {
+            format!("[{}]", mezon_i18n::t(locale, "message.attachments.contact"))
+        }
+        mezon_client::TopicReplyPreview::Interactive => format!(
+            "[{}]",
+            mezon_i18n::t(locale, "notification.interactiveMessage")
+        ),
+        mezon_client::TopicReplyPreview::Attachment => format!(
+            "[{}]",
+            mezon_i18n::t(locale, "message.attachments.attachment")
+        ),
+        mezon_client::TopicReplyPreview::Text(_) => {
+            mezon_i18n::t(locale, "channelTopbar.topic").to_string()
+        }
+    };
+    let topic_title = latest_topic
+        .as_ref()
+        .and_then(|topic| {
+            let message_id = topic.message_id.parse::<MessageId>().ok()?;
+            messages
+                .messages()
+                .iter()
+                .find(|message| message.id == message_id)
+                .and_then(|message| {
+                    plain_topic_content(&message.content).or_else(|| {
+                        message.attachments.first().map(|attachment| {
+                            if attachment.is_image() {
+                                format!("[{}]", mezon_i18n::t(locale, "message.attachments.image"))
+                            } else if attachment.is_video() {
+                                format!("[{}]", mezon_i18n::t(locale, "message.attachments.video"))
+                            } else if !attachment.filename.is_empty() {
+                                format!(
+                                    "[{}] {}",
+                                    mezon_i18n::t(locale, "message.attachments.file"),
+                                    attachment.filename
+                                )
+                            } else {
+                                format!("[{}]", mezon_i18n::t(locale, "message.attachments.file"))
+                            }
+                        })
+                    })
+                })
+        })
+        .or_else(|| {
+            latest_topic
+                .as_ref()
+                .and_then(|topic| plain_topic_content(&topic.content))
+        });
+    let topic_live_last_message = latest_topic.as_ref().and_then(|topic| {
+        let topic_id = topic.id.parse::<ChannelId>().ok()?;
+        messages
+            .messages_in_channel(topic_id)
+            .iter()
+            .rev()
+            .find(|message| !message.content.trim().is_empty() || !message.attachments.is_empty())
+    });
+    let topic_preview = topic_live_last_message
+        .and_then(|message| plain_topic_content(&message.content))
+        .or_else(|| {
+            latest_topic
+                .as_ref()
+                .map(|topic| topic.reply_preview_text())
+        })
+        .filter(|text| !text.trim().is_empty());
+    let topic_live_attachment = latest_topic.as_ref().and_then(|topic| {
+        let topic_id = topic.id.parse::<ChannelId>().ok()?;
+        let latest = topic_live_last_message?;
+        latest.attachments.first().cloned().or_else(|| {
+            messages
+                .messages_in_channel(topic_id)
+                .iter()
+                .rev()
+                .find(|message| {
+                    message.create_time == latest.create_time && !message.attachments.is_empty()
+                })
+                .and_then(|message| message.attachments.first())
+                .cloned()
+        })
+    });
+    let topic_attachment = latest_topic.as_ref().and_then(|topic| {
+        topic_live_attachment.or_else(|| {
+            topic
+                .last_message_attachments
+                .first()
+                .cloned()
+                .map(|attachment| {
+                    mezon_store::MessageAttachment::from_api(
+                        attachment,
+                        mezon_store::AppConfig::try_global(cx),
+                    )
+                })
+        })
+    });
+    let topic_sender_name = latest_topic.as_ref().and_then(|topic| {
+        let clan_id = topic.clan_id.parse::<ClanId>().ok()?;
+        let sender_id = topic.last_sender_id.parse::<UserId>().ok()?;
+        resolve_user_profile(sender_id, ProfileContext::Clan(clan_id), cx)
+            .map(|profile| profile.display_name)
+            .filter(|name| !name.trim().is_empty())
+    });
+    let pinned_store = PinnedMessagesStore::global(cx);
+    let pinned = pinned_store.read(cx);
+    let pin_syncing = pinned.is_loading();
+    let active_clan_id = clan_id.parse::<ClanId>().ok();
+    let latest_pin = (pinned.clan_id() == active_clan_id
+        && pinned.channel_id() == active_channel_id)
+        .then(|| {
+            pinned
+                .pinned()
+                .iter()
+                .max_by_key(|pin| pin.create_time)
+                .cloned()
+        })
+        .flatten();
+
+    let theme = cx.theme();
+    let hover = theme.bg_hover;
+
+    let topic_title: SharedString = if topic_syncing {
+        "".into()
+    } else {
+        topic_title
+            .map(|text| SharedString::from(text.split_whitespace().collect::<Vec<_>>().join(" ")))
+            .or_else(|| {
+                latest_topic
+                    .as_ref()
+                    .map(|topic| SharedString::from(topic_content_kind(&topic.content)))
+            })
+            .unwrap_or_else(|| mezon_i18n::t(locale, "notifications.empty.topics.title").into())
+    };
+    let topic_has_attachment = topic_attachment.is_some()
+        || latest_topic
+            .as_ref()
+            .is_some_and(TopicDiscussion::reply_is_attachment);
+    let topic_preview: SharedString = if topic_syncing {
+        "".into()
+    } else {
+        topic_preview
+            .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+            .map(|text| {
+                if let Some(sender_name) = topic_sender_name.as_deref() {
+                    mezon_i18n::t(locale, "chat.activityStrip.messageFrom")
+                        .replace("{{name}}", sender_name)
+                        .replace("{{message}}", &text)
+                } else {
+                    text
+                }
+            })
+            .map(SharedString::from)
+            .unwrap_or_else(|| {
+                if topic_has_attachment {
+                    topic_sender_name
+                        .as_deref()
+                        .map(|sender_name| {
+                            mezon_i18n::t(locale, "chat.activityStrip.messageFrom")
+                                .replace("{{name}}", sender_name)
+                                .replace("{{message}}", "")
+                        })
+                        .unwrap_or_default()
+                        .into()
+                } else {
+                    mezon_i18n::t(locale, "notifications.empty.topics.description").into()
+                }
+            })
+    };
+    let topic_media = topic_attachment.as_ref().map(|attachment| {
+        if attachment.is_image() {
+            if let Some(path) = attachment.local_source.clone() {
+                return div()
+                    .flex_none()
+                    .size(px(42.))
+                    .rounded(px(7.))
+                    .overflow_hidden()
+                    .child(img(path).size_full().object_fit(ObjectFit::Cover))
+                    .into_any_element();
+            }
+            let source = if !attachment.thumbnail_proxied.is_empty() {
+                attachment.thumbnail_proxied.clone()
+            } else if !attachment.proxied_src.is_empty() {
+                attachment.proxied_src.clone()
+            } else if !attachment.thumbnail.is_empty() {
+                SharedString::from(attachment.thumbnail.clone())
+            } else {
+                SharedString::from(attachment.url.clone())
+            };
+            if !source.is_empty() {
+                return div()
+                    .flex_none()
+                    .size(px(42.))
+                    .rounded(px(7.))
+                    .overflow_hidden()
+                    .child(img(source).size_full().object_fit(ObjectFit::Cover))
+                    .into_any_element();
+            }
+        }
+        let filename: SharedString = if attachment.filename.trim().is_empty() {
+            mezon_i18n::t(locale, "message.attachments.attachment").into()
+        } else {
+            attachment.filename.clone().into()
+        };
+        let size_label: SharedString = mezon_store::format_file_size(attachment.size).into();
+        let file_icon = file_type_icon_for(&attachment.filetype, &attachment.filename);
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .w(px(145.))
+            .h(px(46.))
+            .px_2()
+            .rounded(px(7.))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_hover)
+            .child(img(file_icon.path()).w(px(26.)).h(px(34.)).flex_none())
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .truncate()
+                            .whitespace_nowrap()
+                            .text_size(px(11.))
+                            .text_color(theme.interactive_active)
+                            .child(filename),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .whitespace_nowrap()
+                            .text_size(px(9.))
+                            .text_color(theme.text_muted)
+                            .child(size_label),
+                    ),
+            )
+            .into_any_element()
+    });
+    let topic_cell = div()
+        .id("latest-topic-activity")
+        .flex()
+        .items_center()
+        .gap_3()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .px_3()
+        .rounded(px(9.))
+        .overflow_hidden()
+        .when(latest_topic.is_some() && !topic_syncing, |cell| {
+            cell.cursor_pointer().hover(move |style| style.bg(hover))
+        })
+        // A stable semantic icon avoids remounting an image while clan/topic data resolves.
+        .child(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(px(36.))
+                .child(
+                    Icon::new(IconName::TopicIcon)
+                        .size(px(30.))
+                        .text_color(theme.interactive_active),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex_none()
+                        .h(px(18.))
+                        .truncate()
+                        .whitespace_nowrap()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text_primary)
+                        .child(topic_title),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .h(px(16.))
+                        .truncate()
+                        .whitespace_nowrap()
+                        .text_xs()
+                        .text_color(theme.text_muted)
+                        .child(topic_preview),
+                ),
+        )
+        .children(topic_media)
+        .when_some(
+            (!topic_syncing).then_some(latest_topic).flatten(),
+            |cell, topic| cell.on_click(move |_, _, cx| open_latest_topic(topic.clone(), cx)),
+        );
+
+    let pin_attachment = latest_pin
+        .as_ref()
+        .and_then(|pin| pin.attachments.first())
+        .cloned();
+    let pin_profile = latest_pin.as_ref().and_then(|pin| {
+        let clan_id = active_clan_id?;
+        let sender_id = pin.sender_id.parse::<UserId>().ok()?;
+        resolve_user_profile(sender_id, ProfileContext::Clan(clan_id), cx)
+    });
+    let pin_title: SharedString = if pin_syncing && latest_pin.is_none() {
+        "".into()
+    } else {
+        latest_pin
+            .as_ref()
+            .and_then(|pin| {
+                pin_profile
+                    .as_ref()
+                    .map(|profile| profile.display_name.trim())
+                    .filter(|name| !name.is_empty())
+                    .or_else(|| {
+                        (!pin.sender_name.trim().is_empty()).then(|| pin.sender_name.trim())
+                    })
+            })
+            .map(|name| SharedString::from(name.to_string()))
+            .unwrap_or_else(|| {
+                mezon_i18n::t(locale, "channelTopbar.pinnedMessages.emptyTitle").into()
+            })
+    };
+    let pin_time: SharedString = latest_pin
+        .as_ref()
+        .and_then(|pin| chrono::DateTime::from_timestamp(pin.create_time, 0))
+        .map(|utc| {
+            utc.with_timezone(&chrono::Local)
+                .format("%d/%m/%Y, %H:%M")
+                .to_string()
+        })
+        .unwrap_or_default()
+        .into();
+    let pin_preview: SharedString = if pin_syncing && latest_pin.is_none() {
+        "".into()
+    } else {
+        latest_pin
+            .as_ref()
+            .and_then(|pin| {
+                pin.poll
+                    .as_ref()
+                    .map(|poll| poll.question.trim())
+                    .filter(|question| !question.is_empty())
+                    .map(|question| {
+                        format!(
+                            "{}: {question}",
+                            mezon_i18n::t(locale, "message.poll.pollLabel")
+                        )
+                    })
+                    .or_else(|| Some(pin.content.trim().to_string()))
+            })
+            .filter(|text| !text.trim().is_empty())
+            // Pinned code blocks and long text commonly contain newlines. A compact rail must
+            // remain one line; otherwise wrapping pushes the label/name/time out of the card and
+            // appears to change position when a sidebar opens.
+            .map(|text| SharedString::from(text.split_whitespace().collect::<Vec<_>>().join(" ")))
+            .unwrap_or_else(|| {
+                if latest_pin.is_some() {
+                    "".into()
+                } else {
+                    mezon_i18n::t(locale, "channelTopbar.pinnedMessages.emptyDescription").into()
+                }
+            })
+    };
+    let pin_message_id = latest_pin
+        .as_ref()
+        .and_then(|pin| pin.message_id.parse::<MessageId>().ok());
+    let pin_media = pin_attachment.as_ref().map(|attachment| {
+        if attachment.is_image() {
+            let source = if !attachment.thumbnail_proxied.is_empty() {
+                attachment.thumbnail_proxied.clone()
+            } else if !attachment.proxied_src.is_empty() {
+                attachment.proxied_src.clone()
+            } else {
+                SharedString::from(attachment.url.clone())
+            };
+            if !source.is_empty() {
+                return div()
+                    .flex_none()
+                    .size(px(42.))
+                    .rounded(px(7.))
+                    .overflow_hidden()
+                    .child(img(source).size_full().object_fit(ObjectFit::Cover))
+                    .into_any_element();
+            }
+        }
+        let filename: SharedString = if attachment.filename.trim().is_empty() {
+            mezon_i18n::t(locale, "message.attachments.attachment").into()
+        } else {
+            attachment.filename.clone().into()
+        };
+        let size = if attachment.size_label.is_empty() {
+            mezon_store::format_file_size(attachment.size)
+        } else {
+            attachment.size_label.to_string()
+        };
+        let size_label: SharedString = size.into();
+        let file_icon = file_type_icon_for(&attachment.filetype, &attachment.filename);
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .w(px(145.))
+            .h(px(46.))
+            .px_2()
+            .rounded(px(7.))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_hover)
+            .child(img(file_icon.path()).w(px(26.)).h(px(34.)).flex_none())
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .truncate()
+                            .whitespace_nowrap()
+                            .text_size(px(11.))
+                            .text_color(theme.interactive_active)
+                            .child(filename),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .whitespace_nowrap()
+                            .text_size(px(9.))
+                            .text_color(theme.text_muted)
+                            .child(size_label),
+                    ),
+            )
+            .into_any_element()
+    });
+    let pin_avatar = latest_pin.as_ref().map(|pin| {
+        let display_name = pin_profile
+            .as_ref()
+            .map(|profile| profile.display_name.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| pin.sender_name.clone());
+        let mut avatar = Avatar::new().name(display_name).size_px(px(32.));
+        let raw_source = pin_profile
+            .as_ref()
+            .map(|profile| profile.avatar_url.as_str())
+            .filter(|url| !url.is_empty())
+            .map(str::to_string)
+            .or_else(|| (!pin.avatar_url.is_empty()).then(|| pin.avatar_url.clone()));
+        if let Some(raw_source) = raw_source {
+            avatar = avatar
+                .src(crate::util::imgproxy::avatar_url(cx, &raw_source))
+                .fallback_src(raw_source);
+        } else if !pin.avatar_proxied.is_empty() {
+            avatar = avatar.src(pin.avatar_proxied.clone());
+        }
+        avatar.into_any_element()
+    });
+    let has_pin_time = !pin_time.is_empty();
+    let pin_cell = div()
+        .id("latest-pinned-message")
+        .flex()
+        .items_center()
+        .gap_3()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .px_3()
+        .rounded(px(9.))
+        .overflow_hidden()
+        .when(pin_message_id.is_some(), |cell| {
+            cell.cursor_pointer().hover(move |style| style.bg(hover))
+        })
+        .child(pin_avatar.unwrap_or_else(|| {
+            Icon::new(IconName::PinRight)
+                .size(px(20.))
+                .text_color(theme.text_muted)
+                .into_any_element()
+        }))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap_2()
+                        .h(px(18.))
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .whitespace_nowrap()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.text_primary)
+                                .child(pin_title)
+                                .when(pin_message_id.is_some(), |title| {
+                                    title.flex_none().max_w(px(180.))
+                                })
+                                .when(pin_message_id.is_none(), |title| title.flex_1()),
+                        )
+                        .when(has_pin_time, |header| {
+                            header.child(
+                                div()
+                                    .flex_none()
+                                    .text_sm()
+                                    .text_color(theme.text_muted)
+                                    .child(pin_time),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .h(px(16.))
+                        .truncate()
+                        .whitespace_nowrap()
+                        .text_xs()
+                        .text_color(theme.text_muted)
+                        .child(pin_preview),
+                ),
+        )
+        .children(pin_media)
+        .when_some(pin_message_id, |cell, message_id| {
+            cell.on_click(move |_, _, cx| {
+                MessagesStore::global(cx).update(cx, |store, cx| {
+                    store.jump_to_message(message_id, None, cx);
+                });
+            })
+        });
+
+    div()
+        .id("channel-latest-activity-strip")
+        .flex()
+        .flex_row()
+        .flex_none()
+        .w_full()
+        .h(px(70.))
+        .p_1()
+        .border_b_1()
+        .border_color(theme.border)
+        .bg(theme.bg_primary)
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .size_full()
+                .rounded(px(12.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.bg_secondary)
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .size_full()
+                        .child(topic_cell)
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(2.))
+                                .h(px(42.))
+                                .rounded_full()
+                                .bg(theme.text_muted),
+                        )
+                        .child(pin_cell),
+                ),
+        )
+        .into_any_element()
+}
+
+struct LatestActivityStripView {
+    settings: Entity<Settings>,
+    _topics_sub: Subscription,
+    _pinned_sub: Subscription,
+    _messages_sub: Subscription,
+    _settings_sub: Subscription,
+}
+
+impl LatestActivityStripView {
+    fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
+        let topics_sub = cx.subscribe(&TopicsStore::global(cx), |_, _, event, cx| {
+            if matches!(event, TopicsEvent::Updated) {
+                cx.notify();
+            }
+        });
+        let pinned_sub = cx.subscribe(&PinnedMessagesStore::global(cx), |_, _, event, cx| {
+            if matches!(event, mezon_store::PinnedEvent::Updated) {
+                cx.notify();
+            }
+        });
+        let messages_sub = cx.subscribe(&MessagesStore::global(cx), |_, _, event, cx| {
+            if matches!(
+                event,
+                MessagesEvent::Reset { .. } | MessagesEvent::TopicUpdated { .. }
+            ) {
+                cx.notify();
+            }
+        });
+        let settings_sub = cx.observe(&settings, |_, _, cx| cx.notify());
+        Self {
+            settings,
+            _topics_sub: topics_sub,
+            _pinned_sub: pinned_sub,
+            _messages_sub: messages_sub,
+            _settings_sub: settings_sub,
+        }
+    }
+}
+
+impl Render for LatestActivityStripView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let locale = self.settings.read(cx).language.clone();
+        let clan_id = MessagesStore::global(cx)
+            .read(cx)
+            .active_clan_id()
+            .filter(|clan_id| !clan_id.is_zero())
+            .map(|clan_id| clan_id.to_string());
+        clan_id
+            .map(|clan_id| latest_activity_strip(&locale, &clan_id, cx))
+            .unwrap_or_else(|| div().hidden().into_any_element())
+    }
+}
+
+fn open_latest_topic(topic: TopicDiscussion, cx: &mut App) {
+    let (Ok(clan_id), Ok(channel_id), Ok(topic_id), Ok(message_id)) = (
+        topic.clan_id.parse::<ClanId>(),
+        topic.channel_id.parse::<ChannelId>(),
+        topic.id.parse::<i64>(),
+        topic.message_id.parse::<MessageId>(),
+    ) else {
+        return;
+    };
+    navigate(
+        cx,
+        Route::Channel {
+            clan_id,
+            channel_id,
+        },
+    );
+    TopicBadgeStore::global(cx).update(cx, |store, cx| {
+        store.clear_topic(&topic.id, cx);
+    });
+    ChannelList::global(cx).update(cx, |store, cx| {
+        store.apply_topic_read(ChannelId(topic_id), cx);
+    });
+    TopicsStore::global(cx).update(cx, |store, cx| {
+        store.begin_inbox_topic_jump_to_origin(channel_id, topic_id, message_id, message_id, cx);
+    });
+}
+
 fn leave_removed_conversation(channel_id: ChannelId, cx: &mut App) {
     let viewing = route_targets_conversation(&Router::global(cx).read(cx).route(), channel_id);
     if viewing {
@@ -242,6 +1003,10 @@ impl ChatArea {
         let layout = cx.weak_entity();
         let header = cx.new(|cx| ChatHeader::new(layout, &settings, cx));
         let typing = cx.new(|cx| ChannelTyping::new(&settings, cx));
+        let activity_strip = cx.new({
+            let settings = settings.clone();
+            move |cx| LatestActivityStripView::new(settings, cx)
+        });
         let member_avatar_cache = crate::image_cache::shared_avatar_cache(cx);
         let send_permission_sub = cx.subscribe(
             &ChannelPermissionsStore::global(cx),
@@ -292,6 +1057,7 @@ impl ChatArea {
             settings,
             header,
             typing,
+            activity_strip,
             media_channel_panel: None,
             media_channel_context: None,
             replying_to: None,
@@ -757,6 +1523,9 @@ impl ChatArea {
             }
         };
 
+        let activity_strip = (!is_dm && !stream_sidebar && !media_channel_view)
+            .then(|| AnyView::from(self.activity_strip.clone()));
+
         self.header.update(cx, |header, cx| {
             header.sync(
                 channel_name,
@@ -988,6 +1757,7 @@ impl ChatArea {
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
+            .children(activity_strip)
             .when(!media_channel_view, |col| {
                 let drop_input = mention_input;
                 let input_visible = !send_denied && !banned;

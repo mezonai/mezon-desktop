@@ -64,7 +64,6 @@ pub mod topics;
 pub mod ui_state;
 pub mod user_profile;
 pub mod users_by_user;
-mod voice_presence;
 pub mod voice;
 pub mod wallet;
 mod wallet_persist;

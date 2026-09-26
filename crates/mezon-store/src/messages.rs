@@ -9706,7 +9706,7 @@ pub fn name_for_prioritize(clan_nick: &str, display_name: &str, username: &str) 
 }
 
 impl MessageAttachment {
-    pub(crate) fn from_api(
+    pub fn from_api(
         mut a: mezon_client::transport::ApiAttachment,
         cfg: Option<&AppConfig>,
     ) -> Self {

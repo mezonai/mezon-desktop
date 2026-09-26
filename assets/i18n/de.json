@@ -1103,6 +1103,8 @@
   "channelVoice.pushToTalk.holdingSpace": "Du sprichst — Leertaste loslassen, um stummzuschalten",
   "channelVoice.removedFromChannel": "Du wurdest aus dem Sprachkanal entfernt.",
   "channelVoice.disconnectedAlone": "Du wurdest vom Sprachkanal getrennt, weil du zu lange allein darin warst.",
+  "channelVoice.disconnectedOtherDevice": "Du bist dem Sprachkanal auf einem anderen Gerät beigetreten. Diese Sitzung wurde daher getrennt.",
+  "channelVoice.disconnectedRejoin": "Du wurdest vom Sprachkanal getrennt.",
   "channelVoice.kickMemberFailed": "Mitglied konnte nicht aus dem Thread entfernt werden",
   "channelVoice.kickModal.content": "Möchtest du \"{{userName}}\" wirklich aus dem Sprachkanal entfernen?",
   "channelVoice.kickModal.kick": "Entfernen",
@@ -4747,5 +4749,8 @@
   "screenShare.modeText": "Text",
   "screenShare.modeTextDescription": "Schärferer Text und Folien, geringerer Ressourcenverbrauch.",
   "screenShare.modeVideo": "Video",
-  "screenShare.modeVideoDescription": "Flüssigeres Video; bei langsamer Verbindung kann die Schärfe abnehmen."
+  "screenShare.modeVideoDescription": "Flüssigeres Video; bei langsamer Verbindung kann die Schärfe abnehmen.",
+  "chat.activityStrip.latestPin": "Neueste Anheftung",
+  "chat.activityStrip.latestTopicMessage": "Neueste Nachricht im Thema",
+  "chat.activityStrip.messageFrom": "Nachricht von {{name}}: {{message}}"
 }

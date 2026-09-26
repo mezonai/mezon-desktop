@@ -1103,6 +1103,8 @@
   "channelVoice.pushToTalk.holdingSpace": "말하는 중 — 스페이스바를 떼면 음소거됩니다",
   "channelVoice.removedFromChannel": "음성 채널에서 내보내졌습니다.",
   "channelVoice.disconnectedAlone": "음성 채널에 너무 오랫동안 혼자 있어 연결이 해제되었습니다.",
+  "channelVoice.disconnectedOtherDevice": "다른 기기에서 음성 채널에 참여하여 이 세션의 연결이 끊어졌습니다.",
+  "channelVoice.disconnectedRejoin": "음성 채널 연결이 끊어졌습니다.",
   "channelVoice.kickMemberFailed": "멤버 제거 실패",
   "channelVoice.kickModal.content": "\\\"{{userName}}\\\"를 음성 채널에서 킥하시겠습니까?",
   "channelVoice.kickModal.kick": "킥",
@@ -4747,5 +4749,8 @@
   "screenShare.modeText": "텍스트",
   "screenShare.modeTextDescription": "텍스트와 슬라이드가 더 선명하고 리소스 사용량이 적습니다.",
   "screenShare.modeVideo": "동영상",
-  "screenShare.modeVideoDescription": "영상이 더 부드럽습니다. 연결이 느리면 선명도가 떨어질 수 있습니다."
+  "screenShare.modeVideoDescription": "영상이 더 부드럽습니다. 연결이 느리면 선명도가 떨어질 수 있습니다.",
+  "chat.activityStrip.latestPin": "최근 고정",
+  "chat.activityStrip.latestTopicMessage": "토픽의 최신 메시지",
+  "chat.activityStrip.messageFrom": "{{name}}님의 메시지: {{message}}"
 }

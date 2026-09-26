@@ -62,6 +62,10 @@ fn surface_voice_toast(
             let key = match cause {
                 mezon_store::RemovalCause::Kicked => "channelVoice.removedFromChannel",
                 mezon_store::RemovalCause::AloneTimeout => "channelVoice.disconnectedAlone",
+                mezon_store::RemovalCause::DuplicateSession => {
+                    "channelVoice.disconnectedOtherDevice"
+                }
+                mezon_store::RemovalCause::Disconnected => "channelVoice.disconnectedRejoin",
             };
             crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
                 shell.toast(

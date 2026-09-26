@@ -142,7 +142,12 @@ impl VideoFrameStore {
     }
 
     pub fn note_received(&self, key: u64) {
-        self.state.lock().path_counters.entry(key).or_default().received += 1;
+        self.state
+            .lock()
+            .path_counters
+            .entry(key)
+            .or_default()
+            .received += 1;
     }
 
     pub fn log_frame_path(&self) {

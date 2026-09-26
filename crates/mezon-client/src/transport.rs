@@ -1013,8 +1013,6 @@ pub struct ApiCategoryDesc {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiVoiceChannelUser {
-    #[serde(default)]
-    pub peer_ids: Vec<i32>,
     pub channel_id: i64,
     pub user_ids: Vec<i64>,
     pub share_screen_ids: Vec<i64>,
@@ -1051,7 +1049,7 @@ pub struct ApiClanDesc {
     pub short_url: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiAttachment {
     pub url: String,
     pub filename: String,
@@ -1098,7 +1096,7 @@ impl ApiChannelAttachment {
     }
 }
 
-fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
+pub fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
     if bytes.is_empty() || blob_is_json_null(bytes) {
         return Vec::new();
     }
@@ -5801,28 +5799,18 @@ impl MezonTransport {
         Ok(raw
             .voice_channel_users
             .into_iter()
-            .map(|u| {
-                let aligned = u.user_ids.len() == u.peer_ids.len();
-                let mut user_ids = Vec::new();
-                let mut peer_ids = Vec::new();
-                for (index, user) in u.user_ids.iter().enumerate() {
-                    if let Ok(user) = user.parse::<i64>() {
-                        user_ids.push(user);
-                        if aligned {
-                            peer_ids.push(u.peer_ids[index]);
-                        }
-                    }
-                }
-                ApiVoiceChannelUser {
-                    channel_id: u.channel_id,
-                    user_ids,
-                    peer_ids,
-                    share_screen_ids: u
-                        .share_screen_ids
-                        .iter()
-                        .filter_map(|s| s.parse::<i64>().ok())
-                        .collect(),
-                }
+            .map(|u| ApiVoiceChannelUser {
+                channel_id: u.channel_id,
+                user_ids: u
+                    .user_ids
+                    .iter()
+                    .filter_map(|s| s.parse::<i64>().ok())
+                    .collect(),
+                share_screen_ids: u
+                    .share_screen_ids
+                    .iter()
+                    .filter_map(|s| s.parse::<i64>().ok())
+                    .collect(),
             })
             .collect())
     }

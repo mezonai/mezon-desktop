@@ -10,11 +10,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::router::{Route, Router};
 use gpui::{
-    AnyElement, App, Bounds, Context, DismissEvent, Div, Entity, EventEmitter, Focusable,
-    FontWeight, HighlightStyle, Hsla, Image, ImageFormat, IntoElement, KeyBinding, MouseButton,
-    PathPromptOptions, Pixels, Rgba, ScrollStrategy, SharedString, Stateful, StyledText,
-    Subscription, Task, UniformListScrollHandle, Window, actions, canvas, deferred, div, img,
-    prelude::*, px, uniform_list,
+    AnyElement, App, Bounds, ClipboardItem, Context, DismissEvent, Div, Entity, EventEmitter,
+    Focusable, FontWeight, HighlightStyle, Hsla, Image, ImageFormat, IntoElement, KeyBinding,
+    MouseButton, PathPromptOptions, Pixels, Rgba, ScrollStrategy, SharedString, Stateful,
+    StyledText, Subscription, Task, UniformListScrollHandle, Window, actions, canvas, deferred,
+    div, img, prelude::*, px, uniform_list,
 };
 use mezon_client::transport::QUICK_MENU_TYPE_FLASH;
 use mezon_store::{
@@ -31,7 +31,7 @@ use std::time::Duration;
 
 pub use attachments::build_pending;
 use attachments::{
-    AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, mime_from_extension, validate_batch,
+    AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, build_pending_batch, validate_batch,
 };
 use recorder::{ActiveRecording, MIN_RECORDING_MILLIS, RecordTask, encode_recording};
 
@@ -686,6 +686,8 @@ impl MentionInput {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut this = Self::build(placeholder, settings, true, window, cx);
+        this.input
+            .update(cx, |input, _| input.set_accepts_files(false));
         this.seed(content, spans, window, cx);
         this
     }
@@ -716,8 +718,8 @@ impl MentionInput {
                 MentionFieldEvent::PasteImages(images) => {
                     this.on_paste_images(images.clone(), window, cx)
                 }
-                MentionFieldEvent::PastePaths(paths) => {
-                    this.on_paste_paths(paths.clone(), window, cx)
+                MentionFieldEvent::PastePaths(paths, clipboard) => {
+                    this.paste_paths(paths.clone(), clipboard.clone(), window, cx)
                 }
             },
         );
@@ -1156,20 +1158,15 @@ impl MentionInput {
             multiple: true,
             prompt: None,
         });
+        let generation = self.bind_generation;
         cx.spawn_in(window, async move |this, cx| {
             let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
                 return;
             };
-            let pending = cx
-                .background_spawn(async move {
-                    paths
-                        .into_iter()
-                        .filter_map(build_pending)
-                        .collect::<Vec<_>>()
-                })
-                .await;
-            this.update_in(cx, |this, window, cx| this.add_pending(pending, window, cx))
-                .ok();
+            this.update_in(cx, |this, window, cx| {
+                this.stage_paths(paths, generation, None, window, cx)
+            })
+            .ok();
         })
         .detach();
     }
@@ -1180,22 +1177,68 @@ impl MentionInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.stage_paths(paths, self.bind_generation, None, window, cx);
+    }
+
+    fn paste_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        clipboard: ClipboardItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.stage_paths(paths, self.bind_generation, Some(clipboard), window, cx);
+    }
+
+    fn stage_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        generation: u64,
+        fallback: Option<ClipboardItem>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if paths.is_empty() {
             return;
         }
+        let existing = self.pending_attachments.len();
         cx.spawn_in(window, async move |this, cx| {
-            let pending = cx
-                .background_spawn(async move {
-                    paths
-                        .into_iter()
-                        .filter_map(build_pending)
-                        .collect::<Vec<_>>()
-                })
+            let staged = cx
+                .background_spawn(async move { build_pending_batch(existing, paths) })
                 .await;
-            this.update_in(cx, |this, window, cx| this.add_pending(pending, window, cx))
-                .ok();
+            this.update_in(cx, |this, window, cx| match (staged, fallback) {
+                (Ok(pending), Some(clipboard))
+                    if pending.is_empty() && this.bind_generation == generation =>
+                {
+                    this.input
+                        .update(cx, |input, cx| input.paste_images_or_text(clipboard, cx));
+                }
+                (staged, _) => {
+                    this.add_staged(generation, staged, window, cx);
+                }
+            })
+            .ok();
         })
         .detach();
+    }
+
+    fn add_staged(
+        &mut self,
+        generation: u64,
+        staged: Result<Vec<PendingAttachment>, AttachmentLimit>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.bind_generation != generation {
+            return false;
+        }
+        match staged {
+            Ok(pending) => self.add_pending(pending, window, cx),
+            Err(limit) => {
+                Self::show_upload_limit(limit, window, cx);
+                false
+            }
+        }
     }
 
     fn on_paste(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -1285,6 +1328,7 @@ impl MentionInput {
             return;
         }
         let base = chrono::Utc::now().timestamp_millis();
+        let generation = self.bind_generation;
         cx.spawn_in(window, async move |this, cx| {
             let pending = cx
                 .background_spawn(async move {
@@ -1297,18 +1341,20 @@ impl MentionInput {
                         .collect::<Vec<_>>()
                 })
                 .await;
-            this.update_in(cx, |this, window, cx| this.add_pending(pending, window, cx))
-                .ok();
+            this.update_in(cx, |this, window, cx| {
+                let written: Vec<PathBuf> = pending.iter().map(|p| p.path.clone()).collect();
+                if !this.add_staged(generation, Ok(pending), window, cx) {
+                    cx.background_spawn(async move {
+                        for path in written {
+                            let _ = std::fs::remove_file(path);
+                        }
+                    })
+                    .detach();
+                }
+            })
+            .ok();
         })
         .detach();
-    }
-
-    fn on_paste_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        let images: Vec<PathBuf> = paths
-            .into_iter()
-            .filter(|path| mime_from_extension(path).starts_with("image/"))
-            .collect();
-        self.add_dropped_paths(images, window, cx);
     }
 
     fn start_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {

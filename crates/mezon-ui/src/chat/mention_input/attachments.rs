@@ -42,7 +42,7 @@ pub fn mime_from_extension(path: &Path) -> String {
     mime.to_string()
 }
 
-pub fn build_pending(path: PathBuf) -> Option<PendingAttachment> {
+fn stat_pending(path: PathBuf) -> Option<PendingAttachment> {
     let meta = match std::fs::metadata(&path) {
         Ok(meta) => meta,
         Err(err) => {
@@ -61,22 +61,6 @@ pub fn build_pending(path: PathBuf) -> Option<PendingAttachment> {
     let filetype = mime_from_extension(&path);
     let is_image = filetype.starts_with("image/");
     let is_video = filetype.starts_with("video/");
-    let (width, height, poster_jpeg) = if is_video {
-        match mezon_video::probe_video(&path.to_string_lossy(), POSTER_MAX_EDGE) {
-            Some(probe) => (probe.width, probe.height, probe.poster_jpeg),
-            None => (0, 0, None),
-        }
-    } else if is_image {
-        let (w, h) = image::image_dimensions(&path).unwrap_or((0, 0));
-        (w, h, None)
-    } else {
-        (0, 0, None)
-    };
-    let duration = if filetype.starts_with("audio/") {
-        audio_file_duration(&path, meta.len())
-    } else {
-        0
-    };
     Some(PendingAttachment {
         path,
         filename,
@@ -84,11 +68,42 @@ pub fn build_pending(path: PathBuf) -> Option<PendingAttachment> {
         size: meta.len(),
         is_image,
         is_video,
-        width,
-        height,
-        duration,
-        poster_jpeg,
+        width: 0,
+        height: 0,
+        duration: 0,
+        poster_jpeg: None,
     })
+}
+
+fn probe_pending(mut pending: PendingAttachment) -> PendingAttachment {
+    if pending.is_video {
+        if let Some(probe) =
+            mezon_video::probe_video(&pending.path.to_string_lossy(), POSTER_MAX_EDGE)
+        {
+            pending.width = probe.width;
+            pending.height = probe.height;
+            pending.poster_jpeg = probe.poster_jpeg;
+        }
+    } else if pending.is_image {
+        (pending.width, pending.height) = image::image_dimensions(&pending.path).unwrap_or((0, 0));
+    }
+    if pending.filetype.starts_with("audio/") {
+        pending.duration = audio_file_duration(&pending.path, pending.size);
+    }
+    pending
+}
+
+pub fn build_pending(path: PathBuf) -> Option<PendingAttachment> {
+    stat_pending(path).map(probe_pending)
+}
+
+pub fn build_pending_batch(
+    existing: usize,
+    paths: Vec<PathBuf>,
+) -> Result<Vec<PendingAttachment>, AttachmentLimit> {
+    let staged: Vec<PendingAttachment> = paths.into_iter().filter_map(stat_pending).collect();
+    validate_batch(existing, &staged)?;
+    Ok(staged.into_iter().map(probe_pending).collect())
 }
 
 fn audio_file_duration(path: &Path, file_len: u64) -> i32 {
@@ -197,6 +212,29 @@ mod tests {
     fn build_pending_skips_a_directory_and_a_missing_path() {
         assert!(build_pending(std::env::temp_dir()).is_none());
         assert!(build_pending(std::env::temp_dir().join("mezon_no_such_file_xyz")).is_none());
+    }
+
+    #[test]
+    fn build_pending_batch_checks_limits_on_the_files_it_keeps() {
+        let dir = std::env::temp_dir().join(format!("mezon_batch_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, b"hi").unwrap();
+
+        let Ok(staged) = build_pending_batch(0, vec![dir.clone(), file.clone()]) else {
+            panic!("one small file is within the limits");
+        };
+        assert_eq!(staged.len(), 1, "the folder is skipped, the file kept");
+        assert_eq!(staged[0].filename, "notes.txt");
+        assert!(
+            build_pending_batch(MAX_FILE_ATTACHMENTS - 1, vec![dir.clone(), file.clone()]).is_ok()
+        );
+        assert!(matches!(
+            build_pending_batch(MAX_FILE_ATTACHMENTS, vec![file.clone()]),
+            Err(AttachmentLimit::Count)
+        ));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

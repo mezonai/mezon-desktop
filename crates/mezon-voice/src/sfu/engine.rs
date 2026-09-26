@@ -141,9 +141,9 @@ const CONNECT_POLL: Duration = Duration::from_millis(250);
 const RENEGOTIATION_SETTLE: Duration = Duration::from_millis(50);
 const RECONNECT_DELAY_FAST: Duration = Duration::from_millis(400);
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
-const RECONNECT_FAST_ATTEMPTS: u32 = 5;
-const MAX_RECONNECT_ATTEMPTS: u32 = 40;
-const MAX_INITIAL_CONNECT_ATTEMPTS: u32 = 8;
+const RECONNECT_FAST_ATTEMPTS: u32 = 2;
+const MAX_RECONNECT_ATTEMPTS: u32 = 4;
+const MAX_INITIAL_CONNECT_ATTEMPTS: u32 = 4;
 const RECONNECTING_HEARTBEAT_TICKS: u32 = 10;
 const OFFER_REISSUE_DEADLINE: Duration = Duration::from_secs(8);
 const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(60);
@@ -201,6 +201,8 @@ pub struct ScreenTrack {
 pub enum RemovalCause {
     Kicked,
     AloneTimeout,
+    DuplicateSession,
+    Disconnected,
 }
 
 pub enum SfuEvent {
@@ -641,7 +643,7 @@ async fn engine_main(
             ensure_fresh_token(&mut config, &mut token_refreshes).await;
         }
         first_session = false;
-        let (joined, reason, stale_token) = match run_session(
+        let (joined, reason) = match run_session(
             &config,
             &factory,
             &mut local,
@@ -672,8 +674,15 @@ async fn engine_main(
                 let _ = evt_tx.send(SfuEvent::Disconnected { reason });
                 return Ok(());
             }
-            SessionOutcome::Dropped { joined, reason } => (joined, reason, false),
-            SessionOutcome::DroppedStaleToken { joined, reason } => (joined, reason, true),
+            SessionOutcome::Dropped { reason, .. } => {
+                let _ = evt_tx.send(SfuEvent::Removed {
+                    cause: RemovalCause::Disconnected,
+                    reason: reason.clone(),
+                });
+                let _ = evt_tx.send(SfuEvent::Disconnected { reason });
+                return Ok(());
+            }
+            SessionOutcome::Retryable { joined, reason } => (joined, reason),
         };
 
         if local.ptt_active {
@@ -685,14 +694,6 @@ async fn engine_main(
         ever_joined |= joined;
         if joined {
             token_refreshes = 0;
-        }
-        let refreshed =
-            stale_token && refresh_session_token(&mut config, &mut token_refreshes).await;
-        let token_retries_spent =
-            stale_token && !refreshed && token_refreshes >= MEET_TOKEN_RETRY_LIMIT;
-        if token_retries_spent || (!ever_joined && !refreshed) {
-            let _ = evt_tx.send(SfuEvent::Disconnected { reason });
-            return Ok(());
         }
         let _ = evt_tx.send(SfuEvent::Reconnecting);
         if LocalRoutes::probe().is_empty() {
@@ -838,28 +839,6 @@ fn token_seconds_left(token: &str) -> Option<i64> {
     Some(exp - now)
 }
 
-async fn refresh_session_token(config: &mut SfuConfig, refreshes: &mut u32) -> bool {
-    let Some(refresher) = config.refresh_token.clone() else {
-        return false;
-    };
-    if token_refresh_budget_spent(*refreshes) {
-        tracing::warn!(
-            refreshes = *refreshes,
-            "sfu join token rejected again; refresh limit reached"
-        );
-        return false;
-    }
-    match refresher.mint().await {
-        Some(fresh) if fresh != config.token => {
-            *refreshes += 1;
-            tracing::info!("sfu join token refreshed after the server rejected it");
-            config.token = fresh;
-            true
-        }
-        _ => false,
-    }
-}
-
 fn attempt_cap(ever_connected: bool) -> u32 {
     if ever_connected {
         MAX_RECONNECT_ATTEMPTS
@@ -882,8 +861,8 @@ enum SessionOutcome {
     Closed,
     Fatal(String),
     Removed { cause: RemovalCause, reason: String },
+    Retryable { joined: bool, reason: String },
     Dropped { joined: bool, reason: String },
-    DroppedStaleToken { joined: bool, reason: String },
 }
 
 struct RetiredPeerConnection(Option<PeerConnection>);
@@ -922,10 +901,7 @@ async fn run_session(
         retiring,
     )
     .await;
-    let retryable = matches!(
-        outcome,
-        SessionOutcome::Dropped { .. } | SessionOutcome::DroppedStaleToken { .. }
-    );
+    let retryable = matches!(outcome, SessionOutcome::Retryable { .. });
     match pc {
         Some(pc) if retryable => {
             if let Some(previous) = retiring.take() {
@@ -1050,10 +1026,7 @@ async fn session_loop(
                             "sfu closed the link"
                         );
                         return match verdict {
-                            CloseVerdict::Retry => SessionOutcome::Dropped { joined, reason },
-                            CloseVerdict::RetryWithNewToken => {
-                                SessionOutcome::DroppedStaleToken { joined, reason }
-                            }
+                            CloseVerdict::Retry => SessionOutcome::Retryable { joined, reason },
                             CloseVerdict::Removed(cause) => SessionOutcome::Removed { cause, reason },
                         };
                     }
@@ -1223,7 +1196,7 @@ async fn session_loop(
                         tracing::warn!(%message, joined, "sfu reported an error");
                         let _ = evt_tx.send(SfuEvent::Error(message.clone()));
                         if matches!(message.as_str(), "invalid_token" | "missing_token") {
-                            return SessionOutcome::DroppedStaleToken { joined, reason: message };
+                            return SessionOutcome::Dropped { joined, reason: message };
                         }
                         if joined || resuming {
                             return SessionOutcome::Dropped { joined, reason: message };
@@ -1696,19 +1669,19 @@ fn create_peer_connection(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CloseVerdict {
     Retry,
-    RetryWithNewToken,
     Removed(RemovalCause),
 }
 
 fn classify_close(code: Option<CloseCode>) -> CloseVerdict {
     let Some(code) = code else {
-        return CloseVerdict::Retry;
+        return CloseVerdict::Removed(RemovalCause::Disconnected);
     };
     match u16::from(code) {
-        4004 | 4005 => CloseVerdict::RetryWithNewToken,
+        4001 | 4002 | 4008 | 4010 => CloseVerdict::Retry,
         4006 => CloseVerdict::Removed(RemovalCause::Kicked),
         4011 => CloseVerdict::Removed(RemovalCause::AloneTimeout),
-        _ => CloseVerdict::Retry,
+        4012 => CloseVerdict::Removed(RemovalCause::DuplicateSession),
+        _ => CloseVerdict::Removed(RemovalCause::Disconnected),
     }
 }
 
@@ -1730,6 +1703,7 @@ fn describe_close_code(code: CloseCode) -> Option<&'static str> {
         4009 => "poll start failed",
         4010 => "transport error",
         4011 => "alone participant timeout",
+        4012 => "new session joined with the same user",
         _ => return None,
     })
 }
@@ -2875,48 +2849,48 @@ mod tests {
     }
 
     #[test]
-    fn a_transport_drop_without_a_close_frame_is_retried() {
-        assert_eq!(classify_close(None), CloseVerdict::Retry);
-    }
-
-    #[test]
-    fn an_idle_timeout_is_retried() {
+    fn a_close_without_a_reason_ends_the_call() {
         assert_eq!(
-            classify_close(Some(CloseCode::Library(4001))),
-            CloseVerdict::Retry
+            classify_close(None),
+            CloseVerdict::Removed(RemovalCause::Disconnected)
         );
     }
 
     #[test]
-    fn token_rejections_are_retried_with_a_fresh_token() {
-        for code in [4004, 4005] {
+    fn only_transient_sfu_reasons_are_retried() {
+        for code in [4001, 4002, 4008, 4010] {
             assert_eq!(
                 classify_close(Some(CloseCode::Library(code))),
-                CloseVerdict::RetryWithNewToken,
-                "{code} is the server complaining about the token itself"
+                CloseVerdict::Retry
             );
         }
     }
 
     #[test]
-    fn a_server_without_a_jwt_secret_is_retried_without_minting() {
-        assert_eq!(
-            classify_close(Some(CloseCode::Library(4003))),
-            CloseVerdict::Retry
-        );
+    fn other_sfu_reasons_end_the_call() {
+        for code in [1000, 1001, 1002, 1008, 1011, 4003, 4004, 4005, 4007, 4009] {
+            assert_eq!(
+                classify_close(Some(CloseCode::Library(code))),
+                CloseVerdict::Removed(RemovalCause::Disconnected),
+                "close code {code} should end the call"
+            );
+        }
     }
 
     #[test]
-    fn a_kick_is_not_retried() {
+    fn kick_alone_timeout_and_duplicate_session_have_distinct_causes() {
         assert_eq!(
             classify_close(Some(CloseCode::Library(4006))),
             CloseVerdict::Removed(RemovalCause::Kicked)
         );
-    }
-
-    #[test]
-    fn a_normal_closure_is_still_retried() {
-        assert_eq!(classify_close(Some(CloseCode::Normal)), CloseVerdict::Retry);
+        assert_eq!(
+            classify_close(Some(CloseCode::Library(4011))),
+            CloseVerdict::Removed(RemovalCause::AloneTimeout)
+        );
+        assert_eq!(
+            classify_close(Some(CloseCode::Library(4012))),
+            CloseVerdict::Removed(RemovalCause::DuplicateSession)
+        );
     }
 
     fn jwt_with_exp(exp: i64, padded: bool) -> String {
@@ -2975,18 +2949,6 @@ mod tests {
             fallback_ice_servers: Vec::new(),
             refresh_token: Some(refresher),
         }
-    }
-
-    #[tokio::test]
-    async fn a_rejected_token_is_refreshed_at_most_the_retry_limit() {
-        let (refresher, calls) = counting_refresher(true);
-        let mut config = config_with_refresher("rejected-token", refresher);
-        let mut refreshes = 0;
-        for _ in 0..MEET_TOKEN_RETRY_LIMIT {
-            assert!(refresh_session_token(&mut config, &mut refreshes).await);
-        }
-        assert!(!refresh_session_token(&mut config, &mut refreshes).await);
-        assert_eq!(calls(), MEET_TOKEN_RETRY_LIMIT);
     }
 
     #[tokio::test]

@@ -651,7 +651,8 @@ fn media_sections(sdp: &str) -> Vec<MediaSection> {
         } else if matches!(
             line,
             "a=sendrecv" | "a=sendonly" | "a=recvonly" | "a=inactive"
-        ) && let Some(section) = current.as_mut() {
+        ) && let Some(section) = current.as_mut()
+        {
             section.direction = Some(line.to_owned());
         }
     }

@@ -1434,9 +1434,7 @@ fn self_identity(cx: &App) -> Option<(i64, String, String)> {
 fn ice_servers(cx: &App) -> Vec<IceServerConfig> {
     let config = AppConfig::global(cx);
     if config.webrtc_ice_servers_url.is_empty() || config.webrtc_ice_servers_credential.is_empty() {
-        tracing::warn!(
-            "no turn credentials in this build; calls can only use host candidates"
-        );
+        tracing::warn!("no turn credentials in this build; calls can only use host candidates");
         return Vec::new();
     }
     vec![IceServerConfig {

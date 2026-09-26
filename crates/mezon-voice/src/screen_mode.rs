@@ -58,7 +58,10 @@ mod tests {
         let mode = ScreenShareMode::Text;
         assert_eq!(mode.capture_fps(), 15);
         assert_eq!(mode.encode_max_fps(), 20.0);
-        assert_eq!(mode.degradation(), DegradationPreference::MaintainResolution);
+        assert_eq!(
+            mode.degradation(),
+            DegradationPreference::MaintainResolution
+        );
         assert_eq!(mode.content_hint(), ContentHint::Text);
         assert_eq!(mode.fallback_content_hint(), ContentHint::Detailed);
     }

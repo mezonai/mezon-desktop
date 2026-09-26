@@ -1162,6 +1162,7 @@ impl ChatLayout {
             MessagesStore::global(cx).update(cx, |store, cx| {
                 store.open_channel_in_clan(clan_id, channel_id, cx);
             });
+            self.load_channel_activity(clan_id, channel_id, cx);
         } else {
             self.pending_channel_id = Some(channel_id);
             self.channel_list.update(cx, |channel_list, cx| {
@@ -1193,7 +1194,23 @@ impl ChatLayout {
             MessagesStore::global(cx).update(cx, |store, cx| {
                 store.open_channel_in_clan(clan_id, channel_id, cx);
             });
+            self.load_channel_activity(clan_id, channel_id, cx);
         }
+    }
+
+    fn load_channel_activity(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        let clan_key = clan_id.to_string();
+        let channel_key = channel_id.to_string();
+        TopicsStore::global(cx).update(cx, |store, cx| {
+            store.fetch_if_needed(&clan_key, cx);
+            store.hydrate_latest_topic_preview_for_channel(Some(&channel_key), cx);
+        });
+        PinnedMessagesStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
     }
 
     fn redirect_archived_thread_route(&mut self, cx: &mut Context<Self>) {

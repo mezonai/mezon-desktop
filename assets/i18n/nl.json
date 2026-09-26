@@ -1103,6 +1103,8 @@
   "channelVoice.pushToTalk.holdingSpace": "Je praat — laat Spatie los om te dempen",
   "channelVoice.removedFromChannel": "Je bent uit het spraakkanaal verwijderd.",
   "channelVoice.disconnectedAlone": "Je bent losgekoppeld van het spraakkanaal omdat je er te lang alleen in was.",
+  "channelVoice.disconnectedOtherDevice": "Je bent op een ander apparaat lid geworden van het spraakkanaal. Deze sessie is daarom verbroken.",
+  "channelVoice.disconnectedRejoin": "Je verbinding met het spraakkanaal is verbroken.",
   "channelVoice.kickMemberFailed": "Lid kon niet worden verwijderd",
   "channelVoice.kickModal.content": "Weet je zeker dat je \"{{userName}}\" uit het stemkanaal wilt verwijderen?",
   "channelVoice.kickModal.kick": "Verwijderen",
@@ -4746,5 +4748,8 @@
   "screenShare.modeText": "Tekst",
   "screenShare.modeTextDescription": "Scherpere tekst en dia's, minder gebruik van systeembronnen.",
   "screenShare.modeVideo": "Video",
-  "screenShare.modeVideoDescription": "Vloeiendere video; bij een trage verbinding kan de scherpte afnemen."
+  "screenShare.modeVideoDescription": "Vloeiendere video; bij een trage verbinding kan de scherpte afnemen.",
+  "chat.activityStrip.latestPin": "Laatste pin",
+  "chat.activityStrip.latestTopicMessage": "Laatste bericht in topic",
+  "chat.activityStrip.messageFrom": "Bericht van {{name}}: {{message}}"
 }

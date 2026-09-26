@@ -1103,6 +1103,8 @@
   "channelVoice.pushToTalk.holdingSpace": "Falando — solte Espaço para silenciar",
   "channelVoice.removedFromChannel": "Você foi removido do canal de voz.",
   "channelVoice.disconnectedAlone": "Você foi desconectado do canal de voz porque ficou sozinho nele por muito tempo.",
+  "channelVoice.disconnectedOtherDevice": "Você entrou no canal de voz em outro dispositivo, então esta sessão foi desconectada.",
+  "channelVoice.disconnectedRejoin": "Você foi desconectado do canal de voz.",
   "channelVoice.kickMemberFailed": "Não foi possível remover o membro",
   "channelVoice.kickModal.content": "Tem certeza de que deseja remover \"{{userName}}\" do canal de voz?",
   "channelVoice.kickModal.kick": "Remover",
@@ -4747,5 +4749,8 @@
   "screenShare.modeText": "Texto",
   "screenShare.modeTextDescription": "Texto e slides mais nítidos, menor uso de recursos.",
   "screenShare.modeVideo": "Vídeo",
-  "screenShare.modeVideoDescription": "Vídeo mais fluido; pode perder nitidez em conexões lentas."
+  "screenShare.modeVideoDescription": "Vídeo mais fluido; pode perder nitidez em conexões lentas.",
+  "chat.activityStrip.latestPin": "Fixação mais recente",
+  "chat.activityStrip.latestTopicMessage": "Mensagem mais recente do tópico",
+  "chat.activityStrip.messageFrom": "Mensagem de {{name}}: {{message}}"
 }
