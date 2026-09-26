@@ -3300,8 +3300,6 @@
   "message.deleteMessageModal.delete": "삭제",
   "message.deleteMessageModal.deleteMessageDescription": "이 메시지를 삭제하시겠습니까?",
   "message.deleteMessageModal.remove": "제거",
-  "message.deleteMessageModal.removeAttachmentDescription": "이 메시지의 첨부 파일을 삭제하시겠습니까?",
-  "message.deleteMessageModal.removeAttachmentTitle": "첨부 파일 제거",
   "message.deleteMessageModal.title": "메시지 삭제",
   "message.directMessage.groupCreated": "그룹이 생성됨",
   "message.directMessage.you": "나",

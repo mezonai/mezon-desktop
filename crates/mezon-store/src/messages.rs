@@ -6369,7 +6369,15 @@ impl MessagesStore {
         let Some(existing) = channel.messages.get_mut_by_id(message_id) else {
             return;
         };
+        let attachments_in_update = !incoming.attachments.is_empty();
         merge_message_update(existing, &incoming);
+        if attachments_in_update {
+            let cfg = AppConfig::try_global(cx);
+            let (album_layout, viewer_media) =
+                build_media_presentation(&existing.attachments, cfg.as_deref());
+            existing.album_layout = album_layout;
+            existing.viewer_media = viewer_media;
+        }
         if let Some(keys) = &presign_keys {
             apply_presign_gate(
                 &mut existing.attachments,
@@ -12537,6 +12545,33 @@ mod tests {
             confirmed.attachments[0].local_source,
             Some(std::path::PathBuf::from("/tmp/photo.png"))
         );
+    }
+
+    #[test]
+    fn attachment_update_rebuilds_album_layout() {
+        let image = |n: u32| MessageAttachment {
+            url: format!("https://cdn.example/{n}.png"),
+            filename: format!("{n}.png"),
+            filetype: "image/png".into(),
+            width: 800,
+            height: 600,
+            ..Default::default()
+        };
+        let mut existing = Message::new(MessageId(1), "hi", "u1", "U1", 100)
+            .with_attachments(vec![image(1), image(2), image(3)]);
+        let (layout_three, _) = build_media_presentation(&existing.attachments, None);
+        existing.album_layout = layout_three;
+
+        let incoming = Message::new(MessageId(1), "hi", "u1", "U1", 100)
+            .with_attachments(vec![image(1), image(2)]);
+        merge_message_update(&mut existing, &incoming);
+        let (layout_two, viewer_media) = build_media_presentation(&existing.attachments, None);
+        existing.album_layout = layout_two;
+        existing.viewer_media = viewer_media;
+
+        assert_eq!(existing.attachments.len(), 2);
+        assert!(existing.album_layout.is_some());
+        assert_eq!(existing.viewer_media.len(), 2);
     }
 
     #[test]

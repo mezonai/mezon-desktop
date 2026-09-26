@@ -3308,8 +3308,6 @@
   "message.deleteMessageModal.delete": "Бетерү",
   "message.deleteMessageModal.deleteMessageDescription": "Зинһар, бу хәбәрне бетерәсегез килүен раслагыз?",
   "message.deleteMessageModal.remove": "Бетерү",
-  "message.deleteMessageModal.removeAttachmentDescription": "Зинһар, бу хәбәрдән кушымтаны бетерәсегез килүен раслагыз?",
-  "message.deleteMessageModal.removeAttachmentTitle": "Кушымтаны бетерү",
   "message.deleteMessageModal.title": "Хәбәрне бетерү",
   "message.directMessage.groupCreated": "Төркем булдырылды",
   "message.directMessage.you": "Сез",

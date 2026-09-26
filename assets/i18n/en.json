@@ -3297,8 +3297,6 @@
   "message.deleteMessageModal.delete": "Delete",
   "message.deleteMessageModal.deleteMessageDescription": "Please confirm if you would like to delete this message?",
   "message.deleteMessageModal.remove": "Remove",
-  "message.deleteMessageModal.removeAttachmentDescription": "Please confirm if you would like to remove the attachment from this message?",
-  "message.deleteMessageModal.removeAttachmentTitle": "Remove Attachment",
   "message.deleteMessageModal.title": "Delete Message",
   "message.directMessage.groupCreated": "Group is created",
   "message.directMessage.you": "You",

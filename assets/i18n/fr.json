@@ -3299,8 +3299,6 @@
   "message.deleteMessageModal.delete": "Supprimer",
   "message.deleteMessageModal.deleteMessageDescription": "Voulez-vous supprimer ce message ?",
   "message.deleteMessageModal.remove": "Supprimer",
-  "message.deleteMessageModal.removeAttachmentDescription": "Voulez-vous supprimer la pièce jointe dans ce message ?",
-  "message.deleteMessageModal.removeAttachmentTitle": "Supprimer la pièce jointe",
   "message.deleteMessageModal.title": "Supprimer le message",
   "message.directMessage.groupCreated": "Groupe créé",
   "message.directMessage.you": "Vous",

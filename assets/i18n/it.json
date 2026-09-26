@@ -3300,8 +3300,6 @@
   "message.deleteMessageModal.delete": "Elimina",
   "message.deleteMessageModal.deleteMessageDescription": "Vuoi eliminare questo messaggio?",
   "message.deleteMessageModal.remove": "Rimuovi",
-  "message.deleteMessageModal.removeAttachmentDescription": "Vuoi rimuovere l'allegato da questo messaggio?",
-  "message.deleteMessageModal.removeAttachmentTitle": "Rimuovi allegato",
   "message.deleteMessageModal.title": "Elimina messaggio",
   "message.directMessage.groupCreated": "Gruppo creato",
   "message.directMessage.you": "Tu",

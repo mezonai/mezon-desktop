@@ -3300,8 +3300,6 @@
   "message.deleteMessageModal.delete": "削除",
   "message.deleteMessageModal.deleteMessageDescription": "このメッセージを削除しますか?",
   "message.deleteMessageModal.remove": "削除",
-  "message.deleteMessageModal.removeAttachmentDescription": "このメッセージの添付ファイルを削除しますか?",
-  "message.deleteMessageModal.removeAttachmentTitle": "添付ファイルを削除",
   "message.deleteMessageModal.title": "メッセージを削除",
   "message.directMessage.groupCreated": "グループが作成されました",
   "message.directMessage.you": "あなた",

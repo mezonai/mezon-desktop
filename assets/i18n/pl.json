@@ -3299,8 +3299,6 @@
   "message.deleteMessageModal.delete": "Usuń",
   "message.deleteMessageModal.deleteMessageDescription": "Czy chcesz usunąć tę wiadomość?",
   "message.deleteMessageModal.remove": "Usuń",
-  "message.deleteMessageModal.removeAttachmentDescription": "Czy chcesz usunąć załącznik w tej wiadomości?",
-  "message.deleteMessageModal.removeAttachmentTitle": "Usuń załącznik",
   "message.deleteMessageModal.title": "Usuń wiadomość",
   "message.directMessage.groupCreated": "Grupa została utworzona",
   "message.directMessage.you": "Ty",
