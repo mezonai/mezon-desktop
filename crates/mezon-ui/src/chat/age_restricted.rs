@@ -7,7 +7,7 @@ use gpui::{
 };
 use mezon_store::{
     AccountEvent, AccountStore, Channel, ChannelId, ChannelType, ClanId, Settings, dob_needs_entry,
-    is_adult_dob, schedule_settings_save,
+    is_adult_dob, is_age_restricted, schedule_settings_save,
 };
 
 use crate::app::shell::Shell;
@@ -16,7 +16,6 @@ use crate::router::{Route, navigate};
 use crate::theme::ActiveTheme;
 use crate::util::assets::AGE_RESTRICTED_WARNING;
 
-const AGE_RESTRICTED_ON: i32 = 1;
 const COLOR_DANGER: u32 = 0xDA373C;
 const FIELD_BG: u32 = 0x2F3746;
 const FIELD_BORDER: u32 = 0x3D4656;
@@ -54,7 +53,7 @@ pub fn age_gate_blocks(channel: &Channel, cx: &App) -> bool {
 }
 
 fn gated_channel_type(age_restricted: i32, channel_type: ChannelType) -> bool {
-    age_restricted == AGE_RESTRICTED_ON
+    is_age_restricted(age_restricted)
         && !matches!(channel_type, ChannelType::Voice | ChannelType::Stream)
 }
 

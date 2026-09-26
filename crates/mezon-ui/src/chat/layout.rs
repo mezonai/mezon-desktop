@@ -2985,7 +2985,7 @@ impl ChatLayout {
             if let Some(gate) = self.age_gate.clone() {
                 let channel_name = ch.name.clone();
                 let active_channel_id = ch.id;
-                let header_icon = channel_icon(ch.channel_type, ch.private);
+                let header_icon = channel_icon(ch.channel_type, ch.private, ch.age_restricted);
                 return self
                     .chat_area
                     .render_panel_body(
@@ -3018,7 +3018,7 @@ impl ChatLayout {
             {
                 let channel_name = ch.name.clone();
                 let active_channel_id = ch.id;
-                let header_icon = channel_icon(ch.channel_type, ch.private);
+                let header_icon = channel_icon(ch.channel_type, ch.private, ch.age_restricted);
                 let canvas = self
                     .ensure_canvas_view(clan_id, channel_id, canvas_id, window, cx)
                     .into_any_element();
@@ -3094,7 +3094,11 @@ impl ChatLayout {
                             .render(
                                 &locale,
                                 Some(channel.name.as_str()),
-                                Some(channel_icon(channel.channel_type, channel.private)),
+                                Some(channel_icon(
+                                    channel.channel_type,
+                                    channel.private,
+                                    channel.age_restricted,
+                                )),
                                 false,
                                 None,
                                 Some(channel.id),
@@ -3218,7 +3222,11 @@ impl ChatLayout {
                             .render(
                                 &locale,
                                 Some(channel.name.as_str()),
-                                Some(channel_icon(channel.channel_type, channel.private)),
+                                Some(channel_icon(
+                                    channel.channel_type,
+                                    channel.private,
+                                    channel.age_restricted,
+                                )),
                                 false,
                                 None,
                                 Some(channel.id),
@@ -3296,7 +3304,7 @@ impl ChatLayout {
                 .render(
                     &locale,
                     Some(channel_name.as_str()),
-                    Some(channel_icon(ch.channel_type, ch.private)),
+                    Some(channel_icon(ch.channel_type, ch.private, ch.age_restricted)),
                     false,
                     None,
                     Some(channel_id),

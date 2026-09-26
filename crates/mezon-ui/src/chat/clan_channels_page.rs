@@ -24,6 +24,7 @@ use crate::components::primitives::{
     Avatar, ContextMenu, Icon, IconName, Input, InputEvent, InputState, PaginationButton,
     context_menu_at, pagination_button, pagination_items,
 };
+use crate::router::{Route, Router};
 use crate::theme::ActiveTheme;
 use crate::util::text_utils::normalize_diacritics;
 
@@ -95,23 +96,29 @@ impl ClanChannelsPage {
         })
         .detach();
         cx.observe(&ChannelList::global(cx), |this, _, cx| {
-            let Some(channel_id) = this.pending_edit_channel else {
-                return;
-            };
-            let channel_list = ChannelList::global(cx);
-            let channel_list = channel_list.read(cx);
-            if channel_list.channel(this.clan_id, channel_id).is_some() {
-                this.pending_edit_channel = None;
-                crate::router::navigate(
-                    cx,
-                    crate::router::Route::ChannelSettings {
-                        clan_id: this.clan_id,
-                        channel_id,
-                        tab: crate::chat::channel_settings::ChannelSettingsTab::Overview,
-                    },
-                );
-            } else if !channel_list.is_resolving_channel_detail(channel_id) {
-                this.pending_edit_channel = None;
+            if let Some(channel_id) = this.pending_edit_channel {
+                let channel_list = ChannelList::global(cx);
+                let channel_list = channel_list.read(cx);
+                if channel_list.channel(this.clan_id, channel_id).is_some() {
+                    this.pending_edit_channel = None;
+                    crate::router::navigate(
+                        cx,
+                        crate::router::Route::ChannelSettings {
+                            clan_id: this.clan_id,
+                            channel_id,
+                            tab: crate::chat::channel_settings::ChannelSettingsTab::Overview,
+                        },
+                    );
+                } else if !channel_list.is_resolving_channel_detail(channel_id) {
+                    this.pending_edit_channel = None;
+                }
+            }
+            let visible = matches!(
+                Router::global(cx).read(cx).route(),
+                Route::ClanChannels { clan_id } if clan_id == this.clan_id
+            );
+            if visible {
+                cx.notify();
             }
         })
         .detach();
@@ -481,7 +488,12 @@ impl ClanChannelsPage {
                 )
                 .into_any_element()
         } else {
-            Icon::new(channel_type_icon(channel_type, row.private))
+            let age_restricted = ChannelList::global(cx)
+                .read(cx)
+                .channel(self.clan_id, row.id)
+                .map(|channel| channel.age_restricted)
+                .unwrap_or(0);
+            Icon::new(channel_type_icon(channel_type, row.private, age_restricted))
                 .size(px(if is_thread { 20. } else { 22. }))
                 .text_color(cx.theme().text_secondary)
                 .into_any_element()
