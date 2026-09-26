@@ -426,10 +426,11 @@ impl VideoPlayerView {
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let plain = !event.keystroke.modifiers.modified();
         match event.keystroke.key.as_str() {
             "space" => self.toggle_play(cx),
-            "left" => self.seek_relative(-SEEK_STEP_SECONDS, cx),
-            "right" => self.seek_relative(SEEK_STEP_SECONDS, cx),
+            "left" if plain => self.seek_relative(-SEEK_STEP_SECONDS, cx),
+            "right" if plain => self.seek_relative(SEEK_STEP_SECONDS, cx),
             "f" if !self.theater => self.open_fullscreen(window, cx),
             "escape" if self.theater => self.exit_theater(cx),
             _ => {}

@@ -36,7 +36,7 @@ use items::{
 };
 
 const FILTER_DEBOUNCE_MS: u64 = 300;
-const KEY_CONTEXT: &str = "CommandPalette";
+pub(crate) const KEY_CONTEXT: &str = "CommandPalette";
 
 actions!(mezon_command_palette, [PaletteMoveUp, PaletteMoveDown]);
 

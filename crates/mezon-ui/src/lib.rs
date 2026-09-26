@@ -51,7 +51,8 @@ pub(crate) const SHOW_UNREAD_BADGE_COUNT: bool = true;
 
 pub(crate) const APP_SHELL_KEY_CONTEXT: &str = "AppShell";
 pub(crate) const VIDEO_PLAYER_KEY_CONTEXT: &str = "VideoPlayer";
-const HISTORY_NAVIGATION_SCOPE: &str = "AppShell && !VideoPlayer";
+const MENU_KEY_CONTEXT: &str = "menu";
+const MODAL_BACKDROP_KEY_CONTEXT: &str = "modal_backdrop";
 
 gpui::actions!(
     mezon,
@@ -122,23 +123,43 @@ pub fn init(cx: &mut gpui::App) {
     init_menus(cx);
 }
 
-fn history_navigation_bindings() -> Vec<gpui::KeyBinding> {
+fn history_keystrokes() -> &'static [(&'static str, bool)] {
     #[cfg(target_os = "macos")]
     {
-        vec![
-            gpui::KeyBinding::new("cmd-left", GoBack, Some(HISTORY_NAVIGATION_SCOPE)),
-            gpui::KeyBinding::new("cmd-right", GoForward, Some(HISTORY_NAVIGATION_SCOPE)),
-            gpui::KeyBinding::new("cmd-[", GoBack, Some(HISTORY_NAVIGATION_SCOPE)),
-            gpui::KeyBinding::new("cmd-]", GoForward, Some(HISTORY_NAVIGATION_SCOPE)),
+        &[
+            ("cmd-left", true),
+            ("cmd-right", false),
+            ("cmd-[", true),
+            ("cmd-]", false),
         ]
     }
     #[cfg(not(target_os = "macos"))]
     {
-        vec![
-            gpui::KeyBinding::new("alt-left", GoBack, Some(HISTORY_NAVIGATION_SCOPE)),
-            gpui::KeyBinding::new("alt-right", GoForward, Some(HISTORY_NAVIGATION_SCOPE)),
-        ]
+        &[("alt-left", true), ("alt-right", false)]
     }
+}
+
+fn history_navigation_scope() -> String {
+    format!(
+        "{APP_SHELL_KEY_CONTEXT} && !{MENU_KEY_CONTEXT} && !{MODAL_BACKDROP_KEY_CONTEXT} && !{} && !{}",
+        crate::command_palette::KEY_CONTEXT,
+        crate::tour::KEY_CONTEXT,
+    )
+}
+
+fn history_navigation_bindings() -> Vec<gpui::KeyBinding> {
+    let scope = history_navigation_scope();
+    let canvas = mezon_canvas::CANVAS_EDITING_KEY_CONTEXT;
+    let mut bindings = Vec::with_capacity(history_keystrokes().len() * 2);
+    for &(key, back) in history_keystrokes() {
+        if back {
+            bindings.push(gpui::KeyBinding::new(key, GoBack, Some(scope.as_str())));
+        } else {
+            bindings.push(gpui::KeyBinding::new(key, GoForward, Some(scope.as_str())));
+        }
+        bindings.push(gpui::KeyBinding::new(key, gpui::NoAction, Some(canvas)));
+    }
+    bindings
 }
 
 fn install_history_navigation(cx: &mut gpui::App) {
@@ -149,52 +170,6 @@ fn install_history_navigation(cx: &mut gpui::App) {
     cx.on_action(|_: &GoForward, cx: &mut gpui::App| {
         router::go_forward(cx);
     });
-    cx.observe_keystrokes(|event, window, cx| {
-        if event.action.is_some() || !event.context_stack.is_empty() {
-            return;
-        }
-        if crate::app::main_window::handle(cx) != Some(window.window_handle()) {
-            return;
-        }
-        if is_history_go_back_keystroke(&event.keystroke) {
-            router::go_back(cx);
-        } else if is_history_go_forward_keystroke(&event.keystroke) {
-            router::go_forward(cx);
-        }
-    })
-    .detach();
-}
-
-fn keystroke_matches(keystroke: &gpui::Keystroke, alt: bool, platform: bool, key: &str) -> bool {
-    let modifiers = &keystroke.modifiers;
-    modifiers.alt == alt
-        && modifiers.platform == platform
-        && !modifiers.control
-        && !modifiers.shift
-        && !modifiers.function
-        && keystroke.key == key
-}
-
-#[cfg(target_os = "macos")]
-fn is_history_go_back_keystroke(keystroke: &gpui::Keystroke) -> bool {
-    keystroke_matches(keystroke, false, true, "left")
-        || keystroke_matches(keystroke, false, true, "[")
-}
-
-#[cfg(target_os = "macos")]
-fn is_history_go_forward_keystroke(keystroke: &gpui::Keystroke) -> bool {
-    keystroke_matches(keystroke, false, true, "right")
-        || keystroke_matches(keystroke, false, true, "]")
-}
-
-#[cfg(not(target_os = "macos"))]
-fn is_history_go_back_keystroke(keystroke: &gpui::Keystroke) -> bool {
-    keystroke_matches(keystroke, true, false, "left")
-}
-
-#[cfg(not(target_os = "macos"))]
-fn is_history_go_forward_keystroke(keystroke: &gpui::Keystroke) -> bool {
-    keystroke_matches(keystroke, true, false, "right")
 }
 
 /// macOS menu bar and standard shortcuts. Edit items reuse the input component's clipboard actions.
@@ -293,11 +268,14 @@ fn edit_menu_items(
 #[cfg(test)]
 mod history_navigation_tests {
     use super::{
-        APP_SHELL_KEY_CONTEXT, GoBack, GoForward, VIDEO_PLAYER_KEY_CONTEXT,
-        history_navigation_bindings, is_history_go_back_keystroke, is_history_go_forward_keystroke,
+        APP_SHELL_KEY_CONTEXT, GoBack, GoForward, MENU_KEY_CONTEXT, MODAL_BACKDROP_KEY_CONTEXT,
+        VIDEO_PLAYER_KEY_CONTEXT, history_navigation_bindings,
     };
+    use crate::command_palette::KEY_CONTEXT as COMMAND_PALETTE_KEY_CONTEXT;
+    use crate::tour::KEY_CONTEXT as TOUR_KEY_CONTEXT;
     use gpui::{Action, KeyContext, Keymap, Keystroke};
-    use mezon_widgets::text_actions::TEXT_INPUT_CONTEXT;
+    use mezon_canvas::CANVAS_EDITING_KEY_CONTEXT;
+    use mezon_widgets::text_actions::{TEXT_INPUT_CONTEXT, text_input_bindings};
 
     fn matches(keymap: &Keymap, key: &str, contexts: &[KeyContext], action: &dyn Action) -> bool {
         let keystroke = Keystroke::parse(key).unwrap_or_else(|_| panic!("parse {key}"));
@@ -333,21 +311,9 @@ mod history_navigation_tests {
     }
 
     fn keymap_after_text_editing() -> Keymap {
-        #[cfg(target_os = "macos")]
-        {
-            use gpui::KeyBinding;
-            use mezon_widgets::text_actions::{End, Home};
-            let mut keymap = Keymap::new(history_navigation_bindings());
-            keymap.add_bindings([
-                KeyBinding::new("cmd-left", Home, Some(TEXT_INPUT_CONTEXT)),
-                KeyBinding::new("cmd-right", End, Some(TEXT_INPUT_CONTEXT)),
-            ]);
-            keymap
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            Keymap::new(history_navigation_bindings())
-        }
+        let mut keymap = Keymap::new(history_navigation_bindings());
+        keymap.add_bindings(text_input_bindings());
+        keymap
     }
 
     #[test]
@@ -395,20 +361,47 @@ mod history_navigation_tests {
     }
 
     #[test]
-    fn history_keys_do_not_hijack_video_player_seek() {
+    fn history_shortcuts_still_navigate_while_a_video_is_focused() {
         let keymap = Keymap::new(history_navigation_bindings());
         let video = video_player_context();
 
         #[cfg(target_os = "macos")]
         {
-            assert!(!matches(&keymap, "cmd-left", &video, &GoBack));
-            assert!(!matches(&keymap, "cmd-right", &video, &GoForward));
+            assert!(matches(&keymap, "cmd-[", &video, &GoBack));
+            assert!(matches(&keymap, "cmd-]", &video, &GoForward));
+            assert!(!matches(&keymap, "left", &video, &GoBack));
+            assert!(!matches(&keymap, "right", &video, &GoForward));
         }
 
         #[cfg(not(target_os = "macos"))]
         {
-            assert!(!matches(&keymap, "alt-left", &video, &GoBack));
-            assert!(!matches(&keymap, "alt-right", &video, &GoForward));
+            assert!(matches(&keymap, "alt-left", &video, &GoBack));
+            assert!(matches(&keymap, "alt-right", &video, &GoForward));
+            assert!(!matches(&keymap, "left", &video, &GoBack));
+            assert!(!matches(&keymap, "right", &video, &GoForward));
+        }
+    }
+
+    #[test]
+    fn history_keys_do_not_change_route_behind_an_overlay() {
+        let keymap = Keymap::new(history_navigation_bindings());
+        let key = if cfg!(target_os = "macos") {
+            "cmd-["
+        } else {
+            "alt-left"
+        };
+        for context in [
+            MENU_KEY_CONTEXT,
+            MODAL_BACKDROP_KEY_CONTEXT,
+            COMMAND_PALETTE_KEY_CONTEXT,
+            TOUR_KEY_CONTEXT,
+            CANVAS_EDITING_KEY_CONTEXT,
+        ] {
+            let stack = vec![app_shell_context(), context_with(&[context])];
+            assert!(
+                !matches(&keymap, key, &stack, &GoBack),
+                "{key} must not go back inside {context}"
+            );
         }
     }
 
@@ -432,48 +425,6 @@ mod history_navigation_tests {
         {
             assert!(matches(&keymap, "alt-left", &text, &GoBack));
             assert!(matches(&keymap, "alt-right", &text, &GoForward));
-        }
-    }
-
-    #[test]
-    fn keystroke_fallback_recognises_the_platform_shortcuts() {
-        #[cfg(target_os = "macos")]
-        {
-            for key in ["cmd-left", "cmd-["] {
-                assert!(is_history_go_back_keystroke(
-                    &Keystroke::parse(key).unwrap_or_else(|_| panic!("parse {key}"))
-                ));
-            }
-            for key in ["cmd-right", "cmd-]"] {
-                assert!(is_history_go_forward_keystroke(
-                    &Keystroke::parse(key).unwrap_or_else(|_| panic!("parse {key}"))
-                ));
-            }
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            assert!(is_history_go_back_keystroke(
-                &Keystroke::parse("alt-left").unwrap()
-            ));
-            assert!(is_history_go_forward_keystroke(
-                &Keystroke::parse("alt-right").unwrap()
-            ));
-        }
-    }
-
-    #[test]
-    fn keystroke_fallback_ignores_unrelated_or_over_modified_keys() {
-        for key in [
-            "left",
-            "right",
-            "ctrl-alt-left",
-            "ctrl-alt-right",
-            "shift-alt-left",
-        ] {
-            let keystroke = Keystroke::parse(key).unwrap_or_else(|_| panic!("parse {key}"));
-            assert!(!is_history_go_back_keystroke(&keystroke));
-            assert!(!is_history_go_forward_keystroke(&keystroke));
         }
     }
 }
