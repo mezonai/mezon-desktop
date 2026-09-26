@@ -419,6 +419,11 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
                 .cloned()
         })
         .flatten();
+    let has_topic = latest_topic.is_some() && !topic_syncing;
+    let has_pin = latest_pin.is_some();
+    if !has_topic && !has_pin {
+        return div().hidden().into_any_element();
+    }
 
     let theme = cx.theme();
     let hover = theme.bg_hover;
@@ -475,7 +480,7 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
             if let Some(path) = attachment.local_source.clone() {
                 return div()
                     .flex_none()
-                    .size(px(42.))
+                    .size(px(32.))
                     .rounded(px(7.))
                     .overflow_hidden()
                     .child(img(path).size_full().object_fit(ObjectFit::Cover))
@@ -493,7 +498,7 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
             if !source.is_empty() {
                 return div()
                     .flex_none()
-                    .size(px(42.))
+                    .size(px(32.))
                     .rounded(px(7.))
                     .overflow_hidden()
                     .child(img(source).size_full().object_fit(ObjectFit::Cover))
@@ -512,14 +517,14 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
             .flex_none()
             .items_center()
             .gap_2()
-            .w(px(145.))
-            .h(px(46.))
+            .w(px(124.))
+            .h(px(36.))
             .px_2()
             .rounded(px(7.))
             .border_1()
             .border_color(theme.border)
             .bg(theme.bg_hover)
-            .child(img(file_icon.path()).w(px(26.)).h(px(34.)).flex_none())
+            .child(img(file_icon.path()).w(px(20.)).h(px(26.)).flex_none())
             .child(
                 div()
                     .flex()
@@ -550,11 +555,11 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
         .id("latest-topic-activity")
         .flex()
         .items_center()
-        .gap_3()
+        .gap(px(6.))
         .flex_1()
         .min_w_0()
         .h_full()
-        .px_3()
+        .px(px(6.))
         .rounded(px(9.))
         .overflow_hidden()
         .when(latest_topic.is_some() && !topic_syncing, |cell| {
@@ -567,10 +572,10 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
                 .flex_none()
                 .items_center()
                 .justify_center()
-                .size(px(36.))
+                .size(px(28.))
                 .child(
                     Icon::new(IconName::TopicIcon)
-                        .size(px(30.))
+                        .size(px(22.))
                         .text_color(theme.interactive_active),
                 ),
         )
@@ -694,7 +699,7 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
             if !source.is_empty() {
                 return div()
                     .flex_none()
-                    .size(px(42.))
+                    .size(px(32.))
                     .rounded(px(7.))
                     .overflow_hidden()
                     .child(img(source).size_full().object_fit(ObjectFit::Cover))
@@ -718,14 +723,14 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
             .flex_none()
             .items_center()
             .gap_2()
-            .w(px(145.))
-            .h(px(46.))
+            .w(px(124.))
+            .h(px(36.))
             .px_2()
             .rounded(px(7.))
             .border_1()
             .border_color(theme.border)
             .bg(theme.bg_hover)
-            .child(img(file_icon.path()).w(px(26.)).h(px(34.)).flex_none())
+            .child(img(file_icon.path()).w(px(20.)).h(px(26.)).flex_none())
             .child(
                 div()
                     .flex()
@@ -758,7 +763,7 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
             .map(|profile| profile.display_name.clone())
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| pin.sender_name.clone());
-        let mut avatar = Avatar::new().name(display_name).size_px(px(32.));
+        let mut avatar = Avatar::new().name(display_name).size_px(px(26.));
         let raw_source = pin_profile
             .as_ref()
             .map(|profile| profile.avatar_url.as_str())
@@ -779,11 +784,11 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
         .id("latest-pinned-message")
         .flex()
         .items_center()
-        .gap_3()
+        .gap(px(6.))
         .flex_1()
         .min_w_0()
         .h_full()
-        .px_3()
+        .px(px(6.))
         .rounded(px(9.))
         .overflow_hidden()
         .when(pin_message_id.is_some(), |cell| {
@@ -862,18 +867,14 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
         .flex_row()
         .flex_none()
         .w_full()
-        .h(px(70.))
-        .p_1()
-        .border_b_1()
-        .border_color(theme.border)
-        .bg(theme.bg_primary)
+        .h(px(48.))
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .size_full()
-                .rounded(px(12.))
+                .rounded(px(10.))
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.bg_secondary)
@@ -884,16 +885,18 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
                         .flex_row()
                         .items_center()
                         .size_full()
-                        .child(topic_cell)
-                        .child(
-                            div()
-                                .flex_none()
-                                .w(px(2.))
-                                .h(px(42.))
-                                .rounded_full()
-                                .bg(theme.text_muted),
-                        )
-                        .child(pin_cell),
+                        .when(has_topic, |row| row.child(topic_cell))
+                        .when(has_topic && has_pin, |row| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .w(px(2.))
+                                    .h(px(30.))
+                                    .rounded_full()
+                                    .bg(theme.text_muted),
+                            )
+                        })
+                        .when(has_pin, |row| row.child(pin_cell)),
                 ),
         )
         .into_any_element()
@@ -1757,7 +1760,6 @@ impl ChatArea {
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
-            .children(activity_strip)
             .when(!media_channel_view, |col| {
                 let drop_input = mention_input;
                 let input_visible = !send_denied && !banned;
@@ -1813,6 +1815,16 @@ impl ChatArea {
                         )
                 })
                 .when_some(drop_overlay, |col, overlay| col.child(overlay))
+            })
+            .when_some(activity_strip, |col, strip| {
+                col.child(
+                    div()
+                        .absolute()
+                        .top(px(4.))
+                        .left(px(6.))
+                        .right(px(6.))
+                        .child(strip),
+                )
             });
 
         let has_search_panel = show_results_panel && message_search_panel.is_some();
