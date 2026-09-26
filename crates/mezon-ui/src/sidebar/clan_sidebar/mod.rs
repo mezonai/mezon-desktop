@@ -313,6 +313,8 @@ impl ClanSidebar {
         if *self.rows == rows {
             return false;
         }
+        let old_active_ix = self.rows.iter().position(|row| row.active);
+        let new_active_ix = rows.iter().position(|row| row.active);
         let count = rows.len();
         let item_count = count + 1;
         let needs_reset = self.list_state.item_count() != item_count;
@@ -324,6 +326,11 @@ impl ClanSidebar {
                 item_count,
                 size(px(0.), px(CLAN_ROW_HEIGHT)),
             );
+        }
+        if let Some(ix) = new_active_ix
+            && new_active_ix != old_active_ix
+        {
+            self.list_state.scroll_to_reveal_item(ix);
         }
         true
     }
@@ -504,19 +511,17 @@ fn nav_arrow(id: &'static str, enabled: bool, is_back: bool, theme: &Theme) -> A
         .justify_center()
         .rounded_full()
         .p(px(window_controls::NAV_ARROW_BUTTON_PADDING))
-        .child(icon);
+        .child(icon)
+        .on_click(move |_, _, cx| {
+            if is_back {
+                crate::router::go_back(cx);
+            } else {
+                crate::router::go_forward(cx);
+            }
+        });
 
     if enabled {
-        button = button
-            .cursor_pointer()
-            .hover(move |s| s.bg(bg_hover))
-            .on_click(move |_, _, cx| {
-                if is_back {
-                    crate::router::go_back(cx);
-                } else {
-                    crate::router::go_forward(cx);
-                }
-            });
+        button = button.cursor_pointer().hover(move |s| s.bg(bg_hover));
     }
 
     button.into_any_element()

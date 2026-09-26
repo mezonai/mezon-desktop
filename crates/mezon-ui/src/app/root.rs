@@ -571,6 +571,7 @@ impl Render for RootView {
             .flex()
             .flex_col()
             .size_full()
+            .key_context(crate::APP_SHELL_KEY_CONTEXT)
             .font_family(base_font_family)
             .text_color(theme.text_primary)
             .overflow_hidden()

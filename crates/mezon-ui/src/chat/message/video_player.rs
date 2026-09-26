@@ -821,6 +821,7 @@ impl Render for VideoPlayerView {
             .relative()
             .overflow_hidden()
             .bg(theme.bg_tertiary)
+            .key_context(crate::VIDEO_PLAYER_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
                 view.on_key(event, window, cx);

@@ -314,7 +314,11 @@ impl ChannelSidebar {
                 return;
             }
             this.last_route_channel = active;
-            if this.rebuild_items(cx) {
+            let changed = this.rebuild_items(cx);
+            if let Some(channel_id) = active {
+                this.scroll_to_channel_row(channel_id, false, cx);
+            }
+            if changed {
                 cx.notify();
             }
         });
