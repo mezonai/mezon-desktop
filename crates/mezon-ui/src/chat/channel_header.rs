@@ -1062,16 +1062,19 @@ fn dm_header_actions(state: DmHeaderState) -> &'static [(&'static str, IconName)
             ("hdr-add-members", IconName::IconAddFriendDM),
             ("hdr-members", IconName::IconUserProfileDM),
             ("hdr-gallery", IconName::ImageThumbnail),
+            ("hdr-files", IconName::FileIcon),
         ],
         DmHeaderState::OneToOneBlocked => &[
             ("hdr-pin", IconName::PinRight),
             ("hdr-gallery", IconName::ImageThumbnail),
+            ("hdr-files", IconName::FileIcon),
         ],
         DmHeaderState::Group => &[
             ("hdr-add-members", IconName::IconAddFriendDM),
             ("hdr-members", IconName::MemberList),
             ("hdr-pin", IconName::PinRight),
             ("hdr-gallery", IconName::ImageThumbnail),
+            ("hdr-files", IconName::FileIcon),
         ],
     }
 }
@@ -1519,36 +1522,34 @@ impl Render for ChatHeader {
             })
             .into_any_element();
 
-        let files_trigger = if !self.dm {
-            Some(
-                PopoverMenu::new("hdr-files-popover")
-                    .anchor(Anchor::TopRight)
-                    .attach(Anchor::BottomRight)
-                    .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
-                    .on_open(files_popover_on_open())
-                    .menu({
-                        let settings = settings.clone();
-                        move |window, cx| {
-                            let (clan_id, channel_id) =
-                                crate::chat::files_popover::active_files_channel(cx)?;
-                            Some(cx.new(|cx| {
-                                FilesPopoverPanel::new(
-                                    settings.clone(),
-                                    clan_id,
-                                    channel_id,
-                                    PopoverMenuHandle::default(),
-                                    window,
-                                    cx,
-                                )
-                            }))
-                        }
-                    })
-                    .trigger(FilesPopoverTrigger::new(&theme))
-                    .into_any_element(),
-            )
-        } else {
-            None
-        };
+        let files_tooltip: SharedString =
+            mezon_i18n::t(&locale, "channelTopbar.tooltips.files").into();
+        let files_trigger = Some(
+            PopoverMenu::new("hdr-files-popover")
+                .anchor(Anchor::TopRight)
+                .attach(Anchor::BottomRight)
+                .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
+                .on_open(files_popover_on_open())
+                .menu({
+                    let settings = settings.clone();
+                    move |window, cx| {
+                        let (clan_id, channel_id) =
+                            crate::chat::files_popover::active_files_channel(cx)?;
+                        Some(cx.new(|cx| {
+                            FilesPopoverPanel::new(
+                                settings.clone(),
+                                clan_id,
+                                channel_id,
+                                PopoverMenuHandle::default(),
+                                window,
+                                cx,
+                            )
+                        }))
+                    }
+                })
+                .trigger(FilesPopoverTrigger::new(&theme, files_tooltip))
+                .into_any_element(),
+        );
 
         let members_toggle = Arc::new(move |window: &mut Window, cx: &mut App| {
             let _ = layout_weak.update(cx, |this, cx| this.toggle_member_list(window, cx));
@@ -2193,18 +2194,20 @@ struct FilesPopoverTrigger {
     bg_hover: gpui::Rgba,
     bg_active: gpui::Rgba,
     selected: bool,
+    tooltip: SharedString,
     on_click: Option<ClickHandler>,
     cursor: Option<CursorStyle>,
 }
 
 impl FilesPopoverTrigger {
-    fn new(theme: &Theme) -> Self {
+    fn new(theme: &Theme, tooltip: SharedString) -> Self {
         Self {
             icon_idle: theme.tokens.bg_icon_theme,
             icon_active: theme.text_primary,
             bg_hover: theme.bg_hover,
             bg_active: theme.bg_tertiary,
             selected: false,
+            tooltip,
             on_click: None,
             cursor: None,
         }
@@ -2250,6 +2253,7 @@ impl IntoElement for FilesPopoverTrigger {
             .rounded_md()
             .cursor_pointer()
             .hover(move |s| s.bg(bg_hover))
+            .tooltip(Tooltip::text(self.tooltip))
             .occlude()
             .child(Icon::new(IconName::FileIcon).size(px(20.)).text_color(tint));
         if self.selected {
@@ -2368,15 +2372,22 @@ mod tests {
                 "hdr-add-members",
                 "hdr-members",
                 "hdr-gallery",
+                "hdr-files",
             ]
         );
         assert_eq!(
             action_ids(DmHeaderState::Group),
-            ["hdr-add-members", "hdr-members", "hdr-pin", "hdr-gallery",]
+            [
+                "hdr-add-members",
+                "hdr-members",
+                "hdr-pin",
+                "hdr-gallery",
+                "hdr-files",
+            ]
         );
         assert_eq!(
             action_ids(DmHeaderState::OneToOneBlocked),
-            ["hdr-pin", "hdr-gallery"]
+            ["hdr-pin", "hdr-gallery", "hdr-files"]
         );
     }
 
@@ -2385,5 +2396,6 @@ mod tests {
         let actions = action_ids(DmHeaderState::Unresolved);
         assert_eq!(actions, ["hdr-add-members", "hdr-members", "hdr-pin"]);
         assert!(!actions.contains(&"hdr-gallery"));
+        assert!(!actions.contains(&"hdr-files"));
     }
 }

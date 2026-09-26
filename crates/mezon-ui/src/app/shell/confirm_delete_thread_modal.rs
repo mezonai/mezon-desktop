@@ -109,7 +109,7 @@ impl Render for ConfirmDeleteThreadModal {
             .rounded_lg()
             .border_1()
             .border_color(theme.border)
-            .bg(theme.bg_floating)
+            .bg(theme.tokens.bg_modal_theme)
             .shadow_lg()
             .child(
                 v_flex()
@@ -137,7 +137,9 @@ impl Render for ConfirmDeleteThreadModal {
                     .items_center()
                     .gap_4()
                     .p(px(16.))
-                    .bg(theme.bg_secondary)
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .bg(theme.tokens.bg_hover)
                     .child(
                         Button::new("confirm-delete-thread-cancel")
                             .label(self.cancel_label.clone())
