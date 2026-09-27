@@ -35,6 +35,7 @@ pub struct VideoFrameData {
 }
 
 pub struct VideoFrameStore {
+    pub screen_views: Arc<crate::screen_recovery::ScreenViews>,
     state: Mutex<VideoFrameState>,
     seq: AtomicU64,
     recording: AtomicBool,
@@ -45,6 +46,7 @@ impl Default for VideoFrameStore {
     fn default() -> Self {
         Self {
             state: Mutex::new(VideoFrameState::default()),
+            screen_views: Arc::default(),
             seq: AtomicU64::new(0),
             recording: AtomicBool::new(false),
             frame_tx: watch::channel(0).0,
@@ -142,7 +144,12 @@ impl VideoFrameStore {
     }
 
     pub fn note_received(&self, key: u64) {
-        self.state.lock().path_counters.entry(key).or_default().received += 1;
+        self.state
+            .lock()
+            .path_counters
+            .entry(key)
+            .or_default()
+            .received += 1;
     }
 
     pub fn log_frame_path(&self) {

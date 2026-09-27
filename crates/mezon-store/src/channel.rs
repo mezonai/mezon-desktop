@@ -19,7 +19,6 @@ use mezon_client::{
 };
 
 use crate::KeyedCache;
-use crate::voice_presence::VoicePresence;
 use crate::badge::BadgeService;
 use crate::channel_settings::ChannelSettingsStore;
 use crate::clan::{ClanEvent, ClanList};
@@ -138,6 +137,7 @@ pub struct ArchivedChannelDesc {
     pub channel_id: i64,
     pub channel_label: String,
     pub channel_private: bool,
+    pub channel_type: ChannelType,
     pub category_id: i64,
     pub creator_id: i64,
     pub age_restricted: bool,
@@ -186,6 +186,10 @@ impl Channel {
         self.parent_id.is_some() && self.active == CHANNEL_ACTIVE_ARCHIVED
     }
 
+    pub fn is_age_restricted(&self) -> bool {
+        is_age_restricted(self.age_restricted)
+    }
+
     pub fn visible_in_sidebar(&self) -> bool {
         !self.is_archived()
     }
@@ -202,6 +206,12 @@ impl Channel {
 /// on anything but an app channel; the product exposes it for text and voice
 /// — a private voice room is listed for, and hands a meet token to, its
 /// members and roles only. Stream stays public.
+pub const AGE_RESTRICTED_ON: i32 = 1;
+
+pub fn is_age_restricted(age_restricted: i32) -> bool {
+    age_restricted == AGE_RESTRICTED_ON
+}
+
 pub fn channel_supports_private(channel_type: ChannelType) -> bool {
     matches!(channel_type, ChannelType::Text | ChannelType::Voice)
 }
@@ -596,7 +606,6 @@ struct TopicParentBadge {
 }
 
 struct ClanExtras {
-    voice_peers: Vec<(i64, i64, i32)>,
     voice_map: Option<HashMap<ChannelId, Vec<VoiceMember>>>,
     app_channels: Option<Vec<AppChannel>>,
 }
@@ -653,7 +662,7 @@ pub struct ChannelList {
     user_channels_loading: bool,
     user_channels_generation: u64,
     in_voice: HashMap<UserId, InVoiceInfo>,
-    voice_presence: VoicePresence,
+    voice_revisions: HashMap<ClanId, u64>,
     user_channels_loaded: bool,
     loading: HashMap<ClanId, Shared<Task<()>>>,
     pending_clan_refresh: HashSet<ClanId>,
@@ -846,7 +855,7 @@ impl ChannelList {
         self.user_channels_loading = false;
         self.user_channels_generation = self.user_channels_generation.wrapping_add(1);
         self.in_voice.clear();
-        self.voice_presence = VoicePresence::default();
+        self.voice_revisions.clear();
         self.user_channels_loaded = false;
         self.loading.clear();
         self.pending_clan_refresh.clear();
@@ -959,7 +968,7 @@ impl ChannelList {
             user_channels_loading: false,
             user_channels_generation: 0,
             in_voice: HashMap::new(),
-            voice_presence: VoicePresence::default(),
+            voice_revisions: HashMap::new(),
             user_channels_loaded: false,
             loading: HashMap::new(),
             pending_clan_refresh: HashSet::new(),
@@ -1075,7 +1084,6 @@ impl ChannelList {
         self.user_channels_order
             .retain(|channel_id| self.user_channels.contains_key(channel_id));
         self.in_voice.retain(|_, info| info.clan_id != clan_id);
-        self.voice_presence.forget_clan(clan_id.get());
 
         self.invalidate_channel_index(clan_id);
         if self.active_clan_id == Some(clan_id) {
@@ -1402,6 +1410,17 @@ impl ChannelList {
         self.fetch_clan(clan_id, cx);
     }
 
+    fn voice_revision(&self, clan_id: ClanId) -> u64 {
+        self.voice_revisions
+            .get(&clan_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn bump_voice_revision(&mut self, clan_id: ClanId) {
+        *self.voice_revisions.entry(clan_id).or_default() += 1;
+    }
+
     fn ensure_extras(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         if self.extras_loaded.contains(&clan_id) || !self.extras_loading.insert(clan_id) {
             return;
@@ -1409,7 +1428,7 @@ impl ChannelList {
         let api = self.api.clone();
         let generation = self.reset_generation;
         let socket_generation = self.socket_generation;
-        let presence_revision = self.voice_presence.revision(clan_id.get());
+        let voice_revision = self.voice_revision(clan_id);
         cx.spawn(async move |this, cx| {
             let extras = Self::fetch_clan_extras(&api, clan_id).await;
             let _ = this.update(cx, |this, cx| {
@@ -1419,7 +1438,7 @@ impl ChannelList {
                     return;
                 }
                 this.extras_loading.remove(&clan_id);
-                if this.voice_presence.revision(clan_id.get()) != presence_revision {
+                if this.voice_revision(clan_id) != voice_revision {
                     this.ensure_extras(clan_id, cx);
                     return;
                 }
@@ -1469,9 +1488,10 @@ impl ChannelList {
                     channel_id: d.channel_id,
                     channel_label: d.channel_label,
                     channel_private: d.channel_private != 0,
+                    channel_type: ChannelType::from_raw(d.r#type as u32),
                     category_id: d.category_id,
                     creator_id: d.creator_id,
-                    age_restricted: d.age_restricted != 0,
+                    age_restricted: is_age_restricted(d.age_restricted),
                     last_active_timestamp: d
                         .last_sent_message
                         .filter(|m| m.timestamp_seconds > 0)
@@ -2038,24 +2058,10 @@ impl ChannelList {
             .ok()
             .map(|apps| apps.into_iter().map(AppChannel::from).collect());
 
-        let mut voice_peers = Vec::new();
         let voice_map: Option<HashMap<ChannelId, Vec<VoiceMember>>> = voice_users.map(|users| {
             users
                 .into_iter()
                 .map(|v| {
-                    let peers_aligned = v.user_ids.len() == v.peer_ids.len();
-                    tracing::info!(
-                        clan_id = clan_id.get(), channel_id = v.channel_id,
-                        user_ids = ?v.user_ids, peer_ids = ?v.peer_ids, peers_aligned,
-                        "[MezonSFU][presence] snapshot"
-                    );
-                    voice_peers.extend(v.user_ids.iter().enumerate().map(|(index, &user)| {
-                        (
-                            v.channel_id,
-                            user,
-                            if peers_aligned { v.peer_ids[index] } else { 0 },
-                        )
-                    }));
                     (
                         ChannelId(v.channel_id),
                         voice_members_from(v.user_ids, v.share_screen_ids),
@@ -2066,7 +2072,6 @@ impl ChannelList {
 
         ClanExtras {
             voice_map,
-            voice_peers,
             app_channels,
         }
     }
@@ -2093,7 +2098,6 @@ impl ChannelList {
 
         let mut changed = app_channels_changed;
         if let Some(voice_map) = extras.voice_map.as_ref() {
-            self.voice_presence.replace_clan(clan_id.get(), &extras.voice_peers);
             for ch in owned
                 .iter_mut()
                 .flat_map(|category| category.channels.iter_mut())
@@ -3760,24 +3764,7 @@ impl ChannelList {
                 let clan_id = ClanId(e.clan_id);
                 let channel_id = ChannelId(e.voice_channel_id);
                 let user_id = UserId(e.user_id);
-                tracing::info!(
-                    event = ?e,
-                    peer_id = e.peer_id,
-                    presence_key = "clan_id/channel_id/user_id/peer_id",
-                    "[MezonSFU][presence] received VoiceJoined"
-                );
-                let peers_before =
-                    self.voice_presence
-                        .peer_ids(clan_id.get(), channel_id.get(), user_id.get());
-                self.voice_presence.joined(
-                    clan_id.get(),
-                    channel_id.get(),
-                    user_id.get(),
-                    e.peer_id,
-                );
-                let status_before = self.in_voice.get(&user_id).map(|status| status.channel_id);
-                let mut members_before = 0usize;
-                let mut members_after = 0usize;
+                self.bump_voice_revision(clan_id);
                 let member = VoiceMember {
                     user_id,
                     display_name: e.participant.clone(),
@@ -3794,12 +3781,10 @@ impl ChannelList {
                         .filter(|ch| ch.id == channel_id)
                     {
                         channel_found = true;
-                        members_before += ch.voice_members.len();
                         if !ch.voice_members.iter().any(|m| m.user_id == user_id) {
                             ch.voice_members.push(member.clone());
                             changed = true;
                         }
-                        members_after += ch.voice_members.len();
                     }
                 }
                 tracing::debug!(
@@ -3820,40 +3805,13 @@ impl ChannelList {
                         sharing_screen: false,
                     },
                 );
-                tracing::info!(
-                    peer_id = e.peer_id,
-                    %clan_id, %channel_id, %user_id,
-                    members_before, members_after,
-                    ?peers_before,
-                    peers_after = ?self.voice_presence.peer_ids(clan_id.get(), channel_id.get(), user_id.get()),
-                    ?status_before,
-                    status_after = ?self.in_voice.get(&user_id).map(|status| status.channel_id),
-                    "[MezonSFU][presence] applied VoiceJoined"
-                );
                 notify_in_voice_change(changed, in_voice_changed, cx);
             }
             RealtimeEvent::VoiceLeaved(e) => {
                 let clan_id = ClanId(e.clan_id);
                 let channel_id = ChannelId(e.voice_channel_id);
                 let user_id = UserId(e.voice_user_id);
-                tracing::info!(
-                    event = ?e,
-                    peer_id = e.peer_id,
-                    presence_key = "clan_id/channel_id/user_id/peer_id",
-                    "[MezonSFU][presence] received VoiceLeaved"
-                );
-                let peers_before =
-                    self.voice_presence
-                        .peer_ids(clan_id.get(), channel_id.get(), user_id.get());
-                let remove_user = self.voice_presence.left(
-                    clan_id.get(),
-                    channel_id.get(),
-                    user_id.get(),
-                    e.peer_id,
-                );
-                let status_before = self.in_voice.get(&user_id).map(|status| status.channel_id);
-                let mut members_before = 0usize;
-                let mut members_after = 0usize;
+                self.bump_voice_revision(clan_id);
                 let clan_cached = self.cache.contains(&clan_id);
                 let mut channel_found = false;
                 let mut changed = false;
@@ -3864,12 +3822,8 @@ impl ChannelList {
                         .filter(|ch| ch.id == channel_id)
                     {
                         channel_found = true;
-                        members_before += ch.voice_members.len();
                         let before = ch.voice_members.len();
-                        if remove_user {
-                            ch.voice_members.retain(|m| m.user_id != user_id);
-                        }
-                        members_after += ch.voice_members.len();
+                        ch.voice_members.retain(|m| m.user_id != user_id);
                         if ch.voice_members.len() != before {
                             changed = true;
                         }
@@ -3885,17 +3839,7 @@ impl ChannelList {
                     "realtime VoiceLeaved"
                 );
                 let in_voice_changed =
-                    remove_user && apply_in_voice_leaved(&mut self.in_voice, user_id, channel_id);
-                tracing::info!(
-                    peer_id = e.peer_id,
-                    %clan_id, %channel_id, %user_id,
-                    members_before, members_after,
-                    ?peers_before,
-                    peers_after = ?self.voice_presence.peer_ids(clan_id.get(), channel_id.get(), user_id.get()),
-                    ?status_before,
-                    status_after = ?self.in_voice.get(&user_id).map(|status| status.channel_id),
-                    "[MezonSFU][presence] applied VoiceLeaved"
-                );
+                    apply_in_voice_leaved(&mut self.in_voice, user_id, channel_id);
                 notify_in_voice_change(changed, in_voice_changed, cx);
             }
             RealtimeEvent::ScreenShare(e) => {
@@ -4690,7 +4634,6 @@ impl ChannelList {
                 store.remove_channel_locally(clan_id, channel_id, cx)
             });
         }
-        self.voice_presence.forget_channel(clan_id.get(), channel_id.get());
         self.deleted_channel_ids.insert(channel_id);
         if !parent_id.is_zero() {
             self.deleted_channel_parents.insert(channel_id, parent_id);
@@ -8648,7 +8591,6 @@ mod tests {
 
     fn complete_extras() -> ClanExtras {
         ClanExtras {
-            voice_peers: Vec::new(),
             voice_map: Some(HashMap::new()),
             app_channels: Some(Vec::new()),
         }
@@ -8659,7 +8601,6 @@ mod tests {
 
     fn voice_extras(voice_map: HashMap<ChannelId, Vec<VoiceMember>>) -> ClanExtras {
         ClanExtras {
-            voice_peers: Vec::new(),
             voice_map: Some(voice_map),
             app_channels: Some(Vec::new()),
         }
@@ -8751,7 +8692,6 @@ mod tests {
                 channels.apply_clan_extras(
                     ClanId(1),
                     ClanExtras {
-                        voice_peers: Vec::new(),
                         voice_map: None,
                         app_channels: None,
                     },
@@ -10703,7 +10643,6 @@ mod tests {
                 channels.finish_extras(
                     ClanId(1),
                     ClanExtras {
-                        voice_peers: Vec::new(),
                         voice_map: None,
                         app_channels: None,
                     },

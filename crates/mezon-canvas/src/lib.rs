@@ -13,8 +13,8 @@ pub use navigation::{
 };
 pub use popover::{CanvasPopoverPanel, canvas_popover_on_open};
 pub use view::{
-    CanvasView, TipTapMark, TipTapNode, canvas_can_delete, canvas_can_edit,
-    is_tiptap_content_empty, parse_tiptap_doc,
+    CANVAS_EDITING_KEY_CONTEXT, CanvasView, TipTapMark, TipTapNode, canvas_can_delete,
+    canvas_can_edit, is_tiptap_content_empty, parse_tiptap_doc,
 };
 
 pub fn init(cx: &mut gpui::App) {

@@ -390,7 +390,10 @@ const AVATAR_COLORS: [u32; 7] = [
 ];
 
 fn first_upper_char(name: &str) -> Option<char> {
-    name.chars().next().and_then(|c| c.to_uppercase().next())
+    name.trim()
+        .chars()
+        .next()
+        .and_then(|c| c.to_uppercase().next())
 }
 
 pub(crate) fn avatar_color(name: &str) -> Hsla {
@@ -398,24 +401,8 @@ pub(crate) fn avatar_color(name: &str) -> Hsla {
     Hsla::from(gpui::rgb(AVATAR_COLORS[(code % 7) as usize]))
 }
 
-fn relative_luminance(r: f32, g: f32, b: f32) -> f32 {
-    fn channel(c: f32) -> f32 {
-        if c <= 0.03928 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
-    }
-    0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
-}
-
-pub(crate) fn avatar_text_color(bg: Hsla) -> Hsla {
-    let rgba = bg.to_rgb();
-    if relative_luminance(rgba.r, rgba.g, rgba.b) > 0.55 {
-        Hsla::from(gpui::rgb(0x1f2937))
-    } else {
-        Hsla::white()
-    }
+pub(crate) fn avatar_text_color(_bg: Hsla) -> Hsla {
+    Hsla::white()
 }
 
 pub(crate) fn name_initials(name: &str) -> String {

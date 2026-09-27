@@ -1013,8 +1013,6 @@ pub struct ApiCategoryDesc {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiVoiceChannelUser {
-    #[serde(default)]
-    pub peer_ids: Vec<i32>,
     pub channel_id: i64,
     pub user_ids: Vec<i64>,
     pub share_screen_ids: Vec<i64>,
@@ -1051,7 +1049,7 @@ pub struct ApiClanDesc {
     pub short_url: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiAttachment {
     pub url: String,
     pub filename: String,
@@ -1098,7 +1096,7 @@ impl ApiChannelAttachment {
     }
 }
 
-fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
+pub fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
     if bytes.is_empty() || blob_is_json_null(bytes) {
         return Vec::new();
     }
@@ -5801,28 +5799,18 @@ impl MezonTransport {
         Ok(raw
             .voice_channel_users
             .into_iter()
-            .map(|u| {
-                let aligned = u.user_ids.len() == u.peer_ids.len();
-                let mut user_ids = Vec::new();
-                let mut peer_ids = Vec::new();
-                for (index, user) in u.user_ids.iter().enumerate() {
-                    if let Ok(user) = user.parse::<i64>() {
-                        user_ids.push(user);
-                        if aligned {
-                            peer_ids.push(u.peer_ids[index]);
-                        }
-                    }
-                }
-                ApiVoiceChannelUser {
-                    channel_id: u.channel_id,
-                    user_ids,
-                    peer_ids,
-                    share_screen_ids: u
-                        .share_screen_ids
-                        .iter()
-                        .filter_map(|s| s.parse::<i64>().ok())
-                        .collect(),
-                }
+            .map(|u| ApiVoiceChannelUser {
+                channel_id: u.channel_id,
+                user_ids: u
+                    .user_ids
+                    .iter()
+                    .filter_map(|s| s.parse::<i64>().ok())
+                    .collect(),
+                share_screen_ids: u
+                    .share_screen_ids
+                    .iter()
+                    .filter_map(|s| s.parse::<i64>().ok())
+                    .collect(),
             })
             .collect())
     }
@@ -6539,50 +6527,6 @@ impl MezonTransport {
             ..Default::default()
         };
         let _ack = self.write_or_http_channel_message(message).await?;
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
-    pub async fn update_channel_message_with_attachments(
-        &self,
-        clan_id: i64,
-        channel_id: i64,
-        message_id: i64,
-        content: &str,
-        attachments: Vec<api::MessageAttachment>,
-        mode: i32,
-        is_public: bool,
-        topic_id: i64,
-        is_update_msg_topic: bool,
-        create_time_seconds: u32,
-    ) -> Result<()> {
-        let cid = self.generate_cid();
-        let mut content_json = build_send_content(content, &[], &[], &[]).json;
-        if create_time_seconds > 0 {
-            content_json = with_create_time_seconds(content_json, create_time_seconds);
-        }
-        let body = realtime::ChannelMessageUpdate {
-            clan_id,
-            channel_id,
-            message_id,
-            content: content_json,
-            attachments,
-            mode,
-            is_public,
-            hide_editted: true,
-            create_time_seconds,
-            topic_id,
-            is_update_msg_topic,
-            ..Default::default()
-        }
-        .encode_to_vec();
-        let (code, _) = self
-            .send_api_request(cid, "UpdateChannelMessage", body)
-            .await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
         Ok(())
     }
 

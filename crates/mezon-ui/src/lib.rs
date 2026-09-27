@@ -49,6 +49,11 @@ pub use window_layout::{
 
 pub(crate) const SHOW_UNREAD_BADGE_COUNT: bool = true;
 
+pub(crate) const APP_SHELL_KEY_CONTEXT: &str = "AppShell";
+pub(crate) const VIDEO_PLAYER_KEY_CONTEXT: &str = "VideoPlayer";
+const MENU_KEY_CONTEXT: &str = "menu";
+const MODAL_BACKDROP_KEY_CONTEXT: &str = "modal_backdrop";
+
 gpui::actions!(
     mezon,
     [
@@ -57,7 +62,9 @@ gpui::actions!(
         HideWindow,
         MinimizeWindow,
         HideApp,
-        OpenCommandPalette
+        OpenCommandPalette,
+        GoBack,
+        GoForward,
     ]
 );
 
@@ -103,6 +110,7 @@ pub fn init(cx: &mut gpui::App) {
     cx.on_action(|_: &OpenCommandPalette, cx: &mut gpui::App| {
         command_palette::CommandPaletteModal::try_toggle_authenticated(cx);
     });
+    install_history_navigation(cx);
     components::primitives::init_text_input(cx);
     components::primitives::init_focus_cycle(cx);
     chat::mention_input::init(cx);
@@ -113,6 +121,55 @@ pub fn init(cx: &mut gpui::App) {
     tour::init(cx);
     router::Router::init(cx);
     init_menus(cx);
+}
+
+fn history_keystrokes() -> &'static [(&'static str, bool)] {
+    #[cfg(target_os = "macos")]
+    {
+        &[
+            ("cmd-left", true),
+            ("cmd-right", false),
+            ("cmd-[", true),
+            ("cmd-]", false),
+        ]
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        &[("alt-left", true), ("alt-right", false)]
+    }
+}
+
+fn history_navigation_scope() -> String {
+    format!(
+        "{APP_SHELL_KEY_CONTEXT} && !{MENU_KEY_CONTEXT} && !{MODAL_BACKDROP_KEY_CONTEXT} && !{} && !{}",
+        crate::command_palette::KEY_CONTEXT,
+        crate::tour::KEY_CONTEXT,
+    )
+}
+
+fn history_navigation_bindings() -> Vec<gpui::KeyBinding> {
+    let scope = history_navigation_scope();
+    let canvas = mezon_canvas::CANVAS_EDITING_KEY_CONTEXT;
+    let mut bindings = Vec::with_capacity(history_keystrokes().len() * 2);
+    for &(key, back) in history_keystrokes() {
+        if back {
+            bindings.push(gpui::KeyBinding::new(key, GoBack, Some(scope.as_str())));
+        } else {
+            bindings.push(gpui::KeyBinding::new(key, GoForward, Some(scope.as_str())));
+        }
+        bindings.push(gpui::KeyBinding::new(key, gpui::NoAction, Some(canvas)));
+    }
+    bindings
+}
+
+fn install_history_navigation(cx: &mut gpui::App) {
+    cx.bind_keys(history_navigation_bindings());
+    cx.on_action(|_: &GoBack, cx: &mut gpui::App| {
+        router::go_back(cx);
+    });
+    cx.on_action(|_: &GoForward, cx: &mut gpui::App| {
+        router::go_forward(cx);
+    });
 }
 
 /// macOS menu bar and standard shortcuts. Edit items reuse the input component's clipboard actions.
@@ -206,4 +263,168 @@ fn edit_menu_items(
         MenuItem::separator(),
         MenuItem::os_action("Select All", select_all, OsAction::SelectAll),
     ]
+}
+
+#[cfg(test)]
+mod history_navigation_tests {
+    use super::{
+        APP_SHELL_KEY_CONTEXT, GoBack, GoForward, MENU_KEY_CONTEXT, MODAL_BACKDROP_KEY_CONTEXT,
+        VIDEO_PLAYER_KEY_CONTEXT, history_navigation_bindings,
+    };
+    use crate::command_palette::KEY_CONTEXT as COMMAND_PALETTE_KEY_CONTEXT;
+    use crate::tour::KEY_CONTEXT as TOUR_KEY_CONTEXT;
+    use gpui::{Action, KeyContext, Keymap, Keystroke};
+    use mezon_canvas::CANVAS_EDITING_KEY_CONTEXT;
+    use mezon_widgets::text_actions::{TEXT_INPUT_CONTEXT, text_input_bindings};
+
+    fn matches(keymap: &Keymap, key: &str, contexts: &[KeyContext], action: &dyn Action) -> bool {
+        let keystroke = Keystroke::parse(key).unwrap_or_else(|_| panic!("parse {key}"));
+        let (bindings, pending) =
+            keymap.bindings_for_input(std::slice::from_ref(&keystroke), contexts);
+        assert!(!pending, "{key} must not wait for another key");
+        bindings
+            .first()
+            .is_some_and(|binding| binding.action().partial_eq(action))
+    }
+
+    fn context_with(identifiers: &[&str]) -> KeyContext {
+        let mut context = KeyContext::default();
+        for identifier in identifiers {
+            context.add(*identifier);
+        }
+        context
+    }
+
+    fn app_shell_context() -> KeyContext {
+        context_with(&[APP_SHELL_KEY_CONTEXT])
+    }
+
+    fn text_context() -> Vec<KeyContext> {
+        vec![app_shell_context(), context_with(&[TEXT_INPUT_CONTEXT])]
+    }
+
+    fn video_player_context() -> Vec<KeyContext> {
+        vec![
+            app_shell_context(),
+            context_with(&[VIDEO_PLAYER_KEY_CONTEXT]),
+        ]
+    }
+
+    fn keymap_after_text_editing() -> Keymap {
+        let mut keymap = Keymap::new(history_navigation_bindings());
+        keymap.add_bindings(text_input_bindings());
+        keymap
+    }
+
+    #[test]
+    fn browser_history_keys_navigate_within_the_app_shell() {
+        let keymap = Keymap::new(history_navigation_bindings());
+        let app_shell = &[app_shell_context()];
+
+        #[cfg(target_os = "macos")]
+        {
+            assert!(matches(&keymap, "cmd-left", app_shell, &GoBack));
+            assert!(matches(&keymap, "cmd-right", app_shell, &GoForward));
+            assert!(matches(&keymap, "cmd-[", app_shell, &GoBack));
+            assert!(matches(&keymap, "cmd-]", app_shell, &GoForward));
+            assert!(!matches(&keymap, "alt-left", app_shell, &GoBack));
+            assert!(!matches(&keymap, "alt-right", app_shell, &GoForward));
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(matches(&keymap, "alt-left", app_shell, &GoBack));
+            assert!(matches(&keymap, "alt-right", app_shell, &GoForward));
+            assert!(!matches(&keymap, "ctrl-left", app_shell, &GoBack));
+            assert!(!matches(&keymap, "ctrl-right", app_shell, &GoForward));
+        }
+    }
+
+    #[test]
+    fn history_keys_never_fire_in_detached_viewer_windows() {
+        let keymap = Keymap::new(history_navigation_bindings());
+        let detached_window: &[KeyContext] = &[];
+
+        #[cfg(target_os = "macos")]
+        {
+            assert!(!matches(&keymap, "cmd-left", detached_window, &GoBack));
+            assert!(!matches(&keymap, "cmd-right", detached_window, &GoForward));
+            assert!(!matches(&keymap, "cmd-[", detached_window, &GoBack));
+            assert!(!matches(&keymap, "cmd-]", detached_window, &GoForward));
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(!matches(&keymap, "alt-left", detached_window, &GoBack));
+            assert!(!matches(&keymap, "alt-right", detached_window, &GoForward));
+        }
+    }
+
+    #[test]
+    fn history_shortcuts_still_navigate_while_a_video_is_focused() {
+        let keymap = Keymap::new(history_navigation_bindings());
+        let video = video_player_context();
+
+        #[cfg(target_os = "macos")]
+        {
+            assert!(matches(&keymap, "cmd-[", &video, &GoBack));
+            assert!(matches(&keymap, "cmd-]", &video, &GoForward));
+            assert!(!matches(&keymap, "left", &video, &GoBack));
+            assert!(!matches(&keymap, "right", &video, &GoForward));
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(matches(&keymap, "alt-left", &video, &GoBack));
+            assert!(matches(&keymap, "alt-right", &video, &GoForward));
+            assert!(!matches(&keymap, "left", &video, &GoBack));
+            assert!(!matches(&keymap, "right", &video, &GoForward));
+        }
+    }
+
+    #[test]
+    fn history_keys_do_not_change_route_behind_an_overlay() {
+        let keymap = Keymap::new(history_navigation_bindings());
+        let key = if cfg!(target_os = "macos") {
+            "cmd-["
+        } else {
+            "alt-left"
+        };
+        for context in [
+            MENU_KEY_CONTEXT,
+            MODAL_BACKDROP_KEY_CONTEXT,
+            COMMAND_PALETTE_KEY_CONTEXT,
+            TOUR_KEY_CONTEXT,
+            CANVAS_EDITING_KEY_CONTEXT,
+        ] {
+            let stack = vec![app_shell_context(), context_with(&[context])];
+            assert!(
+                !matches(&keymap, key, &stack, &GoBack),
+                "{key} must not go back inside {context}"
+            );
+        }
+    }
+
+    #[test]
+    fn history_keys_follow_browser_text_editing_exceptions() {
+        let keymap = keymap_after_text_editing();
+        let text = text_context();
+
+        #[cfg(target_os = "macos")]
+        {
+            use mezon_widgets::text_actions::{End, Home};
+            assert!(matches(&keymap, "cmd-left", &text, &Home));
+            assert!(matches(&keymap, "cmd-right", &text, &End));
+            assert!(!matches(&keymap, "cmd-left", &text, &GoBack));
+            assert!(!matches(&keymap, "cmd-right", &text, &GoForward));
+            assert!(matches(&keymap, "cmd-[", &text, &GoBack));
+            assert!(matches(&keymap, "cmd-]", &text, &GoForward));
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(matches(&keymap, "alt-left", &text, &GoBack));
+            assert!(matches(&keymap, "alt-right", &text, &GoForward));
+        }
+    }
 }

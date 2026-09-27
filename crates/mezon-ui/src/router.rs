@@ -433,6 +433,9 @@ pub fn replace(cx: &mut App, route: Route) {
 
 pub fn go_back(cx: &mut App) {
     Router::global(cx).update(cx, |router, cx| {
+        if !router.can_go_back() {
+            return;
+        }
         router.go_back();
         cx.notify();
     });
@@ -440,6 +443,9 @@ pub fn go_back(cx: &mut App) {
 
 pub fn go_forward(cx: &mut App) {
     Router::global(cx).update(cx, |router, cx| {
+        if !router.can_go_forward() {
+            return;
+        }
         router.go_forward();
         cx.notify();
     });

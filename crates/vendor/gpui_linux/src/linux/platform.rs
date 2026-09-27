@@ -731,6 +731,37 @@ pub(super) fn is_within_click_distance(a: Point<Pixels>, b: Point<Pixels>) -> bo
     diff.x.abs() <= DOUBLE_CLICK_DISTANCE && diff.y.abs() <= DOUBLE_CLICK_DISTANCE
 }
 
+// mezon vendor edit: clipboard file lists for paste.
+#[cfg(any(feature = "wayland", feature = "x11"))]
+pub(crate) const FILE_LIST_MIME_TYPES: [&str; 2] =
+    ["text/uri-list", "x-special/gnome-copied-files"];
+
+#[cfg(any(feature = "wayland", feature = "x11"))]
+pub(crate) fn clipboard_item_from_file_list(bytes: &[u8]) -> Option<ClipboardItem> {
+    let list = std::str::from_utf8(bytes).ok()?;
+    let paths: smallvec::SmallVec<[PathBuf; 2]> = list
+        .lines()
+        .map(|line| line.trim_matches(|c: char| c == '\0' || c.is_whitespace()))
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| url::Url::parse(line).ok())
+        .filter_map(|url| url.to_file_path().ok())
+        .collect();
+    if paths.is_empty() {
+        return None;
+    }
+    let text = paths
+        .iter()
+        .map(|path| path.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(ClipboardItem {
+        entries: vec![
+            gpui::ClipboardEntry::ExternalPaths(gpui::ExternalPaths(paths)),
+            gpui::ClipboardEntry::String(gpui::ClipboardString::new(text)),
+        ],
+    })
+}
+
 #[cfg(any(feature = "wayland", feature = "x11"))]
 pub(super) fn new_xkb_context() -> anyhow::Result<xkb::Context> {
     validate_xkb_context(xkb::Context::new(xkb::CONTEXT_NO_FLAGS))
@@ -1201,6 +1232,29 @@ pub(super) fn compositor_gpu_hint_from_dev_t(dev: u64) -> Option<gpui_wgpu::Comp
 mod tests {
     use super::*;
     use gpui::{Point, px};
+
+    #[cfg(any(feature = "wayland", feature = "x11"))]
+    #[test]
+    fn clipboard_file_list_keeps_only_local_files() {
+        let list = b"copy\nfile:///home/me/a%20b.pdf\r\n# comment\nhttps://example.com/x.png\nfile:///tmp/c.txt\n\0";
+        let item = clipboard_item_from_file_list(list).expect("two local files");
+        let [
+            gpui::ClipboardEntry::ExternalPaths(paths),
+            gpui::ClipboardEntry::String(text),
+        ] = item.entries()
+        else {
+            panic!("expected paths then text, got {:?}", item.entries());
+        };
+        let expected = [
+            PathBuf::from("/home/me/a b.pdf"),
+            PathBuf::from("/tmp/c.txt"),
+        ];
+        assert_eq!(paths.paths(), expected);
+        assert_eq!(text.text(), "/home/me/a b.pdf\n/tmp/c.txt");
+
+        assert!(clipboard_item_from_file_list(b"https://example.com/x.png\n").is_none());
+        assert!(clipboard_item_from_file_list(b"").is_none());
+    }
 
     #[cfg(any(feature = "wayland", feature = "x11"))]
     #[test]

@@ -34,6 +34,7 @@ pub enum WelcomeContext {
         name: SharedString,
         private: bool,
         is_stream: bool,
+        age_restricted: i32,
     },
     Thread {
         name: SharedString,

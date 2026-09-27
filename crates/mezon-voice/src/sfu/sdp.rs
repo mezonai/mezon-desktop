@@ -664,8 +664,14 @@ mod tests {
         assert_eq!(got.matches("x-google-start-bitrate").count(), 1);
         assert!(got.contains("x-google-start-bitrate=2500"));
         assert!(got.contains("profile-id=0"));
-        assert!(!got.contains("x-google-min-bitrate"), "a min hint becomes an enforced floor");
-        assert!(!got.contains("x-google-max-bitrate"), "a max hint caps the whole connection");
+        assert!(
+            !got.contains("x-google-min-bitrate"),
+            "a min hint becomes an enforced floor"
+        );
+        assert!(
+            !got.contains("x-google-max-bitrate"),
+            "a max hint caps the whole connection"
+        );
     }
 
     #[test]

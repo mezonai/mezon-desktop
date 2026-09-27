@@ -1,7 +1,7 @@
 use gpui::App;
 use mezon_store::{
-    AccountStore, AppConfig, BadgeService, ClanId, ClanMembersStore, StreamMember, UserId, UsersByUserStore,
-    VoiceMember, user_profile::ProfileContext,
+    AccountStore, AppConfig, BadgeService, ClanId, ClanMembersStore, StreamMember, UserId,
+    UsersByUserStore, VoiceMember, user_profile::ProfileContext,
 };
 
 pub(crate) struct ResolvedMemberDisplay {

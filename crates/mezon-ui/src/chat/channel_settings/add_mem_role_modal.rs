@@ -391,6 +391,9 @@ impl AddMemRoleModal {
         else {
             return IconName::Hashtag;
         };
+        if channel.channel_type == ChannelType::Text && channel.is_age_restricted() {
+            return IconName::HashtagWarning;
+        }
         match (channel.private, channel.channel_type) {
             (true, ChannelType::Voice) => IconName::SpeakerLocked,
             (true, _) => IconName::HashtagLocked,

@@ -6,6 +6,8 @@ mod tracks;
 
 use gpui::{App, AppContext as _, KeyBinding};
 
+pub(crate) const KEY_CONTEXT: &str = "tour";
+
 pub use anchor::{TourAnchor, probe};
 pub use launcher::{TourLauncher, settings_entry_row};
 pub use state::{

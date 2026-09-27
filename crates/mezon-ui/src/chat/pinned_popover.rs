@@ -232,6 +232,7 @@ pub struct PinnedPopoverPanel {
     ogp_image_cache: Entity<LruImageCache>,
     pin_cards: Vec<PinCardVm>,
     selection: SharedSelection,
+    shell_modal_open: bool,
     _subs: Vec<gpui::Subscription>,
 }
 
@@ -244,6 +245,8 @@ impl PinnedPopoverPanel {
     ) -> Self {
         let focus_handle = cx.focus_handle();
         let audio_meta = crate::chat::message::audio_meta::AudioMetaCache::global(cx);
+        let shell = Shell::global(cx);
+        let shell_modal_open = shell.read(cx).has_modal();
 
         let subs = vec![
             cx.observe(&PinnedMessagesStore::global(cx), |this, _, cx| {
@@ -283,6 +286,13 @@ impl PinnedPopoverPanel {
             }),
             cx.observe(&settings, |_, _, cx| cx.notify()),
             cx.observe(&audio_meta, |_, _, cx| cx.notify()),
+            cx.observe(&shell, |this, shell, cx| {
+                let shell_modal_open = shell.read(cx).has_modal();
+                if shell_modal_open != this.shell_modal_open {
+                    this.shell_modal_open = shell_modal_open;
+                    cx.notify();
+                }
+            }),
         ];
 
         let avatar_image_cache = crate::image_cache::shared_avatar_cache(cx);
@@ -308,6 +318,7 @@ impl PinnedPopoverPanel {
             ogp_image_cache,
             pin_cards: Vec::new(),
             selection: MessageSelectionState::new_shared(),
+            shell_modal_open,
             _subs: subs,
         };
         panel.pin_cards = panel.compute_pin_cards(cx);
@@ -816,6 +827,9 @@ impl EventEmitter<DismissEvent> for PinnedPopoverPanel {}
 
 impl Render for PinnedPopoverPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.shell_modal_open {
+            return div().into_any_element();
+        }
         self.message_image_cache
             .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         self.selection.borrow_mut().begin_render();
@@ -902,6 +916,7 @@ impl Render for PinnedPopoverPanel {
                 host,
                 selection,
             ))
+            .into_any_element()
     }
 }
 

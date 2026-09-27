@@ -1103,6 +1103,8 @@
   "channelVoice.pushToTalk.holdingSpace": "Вы гаворыце — адпусціце Прабел, каб выключыць мікрафон",
   "channelVoice.removedFromChannel": "Вас выдалілі з галасавога канала.",
   "channelVoice.disconnectedAlone": "Вас адключылі ад галасавога канала, бо вы занадта доўга былі ў ім адны.",
+  "channelVoice.disconnectedOtherDevice": "Вы далучыліся да галасавога канала на іншай прыладзе, таму гэтая сесія была адключана.",
+  "channelVoice.disconnectedRejoin": "Вас адключылі ад галасавога канала.",
   "channelVoice.kickMemberFailed": "Не атрымалася выдаліць удзельніка",
   "channelVoice.kickModal.content": "Вы ўпэўнены, што хочаце выкінуць \"{{userName}}\" з галасавога канала?",
   "channelVoice.kickModal.kick": "Выкінуць",
@@ -3299,8 +3301,6 @@
   "message.deleteMessageModal.delete": "Выдаліць",
   "message.deleteMessageModal.deleteMessageDescription": "Вы хочаце выдаліць гэта паведамленне?",
   "message.deleteMessageModal.remove": "Выдаліць",
-  "message.deleteMessageModal.removeAttachmentDescription": "Вы хочаце выдаліць укладанне ў гэтым паведамленні?",
-  "message.deleteMessageModal.removeAttachmentTitle": "Выдаліць укладанне",
   "message.deleteMessageModal.title": "Выдаліць паведамленне",
   "message.directMessage.groupCreated": "Група створана",
   "message.directMessage.you": "Вы",
@@ -4746,5 +4746,8 @@
   "screenShare.modeText": "Тэкст",
   "screenShare.modeTextDescription": "Больш выразныя тэкст і слайды, меншае выкарыстанне рэсурсаў.",
   "screenShare.modeVideo": "Відэа",
-  "screenShare.modeVideoDescription": "Больш плаўнае відэа; пры павольным злучэнні выразнасць можа знізіцца."
+  "screenShare.modeVideoDescription": "Больш плаўнае відэа; пры павольным злучэнні выразнасць можа знізіцца.",
+  "chat.activityStrip.latestPin": "Апошняе замацаванне",
+  "chat.activityStrip.latestTopicMessage": "Апошняе паведамленне ў тэме",
+  "chat.activityStrip.messageFrom": "Паведамленне ад {{name}}: {{message}}"
 }

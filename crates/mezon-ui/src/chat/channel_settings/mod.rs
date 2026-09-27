@@ -14,7 +14,7 @@ use gpui::{
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, ClanList, PermissionStore, Settings,
-    can_delete_channel, can_manage_channel,
+    can_delete_channel, can_manage_channel, is_age_restricted,
 };
 
 use crate::app::shell::Shell;
@@ -51,6 +51,7 @@ pub struct ChannelTabContext {
     pub is_thread: bool,
     pub is_welcome_channel: bool,
     pub has_manage_channel: bool,
+    pub age_restricted: i32,
 }
 
 impl ChannelTabContext {
@@ -60,6 +61,7 @@ impl ChannelTabContext {
             is_thread: false,
             is_welcome_channel: false,
             has_manage_channel: false,
+            age_restricted: 0,
         }
     }
 }
@@ -332,6 +334,7 @@ impl ChannelSettingScreen {
             is_thread: channel.is_thread(),
             is_welcome_channel: welcome_channel_id == Some(self.channel_id),
             has_manage_channel,
+            age_restricted: channel.age_restricted,
         }
     }
 
@@ -611,6 +614,7 @@ fn channel_tab_icon(ctx: ChannelTabContext) -> IconName {
     match ctx.channel_type {
         ChannelType::Voice => IconName::Speaker,
         ChannelType::Stream => IconName::Stream,
+        ChannelType::Text if is_age_restricted(ctx.age_restricted) => IconName::HashtagWarning,
         _ => IconName::Hashtag,
     }
 }
@@ -886,7 +890,38 @@ mod tests {
             is_thread,
             is_welcome_channel: welcome,
             has_manage_channel: manage,
+            age_restricted: 0,
         }
+    }
+
+    #[test]
+    fn settings_sidebar_icon_keeps_the_old_glyphs() {
+        let restricted = ChannelTabContext {
+            channel_type: ChannelType::Text,
+            is_thread: false,
+            is_welcome_channel: false,
+            has_manage_channel: true,
+            age_restricted: 1,
+        };
+        assert_eq!(
+            channel_tab_icon(restricted).path(),
+            IconName::HashtagWarning.path()
+        );
+        let voice = ChannelTabContext {
+            channel_type: ChannelType::Voice,
+            ..restricted
+        };
+        assert_eq!(channel_tab_icon(voice).path(), IconName::Speaker.path());
+        let thread = ChannelTabContext {
+            is_thread: true,
+            ..restricted
+        };
+        assert_eq!(channel_tab_icon(thread).path(), IconName::ThreadIcon.path());
+        let forum = ChannelTabContext {
+            channel_type: ChannelType::Forum,
+            ..restricted
+        };
+        assert_eq!(channel_tab_icon(forum).path(), IconName::Hashtag.path());
     }
 
     #[test]

@@ -7,13 +7,16 @@ mod linux_session;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod pipewire_init;
 mod playback_health;
+mod reconnect;
 mod record;
+pub use reconnect::{SfuCloseAction, sfu_close_action, sfu_reconnect_delay};
 mod runtime;
 mod screen;
 mod screen_audio;
 mod screen_mode;
 mod screen_picker;
 mod screen_previews;
+pub mod screen_recovery;
 mod screen_targets;
 mod sfu;
 mod stream_playback;
@@ -249,6 +252,7 @@ impl VoiceSession {
         runtime::runtime().spawn(async move {
             if let Err(e) = session_main(
                 SfuConfig {
+                    screen_views: store.screen_views.clone(),
                     ws_url: url,
                     token,
                     room,
@@ -558,11 +562,11 @@ async fn session_main(
                             audio_tracks.insert(key, handle);
                         }
                     }
-                    SfuEvent::RemoteVideo { key, stream } => {
+                    SfuEvent::RemoteVideo { key, stream, receipt } => {
                         if let Some(handle) = video_tracks.remove(&key) {
                             handle.stop();
                         }
-                        let handle = spawn_video(stream, key, frame_store.clone());
+                        let handle = spawn_video(stream, key, frame_store.clone(), receipt);
                         video_tracks.insert(key, handle);
                     }
                     SfuEvent::RemoteGone { key } => {
@@ -1398,6 +1402,9 @@ impl VideoConvertSlot {
 }
 
 struct VideoTrackHandle {
+    receipt: Arc<screen_recovery::FrameReceipt>,
+    frame_store: Arc<VideoFrameStore>,
+    key: u64,
     task: tokio::task::JoinHandle<()>,
     slot: Arc<VideoConvertSlot>,
 }
@@ -1406,6 +1413,7 @@ impl VideoTrackHandle {
     fn stop(self) {
         self.task.abort();
         self.slot.close();
+        self.receipt.close(|| self.frame_store.remove(self.key));
     }
 }
 
@@ -1413,12 +1421,14 @@ fn spawn_video(
     mut stream: NativeVideoStream,
     key: u64,
     frame_store: Arc<VideoFrameStore>,
+    receipt: Arc<screen_recovery::FrameReceipt>,
 ) -> VideoTrackHandle {
     let slot = Arc::new(VideoConvertSlot::default());
 
     let convert_slot = slot.clone();
     let received_store = frame_store.clone();
-    let convert_store = frame_store;
+    let convert_store = frame_store.clone();
+    let convert_receipt = receipt.clone();
     if let Err(e) = std::thread::Builder::new()
         .name("mezon-video-convert".into())
         .spawn(move || {
@@ -1457,13 +1467,13 @@ fn spawn_video(
                     }
                     continue;
                 }
-                if let Some(recycled) =
+                if let Some(Some(recycled)) = convert_receipt.publish(Instant::now(), || {
                     convert_store.publish(key, width, height, std::mem::take(&mut bgra))
-                {
+                }) {
                     bgra = recycled;
                 }
             }
-            convert_store.remove(key);
+            convert_receipt.close(|| convert_store.remove(key));
         })
     {
         tracing::error!("failed to spawn video convert thread: {e}");
@@ -1488,7 +1498,13 @@ fn spawn_video(
         task_slot.close();
     });
 
-    VideoTrackHandle { task, slot }
+    VideoTrackHandle {
+        task,
+        slot,
+        receipt,
+        frame_store,
+        key,
+    }
 }
 
 fn bounded_dimensions(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {

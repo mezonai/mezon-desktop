@@ -194,6 +194,12 @@ impl ChatLayout {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        cx.on_release(|this, cx| {
+            if let Some(store) = this.voice_store.read(cx).frame_store() {
+                store.screen_views.clear_main();
+            }
+        })
+        .detach();
         cx.subscribe(
             &AccountStore::global(cx),
             |_, _, event: &AccountEvent, cx| {
@@ -1162,6 +1168,7 @@ impl ChatLayout {
             MessagesStore::global(cx).update(cx, |store, cx| {
                 store.open_channel_in_clan(clan_id, channel_id, cx);
             });
+            self.load_channel_activity(clan_id, channel_id, cx);
         } else {
             self.pending_channel_id = Some(channel_id);
             self.channel_list.update(cx, |channel_list, cx| {
@@ -1193,7 +1200,23 @@ impl ChatLayout {
             MessagesStore::global(cx).update(cx, |store, cx| {
                 store.open_channel_in_clan(clan_id, channel_id, cx);
             });
+            self.load_channel_activity(clan_id, channel_id, cx);
         }
+    }
+
+    fn load_channel_activity(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        let clan_key = clan_id.to_string();
+        let channel_key = channel_id.to_string();
+        TopicsStore::global(cx).update(cx, |store, cx| {
+            store.fetch_if_needed(&clan_key, cx);
+            store.hydrate_latest_topic_preview_for_channel(Some(&channel_key), cx);
+        });
+        PinnedMessagesStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
     }
 
     fn redirect_archived_thread_route(&mut self, cx: &mut Context<Self>) {
@@ -1677,6 +1700,10 @@ impl ChatLayout {
 impl Render for ChatLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("ChatLayout");
+        let _screen_recovery_view = self
+            .voice_store
+            .read(cx)
+            .begin_screen_recovery_view(window.is_window_active());
         self.chat_area.ensure_input(window, cx);
         if self.show_member_list && self.is_dm_route(cx) {
             self.chat_area.ensure_dm_profile_panel(window, cx);
@@ -2968,7 +2995,7 @@ impl ChatLayout {
             if let Some(gate) = self.age_gate.clone() {
                 let channel_name = ch.name.clone();
                 let active_channel_id = ch.id;
-                let header_icon = channel_icon(ch.channel_type, ch.private);
+                let header_icon = channel_icon(ch.channel_type, ch.private, ch.age_restricted);
                 return self
                     .chat_area
                     .render_panel_body(
@@ -3001,7 +3028,7 @@ impl ChatLayout {
             {
                 let channel_name = ch.name.clone();
                 let active_channel_id = ch.id;
-                let header_icon = channel_icon(ch.channel_type, ch.private);
+                let header_icon = channel_icon(ch.channel_type, ch.private, ch.age_restricted);
                 let canvas = self
                     .ensure_canvas_view(clan_id, channel_id, canvas_id, window, cx)
                     .into_any_element();
@@ -3035,10 +3062,14 @@ impl ChatLayout {
                     self._voice_ptt_activation =
                         Some(cx.observe_window_activation(window, |this, window, cx| {
                             if !window.is_window_active() {
+                                if let Some(store) = this.voice_store.read(cx).frame_store() {
+                                    store.screen_views.clear_main();
+                                }
                                 this.voice_store.update(cx, |store, cx| {
                                     store.set_push_to_talk(false, cx);
                                 });
                             }
+                            cx.notify();
                         }));
                 }
                 let channel = ch.clone();
@@ -3077,7 +3108,11 @@ impl ChatLayout {
                             .render(
                                 &locale,
                                 Some(channel.name.as_str()),
-                                Some(channel_icon(channel.channel_type, channel.private)),
+                                Some(channel_icon(
+                                    channel.channel_type,
+                                    channel.private,
+                                    channel.age_restricted,
+                                )),
                                 false,
                                 None,
                                 Some(channel.id),
@@ -3201,7 +3236,11 @@ impl ChatLayout {
                             .render(
                                 &locale,
                                 Some(channel.name.as_str()),
-                                Some(channel_icon(channel.channel_type, channel.private)),
+                                Some(channel_icon(
+                                    channel.channel_type,
+                                    channel.private,
+                                    channel.age_restricted,
+                                )),
                                 false,
                                 None,
                                 Some(channel.id),
@@ -3279,7 +3318,7 @@ impl ChatLayout {
                 .render(
                     &locale,
                     Some(channel_name.as_str()),
-                    Some(channel_icon(ch.channel_type, ch.private)),
+                    Some(channel_icon(ch.channel_type, ch.private, ch.age_restricted)),
                     false,
                     None,
                     Some(channel_id),

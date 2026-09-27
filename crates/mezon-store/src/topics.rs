@@ -152,12 +152,75 @@ impl TopicsData {
         self.resort_topics();
     }
 
+    fn note_topic_message(&mut self, message: &api::ChannelMessage) -> bool {
+        if message.topic_id <= 0 || message.code == 2 {
+            return false;
+        }
+        let topic_id = message.topic_id.to_string();
+        let Some(index) = self.topic_index.get(&topic_id).copied() else {
+            return false;
+        };
+        let Some(topic) = self.topics.get_mut(index) else {
+            return false;
+        };
+        if !message.content.is_empty() || message.code == 1 {
+            topic.last_message_content = message.content.clone();
+        }
+        topic.last_message_attachments =
+            mezon_client::transport::parse_message_attachments(&message.attachments);
+        if message.sender_id > 0 {
+            topic.last_sender_id = message.sender_id.to_string();
+        }
+        let timestamp = message.create_time_seconds;
+        if timestamp > topic.last_message_timestamp {
+            topic.last_message_timestamp = timestamp;
+            self.resort_topics();
+        }
+        true
+    }
+
+    fn note_api_topic_message(
+        &mut self,
+        topic_id: &str,
+        message: &mezon_client::transport::ApiMessage,
+    ) -> bool {
+        if message.code == 2 {
+            return false;
+        }
+        let Some(index) = self.topic_index.get(topic_id).copied() else {
+            return false;
+        };
+        let Some(topic) = self.topics.get_mut(index) else {
+            return false;
+        };
+        if !message.content.is_empty() || message.code == 1 {
+            topic.last_message_content = message.content.clone();
+        }
+        topic.last_message_attachments = message.attachments.clone();
+        if message.sender_id > 0 {
+            topic.last_sender_id = message.sender_id.to_string();
+        }
+        let timestamp =
+            normalize_unix_seconds(message.create_time).clamp(0, i64::from(u32::MAX)) as u32;
+        if timestamp >= topic.last_message_timestamp {
+            topic.last_message_timestamp = timestamp;
+            self.resort_topics();
+        }
+        true
+    }
+
     fn merge_topic(&mut self, topic: TopicDiscussion) {
         let topic_id = topic.id.clone();
         if let Some(idx) = self.topic_index.get(&topic_id).copied() {
             let existing = &mut self.topics[idx];
             if !topic.content.is_empty() {
                 existing.content = topic.content;
+            }
+            if !topic.last_message_content.is_empty() {
+                existing.last_message_content = topic.last_message_content;
+            }
+            if !topic.last_message_attachments.is_empty() {
+                existing.last_message_attachments = topic.last_message_attachments;
             }
             if topic.last_message_timestamp > 0 {
                 existing.last_message_timestamp = existing
@@ -313,6 +376,8 @@ pub struct TopicsStore {
     next_page: i32,
     fetch_failures: u32,
     fetch_generation: u64,
+    preview_generation: u64,
+    hydrated_preview_topic_id: Option<String>,
     fetched_at: Option<Instant>,
     panel_open: bool,
     init_topic_message_id: Option<MessageId>,
@@ -355,6 +420,8 @@ impl TopicsStore {
             next_page: 1,
             fetch_failures: 0,
             fetch_generation: 0,
+            preview_generation: 0,
+            hydrated_preview_topic_id: None,
             fetched_at: None,
             panel_open: false,
             init_topic_message_id: None,
@@ -412,6 +479,7 @@ impl TopicsStore {
 
     fn refetch_active_clan(&mut self, cx: &mut Context<Self>) {
         self.fetched_at = None;
+        self.fetch_failures = 0;
         if let Some(clan_id) = self.clan_id.clone() {
             self.fetch(&clan_id, cx);
         }
@@ -430,6 +498,8 @@ impl TopicsStore {
         self.clan_id = None;
         self.loading = false;
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        self.hydrated_preview_topic_id = None;
         self.fetched_at = None;
         self.init_topic_message_id = None;
         self.updated_notify_task = None;
@@ -634,6 +704,9 @@ impl TopicsStore {
                     this.handle_topic_in_message_event(event, cx);
                 },
             );
+            dispatch.on(RealtimeKind::ChannelMessage, &entity, |this, event, cx| {
+                this.handle_channel_message(event, cx);
+            });
             dispatch.on_lagged(&entity, |this, cx| this.resync(cx));
         });
     }
@@ -685,6 +758,21 @@ impl TopicsStore {
         };
         let lsnt = normalize_unix_seconds(ev.lsnt);
         self.upsert_topic_meta(tp_id, ev.rpl, lsnt, cx);
+    }
+
+    fn handle_channel_message(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::ChannelMessage(message) = event else {
+            return;
+        };
+        if !self.is_active_clan(message.clan_id, cx) {
+            return;
+        }
+        if message.code == 2 && message.topic_id > 0 {
+            self.hydrated_preview_topic_id = None;
+            self.hydrate_latest_topic_preview(cx);
+        } else if self.data.note_topic_message(message) {
+            self.schedule_updated_notify(cx);
+        }
     }
 
     fn on_messages_event(&mut self, event: &MessagesEvent, cx: &mut Context<Self>) {
@@ -1687,6 +1775,21 @@ impl TopicsStore {
         }
     }
 
+    pub fn latest_topic_for_channel(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+    ) -> Option<&TopicDiscussion> {
+        self.topics_for(clan_id)
+            .iter()
+            .filter(|topic| topic.channel_id == channel_id)
+            .max_by(|left, right| {
+                left.last_message_timestamp
+                    .cmp(&right.last_message_timestamp)
+                    .then_with(|| left.id.cmp(&right.id))
+            })
+    }
+
     pub fn is_loading(&self) -> bool {
         self.loading
     }
@@ -1701,7 +1804,10 @@ impl TopicsStore {
     }
 
     pub fn fetch_if_needed(&mut self, clan_id: &str, cx: &mut Context<Self>) {
-        if self.is_fresh(clan_id) {
+        if self.is_fresh(clan_id)
+            || (self.clan_id.as_deref() == Some(clan_id)
+                && self.fetch_failures >= MAX_TOPIC_FETCH_FAILURES)
+        {
             return;
         }
         self.fetch(clan_id, cx);
@@ -1715,10 +1821,11 @@ impl TopicsStore {
             self.data.clear_topics();
             self.clan_id = Some(clan_id.to_string());
             self.fetched_at = None;
+            self.hydrated_preview_topic_id = None;
+            self.fetch_failures = 0;
         }
         self.has_more = true;
         self.next_page = 1;
-        self.fetch_failures = 0;
         self.fetch_page(clan_id, 1, false, cx);
     }
 
@@ -1761,7 +1868,6 @@ impl TopicsStore {
         if self.fetch_generation != generation {
             return;
         }
-        self.loading = false;
         match result {
             Ok(topics) => {
                 self.fetch_failures = 0;
@@ -1774,10 +1880,13 @@ impl TopicsStore {
                 }
                 self.clan_id = Some(clan_id.to_string());
                 self.fetched_at = Some(Instant::now());
+                self.loading = false;
                 cx.emit(TopicsEvent::Updated);
                 cx.notify();
+                self.hydrate_latest_topic_preview(cx);
             }
             Err(e) => {
+                self.loading = false;
                 tracing::error!("list_sd_topics failed: {e}");
                 self.fetch_failures = self.fetch_failures.saturating_add(1);
                 if self.fetch_failures >= MAX_TOPIC_FETCH_FAILURES {
@@ -1787,6 +1896,79 @@ impl TopicsStore {
                 cx.notify();
             }
         }
+    }
+
+    /// The topic listing is sufficient for ordering, but its `last_sent_message` is not
+    /// consistently the final reply. Resolve the winner once pagination is complete and use the
+    /// actual newest message for the compact clan activity preview.
+    fn hydrate_latest_topic_preview(&mut self, cx: &mut Context<Self>) {
+        let active_channel_id = MessagesStore::try_global(cx)
+            .and_then(|store| store.read(cx).active_channel_id())
+            .map(|channel_id| channel_id.to_string());
+        self.hydrate_latest_topic_preview_for_channel(active_channel_id.as_deref(), cx);
+    }
+
+    pub fn hydrate_latest_topic_preview_for_channel(
+        &mut self,
+        channel_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(topic) = channel_id
+            .and_then(|channel_id| {
+                let clan_id = self.clan_id.as_deref()?;
+                self.latest_topic_for_channel(clan_id, channel_id)
+            })
+            .or_else(|| self.data.topics().first())
+            .cloned()
+        else {
+            return;
+        };
+        if self.hydrated_preview_topic_id.as_deref() == Some(topic.id.as_str()) {
+            return;
+        }
+        let (Ok(clan_id), Ok(channel_id), Ok(topic_id)) = (
+            topic.clan_id.parse::<i64>(),
+            topic.channel_id.parse::<i64>(),
+            topic.id.parse::<i64>(),
+        ) else {
+            return;
+        };
+        self.hydrated_preview_topic_id = Some(topic.id.clone());
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        let generation = self.preview_generation;
+        let topic_key = topic.id;
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .list_topic_messages(clan_id, channel_id, topic_id, 0, 0, TOPICS_LIMIT as u32)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.preview_generation != generation
+                    || this.hydrated_preview_topic_id.as_deref() != Some(topic_key.as_str())
+                {
+                    return;
+                }
+                match result {
+                    Ok(page) => {
+                        if let Some(message) = page
+                            .messages
+                            .iter()
+                            .filter(|message| message.code != 2)
+                            .max_by_key(|message| normalize_unix_seconds(message.create_time))
+                        {
+                            this.data.note_api_topic_message(&topic_key, message);
+                        }
+                        cx.emit(TopicsEvent::Updated);
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        tracing::warn!("failed to hydrate latest topic {topic_key}: {error}");
+                        this.hydrated_preview_topic_id = None;
+                    }
+                }
+            });
+        })
+        .detach();
     }
 }
 
@@ -1956,6 +2138,8 @@ mod tests {
             creator_id: "3".to_string(),
             last_sender_id: last_sender_id.to_string(),
             content: content.to_string(),
+            last_message_content: String::new(),
+            last_message_attachments: Vec::new(),
             last_message_timestamp,
         }
     }
@@ -2199,6 +2383,30 @@ mod tests {
         ]);
 
         assert_eq!(topic_ids(&data), vec!["20", "30", "10"]);
+        assert_index_matches_topics(&data);
+    }
+
+    #[test]
+    fn realtime_topic_message_updates_preview_and_moves_topic_to_front() {
+        let mut data = TopicsData::default();
+        data.set_topics(vec![
+            topic(10, 1, "3", "older", 100),
+            topic(20, 2, "4", "newer", 200),
+        ]);
+        let message = api::ChannelMessage {
+            topic_id: 10,
+            sender_id: 99,
+            content: "latest reply".into(),
+            create_time_seconds: 300,
+            ..Default::default()
+        };
+
+        assert!(data.note_topic_message(&message));
+        assert_eq!(data.topics()[0].id, "10");
+        assert_eq!(data.topics()[0].content, "older");
+        assert_eq!(data.topics()[0].last_message_content, "latest reply");
+        assert_eq!(data.topics()[0].last_sender_id, "99");
+        assert_eq!(data.topics()[0].last_message_timestamp, 300);
         assert_index_matches_topics(&data);
     }
 

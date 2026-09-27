@@ -39,3 +39,6 @@ windows.workspace = true
 notify-rust = "4"
 zbus = "4"
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

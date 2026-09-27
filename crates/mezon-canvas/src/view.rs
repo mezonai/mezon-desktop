@@ -17,6 +17,7 @@ use mezon_widgets::{
     v_flex,
 };
 
+pub const CANVAS_EDITING_KEY_CONTEXT: &str = "MezonCanvasEditing";
 pub(crate) const CANVAS_CONTENT_HORIZONTAL_PADDING: Pixels = px(16.);
 pub(crate) const CANVAS_CONTENT_MAX_WIDTH_RATIO: f32 = 0.8;
 const CANVAS_CONTENT_MAX_WIDTH: DefiniteLength = relative(CANVAS_CONTENT_MAX_WIDTH_RATIO);
@@ -506,6 +507,7 @@ impl gpui::Render for CanvasView {
             .min_h_0()
             .w_full()
             .bg(theme.bg_primary)
+            .when(editing, |el| el.key_context(CANVAS_EDITING_KEY_CONTEXT))
             .child(top_bar)
             .child(scroll_content)
             .when_some(save_bar, |el, bar| {

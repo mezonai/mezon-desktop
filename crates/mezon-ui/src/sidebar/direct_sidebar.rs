@@ -118,9 +118,18 @@ pub struct DirectSidebar {
     dm_items: Rc<Vec<DmItem>>,
     dm_items_fingerprint: u64,
     pending_rebuild: bool,
+    pending_dm_reveal: Option<ChannelId>,
+    last_revealed_dm: Option<ChannelId>,
     pinned_scroll: gpui::ScrollHandle,
     open_menu: Option<DmMenu>,
     image_cache: Entity<crate::image_cache::LruImageCache>,
+}
+
+fn route_dm_id(cx: &App) -> Option<ChannelId> {
+    match Router::global(cx).read(cx).route() {
+        Route::DirectMessage { direct_id, .. } => Some(direct_id),
+        _ => None,
+    }
 }
 
 fn is_dm_route(cx: &App) -> bool {
@@ -637,6 +646,11 @@ impl DirectSidebar {
                 this.dm_items_fingerprint = dm_items_fingerprint(store.read(cx), cx);
                 this.dm_items = build_dm_items(&mut this.row_caches, store.read(cx), cx);
             }
+            let active = route_dm_id(cx);
+            if active != this.last_revealed_dm {
+                this.last_revealed_dm = active;
+                this.pending_dm_reveal = active.filter(|id| !this.reveal_dm(*id));
+            }
             cx.notify();
         })
         .detach();
@@ -659,6 +673,8 @@ impl DirectSidebar {
             dm_items,
             dm_items_fingerprint,
             pending_rebuild: false,
+            pending_dm_reveal: None,
+            last_revealed_dm: None,
             pinned_scroll: gpui::ScrollHandle::new(),
             open_menu: None,
             image_cache: cx.new(|cx| {
@@ -687,7 +703,35 @@ impl DirectSidebar {
         let items = build_dm_items(&mut self.row_caches, store.read(cx), cx);
         if self.dm_items != items {
             self.dm_items = items;
+            self.flush_dm_reveal();
             cx.notify();
+        }
+    }
+
+    fn reveal_dm(&self, channel_id: ChannelId) -> bool {
+        let Some(ix) = self
+            .dm_items
+            .iter()
+            .position(|item| item.channel_id == channel_id)
+        else {
+            return false;
+        };
+        let pinned_count = self.dm_items.partition_point(|item| item.pinned);
+        if ix < pinned_count {
+            self.pinned_scroll.scroll_to_item(ix);
+        } else {
+            self.list_scroll
+                .scroll_to_item(ix - pinned_count, gpui::ScrollStrategy::Nearest);
+        }
+        true
+    }
+
+    fn flush_dm_reveal(&mut self) {
+        let Some(channel_id) = self.pending_dm_reveal else {
+            return;
+        };
+        if self.reveal_dm(channel_id) {
+            self.pending_dm_reveal = None;
         }
     }
 

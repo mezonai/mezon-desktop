@@ -11,7 +11,7 @@ use gpui::{
 use mezon_store::{
     AppConfig, ChannelId, ChannelList, ChannelType, ClanId, Embed, LinkKind, Message, MessageCode,
     MessageId, MessageSpan, PlatformStore, ProfileContext, RichClick, RichLayout, RichRunKind,
-    RichToken, UserId, invite_id_from_url, is_clan_invite_url, is_here_user_id,
+    RichToken, UserId, invite_id_from_url, is_age_restricted, is_clan_invite_url, is_here_user_id,
 };
 
 use ui::Clickable;
@@ -2471,12 +2471,17 @@ fn hashtag_channel(channel_id: ChannelId, cx: &App) -> Option<ResolvedHashtag> {
         .or_else(|| store.user_channel(channel_id))
         .map(|channel| ResolvedHashtag {
             name: (!channel.name.is_empty()).then(|| SharedString::from(channel.name.as_str())),
-            icon: channel_type_icon(channel.channel_type, channel.private),
+            icon: mention_channel_icon(
+                channel.channel_type,
+                channel.private,
+                channel.age_restricted,
+            ),
         })
 }
 
-fn channel_type_icon(kind: ChannelType, private: bool) -> IconName {
+fn mention_channel_icon(kind: ChannelType, private: bool, age_restricted: i32) -> IconName {
     match kind {
+        ChannelType::Text if is_age_restricted(age_restricted) => IconName::HashtagWarning,
         ChannelType::Voice => {
             if private {
                 IconName::SpeakerLocked

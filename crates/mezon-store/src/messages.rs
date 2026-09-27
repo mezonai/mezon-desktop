@@ -4483,79 +4483,6 @@ impl MessagesStore {
         true
     }
 
-    #[allow(dead_code)]
-    pub fn remove_attachment(
-        &mut self,
-        message_id: MessageId,
-        attachment_index: usize,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(parent_channel_id) = self.active_channel_id else {
-            return;
-        };
-        let storage_id = self.reaction_storage_channel(message_id);
-        let is_topic = self.active_topic_id == Some(storage_id);
-        let mode = self.mode;
-        let is_public = self.is_public;
-        let clan_id = self.active_clan_id.map_or(0, |c| c.get());
-        let cfg = AppConfig::try_global(cx).cloned();
-        let Some(channel) = self.cache.get_mut(&storage_id) else {
-            return;
-        };
-        let Some(msg) = channel.messages.get_mut_by_id(message_id) else {
-            return;
-        };
-        if attachment_index >= msg.attachments.len() {
-            return;
-        }
-        let create_time_seconds = msg.create_time.max(0) as u32;
-        msg.attachments.remove(attachment_index);
-        let (album_layout, viewer_media) = build_media_presentation(&msg.attachments, cfg.as_ref());
-        msg.album_layout = album_layout;
-        msg.viewer_media = viewer_media;
-        let content = msg.content.clone();
-        let remaining: Vec<mezon_client::transport::ApiAttachment> =
-            msg.attachments.iter().map(attachment_to_api).collect();
-        if is_topic {
-            cx.emit(MessagesEvent::TopicUpdated {
-                topic_id: storage_id.get(),
-            });
-        } else {
-            cx.emit(MessagesEvent::Updated {
-                message_id: Some(message_id),
-            });
-        }
-        cx.notify();
-
-        let api = self.api.clone();
-        let (api_channel_id, api_topic_id) = if is_topic {
-            (parent_channel_id.get(), storage_id.get())
-        } else {
-            (storage_id.get(), 0)
-        };
-        let message_num = message_id.get();
-        cx.spawn(async move |_this, _cx| {
-            if let Err(e) = api
-                .update_channel_message_with_attachments(
-                    clan_id,
-                    api_channel_id,
-                    message_num,
-                    &content,
-                    remaining,
-                    mode,
-                    is_public,
-                    api_topic_id,
-                    is_topic,
-                    create_time_seconds,
-                )
-                .await
-            {
-                tracing::error!("remove_attachment update failed: {e}");
-            }
-        })
-        .detach();
-    }
-
     pub fn embed_form_value(&self, message_id: MessageId, input_id: &str) -> Option<&SharedString> {
         self.embed_form
             .get(&message_id)
@@ -6442,6 +6369,7 @@ impl MessagesStore {
         let Some(existing) = channel.messages.get_mut_by_id(message_id) else {
             return;
         };
+        let attachments_in_update = !incoming.attachments.is_empty();
         merge_message_update(existing, &incoming);
         if let Some(keys) = &presign_keys {
             apply_presign_gate(
@@ -6450,6 +6378,12 @@ impl MessagesStore {
                 &base_img,
                 existing.create_time,
             );
+        }
+        if attachments_in_update {
+            let cfg = AppConfig::try_global(cx);
+            let (album_layout, viewer_media) = build_media_presentation(&existing.attachments, cfg);
+            existing.album_layout = album_layout;
+            existing.viewer_media = viewer_media;
         }
         let arms_expiry = existing.attachments.iter().any(|a| a.presign_pending);
         patch_reply_previews_after_update(
@@ -9706,7 +9640,7 @@ pub fn name_for_prioritize(clan_nick: &str, display_name: &str, username: &str) 
 }
 
 impl MessageAttachment {
-    pub(crate) fn from_api(
+    pub fn from_api(
         mut a: mezon_client::transport::ApiAttachment,
         cfg: Option<&AppConfig>,
     ) -> Self {
@@ -10130,6 +10064,77 @@ mod tests {
         assert_eq!(first_non_empty("live", "baked"), "live");
         assert_eq!(first_non_empty("", "baked"), "baked");
         assert_eq!(first_non_empty("", ""), "");
+    }
+
+    fn album_image(name: &str) -> MessageAttachment {
+        MessageAttachment {
+            url: format!("https://cdn.mezon.ai/uploads/{name}.png"),
+            filename: format!("{name}.png"),
+            filetype: "image/png".into(),
+            width: 800,
+            height: 600,
+            ..Default::default()
+        }
+    }
+
+    fn message_with_images(id: i64, names: &[&str], create_time: i64) -> Message {
+        let attachments: Vec<MessageAttachment> =
+            names.iter().map(|name| album_image(name)).collect();
+        let (album_layout, viewer_media) = build_media_presentation(&attachments, None);
+        Message::new(MessageId(id), "hi", "u1", "U1", create_time)
+            .with_attachments(attachments)
+            .with_media_presentation(album_layout, viewer_media)
+    }
+
+    #[gpui::test]
+    fn attachment_update_rebuilds_album_layout_after_the_presign_gate(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+            let channel = ChannelId(10);
+            let created = now_unix_seconds() - presign::PRESIGN_PENDING_MAX_AGE_SEC - 1;
+            store.update(cx, |store, cx| {
+                store.set_channel(
+                    channel,
+                    vec![message_with_images(1, &["a", "b", "c"], created)],
+                );
+                let incoming = Message::new(MessageId(1), "hi", "u1", "U1", created)
+                    .with_attachments(vec![
+                        album_image("a"),
+                        album_image("b"),
+                        album_image("gone"),
+                    ]);
+                store.apply_message_update(
+                    channel,
+                    MessageId(1),
+                    incoming,
+                    Some(vec!["a".into(), "b".into()]),
+                    cx,
+                );
+                let updated = store
+                    .cache
+                    .get(&channel)
+                    .and_then(|bucket| bucket.messages.get_by_id(MessageId(1)))
+                    .expect("updated message");
+                assert_eq!(updated.attachments.len(), 2);
+                assert_eq!(updated.viewer_media.len(), 2);
+                assert_eq!(
+                    updated
+                        .album_layout
+                        .as_ref()
+                        .map(|layout| layout.tiles.len()),
+                    Some(2)
+                );
+            });
+        });
     }
 
     #[gpui::test]

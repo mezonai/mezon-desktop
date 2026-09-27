@@ -1103,6 +1103,8 @@
   "channelVoice.pushToTalk.holdingSpace": "発言中 — スペースキーを離すとミュートします",
   "channelVoice.removedFromChannel": "ボイスチャンネルから退出させられました。",
   "channelVoice.disconnectedAlone": "ボイスチャンネルに長時間ひとりだったため、切断されました。",
+  "channelVoice.disconnectedOtherDevice": "別のデバイスでボイスチャンネルに参加したため、このセッションは切断されました。",
+  "channelVoice.disconnectedRejoin": "ボイスチャンネルから切断されました。",
   "channelVoice.kickMemberFailed": "スレッドからのメンバー削除に失敗しました",
   "channelVoice.kickModal.content": "本当に\"{{userName}}\"をボイスチャンネルから削除しますか？",
   "channelVoice.kickModal.kick": "削除",
@@ -3300,8 +3302,6 @@
   "message.deleteMessageModal.delete": "削除",
   "message.deleteMessageModal.deleteMessageDescription": "このメッセージを削除しますか?",
   "message.deleteMessageModal.remove": "削除",
-  "message.deleteMessageModal.removeAttachmentDescription": "このメッセージの添付ファイルを削除しますか?",
-  "message.deleteMessageModal.removeAttachmentTitle": "添付ファイルを削除",
   "message.deleteMessageModal.title": "メッセージを削除",
   "message.directMessage.groupCreated": "グループが作成されました",
   "message.directMessage.you": "あなた",
@@ -4749,5 +4749,8 @@
   "screenShare.modeText": "テキスト",
   "screenShare.modeTextDescription": "文字やスライドがより鮮明になり、リソース使用量も少なくなります。",
   "screenShare.modeVideo": "ビデオ",
-  "screenShare.modeVideoDescription": "動画がより滑らかになります。回線が遅いと鮮明さが下がる場合があります。"
+  "screenShare.modeVideoDescription": "動画がより滑らかになります。回線が遅いと鮮明さが下がる場合があります。",
+  "chat.activityStrip.latestPin": "最新のピン留め",
+  "chat.activityStrip.latestTopicMessage": "トピックの最新メッセージ",
+  "chat.activityStrip.messageFrom": "{{name}}からのメッセージ: {{message}}"
 }

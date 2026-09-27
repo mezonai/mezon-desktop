@@ -216,6 +216,7 @@ mod tests {
             user_id: None,
             channel_type: Some(channel_type),
             private: false,
+            age_restricted: 0,
             dm_kind: None,
             dm_channel_type: None,
             filter_prioritize: normalize_search_string(label),
