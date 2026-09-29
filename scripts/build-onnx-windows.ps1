@@ -40,12 +40,25 @@ if (-not $ready) {
     }
     $actualRevision = & git -C $source rev-parse HEAD
     if ($LASTEXITCODE -ne 0 -or $actualRevision -ne $revision) { throw "Unexpected ONNX Runtime source revision." }
+
+    $eigenRevision = "1d8b82b0740839c0de7f1242a3585e3390ff5f33"
+    $eigen = Join-Path $repo "target\eigen-source"
+    if (-not (Test-Path (Join-Path $eigen "Eigen\Core"))) {
+        Invoke-Checked git @('init', $eigen)
+        Invoke-Checked git @('-C', $eigen, 'fetch', '--depth', '1', 'https://gitlab.com/libeigen/eigen.git', $eigenRevision)
+        Invoke-Checked git @('-C', $eigen, 'checkout', '--detach', $eigenRevision)
+    }
+    $actualEigenRevision = & git -C $eigen rev-parse HEAD
+    if ($LASTEXITCODE -ne 0 -or $actualEigenRevision -ne $eigenRevision) { throw "Unexpected Eigen source revision." }
+    $eigenCmakePath = $eigen.Replace('\', '/')
+
     $build = Join-Path $repo "target\onnxruntime-build-$toolset"
     Invoke-Checked python @((Join-Path $source 'tools\ci_build\build.py'),
         '--build_dir', $build, '--config', 'Release', '--update', '--build', '--parallel', '2',
         '--skip_tests', '--enable_msvc_static_runtime', '--cmake_generator', 'Ninja',
         '--compile_no_warning_as_error', '--cmake_extra_defines',
-        'onnxruntime_BUILD_SHARED_LIB=OFF', 'onnxruntime_BUILD_UNIT_TESTS=OFF', 'CMAKE_POLICY_VERSION_MINIMUM=3.5')
+        'onnxruntime_BUILD_SHARED_LIB=OFF', 'onnxruntime_BUILD_UNIT_TESTS=OFF', 'CMAKE_POLICY_VERSION_MINIMUM=3.5',
+        "FETCHCONTENT_SOURCE_DIR_EIGEN3=$eigenCmakePath")
 
     $release = Join-Path $build "Release"
     $session = Join-Path $release "onnxruntime_session.lib"
