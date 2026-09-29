@@ -28,12 +28,9 @@ $stamp = Join-Path $package "build-stamp.txt"
 $ready = (Test-Path $stamp) -and ((Get-Content $stamp -Raw).Trim() -eq $cacheKey) -and
     (Test-Path (Join-Path $package "onnxruntime_session.lib"))
 if (-not $ready) {
-    $devcmd = Join-Path $vs "Common7\Tools\VsDevCmd.bat"
-    $environment = & cmd.exe /d /s /c "`"`"$devcmd`" -no_logo -arch=x64 -host_arch=x64 >nul && set`""
-    if ($LASTEXITCODE -ne 0) { throw "Could not initialize the MSVC environment." }
-    foreach ($line in $environment) {
-        if ($line -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process') }
-    }
+    $devShell = Join-Path $vs "Common7\Tools\Launch-VsDevShell.ps1"
+    & $devShell -Arch amd64 -HostArch amd64 -SkipAutomaticLocation | Out-Null
+    Get-Command cl.exe, dumpbin.exe -CommandType Application -ErrorAction Stop | Out-Null
     $env:PATH = "$(Join-Path $vs 'Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja');$env:PATH"
 
     $source = Join-Path $repo "target\onnxruntime-source"
