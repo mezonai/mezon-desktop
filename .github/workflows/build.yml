@@ -123,6 +123,10 @@ jobs:
         if: runner.os == 'Linux'
         run: bash scripts/linux-deps
 
+      - name: Set up ONNX Runtime
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/setup-onnx-windows
+
       - name: Build release binary
         run: cargo build --release -p mezon-app --locked
 
