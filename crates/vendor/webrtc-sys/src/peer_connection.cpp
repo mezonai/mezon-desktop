@@ -152,9 +152,13 @@ void PeerConnection::add_ice_candidate(
     std::shared_ptr<IceCandidate> candidate,
     rust::Box<PeerContext> ctx,
     rust::Fn<void(rust::Box<PeerContext>, RtcError)> on_complete) const {
+  // AddIceCandidate may queue its callback behind SDP operations. Own the
+  // Rust context until completion instead of borrowing this stack frame.
+  // std::function requires a copyable closure, while rust::Box is move-only.
+  auto context = std::make_shared<rust::Box<PeerContext>>(std::move(ctx));
   peer_connection_->AddIceCandidate(
-      candidate->release(), [&](const webrtc::RTCError& err) {
-        on_complete(std::move(ctx), to_error(err));
+      candidate->release(), [context, on_complete](const webrtc::RTCError& err) {
+        on_complete(std::move(*context), to_error(err));
       });
 }
 

@@ -38,6 +38,21 @@ pub fn peek_screen_share_options() -> Option<Vec<ScreenShareOption>> {
     Some(options.clone())
 }
 
+pub fn screen_capture_permitted() -> bool {
+    scap::has_permission()
+}
+
+pub fn request_screen_capture_access() {
+    let spawned = std::thread::Builder::new()
+        .name("mezon-screen-capture-access".into())
+        .spawn(|| {
+            scap::request_permission();
+        });
+    if let Err(e) = spawned {
+        tracing::warn!("screen capture access request failed: {e}");
+    }
+}
+
 pub fn list_screen_share_options() -> Result<Vec<ScreenShareOption>, ScreenShareListError> {
     if let Some(options) = peek_screen_share_options() {
         return Ok(options);
@@ -58,7 +73,7 @@ fn fetch_screen_share_options() -> Result<Vec<ScreenShareOption>, ScreenShareLis
             "screen capture not supported".into(),
         ));
     }
-    if !scap::has_permission() && !scap::request_permission() {
+    if !scap::has_permission() {
         return Err(ScreenShareListError::PermissionDenied);
     }
 

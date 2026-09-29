@@ -16,10 +16,11 @@ use mezon_call::{
     WEBRTC_SDP_STATUS_REMOTE_MEDIA, WEBRTC_SDP_TIMEOUT, compress_sdp, decompress_sdp,
 };
 use mezon_client::{AppApi, RealtimeEvent};
-use mezon_voice::{IceServerConfig, VideoFrameStore};
+use mezon_voice::{IceServerConfig, MediaDevice, VideoFrameStore};
 
 use crate::AppConfig;
 use crate::account::AccountStore;
+use crate::media_permission::MediaPermissionStore;
 use crate::message::CallLogType;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
@@ -129,8 +130,7 @@ pub struct CallStore {
     media: MediaKind,
     local: MediaFlags,
     remote: MediaFlags,
-    mic_prompt: bool,
-    camera_prompt: bool,
+    mic_unavailable: bool,
     selected_input: Option<String>,
     selected_output: Option<String>,
     incoming_offer: Option<String>,
@@ -182,8 +182,7 @@ impl CallStore {
             media: MediaKind::Audio,
             local: MediaFlags::default(),
             remote: MediaFlags::default(),
-            mic_prompt: false,
-            camera_prompt: false,
+            mic_unavailable: false,
             selected_input: None,
             selected_output: None,
             incoming_offer: None,
@@ -284,26 +283,8 @@ impl CallStore {
         mezon_call::REMOTE_FRAME_KEY
     }
 
-    pub fn mic_prompt(&self) -> bool {
-        self.mic_prompt
-    }
-
-    pub fn dismiss_mic_prompt(&mut self, cx: &mut Context<Self>) {
-        if self.mic_prompt {
-            self.mic_prompt = false;
-            cx.notify();
-        }
-    }
-
-    pub fn camera_prompt(&self) -> bool {
-        self.camera_prompt
-    }
-
-    pub fn dismiss_camera_prompt(&mut self, cx: &mut Context<Self>) {
-        if self.camera_prompt {
-            self.camera_prompt = false;
-            cx.notify();
-        }
+    pub fn take_mic_unavailable(&mut self) -> bool {
+        std::mem::take(&mut self.mic_unavailable)
     }
 
     pub fn has_remote_video(&self) -> bool {
@@ -420,14 +401,7 @@ impl CallStore {
         if !matches!(self.phase, CallPhase::Idle) {
             return;
         }
-        if mezon_voice::microphone_denied() {
-            self.mic_prompt = true;
-            cx.notify();
-            return;
-        }
-        if video && mezon_voice::camera_denied() {
-            self.camera_prompt = true;
-            cx.notify();
+        if !Self::start_media_granted(&peer, video, cx) {
             return;
         }
         let Some((self_id, self_name, self_avatar)) = self_identity(cx) else {
@@ -486,9 +460,13 @@ impl CallStore {
         let Some((self_id, self_name, self_avatar)) = self_identity(cx) else {
             return;
         };
-        if mezon_voice::microphone_denied() {
-            self.mic_prompt = true;
-        }
+        tracing::info!(
+            peer = ?self.peer.as_ref().map(|peer| peer.user_id),
+            pending_remote_ice = self.pending_remote_ice.len(),
+            video,
+            "call: accepting incoming offer"
+        );
+        MediaPermissionStore::warn_if_denied_global(MediaDevice::Microphone, cx);
         self.self_id = self_id;
         self.self_name = self_name;
         self.self_avatar = self_avatar;
@@ -545,7 +523,9 @@ impl CallStore {
     }
 
     pub fn toggle_mic(&mut self, cx: &mut Context<Self>) {
-        if self.engine.is_none() {
+        if self.engine.is_none()
+            || (!self.local.mic_on && !Self::toggle_media_granted(MediaDevice::Microphone, cx))
+        {
             return;
         }
         self.local.mic_on = !self.local.mic_on;
@@ -558,7 +538,9 @@ impl CallStore {
     }
 
     pub fn toggle_camera(&mut self, cx: &mut Context<Self>) {
-        if self.engine.is_none() {
+        if self.engine.is_none()
+            || (!self.local.cam_on && !Self::toggle_media_granted(MediaDevice::Camera, cx))
+        {
             return;
         }
         self.local.cam_on = !self.local.cam_on;
@@ -571,6 +553,33 @@ impl CallStore {
         let status = serde_json::json!({ "cameraEnabled": self.local.cam_on }).to_string();
         self.send_to_peer(WEBRTC_SDP_STATUS_REMOTE_MEDIA, status, cx);
         cx.notify();
+    }
+
+    fn start_media_granted(peer: &CallPeer, video: bool, cx: &mut Context<Self>) -> bool {
+        let this = cx.weak_entity();
+        let peer = peer.clone();
+        MediaPermissionStore::ensure_global(
+            MediaDevice::Microphone,
+            move |cx| {
+                let _ = this.update(cx, |this, cx| this.start_call(peer, video, cx));
+            },
+            cx,
+        )
+    }
+
+    fn toggle_media_granted(device: MediaDevice, cx: &mut Context<Self>) -> bool {
+        let this = cx.weak_entity();
+        MediaPermissionStore::ensure_global(
+            device,
+            move |cx| {
+                let _ = this.update(cx, |this, cx| match device {
+                    MediaDevice::Microphone if !this.local.mic_on => this.toggle_mic(cx),
+                    MediaDevice::Camera if !this.local.cam_on => this.toggle_camera(cx),
+                    _ => {}
+                });
+            },
+            cx,
+        )
     }
 
     pub fn set_input_device(&mut self, device_id: Option<String>, cx: &mut Context<Self>) {
@@ -746,11 +755,13 @@ impl CallStore {
                 self.end_call(EndReason::Failed, cx);
             }
             EngineEvent::MicUnavailable => {
-                self.mic_prompt = true;
-                cx.notify();
+                if !MediaPermissionStore::warn_if_denied_global(MediaDevice::Microphone, cx) {
+                    self.mic_unavailable = true;
+                    cx.notify();
+                }
             }
             EngineEvent::CameraUnavailable => {
-                self.camera_prompt = true;
+                MediaPermissionStore::warn_if_denied_global(MediaDevice::Camera, cx);
                 if self.local.cam_on {
                     self.local.cam_on = false;
                     let status = serde_json::json!({ "cameraEnabled": false }).to_string();
@@ -1095,8 +1106,7 @@ impl CallStore {
         self.media = MediaKind::Audio;
         self.local = MediaFlags::default();
         self.remote = MediaFlags::default();
-        self.mic_prompt = false;
-        self.camera_prompt = false;
+        self.mic_unavailable = false;
         self.incoming_offer = None;
         self.pending_remote_ice.clear();
         self.pending_local_ice.clear();
@@ -1288,6 +1298,13 @@ impl CallStore {
         let caller_id = self.self_id;
         cx.background_executor()
             .spawn(async move {
+                let is_sdp = matches!(data_type, WEBRTC_SDP_OFFER | WEBRTC_SDP_ANSWER);
+                if is_sdp {
+                    tracing::info!(
+                        data_type, receiver_id, channel_id,
+                        "call: forwarding local SDP"
+                    );
+                }
                 if let Err(e) = api
                     .forward_webrtc_signaling(
                         receiver_id,
@@ -1300,6 +1317,11 @@ impl CallStore {
                 {
                     tracing::warn!(
                         "call: signaling send failed type={data_type} to={receiver_id}: {e:#}"
+                    );
+                } else if is_sdp {
+                    tracing::info!(
+                        data_type, receiver_id, channel_id,
+                        "call: local SDP acknowledged by signaling server"
                     );
                 }
             })

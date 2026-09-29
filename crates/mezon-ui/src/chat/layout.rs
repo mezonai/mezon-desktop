@@ -11,11 +11,11 @@ use mezon_store::{
     CHANNEL_ACTIVE_ARCHIVED, CHANNEL_ACTIVE_JOINED, CallStore, Channel, ChannelEvent, ChannelId,
     ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore, DirectChannel, DirectKind,
     DirectMessageStore, GroupMembersStore, InboxStore, MessageSearchEvent, MessageSearchStore,
-    MessagesStore, PinnedEvent, PinnedMessagesStore, Settings, StreamStore, THREAD_STATUS_ARCHIVED,
-    ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, UiState, VoiceConnection, VoiceMember,
-    VoiceModerationError, VoiceStore, expand_mention_name_tokens,
+    MessagesStore, NoiseSuppressionStatus, PinnedEvent, PinnedMessagesStore, Settings, StreamStore,
+    THREAD_STATUS_ARCHIVED, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, UiState,
+    VoiceConnection, VoiceMember, VoiceModerationError, VoiceStore, expand_mention_name_tokens,
 };
-use ui::PopoverMenuHandle;
+use ui::{PopoverMenuHandle, Tooltip};
 
 use crate::app::shell::Shell;
 use crate::chat::age_restricted::{AgeRestrictedGate, age_gate_blocks};
@@ -34,7 +34,7 @@ use crate::chat::{CanvasPopoverPanel, CanvasView};
 use crate::components::compositions::channel_row::channel_icon;
 use crate::components::compositions::user_info_bar::UserInfoBar;
 use crate::components::primitives::{
-    Icon, IconName, InputEvent, InputState, Slider, SliderEvent, SliderState,
+    Icon, IconName, InputEvent, InputState, SliderEvent, SliderState, Spinner,
 };
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
@@ -119,14 +119,8 @@ pub struct ChatLayout {
     voice_sound_picker: Option<Entity<VoiceSoundPicker>>,
     _voice_sound_picker_sub: Option<Subscription>,
     _voice_sound_picker_dismiss_sub: Option<Subscription>,
-    ns_slider: Entity<SliderState>,
-    _ns_slider_sub: Subscription,
     stream_volume_slider: Entity<SliderState>,
     _stream_volume_slider_sub: Subscription,
-    ns_popover_open: bool,
-    ns_hovered: bool,
-    ns_dragging: bool,
-    _ns_popover_close: Option<Task<()>>,
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -183,7 +177,7 @@ struct VoiceMiniSlice {
     screen_enabled: bool,
     link_copied: bool,
     noise_suppression_enabled: bool,
-    noise_suppression_level: u8,
+    noise_suppression_status: Option<NoiseSuppressionStatus>,
 }
 
 impl ChatLayout {
@@ -305,6 +299,9 @@ impl ChatLayout {
         let call_panel = cx.new(CallPanelView::new);
         cx.observe(&CallStore::global(cx), |_, _, cx| cx.notify())
             .detach();
+        if let Some(media_access) = crate::chat::media_permission_prompt::observe_media_access(cx) {
+            media_access.detach();
+        }
 
         let stream_store = StreamStore::global(cx);
         cx.observe(&stream_store, |this, store, cx| {
@@ -382,6 +379,10 @@ impl ChatLayout {
         })
         .detach();
         cx.subscribe(&channel_list, |this, _, event, cx| {
+            if let ChannelEvent::AccessLost(channel_id) = event {
+                Self::leave_lost_channel_screen(*channel_id, cx);
+                return;
+            }
             let ChannelEvent::ArchivedByAdministrator { is_thread } = event else {
                 return;
             };
@@ -481,24 +482,6 @@ impl ChatLayout {
             }
         })
         .detach();
-        let ns_level = voice_store.read(cx).noise_suppression_level();
-        let ns_slider = cx.new(|_| {
-            SliderState::new()
-                .min(0.)
-                .max(100.)
-                .step(1.)
-                .default_value(ns_level as f32)
-        });
-        let ns_slider_sub = cx.subscribe(
-            &ns_slider,
-            |_this, _slider: Entity<SliderState>, event: &SliderEvent, cx| {
-                let SliderEvent::Change(value) = event;
-                let level = value.end().round().clamp(0., 100.) as u8;
-                VoiceStore::global(cx).update(cx, |store, cx| {
-                    store.set_noise_suppression_level(level, cx);
-                });
-            },
-        );
         let stream_volume_slider = cx.new(|_| {
             SliderState::new()
                 .min(0.)
@@ -596,14 +579,8 @@ impl ChatLayout {
             voice_sound_picker: None,
             _voice_sound_picker_sub: None,
             _voice_sound_picker_dismiss_sub: None,
-            ns_slider,
-            _ns_slider_sub: ns_slider_sub,
             stream_volume_slider,
             _stream_volume_slider_sub: stream_volume_slider_sub,
-            ns_popover_open: false,
-            ns_hovered: false,
-            ns_dragging: false,
-            _ns_popover_close: None,
         };
         this.sync_active_from_route(cx);
         this.sync_member_list_visibility(cx);
@@ -1262,6 +1239,27 @@ impl ChatLayout {
         );
     }
 
+    /// The settings or canvas of a channel we can no longer see would stay on
+    /// screen with nothing behind it. `redirect_removed_thread_route` only
+    /// leaves a deleted channel, so a lost one is left here. A chat route is
+    /// already moved on by `ensure_active_channel_for_clan`.
+    fn leave_lost_channel_screen(lost: ChannelId, cx: &mut App) {
+        let clan_id = match Router::global(cx).read(cx).route() {
+            Route::ChannelSettings {
+                clan_id,
+                channel_id,
+                ..
+            }
+            | Route::Canvas {
+                clan_id,
+                channel_id,
+                ..
+            } if channel_id == lost => clan_id,
+            _ => return,
+        };
+        crate::channel_navigation::navigate_after_channel_removed(cx, clan_id, lost);
+    }
+
     fn redirect_removed_thread_route(&mut self, cx: &mut Context<Self>) {
         let route = Router::global(cx).read(cx).route().clone();
         match route {
@@ -1651,7 +1649,7 @@ impl ChatLayout {
             let screen_enabled = store.screen_share_enabled();
             let link_copied = store.link_copied();
             let noise_suppression_enabled = store.noise_suppression_enabled();
-            let noise_suppression_level = store.noise_suppression_level();
+            let noise_suppression_status = store.noise_suppression_status();
             let changed = prev.connecting != connecting
                 || prev.label != label
                 || prev.mic_enabled != mic_enabled
@@ -1659,7 +1657,7 @@ impl ChatLayout {
                 || prev.screen_enabled != screen_enabled
                 || prev.link_copied != link_copied
                 || prev.noise_suppression_enabled != noise_suppression_enabled
-                || prev.noise_suppression_level != noise_suppression_level;
+                || prev.noise_suppression_status != noise_suppression_status;
             if changed {
                 if prev.label != label {
                     prev.label = label.to_string();
@@ -1670,7 +1668,7 @@ impl ChatLayout {
                 prev.screen_enabled = screen_enabled;
                 prev.link_copied = link_copied;
                 prev.noise_suppression_enabled = noise_suppression_enabled;
-                prev.noise_suppression_level = noise_suppression_level;
+                prev.noise_suppression_status = noise_suppression_status;
             }
             return changed;
         }
@@ -1691,7 +1689,7 @@ impl ChatLayout {
             screen_enabled: store.screen_share_enabled(),
             link_copied: store.link_copied(),
             noise_suppression_enabled: store.noise_suppression_enabled(),
-            noise_suppression_level: store.noise_suppression_level(),
+            noise_suppression_status: store.noise_suppression_status(),
         });
         true
     }
@@ -2053,14 +2051,15 @@ impl ChatLayout {
             );
             return;
         }
-        if mention_input
-            .update(cx, |mention_input, _| mention_input.take_flash_command())
-            .is_some()
+        if let Some(command) =
+            mention_input.update(cx, |mention_input, _| mention_input.take_flash_command())
         {
+            let invocation = command.invocation(&content);
             crate::chat::ChatSending::send_to_bot(
                 content,
                 content_tokens,
                 attachments,
+                invocation,
                 &self.auth_state,
                 cx,
             );
@@ -2471,6 +2470,15 @@ impl ChatLayout {
         let is_audience = store.is_audience();
         let ptt_active = store.push_to_talk_active();
         let link_copied = store.link_copied();
+        let mic_access_missing = crate::chat::media_permission_prompt::media_access_missing(
+            mezon_store::MediaDevice::Microphone,
+            cx,
+        );
+        let camera_access_missing = crate::chat::media_permission_prompt::media_access_missing(
+            mezon_store::MediaDevice::Camera,
+            cx,
+        );
+        let noise_status = store.noise_suppression_status();
         let noise_control = self.render_noise_control(cx);
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
@@ -2490,6 +2498,9 @@ impl ChatLayout {
             is_audience,
             ptt_active,
             link_copied,
+            mic_access_missing,
+            camera_access_missing,
+            noise_status,
             noise_control,
         ))
     }
@@ -2651,64 +2662,11 @@ impl ChatLayout {
         cx.notify();
     }
 
-    fn set_ns_popover_hover(&mut self, hovered: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if hovered {
-            self.ns_hovered = true;
-            self._ns_popover_close = None;
-            if !self.ns_popover_open {
-                let level = self.voice_store.read(cx).noise_suppression_level();
-                self.ns_slider.update(cx, |slider, cx| {
-                    slider.set_value(level as f32, window, cx);
-                });
-                self.ns_popover_open = true;
-                cx.notify();
-            }
-        } else {
-            self.ns_hovered = false;
-            if !self.ns_dragging {
-                self.schedule_ns_close(cx);
-            }
-        }
-    }
-
-    fn schedule_ns_close(&mut self, cx: &mut Context<Self>) {
-        if !self.ns_popover_open || self._ns_popover_close.is_some() {
-            return;
-        }
-        self._ns_popover_close = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(300))
-                .await;
-            this.update(cx, |this, cx| {
-                this.ns_popover_open = false;
-                this._ns_popover_close = None;
-                cx.notify();
-            })
-            .ok();
-        }));
-    }
-
-    fn ns_drag_started(&mut self) {
-        self.ns_dragging = true;
-        self._ns_popover_close = None;
-    }
-
-    fn ns_drag_ended(&mut self, inside: bool, cx: &mut Context<Self>) {
-        let was_dragging = std::mem::take(&mut self.ns_dragging);
-        if inside {
-            self.ns_hovered = true;
-            self._ns_popover_close = None;
-        } else if was_dragging || !self.ns_hovered {
-            self.ns_hovered = false;
-            self.schedule_ns_close(cx);
-        }
-    }
-
     fn render_noise_control(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
         let store = self.voice_store.read(cx);
         let enabled = store.noise_suppression_enabled();
-        let level = store.noise_suppression_level();
+        let loading = store.noise_suppression_loading();
         let icon = if enabled {
             Icon::new(IconName::NoiseSupressionIcon)
                 .size(px(20.))
@@ -2725,77 +2683,20 @@ impl ChatLayout {
             .justify_center()
             .size(px(24.))
             .rounded(px(4.))
-            .cursor_pointer()
+            .when(!loading, |button| button.cursor_pointer())
             .hover(|s| s.bg(theme.bg_hover))
-            .child(icon)
-            .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
-                this.set_ns_popover_hover(*hovered, window, cx);
-            }))
+            .tooltip(Tooltip::text("Noise Suppression"))
+            .child(if loading {
+                Spinner::new().into_any_element()
+            } else {
+                icon.into_any_element()
+            })
             .on_click(cx.listener(|_this, _, _, cx| {
                 VoiceStore::global(cx).update(cx, |store, cx| {
                     store.toggle_noise_suppression(cx);
                 });
             }));
-
-        let mut root = div().relative().child(button);
-        if self.ns_popover_open && enabled {
-            root = root.child(deferred(
-                div()
-                    .id("voice-ns-popover")
-                    .absolute()
-                    .bottom(px(28.))
-                    .right(px(-16.))
-                    .w(px(240.))
-                    .p_3()
-                    .rounded_md()
-                    .bg(theme.tokens.bg_theme_contexify)
-                    .border_1()
-                    .border_color(theme.border)
-                    .shadow_lg()
-                    .occlude()
-                    .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
-                        this.set_ns_popover_hover(*hovered, window, cx);
-                    }))
-                    .capture_any_mouse_down(
-                        cx.listener(|this, _: &gpui::MouseDownEvent, _, _| this.ns_drag_started()),
-                    )
-                    .on_mouse_up(
-                        gpui::MouseButton::Left,
-                        cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| {
-                            this.ns_drag_ended(true, cx);
-                        }),
-                    )
-                    .on_mouse_up_out(
-                        gpui::MouseButton::Left,
-                        cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| {
-                            this.ns_drag_ended(false, cx);
-                        }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .mb_2()
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme.text_primary)
-                                    .child("Noise Suppression"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(theme.text_primary)
-                                    .child(format!("{level}%")),
-                            ),
-                    )
-                    .child(Slider::new(&self.ns_slider).horizontal()),
-            ));
-        }
-        root.into_any_element()
+        button.into_any_element()
     }
 
     fn get_app_channel_bar(&self, cx: &Context<Self>) -> Option<ChannelAppBarTarget> {

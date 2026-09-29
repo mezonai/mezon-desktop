@@ -194,12 +194,13 @@ pub(crate) fn edit_message_allowed(
 }
 
 pub(crate) fn message_is_editable(msg: &Message, current_user_id: &str) -> bool {
-    edit_message_allowed(
-        current_user_id == msg.sender_id.as_str(),
-        msg.code,
-        msg.is_forwarded,
-        msg.send_failed,
-    )
+    msg.command.is_none()
+        && edit_message_allowed(
+            current_user_id == msg.sender_id.as_str(),
+            msg.code,
+            msg.is_forwarded,
+            msg.send_failed,
+        )
 }
 
 fn can_delete_message(msg: &Message, current_user_id: &str, is_topic_box: bool, cx: &App) -> bool {

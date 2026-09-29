@@ -72,7 +72,7 @@ fn apply_zed_palette(theme: &Theme, cx: &mut App) {
     let colors = &mut zed.styles.colors;
     colors.background = theme.bg_primary.into();
     colors.surface_background = theme.bg_secondary.into();
-    colors.elevated_surface_background = theme.bg_floating.into();
+    colors.elevated_surface_background = theme.tokens.bg_tooltip_app.into();
     colors.panel_background = theme.bg_secondary.into();
     colors.element_background = theme.bg_tertiary.into();
     colors.element_hover = theme.bg_hover.into();
@@ -302,7 +302,7 @@ impl Theme {
         base.bg_primary = t.bg_secondary;
         base.bg_secondary = t.bg_theme_direct_message;
         base.bg_tertiary = t.bg_primary;
-        base.bg_floating = t.bg_tooltip_app;
+        base.bg_floating = t.bg_modal_theme;
         base.bg_hover = t.bg_item_hover;
         base.brand = t.button_theme_primary;
         base.brand_hover = t.bg_button_primary_hover;
@@ -352,6 +352,7 @@ mod tests {
         assert_eq!(theme.bg_primary, t.bg_secondary);
         assert_eq!(theme.bg_secondary, t.bg_theme_direct_message);
         assert_eq!(theme.bg_tertiary, t.bg_primary);
+        assert_eq!(theme.bg_floating, t.bg_modal_theme);
         assert_eq!(theme.border, t.border_primary);
         assert_eq!(theme.brand, t.button_theme_primary);
         assert_eq!(theme.title_bar_bg, t.bg_primary);

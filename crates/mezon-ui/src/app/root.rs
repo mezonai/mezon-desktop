@@ -5,6 +5,7 @@ use crate::auth::login_view::LoginView;
 use crate::chat::call_window::CallOverlay;
 use crate::chat::channel_settings::ChannelSettingScreen;
 use crate::chat::layout::ChatLayout;
+use crate::chat::media_permission_prompt::MediaPermissionOverlay;
 use crate::clan::settings::{ClanSettingScreen, ClanSettingsPage};
 use crate::components::primitives::{Button, Icon, IconName};
 use crate::image_cache::{
@@ -43,6 +44,7 @@ pub struct RootView {
     connecting_since: Option<Instant>,
     network_online: bool,
     call_overlay: Entity<CallOverlay>,
+    media_permission_overlay: Entity<MediaPermissionOverlay>,
     _splash_delay: Option<Task<()>>,
     _recording_toasts: Option<gpui::Subscription>,
     tour_autostart: Option<Task<()>>,
@@ -361,10 +363,12 @@ impl RootView {
             (None, None)
         };
         let call_overlay = cx.new(CallOverlay::new);
+        let media_permission_overlay = cx.new(MediaPermissionOverlay::new);
         Self {
             focus_handle: cx.focus_handle().tab_stop(false),
             reclaim_focus_after_route: true,
             call_overlay,
+            media_permission_overlay,
             title_bar,
             auth_state,
             login_view,
@@ -648,6 +652,7 @@ impl Render for RootView {
             })
             .child(self.shell.clone())
             .child(self.call_overlay.clone())
+            .child(self.media_permission_overlay.clone())
     }
 }
 

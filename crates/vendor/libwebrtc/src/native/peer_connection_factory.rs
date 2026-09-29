@@ -24,9 +24,16 @@ lazy_static! {
 fn ensure_log_sink() {
     let mut log_sink = LOG_SINK.lock();
     if log_sink.is_none() {
-        *log_sink = Some(sys_rtc::ffi::new_log_sink(|msg, _| {
+        *log_sink = Some(sys_rtc::ffi::new_log_sink(|msg, severity| {
             let msg = msg.strip_suffix("\r\n").or(msg.strip_suffix('\n')).unwrap_or(&msg);
-            log::debug!(target: "libwebrtc", "{}", msg);
+            // Preserve native failures in release logs. Keep routine native
+            // messages at debug: ICE/SDP traces are noisy and may contain SDP.
+            match severity {
+                sys_rtc::ffi::LoggingSeverity::Error => log::error!(target: "libwebrtc", "{}", msg),
+                sys_rtc::ffi::LoggingSeverity::Warning => log::warn!(target: "libwebrtc", "{}", msg),
+                sys_rtc::ffi::LoggingSeverity::None => {},
+                _ => log::debug!(target: "libwebrtc", "{}", msg),
+            }
         }));
     }
 }

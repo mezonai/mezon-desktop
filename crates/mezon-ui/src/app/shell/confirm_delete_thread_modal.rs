@@ -121,13 +121,13 @@ impl Render for ConfirmDeleteThreadModal {
                         div()
                             .text_size(px(20.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text_primary)
+                            .text_color(theme.tokens.text_theme_primary)
                             .child(self.title.clone()),
                     )
                     .child(
                         div()
                             .text_size(px(15.))
-                            .text_color(theme.text_primary)
+                            .text_color(theme.tokens.text_theme_primary)
                             .child(self.description.clone()),
                     ),
             )
@@ -137,7 +137,9 @@ impl Render for ConfirmDeleteThreadModal {
                     .items_center()
                     .gap_4()
                     .p(px(16.))
-                    .bg(theme.bg_secondary)
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .bg(theme.tokens.bg_option_active)
                     .child(
                         Button::new("confirm-delete-thread-cancel")
                             .label(self.cancel_label.clone())

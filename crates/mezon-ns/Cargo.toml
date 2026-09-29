@@ -1,0 +1,18 @@
+[package]
+name = "mezon-ns"
+version = "0.1.0"
+edition = "2021"
+links = "mezon_ns"
+publish = false
+
+[dependencies]
+ort-sys = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "download-binaries", "tls-rustls", "api-20"] }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+ort-sys = { version = "=2.0.0-rc.13", default-features = false, features = ["coreml"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+ort-sys = { version = "=2.0.0-rc.13", default-features = false, features = ["directml"] }
+
+[build-dependencies]
+cc = "1.2"

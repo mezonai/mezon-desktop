@@ -3,6 +3,7 @@ mod audio_player;
 pub(crate) use audio_player::report_audio_output_unavailable;
 mod call_log_card;
 mod channel_messages;
+mod command_row;
 mod content;
 mod context;
 mod create_poll_modal;

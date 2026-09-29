@@ -95,7 +95,7 @@ pub enum RolesEvent {
     RoleOrderSaveFailed { clan_id: ClanId },
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq)]
 struct ClanRoles {
     order: Vec<RoleId>,
     by_id: HashMap<RoleId, ClanRoleDetail>,
@@ -125,6 +125,7 @@ pub struct RolesStore {
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
     _members_watch: Option<gpui::Subscription>,
+    _channel_list_watch: Option<gpui::Subscription>,
 }
 
 struct GlobalRolesStore(Entity<RolesStore>);
@@ -193,11 +194,29 @@ impl RolesStore {
         )
     }
 
+    fn watch_channel_list(cx: &mut Context<Self>) -> Option<gpui::Subscription> {
+        let channels = crate::ChannelList::try_global(cx)?;
+        Some(
+            cx.subscribe(&channels, |this, _, event: &crate::ChannelEvent, cx| {
+                if let crate::ChannelEvent::PrivacyChanged {
+                    clan_id,
+                    channel_id,
+                    role_ids,
+                    ..
+                } = event
+                {
+                    this.set_channel_roles(*clan_id, *channel_id, role_ids, cx);
+                }
+            }),
+        )
+    }
+
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
 
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
         let members_watch = Self::watch_clan_members(cx);
+        let channel_list_watch = Self::watch_channel_list(cx);
 
         Self {
             cache: KeyedCache::new(Some(MAX_CACHED_CLANS)),
@@ -213,6 +232,7 @@ impl RolesStore {
             api,
             _conn_watch: conn_watch,
             _members_watch: members_watch,
+            _channel_list_watch: channel_list_watch,
         }
     }
 
@@ -326,6 +346,45 @@ impl RolesStore {
                 changed = true;
             }
             if !role.role_channel_active {
+                role.role_channel_active = true;
+                changed = true;
+            }
+        }
+        if changed {
+            cx.emit(RolesEvent::Changed { clan_id });
+            cx.notify();
+        }
+        changed
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_roles_for_test(&mut self, clan_id: ClanId, roles: Vec<api::Role>) {
+        self.cache
+            .insert(clan_id, roles_map_from_proto(roles), None);
+    }
+
+    pub fn set_channel_roles(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        role_ids: &[RoleId],
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(roles) = self.cache.get_mut(&clan_id) else {
+            return false;
+        };
+        let mut changed = false;
+        for (role_id, role) in roles.by_id.iter_mut() {
+            let granted = role_ids.contains(role_id);
+            let linked = role.channel_ids.contains(&channel_id);
+            if granted && !linked {
+                role.channel_ids.push(channel_id);
+                changed = true;
+            } else if !granted && linked {
+                role.channel_ids.retain(|id| *id != channel_id);
+                changed = true;
+            }
+            if granted && !role.role_channel_active {
                 role.role_channel_active = true;
                 changed = true;
             }
@@ -614,9 +673,15 @@ impl RolesStore {
                             roles.order.len()
                         );
                         let empty = roles.order.is_empty();
+                        // A reload usually returns what we already hold. Announcing it
+                        // anyway would rebuild the member list for nothing.
+                        let unchanged = this.cache.get(&clan_id) == Some(&roles);
                         this.cache.insert(clan_id, roles, None);
                         if empty {
                             this.cache.mark_stale(&clan_id);
+                        }
+                        if unchanged {
+                            return;
                         }
                         this.rebuild_role_styles(clan_id, cx);
                         cx.emit(RolesEvent::Changed { clan_id });
@@ -1527,6 +1592,46 @@ mod tests {
         let role = &roles.by_id[&RoleId(10)];
         assert_eq!(role.channel_ids, vec![ChannelId(7), ChannelId(9)]);
         assert!(role.role_channel_active);
+    }
+
+    #[gpui::test]
+    fn set_channel_roles_replaces_the_roles_linked_to_a_channel(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = init_roles_store(cx);
+            store.update(cx, |store, cx| {
+                store.seed_roles_for_test(
+                    TEST_CLAN,
+                    vec![
+                        api::Role {
+                            channel_ids: vec![7, 9],
+                            role_channel_active: 1,
+                            ..make_role(10, "A", "#f00")
+                        },
+                        api::Role {
+                            channel_ids: vec![7],
+                            role_channel_active: 1,
+                            ..make_role(20, "B", "#0f0")
+                        },
+                        make_role(30, "C", "#00f"),
+                    ],
+                );
+                let linked = |store: &RolesStore, channel_id: i64| {
+                    store
+                        .roles_for_channel(TEST_CLAN, ChannelId(channel_id))
+                        .into_iter()
+                        .map(|(role_id, _)| role_id)
+                        .collect::<Vec<_>>()
+                };
+
+                assert!(store.set_channel_roles(TEST_CLAN, ChannelId(7), &[RoleId(30)], cx));
+                assert_eq!(linked(store, 7), vec![RoleId(30)]);
+                assert_eq!(linked(store, 9), vec![RoleId(10)]);
+
+                assert!(store.set_channel_roles(TEST_CLAN, ChannelId(7), &[], cx));
+                assert!(linked(store, 7).is_empty());
+                assert!(!store.set_channel_roles(TEST_CLAN, ChannelId(7), &[], cx));
+            });
+        });
     }
 
     #[gpui::test]

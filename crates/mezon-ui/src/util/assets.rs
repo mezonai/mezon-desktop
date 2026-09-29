@@ -6,6 +6,7 @@ use rust_embed::RustEmbed;
 
 pub const AVATAR_GROUP: &str = "images/avatar-group.png";
 pub const MEZON_LOGO: &str = "images/logoflashsceenmezon.png";
+pub const APP_ICON: &str = "images/mezon-app-icon.png";
 pub const STREAM_THUMBNAIL: &str = "images/flahstream.png";
 pub const MEZON_COMMUNITY: &str = "images/mezon-community.png";
 pub const CHANNEL_SETTING_LOGO_LIGHT: &str = "images/channel_setting_logo_light.svg";
@@ -48,6 +49,7 @@ mod tests {
         for path in [
             AVATAR_GROUP,
             MEZON_LOGO,
+            APP_ICON,
             STREAM_THUMBNAIL,
             MEZON_COMMUNITY,
             CHANNEL_SETTING_LOGO_LIGHT,

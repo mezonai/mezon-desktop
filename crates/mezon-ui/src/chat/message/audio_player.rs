@@ -1,11 +1,13 @@
+use std::future::Future;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use futures::AsyncReadExt;
+use futures::future::Either;
 use gpui::{
-    App, Bounds, ClickEvent, Context, DragMoveEvent, ElementId, Empty, EntityId, FontFeatures,
-    MouseButton, MouseDownEvent, Pixels, Rgba, SharedString, Task, Window, canvas, div,
-    http_client::HttpClient, prelude::*, px, relative,
+    App, BackgroundExecutor, Bounds, ClickEvent, Context, DragMoveEvent, ElementId, Empty,
+    EntityId, FontFeatures, MouseButton, MouseDownEvent, Pixels, Rgba, SharedString, Task, Window,
+    canvas, div, http_client::HttpClient, prelude::*, px, relative,
 };
 use mezon_audio::{AudioPlayer, DecodedPcm, PcmStream};
 
@@ -19,6 +21,8 @@ const AUDIO_TICK_IDLE: Duration = Duration::from_secs(1);
 const SEEK_TRACK_WIDTH: f32 = 112.0;
 const AUDIO_FETCH_CHUNK: usize = 64 * 1024;
 const AUDIO_FETCH_QUEUE: usize = 8;
+const AUDIO_FETCH_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const AUDIO_READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 static TABULAR_FIGURES: LazyLock<FontFeatures> =
     LazyLock::new(|| FontFeatures(Arc::new(vec![("tnum".to_string(), 1)])));
@@ -84,6 +88,7 @@ pub struct AudioPlayerView {
     download_name: SharedString,
     player: Option<AudioPlayer>,
     state: LoadState,
+    download_failed: bool,
     want_play: bool,
     pending_seek: Option<f64>,
     server_duration: f64,
@@ -110,6 +115,7 @@ impl AudioPlayerView {
             download_name,
             player: None,
             state: LoadState::Loading,
+            download_failed: false,
             want_play: true,
             pending_seek: (start_secs > 0.0).then_some(start_secs),
             server_duration: duration,
@@ -149,26 +155,53 @@ impl AudioPlayerView {
             self.state = LoadState::Failed;
             return;
         }
+        tracing::info!("message audio loading started");
+        self.download_failed = false;
         let client = cx.http_client();
         self._load_task = Some(cx.spawn(async move |this, cx| {
             let (byte_tx, byte_rx) = flume::bounded(AUDIO_FETCH_QUEUE);
             let ready = mezon_audio::spawn_stream_decode(byte_rx);
+            let executor = cx.background_executor().clone();
             let fetch = cx
                 .background_executor()
-                .spawn(async move { fetch_audio(client, url, byte_tx).await });
+                .spawn(async move { fetch_audio(client, url, byte_tx, executor).await });
 
-            if let Ok(Ok(stream)) = ready.recv_async().await {
+            let stream_ready = match futures::future::select(
+                Box::pin(ready.recv_async()),
+                Box::pin(cx.background_executor().timer(AUDIO_READY_TIMEOUT)),
+            )
+            .await
+            {
+                Either::Left((result, _)) => result,
+                Either::Right(_) => {
+                    tracing::warn!("message audio decoder readiness timed out");
+                    let _ = this.update(cx, |view, cx| view.on_load_failed(cx));
+                    return;
+                }
+            };
+
+            if let Ok(Ok(stream)) = stream_ready {
+                tracing::info!("message audio stream ready");
                 let _ = this.update(cx, |view, cx| view.on_stream_ready(stream, cx));
-                if let Err(err) = fetch.await {
-                    tracing::warn!("audio download failed: {err}");
+                match fetch.await {
+                    Ok(bytes) => {
+                        tracing::info!(bytes = bytes.len(), "message audio download complete");
+                    }
+                    Err(err) => {
+                        tracing::warn!("message audio download failed: {err}");
+                        let _ = this.update(cx, |view, cx| view.on_stream_download_failed(cx));
+                    }
                 }
                 return;
             }
 
             let bytes = match fetch.await {
-                Ok(bytes) => bytes,
+                Ok(bytes) => {
+                    tracing::info!(bytes = bytes.len(), "message audio download complete");
+                    bytes
+                }
                 Err(err) => {
-                    tracing::warn!("audio download failed: {err}");
+                    tracing::warn!("message audio download failed: {err}");
                     let _ = this.update(cx, |view, cx| view.on_load_failed(cx));
                     return;
                 }
@@ -180,7 +213,7 @@ impl AudioPlayerView {
             let _ = this.update(cx, |view, cx| match decoded {
                 Ok(pcm) => view.on_pcm_ready(pcm, cx),
                 Err(err) => {
-                    tracing::warn!("audio decode failed: {err}");
+                    tracing::warn!("message audio decode failed: {err}");
                     view.on_load_failed(cx);
                 }
             });
@@ -237,8 +270,30 @@ impl AudioPlayerView {
         true
     }
 
+    fn on_stream_download_failed(&mut self, cx: &mut Context<Self>) {
+        self.download_failed = true;
+        let drained_at = self
+            .player
+            .as_ref()
+            .filter(|player| player.finished())
+            .map(|player| player.position_secs());
+        if let Some(position) = drained_at {
+            self.fail_at(position, cx);
+        }
+    }
+
+    fn fail_at(&mut self, position: f64, cx: &mut Context<Self>) {
+        self.set_playhead(position);
+        self.on_load_failed(cx);
+    }
+
     fn on_load_failed(&mut self, cx: &mut Context<Self>) {
         self.state = LoadState::Failed;
+        self.download_failed = false;
+        self.tick_task = None;
+        self.player = None;
+        self.want_play = false;
+        self.pending_seek = None;
         cx.notify();
     }
 
@@ -272,6 +327,10 @@ impl AudioPlayerView {
         if self.pending_seek.is_some() {
             let landed = self.apply_pending_seek();
             if self.pending_seek.is_some() {
+                if self.download_failed {
+                    self.fail_at(self.playhead, cx);
+                    return false;
+                }
                 return self.want_play
                     || self
                         .player
@@ -286,6 +345,7 @@ impl AudioPlayerView {
             let Some(player) = &self.player else {
                 return self.pending_seek.is_some();
             };
+            player.poll_output();
             if inactive {
                 return player.is_playing() || self.pending_seek.is_some();
             }
@@ -299,6 +359,10 @@ impl AudioPlayerView {
                 player.is_playing() && !finished,
             )
         };
+        if finished && self.download_failed {
+            self.fail_at(position, cx);
+            return false;
+        }
         let position = if finished {
             self.effective_duration()
         } else {
@@ -331,6 +395,9 @@ impl AudioPlayerView {
     }
 
     fn seek_to(&mut self, secs: f64, cx: &mut Context<Self>) {
+        if matches!(self.state, LoadState::Failed) {
+            return;
+        }
         let duration = self.effective_duration();
         if duration <= 0.0 {
             return;
@@ -376,8 +443,7 @@ impl AudioPlayerView {
         if matches!(self.state, LoadState::Failed) {
             self.state = LoadState::Loading;
             self.want_play = true;
-            self.time_label = SharedString::from(time_label(0.0, self.server_duration));
-            self.last_label_seconds = (0, whole_seconds(self.server_duration));
+            self.pending_seek = (self.playhead > 0.0).then_some(self.playhead);
             self.start_loading(self.url.clone(), cx);
             cx.notify();
             return;
@@ -756,8 +822,13 @@ async fn fetch_audio(
     client: Arc<dyn HttpClient>,
     url: SharedString,
     byte_tx: flume::Sender<Vec<u8>>,
+    executor: BackgroundExecutor,
 ) -> anyhow::Result<Vec<u8>> {
-    let mut response = client.get(url.as_ref(), ().into(), true).await?;
+    let mut response =
+        with_inactivity_timeout(&executor, client.get(url.as_ref(), ().into(), true))
+            .await
+            .ok_or_else(|| anyhow::anyhow!("audio HTTP response timed out"))?
+            .map_err(|err| anyhow::anyhow!("audio HTTP request failed: {err}"))?;
     if !response.status().is_success() {
         anyhow::bail!("audio fetch status {}", response.status());
     }
@@ -775,8 +846,12 @@ async fn fetch_audio(
 
     let mut body = Vec::new();
     let mut buffer = vec![0u8; AUDIO_FETCH_CHUNK];
+    let mut decoder_connected = true;
     loop {
-        let read = response.body_mut().read(&mut buffer).await?;
+        let read = with_inactivity_timeout(&executor, response.body_mut().read(&mut buffer))
+            .await
+            .ok_or_else(|| anyhow::anyhow!("audio response body timed out"))?
+            .map_err(|err| anyhow::anyhow!("audio response body failed: {err}"))?;
         if read == 0 {
             break;
         }
@@ -784,9 +859,32 @@ async fn fetch_audio(
             anyhow::bail!("response body exceeds the {AUDIO_FETCH_MAX_BYTES} byte transfer limit");
         }
         body.extend_from_slice(&buffer[..read]);
-        let _ = byte_tx.send_async(buffer[..read].to_vec()).await;
+        if decoder_connected {
+            match with_inactivity_timeout(&executor, byte_tx.send_async(buffer[..read].to_vec()))
+                .await
+            {
+                Some(Ok(())) => {}
+                Some(Err(_)) => decoder_connected = false,
+                None => anyhow::bail!("audio decoder stopped accepting data"),
+            }
+        }
     }
     Ok(body)
+}
+
+async fn with_inactivity_timeout<T>(
+    executor: &BackgroundExecutor,
+    operation: impl Future<Output = T>,
+) -> Option<T> {
+    match futures::future::select(
+        Box::pin(operation),
+        Box::pin(executor.timer(AUDIO_FETCH_IDLE_TIMEOUT)),
+    )
+    .await
+    {
+        Either::Left((result, _)) => Some(result),
+        Either::Right(_) => None,
+    }
 }
 
 pub(crate) fn report_audio_output_unavailable(cx: &mut App) {
@@ -857,8 +955,96 @@ pub(crate) fn audio_time_label(current: f64, duration: f64) -> SharedString {
 
 #[cfg(test)]
 mod tests {
-    use super::{fraction_from_position, time_label};
-    use gpui::{Bounds, point, px, size};
+    use super::{AUDIO_FETCH_IDLE_TIMEOUT, fetch_audio, fraction_from_position, time_label};
+    use futures::AsyncRead;
+    use gpui::{
+        Bounds,
+        http_client::{AsyncBody, FakeHttpClient, Response},
+        point, px, size,
+    };
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
+
+    struct StalledBody;
+
+    impl AsyncRead for StalledBody {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &mut [u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Pending
+        }
+    }
+
+    #[gpui::test]
+    fn stalled_audio_body_times_out_and_closes_decoder_input(cx: &mut gpui::TestAppContext) {
+        let client = FakeHttpClient::create(|_| async {
+            Ok(Response::builder()
+                .status(200)
+                .body(AsyncBody::from_reader(StalledBody))
+                .unwrap())
+        });
+        let (byte_tx, byte_rx) = flume::bounded(1);
+        let outcome = Arc::new(Mutex::new(None));
+        let task_outcome = Arc::clone(&outcome);
+        let executor = cx.executor();
+        let fetch_executor = executor.clone();
+        let _task = executor.spawn(async move {
+            let result = fetch_audio(
+                client,
+                "http://test.example/audio".into(),
+                byte_tx,
+                fetch_executor,
+            )
+            .await;
+            *task_outcome.lock().unwrap() = Some(result.err().map(|err| err.to_string()));
+        });
+
+        cx.run_until_parked();
+        assert!(outcome.lock().unwrap().is_none());
+        cx.executor().advance_clock(AUDIO_FETCH_IDLE_TIMEOUT);
+        cx.run_until_parked();
+        assert_eq!(
+            outcome.lock().unwrap().as_ref(),
+            Some(&Some("audio response body timed out".to_string()))
+        );
+        assert!(byte_rx.is_disconnected());
+    }
+
+    #[gpui::test]
+    fn disconnected_stream_decoder_keeps_bytes_for_full_decode(cx: &mut gpui::TestAppContext) {
+        let client = FakeHttpClient::create(|_| async {
+            Ok(Response::builder()
+                .status(200)
+                .body(AsyncBody::from_reader(futures::io::Cursor::new(vec![
+                    1, 2, 3,
+                ])))
+                .unwrap())
+        });
+        let (byte_tx, byte_rx) = flume::bounded(1);
+        drop(byte_rx);
+        let outcome = Arc::new(Mutex::new(None));
+        let task_outcome = Arc::clone(&outcome);
+        let executor = cx.executor();
+        let fetch_executor = executor.clone();
+        let _task = executor.spawn(async move {
+            let result = fetch_audio(
+                client,
+                "http://test.example/audio".into(),
+                byte_tx,
+                fetch_executor,
+            )
+            .await;
+            *task_outcome.lock().unwrap() = Some(result);
+        });
+
+        cx.run_until_parked();
+        let result = outcome.lock().unwrap().take().unwrap().unwrap();
+        assert_eq!(result, vec![1, 2, 3]);
+    }
 
     #[test]
     fn the_total_is_hidden_until_it_is_known() {

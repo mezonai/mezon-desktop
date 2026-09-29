@@ -24,9 +24,9 @@ impl Render for Tooltip {
             .rounded_md()
             .border_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().bg_floating)
+            .bg(cx.theme().tokens.bg_tooltip_app)
             .text_xs()
-            .text_color(cx.theme().text_primary)
+            .text_color(cx.theme().tokens.text_tooltip_app)
             .child(self.text.clone())
     }
 }

@@ -19,8 +19,8 @@ use mezon_client::{
     AppApi, ChannelAppLaunchParams, RealtimeEvent, api_status_from_error, build_channel_app_url,
 };
 use mezon_voice::{
-    IceServerConfig, MEET_TOKEN_RETRY_LIMIT, TokenRefresher, VoiceConnectOptions, VoiceEvent,
-    VoiceSession,
+    IceServerConfig, MEET_TOKEN_RETRY_LIMIT, MediaDevice, TokenRefresher, VoiceConnectOptions,
+    VoiceEvent, VoiceSession,
 };
 use parking_lot::Mutex;
 
@@ -30,7 +30,8 @@ pub use mezon_voice::{
     CameraDeviceInfo, NetworkQuality, PickedScreen, RemovalCause, ScreenShareKind,
     ScreenShareListError, ScreenShareMode, ScreenShareOption, ScreenSharePreview, SfuRole,
     VideoFrameData, VideoFrameStore, VoiceParticipant, capture_screen_share_preview,
-    list_screen_share_options, peek_screen_share_options, system_screen_share_pick,
+    list_screen_share_options, peek_screen_share_options, request_screen_capture_access,
+    screen_capture_permitted, system_screen_share_pick,
 };
 
 use crate::AppConfig;
@@ -46,6 +47,7 @@ use crate::gifts::{
     parse_flower_reaction_token, serialize_flower_interactive_params,
 };
 use crate::ids::{ClanId, UserId};
+use crate::media_permission::MediaPermissionStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::users_by_user::UsersByUserStore;
 use crate::wallet::{WalletEvent, WalletStore};
@@ -64,7 +66,17 @@ pub enum DeviceMenuKind {
     ScreenShare,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoiseSuppressionStatus {
+    Applying,
+    Applied,
+    Disabled,
+    Error,
+}
+
 const MEET_TOKEN_CACHE_TTL: Duration = Duration::from_secs(45);
+// The web voice thunk normalizes an empty roomName to "0" before requesting the SFU token.
+const SFU_TOKEN_ROOM_NAME: &str = "0";
 const MAX_SFU_RECONNECT_ATTEMPTS: u32 = 4;
 const SFU_RECONNECT_HEALTHY_SESSION: Duration = Duration::from_secs(30);
 const RAISE_HAND_TTL: Duration = Duration::from_secs(10);
@@ -132,7 +144,8 @@ fn redact_interactive_app_url(url: &str) -> String {
 }
 const EMOJI_REACTION_TAIL: Duration = Duration::from_millis(500);
 const MAX_DISPLAYED_REACTIONS: usize = 20;
-const DEFAULT_NOISE_SUPPRESSION_LEVEL: u8 = 20;
+const NOISE_STATUS_MIN_LOADING: Duration = Duration::from_millis(400);
+const NOISE_STATUS_VISIBLE: Duration = Duration::from_millis(1800);
 pub const MAX_SOUND_BYTES: u64 = 1024 * 1024;
 pub const SOUND_ALLOWED_EXTENSIONS: &[&str] = &["mp3", "wav", "mpeg"];
 const KICK_SUPPRESS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -350,11 +363,12 @@ pub struct VoiceStore {
     call_status: VoiceCallStatus,
     channel_label: String,
     mic_enabled: bool,
-    mic_permission_denied: bool,
     camera_enabled: bool,
     screen_share_enabled: bool,
     noise_suppression_enabled: bool,
-    noise_suppression_level: u8,
+    noise_suppression_status: Option<NoiseSuppressionStatus>,
+    noise_suppression_started: Option<Instant>,
+    noise_suppression_generation: u64,
     focused_tile: Option<String>,
     auto_focused_screen: Option<String>,
     fullscreen_screen: Option<u64>,
@@ -740,11 +754,12 @@ impl VoiceStore {
             call_status: VoiceCallStatus::Stable,
             channel_label: String::new(),
             mic_enabled: false,
-            mic_permission_denied: false,
             camera_enabled: false,
             screen_share_enabled: false,
             noise_suppression_enabled: false,
-            noise_suppression_level: DEFAULT_NOISE_SUPPRESSION_LEVEL,
+            noise_suppression_status: None,
+            noise_suppression_started: None,
+            noise_suppression_generation: 0,
             focused_tile: None,
             auto_focused_screen: None,
             fullscreen_screen: None,
@@ -914,7 +929,7 @@ impl VoiceStore {
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let token = api
-                .generate_meet_token(&channel_id, &channel_id, &metadata)
+                .generate_meet_token(&channel_id, SFU_TOKEN_ROOM_NAME, &metadata)
                 .await;
             let _ = this.update(cx, |this, _| {
                 if this.meet_token_prefetching.as_deref() == Some(channel_id.as_str()) {
@@ -985,17 +1000,6 @@ impl VoiceStore {
         self.mic_enabled
     }
 
-    pub fn mic_permission_denied(&self) -> bool {
-        self.mic_permission_denied
-    }
-
-    pub fn dismiss_mic_permission_prompt(&mut self, cx: &mut Context<Self>) {
-        if self.mic_permission_denied {
-            self.mic_permission_denied = false;
-            cx.notify();
-        }
-    }
-
     pub fn camera_enabled(&self) -> bool {
         self.camera_enabled
     }
@@ -1024,22 +1028,87 @@ impl VoiceStore {
         self.noise_suppression_enabled
     }
 
-    pub fn noise_suppression_level(&self) -> u8 {
-        self.noise_suppression_level
+    pub fn noise_suppression_loading(&self) -> bool {
+        self.noise_suppression_status == Some(NoiseSuppressionStatus::Applying)
+    }
+
+    pub fn noise_suppression_status(&self) -> Option<NoiseSuppressionStatus> {
+        self.noise_suppression_status
     }
 
     pub fn toggle_noise_suppression(&mut self, cx: &mut Context<Self>) {
+        if self.noise_suppression_loading() {
+            return;
+        }
+        let Some(session) = &self.session else {
+            tracing::warn!("Mezon-NS toggle ignored: voice session is not ready");
+            self.noise_suppression_status = Some(NoiseSuppressionStatus::Error);
+            self.clear_noise_suppression_status_later(cx);
+            cx.notify();
+            return;
+        };
         self.noise_suppression_enabled = !self.noise_suppression_enabled;
+        self.noise_suppression_status = Some(NoiseSuppressionStatus::Applying);
+        self.noise_suppression_started = Some(Instant::now());
+        self.noise_suppression_generation = self.noise_suppression_generation.wrapping_add(1);
+        session.set_noise_suppression(
+            self.noise_suppression_enabled,
+            self.noise_suppression_generation,
+        );
         cx.notify();
     }
 
-    pub fn set_noise_suppression_level(&mut self, level: u8, cx: &mut Context<Self>) {
-        let level = level.min(100);
-        if self.noise_suppression_level == level {
+    fn finish_noise_suppression(
+        &mut self,
+        generation: u64,
+        result: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.noise_suppression_generation {
             return;
         }
-        self.noise_suppression_level = level;
+        self.noise_suppression_started = None;
+        let status = match result {
+            Ok(()) => {
+                let status = if self.noise_suppression_enabled {
+                    NoiseSuppressionStatus::Applied
+                } else {
+                    NoiseSuppressionStatus::Disabled
+                };
+                status
+            }
+            Err(error) => {
+                tracing::warn!(generation, "Mezon-NS unavailable: {error}");
+                self.noise_suppression_enabled = false;
+                self.noise_suppression_generation =
+                    self.noise_suppression_generation.wrapping_add(1);
+                if let Some(session) = &self.session {
+                    session.set_noise_suppression(false, self.noise_suppression_generation);
+                }
+                NoiseSuppressionStatus::Error
+            }
+        };
+        self.noise_suppression_status = Some(status);
+        self.clear_noise_suppression_status_later(cx);
         cx.notify();
+    }
+
+    fn clear_noise_suppression_status_later(&self, cx: &mut Context<Self>) {
+        let current_generation = self.noise_suppression_generation;
+        let status = self.noise_suppression_status;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NOISE_STATUS_VISIBLE).await;
+            this.update(cx, |this, cx| {
+                if this.noise_suppression_generation == current_generation
+                    && this.noise_suppression_status == status
+                {
+                    this.noise_suppression_status = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn frame_store(&self) -> Option<Arc<VideoFrameStore>> {
@@ -2930,7 +2999,6 @@ impl VoiceStore {
         };
         self.call_status = VoiceCallStatus::Stable;
         self.mic_enabled = false;
-        self.mic_permission_denied = false;
         self.participants.clear();
         self.join_ranks.clear();
         self.speak_ranks.clear();
@@ -2954,7 +3022,7 @@ impl VoiceStore {
         }
         cx.spawn(async move |this, cx| {
             let token = api
-                .generate_meet_token(&channel_id, &channel_id, &metadata)
+                .generate_meet_token(&channel_id, SFU_TOKEN_ROOM_NAME, &metadata)
                 .await;
             let _ = this.update(cx, |this, cx| match token {
                 Ok(token) => {
@@ -3067,7 +3135,7 @@ impl VoiceStore {
                     metadata_tx.unbounded_send(reply).ok()?;
                     let metadata = receiver.await.ok()?;
                     match api
-                        .generate_meet_token(&channel_id, &channel_id, &metadata)
+                        .generate_meet_token(&channel_id, SFU_TOKEN_ROOM_NAME, &metadata)
                         .await
                     {
                         Ok(token) => Some(token),
@@ -3259,7 +3327,7 @@ impl VoiceStore {
             let token = api
                 .generate_meet_token(
                     &snapshot.channel_id,
-                    &snapshot.channel_id,
+                    SFU_TOKEN_ROOM_NAME,
                     &snapshot.metadata,
                 )
                 .await;
@@ -3337,8 +3405,20 @@ impl VoiceStore {
             return;
         }
 
-        let mic_enabled = snapshot.mic_enabled && !mezon_voice::microphone_denied();
-        self.mic_permission_denied = snapshot.mic_enabled && !mic_enabled;
+        // Fetching the token is asynchronous. A mute/unmute, moderator action,
+        // or media toggle during that wait must win over the earlier snapshot.
+        let Some(current) = self.reconnect_snapshot(cx) else {
+            return;
+        };
+        tracing::info!(
+            generation = self.session_generation,
+            captured_mic_enabled = snapshot.mic_enabled,
+            current_mic_enabled = current.mic_enabled,
+            "restoring latest local media state after token refresh"
+        );
+        let snapshot = current;
+        let mic_enabled = snapshot.mic_enabled
+            && !MediaPermissionStore::blocked_global(MediaDevice::Microphone, cx);
         self.close_pip(cx);
         self.fullscreen_screen = None;
         self.clear_session_handles(None, cx);
@@ -3384,7 +3464,7 @@ impl VoiceStore {
         self.last_screen_share = screen_share.clone();
 
         if let Some(session) = &self.session {
-            session.set_mic_enabled(mic_enabled);
+            // start_session already initialized the microphone with this value.
             session.set_camera_enabled(camera_enabled);
             if let Some((pick, share_audio)) = screen_share {
                 session.start_screen_share(pick, share_audio, self.screen_share_mode);
@@ -3417,6 +3497,9 @@ impl VoiceStore {
                 self.join_sound_baseline_set = true;
             }
             VoiceEvent::Reconnecting => {
+                if self.connection.is_connecting() {
+                    self.cached_meet_token = None;
+                }
                 if self
                     .reconnect_healthy_since
                     .is_some_and(|since| since.elapsed() >= SFU_RECONNECT_HEALTHY_SESSION)
@@ -3470,6 +3553,26 @@ impl VoiceStore {
             VoiceEvent::MutedByModerator => {
                 self.mic_enabled = false;
                 self.muted_by_moderator = true;
+            }
+            VoiceEvent::NoiseSuppressionReady { generation, result } => {
+                if generation == self.noise_suppression_generation {
+                    let remaining = self
+                        .noise_suppression_started
+                        .and_then(|started| NOISE_STATUS_MIN_LOADING.checked_sub(started.elapsed()))
+                        .unwrap_or_default();
+                    if !remaining.is_zero() {
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(remaining).await;
+                            this.update(cx, |this, cx| {
+                                this.finish_noise_suppression(generation, result, cx);
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    } else {
+                        self.finish_noise_suppression(generation, result, cx);
+                    }
+                }
             }
             VoiceEvent::DeviceResetToDefault { input } => {
                 let kind = if input {
@@ -3542,7 +3645,9 @@ impl VoiceStore {
                     self.play_join_sound(cx);
                 }
                 if let Some(local) = self.participants.iter().find(|p| p.is_local) {
-                    self.mic_enabled = !local.muted;
+                    // Participant lists describe an earlier engine state. The
+                    // microphone is owned by local controls, PTT grants and
+                    // explicit moderator events; a queued list must not undo it.
                     self.camera_enabled = local.camera.is_some();
                     self.screen_share_enabled = local.screenshare.is_some();
                 }
@@ -3554,6 +3659,9 @@ impl VoiceStore {
             }
             VoiceEvent::Disconnected { reason } => {
                 tracing::info!("voice disconnected: {reason}");
+                if reason.contains("invalid_token") || reason.contains("missing_token") {
+                    self.cached_meet_token = None;
+                }
                 let was_connected = matches!(&self.connection, VoiceConnection::Connected { .. });
                 let unjoined_channel = match &self.connection {
                     VoiceConnection::Connecting { channel_id, .. }
@@ -3578,6 +3686,7 @@ impl VoiceStore {
                 tracing::warn!("voice error: {message}");
                 if message.starts_with("camera:") {
                     self.camera_enabled = false;
+                    MediaPermissionStore::warn_if_denied_global(MediaDevice::Camera, cx);
                 } else if message.starts_with("screen:") {
                     self.screen_share_enabled = false;
                     self.last_screen_share = None;
@@ -3662,12 +3771,9 @@ impl VoiceStore {
             self.set_hold_to_talk(active, cx);
             return;
         }
-        if active && mezon_voice::microphone_denied() {
-            self.mic_permission_denied = true;
-            cx.notify();
+        if active && !MediaPermissionStore::ensure_global(MediaDevice::Microphone, |_| {}, cx) {
             return;
         }
-        self.mic_permission_denied = false;
         self.ptt_held = active;
         if let Some(session) = &self.session {
             session.set_push_to_talk(active);
@@ -3685,25 +3791,35 @@ impl VoiceStore {
         }
         self.ptt_held = active;
         if active {
-            if self.mic_enabled {
+            if self.mic_enabled
+                || !MediaPermissionStore::ensure_global(MediaDevice::Microphone, |_| {}, cx)
+            {
                 return;
             }
-            self.set_mic_enabled(true, cx);
-            self.hold_to_talk = self.mic_enabled;
+            self.apply_mic_enabled(true, cx);
+            self.hold_to_talk = true;
         } else if self.hold_to_talk {
             self.hold_to_talk = false;
-            self.set_mic_enabled(false, cx);
+            self.apply_mic_enabled(false, cx);
         }
     }
 
     pub fn set_mic_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if enabled && mezon_voice::microphone_denied() {
+        if enabled && !self.media_granted(MediaDevice::Microphone, cx) {
             self.mic_enabled = false;
-            self.mic_permission_denied = true;
             cx.notify();
             return;
         }
-        self.mic_permission_denied = false;
+        self.apply_mic_enabled(enabled, cx);
+    }
+
+    fn apply_mic_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        tracing::info!(
+            generation = self.session_generation,
+            previous = self.mic_enabled,
+            enabled,
+            "local microphone control changed"
+        );
         self.mic_enabled = enabled;
         if let Some(session) = &self.session {
             session.set_mic_enabled(enabled);
@@ -3716,10 +3832,45 @@ impl VoiceStore {
     }
 
     pub fn set_camera_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if enabled && !self.media_granted(MediaDevice::Camera, cx) {
+            return;
+        }
         if let Some(session) = &self.session {
             session.set_camera_enabled(enabled);
         }
         cx.notify();
+    }
+
+    fn media_granted(&self, device: MediaDevice, cx: &mut Context<Self>) -> bool {
+        let this = cx.weak_entity();
+        let session_generation = self.session_generation;
+        MediaPermissionStore::ensure_global(
+            device,
+            move |cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.enable_after_grant(device, session_generation, cx)
+                });
+            },
+            cx,
+        )
+    }
+
+    fn enable_after_grant(
+        &mut self,
+        device: MediaDevice,
+        session_generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.is_none() || self.session_generation != session_generation {
+            return;
+        }
+        match device {
+            MediaDevice::Microphone if !self.mic_enabled && !self.is_audience() => {
+                self.set_mic_enabled(true, cx);
+            }
+            MediaDevice::Camera if !self.camera_enabled => self.set_camera_enabled(true, cx),
+            _ => {}
+        }
     }
 
     pub fn set_input_device(&mut self, device_id: Option<String>, cx: &mut Context<Self>) {
@@ -4534,11 +4685,12 @@ impl VoiceStore {
         self.mic_enabled = false;
         self.hold_to_talk = false;
         self.ptt_held = false;
-        self.mic_permission_denied = false;
         self.camera_enabled = false;
         self.screen_share_enabled = false;
         self.noise_suppression_enabled = false;
-        self.noise_suppression_level = DEFAULT_NOISE_SUPPRESSION_LEVEL;
+        self.noise_suppression_status = None;
+        self.noise_suppression_started = None;
+        self.noise_suppression_generation = self.noise_suppression_generation.wrapping_add(1);
         self.focused_tile = None;
         self.auto_focused_screen = None;
         self.room_name.clear();
@@ -4666,6 +4818,7 @@ mod tests {
     };
     use crate::{VoiceInteractiveApp, VoiceInteractiveEventType};
     use gpui::RenderImage;
+    use mezon_voice::VoiceEvent;
     use parking_lot::Mutex;
 
     #[test]
@@ -4719,6 +4872,32 @@ mod tests {
             channel_id: channel_id.into(),
             clan_id: "1".into(),
         }
+    }
+
+    #[gpui::test]
+    fn queued_participant_state_cannot_undo_a_newer_microphone_control(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let voice = init_voice_store(cx);
+            voice.update(cx, |voice, cx| {
+                voice.connection = connected("5");
+                for enabled in [true, false] {
+                    voice.apply_mic_enabled(enabled, cx);
+                    let mut old_local = voice_participant(&ME.to_string(), None);
+                    old_local.is_local = true;
+                    old_local.muted = enabled; // The engine snapshot predates the toggle.
+                    voice.handle_engine_event(VoiceEvent::Participants(vec![old_local]), cx);
+                    assert_eq!(voice.mic_enabled, enabled);
+                }
+                voice.apply_mic_enabled(true, cx);
+                voice.handle_engine_event(VoiceEvent::MutedByModerator, cx);
+                assert!(
+                    !voice.mic_enabled,
+                    "explicit moderation still closes the mic"
+                );
+            });
+        });
     }
 
     fn removed(channel_id: i64, user_ids: Vec<i64>) -> mezon_client::RealtimeEvent {

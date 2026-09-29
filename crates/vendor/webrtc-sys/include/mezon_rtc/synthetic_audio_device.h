@@ -105,7 +105,7 @@ class SyntheticAudioDevice : public webrtc::AudioDeviceModule {
   std::vector<int16_t> data_;
   std::unique_ptr<webrtc::TaskQueueBase, webrtc::TaskQueueDeleter> audio_queue_;
   webrtc::RepeatingTaskHandle audio_task_;
-  webrtc::AudioTransport* audio_transport_;
+  webrtc::AudioTransport* audio_transport_ = nullptr;
   const webrtc::Environment& env_;
   bool playing_{false};
   bool initialized_{false};

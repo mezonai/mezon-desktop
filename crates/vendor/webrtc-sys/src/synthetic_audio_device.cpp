@@ -39,7 +39,7 @@ int32_t SyntheticAudioDevice::Init() {
       webrtc::RepeatingTaskHandle::Start(audio_queue_.get(), [this]() {
         webrtc::MutexLock lock(&mutex_);
 
-        if (playing_) {
+        if (playing_ && audio_transport_) {
           int64_t elapsed_time_ms = -1;
           int64_t ntp_time_ms = -1;
           size_t n_samples_out = 0;
@@ -62,6 +62,9 @@ int32_t SyntheticAudioDevice::Init() {
 int32_t SyntheticAudioDevice::Terminate() {
   {
     webrtc::MutexLock lock(&mutex_);
+    // Init() must not resume requests against the previous connection's
+    // transport before WebRTC has registered and started the new one.
+    playing_ = false;
     if (!initialized_)
       return 0;
 

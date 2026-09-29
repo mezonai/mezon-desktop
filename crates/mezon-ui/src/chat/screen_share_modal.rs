@@ -8,7 +8,8 @@ use gpui::{
 use mezon_store::{
     PickedScreen, ScreenShareKind, ScreenShareListError, ScreenShareOption, ScreenSharePreview,
     Settings, VoiceStore, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options, system_screen_share_pick,
+    peek_screen_share_options, request_screen_capture_access, screen_capture_permitted,
+    system_screen_share_pick,
 };
 
 use crate::app::shell::Shell;
@@ -784,6 +785,7 @@ fn permission_denied_state(locale: &str, cx: &mut Context<ScreenShareModal>) -> 
                         .label(open_settings)
                         .primary()
                         .on_click(|_, _, cx| {
+                            request_screen_capture_access();
                             cx.open_url(MACOS_SCREEN_CAPTURE_SETTINGS_URL);
                         }),
                 ),
@@ -806,6 +808,17 @@ pub fn start_screen_share_flow(
     window: &mut Window,
     cx: &mut App,
 ) {
+    if !screen_capture_permitted() && !settings.read(cx).screen_capture_access_requested {
+        settings.update(cx, |settings, _| {
+            settings.screen_capture_access_requested = true;
+        });
+        mezon_store::schedule_settings_save(&settings, cx);
+        request_screen_capture_access();
+        let locale = settings.read(cx).language.clone();
+        let msg = mezon_i18n::t(&locale, "screenShare.permissionPromptToast").to_string();
+        Shell::global(cx).update(cx, |shell, cx| shell.info(msg, cx));
+        return;
+    }
     let portal = system_screen_share_pick();
     let modal = cx.new(|cx| ScreenShareModal::new(voice, settings, portal, window, cx));
     Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.into(), cx));

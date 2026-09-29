@@ -2,6 +2,7 @@ use gpui::{AnyElement, App, MouseButton, MouseDownEvent, div, prelude::*, px, rg
 use mezon_store::{Message, MessageCode, TopicsStore};
 
 use super::call_log_card::render_call_log_card;
+use super::command_row::render_command_card;
 use super::content::{
     SelectableTextContext, memoized_selectable_message_layout, render_message_content,
 };
@@ -21,7 +22,7 @@ use crate::components::primitives::{Icon, IconName};
 
 const GROUP_MARGIN_TOP: f32 = 10.;
 const MESSAGE_ROW_MIN_HEIGHT: f32 = 30.;
-const EPHEMERAL_BORDER: u32 = 0xa7_8b_fa;
+pub(super) const EPHEMERAL_BORDER: u32 = 0xa7_8b_fa;
 const JUMP_HIGHLIGHT_RGBA: u32 = 0xea_b3_08_33;
 const REPLY_HIGHLIGHT_RGBA: u32 = 0x94_9c_f7_14;
 const TOPIC_CARD_MAX_WIDTH: f32 = 592.0;
@@ -43,6 +44,7 @@ pub fn render_user_message(
     let has_reply = !msg.references.is_empty();
     let show_head = mezon_store::should_show_message_head(msg, combined);
     let row_key = msg.row_anchor_id.0;
+    let command = msg.command.as_deref();
     let ephemeral = msg.code == MessageCode::Ephemeral;
     let sending = msg.is_sending();
     let is_me = ctx.current_user_id == msg.sender_id.as_str();
@@ -108,6 +110,8 @@ pub fn render_user_message(
 
     let content_element = if let Some(input) = editing_input {
         render_edit_box(msg.id, input, ctx)
+    } else if let Some(command) = command {
+        render_command_card(msg, command, ctx)
     } else if let (Some(call_log), Some(selection_context)) =
         (msg.call_log.as_ref(), selection_context.as_ref())
     {
@@ -138,7 +142,7 @@ pub fn render_user_message(
 
     let shows_text_content =
         !editing && msg.call_log.is_none() && msg.code != MessageCode::SendToken;
-    if ephemeral && shows_text_content {
+    if ephemeral && shows_text_content && command.is_none() {
         body_column = body_column.child(render_ephemeral_notice(msg, ctx));
     }
 
@@ -281,7 +285,7 @@ pub fn render_user_message(
                 .border_color(theme.tokens.border_primary)
                 .bg(theme.tokens.bg_tertiary)
         })
-        .when(ephemeral, |d| {
+        .when(ephemeral && command.is_none(), |d| {
             d.bg(theme.tokens.bg_item_theme_hover)
                 .border_l_4()
                 .border_color(rgb(EPHEMERAL_BORDER))

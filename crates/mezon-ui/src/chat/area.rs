@@ -222,84 +222,85 @@ fn onboarding_mission_banner(locale: &str, cx: &mut App) -> Option<gpui::AnyElem
     )
 }
 
-/// Compact activity rail owned by the message column (never the member/topic sidebars).
-fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::AnyElement {
+fn latest_activity_topic(clan_id: &str, cx: &App) -> Option<TopicDiscussion> {
     let topics_store = TopicsStore::global(cx);
     let messages_store = MessagesStore::global(cx);
     let topics = topics_store.read(cx);
     let messages = messages_store.read(cx);
-    let topic_syncing = topics.is_loading();
+    if topics.is_loading() {
+        return None;
+    }
     let active_channel_id = messages.active_channel_id();
     let active_channel_key = active_channel_id.map(|channel_id| channel_id.to_string());
 
     // The list endpoint is the richest source. While it is still loading (or when an older topic
     // only exists in the current channel buffer), synthesize the same row from the origin message
     // and its realtime topic metadata so an existing topic never renders as "empty".
-    let latest_topic = (!topic_syncing)
-        .then(|| {
-            active_channel_key
-                .as_deref()
-                .and_then(|channel_id| topics.latest_topic_for_channel(clan_id, channel_id))
-                .cloned()
-                .or_else(|| {
-                    let clan_id = messages.active_clan_id()?;
-                    let channel_id = messages.active_channel_id()?;
-                    messages
-                        .messages()
+    active_channel_key
+        .as_deref()
+        .and_then(|channel_id| topics.latest_topic_for_channel(clan_id, channel_id))
+        .cloned()
+        .or_else(|| {
+            let clan_id = messages.active_clan_id()?;
+            let channel_id = messages.active_channel_id()?;
+            messages
+                .messages()
+                .iter()
+                .filter_map(|origin| {
+                    let topic_id = origin.topic_id?;
+                    let meta = topics.topic_meta_for_topic(topic_id)?;
+                    Some((meta.lsnt, origin, topic_id))
+                })
+                .max_by_key(|(timestamp, _, _)| *timestamp)
+                .map(|(timestamp, origin, topic_id)| {
+                    let last_visible_message = messages
+                        .messages_in_channel(topic_id)
                         .iter()
-                        .filter_map(|origin| {
-                            let topic_id = origin.topic_id?;
-                            let meta = topics.topic_meta_for_topic(topic_id)?;
-                            Some((meta.lsnt, origin, topic_id))
-                        })
-                        .max_by_key(|(timestamp, _, _)| *timestamp)
-                        .map(|(timestamp, origin, topic_id)| {
-                            let last_visible_message =
-                                messages.messages_in_channel(topic_id).iter().rev().find(
-                                    |message| {
-                                        !message.content.trim().is_empty()
-                                            || !message.attachments.is_empty()
-                                    },
-                                );
-                            TopicDiscussion {
-                                id: topic_id.to_string(),
-                                message_id: origin.id.to_string(),
-                                clan_id: clan_id.to_string(),
-                                channel_id: channel_id.to_string(),
-                                creator_id: origin.sender_id.clone(),
-                                last_sender_id: origin.sender_id.clone(),
-                                content: origin.content.clone(),
-                                last_message_content: last_visible_message
-                                    .map(|message| message.content.clone())
-                                    .unwrap_or_default(),
-                                last_message_attachments: last_visible_message
-                                    .map(|message| {
-                                        message
-                                            .attachments
-                                            .iter()
-                                            .map(|attachment| {
-                                                mezon_client::transport::ApiAttachment {
-                                                    url: attachment.url.clone(),
-                                                    filename: attachment.filename.clone(),
-                                                    filetype: attachment.filetype.clone(),
-                                                    width: attachment.width as i32,
-                                                    height: attachment.height as i32,
-                                                    thumbnail: attachment.thumbnail.clone(),
-                                                    duration: attachment.duration,
-                                                    size: attachment.size.min(i32::MAX as u64)
-                                                        as i32,
-                                                }
-                                            })
-                                            .collect()
+                        .rev()
+                        .find(|message| {
+                            !message.content.trim().is_empty() || !message.attachments.is_empty()
+                        });
+                    TopicDiscussion {
+                        id: topic_id.to_string(),
+                        message_id: origin.id.to_string(),
+                        clan_id: clan_id.to_string(),
+                        channel_id: channel_id.to_string(),
+                        creator_id: origin.sender_id.clone(),
+                        last_sender_id: origin.sender_id.clone(),
+                        content: origin.content.clone(),
+                        last_message_content: last_visible_message
+                            .map(|message| message.content.clone())
+                            .unwrap_or_default(),
+                        last_message_attachments: last_visible_message
+                            .map(|message| {
+                                message
+                                    .attachments
+                                    .iter()
+                                    .map(|attachment| mezon_client::transport::ApiAttachment {
+                                        url: attachment.url.clone(),
+                                        filename: attachment.filename.clone(),
+                                        filetype: attachment.filetype.clone(),
+                                        width: attachment.width as i32,
+                                        height: attachment.height as i32,
+                                        thumbnail: attachment.thumbnail.clone(),
+                                        duration: attachment.duration,
+                                        size: attachment.size.min(i32::MAX as u64) as i32,
                                     })
-                                    .unwrap_or_default(),
-                                last_message_timestamp: timestamp.clamp(0, i64::from(u32::MAX))
-                                    as u32,
-                            }
-                        })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        last_message_timestamp: timestamp.clamp(0, i64::from(u32::MAX)) as u32,
+                    }
                 })
         })
-        .flatten();
+}
+
+/// Compact activity rail owned by the message column (never the member/topic sidebars).
+fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::AnyElement {
+    let messages_store = MessagesStore::global(cx);
+    let messages = messages_store.read(cx);
+    let active_channel_id = messages.active_channel_id();
+    let latest_topic = latest_activity_topic(clan_id, cx);
     let plain_topic_content = |content: &str| match mezon_client::topic_reply_preview(content) {
         mezon_client::TopicReplyPreview::Text(text) => Some(text),
         _ => None,
@@ -419,7 +420,7 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
                 .cloned()
         })
         .flatten();
-    let has_topic = latest_topic.is_some() && !topic_syncing;
+    let has_topic = latest_topic.is_some();
     let has_pin = latest_pin.is_some();
     if !has_topic && !has_pin {
         return div().hidden().into_any_element();
@@ -428,53 +429,45 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
     let theme = cx.theme();
     let hover = theme.bg_hover;
 
-    let topic_title: SharedString = if topic_syncing {
-        "".into()
-    } else {
-        topic_title
-            .map(|text| SharedString::from(text.split_whitespace().collect::<Vec<_>>().join(" ")))
-            .or_else(|| {
-                latest_topic
-                    .as_ref()
-                    .map(|topic| SharedString::from(topic_content_kind(&topic.content)))
-            })
-            .unwrap_or_else(|| mezon_i18n::t(locale, "notifications.empty.topics.title").into())
-    };
+    let topic_title: SharedString = topic_title
+        .map(|text| SharedString::from(text.split_whitespace().collect::<Vec<_>>().join(" ")))
+        .or_else(|| {
+            latest_topic
+                .as_ref()
+                .map(|topic| SharedString::from(topic_content_kind(&topic.content)))
+        })
+        .unwrap_or_else(|| mezon_i18n::t(locale, "notifications.empty.topics.title").into());
     let topic_has_attachment = topic_attachment.is_some()
         || latest_topic
             .as_ref()
             .is_some_and(TopicDiscussion::reply_is_attachment);
-    let topic_preview: SharedString = if topic_syncing {
-        "".into()
-    } else {
-        topic_preview
-            .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
-            .map(|text| {
-                if let Some(sender_name) = topic_sender_name.as_deref() {
-                    mezon_i18n::t(locale, "chat.activityStrip.messageFrom")
-                        .replace("{{name}}", sender_name)
-                        .replace("{{message}}", &text)
-                } else {
-                    text
-                }
-            })
-            .map(SharedString::from)
-            .unwrap_or_else(|| {
-                if topic_has_attachment {
-                    topic_sender_name
-                        .as_deref()
-                        .map(|sender_name| {
-                            mezon_i18n::t(locale, "chat.activityStrip.messageFrom")
-                                .replace("{{name}}", sender_name)
-                                .replace("{{message}}", "")
-                        })
-                        .unwrap_or_default()
-                        .into()
-                } else {
-                    mezon_i18n::t(locale, "notifications.empty.topics.description").into()
-                }
-            })
-    };
+    let topic_preview: SharedString = topic_preview
+        .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+        .map(|text| {
+            if let Some(sender_name) = topic_sender_name.as_deref() {
+                mezon_i18n::t(locale, "chat.activityStrip.messageFrom")
+                    .replace("{{name}}", sender_name)
+                    .replace("{{message}}", &text)
+            } else {
+                text
+            }
+        })
+        .map(SharedString::from)
+        .unwrap_or_else(|| {
+            if topic_has_attachment {
+                topic_sender_name
+                    .as_deref()
+                    .map(|sender_name| {
+                        mezon_i18n::t(locale, "chat.activityStrip.messageFrom")
+                            .replace("{{name}}", sender_name)
+                            .replace("{{message}}", "")
+                    })
+                    .unwrap_or_default()
+                    .into()
+            } else {
+                mezon_i18n::t(locale, "notifications.empty.topics.description").into()
+            }
+        });
     let topic_media = topic_attachment.as_ref().map(|attachment| {
         if attachment.is_image() {
             if let Some(path) = attachment.local_source.clone() {
@@ -562,7 +555,7 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
         .px(px(6.))
         .rounded(px(9.))
         .overflow_hidden()
-        .when(latest_topic.is_some() && !topic_syncing, |cell| {
+        .when(latest_topic.is_some(), |cell| {
             cell.cursor_pointer().hover(move |style| style.bg(hover))
         })
         // A stable semantic icon avoids remounting an image while clan/topic data resolves.
@@ -610,10 +603,9 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
                 ),
         )
         .children(topic_media)
-        .when_some(
-            (!topic_syncing).then_some(latest_topic).flatten(),
-            |cell, topic| cell.on_click(move |_, _, cx| open_latest_topic(topic.clone(), cx)),
-        );
+        .when_some(latest_topic, |cell, topic| {
+            cell.on_click(move |_, _, cx| open_latest_topic(topic.clone(), cx))
+        });
 
     let pin_attachment = latest_pin
         .as_ref()
@@ -866,7 +858,9 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
         .flex()
         .flex_row()
         .flex_none()
-        .w_full()
+        .mt(px(4.))
+        .ml(px(6.))
+        .mr(px(6.))
         .h(px(48.))
         .child(
             div()
@@ -1785,46 +1779,41 @@ impl ChatArea {
                 }
             })
             .when(!media_channel_view, |col| {
-                col.child(div().flex_1().min_h_0().overflow_hidden().child(
-                    if timeline_popover_open {
-                        div()
-                            .size_full()
-                            .child(AnyView::from(self.timeline.clone()))
-                            .into_any_element()
-                    } else {
-                        AnyView::from(self.timeline.clone())
-                            .cached(StyleRefinement::default().size_full())
-                            .into_any_element()
-                    },
-                ))
-                .when_some(ban_notice, |col, notice| col.child(notice))
-                .when(send_denied, |col| col.child(no_permission_notice))
-                .when(!banned && !send_denied, |col| {
-                    col.children(onboarding_mission)
-                        .when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
-                        .when_some(app_channel_bar.as_ref(), |col, target| {
-                            col.child(render_channel_app_bar(locale, target.clone(), cx.theme()))
-                        })
-                        .child(
-                            AnyView::from(self.typing.clone()).cached(
-                                StyleRefinement::default()
-                                    .w_full()
-                                    .h(px(16.))
-                                    .flex_shrink_0(),
-                            ),
-                        )
-                })
-                .when_some(drop_overlay, |col, overlay| col.child(overlay))
-            })
-            .when_some(activity_strip, |col, strip| {
-                col.child(
-                    div()
-                        .absolute()
-                        .top(px(4.))
-                        .left(px(6.))
-                        .right(px(6.))
-                        .child(strip),
-                )
+                col.when_some(activity_strip, |col, strip| col.child(strip))
+                    .child(div().flex_1().min_h_0().overflow_hidden().child(
+                        if timeline_popover_open {
+                            div()
+                                .size_full()
+                                .child(AnyView::from(self.timeline.clone()))
+                                .into_any_element()
+                        } else {
+                            AnyView::from(self.timeline.clone())
+                                .cached(StyleRefinement::default().size_full())
+                                .into_any_element()
+                        },
+                    ))
+                    .when_some(ban_notice, |col, notice| col.child(notice))
+                    .when(send_denied, |col| col.child(no_permission_notice))
+                    .when(!banned && !send_denied, |col| {
+                        col.children(onboarding_mission)
+                            .when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
+                            .when_some(app_channel_bar.as_ref(), |col, target| {
+                                col.child(render_channel_app_bar(
+                                    locale,
+                                    target.clone(),
+                                    cx.theme(),
+                                ))
+                            })
+                            .child(
+                                AnyView::from(self.typing.clone()).cached(
+                                    StyleRefinement::default()
+                                        .w_full()
+                                        .h(px(16.))
+                                        .flex_shrink_0(),
+                                ),
+                            )
+                    })
+                    .when_some(drop_overlay, |col, overlay| col.child(overlay))
             });
 
         let has_search_panel = show_results_panel && message_search_panel.is_some();

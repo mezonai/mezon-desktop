@@ -1444,6 +1444,24 @@ struct AnimationCaps {
     max_bytes: u64,
 }
 
+#[derive(Clone, Copy)]
+enum FrameShape {
+    SquareCrop,
+    KeepAspect,
+}
+
+impl FrameShape {
+    fn target_size(self, width: u32, height: u32, max_px: u32) -> (u32, u32) {
+        match self {
+            FrameShape::SquareCrop => {
+                let side = width.min(height).clamp(1, max_px);
+                (side, side)
+            }
+            FrameShape::KeepAspect => downscale_dimensions(width, height, max_px),
+        }
+    }
+}
+
 /// Emoji painted in the message list: a 24px inline `:emoji:` span, a 48px
 /// jumbo emoji in an emoji-only message, and the reaction pills between them.
 /// 96px covers the largest of those on a 2x display; each surface requests its
@@ -1489,6 +1507,7 @@ fn load_avatar_scaled(
     source: Resource,
     max_px: u32,
     animation: AnimationCaps,
+    shape: FrameShape,
     cx: &mut App,
 ) -> impl Future<Output = Result<Arc<RenderImage>, ImageCacheError>> + Send + 'static {
     let client = cx.http_client();
@@ -1499,7 +1518,7 @@ fn load_avatar_scaled(
         let bytes = match source.clone() {
             Resource::Path(uri) => {
                 if let Some(decoded) = decode_scaled_dynamic_path(uri.as_ref(), max_px) {
-                    return Ok(avatar_render_image(decoded, max_px));
+                    return Ok(avatar_render_image(decoded, max_px, shape));
                 }
                 std::fs::read(uri.as_ref())?
             }
@@ -1534,7 +1553,7 @@ fn load_avatar_scaled(
         };
 
         if image::guess_format(&bytes).is_ok() {
-            decode_avatar_image(&bytes, max_px, animation)
+            decode_avatar_image(&bytes, max_px, animation, shape)
         } else {
             svg_renderer
                 .render_single_frame(&bytes, 1.0)
@@ -1561,6 +1580,7 @@ impl Asset for AvatarImageLoader {
                 max_frames: usize::MAX,
                 max_bytes: AVATAR_ENTRY_MAX_BYTES,
             },
+            FrameShape::SquareCrop,
             cx,
         )
     }
@@ -1584,6 +1604,7 @@ impl Asset for AvatarImageLoaderSmall {
                 max_frames: usize::MAX,
                 max_bytes: AVATAR_ANIMATION_MAX_BYTES,
             },
+            FrameShape::SquareCrop,
             cx,
         )
     }
@@ -1607,6 +1628,7 @@ impl Asset for IconImageLoader {
                 max_frames: MESSAGE_EMOJI_MAX_FRAMES,
                 max_bytes: ICON_ENTRY_MAX_BYTES,
             },
+            FrameShape::KeepAspect,
             cx,
         )
     }
@@ -1634,6 +1656,7 @@ impl Asset for EmojiImageLoader {
                 max_frames: MESSAGE_EMOJI_MAX_FRAMES,
                 max_bytes: EMOJI_ANIMATION_MAX_BYTES,
             },
+            FrameShape::KeepAspect,
             cx,
         )
     }
@@ -1808,6 +1831,7 @@ fn downscaled_avatar_animation_frames<I>(
     max_px: u32,
     frame_cap: usize,
     byte_budget: u64,
+    shape: FrameShape,
 ) -> Result<Vec<image::Frame>, AnimationDecodeError>
 where
     I: Iterator<Item = image::ImageResult<image::Frame>>,
@@ -1819,9 +1843,9 @@ where
         let frame = frame.map_err(|err| AnimationDecodeError::Image(err.into()))?;
         let delay = frame.delay();
         let buffer = frame.into_buffer();
-        let side = buffer.width().min(buffer.height()).clamp(1, max_px);
+        let (width, height) = shape.target_size(buffer.width(), buffer.height(), max_px);
         if max_frames == usize::MAX {
-            let frame_bytes = u64::from(side) * u64::from(side) * 4;
+            let frame_bytes = u64::from(width) * u64::from(height) * 4;
             max_frames = ((byte_budget / frame_bytes) as usize).clamp(2, frame_cap);
         }
 
@@ -1837,7 +1861,7 @@ where
             continue;
         }
         let mut buffer = image::DynamicImage::ImageRgba8(buffer)
-            .resize_to_fill(side, side, image::imageops::FilterType::Triangle)
+            .resize_to_fill(width, height, image::imageops::FilterType::Triangle)
             .into_rgba8();
         for pixel in buffer.chunks_exact_mut(4) {
             pixel.swap(0, 2);
@@ -1879,10 +1903,10 @@ fn decode_scaled_dynamic_path(path: &std::path::Path, max_px: u32) -> Option<ima
     scaled_to_dynamic(mezon_video::scaled_image_decode_path(path, max_px)?)
 }
 
-fn avatar_frame(decoded: image::DynamicImage, max_px: u32) -> image::Frame {
-    let side = decoded.width().min(decoded.height()).clamp(1, max_px);
+fn avatar_frame(decoded: image::DynamicImage, max_px: u32, shape: FrameShape) -> image::Frame {
+    let (width, height) = shape.target_size(decoded.width(), decoded.height(), max_px);
     let mut data = decoded
-        .resize_to_fill(side, side, image::imageops::FilterType::Triangle)
+        .resize_to_fill(width, height, image::imageops::FilterType::Triangle)
         .into_rgba8();
     for pixel in data.chunks_exact_mut(4) {
         pixel.swap(0, 2);
@@ -1890,8 +1914,12 @@ fn avatar_frame(decoded: image::DynamicImage, max_px: u32) -> image::Frame {
     image::Frame::new(data)
 }
 
-fn avatar_render_image(decoded: image::DynamicImage, max_px: u32) -> Arc<RenderImage> {
-    Arc::new(RenderImage::new(vec![avatar_frame(decoded, max_px)]))
+fn avatar_render_image(
+    decoded: image::DynamicImage,
+    max_px: u32,
+    shape: FrameShape,
+) -> Arc<RenderImage> {
+    Arc::new(RenderImage::new(vec![avatar_frame(decoded, max_px, shape)]))
 }
 
 fn decode_static_image(
@@ -1990,6 +2018,7 @@ fn decode_avatar_image(
     bytes: &[u8],
     max_px: u32,
     animation: AnimationCaps,
+    shape: FrameShape,
 ) -> Result<Arc<RenderImage>, ImageCacheError> {
     use image::AnimationDecoder as _;
     let format = image::guess_format(bytes)?;
@@ -2004,11 +2033,13 @@ fn decode_avatar_image(
                 animation.max_px,
                 animation.max_frames,
                 animation.max_bytes,
+                shape,
             ) {
                 Ok(frames) => frames,
                 Err(AnimationDecodeError::BudgetExceeded) => vec![avatar_frame(
                     decode_static_image(bytes, format, max_px)?,
                     max_px,
+                    shape,
                 )],
                 Err(AnimationDecodeError::Image(err)) => return Err(err),
             }
@@ -2022,11 +2053,13 @@ fn decode_avatar_image(
                     animation.max_px,
                     animation.max_frames,
                     animation.max_bytes,
+                    shape,
                 ) {
                     Ok(frames) => frames,
                     Err(AnimationDecodeError::BudgetExceeded) => vec![avatar_frame(
                         decode_static_image(bytes, format, max_px)?,
                         max_px,
+                        shape,
                     )],
                     Err(AnimationDecodeError::Image(err)) => return Err(err),
                 }
@@ -2034,12 +2067,14 @@ fn decode_avatar_image(
                 vec![avatar_frame(
                     decode_static_image(bytes, format, max_px)?,
                     max_px,
+                    shape,
                 )]
             }
         }
         _ => vec![avatar_frame(
             decode_static_image(bytes, format, max_px)?,
             max_px,
+            shape,
         )],
     };
     Ok(Arc::new(RenderImage::new(frames)))
@@ -3096,6 +3131,7 @@ mod tests {
                 max_frames: usize::MAX,
                 max_bytes: AVATAR_ENTRY_MAX_BYTES,
             },
+            FrameShape::SquareCrop,
         )
         .expect("animated avatar");
         assert_eq!(image.frame_count(), 2);
@@ -3127,11 +3163,110 @@ mod tests {
                 max_frames: usize::MAX,
                 max_bytes: AVATAR_ENTRY_MAX_BYTES,
             },
+            FrameShape::SquareCrop,
         )
         .expect("static WebP decodes");
 
         assert_eq!(image.frame_count(), 1);
         assert_eq!(image.size(0).width, image.size(0).height);
+    }
+
+    fn decoded_size<L>(source: &Resource, cx: &mut gpui::TestAppContext) -> (i32, i32)
+    where
+        L: Asset<Source = Resource, Output = Result<Arc<RenderImage>, ImageCacheError>>,
+    {
+        let size = cx
+            .update(|cx| futures::executor::block_on(L::load(source.clone(), cx)))
+            .expect("fixture decodes")
+            .size(0);
+        (size.width.0, size.height.0)
+    }
+
+    #[gpui::test]
+    fn a_wide_emoji_is_decoded_whole_while_an_avatar_stays_square(cx: &mut gpui::TestAppContext) {
+        use image::ImageEncoder as _;
+
+        let pixels = image::RgbaImage::from_pixel(200, 50, image::Rgba([200, 40, 40, 255]));
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(
+                pixels.as_raw(),
+                pixels.width(),
+                pixels.height(),
+                image::ExtendedColorType::Rgba8,
+            )
+            .expect("wide PNG encodes");
+        let path =
+            std::env::temp_dir().join(format!("mezon-wide-emoji-{}.png", std::process::id()));
+        std::fs::write(&path, &bytes).expect("fixture written");
+        let source = Resource::Path(Arc::from(path.as_path()));
+
+        let message_emoji = decoded_size::<EmojiImageLoader>(&source, cx);
+        let picker_emoji = decoded_size::<IconImageLoader>(&source, cx);
+        let avatar = decoded_size::<AvatarImageLoader>(&source, cx);
+        std::fs::remove_file(&path).ok();
+
+        for (surface, (width, height)) in [
+            ("message and reaction", message_emoji),
+            ("picker", picker_emoji),
+        ] {
+            assert_eq!(
+                width,
+                height * 4,
+                "the {surface} emoji loader decoded a 4:1 emoji to {width}x{height}: cropping it \
+                 to its centre square is what turned a wide `:20k:` emoji into `0k`"
+            );
+        }
+        assert_eq!(
+            avatar.0, avatar.1,
+            "avatars are painted into circles and must still be cropped square"
+        );
+    }
+
+    #[test]
+    fn a_wide_animated_emoji_keeps_its_aspect_in_every_frame() {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = GifEncoder::new(&mut bytes);
+            encoder.set_repeat(Repeat::Infinite).expect("GIF repeat");
+            for color in [[255, 0, 0, 255], [0, 255, 0, 255]] {
+                let buffer = image::RgbaImage::from_pixel(200, 50, image::Rgba(color));
+                let frame = image::Frame::from_parts(
+                    buffer,
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(50, 1),
+                );
+                encoder.encode_frame(frame).expect("GIF frame");
+            }
+        }
+
+        let image = decode_avatar_image(
+            &bytes,
+            MESSAGE_EMOJI_DECODE_MAX_PX,
+            AnimationCaps {
+                max_px: MESSAGE_EMOJI_DECODE_MAX_PX,
+                max_frames: MESSAGE_EMOJI_MAX_FRAMES,
+                max_bytes: EMOJI_ANIMATION_MAX_BYTES,
+            },
+            FrameShape::KeepAspect,
+        )
+        .expect("animated emoji");
+
+        assert_eq!(
+            image.frame_count(),
+            2,
+            "keeping the aspect must not cost the animation"
+        );
+        for index in 0..image.frame_count() {
+            let size = image.size(index);
+            assert_eq!(
+                (size.width.0, size.height.0),
+                (96, 24),
+                "frame {index} of a 4:1 animated emoji lost its aspect"
+            );
+        }
     }
 
     #[test]
@@ -3280,7 +3415,7 @@ mod tests {
         }
 
         let decode = |max_px: u32, caps: AnimationCaps| {
-            decode_avatar_image(&bytes, max_px, caps)
+            decode_avatar_image(&bytes, max_px, caps, FrameShape::KeepAspect)
                 .expect("animated emoji")
                 .frame_count()
         };
@@ -3390,6 +3525,7 @@ mod tests {
                 max_frames: MESSAGE_EMOJI_MAX_FRAMES,
                 max_bytes: EMOJI_ANIMATION_MAX_BYTES,
             },
+            FrameShape::KeepAspect,
         )
         .expect("animated icon");
         assert!(
@@ -3443,6 +3579,7 @@ mod tests {
                 max_frames: MESSAGE_EMOJI_MAX_FRAMES,
                 max_bytes: EMOJI_ANIMATION_MAX_BYTES,
             },
+            FrameShape::KeepAspect,
         )
         .expect("animated emoji");
 

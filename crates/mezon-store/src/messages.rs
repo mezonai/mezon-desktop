@@ -40,15 +40,15 @@ use crate::direct::{DirectChannel, DirectKind, DirectMessageStore};
 use crate::group_members::GroupMembersStore;
 use crate::inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxStore};
 use crate::message::{
-    CallLog, CallLogType, Embed, EmbedAnimation, EmbedAuthor, EmbedDatePicker, EmbedField,
-    EmbedFooter, EmbedGrid, EmbedGridItem, EmbedImage, EmbedInput, EmbedRadio, EmbedRadioOption,
-    EmbedTextInput, InvitePreview, MentionTarget, Message, MessageAttachment, MessageButton,
-    MessageCode, MessageComponent, MessageComponentRow, MessageReference, MessageSelect,
-    MessageSelectOption, MessageSpan, OgpPreview, PollAnswerView, PollData, PollDetail,
-    PollLabelSegment, PollVoter, ViewerMedia, aggregate_reactions, apply_reaction_event,
-    compute_show_forwarded_label, message_combined_with_prev, message_sort_key, parse_spans,
-    reaction_key, recompute_message_grouping, rollback_reaction, sort_messages, spans_only_emoji,
-    viewer_highlight_direct,
+    CallLog, CallLogType, CommandInvocation, CommandStatus, Embed, EmbedAnimation, EmbedAuthor,
+    EmbedDatePicker, EmbedField, EmbedFooter, EmbedGrid, EmbedGridItem, EmbedImage, EmbedInput,
+    EmbedRadio, EmbedRadioOption, EmbedTextInput, InvitePreview, MentionTarget, Message,
+    MessageAttachment, MessageButton, MessageCode, MessageComponent, MessageComponentRow,
+    MessageReference, MessageSelect, MessageSelectOption, MessageSpan, OgpPreview, PollAnswerView,
+    PollData, PollDetail, PollLabelSegment, PollVoter, ViewerMedia, aggregate_reactions,
+    apply_reaction_event, compute_show_forwarded_label, message_combined_with_prev,
+    message_sort_key, parse_spans, reaction_key, recompute_message_grouping, rollback_reaction,
+    sort_messages, spans_only_emoji, viewer_highlight_direct,
 };
 use crate::message_time::{unix_now_millis, unix_now_seconds};
 use crate::ogp::is_clan_invite_url;
@@ -75,6 +75,7 @@ use crate::message::STICKER_FILETYPE;
 const AUDIO_FILETYPE: &str = "audio/mpeg";
 pub const ANONYMOUS_SENDER_NAME: &str = "Anonymous";
 const MAX_MESSAGES_PER_CHANNEL: usize = 200;
+const COMMAND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_PENDING_BELOW: usize = 500;
 const MAX_CACHED_CHANNELS: usize = 30;
 const LAST_SEEN_DEBOUNCE: Duration = Duration::from_millis(1000);
@@ -83,6 +84,24 @@ const GIVE_COFFEE_EMOJI_ID: &str = "7280417126303261185";
 const GIVE_COFFEE_EMOJI: &str = ":coffee:";
 const SNOWFLAKE_TIME_SHIFT: i64 = 22;
 const SNOWFLAKE_SEQUENCE_MASK: i64 = (1 << SNOWFLAKE_TIME_SHIFT) - 1;
+
+#[derive(Clone)]
+struct PendingCommand {
+    channel_id: ChannelId,
+    message_id: MessageId,
+    bot_id: i64,
+    timed_out: bool,
+    delivered: bool,
+    resend: Option<CommandResend>,
+}
+
+#[derive(Clone)]
+struct CommandResend {
+    content: String,
+    sender_id: String,
+    sender_name: String,
+    content_tokens: OutgoingContent,
+}
 
 #[derive(Clone)]
 struct PendingSendPayload {
@@ -386,7 +405,7 @@ impl MessageList {
         self.temp_ids.iter().find_map(|temp_id| {
             let idx = *self.index.get(temp_id)?;
             let candidate = &self.items[idx];
-            if candidate.send_failed {
+            if candidate.send_failed || candidate.command.is_some() {
                 return None;
             }
             if candidate.content != content {
@@ -665,6 +684,9 @@ pub struct MessagesStore {
     presign_probe_task: Option<Task<()>>,
     presign_probe_running: bool,
     pending_send_payloads: HashMap<MessageId, PendingSendPayload>,
+    pending_commands: Vec<PendingCommand>,
+    commands_in_flight: HashMap<(ChannelId, i64), usize>,
+    consumed_command_replies: HashSet<MessageId>,
     anonymous_clans: HashSet<ClanId>,
     topic_anonymous_mode: bool,
     last_anonymous_mode: (bool, bool),
@@ -1055,6 +1077,9 @@ impl MessagesStore {
         self.forward_task = None;
         self.forward_in_flight = false;
         self.pending_send_payloads.clear();
+        self.pending_commands.clear();
+        self.commands_in_flight.clear();
+        self.consumed_command_replies.clear();
         self.anonymous_clans.clear();
         self.topic_anonymous_mode = false;
         self.sync_anonymous_mode(cx);
@@ -1140,6 +1165,9 @@ impl MessagesStore {
             presign_probe_running: false,
             forward_in_flight: false,
             pending_send_payloads: HashMap::new(),
+            pending_commands: Vec::new(),
+            commands_in_flight: HashMap::new(),
+            consumed_command_replies: HashSet::new(),
             anonymous_clans: HashSet::new(),
             topic_anonymous_mode: false,
             last_anonymous_mode: (false, false),
@@ -2133,6 +2161,7 @@ impl MessagesStore {
                         removed_bottom: 0,
                     });
                 }
+                this.resolve_pending_commands(channel_id, cx);
                 this.finish_loading_more(cx);
                 cx.notify();
             });
@@ -4863,6 +4892,37 @@ impl MessagesStore {
         sender_name: String,
         content_tokens: OutgoingContent,
         attachments: Vec<OutgoingAttachment>,
+        command: CommandInvocation,
+        cx: &mut Context<Self>,
+    ) {
+        let reply = self.take_reply_target();
+        if reply.is_some() {
+            cx.emit(MessagesEvent::ReplyTargetChanged);
+        }
+        self.dispatch_command_to_bot(
+            content,
+            sender_id,
+            sender_name,
+            content_tokens,
+            attachments,
+            command,
+            reply,
+            None,
+            cx,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_command_to_bot(
+        &mut self,
+        content: String,
+        sender_id: String,
+        sender_name: String,
+        content_tokens: OutgoingContent,
+        attachments: Vec<OutgoingAttachment>,
+        mut command: CommandInvocation,
+        reply: Option<ReplyDraft>,
+        replaces: Option<MessageId>,
         cx: &mut Context<Self>,
     ) {
         let Some(channel_id) = self.active_channel_id else {
@@ -4873,10 +4933,29 @@ impl MessagesStore {
         };
         let is_public = self.is_public;
         let mode = self.mode;
-        let reply = self.take_reply_target();
-        if reply.is_some() {
-            cx.emit(MessagesEvent::ReplyTargetChanged);
+        let flight_bot = command.bot_id;
+        *self
+            .commands_in_flight
+            .entry((channel_id, flight_bot))
+            .or_insert(0) += 1;
+        command.status = CommandStatus::Waiting;
+        command.resendable = attachments.is_empty();
+        if command.bot_name.is_empty() {
+            command.bot_name = ClanMembersStore::try_global(cx)
+                .and_then(|store| {
+                    store
+                        .read(cx)
+                        .member(clan_id, UserId(command.bot_id))
+                        .map(|member| SharedString::from(member.name().to_string()))
+                })
+                .unwrap_or_default();
         }
+        let resend = command.resendable.then(|| CommandResend {
+            content: content.clone(),
+            sender_id: sender_id.clone(),
+            sender_name: sender_name.clone(),
+            content_tokens: content_tokens.clone(),
+        });
         let reply_clan_id = (!self.is_dm)
             .then_some(self.active_clan_id)
             .flatten()
@@ -4938,8 +5017,27 @@ impl MessagesStore {
                 Ok(attachments) => attachments,
                 Err(e) => {
                     tracing::error!("send_message_to_bot attachments failed: {e}");
-                    this.update(cx, |_, cx| cx.emit(MessagesEvent::SendFailedWithoutRow))
-                        .ok();
+                    this.update(cx, |this, cx| {
+                        this.finish_command_flight(channel_id, flight_bot);
+                        if let Some(old) = replaces {
+                            this.remove_local_row(channel_id, old, cx);
+                        }
+                        this.record_failed_command(
+                            channel_id,
+                            command_api_message(
+                                0,
+                                &sent,
+                                &sender_id,
+                                display_name.clone(),
+                                avatar_url.clone(),
+                                Vec::new(),
+                            ),
+                            command.clone(),
+                            resend.clone(),
+                            cx,
+                        );
+                    })
+                    .ok();
                     return;
                 }
             };
@@ -4976,40 +5074,353 @@ impl MessagesStore {
                 Ok(ack) => ack,
                 Err(e) => {
                     tracing::error!("send_message_to_bot failed: {e}");
-                    this.update(cx, |_, cx| cx.emit(MessagesEvent::SendFailedWithoutRow))
-                        .ok();
+                    this.update(cx, |this, cx| {
+                        this.finish_command_flight(channel_id, flight_bot);
+                        if let Some(old) = replaces {
+                            this.remove_local_row(channel_id, old, cx);
+                        }
+                        this.record_failed_command(
+                            channel_id,
+                            command_api_message(
+                                0,
+                                &sent,
+                                &sender_id,
+                                display_name.clone(),
+                                avatar_url.clone(),
+                                sent_attachments.clone(),
+                            ),
+                            command.clone(),
+                            resend.clone(),
+                            cx,
+                        );
+                    })
+                    .ok();
                     return;
                 }
             };
             this.update(cx, |this, cx| {
-                let content_tokens: ApiMessageContent =
-                    serde_json::from_str(&sent.json).unwrap_or_default();
-                let local = ApiMessage {
-                    message_id: ack.message_id,
-                    content: sent.text.clone(),
-                    content_tokens,
-                    content_raw: sent.json.clone(),
-                    code: EPHEMERAL_MESSAGE_CODE,
-                    sender_id: sender_id.parse().unwrap_or(0),
-                    sender_name: display_name,
-                    avatar: avatar_url,
-                    create_time: unix_now_seconds(),
-                    update_time: 0,
-                    hide_editted: true,
-                    attachments: sent_attachments,
-                    references: Vec::new(),
-                    reactions: Vec::new(),
-                    entity_mentions: Vec::new(),
-                    topic_id: 0,
-                };
+                if let Some(old) = replaces {
+                    this.remove_local_row(channel_id, old, cx);
+                }
+                let local = command_api_message(
+                    ack.message_id,
+                    &sent,
+                    &sender_id,
+                    display_name,
+                    avatar_url,
+                    sent_attachments,
+                );
                 let cfg = AppConfig::try_global(cx);
                 let viewer_id = viewer_user_id(cx);
-                let message = message_from_api(local, cfg, viewer_id);
+                let bot_id = command.bot_id;
+                let message = message_from_api(local, cfg, viewer_id).with_command(command);
+                let message_id = message.id;
                 this.apply_incoming_message(channel_id, message, cx);
+                this.track_command(
+                    PendingCommand {
+                        channel_id,
+                        message_id,
+                        bot_id,
+                        timed_out: false,
+                        delivered: true,
+                        resend,
+                    },
+                    cx,
+                );
+                this.finish_command_flight(channel_id, flight_bot);
             })
             .ok();
         })
         .detach();
+    }
+
+    fn finish_command_flight(&mut self, channel_id: ChannelId, bot_id: i64) {
+        let key = (channel_id, bot_id);
+        if let Some(count) = self.commands_in_flight.get_mut(&key) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.commands_in_flight.remove(&key);
+            }
+        }
+    }
+
+    fn command_in_flight(&self, channel_id: ChannelId, bot_id: i64) -> bool {
+        self.commands_in_flight
+            .get(&(channel_id, bot_id))
+            .is_some_and(|count| *count > 0)
+    }
+
+    fn answer_command(
+        &mut self,
+        storage_id: ChannelId,
+        command_id: MessageId,
+        reply_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_commands
+            .retain(|pending| pending.message_id != command_id);
+        self.consumed_command_replies.insert(reply_id);
+        self.set_command_status(
+            storage_id,
+            command_id,
+            CommandStatus::Answered(reply_id),
+            cx,
+        );
+    }
+
+    fn record_failed_command(
+        &mut self,
+        channel_id: ChannelId,
+        mut api_message: ApiMessage,
+        mut command: CommandInvocation,
+        resend: Option<CommandResend>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sort_id) = self
+            .cache
+            .get(&channel_id)
+            .map(|channel| optimistic_sort_id(&channel.messages))
+        else {
+            cx.emit(MessagesEvent::SendFailedWithoutRow);
+            return;
+        };
+        let message_id = MessageId::next_optimistic();
+        api_message.message_id = message_id.get();
+        let bot_id = command.bot_id;
+        command.status = CommandStatus::Failed;
+        let message = message_from_api(api_message, AppConfig::try_global(cx), viewer_user_id(cx))
+            .with_command(command)
+            .with_sort_id(sort_id);
+        self.apply_incoming_message(channel_id, message, cx);
+        self.pending_commands.push(PendingCommand {
+            channel_id,
+            message_id,
+            bot_id,
+            timed_out: false,
+            delivered: false,
+            resend,
+        });
+    }
+
+    fn track_command(&mut self, pending: PendingCommand, cx: &mut Context<Self>) {
+        let channel_id = pending.channel_id;
+        let message_id = pending.message_id;
+        self.pending_commands.push(pending);
+        self.resolve_pending_commands(channel_id, cx);
+        if !self
+            .pending_commands
+            .iter()
+            .any(|pending| pending.message_id == message_id)
+        {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(COMMAND_RESPONSE_TIMEOUT)
+                .await;
+            this.update(cx, |this, cx| {
+                if let Some(pending) = this
+                    .pending_commands
+                    .iter_mut()
+                    .find(|pending| pending.message_id == message_id)
+                {
+                    pending.timed_out = true;
+                    this.set_command_status(channel_id, message_id, CommandStatus::NoResponse, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn resolve_pending_commands(&mut self, storage_id: ChannelId, cx: &mut Context<Self>) {
+        if !self
+            .pending_commands
+            .iter()
+            .any(|pending| pending.delivered && pending.channel_id == storage_id)
+        {
+            return;
+        }
+        let Some(channel) = self.cache.get(&storage_id) else {
+            return;
+        };
+        let items = &channel.messages.items;
+        let mut used: HashSet<MessageId> = items
+            .iter()
+            .filter_map(|msg| match msg.command.as_deref()?.status {
+                CommandStatus::Answered(reply_id) => Some(reply_id),
+                _ => None,
+            })
+            .collect();
+        used.extend(self.consumed_command_replies.iter().copied());
+        let mut waiting: Vec<&PendingCommand> = self
+            .pending_commands
+            .iter()
+            .filter(|pending| pending.delivered && pending.channel_id == storage_id)
+            .collect();
+        waiting.sort_by_key(|pending| pending.timed_out);
+        let mut answered: Vec<(MessageId, MessageId)> = Vec::new();
+        for pending in &waiting {
+            let reply = items.iter().find(|msg| {
+                msg.command.is_none()
+                    && !used.contains(&msg.id)
+                    && msg
+                        .references
+                        .iter()
+                        .any(|reference| reference.message_ref_id == pending.message_id)
+            });
+            if let Some(reply) = reply {
+                used.insert(reply.id);
+                answered.push((pending.message_id, reply.id));
+            }
+        }
+        for pending in &waiting {
+            if answered
+                .iter()
+                .any(|(command_id, _)| *command_id == pending.message_id)
+                || (pending.timed_out && self.command_in_flight(storage_id, pending.bot_id))
+            {
+                continue;
+            }
+            let reply = items.iter().find(|msg| {
+                msg.command.is_none()
+                    && msg.references.is_empty()
+                    && !used.contains(&msg.id)
+                    && msg.id.0 > pending.message_id.0
+                    && msg.sender_user_id.map(|uid| uid.0) == Some(pending.bot_id)
+            });
+            if let Some(reply) = reply {
+                used.insert(reply.id);
+                answered.push((pending.message_id, reply.id));
+            }
+        }
+        for (command_id, reply_id) in answered {
+            self.answer_command(storage_id, command_id, reply_id, cx);
+        }
+    }
+
+    fn note_command_response(
+        &mut self,
+        storage_id: ChannelId,
+        msg: &Message,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending_commands.is_empty()
+            || msg.command.is_some()
+            || self.consumed_command_replies.contains(&msg.id)
+            || self
+                .cache
+                .get(&storage_id)
+                .is_some_and(|channel| channel.messages.contains_id(msg.id))
+        {
+            return;
+        }
+        let answered = if msg.references.is_empty() {
+            self.unreferenced_reply_target(storage_id, msg)
+        } else {
+            msg.references.iter().find_map(|reference| {
+                self.pending_commands
+                    .iter()
+                    .find(|pending| {
+                        pending.delivered
+                            && pending.channel_id == storage_id
+                            && pending.message_id == reference.message_ref_id
+                    })
+                    .map(|pending| pending.message_id)
+            })
+        };
+        if let Some(command_id) = answered {
+            self.answer_command(storage_id, command_id, msg.id, cx);
+        }
+    }
+
+    fn unreferenced_reply_target(&self, storage_id: ChannelId, msg: &Message) -> Option<MessageId> {
+        let sender = msg.sender_user_id.map(|uid| uid.0)?;
+        let from_bot = |pending: &&PendingCommand| {
+            pending.delivered
+                && pending.channel_id == storage_id
+                && pending.bot_id == sender
+                && msg.id.0 > pending.message_id.0
+        };
+        self.pending_commands
+            .iter()
+            .filter(from_bot)
+            .find(|pending| !pending.timed_out)
+            .or_else(|| {
+                if self.command_in_flight(storage_id, sender) {
+                    return None;
+                }
+                self.pending_commands.iter().find(from_bot)
+            })
+            .map(|pending| pending.message_id)
+    }
+
+    fn set_command_status(
+        &mut self,
+        storage_id: ChannelId,
+        message_id: MessageId,
+        status: CommandStatus,
+        cx: &mut Context<Self>,
+    ) {
+        let is_active = self.active_channel_id == Some(storage_id);
+        let Some(channel) = self.cache.get_mut(&storage_id) else {
+            return;
+        };
+        let Some(command) = channel
+            .messages
+            .get_mut_by_id(message_id)
+            .and_then(|msg| msg.command.as_mut())
+        else {
+            return;
+        };
+        if command.status == status {
+            return;
+        }
+        command.status = status;
+        if is_active {
+            cx.emit(MessagesEvent::Updated {
+                message_id: Some(message_id),
+            });
+        }
+        cx.notify();
+    }
+
+    pub fn resend_command(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .pending_commands
+            .iter()
+            .position(|pending| pending.message_id == message_id && pending.resend.is_some())
+        else {
+            return;
+        };
+        let storage_id = self.pending_commands[index].channel_id;
+        if self.active_channel_id != Some(storage_id) {
+            return;
+        }
+        let Some(command) = self
+            .cache
+            .get(&storage_id)
+            .and_then(|channel| channel.messages.get_by_id(message_id))
+            .and_then(|msg| msg.command.as_deref().cloned())
+        else {
+            return;
+        };
+        let pending = self.pending_commands.remove(index);
+        let Some(resend) = pending.resend else {
+            return;
+        };
+        self.set_command_status(storage_id, message_id, CommandStatus::Waiting, cx);
+        self.dispatch_command_to_bot(
+            resend.content,
+            resend.sender_id,
+            resend.sender_name,
+            resend.content_tokens,
+            Vec::new(),
+            command,
+            None,
+            Some(message_id),
+            cx,
+        );
     }
 
     pub fn dismiss_local_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
@@ -5022,6 +5433,8 @@ impl MessagesStore {
         if !is_local {
             return;
         }
+        self.pending_commands
+            .retain(|pending| pending.message_id != message_id);
         self.remove_local_row(storage_id, message_id, cx);
     }
 
@@ -5811,9 +6224,18 @@ impl MessagesStore {
             && self.select_ui.is_empty()
             && self.embed_form.is_empty()
             && self.pending_send_payloads.is_empty()
+            && self.pending_commands.is_empty()
         {
             return;
         }
+        let loaded: Vec<bool> = self
+            .pending_commands
+            .iter()
+            .map(|pending| self.message_is_loaded(pending.message_id))
+            .collect();
+        let mut still_loaded = loaded.into_iter();
+        self.pending_commands
+            .retain(|_| still_loaded.next().unwrap_or(false));
         let stale: Vec<MessageId> = self
             .poll_ui
             .keys()
@@ -6283,6 +6705,7 @@ impl MessagesStore {
         let is_active_topic = self.active_topic_id == Some(storage_id);
         let incoming_id = msg.id;
         let is_buzz = msg.code == MessageCode::MessageBuzz;
+        self.note_command_response(storage_id, &msg, cx);
         let Some(channel) = self.cache.get_mut(&storage_id) else {
             self.set_last_message(storage_id, msg.id);
             return;
@@ -8415,6 +8838,34 @@ fn apply_presign_gate_at(
             pending = a.presign_pending,
             "presign gate"
         );
+    }
+}
+
+fn command_api_message(
+    message_id: i64,
+    sent: &mezon_client::transport::SendContent,
+    sender_id: &str,
+    sender_name: String,
+    avatar: String,
+    attachments: Vec<mezon_client::transport::ApiAttachment>,
+) -> ApiMessage {
+    ApiMessage {
+        message_id,
+        content: sent.text.clone(),
+        content_tokens: serde_json::from_str(&sent.json).unwrap_or_default(),
+        content_raw: sent.json.clone(),
+        code: EPHEMERAL_MESSAGE_CODE,
+        sender_id: sender_id.parse().unwrap_or(0),
+        sender_name,
+        avatar,
+        create_time: unix_now_seconds(),
+        update_time: 0,
+        hide_editted: true,
+        attachments,
+        references: Vec::new(),
+        reactions: Vec::new(),
+        entity_mentions: Vec::new(),
+        topic_id: 0,
     }
 }
 
@@ -13577,6 +14028,21 @@ mod tests {
     }
 
     #[test]
+    fn temp_match_position_skips_command_cards() {
+        let card = command_card(0, 9);
+        let mut failed_card = Message::new(
+            MessageId::next_optimistic(),
+            card.content.clone(),
+            "1",
+            "me",
+            1,
+        );
+        failed_card.command = card.command.clone();
+        let list = MessageList::from_messages(ChannelId(1), vec![failed_card.clone()]);
+        assert_eq!(list.temp_match_position("1", &failed_card.content), None);
+    }
+
+    #[test]
     fn patch_reply_previews_after_delete_marks_reference() {
         let mut list = MessageList::from_messages(
             ChannelId(1),
@@ -14214,6 +14680,443 @@ mod tests {
                     .map(|c| c.messages.items.iter().map(|m| m.id.0).collect())
                     .unwrap_or_default();
                 assert_eq!(left, vec![101]);
+            });
+        });
+    }
+
+    fn open_command_channel(store: &mut MessagesStore, channel: ChannelId) {
+        store.active_channel_id = Some(channel);
+        store.cache.insert(
+            channel,
+            ChannelMessages {
+                messages: MessageList::from_messages(channel, Vec::new()),
+                has_more: false,
+                gap_bottom: false,
+            },
+            None,
+        );
+    }
+
+    fn command_card(id: i64, bot_id: i64) -> Message {
+        let mut card = Message::new(MessageId(id), "*roll 2d6", "1", "me", 100).with_command(
+            CommandInvocation {
+                menu_name: "roll".into(),
+                arguments: "2d6".into(),
+                bot_id,
+                bot_name: "slashbot".into(),
+                status: CommandStatus::Waiting,
+                resendable: false,
+            },
+        );
+        card.code = MessageCode::Ephemeral;
+        card
+    }
+
+    fn send_command(
+        store: &mut MessagesStore,
+        channel: ChannelId,
+        id: i64,
+        bot_id: i64,
+        cx: &mut Context<MessagesStore>,
+    ) {
+        store.apply_incoming_message(channel, command_card(id, bot_id), cx);
+        store.track_command(
+            PendingCommand {
+                channel_id: channel,
+                message_id: MessageId(id),
+                bot_id,
+                timed_out: false,
+                delivered: true,
+                resend: None,
+            },
+            cx,
+        );
+    }
+
+    fn command_status(store: &MessagesStore, channel: ChannelId, id: i64) -> Option<CommandStatus> {
+        store
+            .cache
+            .get(&channel)
+            .and_then(|c| c.messages.get_by_id(MessageId(id)))
+            .and_then(|m| m.command.as_ref())
+            .map(|command| command.status)
+    }
+
+    #[gpui::test]
+    fn the_bots_next_message_answers_its_oldest_waiting_command(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let channel = ChannelId(500);
+                open_command_channel(store, channel);
+                send_command(store, channel, 100, 9, cx);
+                send_command(store, channel, 101, 9, cx);
+
+                let reply = Message::new(MessageId(102), "rolled", "9", "slashbot", 102);
+                store.apply_incoming_message(channel, reply, cx);
+                assert_eq!(
+                    command_status(store, channel, 100),
+                    Some(CommandStatus::Answered(MessageId(102)))
+                );
+                assert_eq!(
+                    command_status(store, channel, 101),
+                    Some(CommandStatus::Waiting)
+                );
+
+                let second = Message::new(MessageId(103), "rolled again", "9", "slashbot", 103);
+                store.apply_incoming_message(channel, second, cx);
+                assert_eq!(
+                    command_status(store, channel, 101),
+                    Some(CommandStatus::Answered(MessageId(103)))
+                );
+                assert!(store.pending_commands.is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_reply_loaded_with_a_newer_page_answers_its_own_command(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let channel = ChannelId(500);
+                open_command_channel(store, channel);
+                send_command(store, channel, 100, 9, cx);
+
+                if let Some(loaded) = store.cache.get_mut(&channel) {
+                    loaded.messages.append_newer(vec![Message::new(
+                        MessageId(101),
+                        "first answer",
+                        "9",
+                        "slashbot",
+                        101,
+                    )]);
+                }
+                store.resolve_pending_commands(channel, cx);
+                assert_eq!(
+                    command_status(store, channel, 100),
+                    Some(CommandStatus::Answered(MessageId(101)))
+                );
+
+                send_command(store, channel, 102, 9, cx);
+                let second = Message::new(MessageId(103), "second answer", "9", "slashbot", 103);
+                store.apply_incoming_message(channel, second, cx);
+                assert_eq!(
+                    command_status(store, channel, 100),
+                    Some(CommandStatus::Answered(MessageId(101)))
+                );
+                assert_eq!(
+                    command_status(store, channel, 102),
+                    Some(CommandStatus::Answered(MessageId(103)))
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_message_from_someone_else_does_not_answer_a_command(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let channel = ChannelId(500);
+                open_command_channel(store, channel);
+                send_command(store, channel, 100, 9, cx);
+
+                let chatter = Message::new(MessageId(101), "hi", "2", "you", 101);
+                store.apply_incoming_message(channel, chatter, cx);
+
+                assert_eq!(
+                    command_status(store, channel, 100),
+                    Some(CommandStatus::Waiting)
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_reply_referencing_a_command_answers_that_command(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let channel = ChannelId(500);
+                open_command_channel(store, channel);
+                send_command(store, channel, 100, 9, cx);
+                send_command(store, channel, 101, 9, cx);
+
+                let reply = Message::new(MessageId(102), "for the second", "9", "slashbot", 102)
+                    .with_references(vec![MessageReference {
+                        message_ref_id: MessageId(101),
+                        ..Default::default()
+                    }]);
+                store.apply_incoming_message(channel, reply, cx);
+
+                assert_eq!(
+                    command_status(store, channel, 100),
+                    Some(CommandStatus::Waiting)
+                );
+                assert_eq!(
+                    command_status(store, channel, 101),
+                    Some(CommandStatus::Answered(MessageId(102)))
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_reply_that_beat_the_ack_still_answers_the_command(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let channel = ChannelId(500);
+                open_command_channel(store, channel);
+                store.apply_incoming_message(channel, command_card(100, 9), cx);
+                let early = Message::new(MessageId(101), "fast", "9", "slashbot", 101);
+                store.apply_incoming_message(channel, early, cx);
+
+                store.track_command(
+                    PendingCommand {
+                        channel_id: channel,
+                        message_id: MessageId(100),
+                        bot_id: 9,
+                        timed_out: false,
+                        delivered: true,
+                        resend: None,
+                    },
+                    cx,
+                );
+
+                assert_eq!(
+                    command_status(store, channel, 100),
+                    Some(CommandStatus::Answered(MessageId(101)))
+                );
+                assert!(store.pending_commands.is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_silent_bot_times_out_and_a_late_reply_still_answers(cx: &mut gpui::TestAppContext) {
+        let store = cx.update(test_store);
+        let channel = ChannelId(500);
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                open_command_channel(store, channel);
+                send_command(store, channel, 100, 9, cx);
+            });
+        });
+
+        cx.executor().advance_clock(COMMAND_RESPONSE_TIMEOUT);
+        cx.run_until_parked();
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                assert_eq!(
+                    command_status(store, channel, 100),
+                    Some(CommandStatus::NoResponse)
+                );
+                let late = Message::new(MessageId(101), "sorry, late", "9", "slashbot", 200);
+                store.apply_incoming_message(channel, late, cx);
+                assert_eq!(
+                    command_status(store, channel, 100),
+                    Some(CommandStatus::Answered(MessageId(101)))
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_timed_out_command_does_not_take_the_reply_of_a_waiting_one(cx: &mut gpui::TestAppContext) {
+        let store = cx.update(test_store);
+        let channel = ChannelId(500);
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                open_command_channel(store, channel);
+                send_command(store, channel, 100, 9, cx);
+            });
+        });
+        cx.executor().advance_clock(COMMAND_RESPONSE_TIMEOUT);
+        cx.run_until_parked();
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                assert_eq!(
+                    command_status(store, channel, 100),
+                    Some(CommandStatus::NoResponse)
+                );
+                send_command(store, channel, 101, 9, cx);
+
+                let pong = Message::new(MessageId(102), "pong", "9", "slashbot", 102);
+                store.apply_incoming_message(channel, pong, cx);
+                assert_eq!(
+                    command_status(store, channel, 101),
+                    Some(CommandStatus::Answered(MessageId(102)))
+                );
+                assert_eq!(
+                    command_status(store, channel, 100),
+                    Some(CommandStatus::NoResponse)
+                );
+
+                let late = Message::new(MessageId(103), "late roll", "9", "slashbot", 103);
+                store.apply_incoming_message(channel, late, cx);
+                assert_eq!(
+                    command_status(store, channel, 100),
+                    Some(CommandStatus::Answered(MessageId(103)))
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_failed_command_is_never_answered_by_the_bot(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let channel = ChannelId(500);
+                open_command_channel(store, channel);
+                let sent = mezon_client::transport::build_send_content("*roll 2d6", &[], &[], &[]);
+                let command = command_card(1, 9).command.map(|command| *command).unwrap();
+                store.record_failed_command(
+                    channel,
+                    command_api_message(0, &sent, "1", "me".into(), String::new(), Vec::new()),
+                    command,
+                    None,
+                    cx,
+                );
+                let failed_id = store
+                    .cache
+                    .get(&channel)
+                    .and_then(|c| c.messages.items.iter().find(|m| m.command.is_some()))
+                    .map(|m| m.id)
+                    .expect("the failed command is shown");
+                assert_eq!(
+                    command_status(store, channel, failed_id.0),
+                    Some(CommandStatus::Failed)
+                );
+
+                let bot = Message::new(MessageId(200), "unrelated", "9", "slashbot", 200);
+                store.apply_incoming_message(channel, bot, cx);
+
+                assert_eq!(
+                    command_status(store, channel, failed_id.0),
+                    Some(CommandStatus::Failed)
+                );
+            });
+        });
+    }
+
+    fn time_out_command(
+        cx: &mut gpui::TestAppContext,
+        store: &Entity<MessagesStore>,
+        channel: ChannelId,
+    ) {
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                open_command_channel(store, channel);
+                send_command(store, channel, 100, 9, cx);
+            });
+        });
+        cx.executor().advance_clock(COMMAND_RESPONSE_TIMEOUT);
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_reply_to_an_unacked_command_is_not_taken_by_a_timed_out_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let store = cx.update(test_store);
+        let channel = ChannelId(500);
+        time_out_command(cx, &store, channel);
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.commands_in_flight.insert((channel, 9), 1);
+                let reply = Message::new(MessageId(102), "for b", "9", "slashbot", 102)
+                    .with_references(vec![MessageReference {
+                        message_ref_id: MessageId(101),
+                        ..Default::default()
+                    }]);
+                store.apply_incoming_message(channel, reply, cx);
+                assert_eq!(
+                    command_status(store, channel, 100),
+                    Some(CommandStatus::NoResponse)
+                );
+
+                send_command(store, channel, 101, 9, cx);
+                store.finish_command_flight(channel, 9);
+                assert_eq!(
+                    command_status(store, channel, 101),
+                    Some(CommandStatus::Answered(MessageId(102)))
+                );
+                assert_eq!(
+                    command_status(store, channel, 100),
+                    Some(CommandStatus::NoResponse)
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn an_unreferenced_reply_waits_for_an_unacked_command(cx: &mut gpui::TestAppContext) {
+        let store = cx.update(test_store);
+        let channel = ChannelId(500);
+        time_out_command(cx, &store, channel);
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.commands_in_flight.insert((channel, 9), 1);
+                let reply = Message::new(MessageId(102), "pong", "9", "slashbot", 102);
+                store.apply_incoming_message(channel, reply, cx);
+                assert_eq!(
+                    command_status(store, channel, 100),
+                    Some(CommandStatus::NoResponse)
+                );
+
+                send_command(store, channel, 101, 9, cx);
+                store.finish_command_flight(channel, 9);
+                assert_eq!(
+                    command_status(store, channel, 101),
+                    Some(CommandStatus::Answered(MessageId(102)))
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_reply_is_not_reused_after_its_card_is_dismissed(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let channel = ChannelId(500);
+                open_command_channel(store, channel);
+                send_command(store, channel, 100, 9, cx);
+                send_command(store, channel, 101, 9, cx);
+                let reply = Message::new(MessageId(102), "answer", "9", "slashbot", 102);
+                store.apply_incoming_message(channel, reply, cx);
+                assert_eq!(
+                    command_status(store, channel, 100),
+                    Some(CommandStatus::Answered(MessageId(102)))
+                );
+
+                store.dismiss_local_message(MessageId(100), cx);
+                store.resolve_pending_commands(channel, cx);
+
+                assert_eq!(
+                    command_status(store, channel, 101),
+                    Some(CommandStatus::Waiting)
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn dismissing_a_command_stops_waiting_for_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let channel = ChannelId(500);
+                open_command_channel(store, channel);
+                send_command(store, channel, 100, 9, cx);
+
+                store.dismiss_local_message(MessageId(100), cx);
+
+                assert!(store.pending_commands.is_empty());
+                assert_eq!(command_status(store, channel, 100), None);
             });
         });
     }

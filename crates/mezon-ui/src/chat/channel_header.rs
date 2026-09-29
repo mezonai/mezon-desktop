@@ -378,6 +378,8 @@ impl ChannelHeader {
                     .flex()
                     .flex_row()
                     .items_center()
+                    .min_w_0()
+                    .overflow_hidden()
                     .gap_1()
                     .when_some(icon.filter(|_| !dm), |this, icon| {
                         let glyph: Hsla = if icon.lock.is_some() {
@@ -418,6 +420,8 @@ impl ChannelHeader {
                     }))
                     .child({
                         let name_el = div()
+                            .min_w_0()
+                            .truncate()
                             .text_base()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.text_primary)
@@ -430,6 +434,8 @@ impl ChannelHeader {
                                 .id("hdr-dm-edit")
                                 .flex()
                                 .flex_col()
+                                .min_w_0()
+                                .overflow_hidden()
                                 .justify_center()
                                 .gap(px(1.))
                                 .px_2()
@@ -465,6 +471,8 @@ impl ChannelHeader {
                                 Some((label, info)) => div()
                                     .flex()
                                     .flex_col()
+                                    .min_w_0()
+                                    .overflow_hidden()
                                     .justify_center()
                                     .gap(px(4.))
                                     .child(name_el.line_height(px(18.)))
@@ -512,6 +520,7 @@ impl ChannelHeader {
             .child(
                 div()
                     .relative()
+                    .flex_shrink_0()
                     .children(crate::tour::probe(
                         crate::tour::TourAnchor::ChannelHeaderTools,
                     ))
@@ -1062,16 +1071,19 @@ fn dm_header_actions(state: DmHeaderState) -> &'static [(&'static str, IconName)
             ("hdr-add-members", IconName::IconAddFriendDM),
             ("hdr-members", IconName::IconUserProfileDM),
             ("hdr-gallery", IconName::ImageThumbnail),
+            ("hdr-files", IconName::FileIcon),
         ],
         DmHeaderState::OneToOneBlocked => &[
             ("hdr-pin", IconName::PinRight),
             ("hdr-gallery", IconName::ImageThumbnail),
+            ("hdr-files", IconName::FileIcon),
         ],
         DmHeaderState::Group => &[
             ("hdr-add-members", IconName::IconAddFriendDM),
             ("hdr-members", IconName::MemberList),
             ("hdr-pin", IconName::PinRight),
             ("hdr-gallery", IconName::ImageThumbnail),
+            ("hdr-files", IconName::FileIcon),
         ],
     }
 }
@@ -1470,16 +1482,16 @@ impl Render for ChatHeader {
             .clone()
             .unwrap_or_else(|| SharedString::from("en"));
 
-        let muted = crate::chat::files_popover::active_files_channel(cx)
-            .map(|(clan_id, channel_id)| {
-                mezon_store::NotificationSettingStore::global(cx)
-                    .read(cx)
-                    .is_muted(channel_id, clan_id, cx)
-            })
-            .unwrap_or(false);
         let notification_trigger = if self.dm {
             None
         } else {
+            let muted = crate::chat::files_popover::active_files_channel(cx)
+                .map(|(clan_id, channel_id)| {
+                    mezon_store::NotificationSettingStore::global(cx)
+                        .read(cx)
+                        .is_muted(channel_id, clan_id, cx)
+                })
+                .unwrap_or(false);
             Some(
                 PopoverMenu::new("hdr-bell-popover")
                     .anchor(Anchor::TopRight)
@@ -1512,43 +1524,52 @@ impl Render for ChatHeader {
             .anchor(Anchor::TopRight)
             .attach(Anchor::BottomRight)
             .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
-            .trigger(GalleryTrigger::new(&theme, gallery_tooltip))
+            .trigger(HeaderPopoverTrigger::new(
+                "hdr-gallery",
+                IconName::ImageThumbnail,
+                &theme,
+                gallery_tooltip,
+            ))
             .menu({
                 let settings = settings.clone();
                 move |window, cx| build_gallery_modal(settings.clone(), window, cx)
             })
             .into_any_element();
 
-        let files_trigger = if !self.dm {
-            Some(
-                PopoverMenu::new("hdr-files-popover")
-                    .anchor(Anchor::TopRight)
-                    .attach(Anchor::BottomRight)
-                    .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
-                    .on_open(files_popover_on_open())
-                    .menu({
-                        let settings = settings.clone();
-                        move |window, cx| {
-                            let (clan_id, channel_id) =
-                                crate::chat::files_popover::active_files_channel(cx)?;
-                            Some(cx.new(|cx| {
-                                FilesPopoverPanel::new(
-                                    settings.clone(),
-                                    clan_id,
-                                    channel_id,
-                                    PopoverMenuHandle::default(),
-                                    window,
-                                    cx,
-                                )
-                            }))
-                        }
-                    })
-                    .trigger(FilesPopoverTrigger::new(&theme))
-                    .into_any_element(),
-            )
-        } else {
-            None
-        };
+        let files_tooltip: SharedString =
+            mezon_i18n::t(&locale, "channelTopbar.tooltips.files").into();
+        let files_popover_key = crate::chat::files_popover::active_files_channel(cx)
+            .map(|(_, channel_id)| channel_id.0 as usize)
+            .unwrap_or_default();
+        let files_trigger = PopoverMenu::new(("hdr-files-popover", files_popover_key))
+            .anchor(Anchor::TopRight)
+            .attach(Anchor::BottomRight)
+            .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
+            .on_open(files_popover_on_open())
+            .menu({
+                let settings = settings.clone();
+                move |window, cx| {
+                    let (clan_id, channel_id) =
+                        crate::chat::files_popover::active_files_channel(cx)?;
+                    Some(cx.new(|cx| {
+                        FilesPopoverPanel::new(
+                            settings.clone(),
+                            clan_id,
+                            channel_id,
+                            PopoverMenuHandle::default(),
+                            window,
+                            cx,
+                        )
+                    }))
+                }
+            })
+            .trigger(HeaderPopoverTrigger::new(
+                "hdr-files",
+                IconName::FileIcon,
+                &theme,
+                files_tooltip,
+            ))
+            .into_any_element();
 
         let members_toggle = Arc::new(move |window: &mut Window, cx: &mut App| {
             let _ = layout_weak.update(cx, |this, cx| this.toggle_member_list(window, cx));
@@ -1582,9 +1603,7 @@ impl Render for ChatHeader {
                 .timeline_tooltip(timeline_tooltip)
                 .on_toggle_timeline(timeline_toggle);
         }
-        if let Some(files_trigger) = files_trigger {
-            header = header.files_trigger(files_trigger);
-        }
+        header = header.files_trigger(files_trigger);
         if self.dm
             && let Some(info) = self.in_voice
         {
@@ -2069,27 +2088,9 @@ fn build_gallery_modal(
     window: &mut Window,
     cx: &mut App,
 ) -> Option<Entity<crate::gallery::GalleryModal>> {
-    use crate::router::{Route, Router};
-    use mezon_store::ClanId;
+    use crate::router::Router;
 
-    let (clan_id, channel_id) = match Router::global(cx).read(cx).route() {
-        Route::Channel {
-            clan_id,
-            channel_id,
-        }
-        | Route::Thread {
-            clan_id,
-            channel_id,
-            ..
-        }
-        | Route::Canvas {
-            clan_id,
-            channel_id,
-            ..
-        } => (clan_id, channel_id),
-        Route::DirectMessage { direct_id, .. } => (ClanId(0), direct_id),
-        _ => return None,
-    };
+    let (clan_id, channel_id) = Router::global(cx).read(cx).conversation_context()?;
     Some(cx.new(|cx| {
         crate::gallery::GalleryModal::new(
             clan_id,
@@ -2102,7 +2103,9 @@ fn build_gallery_modal(
     }))
 }
 
-struct GalleryTrigger {
+struct HeaderPopoverTrigger {
+    id: &'static str,
+    icon: IconName,
     icon_idle: gpui::Rgba,
     icon_active: gpui::Rgba,
     bg_hover: gpui::Rgba,
@@ -2113,9 +2116,11 @@ struct GalleryTrigger {
     cursor: Option<CursorStyle>,
 }
 
-impl GalleryTrigger {
-    fn new(theme: &Theme, tooltip: SharedString) -> Self {
+impl HeaderPopoverTrigger {
+    fn new(id: &'static str, icon: IconName, theme: &Theme, tooltip: SharedString) -> Self {
         Self {
+            id,
+            icon,
             icon_idle: theme.tokens.bg_icon_theme,
             icon_active: theme.text_primary,
             bg_hover: theme.bg_hover,
@@ -2128,7 +2133,7 @@ impl GalleryTrigger {
     }
 }
 
-impl Clickable for GalleryTrigger {
+impl Clickable for HeaderPopoverTrigger {
     fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
         self.on_click = Some(Box::new(handler));
         self
@@ -2140,25 +2145,27 @@ impl Clickable for GalleryTrigger {
     }
 }
 
-impl Toggleable for GalleryTrigger {
+impl Toggleable for HeaderPopoverTrigger {
     fn toggle_state(mut self, selected: bool) -> Self {
         self.selected = selected;
         self
     }
 }
 
-impl IntoElement for GalleryTrigger {
+impl IntoElement for HeaderPopoverTrigger {
     type Element = Stateful<Div>;
 
     fn into_element(self) -> Self::Element {
         let bg_hover = self.bg_hover;
+        let id = self.id;
+        let icon = self.icon;
         let tint = if self.selected {
             self.icon_active
         } else {
             self.icon_idle
         };
         let mut button = div()
-            .id("hdr-gallery")
+            .id(id)
             .flex()
             .items_center()
             .justify_center()
@@ -2169,89 +2176,7 @@ impl IntoElement for GalleryTrigger {
             .hover(move |s| s.bg(bg_hover))
             .tooltip(Tooltip::text(self.tooltip))
             .occlude()
-            .child(
-                Icon::new(IconName::ImageThumbnail)
-                    .size(px(20.))
-                    .text_color(tint),
-            );
-        if self.selected {
-            button = button.bg(self.bg_active);
-        }
-        if let Some(cursor) = self.cursor {
-            button = button.cursor(cursor);
-        }
-        if let Some(handler) = self.on_click {
-            button = button.on_click(handler);
-        }
-        button
-    }
-}
-
-struct FilesPopoverTrigger {
-    icon_idle: gpui::Rgba,
-    icon_active: gpui::Rgba,
-    bg_hover: gpui::Rgba,
-    bg_active: gpui::Rgba,
-    selected: bool,
-    on_click: Option<ClickHandler>,
-    cursor: Option<CursorStyle>,
-}
-
-impl FilesPopoverTrigger {
-    fn new(theme: &Theme) -> Self {
-        Self {
-            icon_idle: theme.tokens.bg_icon_theme,
-            icon_active: theme.text_primary,
-            bg_hover: theme.bg_hover,
-            bg_active: theme.bg_tertiary,
-            selected: false,
-            on_click: None,
-            cursor: None,
-        }
-    }
-}
-
-impl Clickable for FilesPopoverTrigger {
-    fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
-        self.on_click = Some(Box::new(handler));
-        self
-    }
-
-    fn cursor_style(mut self, cursor_style: CursorStyle) -> Self {
-        self.cursor = Some(cursor_style);
-        self
-    }
-}
-
-impl Toggleable for FilesPopoverTrigger {
-    fn toggle_state(mut self, selected: bool) -> Self {
-        self.selected = selected;
-        self
-    }
-}
-
-impl IntoElement for FilesPopoverTrigger {
-    type Element = Stateful<Div>;
-
-    fn into_element(self) -> Self::Element {
-        let bg_hover = self.bg_hover;
-        let tint = if self.selected {
-            self.icon_active
-        } else {
-            self.icon_idle
-        };
-        let mut button = div()
-            .id("hdr-files")
-            .flex()
-            .items_center()
-            .justify_center()
-            .w(px(32.))
-            .h(px(32.))
-            .rounded_md()
-            .cursor_pointer()
-            .hover(move |s| s.bg(bg_hover))
-            .occlude()
-            .child(Icon::new(IconName::FileIcon).size(px(20.)).text_color(tint));
+            .child(Icon::new(icon).size(px(20.)).text_color(tint));
         if self.selected {
             button = button.bg(self.bg_active);
         }
@@ -2368,15 +2293,22 @@ mod tests {
                 "hdr-add-members",
                 "hdr-members",
                 "hdr-gallery",
+                "hdr-files",
             ]
         );
         assert_eq!(
             action_ids(DmHeaderState::Group),
-            ["hdr-add-members", "hdr-members", "hdr-pin", "hdr-gallery",]
+            [
+                "hdr-add-members",
+                "hdr-members",
+                "hdr-pin",
+                "hdr-gallery",
+                "hdr-files",
+            ]
         );
         assert_eq!(
             action_ids(DmHeaderState::OneToOneBlocked),
-            ["hdr-pin", "hdr-gallery"]
+            ["hdr-pin", "hdr-gallery", "hdr-files"]
         );
     }
 
@@ -2385,5 +2317,6 @@ mod tests {
         let actions = action_ids(DmHeaderState::Unresolved);
         assert_eq!(actions, ["hdr-add-members", "hdr-members", "hdr-pin"]);
         assert!(!actions.contains(&"hdr-gallery"));
+        assert!(!actions.contains(&"hdr-files"));
     }
 }

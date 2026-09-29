@@ -321,6 +321,27 @@ impl Router {
         }
     }
 
+    pub fn conversation_context(&self) -> Option<(ClanId, ChannelId)> {
+        match &self.current {
+            Route::Channel {
+                clan_id,
+                channel_id,
+            }
+            | Route::Thread {
+                clan_id,
+                channel_id,
+                ..
+            }
+            | Route::Canvas {
+                clan_id,
+                channel_id,
+                ..
+            } if !clan_id.is_zero() => Some((*clan_id, *channel_id)),
+            Route::DirectMessage { direct_id, .. } => Some((ClanId(0), *direct_id)),
+            _ => None,
+        }
+    }
+
     pub fn current_path(&self) -> String {
         self.current.to_path()
     }
@@ -860,6 +881,38 @@ mod tests {
         });
         router.go_back();
         assert_eq!(router.route(), dm);
+    }
+
+    #[test]
+    fn conversation_context_maps_clan_and_direct_routes() {
+        let mut router = Router::new();
+        router.navigate(Route::Channel {
+            clan_id: ClanId(7),
+            channel_id: ChannelId(11),
+        });
+        assert_eq!(
+            router.conversation_context(),
+            Some((ClanId(7), ChannelId(11)))
+        );
+
+        router.navigate(Route::DirectMessage {
+            direct_id: ChannelId(13),
+            message_type: "3".into(),
+        });
+        assert_eq!(
+            router.conversation_context(),
+            Some((ClanId(0), ChannelId(13)))
+        );
+    }
+
+    #[test]
+    fn conversation_context_rejects_zero_clan_channel_routes() {
+        let mut router = Router::new();
+        router.navigate(Route::Channel {
+            clan_id: ClanId(0),
+            channel_id: ChannelId(11),
+        });
+        assert_eq!(router.conversation_context(), None);
     }
 
     #[test]

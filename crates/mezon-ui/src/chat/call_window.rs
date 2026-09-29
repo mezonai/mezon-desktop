@@ -7,10 +7,13 @@ use gpui::{
 };
 use mezon_store::{
     AudioDeviceInfo, AudioStore, CallPeer, CallPhase, CallStore, ChannelId, DirectMessageStore,
-    MediaFlags, Settings, VoiceRenderFrame,
+    MediaDevice, MediaFlags, Settings, VoiceRenderFrame,
 };
 
 use crate::app::shell::Shell;
+use crate::chat::media_permission_prompt::{
+    media_access_missing, media_permission_badge, observe_media_access,
+};
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
@@ -42,12 +45,6 @@ fn dm_message_type(channel_id: i64, cx: &App) -> String {
         .unwrap_or_else(|| "3".into())
 }
 
-#[derive(Clone, Copy)]
-enum PermissionKind {
-    Mic,
-    Camera,
-}
-
 pub struct CallOverlay {
     call: Entity<CallStore>,
     last_phase: CallPhase,
@@ -61,6 +58,14 @@ impl CallOverlay {
             let phase = call.read(cx).phase();
             let was = this.last_phase;
             this.last_phase = phase;
+            if call.update(cx, |store, _| store.take_mic_unavailable()) {
+                let locale = Settings::try_global(cx)
+                    .map(|s| s.read(cx).language.clone())
+                    .unwrap_or_else(|| "en".to_string());
+                let msg = mezon_i18n::t(&locale, "channelVoice.mediaPermission.micUnavailable")
+                    .to_string();
+                Shell::global(cx).update(cx, |shell, cx| shell.error(msg, cx));
+            }
             if matches!(phase, CallPhase::Connected) && !matches!(was, CallPhase::Connected) {
                 let locale = Settings::try_global(cx)
                     .map(|s| s.read(cx).language.clone())
@@ -76,197 +81,6 @@ impl CallOverlay {
             .detach();
         Self { call, last_phase }
     }
-
-    fn render_permission_modal(
-        &self,
-        cx: &mut Context<Self>,
-        kind: PermissionKind,
-    ) -> gpui::AnyElement {
-        let (
-            card_bg,
-            border,
-            title_color,
-            body_color,
-            icon_bg,
-            icon_color,
-            later_bg,
-            later_hover,
-            open_bg,
-            open_hover,
-        ) = {
-            let theme = cx.theme();
-            (
-                theme.bg_floating,
-                theme.border,
-                theme.text_primary,
-                theme.text_muted,
-                theme.bg_hover,
-                theme.danger_text,
-                theme.bg_tertiary,
-                theme.bg_hover,
-                theme.brand,
-                theme.brand_hover,
-            )
-        };
-        let (icon, title_key, body_key) = match kind {
-            PermissionKind::Mic => (
-                IconName::VoiceMicDisabledIcon,
-                "channelVoice.micPermissionTitle",
-                "channelVoice.micPermissionBody",
-            ),
-            PermissionKind::Camera => (
-                IconName::VoiceCameraDisabledIcon,
-                "channelVoice.permission.cameraTitle",
-                "channelVoice.permission.cameraBody",
-            ),
-        };
-        let locale = Settings::try_global(cx)
-            .map(|s| s.read(cx).language.clone())
-            .unwrap_or_default();
-        let title = mezon_i18n::t(&locale, title_key).to_string();
-        let body = mezon_i18n::t(&locale, body_key).to_string();
-        let open_label = mezon_i18n::t(&locale, "channelVoice.openSettings").to_string();
-        let later_label = mezon_i18n::t(&locale, "channelVoice.later").to_string();
-        let call_later = self.call.clone();
-        let call_open = self.call.clone();
-
-        div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(0x000000cc))
-            .occlude()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_4()
-                    .w(px(360.))
-                    .p_6()
-                    .rounded_xl()
-                    .bg(card_bg)
-                    .border_1()
-                    .border_color(border)
-                    .shadow_lg()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .w(px(56.))
-                            .h(px(56.))
-                            .rounded_full()
-                            .bg(icon_bg)
-                            .child(Icon::new(icon).size(px(26.)).text_color(icon_color)),
-                    )
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(title_color)
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_center()
-                            .text_color(body_color)
-                            .child(body),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_3()
-                            .w_full()
-                            .child(
-                                div()
-                                    .id("call-mic-perm-later")
-                                    .flex_1()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .py_2()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .bg(later_bg)
-                                    .text_color(title_color)
-                                    .hover(move |s| s.bg(later_hover))
-                                    .on_click(move |_, _, cx| {
-                                        call_later.update(cx, |store, cx| match kind {
-                                            PermissionKind::Mic => store.dismiss_mic_prompt(cx),
-                                            PermissionKind::Camera => {
-                                                store.dismiss_camera_prompt(cx)
-                                            }
-                                        });
-                                    })
-                                    .child(later_label),
-                            )
-                            .child(
-                                div()
-                                    .id("call-mic-perm-open")
-                                    .flex_1()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .py_2()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .bg(open_bg)
-                                    .text_color(rgb(0xffffff))
-                                    .hover(move |s| s.bg(open_hover))
-                                    .on_click(move |_, _, cx| {
-                                        match kind {
-                                            PermissionKind::Mic => open_microphone_settings(),
-                                            PermissionKind::Camera => open_camera_settings(),
-                                        }
-                                        call_open.update(cx, |store, cx| match kind {
-                                            PermissionKind::Mic => store.dismiss_mic_prompt(cx),
-                                            PermissionKind::Camera => {
-                                                store.dismiss_camera_prompt(cx)
-                                            }
-                                        });
-                                    })
-                                    .child(open_label),
-                            ),
-                    ),
-            )
-            .into_any_element()
-    }
-}
-
-fn open_microphone_settings() {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open")
-            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
-            .spawn();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "", "ms-settings:privacy-microphone"])
-            .spawn();
-    }
-}
-
-fn open_camera_settings() {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open")
-            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Camera")
-            .spawn();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "", "ms-settings:privacy-webcam"])
-            .spawn();
-    }
 }
 
 impl Render for CallOverlay {
@@ -275,12 +89,6 @@ impl Render for CallOverlay {
             let store = self.call.read(cx);
             (store.phase(), store.peer().cloned())
         };
-        if self.call.read(cx).mic_prompt() {
-            return self.render_permission_modal(cx, PermissionKind::Mic);
-        }
-        if self.call.read(cx).camera_prompt() {
-            return self.render_permission_modal(cx, PermissionKind::Camera);
-        }
         let Some(peer) = peer else {
             return div().into_any_element();
         };
@@ -387,6 +195,9 @@ impl CallPanelView {
         .detach();
         cx.observe(&Router::global(cx), |_, _, cx| cx.notify())
             .detach();
+        if let Some(media_access) = observe_media_access(cx) {
+            media_access.detach();
+        }
         let mut audio_sub = None;
         let (input_devices, output_devices, default_input, default_output) =
             if let Some(audio) = AudioStore::try_global(cx) {
@@ -548,7 +359,7 @@ impl CallPanelView {
                 )
         };
 
-        let controls = self.render_controls(phase, local, cx);
+        let controls = self.render_controls(phase, local, surface, cx);
 
         div()
             .relative()
@@ -572,6 +383,7 @@ impl CallPanelView {
         &self,
         phase: CallPhase,
         local: MediaFlags,
+        surface: gpui::Rgba,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let call = self.call.clone();
@@ -621,37 +433,47 @@ impl CallPanelView {
             ))
             .into_any_element()
         } else {
-            row.child(circle_button(
-                "call-panel-camera",
-                if local.cam_on {
-                    IconName::VoiceCameraIcon
-                } else {
-                    IconName::VoiceCameraDisabledIcon
-                },
-                if local.cam_on { CALL_GREEN } else { 0x4e5058 },
-                px(52.),
-                {
-                    let call = call.clone();
-                    move |cx: &mut App| {
-                        call.update(cx, |store, cx| store.toggle_camera(cx));
-                    }
-                },
+            row.child(with_permission_badge(
+                circle_button(
+                    "call-panel-camera",
+                    if local.cam_on {
+                        IconName::VoiceCameraIcon
+                    } else {
+                        IconName::VoiceCameraDisabledIcon
+                    },
+                    if local.cam_on { CALL_GREEN } else { 0x4e5058 },
+                    px(52.),
+                    {
+                        let call = call.clone();
+                        move |cx: &mut App| {
+                            call.update(cx, |store, cx| store.toggle_camera(cx));
+                        }
+                    },
+                ),
+                MediaDevice::Camera,
+                surface,
+                cx,
             ))
-            .child(circle_button(
-                "call-panel-mic",
-                if local.mic_on {
-                    IconName::VoiceMicIcon
-                } else {
-                    IconName::VoiceMicDisabledIcon
-                },
-                if local.mic_on { 0x4e5058 } else { CALL_RED },
-                px(52.),
-                {
-                    let call = call.clone();
-                    move |cx: &mut App| {
-                        call.update(cx, |store, cx| store.toggle_mic(cx));
-                    }
-                },
+            .child(with_permission_badge(
+                circle_button(
+                    "call-panel-mic",
+                    if local.mic_on {
+                        IconName::VoiceMicIcon
+                    } else {
+                        IconName::VoiceMicDisabledIcon
+                    },
+                    if local.mic_on { 0x4e5058 } else { CALL_RED },
+                    px(52.),
+                    {
+                        let call = call.clone();
+                        move |cx: &mut App| {
+                            call.update(cx, |store, cx| store.toggle_mic(cx));
+                        }
+                    },
+                ),
+                MediaDevice::Microphone,
+                surface,
+                cx,
             ))
             .child(self.render_settings_button(cx))
             .child(circle_button(
@@ -784,6 +606,8 @@ impl CallPanelView {
             .child(
                 div()
                     .flex_1()
+                    .min_w(px(0.))
+                    .whitespace_normal()
                     .text_sm()
                     .text_color(rgb(0xffffff))
                     .child(label),
@@ -1023,6 +847,20 @@ fn device_section_header(text: &'static str) -> gpui::AnyElement {
         .text_color(rgb(0x949ba4))
         .child(text)
         .into_any_element()
+}
+
+fn with_permission_badge(
+    button: Stateful<Div>,
+    device: MediaDevice,
+    ring: gpui::Rgba,
+    cx: &App,
+) -> Div {
+    let badge = media_access_missing(device, cx).then(|| {
+        media_permission_badge(cx.theme(), px(18.), ring)
+            .top(px(-2.))
+            .right(px(-2.))
+    });
+    div().relative().child(button).children(badge)
 }
 
 fn circle_button(

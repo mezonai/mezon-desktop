@@ -37,6 +37,7 @@ pub mod ids;
 pub mod inbox;
 pub mod invite;
 pub mod login;
+pub mod media_permission;
 pub mod message;
 pub mod message_search;
 pub mod message_time;
@@ -175,6 +176,7 @@ pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};
 pub use inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxEvent, InboxStore};
 pub use invite::{InviteDetails, InviteEvent, InviteState, InviteStore};
 pub use login::{LoginStore, token_from_oauth_callback_url};
+pub use media_permission::{MediaPermissionPrompt, MediaPermissionStore};
 pub use message::*;
 pub use message::{
     COMBINE_TIME_WINDOW, Message, MessageAttachment, message_combined_with_prev,
@@ -196,6 +198,7 @@ pub use mezon_client::{
     search_content_highlight_terms, search_dropdown_mode, search_filter_chip_ranges,
     search_page_count, search_page_numbers, should_show_search_dropdown,
 };
+pub use mezon_voice::{MediaDevice, MediaPermission};
 pub use mmn_client::{DECIMAL_FACTOR as TOKEN_DECIMAL_FACTOR, DECIMALS as TOKEN_DECIMALS};
 pub use name_validation::{
     CLAN_NAME_MAX_CHARS, DISPLAY_NAME_MAX_BYTES, DisplayNameError, is_valid_clan_name,
@@ -256,13 +259,14 @@ pub use voice::SimulatedCall;
 pub use voice::record_wayland_session;
 pub use voice::{
     DeviceKind, DeviceMenuKind, DisplayedFlower, DisplayedReaction, MAX_SOUND_BYTES,
-    NetworkQuality, PickedScreen, RecordingState, RecordingToast, RemovalCause,
-    SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareMode,
+    NetworkQuality, NoiseSuppressionStatus, PickedScreen, RecordingState, RecordingToast,
+    RemovalCause, SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareMode,
     ScreenShareOption, ScreenSharePreview, SfuRole, VideoFrameData, VideoFrameStore,
     VoiceCallStatus, VoiceConnection, VoiceModerationError, VoiceParticipant, VoiceRenderFrame,
     VoiceStore, VoiceStoreEvent, camera_tile_id, capture_screen_share_preview,
-    list_screen_share_options, peek_screen_share_options, screen_tile_id, system_screen_share_pick,
-    upload_sound_file, validate_sound_file,
+    list_screen_share_options, peek_screen_share_options, request_screen_capture_access,
+    screen_capture_permitted, screen_tile_id, system_screen_share_pick, upload_sound_file,
+    validate_sound_file,
 };
 pub use wallet::{
     SendTokenRequest, TransactionCursor, WalletDetail, WalletEvent, WalletStore, WalletTransaction,
@@ -446,6 +450,8 @@ pub struct Settings {
     pub tour_done_tracks: Vec<String>,
     #[serde(default)]
     pub tour_eligible: Option<bool>,
+    #[serde(default)]
+    pub screen_capture_access_requested: bool,
 }
 
 impl Default for Settings {
@@ -476,6 +482,7 @@ impl Default for Settings {
             tour_seen_version: 0,
             tour_done_tracks: Vec::new(),
             tour_eligible: None,
+            screen_capture_access_requested: false,
         }
     }
 }

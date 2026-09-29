@@ -230,7 +230,7 @@ async fn run_engine(
     })));
 
     pc.on_ice_gathering_state_change(Some(Box::new(|state| {
-        tracing::debug!("call: ice gathering state = {state:?}");
+        tracing::info!("call: ice gathering state = {state:?}");
     })));
 
     let pump_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -397,20 +397,28 @@ async fn run_engine(
                             tracing::warn!("ignoring remote offer during local negotiation (glare)");
                             continue;
                         }
+                        tracing::info!(
+                            sdp_bytes = sdp.len(),
+                            embedded_candidates = sdp.lines().filter(|line| line.starts_with("a=candidate:")).count(),
+                            "call: applying remote offer"
+                        );
                         let offer = SessionDescription::parse(&sdp, SdpType::Offer)
                             .map_err(|e| anyhow!("offer parse: {} {}", e.line, e.description))?;
                         pc.set_remote_description(offer)
                             .await
                             .context("set remote (offer) failed")?;
+                        tracing::info!(pending_ice = pending_ice.len(), "call: remote offer applied");
                         remote_set = true;
                         drain_ice(&pc, &mut pending_ice).await;
                         let answer = pc
                             .create_answer(AnswerOptions::default())
                             .await
                             .context("create answer failed")?;
+                        tracing::info!("call: local answer created");
                         pc.set_local_description(answer.clone())
                             .await
                             .context("set local (answer) failed")?;
+                        tracing::info!("call: local answer applied -> signaling");
                         let _ = event_tx.send(EngineEvent::LocalAnswer(answer.to_string()));
                     }
                     EngineCommand::ApplyRemoteAnswer(sdp) => {
@@ -419,6 +427,7 @@ async fn run_engine(
                         pc.set_remote_description(answer)
                             .await
                             .context("set remote (answer) failed")?;
+                        tracing::info!(pending_ice = pending_ice.len(), "call: remote answer applied");
                         remote_set = true;
                         drain_ice(&pc, &mut pending_ice).await;
                     }
@@ -516,8 +525,26 @@ async fn log_media_stats(pc: &PeerConnection) {
     let mut remote_level = 0.0f64;
     let mut mic_level = 0.0f64;
     let mut mic_samples = 0u64;
+    let local_candidates = stats
+        .iter()
+        .filter(|stat| matches!(stat, RtcStats::LocalCandidate(_)))
+        .count();
+    let remote_candidates = stats
+        .iter()
+        .filter(|stat| matches!(stat, RtcStats::RemoteCandidate(_)))
+        .count();
     for stat in &stats {
         match stat {
+            RtcStats::Transport(transport) => tracing::info!(
+                dtls = ?transport.transport.dtls_state,
+                ice = ?transport.transport.ice_state,
+                ice_role = ?transport.transport.ice_role,
+                dtls_role = ?transport.transport.dtls_role,
+                selected_pair = !transport.transport.selected_candidate_pair_id.is_empty(),
+                local_candidates,
+                remote_candidates,
+                "call: transport stats"
+            ),
             RtcStats::OutboundRtp(sent) if sent.stream.kind == "audio" => {
                 packets_sent += sent.sent.packets_sent;
                 bytes_sent += sent.sent.bytes_sent;

@@ -285,12 +285,35 @@ int32_t AdmProxy::RegisterAudioCallback(webrtc::AudioTransport* transport) {
 }
 
 int32_t AdmProxy::Init() {
-  // Init is a no-op - Platform ADM is created lazily via AcquirePlatformAdm()
+  webrtc::MutexLock lock(&mutex_);
+
+  // The factory survives an SFU reconnect, but WebRTC can terminate its ADM
+  // when the last connection closes. Recreate the synthetic pumping task and
+  // reinitialize the existing platform ADM before the next connection uses it.
+  if (synthetic_adm_ && !synthetic_adm_->Initialized()) {
+    int32_t result = synthetic_adm_->Init();
+    if (result != 0) {
+      RTC_LOG(LS_ERROR) << "AdmProxy: Synthetic ADM reinitialization failed: " << result;
+      return result;
+    }
+  }
+  if (platform_adm_ && !platform_adm_->Initialized()) {
+    int32_t result = platform_adm_->Init();
+    if (result != 0) {
+      RTC_LOG(LS_ERROR) << "AdmProxy: Platform ADM reinitialization failed: " << result;
+      return result;
+    }
+  }
   return 0;
 }
 
 int32_t AdmProxy::Terminate() {
   webrtc::MutexLock lock(&mutex_);
+
+  playing_ = false;
+  recording_ = false;
+  playout_initialized_ = false;
+  recording_initialized_ = false;
 
   int32_t result = 0;
   if (synthetic_adm_) {

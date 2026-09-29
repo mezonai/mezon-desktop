@@ -15,6 +15,7 @@ struct CaptureChunk {
     delay_ms: i32,
 }
 
+#[derive(Clone)]
 struct ReverseChunk {
     data: Vec<i16>,
     rate: i32,
@@ -247,31 +248,39 @@ fn process_reverse(apm: &mut AudioProcessingModule, mut chunk: ReverseChunk) {
     let _ = apm.process_reverse_stream(&mut chunk.data, chunk.rate, chunk.channels);
 }
 
-fn drain_reverse(apm: &mut AudioProcessingModule, reverse_rx: &flume::Receiver<ReverseChunk>) {
+fn process_capture_dual(
+    apm: &mut AudioProcessingModule,
+    apm_for_mezon_ns: &mut AudioProcessingModule,
+    reverse_rx: &flume::Receiver<ReverseChunk>,
+    mic_tx: &flume::Sender<Vec<i16>>,
+    mut chunk: CaptureChunk,
+    mezon_ns_requested: &AtomicBool,
+) {
     for _ in 0..MAX_REVERSE_DRAIN_PER_CAPTURE {
         let Ok(render) = reverse_rx.try_recv() else {
             break;
         };
-        process_reverse(apm, render);
+        process_reverse(apm, render.clone());
+        process_reverse(apm_for_mezon_ns, render);
     }
-}
-
-fn process_capture(
-    apm: &mut AudioProcessingModule,
-    reverse_rx: &flume::Receiver<ReverseChunk>,
-    mic_tx: &flume::Sender<Vec<i16>>,
-    mut chunk: CaptureChunk,
-) {
-    drain_reverse(apm, reverse_rx);
     let _ = apm.set_stream_delay_ms(chunk.delay_ms);
+    let _ = apm_for_mezon_ns.set_stream_delay_ms(chunk.delay_ms);
+    let mut mezon_input = chunk.data.clone();
     let _ = apm.process_stream(&mut chunk.data, chunk.rate, chunk.channels);
-    let _ = mic_tx.try_send(chunk.data);
+    let _ = apm_for_mezon_ns.process_stream(&mut mezon_input, chunk.rate, chunk.channels);
+    let chosen = if mezon_ns_requested.load(Ordering::Acquire) {
+        mezon_input
+    } else {
+        chunk.data
+    };
+    let _ = mic_tx.try_send(chosen);
 }
 
 fn run_apm(
     capture_rx: flume::Receiver<CaptureChunk>,
     reverse_rx: flume::Receiver<ReverseChunk>,
     mic_tx: flume::Sender<Vec<i16>>,
+    mezon_ns_requested: Arc<AtomicBool>,
 ) {
     enum Event {
         Capture(CaptureChunk),
@@ -279,10 +288,20 @@ fn run_apm(
         Stop,
     }
     let mut apm = AudioProcessingModule::new(true, true, true, true);
+    // Keep the same automatic mic level as the normal path. Mezon-NS replaces
+    // WebRTC's noise suppression, not its gain control.
+    let mut apm_for_mezon_ns = AudioProcessingModule::new(true, true, true, false);
     loop {
         match capture_rx.try_recv() {
             Ok(chunk) => {
-                process_capture(&mut apm, &reverse_rx, &mic_tx, chunk);
+                process_capture_dual(
+                    &mut apm,
+                    &mut apm_for_mezon_ns,
+                    &reverse_rx,
+                    &mic_tx,
+                    chunk,
+                    &mezon_ns_requested,
+                );
                 continue;
             }
             Err(flume::TryRecvError::Disconnected) => break,
@@ -298,10 +317,18 @@ fn run_apm(
             .wait();
         match event {
             Event::Reverse(chunk) => {
-                process_reverse(&mut apm, chunk);
+                process_reverse(&mut apm, chunk.clone());
+                process_reverse(&mut apm_for_mezon_ns, chunk);
             }
             Event::Capture(chunk) => {
-                process_capture(&mut apm, &reverse_rx, &mic_tx, chunk);
+                process_capture_dual(
+                    &mut apm,
+                    &mut apm_for_mezon_ns,
+                    &reverse_rx,
+                    &mic_tx,
+                    chunk,
+                    &mezon_ns_requested,
+                );
             }
             Event::Stop => break,
         }
@@ -433,6 +460,20 @@ impl AudioIo {
         output_device_id: Option<String>,
         record_taps: crate::record::RecordTaps,
     ) -> Result<Self> {
+        Self::start_with_noise(
+            input_device_id,
+            output_device_id,
+            record_taps,
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    pub(crate) fn start_with_noise(
+        input_device_id: Option<String>,
+        output_device_id: Option<String>,
+        record_taps: crate::record::RecordTaps,
+        mezon_ns_requested: Arc<AtomicBool>,
+    ) -> Result<Self> {
         let mixer = Arc::new(PlaybackMixer::new(record_taps));
         let (mic_tx, mic_rx) = flume::bounded::<Vec<i16>>(128);
         let (capture_tx, capture_rx) = flume::bounded::<CaptureChunk>(128);
@@ -449,7 +490,7 @@ impl AudioIo {
             .name("mezon-voice-apm".into())
             .spawn(move || {
                 let _exit = WorkerExitSignal(apm_stopped_tx);
-                run_apm(capture_rx, reverse_rx, mic_tx);
+                run_apm(capture_rx, reverse_rx, mic_tx, mezon_ns_requested);
             })?;
 
         let mixer_for_thread = mixer.clone();
@@ -1120,57 +1161,11 @@ fn drop_stream_detached(stream: cpal::Stream) {
 }
 
 #[cfg(target_os = "macos")]
-fn mic_authorization_status() -> i64 {
-    use cocoa::base::{id, nil};
-    use cocoa::foundation::NSString;
-    use objc::runtime::Class;
-    use objc::{msg_send, sel, sel_impl};
-
-    unsafe {
-        let Some(cls) = Class::get("AVCaptureDevice") else {
-            return 3;
-        };
-        let media_type: id = NSString::alloc(nil).init_str("soun");
-        msg_send![cls, authorizationStatusForMediaType: media_type]
-    }
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn microphone_denied() -> bool {
-    matches!(mic_authorization_status(), 1 | 2)
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn microphone_denied() -> bool {
-    false
-}
-
-#[cfg(target_os = "macos")]
 fn request_macos_microphone_permission() {
-    use std::time::Duration;
-
-    use block::ConcreteBlock;
-    use cocoa::base::{BOOL, NO, id, nil};
-    use cocoa::foundation::NSString;
-    use objc::runtime::Class;
-    use objc::{msg_send, sel, sel_impl};
-
-    if mic_authorization_status() != 0 {
-        return;
-    }
-    let Some(cls) = Class::get("AVCaptureDevice") else {
-        return;
-    };
-    let media_type: id = unsafe { NSString::alloc(nil).init_str("soun") };
-    let (tx, rx) = flume::bounded::<bool>(1);
-    let handler = ConcreteBlock::new(move |granted: BOOL| {
-        let _ = tx.send(granted != NO);
-    });
-    let handler = handler.copy();
-    let _: () = unsafe {
-        msg_send![cls, requestAccessForMediaType: media_type completionHandler: &*handler]
-    };
-    let _ = rx.recv_timeout(Duration::from_secs(15));
+    crate::permission::request_media_permission_blocking(
+        crate::MediaDevice::Microphone,
+        Duration::from_secs(15),
+    );
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -436,11 +436,18 @@ impl VoicePage {
                     .border_1()
                     .border_color(theme.border)
                     .cursor_pointer()
-                    .child(Label::new(selected_name).text_sm().text_color(if is_empty {
-                        theme.text_muted
-                    } else {
-                        theme.text_primary
-                    }))
+                    .child(
+                        Label::new(selected_name)
+                            .flex_1()
+                            .min_w(px(0.))
+                            .whitespace_normal()
+                            .text_sm()
+                            .text_color(if is_empty {
+                                theme.text_muted
+                            } else {
+                                theme.text_primary
+                            }),
+                    )
                     .child(div().text_color(theme.text_muted).child(if is_open {
                         "▲"
                     } else {
@@ -488,6 +495,8 @@ impl VoicePage {
                                 .when(!is_selected, |el| el.hover(|el| el.bg(theme.bg_tertiary)))
                                 .child(
                                     Label::new(device_name)
+                                        .w_full()
+                                        .whitespace_normal()
                                         .text_sm()
                                         .text_color(theme.text_primary),
                                 )

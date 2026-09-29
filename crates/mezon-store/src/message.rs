@@ -259,6 +259,24 @@ pub struct MessageReference {
     pub is_poll: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandStatus {
+    Waiting,
+    Answered(MessageId),
+    NoResponse,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandInvocation {
+    pub menu_name: SharedString,
+    pub arguments: SharedString,
+    pub bot_id: i64,
+    pub bot_name: SharedString,
+    pub status: CommandStatus,
+    pub resendable: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReactionSender {
     pub sender_id: String,
@@ -771,6 +789,7 @@ pub struct Message {
     /// re-send the whole payload (markdown/emoji/hashtag/embed tokens) rather
     /// than just the plain text. `None` for optimistic messages.
     pub raw_content: Option<Arc<str>>,
+    pub command: Option<Box<CommandInvocation>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1815,7 +1834,13 @@ impl Message {
             album_layout: None,
             viewer_media: Vec::new().into(),
             raw_content: None,
+            command: None,
         }
+    }
+
+    pub fn with_command(mut self, command: CommandInvocation) -> Self {
+        self.command = Some(Box::new(command));
+        self
     }
 
     pub fn with_sort_id(mut self, sort_id: i64) -> Self {
@@ -1983,6 +2008,31 @@ impl Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_command_card_groups_with_its_own_senders_messages_only() {
+        let command = || CommandInvocation {
+            menu_name: "roll".into(),
+            arguments: "2d6".into(),
+            bot_id: 9,
+            bot_name: "bot".into(),
+            status: CommandStatus::Waiting,
+            resendable: true,
+        };
+        let mine = Message::new(MessageId(1), "hello", "7", "me", 100);
+        let mut card_after_mine =
+            Message::new(MessageId(2), "*roll 2d6", "7", "me", 101).with_command(command());
+        card_after_mine.code = MessageCode::Ephemeral;
+        let theirs = Message::new(MessageId(3), "hi", "8", "them", 102);
+        let mut card_after_theirs =
+            Message::new(MessageId(4), "*roll 2d6", "7", "me", 103).with_command(command());
+        card_after_theirs.code = MessageCode::Ephemeral;
+        assert!(message_combined_with_prev(Some(&mine), &card_after_mine));
+        assert!(!message_combined_with_prev(
+            Some(&theirs),
+            &card_after_theirs
+        ));
+    }
 
     fn forwarded(id: i64, sender: &str, time: i64) -> Message {
         Message::new(MessageId(id), "m", sender, "U", time).with_forwarded(true)

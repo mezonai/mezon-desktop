@@ -266,7 +266,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -277,7 +277,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -847,6 +847,12 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "base64ct"
@@ -2347,7 +2353,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2606,7 +2612,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3305,7 +3311,7 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.1.3",
+ "windows-link 0.2.1",
  "windows-result 0.4.1",
 ]
 
@@ -4283,6 +4289,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hmac-sha256"
+version = "1.1.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ad320b3b96fb2a455a0726d16efe0a5afdbd34b71dea5bc53b05ea057714d4e"
+
+[[package]]
 name = "home"
 version = "0.5.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4412,7 +4424,7 @@ version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-util",
@@ -5337,6 +5349,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "lzma-rust2"
+version = "0.15.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e20f57f9918e5bd7bc58c22cdd70a6afc7375d4dd9683af5f2b34bd3d2bba619"
+
+[[package]]
 name = "mac"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5495,7 +5513,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-active-windows"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -5508,7 +5526,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-app"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -5539,7 +5557,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-audio"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "anyhow",
  "flume",
@@ -5554,10 +5572,10 @@ dependencies = [
 
 [[package]]
 name = "mezon-call"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "anyhow",
- "base64",
+ "base64 0.22.1",
  "flate2",
  "flume",
  "futures",
@@ -5572,10 +5590,10 @@ dependencies = [
 
 [[package]]
 name = "mezon-canvas"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "anyhow",
- "base64",
+ "base64 0.22.1",
  "futures",
  "gpui",
  "image",
@@ -5594,7 +5612,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-cli"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -5610,11 +5628,11 @@ dependencies = [
 
 [[package]]
 name = "mezon-client"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "core-foundation 0.9.4",
  "dirs 5.0.1",
@@ -5647,18 +5665,18 @@ dependencies = [
 
 [[package]]
 name = "mezon-i18n"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "mezon-mcp"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "anyhow",
  "axum",
- "base64",
+ "base64 0.22.1",
  "dirs 5.0.1",
  "futures",
  "mezon-client",
@@ -5675,7 +5693,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-native"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "anyhow",
  "auto-launch",
@@ -5702,8 +5720,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mezon-ns"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "ort-sys",
+]
+
+[[package]]
 name = "mezon-pdf"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "anyhow",
  "core-graphics 0.24.0",
@@ -5716,7 +5742,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-proto"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "prost",
  "prost-build",
@@ -5727,7 +5753,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-record"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -5750,7 +5776,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-store"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5784,7 +5810,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-stream"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "anyhow",
  "flume",
@@ -5801,7 +5827,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-theme"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "gpui",
  "theme",
@@ -5809,10 +5835,10 @@ dependencies = [
 
 [[package]]
 name = "mezon-ui"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "anyhow",
- "base64",
+ "base64 0.22.1",
  "block",
  "chrono",
  "flume",
@@ -5854,10 +5880,10 @@ dependencies = [
 
 [[package]]
 name = "mezon-updater"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "anyhow",
- "base64",
+ "base64 0.22.1",
  "semver",
  "serde",
  "serde_json",
@@ -5875,7 +5901,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-video"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -5899,10 +5925,10 @@ dependencies = [
 
 [[package]]
 name = "mezon-voice"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "anyhow",
- "base64",
+ "base64 0.22.1",
  "block",
  "cocoa 0.25.0",
  "core-graphics-helmer-fork",
@@ -5915,6 +5941,7 @@ dependencies = [
  "libc",
  "libwebrtc",
  "mezon-native",
+ "mezon-ns",
  "mezon-record",
  "nokhwa",
  "objc",
@@ -5941,7 +5968,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-widgets"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
  "gpui",
  "mezon-store",
@@ -6006,9 +6033,9 @@ dependencies = [
 
 [[package]]
 name = "mmn-client"
-version = "2.1.6"
+version = "2.1.7"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bs58",
  "bytes",
  "ed25519-dalek",
@@ -6348,7 +6375,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6918,6 +6945,17 @@ checksum = "9aa2b01e1d916879f73a53d01d1d6cee68adbb31d6d9177a8cfce093cced1d50"
 dependencies = [
  "futures-core",
  "pin-project-lite",
+]
+
+[[package]]
+name = "ort-sys"
+version = "2.0.0-rc.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf211e3776eea6aec988552fa118dd746d70e1b1e5e244058d1c98015f3e5872"
+dependencies = [
+ "hmac-sha256",
+ "lzma-rust2",
+ "ureq",
 ]
 
 [[package]]
@@ -7541,7 +7579,7 @@ version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
- "heck 0.4.1",
+ "heck 0.5.0",
  "itertools 0.14.0",
  "log",
  "multimap",
@@ -8108,7 +8146,7 @@ version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-core",
@@ -8206,7 +8244,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "14db48ee17a9ba61810ab1a9c1beb7d06d8136ae39ac25a1137f10d357af01af"
 dependencies = [
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "futures",
@@ -8351,7 +8389,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8985,7 +9023,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "socks"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0c3dbbd9ae980613c6dd8e28a9407b50509d3803b57624d5dfe8315218cd58b"
+dependencies = [
+ "byteorder",
+ "libc",
+ "winapi",
 ]
 
 [[package]]
@@ -9054,7 +9103,7 @@ dependencies = [
  "cfg-if 1.0.4",
  "libc",
  "psm",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9609,7 +9658,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10159,7 +10208,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c5f7c95348f20c1c913d72157b3c6dee6ea3e30b3d19502c5a7f6d3f160dacbf"
 dependencies = [
  "cc",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -10245,7 +10294,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10385,6 +10434,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "ureq"
+version = "3.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a7ac20be9b7726e0bbdbf974c059676d9acb1cd414961f570a4e8231cacd7fc"
+dependencies = [
+ "base64 0.23.1",
+ "log",
+ "percent-encoding",
+ "rustls",
+ "rustls-pki-types",
+ "socks",
+ "ureq-proto",
+ "utf8-zero",
+ "webpki-roots 1.0.8",
+]
+
+[[package]]
+name = "ureq-proto"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f86fd172ccca569e458f61b6bdd6220965a9ef36e672a6852953b51a0e1583be"
+dependencies = [
+ "base64 0.23.1",
+ "http",
+ "httparse",
+ "log",
+]
+
+[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10402,7 +10480,7 @@ version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "80be9b06fbae3b8b303400ab20778c80bbaf338f563afe567cf3c9eea17b47ef"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "data-url",
  "flate2",
  "fontdb",
@@ -10428,6 +10506,12 @@ name = "utf-8"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
+
+[[package]]
+name = "utf8-zero"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8c0a043c9540bae7c578c88f91dda8bd82e59ae27c21baca69c8b191aaf5a6e"
 
 [[package]]
 name = "utf8_iter"
@@ -11135,7 +11219,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12236,7 +12320,7 @@ name = "zed-reqwest"
 version = "0.12.15-zed"
 source = "git+https://github.com/zed-industries/reqwest.git?rev=c15662463bda39148ba154100dd44d3fba5873a4#c15662463bda39148ba154100dd44d3fba5873a4"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "encoding_rs",
  "futures-core",

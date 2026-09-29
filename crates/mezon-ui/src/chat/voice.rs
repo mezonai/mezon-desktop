@@ -10,15 +10,19 @@ use gpui::{
 };
 use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, DeviceKind, DeviceMenuKind, DisplayedFlower,
-    DisplayedReaction, PERMISSION_MANAGE_CHANNEL, PermissionStore, RecordingState, ScreenShareMode,
-    Settings, SfuRole, UserId, VoiceCallStatus, VoiceConnection, VoiceInteractiveApp, VoiceMember,
-    VoiceParticipant, VoiceRenderFrame, VoiceStore, WalletStore, flower_menu_blocked,
+    DisplayedReaction, MediaDevice, NoiseSuppressionStatus, PERMISSION_MANAGE_CHANNEL,
+    PermissionStore, RecordingState, ScreenShareMode, Settings, SfuRole, UserId, VoiceCallStatus,
+    VoiceConnection, VoiceInteractiveApp, VoiceMember, VoiceParticipant, VoiceRenderFrame,
+    VoiceStore, WalletStore, flower_menu_blocked,
 };
 
 use crate::ChatLayout;
 use crate::Shell;
 use crate::chat::flower_celebration::FlowerCelebrationElement;
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
+use crate::chat::media_permission_prompt::{
+    media_access_missing, media_access_needed_label, media_permission_badge,
+};
 use crate::components::primitives::{
     Avatar, ContextMenu, Icon, IconName, Sizable, Size, Spinner, context_menu_at,
 };
@@ -141,6 +145,9 @@ pub fn render_mini_bar(
     is_audience: bool,
     ptt_active: bool,
     link_copied: bool,
+    mic_access_missing: bool,
+    camera_access_missing: bool,
+    noise_status: Option<NoiseSuppressionStatus>,
     noise_control: AnyElement,
 ) -> AnyElement {
     let neutral_bg = theme.bg_secondary;
@@ -166,7 +173,7 @@ pub fn render_mini_bar(
         address
     };
 
-    let subtitle = {
+    let address_subtitle = {
         let channel_id = channel_id.to_string();
         let clan_id = clan_id.to_string();
         let hover_color = theme.text_primary;
@@ -191,6 +198,22 @@ pub fn render_mini_bar(
                     },
                 );
             })
+            .into_any_element()
+    };
+    let subtitle = if let Some(status) = noise_status {
+        let (label, color) = match status {
+            NoiseSuppressionStatus::Applying => ("Applying noise filter…", theme.text_secondary),
+            NoiseSuppressionStatus::Applied => ("Noise filter applied", theme.status_online),
+            NoiseSuppressionStatus::Disabled => ("Noise filter off", theme.text_secondary),
+            NoiseSuppressionStatus::Error => ("Noise filter failed", theme.danger_text),
+        };
+        div()
+            .text_xs()
+            .text_color(color)
+            .child(label)
+            .into_any_element()
+    } else {
+        address_subtitle
     };
 
     let copy_button = {
@@ -284,14 +307,20 @@ pub fn render_mini_bar(
             neutral_hover,
             theme.text_primary,
         )
-        .tooltip(Tooltip::text(mezon_i18n::t(
-            locale,
-            if mic_enabled {
-                "channelVoice.turnOffMicrophone"
-            } else {
-                "channelVoice.turnOnMicrophone"
-            },
-        )))
+        .relative()
+        .tooltip(Tooltip::text(if mic_access_missing {
+            media_access_needed_label(MediaDevice::Microphone, locale)
+        } else {
+            mezon_i18n::t(
+                locale,
+                if mic_enabled {
+                    "channelVoice.turnOffMicrophone"
+                } else {
+                    "channelVoice.turnOnMicrophone"
+                },
+            )
+        }))
+        .children(mic_access_missing.then(|| mini_bar_permission_badge(theme)))
         .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.toggle_mic(cx)))
     };
 
@@ -308,14 +337,20 @@ pub fn render_mini_bar(
             neutral_hover,
             theme.text_primary,
         )
-        .tooltip(Tooltip::text(mezon_i18n::t(
-            locale,
-            if camera_enabled {
-                "channelVoice.turnOffCamera"
-            } else {
-                "channelVoice.turnOnCamera"
-            },
-        )))
+        .relative()
+        .tooltip(Tooltip::text(if camera_access_missing {
+            media_access_needed_label(MediaDevice::Camera, locale)
+        } else {
+            mezon_i18n::t(
+                locale,
+                if camera_enabled {
+                    "channelVoice.turnOffCamera"
+                } else {
+                    "channelVoice.turnOnCamera"
+                },
+            )
+        }))
+        .children(camera_access_missing.then(|| mini_bar_permission_badge(theme)))
         .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.toggle_camera(cx)))
     };
 
@@ -375,9 +410,13 @@ pub fn render_mini_bar(
             (neutral_bg.into(), neutral_hover, theme.text_primary.into())
         };
         push_to_talk_press(
-            panel_control_button("voice-panel-ptt", IconName::InPttCall, bg, hover, color).tooltip(
-                Tooltip::text(mezon_i18n::t(locale, "channelVoice.pushToTalk.hold")),
-            ),
+            panel_control_button("voice-panel-ptt", IconName::InPttCall, bg, hover, color)
+                .relative()
+                .tooltip(Tooltip::text(mezon_i18n::t(
+                    locale,
+                    "channelVoice.pushToTalk.hold",
+                )))
+                .children(mic_access_missing.then(|| mini_bar_permission_badge(theme))),
             voice,
         )
     });
@@ -439,6 +478,12 @@ fn push_to_talk_press(
         .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
             release_outside.update(cx, |store, cx| store.set_push_to_talk(false, cx));
         })
+}
+
+fn mini_bar_permission_badge(theme: &Theme) -> gpui::Div {
+    media_permission_badge(theme, px(16.), theme.surfaces.surface.solid)
+        .top(px(-6.))
+        .right(px(-6.))
 }
 
 fn panel_control_button(
@@ -1738,11 +1783,6 @@ fn render_in_call(
             .into_any_element()
     });
 
-    let mic_modal = voice
-        .read(cx)
-        .mic_permission_denied()
-        .then(|| mic_permission_modal(theme, locale, voice));
-
     let participant_menu = voice
         .read(cx)
         .participant_menu()
@@ -1829,7 +1869,6 @@ fn render_in_call(
             &channel.voice_members,
             voice.read(cx),
         ))
-        .children(mic_modal)
         .children(participant_menu)
         .children(kick_modal)
         .into_any_element()
@@ -1915,124 +1954,6 @@ pub(crate) fn render_screen_fullscreen_overlay(
             )
             .into_any_element(),
     )
-}
-
-fn open_microphone_settings() {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open")
-            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
-            .spawn();
-    }
-}
-
-fn mic_permission_modal(theme: &Theme, locale: &str, voice: &Entity<VoiceStore>) -> AnyElement {
-    let title =
-        SharedString::from(mezon_i18n::t(locale, "channelVoice.micPermissionTitle").to_string());
-    let body =
-        SharedString::from(mezon_i18n::t(locale, "channelVoice.micPermissionBody").to_string());
-    let open_label =
-        SharedString::from(mezon_i18n::t(locale, "channelVoice.openSettings").to_string());
-    let later_label = SharedString::from(mezon_i18n::t(locale, "channelVoice.later").to_string());
-
-    let later_hover = darken(theme.bg_tertiary, 0.03);
-    let primary_hover = theme.brand_hover;
-    let voice_later = voice.clone();
-
-    div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(gpui::rgba(0x000000b3))
-        .occlude()
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap_4()
-                .w(px(380.))
-                .p_6()
-                .rounded_xl()
-                .bg(theme.bg_floating)
-                .border_1()
-                .border_color(theme.border)
-                .shadow_lg()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .w(px(56.))
-                        .h(px(56.))
-                        .rounded_full()
-                        .bg(theme.bg_hover)
-                        .child(
-                            Icon::new(IconName::VoiceMicDisabledIcon)
-                                .size(px(26.))
-                                .text_color(theme.danger_text),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_lg()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text_primary)
-                        .child(title),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_center()
-                        .text_color(theme.text_muted)
-                        .child(body),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap_3()
-                        .w_full()
-                        .child(
-                            div()
-                                .id("mic-perm-later")
-                                .flex_1()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .py_2()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .bg(theme.bg_tertiary)
-                                .text_color(theme.text_primary)
-                                .hover(move |s| s.bg(later_hover))
-                                .on_click(move |_, _, cx| {
-                                    voice_later.update(cx, |store, cx| {
-                                        store.dismiss_mic_permission_prompt(cx)
-                                    })
-                                })
-                                .child(later_label),
-                        )
-                        .child(
-                            div()
-                                .id("mic-perm-open")
-                                .flex_1()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .py_2()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .bg(theme.brand)
-                                .text_color(gpui::rgb(0xffffff))
-                                .hover(move |s| s.bg(primary_hover))
-                                .on_click(|_, _, _| open_microphone_settings())
-                                .child(open_label),
-                        ),
-                ),
-        )
-        .into_any_element()
 }
 
 fn kick_confirm_modal(
@@ -3158,21 +3079,25 @@ fn control_bar(
     let neutral_bg = theme.bg_secondary;
     let neutral_hover = darken(theme.bg_secondary, 0.1);
 
-    let mic_tooltip = mezon_i18n::t(
-        locale,
+    let mic_tooltip = media_button_tooltip(
+        MediaDevice::Microphone,
         if mic_enabled {
             "channelVoice.turnOffMicrophone"
         } else {
             "channelVoice.turnOnMicrophone"
         },
-    );
-    let camera_tooltip = mezon_i18n::t(
         locale,
+        cx,
+    );
+    let camera_tooltip = media_button_tooltip(
+        MediaDevice::Camera,
         if camera_enabled {
             "channelVoice.turnOffCamera"
         } else {
             "channelVoice.turnOnCamera"
         },
+        locale,
+        cx,
     );
     let screen_tooltip = mezon_i18n::t(
         locale,
@@ -3306,7 +3231,15 @@ fn control_bar(
         );
         let callout = (!store.ptt_hint_dismissed())
             .then(|| render_ptt_hint_callout(theme, locale, ptt_active, voice));
-        div().relative().child(button).children(callout)
+        div()
+            .relative()
+            .child(button)
+            .children(control_bar_permission_badge(
+                theme,
+                Some(MediaDevice::Microphone),
+                cx,
+            ))
+            .children(callout)
     });
 
     let interactive_app_button = Some({
@@ -4095,12 +4028,45 @@ fn device_control(
     };
     let flyout =
         is_open.then(|| device_flyout(theme, locale, voice, settings, store, menu_kind, cx));
+    let permission_device = match menu_kind {
+        DeviceMenuKind::Microphone => Some(MediaDevice::Microphone),
+        DeviceMenuKind::Camera => Some(MediaDevice::Camera),
+        DeviceMenuKind::ScreenShare => None,
+    };
     div()
         .relative()
         .child(button)
         .child(arrow)
+        .children(control_bar_permission_badge(theme, permission_device, cx))
         .children(flyout)
         .into_any_element()
+}
+
+fn control_bar_permission_badge(
+    theme: &Theme,
+    device: Option<MediaDevice>,
+    cx: &App,
+) -> Option<gpui::Div> {
+    device
+        .filter(|device| media_access_missing(*device, cx))
+        .map(|_| {
+            media_permission_badge(theme, px(18.), theme.bg_tertiary)
+                .top(px(-4.))
+                .right(px(-4.))
+        })
+}
+
+fn media_button_tooltip(
+    device: MediaDevice,
+    toggle_key: &'static str,
+    locale: &str,
+    cx: &App,
+) -> &'static str {
+    if media_access_missing(device, cx) {
+        media_access_needed_label(device, locale)
+    } else {
+        mezon_i18n::t(locale, toggle_key)
+    }
 }
 
 fn device_flyout(
@@ -4149,7 +4115,7 @@ fn device_flyout(
         .flex()
         .flex_col()
         .gap(px(6.))
-        .w(px(220.))
+        .w(px(280.))
         .p_2()
         .rounded_md()
         .bg(theme.tokens.bg_theme_contexify)
@@ -4374,8 +4340,8 @@ fn device_row(
                     div()
                         .mt(px(2.))
                         .text_xs()
-                        .text_color(theme.text_muted)
                         .truncate()
+                        .text_color(theme.text_muted)
                         .child(active_name),
                 ),
         )
@@ -4414,7 +4380,7 @@ fn device_list_panel(
         .flex()
         .flex_col()
         .gap(px(2.))
-        .min_w(px(240.))
+        .min_w(px(280.))
         .max_h(px(320.))
         .overflow_y_scroll()
         .p_1()

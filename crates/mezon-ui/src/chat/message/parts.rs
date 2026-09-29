@@ -2238,8 +2238,8 @@ pub(crate) fn open_viewer_from_message(
     cx: &mut gpui::App,
 ) {
     use crate::image_viewer::{OpenViewerRequest, open_image_viewer, resolve_channel_label};
-    use crate::router::{Route, Router};
-    use mezon_store::{AppConfig, ChannelAttachment, ClanId};
+    use crate::router::Router;
+    use mezon_store::{AppConfig, ChannelAttachment};
 
     if att.url.is_empty() {
         return;
@@ -2248,23 +2248,8 @@ pub(crate) fn open_viewer_from_message(
         return;
     }
 
-    let (clan_id, channel_id) = match Router::global(cx).read(cx).route() {
-        Route::Channel {
-            clan_id,
-            channel_id,
-        }
-        | Route::Thread {
-            clan_id,
-            channel_id,
-            ..
-        }
-        | Route::Canvas {
-            clan_id,
-            channel_id,
-            ..
-        } => (clan_id, channel_id),
-        Route::DirectMessage { direct_id, .. } => (ClanId(0), direct_id),
-        _ => return,
+    let Some((clan_id, channel_id)) = Router::global(cx).read(cx).conversation_context() else {
+        return;
     };
 
     let seed = ChannelAttachment::seed_from_message(

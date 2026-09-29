@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -23,7 +24,10 @@ use libwebrtc::video_track::RtcVideoTrack;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tracing::Instrument as _;
 
+use crate::playback_health::{AudioRecoveryProgress, PlaybackRecovery};
+use crate::reconnect::MuteSync;
 use crate::screen_recovery::{FrameReceipt, ScreenRecovery, ScreenSource, ScreenViews};
 use crate::video::track_frame_key;
 use crate::{IceServerConfig, MEET_TOKEN_RETRY_LIMIT, ScreenShareMode, TokenRefresher};
@@ -147,7 +151,12 @@ const MAX_INITIAL_CONNECT_ATTEMPTS: u32 = 3;
 const RECONNECTING_HEARTBEAT_TICKS: u32 = 10;
 const OFFER_REISSUE_DEADLINE: Duration = Duration::from_secs(8);
 const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(60);
-const SELF_MUTE_CORRELATION: Duration = Duration::from_millis(300);
+const SIGNALING_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(15);
+const STATS_TIMEOUT: Duration = Duration::from_secs(2);
+const JOIN_TIMEOUT: Duration = Duration::from_secs(30);
+const SIGNALING_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SfuRole {
@@ -241,7 +250,7 @@ pub enum SfuEvent {
 
 enum EngineCommand {
     SetLocalAudio(Option<RtcAudioTrack>),
-    RefreshRemoteAudio(u64),
+    RefreshRemoteAudio(u64, PlaybackRecovery),
     SetLocalCamera(Option<RtcVideoTrack>),
     SetLocalScreen(Option<ScreenTrack>),
     SetMute(bool),
@@ -265,14 +274,21 @@ impl SfuEngine {
         evt_tx: flume::Sender<SfuEvent>,
     ) -> (Self, tokio::task::JoinHandle<()>) {
         let (cmd_tx, cmd_rx) = flume::unbounded();
-        let handle = crate::runtime::runtime().spawn(async move {
-            if let Err(e) = engine_main(config, factory, cmd_rx, &evt_tx).await {
-                tracing::error!("sfu engine stopped: {e:#}");
-                let _ = evt_tx.send(SfuEvent::Disconnected {
-                    reason: e.to_string(),
-                });
+        let span = tracing::info_span!("voice_sfu",
+            connection_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed),
+            room = %config.room,
+        );
+        let handle = crate::runtime::runtime().spawn(
+            async move {
+                if let Err(e) = engine_main(config, factory, cmd_rx, &evt_tx).await {
+                    tracing::error!("sfu engine stopped: {e:#}");
+                    let _ = evt_tx.send(SfuEvent::Disconnected {
+                        reason: e.to_string(),
+                    });
+                }
             }
-        });
+            .instrument(span),
+        );
         (Self { cmd_tx }, handle)
     }
 
@@ -316,8 +332,10 @@ impl SfuEngine {
         let _ = self.cmd_tx.send(EngineCommand::ParticipantAction(token));
     }
 
-    pub(crate) fn refresh_remote_audio(&self, key: u64) {
-        let _ = self.cmd_tx.send(EngineCommand::RefreshRemoteAudio(key));
+    pub(crate) fn refresh_remote_audio(&self, key: u64, recovery: PlaybackRecovery) {
+        let _ = self
+            .cmd_tx
+            .send(EngineCommand::RefreshRemoteAudio(key, recovery));
     }
 
     pub fn close(&self) {
@@ -496,6 +514,7 @@ struct LocalTracks {
     screen: Option<ScreenTrack>,
     screen_audio: bool,
     muted: bool,
+    mute_revision: u64,
     ptt_active: bool,
     ptt_requested: bool,
 }
@@ -508,6 +527,7 @@ impl LocalTracks {
             screen: None,
             screen_audio: false,
             muted,
+            mute_revision: 0,
             ptt_active: false,
             ptt_requested: false,
         }
@@ -638,9 +658,11 @@ async fn engine_main(
     let mut token_refreshes: u32 = 0;
     let mut ever_joined = false;
     let mut ever_connected = false;
-    let mut retiring = RetiredPeerConnection(None);
+    let mut retiring = ClosingPeerConnection(None);
     let mut first_session = true;
     let mut token_rejected = false;
+    let mut auth_rejections = 0u32;
+    let mut epoch = 0u64;
 
     loop {
         if !first_session {
@@ -662,13 +684,18 @@ async fn engine_main(
             };
             if !ready {
                 let _ = evt_tx.send(SfuEvent::Disconnected {
-                    reason: "SFU token refresh failed".into(),
+                    reason: if token_rejected {
+                        "invalid_token: SFU token refresh failed".into()
+                    } else {
+                        "SFU token refresh failed".into()
+                    },
                 });
                 return Ok(());
             }
             token_rejected = false;
         }
         first_session = false;
+        epoch = epoch.wrapping_add(1);
         let (joined, reason) = match run_session(
             &config,
             &factory,
@@ -680,6 +707,11 @@ async fn engine_main(
             &mut attempts,
             &mut retiring.0,
         )
+        .instrument(tracing::info_span!(
+            "sfu_session",
+            epoch,
+            peer_id = tracing::field::Empty
+        ))
         .await
         {
             SessionOutcome::Closed => {
@@ -701,6 +733,14 @@ async fn engine_main(
                 return Ok(());
             }
             SessionOutcome::RefreshToken { joined, reason } => {
+                auth_rejections += 1;
+                if auth_rejections >= 2 {
+                    tracing::warn!(auth_rejections, %reason, "SFU rejected both the original and refreshed join tokens");
+                    let _ = evt_tx.send(SfuEvent::Disconnected {
+                        reason: format!("{reason}: refreshed token was also rejected"),
+                    });
+                    return Ok(());
+                }
                 token_rejected = true;
                 (joined, reason)
             }
@@ -717,6 +757,7 @@ async fn engine_main(
         ever_joined |= joined;
         if joined {
             token_refreshes = 0;
+            auth_rejections = 0;
         }
         let _ = evt_tx.send(SfuEvent::Reconnecting);
         if LocalRoutes::probe().is_empty() {
@@ -843,7 +884,7 @@ fn apply_offline_command(
         EngineCommand::SetCameraActive(_)
         | EngineCommand::SetScreenActive(_)
         | EngineCommand::ParticipantAction(_)
-        | EngineCommand::RefreshRemoteAudio(_)
+        | EngineCommand::RefreshRemoteAudio(_, _)
         | EngineCommand::Close => {}
     }
     local.apply_audio_gate(None, role);
@@ -865,8 +906,8 @@ async fn ensure_fresh_token(config: &mut SfuConfig, refreshes: &mut u32, rejecte
         return !rejected;
     }
     *refreshes += 1;
-    match refresher.mint().await {
-        Some(fresh) if !fresh.is_empty() && (!rejected || fresh != config.token) => {
+    match tokio::time::timeout(SIGNALING_OPERATION_TIMEOUT, refresher.mint()).await {
+        Ok(Some(fresh)) if !fresh.is_empty() && (!rejected || fresh != config.token) => {
             config.token = fresh;
             true
         }
@@ -915,9 +956,9 @@ enum SessionOutcome {
     RefreshToken { joined: bool, reason: String },
 }
 
-struct RetiredPeerConnection(Option<PeerConnection>);
+struct ClosingPeerConnection(Option<PeerConnection>);
 
-impl Drop for RetiredPeerConnection {
+impl Drop for ClosingPeerConnection {
     fn drop(&mut self) {
         if let Some(pc) = self.0.take() {
             pc.close();
@@ -937,7 +978,9 @@ async fn run_session(
     attempts: &mut u32,
     retiring: &mut Option<PeerConnection>,
 ) -> SessionOutcome {
-    let mut pc: Option<PeerConnection> = None;
+    // Close the active transport even if the store cancels this session while
+    // signaling/negotiation is pending. Dropping a PC wrapper alone is not Close.
+    let mut pc = ClosingPeerConnection(None);
     let outcome = session_loop(
         config,
         factory,
@@ -947,16 +990,13 @@ async fn run_session(
         resuming,
         ever_connected,
         attempts,
-        &mut pc,
+        &mut pc.0,
         retiring,
     )
     .await;
     // Each retry starts with fresh SDP/ICE/DTLS. Never retain a failed PC during backoff.
     if let Some(previous) = retiring.take() {
         previous.close();
-    }
-    if let Some(pc) = pc {
-        pc.close();
     }
     outcome
 }
@@ -975,12 +1015,20 @@ async fn session_loop(
     retiring: &mut Option<PeerConnection>,
 ) -> SessionOutcome {
     let url = build_ws_url(&config.ws_url, &config.token);
-    let ws = match connect_async(url.as_str()).await {
-        Ok((ws, _)) => ws,
-        Err(e) => {
+    let ws = match tokio::time::timeout(SIGNALING_OPERATION_TIMEOUT, connect_async(url.as_str()))
+        .await
+    {
+        Ok(Ok((ws, _))) => ws,
+        Ok(Err(e)) => {
             return SessionOutcome::Dropped {
                 joined: false,
                 reason: format!("websocket connect failed: {e}"),
+            };
+        }
+        Err(_) => {
+            return SessionOutcome::Dropped {
+                joined: false,
+                reason: "websocket connect timed out".into(),
             };
         }
     };
@@ -1001,6 +1049,10 @@ async fn session_loop(
     }
 
     let mut membership = Membership::default();
+    let mut audio_recovery: HashMap<u64, AudioRecoveryProgress> = HashMap::new();
+    // Several silent receivers can request recovery at once. Share one bounded
+    // stats read across them, including failures, to keep signaling responsive.
+    let mut recovery_stats: Option<(Instant, Option<Vec<RtcStats>>)> = None;
     let mut screen_recovery = ScreenRecovery::default();
     let (transport_state_tx, transport_state_rx) = flume::unbounded::<PeerConnectionState>();
     let (ice_state_tx, ice_state_rx) = flume::unbounded::<IceConnectionState>();
@@ -1010,7 +1062,7 @@ async fn session_loop(
     stats_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pending_offer: Option<(u64, String)> = None;
     let mut offer_reissue_deadline: Option<tokio::time::Instant> = None;
-    let mut forced_mute_deadline: Option<tokio::time::Instant> = None;
+    let mut mute_sync = MuteSync::default();
     let mut tiers = PublishTiers::default();
     let mut camera_tier_pending: Option<(usize, tokio::time::Instant)> = None;
     let mut screen_adaptation = ScreenAdaptation::default();
@@ -1032,6 +1084,8 @@ async fn session_loop(
     let mut announced_connection = false;
     let mut joined_room = config.room.clone();
     let mut joined = false;
+    let session_started = Instant::now();
+    let mut last_signaling_received = session_started;
 
     loop {
         if joined && transport_connected && !announced_connection {
@@ -1100,10 +1154,13 @@ async fn session_loop(
                 let Some(frame) = incoming else {
                     return SessionOutcome::Dropped { joined, reason: "websocket closed".into() };
                 };
+                last_signaling_received = Instant::now();
                 let text = match frame {
                     Ok(Message::Text(text)) => text,
                     Ok(Message::Ping(payload)) => {
-                        let _ = ws_tx.send(Message::Pong(payload)).await;
+                        if send_frame(&mut ws_tx, Message::Pong(payload)).await.is_err() {
+                            return SessionOutcome::Dropped { joined, reason: "websocket pong send failed".into() };
+                        }
                         continue;
                     }
                     Ok(Message::Close(frame)) => {
@@ -1191,7 +1248,8 @@ async fn session_loop(
                         offer_reissue_deadline = None;
                     }
                     ServerMessage::RoomSnapshot { self_peer_id, members } => {
-                        tracing::info!(members = members.len(), "sfu room snapshot");
+                        tracing::Span::current().record("peer_id", self_peer_id);
+                        tracing::info!(self_peer_id, members = members.len(), "sfu room snapshot");
                         membership.self_peer_id = self_peer_id;
                         joined = true;
                         for member in members {
@@ -1199,7 +1257,7 @@ async fn session_loop(
                         }
                         if !announced_state {
                             announced_state = true;
-                            if announce_initial_state(&mut ws_tx, config, local).await.is_err() {
+                            if announce_initial_state(&mut ws_tx, config, local, &mut mute_sync).await.is_err() {
                                 return SessionOutcome::Dropped { joined, reason: "initial state send failed".into() };
                             }
                         }
@@ -1216,14 +1274,10 @@ async fn session_loop(
                     }
                     ServerMessage::PeerUpdated { peer } => {
                         if let Some(peer) = peer {
-                            if joined
-                                && peer.is_mute
-                                && !local.muted
-                                && peer.peer_id == membership.self_peer_id
-                            {
-                                forced_mute_deadline.get_or_insert_with(|| {
-                                    tokio::time::Instant::now() + SELF_MUTE_CORRELATION
-                                });
+                            if joined && peer.peer_id == membership.self_peer_id {
+                                tracing::info!(remote_muted = peer.is_mute, local_muted = local.muted,
+                                    pending_mute_acks = mute_sync.pending_count(), "sfu self mute update");
+                                mute_sync.observe_self(peer.is_mute, local.muted, Instant::now());
                             }
                             membership.apply(peer);
                             let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
@@ -1236,6 +1290,7 @@ async fn session_loop(
                             "sfu peer left; retiring only its remote media");
                         for mid in released {
                             let key = remote_frame_key(&mid);
+                            audio_recovery.remove(&key);
                             if membership.live_tracks.remove(&key).is_some() {
                                 let _ = evt_tx.send(SfuEvent::RemoteGone { key });
                             }
@@ -1250,8 +1305,10 @@ async fn session_loop(
                         local.apply_audio_gate(pc.as_ref(), config.role);
                         let _ = evt_tx.send(SfuEvent::PttActive(active));
                     }
-                    ServerMessage::MuteChanged { .. } => {
-                        forced_mute_deadline = None;
+                    ServerMessage::MuteChanged { is_mute } => {
+                        let revision = mute_sync.acknowledge(is_mute);
+                        tracing::info!(is_mute, matched_revision = revision,
+                            pending_mute_acks = mute_sync.pending_count(), "sfu mute acknowledgement");
                     }
                     ServerMessage::KeyframeRequested { .. }
                     | ServerMessage::VisibilityChanged { .. }
@@ -1313,12 +1370,41 @@ async fn session_loop(
                         if let Some(pc) = &*pc {
                             pc.close();
                         }
-                        let _ = ws_tx.send(Message::Close(None)).await;
+                        let _ = send_frame(&mut ws_tx, Message::Close(None)).await;
                         return SessionOutcome::Closed;
                     }
-                    EngineCommand::RefreshRemoteAudio(key) => {
+                    EngineCommand::RefreshRemoteAudio(key, recovery) => {
+                        if !recovery.still_stalled() || !membership.live_tracks.contains_key(&key) {
+                            audio_recovery.remove(&key);
+                            continue;
+                        }
                         if let Some(peer_connection) = pc.as_ref() {
-                            sync_remote_media(peer_connection, &mut membership, evt_tx, Some(key));
+                            if transport_connected {
+                                if recovery_stats.as_ref().is_none_or(|(at, _)| at.elapsed() >= MEDIA_STATS_INTERVAL) {
+                                    let stats = tokio::time::timeout(STATS_TIMEOUT, peer_connection.get_stats())
+                                        .await.ok().and_then(|result| result.ok());
+                                    recovery_stats = Some((Instant::now(), stats));
+                                }
+                                for stat in recovery_stats.as_ref().and_then(|(_, stats)| stats.as_ref()).into_iter().flatten() {
+                                    if let RtcStats::InboundRtp(inbound) = stat
+                                        && inbound.stream.kind == "audio"
+                                        && remote_frame_key(&inbound.inbound.mid) == key
+                                        && audio_recovery.entry(key).or_default().observe(
+                                            &recovery, &inbound.rtc.id, inbound.received.packets_received,
+                                        )
+                                    {
+                                        tracing::warn!(key, attempt = recovery.attempt,
+                                            "audio RTP is arriving without playback callbacks; restarting the sfu session");
+                                        return SessionOutcome::Dropped {
+                                            joined,
+                                            reason: "audio playback stalled despite incoming RTP".into(),
+                                        };
+                                    }
+                                }
+                            }
+                            if recovery.rebind() && recovery.still_stalled() {
+                                sync_remote_media(peer_connection, &mut membership, evt_tx, Some(key));
+                            }
                         }
                     }
                     EngineCommand::SetLocalAudio(track) => {
@@ -1353,9 +1439,10 @@ async fn session_loop(
                         }
                     }
                     EngineCommand::SetMute(muted) => {
+                        mute_sync.cancel_inference();
                         local.muted = muted;
                         local.apply_audio_gate(pc.as_ref(), config.role);
-                        if joined && send(&mut ws_tx, &ClientMessage::Mute { is_mute: muted }).await.is_err() {
+                        if joined && send_mute(&mut ws_tx, local, &mut mute_sync, muted, "local_control").await.is_err() {
                             return SessionOutcome::Dropped { joined, reason: "mute send failed".into() };
                         }
                     }
@@ -1398,7 +1485,11 @@ async fn session_loop(
                             [ClientMessage::PushToTalk { active: false }, ClientMessage::Mute { is_mute: true }]
                         };
                         for message in &ordered {
-                            if send(&mut ws_tx, message).await.is_err() {
+                            let sent = match message {
+                                ClientMessage::Mute { is_mute } => send_mute(&mut ws_tx, local, &mut mute_sync, *is_mute, "push_to_talk").await,
+                                _ => send(&mut ws_tx, message).await,
+                            };
+                            if sent.is_err() {
                                 return SessionOutcome::Dropped { joined, reason: "push_to_talk send failed".into() };
                             }
                         }
@@ -1463,6 +1554,25 @@ async fn session_loop(
                 }
             }
             _ = connect_timer.tick() => {
+                if let Some(revision) = mute_sync.timed_out_revision(Instant::now()) {
+                    tracing::warn!(mute_revision = revision, "sfu mute acknowledgement timed out; resynchronizing the session");
+                    return SessionOutcome::Dropped {
+                        joined,
+                        reason: "sfu mute acknowledgement timed out".into(),
+                    };
+                }
+                if !joined && session_started.elapsed() >= JOIN_TIMEOUT {
+                    return SessionOutcome::Dropped {
+                        joined,
+                        reason: "sfu join or room snapshot timed out".into(),
+                    };
+                }
+                if last_signaling_received.elapsed() >= SIGNALING_IDLE_TIMEOUT {
+                    return SessionOutcome::Dropped {
+                        joined,
+                        reason: "sfu signaling heartbeat timed out".into(),
+                    };
+                }
                 if let Some(since) = disconnected_since {
                     let waited = since.elapsed();
                     if waited >= TRANSPORT_DISCONNECTED_GRACE {
@@ -1616,10 +1726,9 @@ async fn session_loop(
                     reason: "sfu never reissued the rejected offer".into(),
                 };
             }
-            () = tokio::time::sleep_until(forced_mute_deadline.unwrap_or_else(tokio::time::Instant::now)), if forced_mute_deadline.is_some() => {
-                forced_mute_deadline = None;
-                if !local.muted {
-                    tracing::info!("sfu moderator muted this device");
+            () = tokio::time::sleep_until(mute_sync.deadline().map(tokio::time::Instant::from_std).unwrap_or_else(tokio::time::Instant::now)), if mute_sync.deadline().is_some() => {
+                if mute_sync.take_forced_mute(Instant::now()) && !local.muted {
+                    tracing::info!("sfu self mute update without a pending local request; applying inferred moderator mute");
                     local.muted = true;
                     local.apply_audio_gate(pc.as_ref(), config.role);
                     let _ = evt_tx.send(SfuEvent::MutedByModerator);
@@ -1633,7 +1742,7 @@ async fn session_loop(
                     tracing::warn!("sfu offered before the joined response; dropping the offer");
                     continue;
                 };
-                match negotiate(
+                match tokio::time::timeout(NEGOTIATION_TIMEOUT, negotiate(
                     &peer_connection,
                     generation,
                     &offer_sdp,
@@ -1643,8 +1752,10 @@ async fn session_loop(
                     &mut ws_tx,
                     &mut membership,
                     evt_tx,
-                )
+                ))
                 .await
+                .context("sfu negotiation timed out")
+                .and_then(|result| result)
                 {
                     Ok(()) => {
                         tracing::debug!(generation, "sfu answer sent");
@@ -1677,25 +1788,46 @@ type WsSink = futures::stream::SplitSink<
 
 async fn send(ws_tx: &mut WsSink, message: &ClientMessage) -> Result<()> {
     let text = serde_json::to_string(message).context("serialize signaling message")?;
-    ws_tx
-        .send(Message::Text(text.into()))
+    send_frame(ws_tx, Message::Text(text.into())).await
+}
+
+async fn send_frame(ws_tx: &mut WsSink, message: Message) -> Result<()> {
+    tokio::time::timeout(SIGNALING_OPERATION_TIMEOUT, ws_tx.send(message))
         .await
+        .context("send signaling message timed out")?
         .context("send signaling message")
+}
+
+async fn send_mute(
+    ws_tx: &mut WsSink,
+    local: &mut LocalTracks,
+    mute_sync: &mut MuteSync,
+    is_mute: bool,
+    source: &'static str,
+) -> Result<()> {
+    // Diagnostic revision only. Rejecting revisions on the wire requires SFU
+    // protocol support; do not silently add fields the server does not enforce.
+    local.mute_revision = local.mute_revision.wrapping_add(1);
+    tracing::info!(
+        is_mute,
+        source,
+        mute_revision = local.mute_revision,
+        "sending sfu mute state"
+    );
+    send(ws_tx, &ClientMessage::Mute { is_mute }).await?;
+    mute_sync.sent(is_mute, local.mute_revision, Instant::now());
+    Ok(())
 }
 
 async fn announce_initial_state(
     ws_tx: &mut WsSink,
     config: &SfuConfig,
-    local: &LocalTracks,
+    local: &mut LocalTracks,
+    mute_sync: &mut MuteSync,
 ) -> Result<()> {
     let resume_push_to_talk = local.resumes_push_to_talk(config.role);
-    send(
-        ws_tx,
-        &ClientMessage::Mute {
-            is_mute: local.announced_mute(config.role),
-        },
-    )
-    .await?;
+    let is_mute = local.announced_mute(config.role);
+    send_mute(ws_tx, local, mute_sync, is_mute, "join_restore").await?;
     if resume_push_to_talk {
         tracing::info!("re-asserting the held push-to-talk turn on the new sfu session");
         send(ws_tx, &ClientMessage::PushToTalk { active: true }).await?;
@@ -1823,7 +1955,8 @@ fn close_reason(code: Option<CloseCode>, frame_reason: Option<&str>) -> String {
 }
 
 async fn log_media_stats(pc: &PeerConnection) -> Option<ScreenStats> {
-    let Ok(stats) = pc.get_stats().await else {
+    let Ok(Ok(stats)) = tokio::time::timeout(STATS_TIMEOUT, pc.get_stats()).await else {
+        tracing::warn!("sfu media stats unavailable or timed out");
         return None;
     };
 

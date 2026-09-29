@@ -6,6 +6,7 @@ members = [
     "crates/mezon-client",
     "crates/mezon-store",
     "crates/mezon-voice",
+    "crates/mezon-ns",
     "crates/mezon-stream",
     "crates/mezon-call",
     "crates/mezon-video",
@@ -63,7 +64,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "2.1.6"
+version = "2.1.7"
 edition = "2024"
 authors = ["Mezon Team"]
 license = "GPL-3.0-or-later"
@@ -123,6 +124,7 @@ mezon-ui      = { path = "crates/mezon-ui" }
 mezon-client  = { path = "crates/mezon-client" }
 mezon-store   = { path = "crates/mezon-store" }
 mezon-voice   = { path = "crates/mezon-voice" }
+mezon-ns      = { path = "crates/mezon-ns" }
 mezon-call    = { path = "crates/mezon-call" }
 mezon-stream  = { path = "crates/mezon-stream" }
 mezon-video   = { path = "crates/mezon-video" }

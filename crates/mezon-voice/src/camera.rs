@@ -596,58 +596,19 @@ fn try_open_camera(index: &CameraIndex, requested: RequestedFormat<'_>) -> Resul
 
 #[cfg(target_os = "macos")]
 fn request_macos_permission() -> bool {
-    use std::time::Duration;
-
-    if nokhwa::nokhwa_check() {
-        return true;
+    let granted = crate::permission::request_media_permission_blocking(
+        crate::MediaDevice::Camera,
+        std::time::Duration::from_secs(15),
+    );
+    if !granted {
+        tracing::warn!("camera permission denied");
     }
-
-    let (tx, rx) = flume::bounded(1);
-    nokhwa::nokhwa_initialize(move |granted| {
-        let _ = tx.send(granted);
-    });
-    match rx.recv_timeout(Duration::from_secs(15)) {
-        Ok(true) => true,
-        Ok(false) => {
-            tracing::warn!("camera permission denied");
-            false
-        }
-        Err(_) => {
-            tracing::warn!("camera permission request timed out");
-            false
-        }
-    }
+    granted
 }
 
 #[cfg(not(target_os = "macos"))]
 fn request_macos_permission() -> bool {
     true
-}
-
-#[cfg(target_os = "macos")]
-fn camera_authorization_status() -> i64 {
-    use cocoa::base::{id, nil};
-    use cocoa::foundation::NSString;
-    use objc::runtime::Class;
-    use objc::{msg_send, sel, sel_impl};
-
-    unsafe {
-        let Some(cls) = Class::get("AVCaptureDevice") else {
-            return 3;
-        };
-        let media_type: id = NSString::alloc(nil).init_str("vide");
-        msg_send![cls, authorizationStatusForMediaType: media_type]
-    }
-}
-
-#[cfg(target_os = "macos")]
-pub fn camera_denied() -> bool {
-    matches!(camera_authorization_status(), 1 | 2)
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn camera_denied() -> bool {
-    false
 }
 
 #[cfg(test)]

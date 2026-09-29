@@ -20,12 +20,13 @@ use mezon_client::transport::QUICK_MENU_TYPE_FLASH;
 use mezon_store::{
     AccountEvent, AccountStore, AppConfig, AudioStore, AuthState, BadgeService, Channel,
     ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent, ChannelMembersStore, ChannelType,
-    ClanId, ClanList, ClanMembersEvent, ClanMembersStore, ComposeDraft, ComposeStore, ComposeToken,
-    ComposeTokenKind, DirectEvent, DirectMessageStore, Emoji, EmojiEvent, EmojiStore,
-    GroupMembersEvent, GroupMembersStore, LoginStore, MENTION_HERE_USER_ID, MessageSpan,
-    MessagesStore, OgpResult, OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag,
-    OutgoingMention, OutgoingOgp, QuickMenuStore, RolesEvent, RolesStore, Settings, UserId,
-    fetch_invite_preview, fetch_ogp, first_previewable_url, internal_invite_id, is_clan_invite_url,
+    ClanId, ClanList, ClanMembersEvent, ClanMembersStore, CommandInvocation, CommandStatus,
+    ComposeDraft, ComposeStore, ComposeToken, ComposeTokenKind, DirectEvent, DirectMessageStore,
+    Emoji, EmojiEvent, EmojiStore, GroupMembersEvent, GroupMembersStore, LoginStore,
+    MENTION_HERE_USER_ID, MessageSpan, MessagesStore, OgpResult, OutgoingAttachment,
+    OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention, OutgoingOgp, QuickMenuStore,
+    RolesEvent, RolesStore, Settings, UserId, fetch_invite_preview, fetch_ogp,
+    first_previewable_url, internal_invite_id, is_clan_invite_url,
 };
 use std::time::Duration;
 
@@ -73,6 +74,7 @@ const CONVERT_PREFIX_LEN: usize = 8;
 const PASTE_SAFETY_CAP_UTF16: usize = 100_000;
 const STREAM_MODE_DM: i32 = 4;
 const MENTION_ROW_PX: f32 = 40.;
+const SUGGESTION_SECONDARY_MAX_WIDTH: f32 = 280.;
 const MENTION_POPUP_MAX_PX: f32 = MENTION_ROW_PX * MAX_SUGGESTIONS as f32;
 
 actions!(
@@ -310,6 +312,16 @@ struct SlashCommandRaw {
     bot_id: i64,
 }
 
+impl SlashCommandRaw {
+    fn bot_command(&self, action_msg: &SharedString) -> Option<FlashCommand> {
+        (self.bot_id != 0).then(|| FlashCommand {
+            bot_id: self.bot_id,
+            menu_name: self.display.clone(),
+            action_msg: action_msg.clone(),
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FlashCommand {
     pub bot_id: i64,
@@ -321,6 +333,22 @@ impl FlashCommand {
     fn still_prefixes(&self, content: &str) -> bool {
         let action = self.action_msg.trim();
         !action.is_empty() && content.trim_start().starts_with(action)
+    }
+
+    pub fn invocation(&self, content: &str) -> CommandInvocation {
+        let content = content.trim_start();
+        let arguments = content
+            .strip_prefix(self.action_msg.trim())
+            .unwrap_or(content)
+            .trim();
+        CommandInvocation {
+            menu_name: self.menu_name.clone(),
+            arguments: arguments.to_string().into(),
+            bot_id: self.bot_id,
+            bot_name: SharedString::default(),
+            status: CommandStatus::Waiting,
+            resendable: false,
+        }
     }
 }
 
@@ -1952,7 +1980,9 @@ impl MentionInput {
                         this.invalidate_pool(Sigil::Hash, cx);
                     }
                     ChannelEvent::Unread(_) | ChannelEvent::InVoiceChanged => {}
-                    ChannelEvent::ArchivedByAdministrator { .. } | ChannelEvent::AccessLost(_) => {}
+                    ChannelEvent::ArchivedByAdministrator { .. }
+                    | ChannelEvent::AccessLost(_)
+                    | ChannelEvent::PrivacyChanged { .. } => {}
                 },
             ),
             cx.subscribe(
@@ -2214,11 +2244,7 @@ impl MentionInput {
                 self.input.update(cx, |input, cx| {
                     input.replace_range(at..replace_end, action_msg.as_ref(), window, cx)
                 });
-                self.flash_command = Some(FlashCommand {
-                    bot_id: command.bot_id,
-                    menu_name: command.display.clone(),
-                    action_msg: action_msg.clone(),
-                });
+                self.flash_command = command.bot_command(action_msg);
                 self.reset_popup();
                 self.sync_ranges(cx);
                 cx.notify();
@@ -2780,6 +2806,8 @@ impl MentionInput {
                     .when_some(leading, |row, leading| row.child(leading))
                     .child(
                         div()
+                            .min_w_0()
+                            .truncate()
                             .text_size(px(15.))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(display_color)
@@ -2790,7 +2818,9 @@ impl MentionInput {
             .when(!secondary.is_empty(), |row| {
                 row.child(
                     div()
-                        .flex_shrink_0()
+                        .min_w_0()
+                        .max_w(px(SUGGESTION_SECONDARY_MAX_WIDTH))
+                        .truncate()
                         .text_size(px(12.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(text_primary)
@@ -3387,7 +3417,35 @@ impl Render for MentionInput {
 
 #[cfg(test)]
 mod flash_command_tests {
-    use super::FlashCommand;
+    use super::{FlashCommand, SlashCommandRaw};
+
+    fn menu(bot_id: i64) -> SlashCommandRaw {
+        SlashCommandRaw {
+            id: "quick_menu_1".into(),
+            display: "daily".into(),
+            display_lc: "daily".into(),
+            description: "*daily".into(),
+            action_msg: Some("*daily".into()),
+            bot_id,
+        }
+    }
+
+    #[test]
+    fn user_created_menu_is_not_a_bot_command() {
+        assert_eq!(menu(0).bot_command(&"*daily".into()), None);
+    }
+
+    #[test]
+    fn bot_menu_becomes_a_bot_command() {
+        assert_eq!(
+            menu(7).bot_command(&"*daily".into()),
+            Some(FlashCommand {
+                bot_id: 7,
+                menu_name: "daily".into(),
+                action_msg: "*daily".into(),
+            })
+        );
+    }
 
     fn command(action: &str) -> FlashCommand {
         FlashCommand {
@@ -3406,6 +3464,17 @@ mod flash_command_tests {
         assert!(!cmd.still_prefixes("daily"));
         assert!(!cmd.still_prefixes("hello *daily"));
         assert!(!cmd.still_prefixes(""));
+    }
+
+    #[test]
+    fn invocation_carries_the_menu_name_and_the_text_after_the_command() {
+        let invocation = command("*daily").invocation("  *daily  report for today ");
+        assert_eq!(invocation.menu_name.as_ref(), "daily");
+        assert_eq!(invocation.arguments.as_ref(), "report for today");
+        assert_eq!(
+            command("*daily").invocation("*daily").arguments.as_ref(),
+            ""
+        );
     }
 
     #[test]
