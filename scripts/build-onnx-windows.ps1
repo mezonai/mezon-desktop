@@ -79,6 +79,16 @@ if (-not $ready) {
         New-Item -ItemType Directory -Force (Split-Path $destination -Parent) | Out-Null
         Copy-Item $lib.FullName $destination
     }
+
+    # ONNX Runtime 1.22 no longer builds re2, but ort-sys still emits `static=re2`.
+    $re2 = Join-Path $package "_deps\re2-build"
+    New-Item -ItemType Directory -Force $re2 | Out-Null
+    $re2Source = Join-Path $re2 "re2_stub.c"
+    Set-Content $re2Source "int mezon_re2_stub;"
+    Invoke-Checked cl.exe @('/nologo', '/c', '/MT', '/Zl', "/Fo$(Join-Path $re2 're2_stub.obj')", $re2Source)
+    Invoke-Checked lib.exe @('/nologo', "/OUT:$(Join-Path $re2 're2.lib')", (Join-Path $re2 're2_stub.obj'))
+    Remove-Item $re2Source, (Join-Path $re2 're2_stub.obj')
+
     Set-Content $stamp $cacheKey
 }
 
