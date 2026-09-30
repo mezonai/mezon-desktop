@@ -61,6 +61,8 @@ if (-not $ready) {
         "FETCHCONTENT_SOURCE_DIR_EIGEN3=$eigenCmakePath")
 
     $release = Join-Path $build "Release"
+    Invoke-Checked cmake @('--build', $release, '--target', 're2', '--parallel', '2')
+    if (-not (Test-Path (Join-Path $release "_deps\re2-build\re2.lib"))) { throw "re2 static library was not produced." }
     $session = Join-Path $release "onnxruntime_session.lib"
     if (-not (Test-Path $session)) { throw "ONNX Runtime static libraries were not produced." }
     $directives = & dumpbin.exe /nologo /directives $session
@@ -79,15 +81,6 @@ if (-not $ready) {
         New-Item -ItemType Directory -Force (Split-Path $destination -Parent) | Out-Null
         Copy-Item $lib.FullName $destination
     }
-
-    # ONNX Runtime 1.22 no longer builds re2, but ort-sys still emits `static=re2`.
-    $re2 = Join-Path $package "_deps\re2-build"
-    New-Item -ItemType Directory -Force $re2 | Out-Null
-    $re2Source = Join-Path $re2 "re2_stub.c"
-    Set-Content $re2Source "int mezon_re2_stub;"
-    Invoke-Checked cl.exe @('/nologo', '/c', '/MT', '/Zl', "/Fo$(Join-Path $re2 're2_stub.obj')", $re2Source)
-    Invoke-Checked lib.exe @('/nologo', "/OUT:$(Join-Path $re2 're2.lib')", (Join-Path $re2 're2_stub.obj'))
-    Remove-Item $re2Source, (Join-Path $re2 're2_stub.obj')
 
     Set-Content $stamp $cacheKey
 }
