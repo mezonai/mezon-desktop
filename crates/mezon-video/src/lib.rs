@@ -18,6 +18,10 @@ mod poster_fallback;
 mod render_frame;
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod unsupported;
+#[cfg(target_os = "macos")]
+mod webm_frame_macos;
+#[cfg(any(windows, target_os = "macos"))]
+mod webm_player;
 #[cfg(windows)]
 #[path = "windows.rs"]
 mod windows_impl;

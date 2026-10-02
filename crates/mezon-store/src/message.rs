@@ -94,23 +94,6 @@ impl MessageAttachment {
         Self::media_is_video(&self.filetype, &self.url)
     }
 
-    /// A Matroska video (`.webm`, and the `video/matroska` MIME a browser
-    /// recorder writes) rides on whatever demuxer the platform player has:
-    /// GStreamer reads it, AVFoundation (macOS) and Media Foundation (Windows)
-    /// do not. There the inline player can only mount, fail, and sit on a play
-    /// button that never does anything, so hand the file to the download box
-    /// instead. Audio `.webm` (voice messages) is decoded in-app by symphonia
-    /// and is deliberately left alone.
-    fn is_undecodable_matroska(&self, ext: Option<&str>) -> bool {
-        if cfg!(target_os = "linux") || self.filetype.contains("audio") {
-            return false;
-        }
-        matches!(
-            self.filetype.as_str(),
-            "video/webm" | "video/matroska" | "video/x-matroska"
-        ) || ext == Some("webm")
-    }
-
     pub fn is_unsupported_media(&self) -> bool {
         if matches!(
             self.filetype.as_str(),
@@ -130,9 +113,6 @@ impl MessageAttachment {
             return true;
         }
         let ext = url_extension(&self.filename).or_else(|| url_extension(&self.url));
-        if self.is_undecodable_matroska(ext.as_deref()) {
-            return true;
-        }
         matches!(
             ext.as_deref(),
             Some(
@@ -2999,20 +2979,17 @@ mod tests {
     }
 
     #[test]
-    fn matroska_video_is_unsupported_where_the_platform_cannot_demux_it() {
-        // GStreamer reads Matroska; AVFoundation and Media Foundation do not.
-        let expected = !cfg!(target_os = "linux");
-
+    fn matroska_video_is_supported_on_desktop() {
         let webm = attachment("video/webm", "https://cdn.example/x.webm");
-        assert_eq!(webm.is_unsupported_media(), expected);
+        assert!(!webm.is_unsupported_media());
+        assert!(webm.is_video());
 
-        // A browser recorder writes `video/matroska`, and the web client uploads
-        // the bare "video" category instead of a MIME, so the extension has to
-        // carry the decision on its own.
         let matroska = attachment("video/matroska", "https://cdn.example/1234.webm");
-        assert_eq!(matroska.is_unsupported_media(), expected);
+        assert!(!matroska.is_unsupported_media());
+        assert!(matroska.is_video());
         let uploaded = attachment("video", "https://cdn.example/1234.webm");
-        assert_eq!(uploaded.is_unsupported_media(), expected);
+        assert!(!uploaded.is_unsupported_media());
+        assert!(uploaded.is_video());
     }
 
     #[test]

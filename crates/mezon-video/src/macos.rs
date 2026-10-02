@@ -115,7 +115,16 @@ fn seconds_to_cm_time(seconds: f64) -> CmTime {
     }
 }
 
+enum PlayerBackend {
+    AvFoundation(AvFoundationPlayer),
+    Webm(crate::webm_player::WebmPlayerImpl),
+}
+
 pub struct PlayerImpl {
+    inner: PlayerBackend,
+}
+
+struct AvFoundationPlayer {
     player: StrongPtr,
     asset: StrongPtr,
     output: StrongPtr,
@@ -128,6 +137,101 @@ pub struct PlayerImpl {
 
 impl PlayerImpl {
     pub fn open(url: &str, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
+        let inner = if crate::webm_player::is_webm_source(url) {
+            PlayerBackend::Webm(crate::webm_player::WebmPlayerImpl::open(url, max_size)?)
+        } else {
+            PlayerBackend::AvFoundation(AvFoundationPlayer::open(url, max_size)?)
+        };
+        Ok(Self { inner })
+    }
+
+    pub fn copy_frame(&self) -> Option<VideoFrame> {
+        match &self.inner {
+            PlayerBackend::AvFoundation(player) => player.copy_frame(),
+            PlayerBackend::Webm(player) => player.copy_frame(),
+        }
+    }
+
+    pub fn play(&self) {
+        match &self.inner {
+            PlayerBackend::AvFoundation(player) => player.play(),
+            PlayerBackend::Webm(player) => player.play(),
+        }
+    }
+
+    pub fn pause(&self) {
+        match &self.inner {
+            PlayerBackend::AvFoundation(player) => player.pause(),
+            PlayerBackend::Webm(player) => player.pause(),
+        }
+    }
+
+    pub fn is_playing(&self) -> bool {
+        match &self.inner {
+            PlayerBackend::AvFoundation(player) => player.is_playing(),
+            PlayerBackend::Webm(player) => player.is_playing(),
+        }
+    }
+
+    pub fn current_time(&self) -> f64 {
+        match &self.inner {
+            PlayerBackend::AvFoundation(player) => player.current_time(),
+            PlayerBackend::Webm(player) => player.current_time(),
+        }
+    }
+
+    pub fn duration(&self) -> f64 {
+        match &self.inner {
+            PlayerBackend::AvFoundation(player) => player.duration(),
+            PlayerBackend::Webm(player) => player.duration(),
+        }
+    }
+
+    pub fn seek(&self, to_seconds: f64) {
+        match &self.inner {
+            PlayerBackend::AvFoundation(player) => player.seek(to_seconds),
+            PlayerBackend::Webm(player) => player.seek(to_seconds),
+        }
+    }
+
+    pub fn set_volume(&self, volume: f32) {
+        match &self.inner {
+            PlayerBackend::AvFoundation(player) => player.set_volume(volume),
+            PlayerBackend::Webm(player) => player.set_volume(volume),
+        }
+    }
+
+    pub fn volume(&self) -> f32 {
+        match &self.inner {
+            PlayerBackend::AvFoundation(player) => player.volume(),
+            PlayerBackend::Webm(player) => player.volume(),
+        }
+    }
+
+    pub fn set_muted(&self, muted: bool) {
+        match &self.inner {
+            PlayerBackend::AvFoundation(player) => player.set_muted(muted),
+            PlayerBackend::Webm(player) => player.set_muted(muted),
+        }
+    }
+
+    pub fn is_muted(&self) -> bool {
+        match &self.inner {
+            PlayerBackend::AvFoundation(player) => player.is_muted(),
+            PlayerBackend::Webm(player) => player.is_muted(),
+        }
+    }
+
+    pub fn failed(&self) -> bool {
+        match &self.inner {
+            PlayerBackend::AvFoundation(player) => player.failed(),
+            PlayerBackend::Webm(player) => player.failed(),
+        }
+    }
+}
+
+impl AvFoundationPlayer {
+    fn open(url: &str, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
         let c_url = CString::new(url).map_err(|_| PlayerError::InvalidUrl)?;
         unsafe {
             let ns_string = class!(NSString);
@@ -192,7 +296,7 @@ impl PlayerImpl {
         }
     }
 
-    pub fn copy_frame(&self) -> Option<VideoFrame> {
+    fn copy_frame(&self) -> Option<VideoFrame> {
         self.apply_preferred_transform();
         if self.waiting_for_transform() {
             return None;
@@ -312,33 +416,33 @@ impl PlayerImpl {
         true
     }
 
-    pub fn play(&self) {
+    fn play(&self) {
         unsafe {
             let _: () = msg_send![*self.player, play];
         }
     }
 
-    pub fn pause(&self) {
+    fn pause(&self) {
         unsafe {
             let _: () = msg_send![*self.player, pause];
         }
     }
 
-    pub fn is_playing(&self) -> bool {
+    fn is_playing(&self) -> bool {
         unsafe {
             let rate: f32 = msg_send![*self.player, rate];
             rate != 0.0
         }
     }
 
-    pub fn current_time(&self) -> f64 {
+    fn current_time(&self) -> f64 {
         unsafe {
             let time: CmTime = msg_send![*self.player, currentTime];
             cm_time_to_seconds(time)
         }
     }
 
-    pub fn duration(&self) -> f64 {
+    fn duration(&self) -> f64 {
         let item = self.current_item();
         if item.is_null() {
             return 0.0;
@@ -349,7 +453,7 @@ impl PlayerImpl {
         }
     }
 
-    pub fn seek(&self, to_seconds: f64) {
+    fn seek(&self, to_seconds: f64) {
         unsafe {
             let target = seconds_to_cm_time(to_seconds);
             let zero = CmTime {
@@ -367,34 +471,34 @@ impl PlayerImpl {
         }
     }
 
-    pub fn set_volume(&self, volume: f32) {
+    fn set_volume(&self, volume: f32) {
         unsafe {
             let _: () = msg_send![*self.player, setVolume: volume.clamp(0.0, 1.0)];
         }
     }
 
-    pub fn volume(&self) -> f32 {
+    fn volume(&self) -> f32 {
         unsafe {
             let value: f32 = msg_send![*self.player, volume];
             value
         }
     }
 
-    pub fn set_muted(&self, muted: bool) {
+    fn set_muted(&self, muted: bool) {
         unsafe {
             let value: BOOL = if muted { YES } else { NO };
             let _: () = msg_send![*self.player, setMuted: value];
         }
     }
 
-    pub fn is_muted(&self) -> bool {
+    fn is_muted(&self) -> bool {
         unsafe {
             let value: BOOL = msg_send![*self.player, isMuted];
             value != NO
         }
     }
 
-    pub fn failed(&self) -> bool {
+    fn failed(&self) -> bool {
         let item = self.current_item();
         if item.is_null() {
             return false;
@@ -406,7 +510,7 @@ impl PlayerImpl {
     }
 }
 
-impl Drop for PlayerImpl {
+impl Drop for AvFoundationPlayer {
     fn drop(&mut self) {
         unsafe {
             let _: () = msg_send![*self.player, pause];
@@ -468,6 +572,9 @@ fn frame_format_is_renderable(format: u32) -> bool {
 const POSTER_TIME_SECONDS: f64 = 1.0;
 
 pub fn probe_video(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
+    if crate::webm_player::is_webm_source(path) {
+        return crate::webm_player::probe_webm(path, max_poster_edge);
+    }
     let c_path = CString::new(path).ok()?;
     objc::rc::autoreleasepool(|| unsafe {
         let ns_string = class!(NSString);

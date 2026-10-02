@@ -347,10 +347,11 @@ impl VideoPlayerView {
         cx.notify();
     }
 
-    fn seek_relative(&mut self, delta: f64, cx: &mut Context<Self>) {
+    fn seek_relative(&mut self, delta: f64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(player) = self.player.clone() else {
             return;
         };
+        let was_playing = player.is_playing();
         let target = {
             let mut shared = self.shared.borrow_mut();
             if shared.duration <= 0.0 {
@@ -361,13 +362,19 @@ impl VideoPlayerView {
             target
         };
         player.seek(target);
+        if was_playing {
+            player.play();
+            self.shared.borrow_mut().playing = true;
+        }
+        self.apply_seeked_frame(&player, window, cx);
         cx.notify();
     }
 
-    fn seek_to_x(&mut self, x: Pixels, cx: &mut Context<Self>) {
+    fn seek_to_x(&mut self, x: Pixels, window: &mut Window, cx: &mut Context<Self>) {
         let Some(player) = self.player.clone() else {
             return;
         };
+        let was_playing = player.is_playing();
         let bounds = self.track_bounds;
         let target = {
             let mut shared = self.shared.borrow_mut();
@@ -379,7 +386,30 @@ impl VideoPlayerView {
             target
         };
         player.seek(target);
+        if was_playing {
+            player.play();
+            self.shared.borrow_mut().playing = true;
+        }
+        self.apply_seeked_frame(&player, window, cx);
         cx.notify();
+    }
+
+    fn apply_seeked_frame(
+        &mut self,
+        player: &VideoPlayer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(frame) = player.copy_frame() else {
+            return;
+        };
+        let frame = Self::adopt_frame(&self.shared, frame, window, cx);
+        let previous = self.shared.borrow_mut().frame.replace(frame);
+        Self::release_stale_frame(previous, &self.shared, window, cx);
+        let current_time = player.current_time();
+        let duration = player.duration();
+        self.shared.borrow_mut().current_time = current_time;
+        self.refresh_time_label(player.is_playing(), current_time, duration);
     }
 
     fn open_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -429,8 +459,8 @@ impl VideoPlayerView {
         let plain = !event.keystroke.modifiers.modified();
         match event.keystroke.key.as_str() {
             "space" => self.toggle_play(cx),
-            "left" if plain => self.seek_relative(-SEEK_STEP_SECONDS, cx),
-            "right" if plain => self.seek_relative(SEEK_STEP_SECONDS, cx),
+            "left" if plain => self.seek_relative(-SEEK_STEP_SECONDS, window, cx),
+            "right" if plain => self.seek_relative(SEEK_STEP_SECONDS, window, cx),
             "f" if !self.theater => self.open_fullscreen(window, cx),
             "escape" if self.theater => self.exit_theater(cx),
             _ => {}
@@ -586,8 +616,8 @@ impl VideoPlayerView {
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|view, event: &MouseDownEvent, _window, cx| {
-                    view.seek_to_x(event.position.x, cx);
+                cx.listener(|view, event: &MouseDownEvent, window, cx| {
+                    view.seek_to_x(event.position.x, window, cx);
                 }),
             )
             .on_drag(SeekDrag(entity_id), |drag, _, _, cx| {
@@ -595,12 +625,12 @@ impl VideoPlayerView {
                 cx.new(|_| drag.clone())
             })
             .on_drag_move(
-                cx.listener(move |view, event: &DragMoveEvent<SeekDrag>, _window, cx| {
+                cx.listener(move |view, event: &DragMoveEvent<SeekDrag>, window, cx| {
                     let SeekDrag(id) = event.drag(cx);
                     if *id != entity_id {
                         return;
                     }
-                    view.seek_to_x(event.event.position.x, cx);
+                    view.seek_to_x(event.event.position.x, window, cx);
                 }),
             )
             .child(

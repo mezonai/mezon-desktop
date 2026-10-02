@@ -77,6 +77,42 @@ pub(crate) fn pack_bgra_rows_turned(
     Some((turned_width as u32, turned_height as u32, out))
 }
 
+pub(crate) fn i420_to_bgra(
+    width: u32,
+    height: u32,
+    y: &[u8],
+    u: &[u8],
+    v: &[u8],
+) -> Option<Vec<u8>> {
+    let w = width as usize;
+    let h = height as usize;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let uv_w = w.div_ceil(2);
+    let uv_h = h.div_ceil(2);
+    if y.len() < w * h || u.len() < uv_w * uv_h || v.len() < uv_w * uv_h {
+        return None;
+    }
+    let mut bgra = vec![0u8; w * h * 4];
+    for row in 0..h {
+        for col in 0..w {
+            let y_val = i32::from(y[row * w + col]);
+            let u_val = i32::from(u[(row / 2) * uv_w + col / 2]) - 128;
+            let v_val = i32::from(v[(row / 2) * uv_w + col / 2]) - 128;
+            let r = (y_val + ((1436 * v_val) >> 10)).clamp(0, 255) as u8;
+            let g = (y_val - ((352 * u_val + 731 * v_val) >> 10)).clamp(0, 255) as u8;
+            let b = (y_val + ((1814 * u_val) >> 10)).clamp(0, 255) as u8;
+            let i = (row * w + col) * 4;
+            bgra[i] = b;
+            bgra[i + 1] = g;
+            bgra[i + 2] = r;
+            bgra[i + 3] = 255;
+        }
+    }
+    Some(bgra)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

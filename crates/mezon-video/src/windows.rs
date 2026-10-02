@@ -75,7 +75,16 @@ struct StagingTextures {
     staging: ID3D11Texture2D,
 }
 
+enum PlayerBackend {
+    MediaFoundation(MediaFoundationPlayer),
+    Webm(crate::webm_player::WebmPlayerImpl),
+}
+
 pub struct PlayerImpl {
+    inner: PlayerBackend,
+}
+
+struct MediaFoundationPlayer {
     engine: IMFMediaEngine,
     engine_ex: Option<IMFMediaEngineEx>,
     device: ID3D11Device,
@@ -94,13 +103,110 @@ impl PlayerImpl {
         if url.is_empty() {
             return Err(PlayerError::InvalidUrl);
         }
-        Self::build(url, max_size).map_err(|error| {
-            tracing::warn!(target: "mezon_video", ?error, "failed to open media foundation engine");
-            PlayerError::Open
-        })
+        let inner = if crate::webm_player::is_webm_source(url) {
+            PlayerBackend::Webm(crate::webm_player::WebmPlayerImpl::open(url, max_size)?)
+        } else {
+            MediaFoundationPlayer::build(url, max_size).map_err(|error| {
+                tracing::warn!(target: "mezon_video", ?error, "failed to open media foundation engine");
+                PlayerError::Open
+            })?
+        };
+        Ok(Self { inner })
     }
 
-    fn build(url: &str, max_size: Option<(u32, u32)>) -> windows::core::Result<Self> {
+    pub fn copy_frame(&self) -> Option<VideoFrame> {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.copy_frame(),
+            PlayerBackend::Webm(player) => player.copy_frame(),
+        }
+    }
+
+    pub fn play(&self) {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.play(),
+            PlayerBackend::Webm(player) => player.play(),
+        }
+    }
+
+    pub fn pause(&self) {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.pause(),
+            PlayerBackend::Webm(player) => player.pause(),
+        }
+    }
+
+    pub fn is_playing(&self) -> bool {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.is_playing(),
+            PlayerBackend::Webm(player) => player.is_playing(),
+        }
+    }
+
+    pub fn current_time(&self) -> f64 {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.current_time(),
+            PlayerBackend::Webm(player) => player.current_time(),
+        }
+    }
+
+    pub fn duration(&self) -> f64 {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.duration(),
+            PlayerBackend::Webm(player) => player.duration(),
+        }
+    }
+
+    pub fn seek(&self, to_seconds: f64) {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.seek(to_seconds),
+            PlayerBackend::Webm(player) => player.seek(to_seconds),
+        }
+    }
+
+    pub fn set_volume(&self, volume: f32) {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.set_volume(volume),
+            PlayerBackend::Webm(player) => player.set_volume(volume),
+        }
+    }
+
+    pub fn volume(&self) -> f32 {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.volume(),
+            PlayerBackend::Webm(player) => player.volume(),
+        }
+    }
+
+    pub fn set_muted(&self, muted: bool) {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.set_muted(muted),
+            PlayerBackend::Webm(player) => player.set_muted(muted),
+        }
+    }
+
+    pub fn is_muted(&self) -> bool {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.is_muted(),
+            PlayerBackend::Webm(player) => player.is_muted(),
+        }
+    }
+
+    pub fn failed(&self) -> bool {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.failed(),
+            PlayerBackend::Webm(player) => player.failed(),
+        }
+    }
+}
+
+impl MediaFoundationPlayer {
+    fn build(url: &str, max_size: Option<(u32, u32)>) -> windows::core::Result<PlayerBackend> {
+        Ok(PlayerBackend::MediaFoundation(Self::build_engine(
+            url, max_size,
+        )?))
+    }
+
+    fn build_engine(url: &str, max_size: Option<(u32, u32)>) -> windows::core::Result<Self> {
         ensure_media_foundation()?;
         unsafe {
             let mut device: Option<ID3D11Device> = None;
@@ -171,7 +277,7 @@ impl PlayerImpl {
         }
     }
 
-    pub fn copy_frame(&self) -> Option<VideoFrame> {
+    fn copy_frame(&self) -> Option<VideoFrame> {
         unsafe {
             let pts = match self.engine.OnVideoStreamTick() {
                 Ok(pts) => pts,
@@ -361,23 +467,23 @@ impl PlayerImpl {
         texture.ok_or_else(|| windows::core::Error::from(E_FAIL))
     }
 
-    pub fn play(&self) {
+    fn play(&self) {
         unsafe {
             let _ = self.engine.Play();
         }
     }
 
-    pub fn pause(&self) {
+    fn pause(&self) {
         unsafe {
             let _ = self.engine.Pause();
         }
     }
 
-    pub fn is_playing(&self) -> bool {
+    fn is_playing(&self) -> bool {
         unsafe { !self.engine.IsPaused().as_bool() }
     }
 
-    pub fn current_time(&self) -> f64 {
+    fn current_time(&self) -> f64 {
         let value = unsafe { self.engine.GetCurrentTime() };
         if value.is_finite() && value >= 0.0 {
             value
@@ -386,7 +492,7 @@ impl PlayerImpl {
         }
     }
 
-    pub fn duration(&self) -> f64 {
+    fn duration(&self) -> f64 {
         let value = unsafe { self.engine.GetDuration() };
         if value.is_finite() && value >= 0.0 {
             value
@@ -395,7 +501,7 @@ impl PlayerImpl {
         }
     }
 
-    pub fn seek(&self, to_seconds: f64) {
+    fn seek(&self, to_seconds: f64) {
         let target = if to_seconds.is_finite() && to_seconds >= 0.0 {
             to_seconds
         } else {
@@ -406,33 +512,33 @@ impl PlayerImpl {
         }
     }
 
-    pub fn set_volume(&self, volume: f32) {
+    fn set_volume(&self, volume: f32) {
         let target = (volume as f64).clamp(0.0, 1.0);
         unsafe {
             let _ = self.engine.SetVolume(target);
         }
     }
 
-    pub fn volume(&self) -> f32 {
+    fn volume(&self) -> f32 {
         unsafe { self.engine.GetVolume() as f32 }
     }
 
-    pub fn set_muted(&self, muted: bool) {
+    fn set_muted(&self, muted: bool) {
         unsafe {
             let _ = self.engine.SetMuted(muted);
         }
     }
 
-    pub fn is_muted(&self) -> bool {
+    fn is_muted(&self) -> bool {
         unsafe { self.engine.GetMuted().as_bool() }
     }
 
-    pub fn failed(&self) -> bool {
+    fn failed(&self) -> bool {
         self.failed.load(Ordering::SeqCst)
     }
 }
 
-impl Drop for PlayerImpl {
+impl Drop for MediaFoundationPlayer {
     fn drop(&mut self) {
         unsafe {
             let _ = self.engine.Shutdown();
@@ -446,6 +552,9 @@ const POSTER_MAX_READS: u32 = 32;
 pub fn probe_video(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
     if path.is_empty() {
         return None;
+    }
+    if crate::webm_player::is_webm_source(path) {
+        return crate::webm_player::probe_webm(path, max_poster_edge);
     }
     ensure_media_foundation().ok()?;
     unsafe {
