@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    Anchor, AnyElement, App, ClickEvent, Entity, FontWeight, Hsla, MouseButton, ObjectFit,
-    SharedString, Transformation, Window, div, img, prelude::*, px, radians, rems, rgba,
+    Anchor, AnyElement, App, ClickEvent, CursorStyle, Entity, FontWeight, Hsla, MouseButton,
+    ObjectFit, SharedString, Transformation, Window, div, img, prelude::*, px, radians, rems, rgba,
 };
 use mezon_store::{
     AccountStore, AlbumLayout, AppConfig, AttachmentSeedInput, BadgeService, ChannelId,
@@ -21,11 +21,12 @@ use super::audio_player::{
     preview_seek_track,
 };
 use super::content::{
-    INLINE_ICON_RESERVE, SELECTION_BG, SelectableTextContext, hashtag_chip, profile_popover_trigger,
+    INLINE_ICON_RESERVE, SELECTION_BG, SelectableTextContext, hashtag_chip,
+    profile_popover_trigger, render_emoji_span,
 };
 use super::context::{REPLY_USERNAME_COLOR, ROW_MEMO_CAPACITY, RecentEmojiCell, RowCtx};
 use super::gif_video::GifVideoView;
-use super::inline_content::{IconOverlay, InlineContent, StyledRun};
+use super::inline_content::{IconOverlay, ImageOverlay, InlineContent, StyledRun};
 use super::reaction_detail::{UserReactionPanel, emoji_error_fallback};
 use super::selection::{SelectableRegion, TextSegment};
 use super::time::format_message_time;
@@ -37,6 +38,7 @@ use crate::theme::Theme;
 
 const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
 const SYSTEM_AVATAR_PATH: &str = "images/mezon_logo.png";
+const REPLY_TEXT_SIZE: f32 = 14.;
 pub(crate) const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 
 pub fn effective_clan_id(clan_id: Option<ClanId>, cx: &App) -> Option<ClanId> {
@@ -516,7 +518,7 @@ pub fn render_reply(msg: &Message, reference: &MessageReference, ctx: &RowCtx) -
             .h(px(24.))
             .pl(px(super::context::REPLY_INSET))
             .pr(px(super::context::CONTENT_RIGHT_PAD))
-            .text_size(px(14.))
+            .text_size(px(REPLY_TEXT_SIZE))
             .child(
                 Icon::new(IconName::ReplyCorner)
                     .size_4()
@@ -585,7 +587,7 @@ pub fn render_reply(msg: &Message, reference: &MessageReference, ctx: &RowCtx) -
         .h(px(24.))
         .pl(px(super::context::REPLY_INSET))
         .pr(px(super::context::CONTENT_RIGHT_PAD))
-        .text_size(px(14.))
+        .text_size(px(REPLY_TEXT_SIZE))
         .cursor_pointer()
         .when(!jump_target.is_zero(), |d| {
             d.on_click(move |_, _, cx| {
@@ -664,6 +666,14 @@ fn render_reply_preview_spans(
     spans: &[MessageSpan],
     ctx: &RowCtx,
 ) -> AnyElement {
+    render_reply_text_spans(reference, spans, ctx)
+}
+
+fn render_reply_text_spans(
+    reference: &MessageReference,
+    spans: &[MessageSpan],
+    ctx: &RowCtx,
+) -> AnyElement {
     let theme = ctx.theme;
     let mention_color: Hsla = theme.tokens.mention_color.into();
     let mention_bg: Hsla = theme.tokens.mention_primary.into();
@@ -671,6 +681,7 @@ fn render_reply_preview_spans(
     let mut text = String::new();
     let mut runs: Vec<StyledRun> = Vec::new();
     let mut icons: Vec<IconOverlay> = Vec::new();
+    let mut images: Vec<ImageOverlay> = Vec::new();
     for span in spans {
         match span {
             MessageSpan::Hashtag {
@@ -678,9 +689,6 @@ fn render_reply_preview_spans(
                 channel_id,
             } => {
                 let chip = hashtag_chip(display, channel_id.as_deref(), ctx.locale, ctx.app);
-                if !text.is_empty() && !text.ends_with(' ') {
-                    text.push(' ');
-                }
                 let icon_index = text.len();
                 text.push(INLINE_ICON_RESERVE);
                 let label_index = text.len();
@@ -706,9 +714,39 @@ fn render_reply_preview_spans(
                     icon: chip.icon,
                     color: mention_color,
                 });
-                text.push(' ');
             }
             MessageSpan::Text(chunk) => text.push_str(chunk),
+            MessageSpan::Emoji {
+                name,
+                emoji_id,
+                src,
+            } => {
+                let byte_index = text.len();
+                text.push(INLINE_ICON_RESERVE);
+                let end = text.len();
+                runs.push(StyledRun {
+                    range: byte_index..end,
+                    color: None,
+                    background: None,
+                    font_weight: Some(FontWeight::NORMAL),
+                    fade_out: Some(1.),
+                });
+                images.push(ImageOverlay {
+                    byte_index,
+                    size: px(REPLY_TEXT_SIZE),
+                    prepainted: false,
+                    element: render_emoji_span(
+                        name,
+                        emoji_id,
+                        src,
+                        ctx.theme.tokens.text_theme_message,
+                        ctx,
+                        px(REPLY_TEXT_SIZE),
+                        None,
+                    )
+                    .into_any_element(),
+                });
+            }
             _ => {}
         }
     }
@@ -716,16 +754,20 @@ fn render_reply_preview_spans(
         .flex_1()
         .min_w_0()
         .truncate()
-        .child(InlineContent::new(
-            ("reply-preview", reference.message_ref_id.0 as usize),
-            text.into(),
-            runs,
-            icons,
-            Vec::new(),
-            body,
-            None,
-            ctx.selection.clone(),
-        ))
+        .child(
+            InlineContent::new(
+                ("reply-preview", reference.message_ref_id.0 as usize),
+                text.into(),
+                runs,
+                icons,
+                Vec::new(),
+                body,
+                None,
+                ctx.selection.clone(),
+            )
+            .image_overlays(images)
+            .cursor_style(CursorStyle::PointingHand),
+        )
         .into_any_element()
 }
 

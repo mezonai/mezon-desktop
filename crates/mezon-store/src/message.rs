@@ -1460,10 +1460,12 @@ pub(crate) fn split_token_transaction(content: &str) -> TokenTransaction {
 const REPLY_PREVIEW_MAX_CHARS: usize = 120;
 
 pub(crate) fn reply_preview_spans(spans: &[MessageSpan]) -> Vec<MessageSpan> {
-    if !spans
-        .iter()
-        .any(|span| matches!(span, MessageSpan::Hashtag { .. }))
-    {
+    if !spans.iter().any(|span| {
+        matches!(
+            span,
+            MessageSpan::Hashtag { .. } | MessageSpan::Emoji { .. }
+        )
+    }) {
         return Vec::new();
     }
     let mut builder = ReplyPreviewBuilder::default();
@@ -1476,13 +1478,17 @@ pub(crate) fn reply_preview_spans(spans: &[MessageSpan]) -> Vec<MessageSpan> {
                 display,
                 channel_id,
             } => builder.push_hashtag(display, channel_id.clone()),
+            MessageSpan::Emoji {
+                name,
+                emoji_id,
+                src,
+            } => builder.push_emoji(name, emoji_id, src),
             MessageSpan::Text(text)
             | MessageSpan::Bold(text)
             | MessageSpan::Code(text)
             | MessageSpan::CodeBlock { text, .. }
             | MessageSpan::Link { text, .. }
             | MessageSpan::Mention { display: text, .. }
-            | MessageSpan::Emoji { name: text, .. }
             | MessageSpan::Canvas { title: text, .. }
             | MessageSpan::Heading { text, .. } => builder.push_text(text),
         }
@@ -1510,7 +1516,11 @@ impl ReplyPreviewBuilder {
     }
 
     fn push_text(&mut self, text: &str) {
-        for word in text.split_whitespace() {
+        let mut words = text.split_whitespace().peekable();
+        if text.chars().next().is_some_and(char::is_whitespace) && words.peek().is_some() {
+            self.needs_space = true;
+        }
+        while let Some(word) = words.next() {
             if self.full {
                 return;
             }
@@ -1520,21 +1530,49 @@ impl ReplyPreviewBuilder {
             for ch in word.chars() {
                 self.push_char(ch);
             }
-            self.needs_space = true;
+            self.needs_space = words.peek().is_some();
         }
+        self.needs_space |= text.chars().last().is_some_and(char::is_whitespace);
     }
 
     fn push_hashtag(&mut self, display: &str, channel_id: Option<String>) {
         let label: String = display.split_whitespace().collect::<Vec<_>>().join(" ");
-        if self.chars + label.chars().count() > REPLY_PREVIEW_MAX_CHARS {
+        let separator = usize::from(self.needs_space);
+        if self.chars + separator + label.chars().count() > REPLY_PREVIEW_MAX_CHARS {
             self.full = true;
             return;
+        }
+        if self.needs_space {
+            self.push_char(' ');
         }
         self.flush_text();
         self.chars += label.chars().count();
         self.out.push(MessageSpan::Hashtag {
             display: label.into(),
             channel_id,
+        });
+        self.needs_space = false;
+    }
+
+    fn push_emoji(&mut self, name: &SharedString, emoji_id: &str, src: &SharedString) {
+        if emoji_id.is_empty() || emoji_id == "0" {
+            self.push_text(name);
+            return;
+        }
+        let separator = usize::from(self.needs_space);
+        if self.chars + separator + 1 > REPLY_PREVIEW_MAX_CHARS {
+            self.full = true;
+            return;
+        }
+        if self.needs_space {
+            self.push_char(' ');
+        }
+        self.flush_text();
+        self.chars += 1;
+        self.out.push(MessageSpan::Emoji {
+            name: name.clone(),
+            emoji_id: emoji_id.to_string(),
+            src: src.clone(),
         });
         self.needs_space = false;
     }
@@ -1548,6 +1586,36 @@ impl ReplyPreviewBuilder {
     }
 
     fn finish(mut self) -> Vec<MessageSpan> {
+        if self.full {
+            while self.chars >= REPLY_PREVIEW_MAX_CHARS {
+                if self.text.pop().is_some() {
+                    self.chars -= 1;
+                    continue;
+                }
+                match self.out.last_mut() {
+                    Some(MessageSpan::Text(text)) if !text.is_empty() => {
+                        let mut owned = text.to_string();
+                        owned.pop();
+                        *text = owned.into();
+                        self.chars -= 1;
+                    }
+                    Some(MessageSpan::Emoji { .. }) => {
+                        self.out.pop();
+                        self.chars -= 1;
+                    }
+                    Some(MessageSpan::Hashtag { display, .. }) if !display.is_empty() => {
+                        let mut truncated = display.to_string();
+                        truncated.pop();
+                        *self.out.last_mut().expect("the hashtag still exists") =
+                            MessageSpan::Text(truncated.into());
+                        self.chars -= 1;
+                    }
+                    _ => break,
+                }
+            }
+            self.text.push('…');
+            self.chars += 1;
+        }
         self.flush_text();
         self.out
     }
@@ -1770,6 +1838,21 @@ pub fn fill_emoji_sources(spans: &mut [MessageSpan], cfg: Option<&AppConfig>) {
             && !emoji_id.is_empty()
         {
             *src = cfg.emoji_src_sized(emoji_id, source_px).into();
+        }
+    }
+}
+
+pub(crate) fn fill_reply_emoji_sources(spans: &mut [MessageSpan], cfg: Option<&AppConfig>) {
+    const REPLY_EMOJI_SOURCE_PX: u32 = 32;
+    let Some(cfg) = cfg else {
+        return;
+    };
+    for span in spans.iter_mut() {
+        if let MessageSpan::Emoji { emoji_id, src, .. } = span
+            && !emoji_id.is_empty()
+            && emoji_id != "0"
+        {
+            *src = cfg.emoji_src_sized(emoji_id, REPLY_EMOJI_SOURCE_PX).into();
         }
     }
 }
@@ -2106,7 +2189,7 @@ mod tests {
     }
 
     #[test]
-    fn reply_preview_spans_is_empty_without_a_hashtag() {
+    fn reply_preview_spans_is_empty_without_rich_tokens() {
         let spans = vec![
             MessageSpan::Text("hello ".into()),
             MessageSpan::Mention {
@@ -2135,9 +2218,9 @@ mod tests {
         assert_eq!(
             reply_preview_spans(&spans),
             vec![
-                MessageSpan::Text("see".into()),
+                MessageSpan::Text("see ".into()),
                 hashtag("#general", "10"),
-                MessageSpan::Text("and @bob in".into()),
+                MessageSpan::Text(" and @bob in ".into()),
                 hashtag("#voice room", "11"),
             ]
         );
@@ -2150,8 +2233,125 @@ mod tests {
         let preview = reply_preview_spans(&spans);
         assert_eq!(preview.len(), 1);
         match &preview[0] {
-            MessageSpan::Text(text) => assert_eq!(text.chars().count(), REPLY_PREVIEW_MAX_CHARS),
+            MessageSpan::Text(text) => {
+                assert_eq!(text.chars().count(), REPLY_PREVIEW_MAX_CHARS);
+                assert!(text.ends_with('…'));
+            }
             other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reply_preview_spans_keeps_valid_emoji_as_one_preview_slot() {
+        let spans = vec![
+            MessageSpan::Text("x".repeat(REPLY_PREVIEW_MAX_CHARS - 1).into()),
+            MessageSpan::Emoji {
+                name: ":a_very_long_shortcode:".into(),
+                emoji_id: "123".into(),
+                src: "cached-source".into(),
+            },
+        ];
+
+        let preview = reply_preview_spans(&spans);
+        assert!(
+            matches!(preview.last(), Some(MessageSpan::Emoji { emoji_id, .. }) if emoji_id == "123")
+        );
+    }
+
+    #[test]
+    fn reply_preview_spans_keeps_emoji_only_content() {
+        let emoji = MessageSpan::Emoji {
+            name: ":melon:".into(),
+            emoji_id: "123".into(),
+            src: "cached-source".into(),
+        };
+        assert_eq!(
+            reply_preview_spans(std::slice::from_ref(&emoji)),
+            vec![emoji]
+        );
+    }
+
+    #[test]
+    fn reply_preview_spans_preserves_authored_spacing_around_emoji() {
+        let emoji = MessageSpan::Emoji {
+            name: ":melon:".into(),
+            emoji_id: "123".into(),
+            src: "cached-source".into(),
+        };
+        assert_eq!(
+            reply_preview_spans(&[
+                MessageSpan::Text("before ".into()),
+                emoji.clone(),
+                MessageSpan::Text(" after".into()),
+            ]),
+            vec![
+                MessageSpan::Text("before ".into()),
+                emoji.clone(),
+                MessageSpan::Text(" after".into()),
+            ]
+        );
+        assert_eq!(
+            reply_preview_spans(&[
+                MessageSpan::Text("before".into()),
+                emoji.clone(),
+                MessageSpan::Text("after".into()),
+            ]),
+            vec![
+                MessageSpan::Text("before".into()),
+                emoji,
+                MessageSpan::Text("after".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn reply_preview_spans_marks_content_dropped_after_the_cap() {
+        let spans = vec![
+            MessageSpan::Text("x".repeat(REPLY_PREVIEW_MAX_CHARS).into()),
+            MessageSpan::Emoji {
+                name: ":melon:".into(),
+                emoji_id: "123".into(),
+                src: "cached-source".into(),
+            },
+        ];
+        let preview = reply_preview_spans(&spans);
+        assert_eq!(preview.len(), 1);
+        assert!(matches!(&preview[0], MessageSpan::Text(text) if text.ends_with('…')));
+    }
+
+    #[test]
+    fn reply_preview_spans_keeps_ellipsis_with_hashtag_at_the_cap() {
+        let spans = vec![
+            MessageSpan::Text(format!("{} ", "x".repeat(REPLY_PREVIEW_MAX_CHARS - 2)).into()),
+            hashtag("#", "10"),
+            MessageSpan::Text("later".into()),
+        ];
+        let preview = reply_preview_spans(&spans);
+        let visible_chars: usize = preview
+            .iter()
+            .map(|span| match span {
+                MessageSpan::Text(text) => text.chars().count(),
+                MessageSpan::Hashtag { display, .. } => display.chars().count(),
+                MessageSpan::Emoji { .. } => 1,
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(visible_chars, REPLY_PREVIEW_MAX_CHARS);
+        assert!(matches!(preview.last(), Some(MessageSpan::Text(text)) if text.ends_with('…')));
+    }
+
+    #[test]
+    fn reply_preview_spans_falls_back_to_text_for_missing_emoji_id() {
+        for emoji_id in ["", "0"] {
+            let spans = vec![MessageSpan::Emoji {
+                name: ":melon:".into(),
+                emoji_id: emoji_id.into(),
+                src: SharedString::default(),
+            }];
+            assert_eq!(
+                reply_preview_spans(&spans),
+                vec![MessageSpan::Text(":melon:".into())]
+            );
         }
     }
 

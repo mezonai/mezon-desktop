@@ -1056,11 +1056,10 @@ fn send_attachment(
     let store = mezon_store::MessagesStore::global(cx);
     let reply_draft = (reply_to != 0)
         .then(|| {
-            store
-                .read(cx)
-                .reply_draft_for(mezon_store::MessageRef::unbucketed(mezon_store::MessageId(
-                    reply_to,
-                )))
+            store.read(cx).reply_draft_for_with_config(
+                mezon_store::MessageRef::unbucketed(mezon_store::MessageId(reply_to)),
+                mezon_store::AppConfig::try_global(cx),
+            )
         })
         .flatten();
     if reply_to != 0 && reply_draft.is_none() {

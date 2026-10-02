@@ -749,7 +749,7 @@ fn render_selectable_segmented_spans(
                 let bounds = Rc::new(Cell::new(None));
                 segments.push(TextSegment::bounded(base..end, bounds.clone()));
                 let mut emoji =
-                    render_emoji_span(name, emoji_id, src, body_color, ctx, emoji_size, base);
+                    render_emoji_span(name, emoji_id, src, body_color, ctx, emoji_size, Some(base));
                 if let Some(gap) = trailing_gap {
                     emoji = emoji.mr(gap_width(gap, text_size));
                 }
@@ -1856,7 +1856,13 @@ fn append_span(
             let key = *span_key;
             *span_key += 1;
             row.child(render_emoji_span(
-                name, emoji_id, src, body_color, ctx, emoji_size, key,
+                name,
+                emoji_id,
+                src,
+                body_color,
+                ctx,
+                emoji_size,
+                Some(key),
             ))
         }
         MessageSpan::Canvas { title, .. } => row.child(render_canvas_chip(title.clone())),
@@ -2111,14 +2117,14 @@ fn render_social_link_card(
         .into_any_element()
 }
 
-fn render_emoji_span(
+pub(super) fn render_emoji_span(
     name: &SharedString,
     emoji_id: &str,
     precomputed_src: &SharedString,
     body_color: gpui::Rgba,
     ctx: &RowCtx,
     size: Pixels,
-    key: usize,
+    animation_key: Option<usize>,
 ) -> gpui::Div {
     let src: SharedString = if precomputed_src.is_empty() {
         crate::util::imgproxy::emoji_url_sized(ctx.app, emoji_id, emoji_source_px(size)).into()
@@ -2136,16 +2142,16 @@ fn render_emoji_span(
         .map_or(image_size, |image| {
             emoji_width(image.size(0), image_size, size)
         });
+    let image = emoji_image(src, width, image_size).with_fallback(
+        super::reaction_detail::emoji_error_fallback(image_size, ctx.theme.text_muted),
+    );
+    let image = match animation_key {
+        Some(key) => image.id(("msg-emoji-frames", key)).into_any_element(),
+        None => image.into_any_element(),
+    };
     emoji_box(size, width)
         .image_cache(ctx.icon_cache.clone())
-        .child(
-            emoji_image(src, width, image_size)
-                .id(("msg-emoji-frames", key))
-                .with_fallback(super::reaction_detail::emoji_error_fallback(
-                    image_size,
-                    ctx.theme.text_muted,
-                )),
-        )
+        .child(image)
 }
 
 fn emoji_box(size: Pixels, width: Pixels) -> gpui::Div {
