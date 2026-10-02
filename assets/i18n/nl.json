@@ -1003,6 +1003,7 @@
   "channelTopbar.gallery.toDate": "Tot datum",
   "channelTopbar.gallery.validation.startDateBeforeEnd": "Startdatum moet voor of op einddatum zijn",
   "channelTopbar.invoice": "In stemkanaal",
+  "channelTopbar.shareScreen": "Scherm delen",
   "channelTopbar.joinedThreads": "Deelgenomen threads",
   "channelTopbar.loading": "Aan het laden...",
   "channelTopbar.modals.canvas.create": "Aanmaken",

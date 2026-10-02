@@ -4,22 +4,18 @@ use gpui::{
 use mezon_store::{ChannelId, DirectKind, DmAvatarPresence};
 
 use crate::components::compositions::channel_row_element::{BUZZ_COLOR, BUZZ_LABEL};
-use crate::components::primitives::{Avatar, Icon, IconName};
+use crate::components::primitives::{Avatar, Icon};
 use crate::router::{Route, navigate};
 use crate::theme::Theme;
-use crate::util::user_status::{in_voice_icon_color, in_voice_status_label_color};
+use crate::util::user_status::{
+    VoiceActivityBadge, in_voice_icon_color, in_voice_status_label_color,
+};
 
 pub type CloseHandler = fn(ChannelId, &mut Window, &mut App);
 
 pub const DM_ROW_HEIGHT: f32 = 42.;
 
 const DM_AVATAR_SIZE: Pixels = px(32.);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DmVoiceBadge {
-    InVoice,
-    SharingScreen,
-}
 
 pub struct DmRow {
     id: SharedString,
@@ -35,7 +31,7 @@ pub struct DmRow {
     group_name: SharedString,
     close_id: SharedString,
     suppress_hover: bool,
-    voice_badge: Option<(DmVoiceBadge, SharedString)>,
+    voice_badge: Option<(VoiceActivityBadge, SharedString)>,
     image_cache: Option<gpui::Entity<crate::image_cache::LruImageCache>>,
     on_close: Option<(ChannelId, CloseHandler)>,
 }
@@ -122,7 +118,7 @@ impl DmRow {
         self
     }
 
-    pub fn voice_badge(mut self, badge: DmVoiceBadge, label: SharedString) -> Self {
+    pub fn voice_badge(mut self, badge: VoiceActivityBadge, label: SharedString) -> Self {
         self.voice_badge = Some((badge, label));
         self
     }
@@ -214,18 +210,10 @@ impl DmRow {
                     Some((badge, label)) => {
                         let voice_icon_color = in_voice_icon_color(theme);
                         let voice_label_color = in_voice_status_label_color(theme);
-                        let icon = match badge {
-                            DmVoiceBadge::InVoice => Icon::new(IconName::Speaker)
-                                .size(px(10.))
-                                .text_color(voice_icon_color)
-                                .into_any_element(),
-                            DmVoiceBadge::SharingScreen => {
-                                Icon::new(IconName::VoiceScreenShareIcon)
-                                    .size(px(10.))
-                                    .text_color(voice_icon_color)
-                                    .into_any_element()
-                            }
-                        };
+                        let icon = Icon::new(badge.icon())
+                            .size(px(10.))
+                            .text_color(voice_icon_color)
+                            .into_any_element();
                         div()
                             .flex_1()
                             .min_w_0()
@@ -239,11 +227,19 @@ impl DmRow {
                                     .flex()
                                     .flex_row()
                                     .items_center()
+                                    .min_w_0()
+                                    .overflow_hidden()
                                     .gap(px(2.))
                                     .h(px(16.))
                                     .child(icon)
                                     .child(
-                                        div().text_xs().text_color(voice_label_color).child(label),
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(voice_label_color)
+                                            .child(label),
                                     ),
                             )
                             .into_any_element()

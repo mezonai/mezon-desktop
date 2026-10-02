@@ -1005,6 +1005,7 @@
   "channelTopbar.gallery.toDate": "Hasta fecha",
   "channelTopbar.gallery.validation.startDateBeforeEnd": "La fecha de inicio debe ser anterior o igual a la fecha de fin",
   "channelTopbar.invoice": "En voz",
+  "channelTopbar.shareScreen": "Compartiendo pantalla",
   "channelTopbar.joinedThreads": "Hilos unidos",
   "channelTopbar.loading": "Cargando...",
   "channelTopbar.modals.canvas.create": "Crear",

@@ -6064,6 +6064,17 @@ fn apply_in_voice_joined(
     if user_id.is_zero() {
         return false;
     }
+    let info = match in_voice.get(&user_id) {
+        Some(previous)
+            if previous.clan_id == info.clan_id && previous.channel_id == info.channel_id =>
+        {
+            InVoiceInfo {
+                sharing_screen: previous.sharing_screen || info.sharing_screen,
+                ..info
+            }
+        }
+        _ => info,
+    };
     in_voice.insert(user_id, info) != Some(info)
 }
 
@@ -6216,7 +6227,13 @@ fn merge_previous_voice_members(
             continue;
         };
         for member in prev {
-            if !ch.voice_members.iter().any(|m| m.user_id == member.user_id) {
+            if let Some(current) = ch
+                .voice_members
+                .iter_mut()
+                .find(|current| current.user_id == member.user_id)
+            {
+                current.sharing_screen |= member.sharing_screen;
+            } else {
                 ch.voice_members.push(member.clone());
             }
         }
@@ -7339,6 +7356,32 @@ mod tests {
         assert_eq!(members.len(), 2);
         assert!(members.iter().any(|m| m.user_id == UserId(2)));
         assert_eq!(members.iter().filter(|m| m.user_id == UserId(1)).count(), 1);
+    }
+
+    #[test]
+    fn merge_previous_voice_members_preserves_live_screen_share() {
+        let mut fresh = categories();
+        fresh[0].channels[0].voice_members = vec![VoiceMember {
+            user_id: UserId(1),
+            display_name: "u1".into(),
+            avatar_url: String::new(),
+            sharing_screen: false,
+        }];
+        let previous = [(
+            ChannelId(10),
+            vec![VoiceMember {
+                user_id: UserId(1),
+                display_name: "u1".into(),
+                avatar_url: String::new(),
+                sharing_screen: true,
+            }],
+        )]
+        .into_iter()
+        .collect();
+
+        merge_previous_voice_members(&mut fresh, &previous);
+
+        assert!(fresh[0].channels[0].voice_members[0].sharing_screen);
     }
 
     #[test]
@@ -8894,6 +8937,31 @@ mod tests {
                         channel_id: VOICE_CHANNEL,
                         sharing_screen: true,
                     })
+                );
+
+                channels.handle_event(
+                    &RealtimeEvent::VoiceJoined(mezon_proto::realtime::VoiceJoinedEvent {
+                        clan_id: 1,
+                        user_id: VOICE_USER.get(),
+                        voice_channel_id: VOICE_CHANNEL.get(),
+                        participant: "someone".into(),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                assert_eq!(sharing(channels), Some(true));
+                assert!(
+                    channels
+                        .in_voice_status(VOICE_USER)
+                        .is_some_and(|info| info.sharing_screen)
+                );
+
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                assert_eq!(sharing(channels), Some(true));
+                assert!(
+                    channels
+                        .in_voice_status(VOICE_USER)
+                        .is_some_and(|info| info.sharing_screen)
                 );
 
                 channels.handle_event(
@@ -12237,6 +12305,17 @@ mod tests {
 
         assert!(apply_in_voice_joined(&mut map, UserId(7), in_voice(2, 20)));
         assert_eq!(map.get(&UserId(7)), Some(&in_voice(2, 20)));
+    }
+
+    #[test]
+    fn duplicate_in_voice_join_preserves_screen_share() {
+        let mut map = HashMap::new();
+        let mut sharing = in_voice(1, 10);
+        sharing.sharing_screen = true;
+        assert!(apply_in_voice_joined(&mut map, UserId(7), sharing));
+
+        assert!(!apply_in_voice_joined(&mut map, UserId(7), in_voice(1, 10)));
+        assert_eq!(map.get(&UserId(7)), Some(&sharing));
     }
 
     #[test]

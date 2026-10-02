@@ -1003,6 +1003,7 @@
   "channelTopbar.gallery.toDate": "Till datum",
   "channelTopbar.gallery.validation.startDateBeforeEnd": "Startdatum måste vara före eller samma som slutdatum",
   "channelTopbar.invoice": "I röstkanal",
+  "channelTopbar.shareScreen": "Delar skärm",
   "channelTopbar.joinedThreads": "Anslutna trådar",
   "channelTopbar.loading": "Laddar...",
   "channelTopbar.modals.canvas.create": "Skapa",

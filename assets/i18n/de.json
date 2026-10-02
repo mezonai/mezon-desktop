@@ -1003,6 +1003,7 @@
   "channelTopbar.gallery.toDate": "Bis Datum",
   "channelTopbar.gallery.validation.startDateBeforeEnd": "Das Startdatum muss vor oder am Enddatum liegen",
   "channelTopbar.invoice": "In Sprachkanälen",
+  "channelTopbar.shareScreen": "Bildschirm wird geteilt",
   "channelTopbar.joinedThreads": "Beigetretene Threads",
   "channelTopbar.loading": "Wird geladen...",
   "channelTopbar.modals.canvas.create": "Erstellen",

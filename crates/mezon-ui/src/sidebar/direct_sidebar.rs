@@ -21,10 +21,11 @@ use crate::chat::add_members_to_group_modal::AddMembersToGroupModal;
 use crate::chat::edit_group_modal::EditGroupModal;
 use crate::chat::user_profile_modal::UserProfileModal;
 use crate::command_palette::CommandPaletteModal;
-use crate::components::compositions::{DM_ROW_HEIGHT, DmRow, DmVoiceBadge};
+use crate::components::compositions::{DM_ROW_HEIGHT, DmRow};
 use crate::components::primitives::{ContextMenu, Icon, IconName, context_menu_at};
 use crate::router::{Route, Router, navigate};
 use crate::theme::{ActiveTheme, Theme};
+use crate::util::user_status::VoiceActivityBadge;
 
 const PINNED_LIST_MAX_HEIGHT: f32 = 215.;
 
@@ -52,7 +53,7 @@ struct DmItem {
     unread: bool,
     buzz: bool,
     presence_badge: DmAvatarPresence,
-    voice_badge: Option<DmVoiceBadge>,
+    voice_badge: Option<VoiceActivityBadge>,
     muted: bool,
     avatar_src: SharedString,
     avatar_raw: SharedString,
@@ -140,17 +141,13 @@ fn is_dm_route(cx: &App) -> bool {
     )
 }
 
-fn dm_voice_badge(ch: &DirectChannel, channels: &ChannelList) -> Option<DmVoiceBadge> {
+fn dm_voice_badge(ch: &DirectChannel, channels: &ChannelList) -> Option<VoiceActivityBadge> {
     if ch.kind != DirectKind::Dm {
         return None;
     }
     let user_id = ch.peer_user_id?;
     let info = channels.in_voice_status(user_id)?;
-    Some(if info.sharing_screen {
-        DmVoiceBadge::SharingScreen
-    } else {
-        DmVoiceBadge::InVoice
-    })
+    Some(info.into())
 }
 
 fn dm_presence_badge(
@@ -192,8 +189,8 @@ fn dm_items_fingerprint(store: &DirectMessageStore, cx: &App) -> u64 {
                 u8::from(buzz.has_buzz(ch.id)),
                 dm_presence_badge(ch, presence, own_presence) as u8,
                 dm_voice_badge(ch, channels).map_or(0, |badge| match badge {
-                    DmVoiceBadge::InVoice => 1,
-                    DmVoiceBadge::SharingScreen => 2,
+                    VoiceActivityBadge::InVoice => 1,
+                    VoiceActivityBadge::SharingScreen => 2,
                 }),
                 u8::from(notifications.is_some_and(|store| store.is_time_muted(ch.id))),
                 u8::from(store.is_pinned(ch.id)),
@@ -256,10 +253,9 @@ fn render_dm_row(
     .image_cache(image_cache.clone())
     .on_close(item.channel_id, request_dm_close);
     if let Some(badge) = item.voice_badge {
-        let label = match badge {
-            DmVoiceBadge::InVoice => in_voice_label.clone(),
-            DmVoiceBadge::SharingScreen => share_screen_label.clone(),
-        };
+        let label = badge
+            .member_label(in_voice_label, share_screen_label)
+            .clone();
         row = row.voice_badge(badge, label);
     }
     let channel_id = item.channel_id;

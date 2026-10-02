@@ -1002,6 +1002,7 @@
   "channelTopbar.gallery.toDate": "To Date",
   "channelTopbar.gallery.validation.startDateBeforeEnd": "Start date must be before or equal to end date",
   "channelTopbar.invoice": "In voice",
+  "channelTopbar.shareScreen": "Sharing screen",
   "channelTopbar.joinedThreads": "Joined Threads",
   "channelTopbar.loading": "Loading...",
   "channelTopbar.modals.canvas.create": "Create",

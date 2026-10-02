@@ -1003,6 +1003,7 @@
   "channelTopbar.gallery.toDate": "Đến ngày",
   "channelTopbar.gallery.validation.startDateBeforeEnd": "Ngày bắt đầu phải trước hoặc bằng ngày kết thúc",
   "channelTopbar.invoice": "Trong kênh thoại",
+  "channelTopbar.shareScreen": "Đang chia sẻ màn hình",
   "channelTopbar.joinedThreads": "Chủ đề đã tham gia",
   "channelTopbar.loading": "Đang tải...",
   "channelTopbar.modals.canvas.create": "Tạo",

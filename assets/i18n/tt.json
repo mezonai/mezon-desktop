@@ -1012,6 +1012,7 @@
   "channelTopbar.gallery.toDate": "Датага кадәр",
   "channelTopbar.gallery.validation.startDateBeforeEnd": "Башлану датасы тәмамлану датасыннан иртәрәк яки тигез булырга тиеш",
   "channelTopbar.invoice": "Шалтыратуда",
+  "channelTopbar.shareScreen": "Экран белән бүлешә",
   "channelTopbar.joinedThreads": "Минем ботакламаларым",
   "channelTopbar.loading": "Йөкләү...",
   "channelTopbar.modals.canvas.create": "Булдыру",

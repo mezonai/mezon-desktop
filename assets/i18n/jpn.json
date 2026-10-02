@@ -1003,6 +1003,7 @@
   "channelTopbar.gallery.toDate": "まで",
   "channelTopbar.gallery.validation.startDateBeforeEnd": "開始日は終了日以前または同じである必要があります",
   "channelTopbar.invoice": "音声チャンネル内",
+  "channelTopbar.shareScreen": "画面共有中",
   "channelTopbar.joinedThreads": "参加したスレッド",
   "channelTopbar.loading": "読み込み中...",
   "channelTopbar.modals.canvas.create": "作成",

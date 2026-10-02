@@ -1003,6 +1003,7 @@
   "channelTopbar.gallery.toDate": "종료일",
   "channelTopbar.gallery.validation.startDateBeforeEnd": "시작일은 종료일 이전 또는 동일해야 합니다",
   "channelTopbar.invoice": "음성 채널에서",
+  "channelTopbar.shareScreen": "화면 공유 중",
   "channelTopbar.joinedThreads": "참가한 스레드",
   "channelTopbar.loading": "로딩 중...",
   "channelTopbar.modals.canvas.create": "만들기",

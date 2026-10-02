@@ -1003,6 +1003,7 @@
   "channelTopbar.gallery.toDate": "Да даты",
   "channelTopbar.gallery.validation.startDateBeforeEnd": "Дата пачатку павінна быць да або роўнай даце завяршэння",
   "channelTopbar.invoice": "У галасавым канале",
+  "channelTopbar.shareScreen": "Абагульванне экрана",
   "channelTopbar.joinedThreads": "Далучаныя тэмы",
   "channelTopbar.loading": "Загрузка...",
   "channelTopbar.modals.canvas.create": "Стварыць",

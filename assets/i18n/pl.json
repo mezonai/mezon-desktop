@@ -1003,6 +1003,7 @@
   "channelTopbar.gallery.toDate": "Do dnia",
   "channelTopbar.gallery.validation.startDateBeforeEnd": "Data rozpoczęcia musi być poprzedzać lub być równa data zakończenia",
   "channelTopbar.invoice": "W kanale głosowym",
+  "channelTopbar.shareScreen": "Udostępnia ekran",
   "channelTopbar.joinedThreads": "Dołączone wątki",
   "channelTopbar.loading": "Ładowanie...",
   "channelTopbar.modals.canvas.create": "Utwórz",

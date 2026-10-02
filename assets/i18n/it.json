@@ -1003,6 +1003,7 @@
   "channelTopbar.gallery.toDate": "A",
   "channelTopbar.gallery.validation.startDateBeforeEnd": "La data di inizio deve essere precedente o uguale alla data di fine",
   "channelTopbar.invoice": "Nel canale vocale",
+  "channelTopbar.shareScreen": "Condivisione dello schermo",
   "channelTopbar.joinedThreads": "Thread a cui hai partecipato",
   "channelTopbar.loading": "Caricamento...",
   "channelTopbar.modals.canvas.create": "Crea",

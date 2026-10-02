@@ -1003,6 +1003,7 @@
   "channelTopbar.gallery.toDate": "До дати",
   "channelTopbar.gallery.validation.startDateBeforeEnd": "Дата початку має бути до або дорівнювати даті завершення",
   "channelTopbar.invoice": "У голосовому каналі",
+  "channelTopbar.shareScreen": "Ділиться екраном",
   "channelTopbar.joinedThreads": "Приєднані теми",
   "channelTopbar.loading": "Завантаження...",
   "channelTopbar.modals.canvas.create": "Створити",

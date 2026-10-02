@@ -1012,6 +1012,7 @@
   "channelTopbar.gallery.toDate": "К дате",
   "channelTopbar.gallery.validation.startDateBeforeEnd": "Дата начала должна быть ранней или равна дате окончания",
   "channelTopbar.invoice": "В звонке",
+  "channelTopbar.shareScreen": "Демонстрация экрана",
   "channelTopbar.joinedThreads": "Мои ветки",
   "channelTopbar.loading": "Загрузка...",
   "channelTopbar.modals.canvas.create": "Создать",
