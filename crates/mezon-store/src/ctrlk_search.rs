@@ -151,6 +151,21 @@ impl CtrlKSearchStore {
         });
     }
 
+    pub fn search_channels(
+        &self,
+        query: String,
+        cx: &App,
+    ) -> Task<anyhow::Result<Vec<CtrlKChannel>>> {
+        let api = self.api.clone();
+        cx.background_spawn(async move {
+            let response = api
+                .search_ctrl_k(&query, CtrlKSearchType::Channels.as_raw())
+                .await
+                .inspect_err(|err| tracing::warn!("SearchCtrlK channels failed: {err}"))?;
+            Ok(map_channels(response.channels))
+        })
+    }
+
     fn cancel_pending(&mut self) {
         self.search_generation = self.search_generation.wrapping_add(1);
     }
