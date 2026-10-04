@@ -1,5 +1,5 @@
 use gpui::{Context, FocusHandle, SharedString, Window, div, prelude::*, px};
-use mezon_store::{MessageId, MessagesStore};
+use mezon_store::{MessageRef, MessagesStore};
 
 use super::Shell;
 use crate::components::primitives::{Button, ButtonVariants, h_flex, v_flex};
@@ -7,7 +7,7 @@ use crate::theme::ActiveTheme;
 
 pub(super) struct ConfirmDeleteMessageModal {
     pub(super) focus_handle: FocusHandle,
-    pub(super) message_id: MessageId,
+    pub(super) target: MessageRef,
     pub(super) title: SharedString,
     pub(super) description: SharedString,
     pub(super) cancel_label: SharedString,
@@ -17,7 +17,7 @@ pub(super) struct ConfirmDeleteMessageModal {
 impl Render for ConfirmDeleteMessageModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let message_id = self.message_id;
+        let target = self.target;
 
         v_flex()
             .track_focus(&self.focus_handle)
@@ -64,7 +64,7 @@ impl Render for ConfirmDeleteMessageModal {
                             .danger()
                             .on_click(move |_, _window, cx| {
                                 MessagesStore::global(cx).update(cx, |store, cx| {
-                                    store.delete_message(message_id, cx);
+                                    store.delete_message(target, cx);
                                 });
                                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
                             }),

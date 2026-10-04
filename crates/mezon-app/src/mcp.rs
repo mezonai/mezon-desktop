@@ -1058,7 +1058,9 @@ fn send_attachment(
         .then(|| {
             store
                 .read(cx)
-                .reply_draft_for(mezon_store::MessageId(reply_to))
+                .reply_draft_for(mezon_store::MessageRef::unbucketed(mezon_store::MessageId(
+                    reply_to,
+                )))
         })
         .flatten();
     if reply_to != 0 && reply_draft.is_none() {

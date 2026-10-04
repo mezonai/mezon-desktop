@@ -8,7 +8,7 @@ use gpui::{
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelType, ClanId, ClanList, DirectKind,
     DirectMessageStore, ForwardTarget, FriendState, FriendStore, MAX_FORWARD_MESSAGE_LENGTH,
-    Message, MessageId, MessagesEvent, MessagesStore, ProfileContext, ShareContactSubject, UserId,
+    Message, MessageRef, MessagesEvent, MessagesStore, ProfileContext, ShareContactSubject, UserId,
     UsersByUserStore, is_age_restricted, resolve_avatar_url, resolve_user_profile,
 };
 
@@ -161,13 +161,17 @@ impl SharedContent {
     }
 }
 
-fn build_shared_content(message_ids: &[MessageId], cx: &App) -> SharedContent {
+fn build_shared_content(sources: &[MessageRef], cx: &App) -> SharedContent {
     let store = MessagesStore::global(cx);
     let store = store.read(cx);
     let messages = store.messages();
-    let selected: Vec<&Message> = message_ids
+    let selected: Vec<&Message> = sources
         .iter()
-        .filter_map(|id| messages.iter().find(|m| m.id == *id))
+        .filter_map(|source| {
+            store
+                .message_in_channel(source.bucket, source.id)
+                .or_else(|| messages.iter().find(|m| m.id == source.id))
+        })
         .collect();
 
     let mut content = SharedContent {
@@ -404,7 +408,7 @@ pub struct ForwardMessageModal {
     fingerprint: u64,
     focus_handle: FocusHandle,
     locale: SharedString,
-    message_ids: Vec<MessageId>,
+    sources: Vec<MessageRef>,
     shared: SharedContent,
     shared_summary: Option<SharedString>,
     options: Vec<ForwardOption>,
@@ -438,13 +442,8 @@ impl Focusable for ForwardMessageModal {
 }
 
 impl ForwardMessageModal {
-    pub fn open(
-        message_ids: Vec<MessageId>,
-        locale: SharedString,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        if message_ids.is_empty() {
+    pub fn open(sources: Vec<MessageRef>, locale: SharedString, window: &mut Window, cx: &mut App) {
+        if sources.is_empty() {
             return;
         }
         DirectMessageStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
@@ -520,7 +519,7 @@ impl ForwardMessageModal {
             let image_cache = crate::image_cache::shared_avatar_cache(cx);
             let options = build_options(cx);
             let filtered = (0..options.len().min(MAX_RESULTS)).collect();
-            let shared = build_shared_content(&message_ids, cx);
+            let shared = build_shared_content(&sources, cx);
             let shared_summary = shared.summary(&locale_for_labels);
             Self {
                 fingerprint: source_fingerprint(cx),
@@ -528,7 +527,7 @@ impl ForwardMessageModal {
                 shared,
                 shared_summary,
                 locale,
-                message_ids,
+                sources,
                 options,
                 filtered,
                 scope: SearchScope::All,
@@ -677,7 +676,7 @@ impl ForwardMessageModal {
             let value = self.note_input.read(cx).value().trim().to_string();
             (!value.is_empty()).then_some(value)
         };
-        let ids = self.message_ids.clone();
+        let ids = self.sources.clone();
         let started =
             MessagesStore::global(cx).update(cx, |store, cx| store.forward(ids, targets, note, cx));
         if !started {

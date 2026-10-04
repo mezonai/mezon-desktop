@@ -225,6 +225,7 @@ fn render_wave_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
                 .child(
                     gpui::img(SharedString::from(sticker_url.clone()))
                         .size(px(32.))
+                        .aspect_square()
                         .flex_none(),
                 )
                 .child(

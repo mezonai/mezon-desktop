@@ -3269,6 +3269,7 @@
   "message.actions.unPinMessage": "Odepnij wiadomość",
   "message.addAMessage": "Dodaj wiadomość (Opcjonalne)",
   "message.attachment.uploading": "Przekazywanie...",
+  "message.attachment.uploadFailed": "Nie udało się przesłać",
   "message.attachments.attachment": "Załącznik",
   "message.attachments.audio": "Wiadomość głosowa",
   "message.attachments.contact": "Karta wizytowa",
@@ -4774,5 +4775,8 @@
   "screenShare.modeVideoDescription": "Płynniejsze wideo; przy wolnym połączeniu ostrość może spaść.",
   "chat.activityStrip.latestPin": "Najnowsze przypięcie",
   "chat.activityStrip.latestTopicMessage": "Najnowsza wiadomość w temacie",
-  "chat.activityStrip.messageFrom": "Wiadomość od {{name}}: {{message}}"
+  "chat.activityStrip.messageFrom": "Wiadomość od {{name}}: {{message}}",
+  "chat.activityStrip.hideAction": "Ukryj pasek przypięć i tematów",
+  "chat.activityStrip.hideConfirm.title": "Ukryj pasek przypięć i tematów",
+  "chat.activityStrip.hideConfirm.description": "Ukryć pasek przypięć i tematów dla tego kanału? Pojawi się automatycznie ponownie po dodaniu nowego przypięcia lub tematu."
 }

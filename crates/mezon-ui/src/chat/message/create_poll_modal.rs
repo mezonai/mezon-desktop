@@ -337,6 +337,7 @@ impl Render for CreatePollModal {
                 .image_cache(&emoji_cache)
                 .id(("poll-answer-emoji-frames", index))
                 .size(px(20.))
+                .aspect_square()
                 .flex_none()
                 .into_any_element(),
                 None => Icon::new(IconName::Smile)

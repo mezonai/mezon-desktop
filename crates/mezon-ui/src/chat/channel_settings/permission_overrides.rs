@@ -195,8 +195,9 @@ impl PermissionOverrides {
             cx.subscribe(
                 &ChannelUsersStore::global(cx),
                 |this, _, event: &ChannelUsersEvent, cx| {
-                    let ChannelUsersEvent::Changed { channel_id } = event;
-                    if *channel_id == this.channel_id {
+                    if let ChannelUsersEvent::Changed { channel_id } = event
+                        && *channel_id == this.channel_id
+                    {
                         this.refresh(cx);
                     }
                 },

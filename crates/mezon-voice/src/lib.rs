@@ -85,7 +85,9 @@ pub use screen_targets::{
 };
 #[cfg(target_os = "macos")]
 pub use video::VideoSurface;
-pub use video::{VideoFrameData, VideoFrameStore, i420_to_bgra_into, local_camera_key};
+pub use video::{
+    VideoFrameData, VideoFrameStore, i420_to_bgra_into, local_camera_key, rotate_bgra_into,
+};
 
 use crate::screen::ScreenStopper;
 use crate::video::local_screen_key;

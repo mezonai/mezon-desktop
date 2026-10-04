@@ -3270,6 +3270,7 @@
   "message.actions.unPinMessage": "Anpinnen aufheben",
   "message.addAMessage": "Eine Nachricht hinzufügen (optional)",
   "message.attachment.uploading": "Wird hochgeladen...",
+  "message.attachment.uploadFailed": "Hochladen fehlgeschlagen",
   "message.attachments.attachment": "Anhang",
   "message.attachments.audio": "Sprachnachricht",
   "message.attachments.contact": "Visitenkarte",
@@ -4775,5 +4776,8 @@
   "screenShare.modeVideoDescription": "Flüssigeres Video; bei langsamer Verbindung kann die Schärfe abnehmen.",
   "chat.activityStrip.latestPin": "Neueste Anheftung",
   "chat.activityStrip.latestTopicMessage": "Neueste Nachricht im Thema",
-  "chat.activityStrip.messageFrom": "Nachricht von {{name}}: {{message}}"
+  "chat.activityStrip.messageFrom": "Nachricht von {{name}}: {{message}}",
+  "chat.activityStrip.hideAction": "Anheftungs- und Themenleiste ausblenden",
+  "chat.activityStrip.hideConfirm.title": "Anheftungs- und Themenleiste ausblenden",
+  "chat.activityStrip.hideConfirm.description": "Die Leiste mit Anheftungen und Themen für diesen Kanal ausblenden? Sie wird bei einer neuen Anheftung oder einem neuen Thema automatisch wieder angezeigt."
 }

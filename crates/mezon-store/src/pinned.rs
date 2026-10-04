@@ -85,6 +85,7 @@ struct PinFetchState {
     generation: u64,
     active: Option<u64>,
     dirty: bool,
+    confirmed: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -97,12 +98,14 @@ enum PinFetchCompletion {
 impl PinFetchState {
     fn invalidate(&mut self) {
         self.dirty = true;
+        self.confirmed = false;
     }
 
     fn reset(&mut self) {
         self.generation += 1;
         self.active = None;
         self.dirty = false;
+        self.confirmed = false;
     }
 
     fn start(&mut self) -> Option<u64> {
@@ -125,6 +128,10 @@ impl PinFetchState {
         } else {
             PinFetchCompletion::Apply
         }
+    }
+
+    fn confirm(&mut self) {
+        self.confirmed = true;
     }
 }
 
@@ -247,6 +254,15 @@ impl PinnedMessagesStore {
             .and_then(|id| id.parse::<ChannelId>().ok())
     }
 
+    pub fn is_loaded_for(&self, clan_id: ClanId, channel_id: ChannelId) -> bool {
+        self.clan_id() == Some(clan_id)
+            && self.channel_id() == Some(channel_id)
+            && self.loaded_channel.as_deref() == self.channel_id.as_deref()
+            && !self.is_loading()
+            && !self.fetch_state.dirty
+            && self.fetch_state.confirmed
+    }
+
     fn sync_from_messages(&mut self, store: &Entity<MessagesStore>, cx: &mut Context<Self>) {
         let (channel_id, clan_id) = {
             let messages = store.read(cx);
@@ -273,6 +289,9 @@ impl PinnedMessagesStore {
         // A request for the previous channel must neither block nor overwrite the new one. Keep
         // the per-channel cache visible while the latest state is fetched to avoid UI flicker.
         self.fetch_state.reset();
+        if cache_fresh {
+            self.fetch_state.confirm();
+        }
         cx.emit(PinnedEvent::Updated);
         cx.notify();
     }
@@ -294,7 +313,7 @@ impl PinnedMessagesStore {
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.loaded_channel = None;
-        self.fetch_state.invalidate();
+        self.invalidate_active_snapshot();
         self.fetch(cx);
     }
 
@@ -363,6 +382,7 @@ impl PinnedMessagesStore {
                             this.channel_fetched_at.insert(key, Instant::now());
                         }
                         this.loaded_channel = Some(channel_id);
+                        this.fetch_state.confirm();
                     }
                     Err(e) => {
                         this.loaded_channel = Some(channel_id);
@@ -390,8 +410,17 @@ impl PinnedMessagesStore {
         }
     }
 
+    fn invalidate_active_snapshot(&mut self) {
+        self.fetch_state.invalidate();
+        if let Some(key) = self.active_cache_key() {
+            self.channel_fetched_at.remove(&key);
+        }
+    }
+
     fn invalidate_channel_cache(&mut self, channel_id: &str) {
         self.channel_cache
+            .retain(|(_, cached_channel_id), _| cached_channel_id != channel_id);
+        self.channel_fetched_at
             .retain(|(_, cached_channel_id), _| cached_channel_id != channel_id);
     }
 
@@ -444,6 +473,7 @@ impl PinnedMessagesStore {
         self.messages
             .insert(0, pinned_from_last_pin_event(pin, cfg));
         self.cache_active_messages();
+        self.invalidate_active_snapshot();
         cx.emit(PinnedEvent::Updated);
         cx.notify();
         self.refresh(cx);
@@ -468,6 +498,7 @@ impl PinnedMessagesStore {
             .retain(|m| m.message_id != message_id && m.id != pin_id && m.id != message_id);
         if self.messages.len() != before {
             self.cache_active_messages();
+            self.invalidate_active_snapshot();
             cx.emit(PinnedEvent::Updated);
             cx.notify();
         }
@@ -580,8 +611,8 @@ impl PinnedMessagesStore {
             },
         );
         self.cache_active_messages();
+        self.invalidate_active_snapshot();
         cx.emit(PinnedEvent::Updated);
-        self.fetch_state.invalidate();
         self.set_pin_badge(&channel_id_str, cx);
         cx.notify();
 
@@ -675,8 +706,8 @@ impl PinnedMessagesStore {
         };
         self.messages.retain(|m| m.id != pin_id);
         self.cache_active_messages();
+        self.invalidate_active_snapshot();
         cx.emit(PinnedEvent::Updated);
-        self.fetch_state.invalidate();
         cx.notify();
 
         let api = self.api.clone();
@@ -1130,6 +1161,22 @@ mod tests {
         assert_eq!(state.finish(second), PinFetchCompletion::Retry);
         let third = state.start().unwrap();
         assert_eq!(state.finish(third), PinFetchCompletion::Apply);
+    }
+
+    #[test]
+    fn failed_refresh_never_confirms_an_optimistic_snapshot() {
+        let mut state = PinFetchState::default();
+        state.confirm();
+        state.invalidate();
+        let failed = state.start().unwrap();
+        assert_eq!(state.finish(failed), PinFetchCompletion::Apply);
+        assert!(!state.confirmed);
+
+        state.invalidate();
+        let successful = state.start().unwrap();
+        assert_eq!(state.finish(successful), PinFetchCompletion::Apply);
+        state.confirm();
+        assert!(state.confirmed);
     }
 
     #[test]

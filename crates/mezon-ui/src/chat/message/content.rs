@@ -4,9 +4,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Bounds, Entity, FontWeight, HighlightStyle, Hsla, InteractiveText, ObjectFit,
-    Pixels, SharedString, StyledText, TextLayout, UnderlineStyle, canvas, div, fill, img, point,
-    prelude::*, px, relative, rems, rgb, rgba, size,
+    AnyElement, App, Bounds, DefiniteLength, DevicePixels, Entity, FontWeight, HighlightStyle,
+    Hsla, ImageSource, Img, InteractiveText, ObjectFit, Pixels, Resource, SharedString, Size,
+    StyledText, TextLayout, UnderlineStyle, canvas, div, fill, img, point, prelude::*, px,
+    relative, rems, rgb, rgba, size,
 };
 use mezon_store::{
     AppConfig, ChannelId, ChannelList, ChannelType, ClanId, Embed, LinkKind, Message, MessageCode,
@@ -42,6 +43,9 @@ const SOCIAL_CARD_WIDTH: f32 = 400.;
 const SOCIAL_CARD_PADDING: f32 = 16.;
 const EMOJI_SIZE: f32 = 24.;
 const EMOJI_JUMBO_SIZE: f32 = 48.;
+const EMOJI_JUMBO_TOP_PADDING: f32 = 4.;
+const MESSAGE_LINE_HEIGHT: f32 = 1.375;
+const GG_SANS_SPACE_ADVANCE: f32 = 0.22;
 
 /// The image proxy is asked for the emoji at the size it will actually be
 /// painted on a 2x display. An atlas tile smaller than its box is magnified
@@ -684,8 +688,23 @@ fn render_selectable_segmented_spans(
         row = row.text_size(text_size);
     }
     let mut link_part_index = 0usize;
-    for span in spans {
+    for (index, span) in spans.iter().enumerate() {
         match span {
+            MessageSpan::Text(_) if follows_emoji_that_takes_it(spans, index) => {}
+            MessageSpan::Text(text) if separates_inline_spans(spans, index, text) => {
+                let end = base + text.len();
+                let is_selected = selected
+                    .as_ref()
+                    .is_some_and(|range| range.start < end && range.end > base);
+                let bounds = Rc::new(Cell::new(None));
+                segments.push(TextSegment::bounded(base..end, bounds.clone()));
+                row = row.child(SelectableRegion::new(
+                    inline_gap(text, text_size).into_any_element(),
+                    bounds,
+                    is_selected.then(|| rgba(SELECTION_BG)),
+                ));
+                base = end;
+            }
             MessageSpan::Text(text) => {
                 let pieces = memoized_selectable_text_pieces(text, ctx);
                 for piece in pieces.iter() {
@@ -722,18 +741,24 @@ fn render_selectable_segmented_spans(
                 emoji_id,
                 src,
             } => {
+                let trailing_gap = gap_after(spans, index);
                 let end = base + name.len();
                 let is_selected = selected
                     .as_ref()
                     .is_some_and(|range| range.start < end && range.end > base);
                 let bounds = Rc::new(Cell::new(None));
                 segments.push(TextSegment::bounded(base..end, bounds.clone()));
+                let mut emoji =
+                    render_emoji_span(name, emoji_id, src, body_color, ctx, emoji_size, base);
+                if let Some(gap) = trailing_gap {
+                    emoji = emoji.mr(gap_width(gap, text_size));
+                }
                 row = row.child(SelectableRegion::new(
-                    render_emoji_span(name, emoji_id, src, body_color, ctx, emoji_size, base),
+                    emoji.into_any_element(),
                     bounds,
                     is_selected.then(|| rgba(SELECTION_BG)),
                 ));
-                base = end;
+                base = end + trailing_gap.map_or(0, |gap| gap.len());
             }
             MessageSpan::Mention {
                 display,
@@ -1628,6 +1653,55 @@ fn selectable_segment_shared(
     ))
 }
 
+fn inline_gap(text: &str, text_size: Option<Pixels>) -> gpui::Div {
+    div()
+        .flex_none()
+        .w(gap_width(text, text_size))
+        .h(rems(MESSAGE_LINE_HEIGHT))
+}
+
+fn gap_width(text: &str, text_size: Option<Pixels>) -> DefiniteLength {
+    let spaces = GG_SANS_SPACE_ADVANCE * text.chars().count() as f32;
+    match text_size {
+        Some(text_size) => (text_size * spaces).into(),
+        None => rems(spaces).into(),
+    }
+}
+
+fn gap_after(spans: &[MessageSpan], index: usize) -> Option<&SharedString> {
+    match spans.get(index + 1) {
+        Some(MessageSpan::Text(text)) if separates_inline_spans(spans, index + 1, text) => {
+            Some(text)
+        }
+        _ => None,
+    }
+}
+
+fn separates_inline_spans(spans: &[MessageSpan], index: usize, text: &str) -> bool {
+    !text.is_empty()
+        && text.trim().is_empty()
+        && index
+            .checked_sub(1)
+            .and_then(|previous| spans.get(previous))
+            .is_some_and(is_inline_span)
+        && spans.get(index + 1).is_some_and(is_inline_span)
+        && !text.contains('\n')
+}
+
+fn follows_emoji_that_takes_it(spans: &[MessageSpan], index: usize) -> bool {
+    index.checked_sub(1).is_some_and(|previous| {
+        matches!(spans[previous], MessageSpan::Emoji { .. }) && gap_after(spans, previous).is_some()
+    })
+}
+
+fn is_inline_span(span: &MessageSpan) -> bool {
+    match span {
+        MessageSpan::CodeBlock { .. } | MessageSpan::Heading { .. } => false,
+        MessageSpan::Link { kind, .. } => *kind == LinkKind::Plain,
+        _ => true,
+    }
+}
+
 fn rich_content_row(body_color: gpui::Rgba, inline: bool) -> gpui::Div {
     let mut row = div()
         .flex()
@@ -1636,7 +1710,7 @@ fn rich_content_row(body_color: gpui::Rgba, inline: bool) -> gpui::Div {
         .items_baseline()
         .min_w_0()
         .text_base()
-        .line_height(rems(1.375))
+        .line_height(rems(MESSAGE_LINE_HEIGHT))
         .text_color(body_color);
     if inline {
         row = row.flex_shrink_0();
@@ -2045,33 +2119,65 @@ fn render_emoji_span(
     ctx: &RowCtx,
     size: Pixels,
     key: usize,
-) -> AnyElement {
+) -> gpui::Div {
     let src: SharedString = if precomputed_src.is_empty() {
         crate::util::imgproxy::emoji_url_sized(ctx.app, emoji_id, emoji_source_px(size)).into()
     } else {
         precomputed_src.clone()
     };
     if src.is_empty() {
-        return div()
-            .text_color(body_color)
-            .child(name.clone())
-            .into_any_element();
+        return div().text_color(body_color).child(name.clone());
     }
-    div()
-        .flex_none()
-        .size(size)
+    let image_size = emoji_image_size(size);
+    let width = ctx
+        .icon_cache
+        .read(ctx.app)
+        .ready_render_image(&Resource::Uri(src.clone().into()))
+        .map_or(image_size, |image| {
+            emoji_width(image.size(0), image_size, size)
+        });
+    emoji_box(size, width)
         .image_cache(ctx.icon_cache.clone())
         .child(
-            img(src)
+            emoji_image(src, width, image_size)
                 .id(("msg-emoji-frames", key))
-                .size(size)
-                .object_fit(ObjectFit::Contain)
                 .with_fallback(super::reaction_detail::emoji_error_fallback(
-                    size,
+                    image_size,
                     ctx.theme.text_muted,
                 )),
         )
-        .into_any_element()
+}
+
+fn emoji_box(size: Pixels, width: Pixels) -> gpui::Div {
+    div()
+        .flex_none()
+        .w(width)
+        .when(size >= px(EMOJI_JUMBO_SIZE), |emoji| {
+            emoji.pt(px(EMOJI_JUMBO_TOP_PADDING))
+        })
+}
+
+fn emoji_width(bitmap: Size<DevicePixels>, height: Pixels, max_width: Pixels) -> Pixels {
+    if bitmap.width.0 <= 0 || bitmap.height.0 <= 0 {
+        return height;
+    }
+    (height * (bitmap.width.0 as f32 / bitmap.height.0 as f32)).min(max_width)
+}
+
+fn emoji_image_size(size: Pixels) -> Pixels {
+    if size >= px(EMOJI_JUMBO_SIZE) {
+        size - px(EMOJI_JUMBO_TOP_PADDING)
+    } else {
+        size
+    }
+}
+
+fn emoji_image(source: impl Into<ImageSource>, width: Pixels, height: Pixels) -> Img {
+    img(source)
+        .w(width)
+        .h(height)
+        .aspect_ratio(width / height)
+        .object_fit(ObjectFit::Contain)
 }
 
 fn render_mention_chip(
@@ -3207,5 +3313,253 @@ mod social_card_tests {
                 "https://www.tiktok.com/@user/video/123"
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod emoji_layout_tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use gpui::{
+        Bounds, DefiniteLength, DevicePixels, Pixels, RenderImage, SharedString, TestAppContext,
+        point, prelude::*, px, rems, rgb, size,
+    };
+    use mezon_store::MessageSpan;
+
+    use super::super::selection::SelectableRegion;
+    use super::{
+        EMOJI_JUMBO_TOP_PADDING, GG_SANS_SPACE_ADVANCE, emoji_box, emoji_image, emoji_image_size,
+        emoji_width, follows_emoji_that_takes_it, gap_after, gap_width, inline_gap,
+        rich_content_row, separates_inline_spans,
+    };
+
+    const EMOJI: Pixels = px(48.);
+
+    fn bitmap(width: u32, height: u32) -> Arc<RenderImage> {
+        let pixels = image::RgbaImage::new(width, height);
+        Arc::new(RenderImage::new(vec![image::Frame::new(pixels)]))
+    }
+
+    fn laid_out(cx: &mut TestAppContext, image: Arc<RenderImage>, width: Pixels) -> Bounds<Pixels> {
+        let cx = cx.add_empty_window();
+        let bounds = Rc::new(Cell::new(None));
+        let slot = bounds.clone();
+        cx.draw(
+            point(px(0.), px(0.)),
+            size(px(300.), px(300.)),
+            move |_, _| {
+                SelectableRegion::new(
+                    emoji_image(image, width, EMOJI).into_any_element(),
+                    slot,
+                    None,
+                )
+                .into_any_element()
+            },
+        );
+        bounds.get().expect("emoji was laid out")
+    }
+
+    #[gpui::test]
+    fn a_tall_emoji_stays_in_its_square_box_until_it_loads(cx: &mut TestAppContext) {
+        assert_eq!(laid_out(cx, bitmap(48, 96), EMOJI).size, size(EMOJI, EMOJI));
+    }
+
+    #[gpui::test]
+    fn a_loaded_tall_emoji_narrows_like_the_web(cx: &mut TestAppContext) {
+        let image = bitmap(48, 96);
+        let width = emoji_width(image.size(0), EMOJI, EMOJI);
+
+        assert_eq!(width, px(24.));
+        assert_eq!(laid_out(cx, image, width).size, size(px(24.), EMOJI));
+    }
+
+    #[test]
+    fn a_jumbo_emoji_is_as_wide_as_react_lets_it_be() {
+        let height = emoji_image_size(EMOJI);
+
+        assert_eq!(height, px(44.));
+        assert_eq!(
+            emoji_width(size(DevicePixels(64), DevicePixels(64)), height, EMOJI),
+            px(44.)
+        );
+        assert_eq!(
+            emoji_width(size(DevicePixels(96), DevicePixels(48)), height, EMOJI),
+            EMOJI
+        );
+        assert_eq!(
+            emoji_width(size(DevicePixels(92), DevicePixels(128)), height, EMOJI),
+            px(44.) * (92. / 128.)
+        );
+    }
+
+    #[gpui::test]
+    fn a_wide_emoji_stays_in_its_square_box(cx: &mut TestAppContext) {
+        let image = bitmap(96, 48);
+        let width = emoji_width(image.size(0), EMOJI, EMOJI);
+
+        assert_eq!(laid_out(cx, image, width).size, size(EMOJI, EMOJI));
+    }
+
+    #[gpui::test]
+    fn wrapped_jumbo_emoji_rows_are_spaced_like_the_web(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let image = bitmap(48, 96);
+        let height = emoji_image_size(EMOJI);
+        let width = emoji_width(image.size(0), height, EMOJI);
+        let first = Rc::new(Cell::new(None));
+        let second = Rc::new(Cell::new(None));
+        let slots = [first.clone(), second.clone()];
+        cx.draw(
+            point(px(0.), px(0.)),
+            size(px(40.), px(300.)),
+            move |_, _| {
+                slots
+                    .iter()
+                    .fold(rich_content_row(rgb(0), false), |row, slot| {
+                        row.child(emoji_box(EMOJI, width).child(SelectableRegion::new(
+                            emoji_image(image.clone(), width, height).into_any_element(),
+                            slot.clone(),
+                            None,
+                        )))
+                    })
+                    .into_any_element()
+            },
+        );
+        let (first, second) = (first.get().unwrap(), second.get().unwrap());
+
+        assert_eq!(first.size, size(px(22.), px(44.)));
+        assert_eq!(second.top() - first.bottom(), px(EMOJI_JUMBO_TOP_PADDING));
+    }
+
+    #[gpui::test]
+    fn an_inline_emoji_keeps_the_text_line_height(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let image = bitmap(48, 96);
+        let line = Rc::new(Cell::new(None));
+        let slot = line.clone();
+        cx.draw(
+            point(px(0.), px(0.)),
+            size(px(300.), px(300.)),
+            move |_, _| {
+                let inline = px(24.);
+                SelectableRegion::new(
+                    rich_content_row(rgb(0), false)
+                        .child("text")
+                        .child(emoji_box(inline, inline).child(emoji_image(image, inline, inline)))
+                        .into_any_element(),
+                    slot,
+                    None,
+                )
+                .into_any_element()
+            },
+        );
+
+        assert_eq!(line.get().expect("line was laid out").size.height, px(24.));
+    }
+
+    #[gpui::test]
+    fn a_gap_is_as_wide_as_a_gg_sans_space(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let bounds = Rc::new(Cell::new(None));
+        let slot = bounds.clone();
+        cx.draw(
+            point(px(0.), px(0.)),
+            size(px(300.), px(300.)),
+            move |_, _| {
+                SelectableRegion::new(inline_gap(" ", None).into_any_element(), slot, None)
+                    .into_any_element()
+            },
+        );
+        let width = bounds.get().expect("gap was laid out").size.width;
+
+        assert!((width - px(3.52)).abs() < px(0.1), "gap {width:?}");
+    }
+
+    #[test]
+    fn a_gap_is_one_space_per_character_at_the_row_text_size() {
+        assert_eq!(
+            gap_width("  ", None),
+            DefiniteLength::from(rems(GG_SANS_SPACE_ADVANCE * 2.))
+        );
+        assert_eq!(
+            gap_width(" ", Some(px(14.))),
+            DefiniteLength::from(px(14.) * GG_SANS_SPACE_ADVANCE)
+        );
+    }
+
+    fn emoji() -> MessageSpan {
+        MessageSpan::Emoji {
+            name: SharedString::from(":a:"),
+            emoji_id: "1".into(),
+            src: SharedString::default(),
+        }
+    }
+
+    fn text(value: &'static str) -> MessageSpan {
+        MessageSpan::Text(SharedString::from(value))
+    }
+
+    fn separates(spans: &[MessageSpan], index: usize) -> bool {
+        let MessageSpan::Text(value) = &spans[index] else {
+            unreachable!("the probed span is text");
+        };
+        separates_inline_spans(spans, index, value)
+    }
+
+    #[test]
+    fn the_space_between_two_emoji_is_kept() {
+        assert!(separates(&[emoji(), text(" "), emoji()], 1));
+        assert!(separates(&[emoji(), text("  "), emoji()], 1));
+    }
+
+    #[test]
+    fn leading_trailing_and_line_breaking_whitespace_is_not_a_gap() {
+        assert!(!separates(&[text(" "), emoji()], 0));
+        assert!(!separates(&[emoji(), text(" ")], 1));
+        assert!(!separates(&[emoji(), text(" \n "), emoji()], 1));
+        assert!(!separates(&[emoji(), text(" a "), emoji()], 1));
+    }
+
+    #[test]
+    fn an_emoji_takes_the_gap_that_follows_it() {
+        let spans = [emoji(), text(" "), emoji(), text(" hi")];
+
+        assert_eq!(gap_after(&spans, 0).map(|gap| gap.as_ref()), Some(" "));
+        assert!(gap_after(&spans, 2).is_none());
+        assert!(gap_after(&spans, 3).is_none());
+    }
+
+    #[test]
+    fn only_the_gap_an_emoji_took_is_skipped() {
+        let mention = MessageSpan::Mention {
+            display: SharedString::from("@a"),
+            user_id: None,
+            role_id: None,
+        };
+
+        assert!(follows_emoji_that_takes_it(
+            &[emoji(), text(" "), emoji()],
+            1
+        ));
+        assert!(!follows_emoji_that_takes_it(
+            &[mention, text(" "), emoji()],
+            1
+        ));
+        assert!(!follows_emoji_that_takes_it(&[emoji(), text(" ")], 1));
+        assert!(!follows_emoji_that_takes_it(&[emoji(), text(" hi")], 1));
+        assert!(!follows_emoji_that_takes_it(&[text(" "), emoji()], 0));
+    }
+
+    #[test]
+    fn whitespace_next_to_a_block_is_not_a_gap() {
+        let code_block = MessageSpan::CodeBlock {
+            language: None,
+            text: SharedString::from("x"),
+            fenced_source: SharedString::from("```x```"),
+        };
+
+        assert!(!separates(&[code_block, text(" "), emoji()], 1));
     }
 }

@@ -41,8 +41,9 @@ use xkbc::x11::ffi::{XKB_X11_MIN_MAJOR_XKB_VERSION, XKB_X11_MIN_MINOR_XKB_VERSIO
 use xkbcommon::xkb::{self as xkbc, STATE_LAYOUT_EFFECTIVE};
 
 use super::{
-    ButtonOrScroll, ImEvent, ScrollDirection, X11Display, X11ImContext, X11WindowStatePtr,
-    XcbAtoms, XimCallbackEvent, XimHandler, button_or_scroll_from_event_detail, check_reply,
+    ButtonOrScroll, IM_CONNECT_WAIT, ImConnectAttempt, ImEvent, PendingImConnect, ScrollDirection,
+    X11Display, X11ImContext, X11WindowStatePtr, XcbAtoms, XimCallbackEvent, XimHandler,
+    button_or_scroll_from_event_detail, check_reply,
     clipboard::{self, Clipboard},
     get_reply, get_valuator_axis_index, handle_connection_error, modifiers_from_state,
     pressed_button_from_mask, surrounding_char_delete_to_bytes, xcb_flush,
@@ -371,6 +372,7 @@ pub struct X11ClientState {
     pub(crate) xim_handler: Option<XimHandler>,
     pub(crate) im: Option<X11ImContext>,
     im_watch_token: Option<RegistrationToken>,
+    im_connect: Option<(PendingImConnect, RegistrationToken)>,
     dbus_unavailable: bool,
     dbus_im_focused: bool,
     ime_resync: bool,
@@ -635,8 +637,11 @@ impl X11Client {
 
         let xcb_connection = Rc::new(xcb_connection);
 
-        let im = X11ImContext::connect();
-        let (ximc, xim_handler) = if im.is_some() {
+        let (im, im_pending) = match X11ImContext::connect_within(IM_CONNECT_WAIT) {
+            ImConnectAttempt::Ready(im) => (im, None),
+            ImConnectAttempt::Pending(pending, source) => (None, Some((pending, source))),
+        };
+        let (ximc, xim_handler) = if im.is_some() || im_pending.is_some() {
             (None, None)
         } else {
             match X11rbClient::init(Rc::clone(&xcb_connection), x_root_index, None) {
@@ -727,6 +732,7 @@ impl X11Client {
             xim_handler,
             im,
             im_watch_token: None,
+            im_connect: None,
             dbus_unavailable: false,
             dbus_im_focused: false,
             ime_resync: true,
@@ -762,6 +768,9 @@ impl X11Client {
                 )
                 .map_err(|err| anyhow!("Failed to initialize IME D-Bus source: {err:?}"))?;
             client.0.borrow_mut().im_watch_token = Some(token);
+        }
+        if let Some((pending, source)) = im_pending {
+            client.await_dbus_im(pending, source);
         }
         Ok(client)
     }
@@ -996,7 +1005,11 @@ impl X11Client {
         }
         let (xcb_connection, x_root_index) = {
             let state = self.0.borrow();
-            if state.im.is_some() || state.ximc.is_some() || state.xim_handler.is_some() {
+            if state.im.is_some()
+                || state.im_connect.is_some()
+                || state.ximc.is_some()
+                || state.xim_handler.is_some()
+            {
                 return;
             }
             (Rc::clone(&state.xcb_connection), state.x_root_index)
@@ -1385,19 +1398,74 @@ impl X11Client {
 
     fn reconnect_dbus_im(&self) -> bool {
         self.drop_dbus_im();
-        let Some(im) = X11ImContext::connect() else {
+        if self.0.borrow().im_connect.is_some() {
+            return false;
+        }
+        match X11ImContext::connect_within(IM_CONNECT_WAIT) {
+            ImConnectAttempt::Ready(im) => self.install_dbus_im(im),
+            ImConnectAttempt::Pending(pending, source) => {
+                self.await_dbus_im(pending, source);
+                false
+            }
+        }
+    }
+
+    fn await_dbus_im(&self, pending: PendingImConnect, source: calloop::ping::PingSource) {
+        let handle = self.0.borrow().loop_handle.clone();
+        match handle.insert_source(source, |_, _, client| client.finish_dbus_im_connect()) {
+            Ok(token) => self.0.borrow_mut().im_connect = Some((pending, token)),
+            Err(_) => self.0.borrow_mut().dbus_unavailable = true,
+        }
+    }
+
+    fn finish_dbus_im_connect(&self) {
+        let ready = self
+            .0
+            .borrow()
+            .im_connect
+            .as_ref()
+            .and_then(|(pending, _)| pending.try_take());
+        let Some(im) = ready else {
+            return;
+        };
+        let connect = self.0.borrow_mut().im_connect.take();
+        if let Some((_, token)) = connect {
+            self.0.borrow().loop_handle.remove(token);
+        }
+        if self.install_dbus_im(im) {
+            self.drain_dbus_im();
+        } else {
+            self.revive_xim_if_dead();
+        }
+    }
+
+    fn install_dbus_im(&self, im: Option<X11ImContext>) -> bool {
+        let Some(im) = im else {
             self.0.borrow_mut().dbus_unavailable = true;
             return false;
         };
         let watch = im.watch_fd();
         let kind = im.kind();
-        {
+        let mut ended_xim_composition = false;
+        let window_id = {
             let mut state = self.0.borrow_mut();
             if kind == super::im_frontend::ImKind::IBus {
+                if let Some((mut ximc, xim_handler)) = state.take_xim() {
+                    if xim_handler.connected && xim_handler.ic_id != 0 {
+                        let _ = ximc.unset_focus(xim_handler.im_id, xim_handler.ic_id);
+                    }
+                    ended_xim_composition = std::mem::take(&mut state.composing);
+                    state.pre_edit_text.take();
+                }
                 state.ximc = None;
                 state.xim_handler = None;
             }
             state.im = Some(im);
+            state.keyboard_focused_window
+        };
+        if ended_xim_composition && let Some(window) = window_id.and_then(|id| self.get_window(id))
+        {
+            window.handle_ime_unmark();
         }
         if !self.install_im_watch(watch) {
             self.0.borrow_mut().dbus_unavailable = true;

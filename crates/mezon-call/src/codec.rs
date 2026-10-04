@@ -35,6 +35,8 @@ pub struct OfferPayload {
     pub caller_avatar: String,
     #[serde(rename = "sentAt", default, deserialize_with = "de_string_or_number")]
     pub sent_at: String,
+    #[serde(rename = "isVideoCall", default)]
+    pub is_video_call: bool,
 }
 
 fn de_string_or_number<'de, D>(deserializer: D) -> Result<String, D::Error>

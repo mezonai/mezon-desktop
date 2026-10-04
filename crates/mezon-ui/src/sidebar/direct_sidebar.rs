@@ -6,8 +6,8 @@ use gpui::{
     UniformListScrollHandle, WeakEntity, Window, div, img, prelude::*, px, size, uniform_list,
 };
 use mezon_store::{
-    AccountEvent, AccountStore, ChannelEvent, ChannelId, ChannelList, ClanId, DirectChannel,
-    DirectKind, DirectMessageStore, DmAvatarPresence, FriendState, FriendStore,
+    AccountEvent, AccountStore, BuzzStore, ChannelEvent, ChannelId, ChannelList, ClanId,
+    DirectChannel, DirectKind, DirectMessageStore, DmAvatarPresence, FriendState, FriendStore,
     NotificationSettingStore, PresenceEvent, PresenceStore, Settings, UserId, UserPresence,
     current_user_presence,
 };
@@ -50,6 +50,7 @@ struct DmItem {
     label: SharedString,
     kind: DirectKind,
     unread: bool,
+    buzz: bool,
     presence_badge: DmAvatarPresence,
     voice_badge: Option<DmVoiceBadge>,
     muted: bool,
@@ -179,6 +180,8 @@ fn dm_items_fingerprint(store: &DirectMessageStore, cx: &App) -> u64 {
     let own_presence = current_user_presence(cx);
     let notifications = NotificationSettingStore::try_global(cx);
     let notifications = notifications.as_ref().map(|store| store.read(cx));
+    let buzz = BuzzStore::global(cx);
+    let buzz = buzz.read(cx);
     store.channels().iter().fold(FNV_OFFSET, |h, ch| {
         let h = fold(h, &ch.id.0.to_le_bytes());
         let h = fold(
@@ -186,6 +189,7 @@ fn dm_items_fingerprint(store: &DirectMessageStore, cx: &App) -> u64 {
             &[
                 ch.kind as u8,
                 u8::from(ch.is_unread()),
+                u8::from(buzz.has_buzz(ch.id)),
                 dm_presence_badge(ch, presence, own_presence) as u8,
                 dm_voice_badge(ch, channels).map_or(0, |badge| match badge {
                     DmVoiceBadge::InVoice => 1,
@@ -244,6 +248,7 @@ fn render_dm_row(
     )
     .selected(selected)
     .unread(item.unread)
+    .buzz(item.buzz)
     .presence_badge(item.presence_badge)
     .avatar_src(item.avatar_src.clone())
     .avatar_raw(item.avatar_raw.clone())
@@ -298,6 +303,8 @@ fn build_dm_items(
     let own_presence = current_user_presence(cx);
     let notifications = NotificationSettingStore::try_global(cx);
     let notifications = notifications.as_ref().map(|store| store.read(cx));
+    let buzz = BuzzStore::global(cx);
+    let buzz = buzz.read(cx);
     let all = store.channels();
     let mut ordered: Vec<&DirectChannel> = Vec::with_capacity(all.len());
     ordered.extend(all.iter().filter(|ch| store.is_pinned(ch.id)));
@@ -309,6 +316,7 @@ fn build_dm_items(
         .map(|ch| {
             let pinned = store.is_pinned(ch.id);
             let unread = ch.is_unread();
+            let has_buzz = buzz.has_buzz(ch.id);
             let presence_badge = dm_presence_badge(ch, presence, own_presence);
             let voice_badge = dm_voice_badge(ch, channels);
             let muted = notifications.is_some_and(|store| store.is_time_muted(ch.id));
@@ -322,6 +330,7 @@ fn build_dm_items(
                 label: cached.label.clone(),
                 kind: ch.kind,
                 unread,
+                buzz: has_buzz,
                 presence_badge,
                 voice_badge,
                 muted,
@@ -658,6 +667,10 @@ impl DirectSidebar {
         cx.observe(&FriendStore::global(cx), |_, _, cx| cx.notify())
             .detach();
         cx.observe(&NotificationSettingStore::global(cx), |this, _, cx| {
+            this.refresh_dm_items(cx)
+        })
+        .detach();
+        cx.observe(&BuzzStore::global(cx), |this, _, cx| {
             this.refresh_dm_items(cx)
         })
         .detach();

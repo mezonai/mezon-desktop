@@ -89,6 +89,7 @@ pub enum DirectEvent {
 }
 
 const DM_PAGE_SIZE: i32 = 500;
+const DM_MEMBER_FETCH_LIMIT: i32 = 500;
 const DM_FETCH_MAX_ATTEMPTS: u32 = 3;
 const DM_FETCH_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(400);
 const MESSAGE_CODE_SEND_TOKEN: i32 = 11;
@@ -262,6 +263,7 @@ pub struct DirectMessageStore {
     pending_changed: Vec<ChannelId>,
     changed_notify_task: Option<Task<()>>,
     dm_space_joined: bool,
+    first_listing_done: bool,
     /// Bumped when the socket comes back. A listing issued on the socket that
     /// died carries the old value and drops its result, so the reconnect can
     /// clear `loading` and re-issue without the dead fetch clearing the flag —
@@ -308,6 +310,7 @@ impl DirectMessageStore {
         self.pending_changed.clear();
         self.changed_notify_task = None;
         self.dm_space_joined = false;
+        self.first_listing_done = false;
         cx.emit(DirectEvent::Changed { channel_id: None });
         cx.notify();
     }
@@ -326,6 +329,7 @@ impl DirectMessageStore {
             pending_changed: Vec::new(),
             changed_notify_task: None,
             dm_space_joined: false,
+            first_listing_done: false,
             socket_generation: 0,
             api,
             _conn_watch: conn_watch,
@@ -385,6 +389,13 @@ impl DirectMessageStore {
 
     pub fn channels(&self) -> &[DirectChannel] {
         self.channels.as_slice()
+    }
+
+    pub fn dm_with_peer(&self, user_id: UserId) -> Option<&DirectChannel> {
+        self.channels
+            .as_slice()
+            .iter()
+            .find(|channel| channel.kind == DirectKind::Dm && channel.peer_user_id == Some(user_id))
     }
 
     pub fn find(&self, id: ChannelId) -> Option<&DirectChannel> {
@@ -525,12 +536,7 @@ impl DirectMessageStore {
         let api = self.api.clone();
         let existing = existing_channel.or_else(|| {
             user_id.and_then(|user_id| {
-                self.channels
-                    .as_slice()
-                    .iter()
-                    .find(|channel| {
-                        channel.kind == DirectKind::Dm && channel.peer_user_id == Some(user_id)
-                    })
+                self.dm_with_peer(user_id)
                     .map(|channel| (channel.id, channel.kind.stream_mode()))
             })
         });
@@ -793,6 +799,7 @@ impl DirectMessageStore {
         self.loading = true;
         let api = self.api.clone();
         let socket_generation = self.socket_generation;
+        let listing_first = !self.first_listing_done;
         let timer = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
             // Retried, because a failure here does more than leave the list stale:
@@ -800,7 +807,13 @@ impl DirectMessageStore {
             // else re-triggers it while the socket stays up.
             let mut attempt = 1u32;
             let (result, badges) = loop {
-                let pair = tokio::join!(api.list_dm_channels(1), api.list_channel_badge_counts(0));
+                let pair = listing_then_badges(
+                    listing_first,
+                    attempt < DM_FETCH_MAX_ATTEMPTS,
+                    api.list_dm_channels(1),
+                    || api.list_channel_badge_counts(0),
+                )
+                .await;
                 if pair.0.is_ok() || attempt >= DM_FETCH_MAX_ATTEMPTS {
                     break pair;
                 }
@@ -829,6 +842,7 @@ impl DirectMessageStore {
                 match result {
                     Ok(list) => {
                         tracing::info!("DirectMessageStore: fetched {} DM channels", list.len());
+                        this.first_listing_done = true;
                         // The gateway has just served this user's clan-0 channel
                         // listing, so its cache is warm and the join can fan out.
                         this.join_dm_space(cx);
@@ -962,10 +976,6 @@ impl DirectMessageStore {
         true
     }
 
-    /// Mirrors mezon-react's `addDirectByMessageWS`: a DM/group message arriving for a
-    /// conversation not in the list (stranger DM, first message ever) synthesizes the entry
-    /// from the message itself so the conversation shows up immediately. The next full fetch
-    /// replaces it with the server record.
     pub fn insert_from_message(
         &mut self,
         m: &mezon_proto::api::ChannelMessage,
@@ -973,15 +983,59 @@ impl DirectMessageStore {
         increment_unread: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self
-            .channels
-            .push_new(direct_from_message(m, from_me, increment_unread))
-        {
+        let channel = direct_from_message(m, from_me, increment_unread);
+        if from_me {
+            self.insert_after_member_lookup(channel, UserId(m.sender_id), cx);
+            return false;
+        }
+        if !self.channels.push_new(channel) {
             return false;
         }
         cx.emit(DirectEvent::Changed { channel_id: None });
         cx.notify();
         true
+    }
+
+    fn insert_after_member_lookup(
+        &self,
+        channel: DirectChannel,
+        self_id: UserId,
+        cx: &mut Context<Self>,
+    ) {
+        let api = self.api.clone();
+        let socket_generation = self.socket_generation;
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .list_channel_users_uc(channel.id.get(), DM_MEMBER_FETCH_LIMIT)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.socket_generation != socket_generation {
+                    return;
+                }
+                let members = match result {
+                    Ok(members) => members,
+                    Err(e) => {
+                        tracing::warn!(
+                            "list_channel_users_uc failed for conversation {}: {e}",
+                            channel.id
+                        );
+                        return;
+                    }
+                };
+                let mut channel = channel;
+                enrich_direct_from_event_users(
+                    &mut channel,
+                    &users_from_channel_members(&members),
+                    Some(self_id),
+                );
+                if channel.label.is_empty() || !this.channels.push_new(channel) {
+                    return;
+                }
+                cx.emit(DirectEvent::Changed { channel_id: None });
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn note_read(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) -> bool {
@@ -1203,6 +1257,22 @@ struct DmBadgeInfo {
     badge_count: i32,
     last_sent_timestamp: i64,
     last_seen_timestamp: i64,
+}
+
+async fn listing_then_badges<T, U: Default, E, B: Future<Output = Result<U, E>>>(
+    sequential: bool,
+    listing_retry_left: bool,
+    listing: impl Future<Output = Result<T, E>>,
+    badges: impl FnOnce() -> B,
+) -> (Result<T, E>, Result<U, E>) {
+    if !sequential {
+        return tokio::join!(listing, badges());
+    }
+    let listed = listing.await;
+    if listed.is_err() && listing_retry_left {
+        return (listed, Ok(U::default()));
+    }
+    (listed, badges().await)
 }
 
 fn badge_map_from_descs(
@@ -1448,6 +1518,24 @@ fn enrich_direct_from_event_users(
     }
 }
 
+fn users_from_channel_members(
+    members: &mezon_proto::api::AllUsersAddChannelResponse,
+) -> Vec<mezon_proto::realtime::UserProfileRedis> {
+    members
+        .user_ids
+        .iter()
+        .enumerate()
+        .map(|(i, &user_id)| mezon_proto::realtime::UserProfileRedis {
+            user_id,
+            username: members.usernames.get(i).cloned().unwrap_or_default(),
+            display_name: members.display_names.get(i).cloned().unwrap_or_default(),
+            avatar: members.avatars.get(i).cloned().unwrap_or_default(),
+            online: members.onlines.get(i).copied().unwrap_or(false),
+            ..Default::default()
+        })
+        .collect()
+}
+
 fn apply_member_count(channel: &mut DirectChannel, member_count: u32) -> bool {
     if channel.kind != DirectKind::Group
         || member_count == 0
@@ -1469,7 +1557,10 @@ fn direct_from_message(
     } else {
         DirectKind::Dm
     };
-    let label = if !m.display_name.is_empty() {
+    let sender = (!from_me && m.sender_id != 0).then_some(UserId(m.sender_id));
+    let label = if from_me {
+        String::new()
+    } else if !m.display_name.is_empty() {
         m.display_name.clone()
     } else {
         m.username.clone()
@@ -1480,24 +1571,25 @@ fn direct_from_message(
         0
     };
     let (peer_user_id, peer_username) = match kind {
-        DirectKind::Dm => (
-            (m.sender_id != 0).then_some(UserId(m.sender_id)),
-            m.username.clone(),
-        ),
-        DirectKind::Group => (None, String::new()),
+        DirectKind::Dm if !from_me => (sender, m.username.clone()),
+        _ => (None, String::new()),
     };
     DirectChannel {
         id: ChannelId(m.channel_id),
         label,
         kind,
-        avatar: m.avatar.clone(),
+        avatar: if from_me {
+            String::new()
+        } else {
+            m.avatar.clone()
+        },
         peer_user_id,
         peer_username,
         creator_id: match kind {
-            DirectKind::Dm => (m.sender_id != 0).then_some(UserId(m.sender_id)),
+            DirectKind::Dm => sender,
             DirectKind::Group => None,
         },
-        online: true,
+        online: !from_me,
         member_count: 0,
         unread_count: u32::from(increment_unread),
         last_sent_timestamp: ts,
@@ -2458,6 +2550,77 @@ mod tests {
         ));
         crate::realtime::RealtimeDispatch::init(api.clone(), cx);
         cx.new(|cx| DirectMessageStore::new(api, cx))
+    }
+
+    fn run_listing_then_badges(
+        sequential: bool,
+        listing_ok: bool,
+        listing_retry_left: bool,
+    ) -> (Vec<&'static str>, Result<Vec<u32>, ()>) {
+        let log = std::cell::RefCell::new(Vec::new());
+        let (_, badges) = futures::executor::block_on(listing_then_badges(
+            sequential,
+            listing_retry_left,
+            async {
+                log.borrow_mut().push("listing-sent");
+                tokio::task::yield_now().await;
+                log.borrow_mut().push("listing-answered");
+                if listing_ok { Ok(()) } else { Err(()) }
+            },
+            || async {
+                log.borrow_mut().push("badges-sent");
+                Ok(vec![7])
+            },
+        ));
+        (log.into_inner(), badges)
+    }
+
+    fn position(events: &[&str], event: &str) -> usize {
+        events
+            .iter()
+            .position(|logged| *logged == event)
+            .unwrap_or(usize::MAX)
+    }
+
+    #[test]
+    fn the_first_listing_is_answered_before_the_badges_are_sent() {
+        let (events, badges) = run_listing_then_badges(true, true, true);
+        assert_eq!(events, ["listing-sent", "listing-answered", "badges-sent"]);
+        assert_eq!(badges, Ok(vec![7]));
+    }
+
+    #[test]
+    fn later_listings_send_the_badges_before_the_listing_is_answered() {
+        let (events, badges) = run_listing_then_badges(false, true, true);
+        assert!(position(&events, "badges-sent") < position(&events, "listing-answered"));
+        assert_eq!(badges, Ok(vec![7]));
+    }
+
+    #[test]
+    fn a_first_listing_that_will_be_retried_skips_the_badges() {
+        let (events, badges) = run_listing_then_badges(true, false, true);
+        assert!(!events.contains(&"badges-sent"));
+        assert_eq!(badges, Ok(Vec::new()));
+    }
+
+    #[test]
+    fn a_first_listing_that_failed_for_good_still_asks_for_the_badges() {
+        let (events, badges) = run_listing_then_badges(true, false, false);
+        assert_eq!(events, ["listing-sent", "listing-answered", "badges-sent"]);
+        assert_eq!(badges, Ok(vec![7]));
+    }
+
+    #[gpui::test]
+    fn a_new_session_lists_before_asking_for_badges_again(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = dm_store(cx);
+            store.update(cx, |store, cx| {
+                assert!(!store.first_listing_done);
+                store.first_listing_done = true;
+                store.reset(cx);
+                assert!(!store.first_listing_done);
+            });
+        });
     }
 
     fn conversation(id: i64, ts: i64) -> DirectChannel {

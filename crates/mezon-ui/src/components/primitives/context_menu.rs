@@ -382,6 +382,10 @@ pub struct ContextMenuProbeItem {
 }
 
 impl ContextMenu {
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty() && self.quick_reactions.is_empty()
+    }
+
     pub fn probe_items(&self) -> Vec<ContextMenuProbeItem> {
         self.items
             .iter()
@@ -593,6 +597,7 @@ impl RenderOnce for ContextMenu {
                         img(SharedString::from(src))
                             .id("quick-reaction-emoji-frames")
                             .size(px(QUICK_REACTION_EMOJI_PX))
+                            .aspect_square()
                             .with_fallback(move || {
                                 div()
                                     .size(px(QUICK_REACTION_EMOJI_PX))
@@ -950,6 +955,7 @@ impl RenderOnce for ContextMenu {
                                     img(SharedString::from(src))
                                         .id("reaction-sub-emoji-frames")
                                         .size(px(QUICK_REACTION_EMOJI_PX))
+                                        .aspect_square()
                                         .flex_none()
                                         .with_fallback(move || {
                                             div()

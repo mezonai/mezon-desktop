@@ -339,6 +339,8 @@ fn composer_snapshot(cx: &mut App) -> anyhow::Result<Value> {
         // What the next submit will answer, if anything.
         "reply_target": reply_target,
         "popup_open": popup_open,
+        "searching": composer.probe_searching(),
+        "stale": composer.probe_holding_stale(),
         "selected": selected,
         "suggestions": suggestions,
         "panel": composer.active_panel(cx).map(|tab| match tab {
@@ -737,7 +739,10 @@ pub fn topic_drop_paths(cx: &mut App, paths: Vec<String>) -> anyhow::Result<Valu
 pub fn reply_begin(cx: &mut App, message_id: i64) -> anyhow::Result<Value> {
     let store = mezon_store::MessagesStore::global(cx);
     store.update(cx, |store, cx| {
-        store.set_reply_to(mezon_store::MessageId::new(message_id), cx)
+        store.set_reply_to(
+            mezon_store::MessageRef::unbucketed(mezon_store::MessageId::new(message_id)),
+            cx,
+        )
     });
     let target = store.read(cx).reply_target().map(|draft| {
         json!({

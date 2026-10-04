@@ -2,8 +2,8 @@ use gpui::{App, ClipboardItem, SharedString, WeakEntity, Window};
 use mezon_client::transport::QUICK_MENU_TYPE_QUICK;
 use mezon_store::{
     AppConfig, ChannelId, ChannelPermissionsStore, DirectKind, DirectMessageStore, EmojiStore,
-    Message, MessageCode, MessageId, MessagesStore, PERMISSION_DELETE_MESSAGE, PinnedMessagesStore,
-    QuickMenuStore, ThreadsStore, TopicsStore,
+    Message, MessageCode, MessageId, MessageRef, MessagesStore, PERMISSION_DELETE_MESSAGE,
+    PinnedMessagesStore, QuickMenuStore, ThreadsStore, TopicsStore,
 };
 
 use super::channel_messages::ChannelMessages;
@@ -18,14 +18,14 @@ pub(crate) fn resolve_forward_group_in(
     messages: &[Message],
     message_id: MessageId,
     sender_id: &str,
-) -> Vec<MessageId> {
+) -> Vec<MessageRef> {
     let Some(start) = messages.iter().position(|m| m.id == message_id) else {
-        return vec![message_id];
+        return vec![MessageRef::unbucketed(message_id)];
     };
-    let mut ids = vec![message_id];
+    let mut ids = vec![messages[start].message_ref()];
     for m in &messages[start + 1..] {
         if m.combined_with_prev && m.sender_id.as_str() == sender_id {
-            ids.push(m.id);
+            ids.push(m.message_ref());
         } else {
             break;
         }
@@ -37,7 +37,7 @@ pub(crate) fn resolve_forward_group(
     message_id: MessageId,
     sender_id: &str,
     cx: &App,
-) -> Vec<MessageId> {
+) -> Vec<MessageRef> {
     let store = MessagesStore::global(cx);
     let store = store.read(cx);
     resolve_forward_group_in(store.messages(), message_id, sender_id)
@@ -45,7 +45,7 @@ pub(crate) fn resolve_forward_group(
 
 fn append_quick_menus(
     menu: ContextMenu,
-    message_id: MessageId,
+    target: MessageRef,
     locale: &str,
     quick_menu_submenu_open: bool,
     host: WeakEntity<ChannelMessages>,
@@ -92,7 +92,7 @@ fn append_quick_menus(
                 return;
             };
             MessagesStore::global(cx).update(cx, |store, cx| {
-                store.execute_quick_menu(name.as_ref(), message_id, cx);
+                store.execute_quick_menu(name.as_ref(), target, cx);
             });
         },
     )
@@ -190,13 +190,14 @@ pub(crate) fn edit_message_allowed(
         && !is_forwarded
         && code != MessageCode::SendToken
         && code != MessageCode::Poll
+        && code != MessageCode::Topic
         && code.is_user_timeline()
 }
 
 pub(crate) fn message_is_editable(msg: &Message, current_user_id: &str) -> bool {
     msg.command.is_none()
         && edit_message_allowed(
-            current_user_id == msg.sender_id.as_str(),
+            msg.is_sent_by(current_user_id),
             msg.code,
             msg.is_forwarded,
             msg.send_failed,
@@ -288,7 +289,7 @@ fn build_failed_menu(
             }
         }
     };
-    let message_id = msg.id;
+    let target = msg.message_ref();
     let locale_owned = locale.to_string();
     ContextMenu::new()
         .on_dismiss(dismiss)
@@ -297,7 +298,7 @@ fn build_failed_menu(
             IconName::ResendMessageRightClick,
             move |_, cx| {
                 MessagesStore::global(cx).update(cx, |store, cx| {
-                    store.resend_message(message_id, cx);
+                    store.resend_message(target, cx);
                 });
                 Shell::global(cx).update(cx, |shell, cx| {
                     shell.info(
@@ -315,7 +316,7 @@ fn build_failed_menu(
             IconName::DeleteMessageRightClick,
             move |_, cx| {
                 MessagesStore::global(cx)
-                    .update(cx, |store, cx| store.remove_failed_message(message_id, cx));
+                    .update(cx, |store, cx| store.remove_failed_message(target, cx));
             },
         )
 }
@@ -323,7 +324,7 @@ fn build_failed_menu(
 #[allow(clippy::too_many_arguments)]
 fn menu_with_reactions(
     dismiss: impl Fn(&mut Window, &mut App) + 'static,
-    message_id: MessageId,
+    target: MessageRef,
     reaction_submenu_open: bool,
     add_reaction_label: SharedString,
     view_more_label: SharedString,
@@ -339,7 +340,7 @@ fn menu_with_reactions(
             quick_emojis.clone(),
             move |emoji_id, shortname, _window, cx| {
                 MessagesStore::global(cx).update(cx, |store, cx| {
-                    store.add_reaction(message_id, emoji_id, shortname, cx);
+                    store.add_reaction(target, emoji_id, shortname, cx);
                 });
             },
         )
@@ -360,7 +361,7 @@ fn menu_with_reactions(
             },
             move |emoji_id, shortname, _window, cx| {
                 MessagesStore::global(cx).update(cx, |store, cx| {
-                    store.add_reaction(message_id, emoji_id, shortname, cx);
+                    store.add_reaction(target, emoji_id, shortname, cx);
                 });
             },
             move |window, cx| {
@@ -369,7 +370,7 @@ fn menu_with_reactions(
                 window.defer(cx, move |window, cx| {
                     if let Some(view) = host.upgrade() {
                         view.update(cx, |this, cx| {
-                            this.open_reaction_picker(message_id, position, window, cx);
+                            this.open_reaction_picker(target.id, position, window, cx);
                         });
                     }
                 });
@@ -411,7 +412,7 @@ fn build_topic_menu(
 
     let mut menu = menu_with_reactions(
         dismiss,
-        msg.id,
+        msg.message_ref(),
         reaction_submenu_open,
         t("contextMenu.addReaction").into(),
         t("contextMenu.viewMore").into(),
@@ -420,13 +421,13 @@ fn build_topic_menu(
     );
 
     if sender_allows_give_coffee(msg, current_user_id, cx) {
-        let message_id = msg.id;
+        let target = msg.message_ref();
         menu = menu.item_trailing_icon(
             t("contextMenu.giveACoffee"),
             IconName::DollarIconRightClick,
             move |_, cx| {
                 MessagesStore::global(cx).update(cx, |store, cx| {
-                    store.give_coffee_reaction(message_id, cx);
+                    store.give_coffee_reaction(target, cx);
                 });
             },
         );
@@ -450,29 +451,24 @@ fn build_topic_menu(
     menu = menu.separator();
 
     {
-        let message_id = msg.id;
+        let target = msg.message_ref();
         menu = menu.item_trailing_icon(
             t("contextMenu.reply"),
             IconName::ReplyRightClick,
             move |_, cx| {
-                TopicsStore::global(cx).update(cx, |store, cx| store.set_reply_to(message_id, cx));
+                TopicsStore::global(cx).update(cx, |store, cx| store.set_reply_to(target, cx));
             },
         );
     }
 
     if !is_poll {
         let locale_owned = locale.to_string();
-        let message_id = msg.id;
+        let target = msg.message_ref();
         menu = menu.item_trailing_icon(
             t("contextMenu.forwardMessage"),
             IconName::ForwardRightClick,
             move |window, cx| {
-                ForwardMessageModal::open(
-                    vec![message_id],
-                    locale_owned.clone().into(),
-                    window,
-                    cx,
-                );
+                ForwardMessageModal::open(vec![target], locale_owned.clone().into(), window, cx);
             },
         );
     }
@@ -513,20 +509,19 @@ fn build_topic_menu(
     }
 
     {
-        let message_id = msg.id;
+        let target = msg.message_ref();
         menu = menu.item_trailing_icon(
             t("contextMenu.addToInbox"),
             IconName::AddToInboxIcon,
             move |_window, cx| {
-                MessagesStore::global(cx)
-                    .update(cx, |store, cx| store.add_to_inbox(message_id, cx));
+                MessagesStore::global(cx).update(cx, |store, cx| store.add_to_inbox(target, cx));
             },
         );
     }
 
     menu = append_quick_menus(
         menu,
-        msg.id,
+        msg.message_ref(),
         locale,
         quick_menu_submenu_open,
         host.clone(),
@@ -555,7 +550,7 @@ fn build_topic_menu(
     }
 
     if can_delete_message(msg, current_user_id, true, cx) {
-        let message_id = msg.id;
+        let target = msg.message_ref();
         let locale_owned = locale.to_string();
         menu = menu.separator().danger_item_trailing_icon(
             t("contextMenu.deleteMessage"),
@@ -563,7 +558,7 @@ fn build_topic_menu(
             move |window, cx| {
                 let locale = locale_owned.clone();
                 Shell::global(cx).update(cx, |shell, cx| {
-                    shell.confirm_delete_message(message_id, &locale, window, cx);
+                    shell.confirm_delete_message(target, &locale, window, cx);
                 });
             },
         );
@@ -611,7 +606,7 @@ fn build_channel_menu(
 
     let mut menu = menu_with_reactions(
         dismiss,
-        msg.id,
+        msg.message_ref(),
         reaction_submenu_open,
         t("contextMenu.addReaction").into(),
         t("contextMenu.viewMore").into(),
@@ -620,13 +615,13 @@ fn build_channel_menu(
     );
 
     if !is_own_message && sender_allows_give_coffee(msg, current_user_id, cx) {
-        let message_id = msg.id;
+        let target = msg.message_ref();
         menu = menu.item_trailing_icon(
             t("contextMenu.giveACoffee"),
             IconName::DollarIconRightClick,
             move |_, cx| {
                 MessagesStore::global(cx).update(cx, |store, cx| {
-                    store.give_coffee_reaction(message_id, cx);
+                    store.give_coffee_reaction(target, cx);
                 });
             },
         );
@@ -671,30 +666,24 @@ fn build_channel_menu(
     menu = menu.separator();
 
     if can_send_message || MessagesStore::global(cx).read(cx).is_dm() {
-        let message_id = msg.id;
+        let target = msg.message_ref();
         menu = menu.item_trailing_icon(
             t("contextMenu.reply"),
             IconName::ReplyRightClick,
             move |_, cx| {
-                MessagesStore::global(cx)
-                    .update(cx, |store, cx| store.set_reply_to(message_id, cx));
+                MessagesStore::global(cx).update(cx, |store, cx| store.set_reply_to(target, cx));
             },
         );
     }
 
     if !is_poll {
         let locale_owned = locale.to_string();
-        let message_id = msg.id;
+        let target = msg.message_ref();
         menu = menu.item_trailing_icon(
             t("contextMenu.forwardMessage"),
             IconName::ForwardRightClick,
             move |window, cx| {
-                ForwardMessageModal::open(
-                    vec![message_id],
-                    locale_owned.clone().into(),
-                    window,
-                    cx,
-                );
+                ForwardMessageModal::open(vec![target], locale_owned.clone().into(), window, cx);
             },
         );
     }
@@ -795,19 +784,18 @@ fn build_channel_menu(
         );
     }
     {
-        let message_id = msg.id;
+        let target = msg.message_ref();
         menu = menu.item_trailing_icon(
             t("contextMenu.addToInbox"),
             IconName::AddToInboxIcon,
             move |_window, cx| {
-                MessagesStore::global(cx)
-                    .update(cx, |store, cx| store.add_to_inbox(message_id, cx));
+                MessagesStore::global(cx).update(cx, |store, cx| store.add_to_inbox(target, cx));
             },
         );
     }
     menu = append_quick_menus(
         menu,
-        msg.id,
+        msg.message_ref(),
         locale,
         quick_menu_submenu_open,
         host.clone(),
@@ -887,7 +875,7 @@ fn build_channel_menu(
     }
 
     if can_delete_message(msg, current_user_id, false, cx) {
-        let message_id = msg.id;
+        let target = msg.message_ref();
         let locale_owned = locale.to_string();
         menu = menu.separator().danger_item_trailing_icon(
             t("contextMenu.deleteMessage"),
@@ -895,7 +883,7 @@ fn build_channel_menu(
             move |window, cx| {
                 let locale = locale_owned.clone();
                 Shell::global(cx).update(cx, |shell, cx| {
-                    shell.confirm_delete_message(message_id, &locale, window, cx);
+                    shell.confirm_delete_message(target, &locale, window, cx);
                 });
             },
         );
@@ -958,6 +946,7 @@ mod edit_permission_tests {
         for code in [
             MessageCode::SendToken,
             MessageCode::Poll,
+            MessageCode::Topic,
             MessageCode::Welcome,
             MessageCode::AuditLog,
             MessageCode::CreateThread,

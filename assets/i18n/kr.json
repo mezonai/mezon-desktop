@@ -3270,6 +3270,7 @@
   "message.actions.unPinMessage": "메시지 고정 해제",
   "message.addAMessage": "메시지 추가 (선택 사항)",
   "message.attachment.uploading": "업로드 중...",
+  "message.attachment.uploadFailed": "업로드 실패",
   "message.attachments.attachment": "첨부 파일",
   "message.attachments.audio": "음성 메시지",
   "message.attachments.contact": "명함",
@@ -4775,5 +4776,8 @@
   "screenShare.modeVideoDescription": "영상이 더 부드럽습니다. 연결이 느리면 선명도가 떨어질 수 있습니다.",
   "chat.activityStrip.latestPin": "최근 고정",
   "chat.activityStrip.latestTopicMessage": "토픽의 최신 메시지",
-  "chat.activityStrip.messageFrom": "{{name}}님의 메시지: {{message}}"
+  "chat.activityStrip.messageFrom": "{{name}}님의 메시지: {{message}}",
+  "chat.activityStrip.hideAction": "고정 및 토픽 표시줄 숨기기",
+  "chat.activityStrip.hideConfirm.title": "고정 및 토픽 표시줄 숨기기",
+  "chat.activityStrip.hideConfirm.description": "이 채널의 고정 및 토픽 표시줄을 숨기시겠습니까? 새 고정이나 토픽이 생기면 자동으로 다시 나타납니다."
 }

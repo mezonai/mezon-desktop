@@ -30,7 +30,7 @@ use crate::permissions::{
     PERMISSION_MANAGE_CLAN, PermissionStore,
 };
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
-use crate::text_utils::normalize_diacritics;
+use crate::text_utils::{VietnameseSortKey, vietnamese_sort_key};
 use crate::threads::CHANNEL_TYPE_THREAD;
 
 pub const FAVOR_CATE_ID: &str = "favorCate";
@@ -666,8 +666,6 @@ pub struct ChannelList {
     forgotten_clans: HashSet<ClanId>,
     user_channels: HashMap<ChannelId, Channel>,
     user_channels_order: Vec<ChannelId>,
-    user_channels_loading: bool,
-    user_channels_generation: u64,
     in_voice: HashMap<UserId, InVoiceInfo>,
     voice_revisions: HashMap<ClanId, u64>,
     user_channels_loaded: bool,
@@ -859,8 +857,6 @@ impl ChannelList {
         self.forgotten_clans.clear();
         self.user_channels.clear();
         self.user_channels_order.clear();
-        self.user_channels_loading = false;
-        self.user_channels_generation = self.user_channels_generation.wrapping_add(1);
         self.in_voice.clear();
         self.voice_revisions.clear();
         self.user_channels_loaded = false;
@@ -972,8 +968,6 @@ impl ChannelList {
             forgotten_clans: HashSet::new(),
             user_channels: HashMap::new(),
             user_channels_order: Vec::new(),
-            user_channels_loading: false,
-            user_channels_generation: 0,
             in_voice: HashMap::new(),
             voice_revisions: HashMap::new(),
             user_channels_loaded: false,
@@ -1022,9 +1016,6 @@ impl ChannelList {
         if !self.forgotten_clans.remove(&clan_id) {
             return;
         }
-        self.user_channels_generation = self.user_channels_generation.wrapping_add(1);
-        self.user_channels_loading = false;
-        self.user_channels_loaded = false;
         self.fetch_user_channels(cx);
         let active = self
             .active_clan_id
@@ -1038,8 +1029,6 @@ impl ChannelList {
 
     pub fn forget_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         self.forgotten_clans.insert(clan_id);
-        self.user_channels_generation = self.user_channels_generation.wrapping_add(1);
-        self.user_channels_loading = false;
         let channel_ids: Vec<ChannelId> = self
             .cache
             .get(&clan_id)
@@ -1794,36 +1783,10 @@ impl ChannelList {
     }
 
     fn fetch_user_channels(&mut self, cx: &mut Context<Self>) {
-        if self.user_channels_loading {
-            return;
-        }
-        self.user_channels_loading = true;
-        let api = self.api.clone();
-        let reset_generation = self.reset_generation;
-        let user_channels_generation = self.user_channels_generation;
-        cx.spawn(async move |this, cx| {
-            let result = api.list_channel_by_user_id().await;
-            let _ = this.update(cx, |this, cx| {
-                if this.reset_generation != reset_generation
-                    || this.user_channels_generation != user_channels_generation
-                {
-                    return;
-                }
-                this.user_channels_loading = false;
-                match result {
-                    Ok(descs) => {
-                        this.merge_user_channels_from_api_descs(descs, cx);
-                        this.user_channels_loaded = true;
-                        cx.emit(ChannelEvent::UserChannelsLoaded);
-                        cx.notify();
-                    }
-                    Err(e) => {
-                        tracing::warn!("list_channel_by_user_id failed: {e}");
-                    }
-                }
-            });
-        })
-        .detach();
+        self.sync_user_channels_from_all_loaded_caches(cx);
+        self.user_channels_loaded = true;
+        cx.emit(ChannelEvent::UserChannelsLoaded);
+        cx.notify();
     }
 
     pub fn user_channel(&self, channel_id: ChannelId) -> Option<&Channel> {
@@ -1842,7 +1805,7 @@ impl ChannelList {
     }
 
     pub fn ensure_user_channels_loaded(&mut self, cx: &mut Context<Self>) {
-        if !self.user_channels_loaded && !self.user_channels_loading {
+        if !self.user_channels_loaded {
             self.fetch_user_channels(cx);
         }
     }
@@ -2429,7 +2392,8 @@ impl ChannelList {
         }
     }
 
-    fn merge_user_channels_from_api_descs(
+    #[cfg(test)]
+    fn seed_user_channels_for_test(
         &mut self,
         descs: Vec<mezon_client::transport::ApiChannelDesc>,
         cx: &mut Context<Self>,
@@ -2451,7 +2415,12 @@ impl ChannelList {
     }
 
     fn sync_user_channels_from_all_loaded_caches(&mut self, _cx: &mut Context<Self>) {
-        let clan_ids: Vec<ClanId> = self.cache.iter().map(|(id, _)| *id).collect();
+        let clan_ids: Vec<ClanId> = self
+            .cache
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| !self.forgotten_clans.contains(id))
+            .collect();
         for clan_id in clan_ids {
             let batch: Vec<Channel> = self
                 .cache
@@ -3670,6 +3639,9 @@ impl ChannelList {
                         break;
                     }
                 }
+                if changed && label.is_some() {
+                    self.invalidate_channel_index(clan_id);
+                }
                 if changed {
                     cx.notify();
                 }
@@ -4066,8 +4038,6 @@ impl ChannelList {
         self.extras_loaded.clear();
         self.extras_loading.clear();
         self.loading.clear();
-        self.user_channels_generation = self.user_channels_generation.wrapping_add(1);
-        self.user_channels_loading = false;
         self.fetch_user_channels(cx);
         if let Some(clan_id) = self.active_clan_id {
             self.load_for_clan(clan_id, cx);
@@ -4341,7 +4311,12 @@ impl ChannelList {
             return Some(clan_id);
         }
         let clan_id = self.active_clan_id?;
-        let parent_id = self.active_channel_id?;
+        let active_channel_id = self.active_channel_id?;
+        let parent_id = self
+            .channel(clan_id, active_channel_id)
+            .filter(|viewed| viewed.channel_type == ChannelType::Thread)
+            .and_then(|viewed| viewed.parent_id)
+            .unwrap_or(active_channel_id);
         let channel = thread_channel_from_context(
             thread_id,
             label,
@@ -4385,6 +4360,7 @@ impl ChannelList {
     fn resort_thread_block_for(&mut self, clan_id: ClanId, channel_id: ChannelId) {
         if let Some(categories) = self.cache.get_mut(&clan_id) {
             resort_thread_block(categories, channel_id);
+            self.invalidate_channel_index(clan_id);
         }
     }
 
@@ -5799,10 +5775,8 @@ fn assemble_with_favorites(mut categories: Vec<Category>, clan_id: ClanId) -> Ve
     categories
 }
 
-/// Sort key for a thread row in the sidebar: accent-folded, lower-cased label,
-/// tie-broken by id so equal labels keep a stable order.
-fn thread_sort_key(ch: &Channel) -> (String, ChannelId) {
-    (normalize_diacritics(&ch.name), ch.id)
+fn thread_sort_key(ch: &Channel) -> (VietnameseSortKey, ChannelId) {
+    (vietnamese_sort_key(&ch.name), ch.id)
 }
 
 /// Half-open range of the contiguous rows belonging to `parent_id`'s thread block.
@@ -7131,7 +7105,7 @@ mod tests {
         cx.update(|cx| {
             let channels = init_authenticated_channel_list(cx);
             channels.update(cx, |channels, cx| {
-                channels.merge_user_channels_from_api_descs(
+                channels.seed_user_channels_for_test(
                     vec![api_desc(2, "alpha", 0), api_desc(6, "zulu", 0)],
                     cx,
                 );
@@ -7199,7 +7173,7 @@ mod tests {
                     cx,
                 );
                 channels.apply_local_archive(ClanId(1), ChannelId(1), ChannelId(0), cx);
-                channels.merge_user_channels_from_api_descs(vec![api_desc(1, "general", 0)], cx);
+                channels.seed_user_channels_for_test(vec![api_desc(1, "general", 0)], cx);
 
                 let targets = channels.webhook_target_channels_for_clan(ClanId(1));
                 assert!(targets.is_empty());
@@ -8195,24 +8169,74 @@ mod tests {
         assert_eq!(names, vec!["parent", "alpha", "mike", "zulu"]);
     }
 
-    #[test]
-    fn build_categories_thread_sort_is_case_and_accent_insensitive() {
+    fn sorted_thread_names(names: &[&str]) -> Vec<String> {
         let api_cats = vec![ApiCategoryDesc {
             category_id: 1,
             category_name: "General".into(),
             clan_id: 1,
             category_order: 0,
         }];
-        let mut da_nang = make_thread(11, 10, "1");
-        da_nang.name = "Đà Nẵng".into();
-        let mut zebra = make_thread(12, 10, "1");
-        zebra.name = "zebra".into();
-        let mut echo = make_thread(13, 10, "1");
-        echo.name = "Echo".into();
-        let mut channels = vec![make_channel(10, "parent", "1"), zebra, echo, da_nang];
+        let mut channels = vec![make_channel(10, "parent", "1")];
+        for (index, name) in names.iter().enumerate() {
+            let mut thread = make_thread(11 + index as i64, 10, "1");
+            thread.name = (*name).into();
+            channels.push(thread);
+        }
         let cats = build_categories(api_cats, &mut channels);
-        let names: Vec<&str> = cats[0].channels.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["parent", "Đà Nẵng", "Echo", "zebra"]);
+        cats[0].channels[1..]
+            .iter()
+            .map(|c| c.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn threads_sort_icons_then_numbers_then_lowercase_then_uppercase() {
+        assert_eq!(
+            sorted_thread_names(&[
+                "channelmessage",
+                "desktop-rust",
+                "Events",
+                "rules",
+                "ui-adjustment",
+                "webhook-github",
+                "📅 daily",
+                "123 release",
+            ]),
+            vec![
+                "📅 daily",
+                "123 release",
+                "channelmessage",
+                "desktop-rust",
+                "rules",
+                "ui-adjustment",
+                "webhook-github",
+                "Events",
+            ]
+        );
+    }
+
+    #[test]
+    fn threads_sort_by_the_vietnamese_alphabet() {
+        assert_eq!(
+            sorted_thread_names(&[
+                "đá", "dê", "ân", "ăn", "an", "ơi", "ôm", "om", "ưu", "uống", "ê", "e",
+            ]),
+            vec![
+                "an", "ăn", "ân", "dê", "đá", "e", "ê", "om", "ôm", "ơi", "uống", "ưu",
+            ]
+        );
+        assert_eq!(
+            sorted_thread_names(&["Echo", "Đà Nẵng", "Dê"]),
+            vec!["Dê", "Đà Nẵng", "Echo"]
+        );
+    }
+
+    #[test]
+    fn threads_with_the_same_letters_sort_by_tone() {
+        assert_eq!(
+            sorted_thread_names(&["bạn", "bán", "bàn", "ban", "bản", "bãn", "bác"]),
+            vec!["bác", "ban", "bàn", "bản", "bãn", "bán", "bạn"]
+        );
     }
 
     #[test]
@@ -8240,6 +8264,47 @@ mod tests {
 
         let names: Vec<&str> = cats[0].channels.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["parent", "alpha", "mike", "zulu", "later"]);
+    }
+
+    #[test]
+    fn a_new_thread_lands_in_its_vietnamese_alphabet_slot() {
+        let thread = |id: i64, name: &str| {
+            let mut thread = make_thread(id, 10, "cat1");
+            thread.name = name.into();
+            thread
+        };
+        let mut cats = vec![Category {
+            id: "cat1".into(),
+            clan_id: ClanId(1),
+            name: "General".into(),
+            order: 0,
+            channels: vec![
+                make_channel(10, "parent", "cat1"),
+                thread(15, "📅 daily"),
+                thread(16, "channelmessage"),
+                thread(17, "Events"),
+                make_channel(50, "later", "cat1"),
+            ],
+        }];
+
+        assert!(insert_channel(&mut cats, thread(90, "đổi tên")));
+        assert!(insert_channel(&mut cats, thread(91, "7 ngày")));
+        assert!(insert_channel(&mut cats, thread(92, "Ăn trưa")));
+
+        let names: Vec<&str> = cats[0].channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "parent",
+                "📅 daily",
+                "7 ngày",
+                "channelmessage",
+                "đổi tên",
+                "Ăn trưa",
+                "Events",
+                "later",
+            ]
+        );
     }
 
     #[test]
@@ -8977,7 +9042,6 @@ mod tests {
                 channels.user_channels_loaded,
                 "leave must not reset user_channels_loaded; a palette open would refetch and mark it loaded again"
             );
-            assert!(!channels.user_channels_loading);
             assert!(channels.user_channel(ChannelId(10)).is_none());
         });
     }
@@ -9037,15 +9101,15 @@ mod tests {
                     !channels.forgotten_clans.contains(&ClanId(1)),
                     "ClanEvent::Joined must clear the forgotten guard when the clan list lands"
                 );
-                assert!(
-                    !channels.user_channels_loaded,
-                    "rejoin must reset user_channels_loaded so the new clan is fetched"
-                );
                 channels.load_for_clan(ClanId(1), cx);
                 channels.apply_clan_structure(ClanId(1), categories(), None, cx);
                 assert!(
                     channels.cache.get(&ClanId(1)).is_some(),
                     "joining a clan again must show its channels without restarting the app"
+                );
+                assert!(
+                    channels.user_channels().any(|ch| ch.clan_id == ClanId(1)),
+                    "a rejoined clan's channels must be back in the cross-clan list"
                 );
             });
         });
@@ -9112,7 +9176,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn in_flight_user_channels_after_leave_do_not_restore_the_left_clan(
+    fn rebuilding_user_channels_after_leave_does_not_restore_the_left_clan(
         cx: &mut gpui::TestAppContext,
     ) {
         let channels = cx.update(|cx| {
@@ -9123,8 +9187,8 @@ mod tests {
             channels.update(cx, |channels, cx| {
                 channels.seed_clan_channels_for_test(ClanId(1), categories());
                 channels.apply_clan_structure(ClanId(1), categories(), None, cx);
-                channels.user_channels_loaded = true;
-                channels.user_channels_loading = true;
+                channels.fetch_user_channels(cx);
+                assert!(channels.user_channels().any(|ch| ch.clan_id == ClanId(1)));
             });
             channels
         });
@@ -9143,40 +9207,10 @@ mod tests {
 
         cx.update(|cx| {
             channels.update(cx, |channels, cx| {
-                assert!(!channels.user_channels_loading);
-                assert!(channels.user_channels_loaded);
-                channels.merge_user_channels_from_api_descs(
-                    vec![ApiChannelDesc {
-                        channel_id: 10,
-                        channel_label: "alpha".into(),
-                        channel_type: 1,
-                        clan_id: 1,
-                        category_name: String::new(),
-                        category_id: 0,
-                        channel_private: 0,
-                        count_mess_unread: 0,
-                        member_count: 0,
-                        parent_id: 0,
-                        is_mute: false,
-                        last_seen_message_id: 0,
-                        last_seen_timestamp: 0,
-                        last_sent_message_id: 0,
-                        last_sent_timestamp: 0,
-                        badge_count: 0,
-                        active: CHANNEL_ACTIVE_JOINED,
-                        creator_id: 0,
-                        clan_name: String::new(),
-                        channel_avatar: String::new(),
-                        topic: String::new(),
-                        age_restricted: 0,
-                        e2ee: 0,
-                        app_id: 0,
-                    }],
-                    cx,
-                );
+                channels.fetch_user_channels(cx);
                 assert!(
-                    channels.user_channel(ChannelId(10)).is_none(),
-                    "a list_channel_by_user_id that resolves after leave must not restore the left clan"
+                    channels.user_channels().all(|ch| ch.clan_id != ClanId(1)),
+                    "rebuilding the cross-clan list after leave must not restore the left clan"
                 );
             });
         });
@@ -9402,7 +9436,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn list_channel_by_user_id_merge_keeps_clan_structure_threads(cx: &mut gpui::TestAppContext) {
+    fn user_channels_keep_clan_structure_threads(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let channels = init_authenticated_channel_list(cx);
             channels.update(cx, |channels, cx| {
@@ -9416,7 +9450,7 @@ mod tests {
                     thread.private = true;
                 }
                 channels.apply_clan_structure(ClanId(1), structure, None, cx);
-                channels.merge_user_channels_from_api_descs(vec![], cx);
+                channels.fetch_user_channels(cx);
 
                 let thread = channels.user_channel(ChannelId(9)).expect("private thread");
                 assert_eq!(thread.name, "Tes Private thread");
@@ -12943,6 +12977,43 @@ mod tests {
     }
 
     #[gpui::test]
+    fn ensure_thread_channel_files_a_thread_opened_from_a_sibling_under_the_parent(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_three_named_threads(),
+                    None,
+                    cx,
+                );
+                channels.active_clan_id = Some(ClanId(1));
+                channels.active_channel_id = Some(ChannelId(8));
+
+                channels.ensure_thread_channel_with_active(
+                    ChannelId(20),
+                    "lima".into(),
+                    CHANNEL_ACTIVE_JOINED,
+                    false,
+                    None,
+                    cx,
+                );
+
+                let created = channels
+                    .channel(ClanId(1), ChannelId(20))
+                    .expect("new thread is in the sidebar");
+                assert_eq!(created.parent_id, Some(ChannelId(1)));
+                assert_eq!(
+                    thread_names_in_clan(channels, ClanId(1)),
+                    vec!["parent", "alpha", "lima", "mike", "zulu"]
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
     fn apply_thread_reactivated_resorts_after_a_rename(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
@@ -13461,6 +13532,148 @@ mod tests {
 
                 assert_eq!(drawn_rows(channels), vec![1, 42, 41, 2, 3]);
                 assert_eq!(row_order(channels, &category_key()), vec![1, 2, 3]);
+            });
+        });
+    }
+
+    fn structure_with_threads(threads: &[(i64, &str)]) -> Vec<Category> {
+        let api_cats = vec![ApiCategoryDesc {
+            category_id: 1,
+            category_name: "General".into(),
+            clan_id: 1,
+            category_order: 0,
+        }];
+        let mut rows = vec![make_channel(1, "mezon", "1")];
+        for (id, name) in threads {
+            let mut thread = make_channel(*id, name, "1");
+            thread.parent_id = Some(ChannelId(1));
+            rows.push(thread);
+        }
+        build_categories(api_cats, &mut rows)
+    }
+
+    fn found_ids(channels: &ChannelList, ids: &[i64]) -> Vec<Option<i64>> {
+        ids.iter()
+            .map(|id| {
+                channels
+                    .channel(ClanId(1), ChannelId(*id))
+                    .map(|channel| channel.id.get())
+            })
+            .collect()
+    }
+
+    #[gpui::test]
+    fn a_thread_renamed_by_someone_else_is_still_found_where_it_moved(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                let threads = [(41, "alpha"), (42, "mike"), (43, "zulu")];
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_threads(&threads),
+                    None,
+                    cx,
+                );
+                assert_eq!(
+                    found_ids(channels, &[41, 42, 43]),
+                    vec![Some(41), Some(42), Some(43)]
+                );
+
+                channels.handle_event(
+                    &RealtimeEvent::ChannelUpdated(mezon_proto::realtime::ChannelUpdatedEvent {
+                        clan_id: 1,
+                        channel_id: 41,
+                        channel_label: "Zeta".into(),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+
+                assert_eq!(drawn_rows(channels), vec![1, 42, 43, 41]);
+                assert_eq!(
+                    found_ids(channels, &[41, 42, 43]),
+                    vec![Some(41), Some(42), Some(43)]
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_thread_renamed_on_reactivation_is_still_found_where_it_moved(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                let threads = [(41, "events"), (42, "mike"), (43, "zulu")];
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_threads(&threads),
+                    None,
+                    cx,
+                );
+                assert_eq!(
+                    found_ids(channels, &[41, 42, 43]),
+                    vec![Some(41), Some(42), Some(43)]
+                );
+
+                channels.ensure_thread_with_parent_active(
+                    ChannelId(41),
+                    ChannelId(1),
+                    ClanId(1),
+                    "Events".into(),
+                    CHANNEL_ACTIVE_JOINED,
+                    true,
+                    None,
+                    cx,
+                );
+
+                assert_eq!(drawn_rows(channels), vec![1, 42, 43, 41]);
+                assert_eq!(
+                    found_ids(channels, &[41, 42, 43]),
+                    vec![Some(41), Some(42), Some(43)]
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn dragged_threads_keep_their_order_and_new_ones_follow_in_vietnamese_order(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let structure = structure_with_threads;
+        let dragged = [(41, "rules"), (42, "channelmessage"), (43, "Events")];
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure(&dragged), None, cx);
+                assert_eq!(drawn_rows(channels), vec![1, 42, 41, 43]);
+
+                channels.move_sidebar_row(
+                    SidebarOrderKey::Threads(ChannelId(1)),
+                    ChannelId(43),
+                    ChannelId(42),
+                    cx,
+                );
+                assert_eq!(drawn_rows(channels), vec![1, 43, 42, 41]);
+
+                let with_new_threads = [
+                    dragged[0],
+                    dragged[1],
+                    dragged[2],
+                    (44, "đổi tên"),
+                    (45, "📅 daily"),
+                    (46, "Ăn trưa"),
+                ];
+                channels.apply_clan_structure(ClanId(1), structure(&with_new_threads), None, cx);
+                assert_eq!(drawn_rows(channels), vec![1, 43, 42, 41, 45, 44, 46]);
+
+                let mut renamed = with_new_threads;
+                renamed[2] = (43, "zzz");
+                channels.apply_clan_structure(ClanId(1), structure(&renamed), None, cx);
+                assert_eq!(drawn_rows(channels), vec![1, 43, 42, 41, 45, 44, 46]);
             });
         });
     }

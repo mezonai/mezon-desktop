@@ -777,7 +777,14 @@ fn thread_card(
         )
         .on_click(move |_: &ClickEvent, _window, cx| {
             layout.update(cx, |layout, cx| {
-                layout.navigate_to_thread(&channel_id, &clan_id, &parent_id, &thread_label, cx);
+                layout.navigate_to_thread(
+                    &channel_id,
+                    &clan_id,
+                    &parent_id,
+                    &thread_label,
+                    None,
+                    cx,
+                );
             });
         })
         .into_any_element()

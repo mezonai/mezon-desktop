@@ -3269,6 +3269,7 @@
   "message.actions.unPinMessage": "Адмацаваць паведамленне",
   "message.addAMessage": "Дадаць паведамленне (неабавязкова)",
   "message.attachment.uploading": "Загрузка...",
+  "message.attachment.uploadFailed": "Не атрымалася загрузіць",
   "message.attachments.attachment": "Укладанне",
   "message.attachments.audio": "Галасавое паведамленне",
   "message.attachments.contact": "Кантакт",
@@ -4774,5 +4775,8 @@
   "screenShare.modeVideoDescription": "Больш плаўнае відэа; пры павольным злучэнні выразнасць можа знізіцца.",
   "chat.activityStrip.latestPin": "Апошняе замацаванне",
   "chat.activityStrip.latestTopicMessage": "Апошняе паведамленне ў тэме",
-  "chat.activityStrip.messageFrom": "Паведамленне ад {{name}}: {{message}}"
+  "chat.activityStrip.messageFrom": "Паведамленне ад {{name}}: {{message}}",
+  "chat.activityStrip.hideAction": "Схаваць панэль замацаванняў і тэм",
+  "chat.activityStrip.hideConfirm.title": "Схаваць панэль замацаванняў і тэм",
+  "chat.activityStrip.hideConfirm.description": "Схаваць панэль замацаванняў і тэм для гэтага канала? Яна аўтаматычна з’явіцца зноў пасля новага замацавання або новай тэмы."
 }

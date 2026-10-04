@@ -24,11 +24,12 @@ use crate::text_actions::{
     TEXT_INPUT_CONTEXT, Undo, Up,
 };
 use crate::text_edit::{
-    EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
-    granularity_for_click, home_target, ime_replace_range, line_end, line_start,
-    marked_caret_range, marked_range_after_delete, next_word_boundary, previous_word_boundary,
-    range_for_granularity, should_coalesce, splice_out_byte_range, surrounding_delete_range,
-    swallow_discarded_ime_commit,
+    EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, ceil_char_boundary,
+    clip_insert_to_byte_limit, clipped_edit_is_rejected, extend_range_for_granularity,
+    floor_char_boundary, granularity_for_click, home_target, ime_replace_range, line_end,
+    line_start, marked_caret_range, marked_range_after_delete, next_word_boundary,
+    previous_word_boundary, range_for_granularity, should_coalesce, splice_out_byte_range,
+    surrounding_delete_range, swallow_discarded_ime_commit,
 };
 
 const MASK: char = '\u{2022}';
@@ -62,6 +63,7 @@ pub struct InputState {
     multi_line: bool,
     embedded: bool,
     validate: Option<ValidateFn>,
+    max_bytes: Option<usize>,
     height: Option<Pixels>,
     radius: Option<Pixels>,
     bg_override: Option<Hsla>,
@@ -115,6 +117,7 @@ impl InputState {
             multi_line: false,
             embedded: false,
             validate: None,
+            max_bytes: None,
             height: None,
             radius: None,
             bg_override: None,
@@ -238,6 +241,11 @@ impl InputState {
         self
     }
 
+    pub fn max_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_bytes = Some(max_bytes);
+        self
+    }
+
     pub fn value(&self) -> &str {
         self.content.as_ref()
     }
@@ -267,7 +275,14 @@ impl InputState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.content = value.into();
+        let value = value.into();
+        self.content = match self.max_bytes {
+            Some(max_bytes) if value.len() > max_bytes => value
+                [..floor_char_boundary(&value, max_bytes)]
+                .to_string()
+                .into(),
+            _ => value,
+        };
         let end = self.content.len();
         self.selected_range = end..end;
         self.marked_range = None;
@@ -295,6 +310,37 @@ impl InputState {
         self.token_bg_ranges.clear();
         self.token_bg_color = None;
         cx.notify();
+    }
+
+    fn clip_abandoned_preedit(
+        &mut self,
+        marked: Range<usize>,
+        max_bytes: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if self.content.len() <= max_bytes {
+            return;
+        }
+        let start = floor_char_boundary(&self.content, marked.start);
+        let end = ceil_char_boundary(&self.content, marked.end).max(start);
+        let (next, caret) = {
+            let kept = clip_insert_to_byte_limit(
+                self.content.len(),
+                end - start,
+                &self.content[start..end],
+                max_bytes,
+            );
+            (
+                format!("{}{kept}{}", &self.content[..start], &self.content[end..]),
+                start + kept.len(),
+            )
+        };
+        self.content = next.into();
+        self.selected_range = caret..caret;
+        self.refresh_filter_token_chips(cx);
+        self.pause_caret_blink(cx);
+        cx.notify();
+        cx.emit(InputEvent::Change);
     }
 
     fn refresh_filter_token_chips(&mut self, cx: &mut Context<Self>) {
@@ -1021,14 +1067,17 @@ impl EntityInputHandler for InputState {
             .map(|range| self.range_to_utf16(range))
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         #[cfg(target_os = "linux")]
         if let Some(marked) = self.marked_range.clone() {
             let start = marked.start.min(self.content.len());
             let end = marked.end.min(self.content.len()).max(start);
             self.discard_ime_commit = self.content.get(start..end).map(str::to_string);
         }
-        self.marked_range = None;
+        let marked = self.marked_range.take();
+        if let (Some(marked), Some(max_bytes)) = (marked, self.max_bytes) {
+            self.clip_abandoned_preedit(marked, max_bytes, cx);
+        }
     }
 
     fn replace_text_in_range(
@@ -1052,6 +1101,17 @@ impl EntityInputHandler for InputState {
             ime_replace_range(&self.selected_range, self.marked_range.as_ref())
         };
         let prior_marked = self.marked_range.clone();
+
+        let requested = new_text;
+        let new_text = match self.max_bytes {
+            Some(max_bytes) => {
+                clip_insert_to_byte_limit(self.content.len(), range.len(), new_text, max_bytes)
+            }
+            None => new_text,
+        };
+        if clipped_edit_is_rejected(requested, new_text, self.marked_range.is_some()) {
+            return;
+        }
 
         let candidate =
             self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
@@ -2012,8 +2072,123 @@ impl RenderOnce for Input {
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_draw_offset, to_single_line_display};
-    use gpui::{SharedString, px};
+    use super::{InputState, compute_draw_offset, to_single_line_display};
+    use gpui::{Entity, EntityInputHandler, SharedString, TestAppContext, VisualTestContext, px};
+
+    fn input_with_limit(
+        cx: &mut TestAppContext,
+        max_bytes: Option<usize>,
+    ) -> (Entity<InputState>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            mezon_theme::set_theme(mezon_theme::resolve_theme("dark"), cx);
+            crate::text_actions::init(cx);
+        });
+        cx.add_window_view(|window, cx| {
+            let input = InputState::new(window, cx);
+            match max_bytes {
+                Some(max_bytes) => input.max_bytes(max_bytes),
+                None => input,
+            }
+        })
+    }
+
+    fn set(input: &Entity<InputState>, cx: &mut VisualTestContext, value: &str) {
+        let value = value.to_string();
+        input.update_in(cx, |state, window, cx| state.set_value(value, window, cx));
+    }
+
+    fn insert(input: &Entity<InputState>, cx: &mut VisualTestContext, text: &str) {
+        input.update_in(cx, |state, window, cx| {
+            state.replace_text_in_range(None, text, window, cx)
+        });
+    }
+
+    fn compose(input: &Entity<InputState>, cx: &mut VisualTestContext, preedit: &str) {
+        input.update_in(cx, |state, window, cx| {
+            state.replace_and_mark_text_in_range(None, preedit, None, window, cx)
+        });
+    }
+
+    fn value(input: &Entity<InputState>, cx: &mut VisualTestContext) -> String {
+        input.update(cx, |state, _| state.value().to_string())
+    }
+
+    fn composing(input: &Entity<InputState>, cx: &mut VisualTestContext) -> bool {
+        input.update(cx, |state, _| state.is_composing())
+    }
+
+    #[gpui::test]
+    fn typing_and_pasting_stop_at_the_byte_limit(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, Some(512));
+        set(&input, cx, &"a".repeat(505));
+        insert(&input, cx, &"b".repeat(10));
+        assert_eq!(value(&input, cx), "a".repeat(505) + &"b".repeat(7));
+        insert(&input, cx, "c");
+        assert_eq!(value(&input, cx).len(), 512);
+    }
+
+    #[gpui::test]
+    fn a_long_paste_is_cut_on_a_char_boundary(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, Some(512));
+        insert(&input, cx, &"ệ".repeat(200));
+        assert_eq!(value(&input, cx), "ệ".repeat(170));
+    }
+
+    #[gpui::test]
+    fn replacing_committed_text_that_would_not_fit_keeps_the_original(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, Some(512));
+        let original = "a".repeat(511) + "e";
+        set(&input, cx, &original);
+        input.update_in(cx, |state, window, cx| {
+            state.replace_text_in_range(Some(511..512), "ệ", window, cx)
+        });
+        assert_eq!(value(&input, cx), original);
+    }
+
+    #[gpui::test]
+    fn a_preedit_may_overflow_until_it_commits(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, Some(512));
+        set(&input, cx, &"a".repeat(511));
+        compose(&input, cx, "e");
+        compose(&input, cx, "ê");
+        assert_eq!(value(&input, cx).len(), 513);
+        assert!(composing(&input, cx));
+        insert(&input, cx, "ê");
+        assert_eq!(value(&input, cx), "a".repeat(511));
+        assert!(!composing(&input, cx));
+        compose(&input, cx, "b");
+        insert(&input, cx, "b");
+        assert_eq!(value(&input, cx), "a".repeat(511) + "b");
+    }
+
+    #[gpui::test]
+    fn an_abandoned_preedit_is_cut_to_the_limit(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, Some(512));
+        set(&input, cx, &"a".repeat(510));
+        compose(&input, cx, "xyz");
+        input.update_in(cx, |state, window, cx| state.unmark_text(window, cx));
+        assert_eq!(value(&input, cx), "a".repeat(510) + "xy");
+        assert!(!composing(&input, cx));
+    }
+
+    #[gpui::test]
+    fn set_value_is_cut_to_the_limit(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, Some(4));
+        set(&input, cx, "abệ");
+        assert_eq!(value(&input, cx), "ab");
+    }
+
+    #[gpui::test]
+    fn an_input_without_a_limit_is_unchanged(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, None);
+        let long = "ệ".repeat(300);
+        set(&input, cx, &long);
+        insert(&input, cx, &long);
+        assert_eq!(value(&input, cx).len(), long.len() * 2);
+        compose(&input, cx, "e");
+        input.update_in(cx, |state, window, cx| state.unmark_text(window, cx));
+        assert_eq!(value(&input, cx).len(), long.len() * 2 + 1);
+    }
 
     #[test]
     fn single_line_display_collapses_newlines_preserving_byte_len() {

@@ -31,7 +31,7 @@ public:
         twiddle_re_.resize(N / 2);
         twiddle_im_.resize(N / 2);
         for (int k = 0; k < N / 2; ++k) {
-            double angle = -2.0 * M_PI * k / N;
+            double angle = -2.0 * PI * k / N;
             twiddle_re_[k] = static_cast<float>(std::cos(angle));
             twiddle_im_[k] = static_cast<float>(std::sin(angle));
         }
@@ -39,7 +39,7 @@ public:
         // 3. Precompute Hann analysis and synthesis window (length 400, periodic=True matches PyTorch)
         window_.resize(400);
         for (int i = 0; i < 400; ++i) {
-            window_[i] = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * i / 400.0f));
+            window_[i] = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(PI) * i / 400.0f));
         }
 
         // Scratch buffers (preallocated to ensure zero allocations on audio thread)
@@ -148,6 +148,8 @@ public:
     }
 
 private:
+    static constexpr double PI = 3.14159265358979323846;
+
     std::vector<int> bit_rev_;
     std::vector<float> twiddle_re_;
     std::vector<float> twiddle_im_;

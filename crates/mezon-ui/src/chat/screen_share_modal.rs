@@ -570,7 +570,11 @@ impl Render for ScreenShareModal {
                     .border_t_1()
                     .border_color(border)
                     .when(
-                        cfg!(any(target_os = "macos", target_os = "windows")),
+                        cfg!(any(
+                            target_os = "macos",
+                            target_os = "windows",
+                            target_os = "linux"
+                        )),
                         |footer| {
                             footer.child(
                                 h_flex()

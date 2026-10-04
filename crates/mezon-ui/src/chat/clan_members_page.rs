@@ -1277,6 +1277,7 @@ fn role_badge(
             element.child(
                 img(crate::util::imgproxy::role_icon_url(cx, &role.icon))
                     .size(px(12.))
+                    .aspect_square()
                     .flex_shrink_0()
                     .when_some(crate::image_cache::role_icon_cache(cx), |el, cache| {
                         el.image_cache(&cache)

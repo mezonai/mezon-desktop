@@ -381,6 +381,7 @@ pub(super) fn role_icon_thumbnail(
         .child(
             gpui::img(crate::util::imgproxy::role_icon_url(cx, &icon))
                 .size_full()
+                .aspect_square()
                 .object_fit(gpui::ObjectFit::Cover)
                 .image_cache(cache),
         )
@@ -407,6 +408,7 @@ pub(super) fn role_glyph(
     } else {
         img(crate::util::imgproxy::role_icon_url(cx, icon))
             .size(px(20.0))
+            .aspect_square()
             .flex_shrink_0()
             .image_cache(cache)
             .into_any_element()

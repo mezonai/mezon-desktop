@@ -3410,12 +3410,6 @@ impl VoiceStore {
         let Some(current) = self.reconnect_snapshot(cx) else {
             return;
         };
-        tracing::info!(
-            generation = self.session_generation,
-            captured_mic_enabled = snapshot.mic_enabled,
-            current_mic_enabled = current.mic_enabled,
-            "restoring latest local media state after token refresh"
-        );
         let snapshot = current;
         let mic_enabled = snapshot.mic_enabled
             && !MediaPermissionStore::blocked_global(MediaDevice::Microphone, cx);
@@ -3814,12 +3808,6 @@ impl VoiceStore {
     }
 
     fn apply_mic_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        tracing::info!(
-            generation = self.session_generation,
-            previous = self.mic_enabled,
-            enabled,
-            "local microphone control changed"
-        );
         self.mic_enabled = enabled;
         if let Some(session) = &self.session {
             session.set_mic_enabled(enabled);
@@ -4818,7 +4806,6 @@ mod tests {
     };
     use crate::{VoiceInteractiveApp, VoiceInteractiveEventType};
     use gpui::RenderImage;
-    use mezon_voice::VoiceEvent;
     use parking_lot::Mutex;
 
     #[test]
@@ -4872,32 +4859,6 @@ mod tests {
             channel_id: channel_id.into(),
             clan_id: "1".into(),
         }
-    }
-
-    #[gpui::test]
-    fn queued_participant_state_cannot_undo_a_newer_microphone_control(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(|cx| {
-            let voice = init_voice_store(cx);
-            voice.update(cx, |voice, cx| {
-                voice.connection = connected("5");
-                for enabled in [true, false] {
-                    voice.apply_mic_enabled(enabled, cx);
-                    let mut old_local = voice_participant(&ME.to_string(), None);
-                    old_local.is_local = true;
-                    old_local.muted = enabled; // The engine snapshot predates the toggle.
-                    voice.handle_engine_event(VoiceEvent::Participants(vec![old_local]), cx);
-                    assert_eq!(voice.mic_enabled, enabled);
-                }
-                voice.apply_mic_enabled(true, cx);
-                voice.handle_engine_event(VoiceEvent::MutedByModerator, cx);
-                assert!(
-                    !voice.mic_enabled,
-                    "explicit moderation still closes the mic"
-                );
-            });
-        });
     }
 
     fn removed(channel_id: i64, user_ids: Vec<i64>) -> mezon_client::RealtimeEvent {

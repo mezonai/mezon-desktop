@@ -792,12 +792,12 @@ fn frame_element(
     match frame {
         Some(VoiceRenderFrame::Image(image)) => img(image)
             .size_full()
-            .object_fit(ObjectFit::Cover)
+            .object_fit(ObjectFit::Contain)
             .into_any_element(),
         #[cfg(target_os = "macos")]
         Some(VoiceRenderFrame::Surface(surface)) => gpui::surface(surface.into_inner())
             .size_full()
-            .object_fit(ObjectFit::Cover)
+            .object_fit(ObjectFit::Contain)
             .into_any_element(),
         _ => avatar_element(name, avatar, avatar_size),
     }

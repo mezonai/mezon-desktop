@@ -73,8 +73,16 @@ pub fn thread_preview_display(content: &str) -> String {
 
 #[derive(Debug, Clone)]
 pub enum ThreadsEvent {
-    ThreadCreated { channel_id: String, clan_id: String },
-    CreateFailed { reason: ThreadCreateFailReason },
+    ThreadCreated {
+        channel_id: String,
+        clan_id: String,
+        parent_id: String,
+        name: String,
+        private: bool,
+    },
+    CreateFailed {
+        reason: ThreadCreateFailReason,
+    },
     LeaveFailed,
     OpenPopoverRequested,
 }
@@ -1175,6 +1183,9 @@ impl ThreadsStore {
 
             let thread_id = thread.channel_id;
             let thread_id_str = thread_id.to_string();
+            let thread_name = Some(thread.channel_label)
+                .filter(|label| !label.is_empty())
+                .unwrap_or(name);
 
             if let Err(e) = api
                 .join_chat(clan_id_i64, thread_id, CHANNEL_TYPE_THREAD as i32, false)
@@ -1298,6 +1309,9 @@ impl ThreadsStore {
                 cx.emit(ThreadsEvent::ThreadCreated {
                     channel_id: thread_id_str,
                     clan_id: clan_id.clone(),
+                    parent_id,
+                    name: thread_name,
+                    private: channel_private != 0,
                 });
                 cx.notify();
             }) {

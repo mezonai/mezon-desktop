@@ -3508,6 +3508,7 @@
   "message.actions.unPinMessage": "Открепить сообщение",
   "message.addAMessage": "Добавить сообщение (опционально)",
   "message.attachment.uploading": "Загрузка...",
+  "message.attachment.uploadFailed": "Не удалось загрузить",
   "message.attachments.attachment": "Вложение",
   "message.attachments.audio": "Аудио",
   "message.attachments.contact": "Контакт",
@@ -5017,5 +5018,8 @@
   "screenShare.modeVideoDescription": "Более плавное видео; при медленном соединении чёткость может снизиться.",
   "chat.activityStrip.latestPin": "Последнее закрепление",
   "chat.activityStrip.latestTopicMessage": "Последнее сообщение в теме",
-  "chat.activityStrip.messageFrom": "Сообщение от {{name}}: {{message}}"
+  "chat.activityStrip.messageFrom": "Сообщение от {{name}}: {{message}}",
+  "chat.activityStrip.hideAction": "Скрыть панель закреплений и тем",
+  "chat.activityStrip.hideConfirm.title": "Скрыть панель закреплений и тем",
+  "chat.activityStrip.hideConfirm.description": "Скрыть панель закреплений и тем для этого канала? Она автоматически появится снова при новом закреплении или новой теме."
 }

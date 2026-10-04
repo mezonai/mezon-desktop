@@ -539,6 +539,7 @@ impl Render for ReactionPicker {
                             .id("picker-hover-emoji-frames")
                             .max_w(px(28.))
                             .max_h(px(28.))
+                            .aspect_square()
                             .with_fallback(emoji_error_fallback(px(28.), text_muted)),
                     )
                 })
@@ -585,6 +586,7 @@ fn category_logo(
     if !logo.is_empty() {
         return img(logo.clone())
             .size(px(size))
+            .aspect_square()
             .rounded_full()
             .object_fit(gpui::ObjectFit::Cover)
             .with_fallback(emoji_error_fallback(px(size), theme.text_muted))
@@ -704,6 +706,7 @@ fn render_emoji_row(
         if !emoji.src.is_empty() {
             let image = img(emoji.src.clone())
                 .size(px(EMOJI_PX))
+                .aspect_square()
                 .object_fit(gpui::ObjectFit::Contain)
                 .with_fallback(emoji_error_fallback(px(EMOJI_PX), text_muted));
             cell = cell.child(if hovered_cell == Some(&emoji.emoji_id) {

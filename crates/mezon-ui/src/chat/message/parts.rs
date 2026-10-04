@@ -10,9 +10,9 @@ use gpui::{
 use mezon_store::{
     AccountStore, AlbumLayout, AppConfig, AttachmentSeedInput, BadgeService, ChannelId,
     ChannelType, ClanId, ClanList, ClanMembersStore, Emoji, Message, MessageAttachment,
-    MessageCode, MessageId, MessageReference, MessageSpan, MessagesStore, ProfileContext, Reaction,
-    STICKER_FILETYPE, ThreadsStore, TopicsStore, UserId, UsersByUserStore, ViewerMedia,
-    resolve_avatar_url, resolve_user_profile,
+    MessageCode, MessageId, MessageRef, MessageReference, MessageSpan, MessagesStore,
+    ProfileContext, Reaction, STICKER_FILETYPE, ThreadsStore, TopicsStore, UserId,
+    UsersByUserStore, ViewerMedia, resolve_avatar_url, resolve_user_profile,
 };
 use smallvec::SmallVec;
 
@@ -460,6 +460,7 @@ pub fn render_head(msg: &Message, ctx: &RowCtx) -> AnyElement {
         name = name.flex().flex_row().items_center().child(
             img(crate::util::imgproxy::role_icon_url(ctx.app, &icon))
                 .size(px(20.))
+                .aspect_square()
                 .ml(px(4.))
                 .flex_none()
                 .image_cache(&ctx.icon_cache),
@@ -910,28 +911,67 @@ fn attachment_sending_overlay(
         )
 }
 
-fn attachment_failed_overlay(theme: &Theme) -> impl IntoElement {
+fn attachment_failed_overlay(
+    theme: &Theme,
+    locale: &str,
+    box_width: f32,
+    box_height: f32,
+) -> impl IntoElement {
+    let fits_label = box_width >= SENDING_LABEL_MIN_WIDTH && box_height >= SENDING_LABEL_MIN_HEIGHT;
+    let icon = Icon::new(IconName::TriangleAlert)
+        .size(px(16.))
+        .text_color(theme.danger_text);
+    let badge = if fits_label {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .px_3()
+            .py_1p5()
+            .rounded_full()
+            .bg(MEDIA_BADGE_BG)
+            .child(icon)
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(gpui::white())
+                    .child(mezon_i18n::t(locale, "message.attachment.uploadFailed")),
+            )
+    } else {
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(32.))
+            .rounded_full()
+            .bg(MEDIA_BADGE_BG)
+            .child(icon)
+    };
     div()
         .absolute()
         .inset_0()
         .flex()
         .items_center()
         .justify_center()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(40.))
-                .rounded_full()
-                .bg(theme.bg_floating)
-                .child(
-                    Icon::new(IconName::TriangleAlert)
-                        .size(px(24.))
-                        .text_color(theme.danger_text),
-                ),
-        )
+        .bg(MEDIA_FAILED_SCRIM)
+        .child(badge)
 }
+
+const MEDIA_FAILED_SCRIM: gpui::Rgba = gpui::Rgba {
+    r: 0.,
+    g: 0.,
+    b: 0.,
+    a: 0.45,
+};
+
+const MEDIA_BADGE_BG: gpui::Rgba = gpui::Rgba {
+    r: 0.,
+    g: 0.,
+    b: 0.,
+    a: 0.65,
+};
 
 fn render_audio(
     msg_id: MessageId,
@@ -1136,7 +1176,12 @@ fn render_album(
                 });
         }
         if att.upload_failed {
-            tile_element = tile_element.child(attachment_failed_overlay(theme));
+            tile_element = tile_element.child(attachment_failed_overlay(
+                theme,
+                ctx.locale,
+                tile.width,
+                tile.height,
+            ));
         } else if att.uploading {
             tile_element = tile_element.child(attachment_sending_overlay(
                 theme,
@@ -1207,7 +1252,17 @@ fn presign_child(
     // A recipient never sees `uploading` — only `presign_pending` — so without
     // this the whole upload window is a bare spinner on their side while the
     // sender gets a labelled one.
-    if att.thumbnail.is_empty() {
+    if att.upload_failed {
+        if att.thumbnail.is_empty() {
+            parent
+        } else {
+            parent.child(
+                img(SharedString::from(att.thumbnail.clone()))
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            )
+        }
+    } else if att.thumbnail.is_empty() {
         parent.child(attachment_sending_overlay(
             theme, locale, box_width, box_height,
         ))
@@ -1300,7 +1355,12 @@ fn render_photo(
                 }),
         );
         if att.upload_failed {
-            el = el.child(attachment_failed_overlay(theme));
+            el = el.child(attachment_failed_overlay(
+                theme,
+                ctx.locale,
+                att.display_width,
+                att.display_height,
+            ));
         } else if sending {
             el = el.child(attachment_sending_overlay(
                 theme,
@@ -1332,7 +1392,12 @@ fn render_photo(
             att.display_height,
         );
         if att.upload_failed {
-            placeholder = placeholder.child(attachment_failed_overlay(theme));
+            placeholder = placeholder.child(attachment_failed_overlay(
+                theme,
+                ctx.locale,
+                att.display_width,
+                att.display_height,
+            ));
         } else if sending {
             placeholder = placeholder.child(attachment_sending_overlay(
                 theme,
@@ -1413,7 +1478,12 @@ fn render_photo(
             }),
     );
     if att.upload_failed {
-        el = el.child(attachment_failed_overlay(theme));
+        el = el.child(attachment_failed_overlay(
+            theme,
+            ctx.locale,
+            att.display_width,
+            att.display_height,
+        ));
     } else if sending {
         el = el.child(attachment_sending_overlay(
             theme,
@@ -1454,7 +1524,7 @@ fn render_video_poster(
     let url = SharedString::from(att.url.clone());
     let filename = SharedString::from(att.filename.clone());
     let thumbnail = if att.presign_pending {
-        SharedString::default()
+        SharedString::from(att.thumbnail.clone())
     } else {
         att.thumbnail_proxied.clone()
     };
@@ -1484,10 +1554,15 @@ fn render_video_poster(
         });
     if att.upload_failed {
         return container
-            .child(attachment_failed_overlay(theme))
+            .child(attachment_failed_overlay(
+                theme,
+                ctx.locale,
+                att.display_width,
+                att.display_height,
+            ))
             .into_any_element();
     }
-    if sending {
+    if sending || att.presign_pending {
         return container
             .child(attachment_sending_overlay(
                 theme,
@@ -1496,17 +1571,6 @@ fn render_video_poster(
                 att.display_height,
             ))
             .into_any_element();
-    }
-    if att.presign_pending {
-        return presign_child(
-            container,
-            att,
-            theme,
-            ctx.locale,
-            att.display_width,
-            att.display_height,
-        )
-        .into_any_element();
     }
     let overlay = div()
         .absolute()
@@ -1613,8 +1677,8 @@ fn render_file_box(
     // only `presign_pending`, and every button in this box (download, open PDF)
     // hits the object URL directly. React filters pending documents out of the
     // list; the spinner state already disables all of them.
-    let sending = att.uploading || att.presign_pending;
     let failed = att.upload_failed;
+    let sending = !failed && (att.uploading || att.presign_pending);
     let filename = if att.filename.is_empty() {
         SharedString::from("Attachment")
     } else {
@@ -1625,7 +1689,9 @@ fn render_file_box(
     // While the object is not on the CDN yet the size we have is the sender's
     // claim about a file nobody can fetch, so say what is actually happening
     // instead — the spinner alone reads as a stuck row.
-    let size_line = if sending {
+    let size_line = if failed {
+        SharedString::from(mezon_i18n::t(ctx.locale, "message.attachment.uploadFailed"))
+    } else if sending {
         SharedString::from(mezon_i18n::t(ctx.locale, "message.attachment.uploading"))
     } else {
         SharedString::from(format!("size: {}", att.size_label))
@@ -1737,7 +1803,11 @@ fn render_file_box(
                 .child(
                     div()
                         .text_size(px(14.))
-                        .text_color(theme.tokens.text_theme_primary)
+                        .text_color(if failed {
+                            theme.danger_text
+                        } else {
+                            theme.tokens.text_theme_primary
+                        })
                         .child(size_line),
                 ),
         )
@@ -1836,7 +1906,7 @@ pub fn render_reactions(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
     }
     let mut row = div().flex().flex_row().flex_wrap().gap_2().mt_1().w_full();
     for reaction in msg.reactions.iter() {
-        row = row.child(reaction_pill(reaction, msg.id, ctx));
+        row = row.child(reaction_pill(reaction, msg.message_ref(), ctx));
     }
     row = row.child(add_reaction_button(msg.id, ctx));
     Some(row.into_any_element())
@@ -1922,7 +1992,7 @@ fn reaction_emoji_src(reaction: &Reaction, ctx: &RowCtx) -> SharedString {
     src
 }
 
-fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> AnyElement {
+fn reaction_pill(reaction: &Reaction, target: MessageRef, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let reacted = !ctx.current_user_id.is_empty() && reaction.has_sender(ctx.current_user_id);
     let count_label = reaction.count_label.clone();
@@ -1956,18 +2026,13 @@ fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> An
             .cursor_pointer()
             .on_click(move |_, _, cx| {
                 MessagesStore::global(cx).update(cx, |store, cx| {
-                    store.add_reaction(
-                        message_id,
-                        add_emoji_id.to_string(),
-                        add_emoji.to_string(),
-                        cx,
-                    );
+                    store.add_reaction(target, add_emoji_id.to_string(), add_emoji.to_string(), cx);
                 });
             })
             .hoverable_tooltip(move |_window, cx| {
                 cx.new(|cx| {
                     UserReactionPanel::new(
-                        message_id,
+                        target,
                         panel_emoji_id.clone(),
                         panel_emoji.clone(),
                         avatar_cache.clone(),
@@ -2007,6 +2072,7 @@ fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> An
                 img(src)
                     .id("reaction-emoji-frames")
                     .size(px(REACTION_EMOJI_PX))
+                    .aspect_square()
                     .object_fit(ObjectFit::ScaleDown)
                     .with_fallback(emoji_error_fallback(
                         px(REACTION_EMOJI_PX),
@@ -2053,14 +2119,14 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
         0.
     };
 
-    let reply_id = msg.id;
+    let reply_target = msg.message_ref();
     let react_id = msg.id;
     let react_host = ctx.video_host.clone();
 
     let is_topic_msg = msg.code == MessageCode::Topic;
     let is_poll_msg = msg.code == MessageCode::Poll;
     let sender_is_real = !msg.sender_id.is_empty() && msg.sender_id != "0";
-    let is_own_message = ctx.current_user_id == msg.sender_id.as_str();
+    let is_own_message = msg.is_sent_by(ctx.current_user_id);
 
     let show_topic = !ctx.is_topic_box
         && ctx.can_send_message
@@ -2083,6 +2149,7 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
     let show_coffee = !is_own_message && sender_is_real;
 
     let msg_id = msg.id;
+    let target = msg.message_ref();
     let edit_host = ctx.video_host.clone();
     let option_host = ctx.video_host.clone();
 
@@ -2102,13 +2169,14 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
                 .hover(move |s| s.bg(bg_hover))
                 .on_click(move |_, _, cx| {
                     MessagesStore::global(cx).update(cx, |store, cx| {
-                        store.add_reaction(msg_id, emoji_id.to_string(), shortname.to_string(), cx);
+                        store.add_reaction(target, emoji_id.to_string(), shortname.to_string(), cx);
                     });
                 });
             if !emoji.src.is_empty() {
                 cell = cell.child(
                     img(emoji.src.clone())
                         .size(px(RECENT_EMOJI_PX))
+                        .aspect_square()
                         .object_fit(ObjectFit::ScaleDown)
                         .image_cache(&ctx.icon_cache)
                         .id("recent-emoji-frames")
@@ -2181,10 +2249,10 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
                 action("reply", IconName::Reply, 20.).on_click(move |_, _, cx| {
                     if is_topic {
                         TopicsStore::global(cx)
-                            .update(cx, |store, cx| store.set_reply_to(reply_id, cx));
+                            .update(cx, |store, cx| store.set_reply_to(reply_target, cx));
                     } else {
                         MessagesStore::global(cx)
-                            .update(cx, |store, cx| store.set_reply_to(reply_id, cx));
+                            .update(cx, |store, cx| store.set_reply_to(reply_target, cx));
                     }
                 }),
             )
@@ -2206,12 +2274,12 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
             )
         })
         .when(show_coffee, |d| {
-            let message_id = msg.id;
+            let target = msg.message_ref();
             d.child(
                 action("give-coffee", IconName::DollarIconRightClick, 20.).on_click(
                     move |_, _, cx| {
                         MessagesStore::global(cx).update(cx, |store, cx| {
-                            store.give_coffee_reaction(message_id, cx);
+                            store.give_coffee_reaction(target, cx);
                         });
                     },
                 ),

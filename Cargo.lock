@@ -587,7 +587,7 @@ dependencies = [
  "libc",
  "pin-project",
  "redox_syscall 0.2.16",
- "xattr",
+ "xattr 0.2.3",
 ]
 
 [[package]]
@@ -2236,6 +2236,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid",
+ "zeroize",
+]
+
+[[package]]
+name = "der"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a878c850e9e421b20262e9b41f9c860e4785fa07541c266b62ff9d1ef998a80a"
+dependencies = [
+ "pem-rfc7468",
  "zeroize",
 ]
 
@@ -4289,12 +4299,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hmac-sha256"
-version = "1.1.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ad320b3b96fb2a455a0726d16efe0a5afdbd34b71dea5bc53b05ea057714d4e"
-
-[[package]]
 name = "home"
 version = "0.5.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5349,12 +5353,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lzma-rust2"
-version = "0.15.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e20f57f9918e5bd7bc58c22cdd70a6afc7375d4dd9683af5f2b34bd3d2bba619"
-
-[[package]]
 name = "mac"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5513,7 +5511,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-active-windows"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -5526,7 +5524,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-app"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -5557,7 +5555,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-audio"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "anyhow",
  "flume",
@@ -5572,7 +5570,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-call"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5590,7 +5588,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-canvas"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5612,7 +5610,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-cli"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -5628,7 +5626,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-client"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5665,14 +5663,14 @@ dependencies = [
 
 [[package]]
 name = "mezon-i18n"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "mezon-mcp"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -5693,7 +5691,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-native"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "anyhow",
  "auto-launch",
@@ -5724,12 +5722,13 @@ name = "mezon-ns"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "openssl-sys",
  "ort-sys",
 ]
 
 [[package]]
 name = "mezon-pdf"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "anyhow",
  "core-graphics 0.24.0",
@@ -5742,7 +5741,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-proto"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "prost",
  "prost-build",
@@ -5753,7 +5752,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-record"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -5776,7 +5775,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-store"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5810,7 +5809,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-stream"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "anyhow",
  "flume",
@@ -5827,7 +5826,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-theme"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "gpui",
  "theme",
@@ -5835,7 +5834,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-ui"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5880,7 +5879,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-updater"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5901,7 +5900,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-video"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -5925,7 +5924,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-voice"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5968,7 +5967,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-widgets"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "gpui",
  "mezon-store",
@@ -6033,7 +6032,7 @@ dependencies = [
 
 [[package]]
 name = "mmn-client"
-version = "2.1.7"
+version = "2.1.8"
 dependencies = [
  "base64 0.22.1",
  "bs58",
@@ -6175,6 +6174,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "706bf8a5e8c8ddb99128c3291d31bd21f4bcde17f0f4c20ec678d85c74faa149"
 dependencies = [
  "log",
+]
+
+[[package]]
+name = "native-tls"
+version = "0.2.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "465500e14ea162429d264d44189adc38b199b62b1c21eea9f69e4b73cb03bbf2"
+dependencies = [
+ "libc",
+ "log",
+ "openssl",
+ "openssl-probe",
+ "openssl-sys",
+ "schannel",
+ "security-framework 3.7.0",
+ "security-framework-sys",
+ "tempfile",
 ]
 
 [[package]]
@@ -6897,10 +6913,57 @@ dependencies = [
 ]
 
 [[package]]
+name = "openssl"
+version = "0.10.81"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77823a27f0babb03091cb9ed9ef80af3b39dbc82f97e8fa530374b7dafd87a45"
+dependencies = [
+ "bitflags 2.13.0",
+ "cfg-if 1.0.4",
+ "foreign-types 0.3.2",
+ "libc",
+ "openssl-macros",
+ "openssl-sys",
+]
+
+[[package]]
+name = "openssl-macros"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a948666b637a0f465e8564c73e89d4dde00d72d4d473cc972f390fc3dcee7d9c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
 name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
+
+[[package]]
+name = "openssl-src"
+version = "300.6.1+3.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46eb8fb9fb3b61ce1c0f8a026c4c1a0714d3a9e138e7fbde78753ce2babc3846"
+dependencies = [
+ "cc",
+]
+
+[[package]]
+name = "openssl-sys"
+version = "0.9.117"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b47e7e6bb2c38cd930d25a23b40fa52e068c10e85f3e03a7f5ba5aaca5713695"
+dependencies = [
+ "cc",
+ "libc",
+ "openssl-src",
+ "pkg-config",
+ "vcpkg",
+]
 
 [[package]]
 name = "optfield"
@@ -6949,12 +7012,14 @@ dependencies = [
 
 [[package]]
 name = "ort-sys"
-version = "2.0.0-rc.13"
+version = "2.0.0-rc.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf211e3776eea6aec988552fa118dd746d70e1b1e5e244058d1c98015f3e5872"
+checksum = "e2aba9f5c7c479925205799216e7e5d07cc1d4fa76ea8058c60a9a30f6a4e890"
 dependencies = [
- "hmac-sha256",
- "lzma-rust2",
+ "flate2",
+ "pkg-config",
+ "sha2",
+ "tar",
  "ureq",
 ]
 
@@ -7093,6 +7158,15 @@ name = "peeking_take_while"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b17cddbe7ec3f8bc800887bab5e717348c95ea2ca0b1bf0837fb964dc67099"
+
+[[package]]
+name = "pem-rfc7468"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6305423e0e7738146434843d1694d621cce767262b2a86910beab705e4493d9"
+dependencies = [
+ "base64ct",
+]
 
 [[package]]
 name = "percent-encoding"
@@ -7287,7 +7361,7 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
 dependencies = [
- "der",
+ "der 0.7.10",
  "spki",
 ]
 
@@ -9071,7 +9145,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
- "der",
+ "der 0.7.10",
 ]
 
 [[package]]
@@ -9614,6 +9688,17 @@ name = "tap"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr 1.6.1",
+]
 
 [[package]]
 name = "target-lexicon"
@@ -10440,14 +10525,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a7ac20be9b7726e0bbdbf974c059676d9acb1cd414961f570a4e8231cacd7fc"
 dependencies = [
  "base64 0.23.1",
+ "der 0.8.2",
  "log",
+ "native-tls",
  "percent-encoding",
- "rustls",
  "rustls-pki-types",
  "socks",
  "ureq-proto",
  "utf8-zero",
- "webpki-roots 1.0.8",
+ "webpki-root-certs 1.0.8",
 ]
 
 [[package]]
@@ -11986,6 +12072,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d1526bbe5aaeb5eb06885f4d987bcdfa5e23187055de9b83fe00156a821fabc"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix 1.1.4",
 ]
 
 [[package]]

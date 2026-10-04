@@ -241,6 +241,9 @@ mod linux {
     }
 
     pub fn start_screen_audio() -> Result<ScreenAudioCapture, String> {
+        if !crate::pipewire_init::ensure_pipewire_stubs_armed() {
+            return Err("PipeWire unavailable for system audio capture".into());
+        }
         let (sample_tx, sample_rx) = flume::bounded::<Vec<i16>>(64);
         let (init_tx, init_rx) = flume::bounded::<Result<(), String>>(1);
         let (terminate_tx, terminate_rx) = pw::channel::channel::<Terminate>();

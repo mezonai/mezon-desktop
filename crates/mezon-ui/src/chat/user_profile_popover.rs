@@ -413,6 +413,7 @@ impl UserProfilePopover {
                 el.child(
                     img(chip.icon.clone())
                         .size(px(12.))
+                        .aspect_square()
                         .flex_shrink_0()
                         .when_some(icon_cache.clone(), |el, cache| el.image_cache(&cache)),
                 )
@@ -577,6 +578,7 @@ impl UserProfilePopover {
                 el.child(
                     img(chip.icon.clone())
                         .size(px(12.))
+                        .aspect_square()
                         .flex_shrink_0()
                         .when_some(icon_cache.clone(), |el, cache| el.image_cache(&cache)),
                 )

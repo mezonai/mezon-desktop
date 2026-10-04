@@ -102,6 +102,50 @@ fn api_status_error(code: u32) -> anyhow::Error {
     ApiStatusError { code }.into()
 }
 
+#[derive(Debug)]
+struct EnvelopeStatus {
+    api_name: String,
+    message: String,
+    code: i32,
+}
+
+impl std::fmt::Display for EnvelopeStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} failed: {} (code={})",
+            self.api_name, self.message, self.code
+        )
+    }
+}
+
+const ENVELOPE_NOT_FOUND: i32 = 404;
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn unknown_api_error(api_name: &str) -> anyhow::Error {
+    anyhow::Error::new(ApiStatusError {
+        code: ApiStatusError::NOT_FOUND,
+    })
+    .context(EnvelopeStatus {
+        api_name: api_name.to_string(),
+        message: "Not found.".to_string(),
+        code: ENVELOPE_NOT_FOUND,
+    })
+}
+
+pub fn is_unknown_api_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<EnvelopeStatus>()
+        .is_some_and(|status| status.code == ENVELOPE_NOT_FOUND)
+}
+
+pub const MENTION_SEARCH_MIN_CHARS: usize = 2;
+pub const MENTION_SEARCH_MAX_CHARS: usize = 64;
+
+pub fn mention_search_text_accepted(text: &str) -> bool {
+    let chars = text.trim().chars().filter(|c| !c.is_control()).count();
+    (MENTION_SEARCH_MIN_CHARS..=MENTION_SEARCH_MAX_CHARS).contains(&chars)
+}
+
 /// Promise executor for matching responses to requests.
 struct PromiseExecutor {
     sender: oneshot::Sender<(u32, Vec<u8>)>,
@@ -2897,7 +2941,7 @@ mod string_or_number {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct OutgoingMention {
     pub user_id: String,
     pub role_id: String,
@@ -2987,7 +3031,7 @@ pub fn mention_content_tokens(mentions: &[OutgoingMention]) -> Vec<ContentToken>
         .collect()
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct OutgoingHashtag {
     pub channel_id: String,
     pub s: i32,
@@ -3012,7 +3056,7 @@ pub fn hashtag_content_tokens(hashtags: &[OutgoingHashtag]) -> Vec<ContentToken>
         .collect()
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct OutgoingEmoji {
     pub emoji_id: String,
     pub s: i32,
@@ -3477,7 +3521,7 @@ fn with_presign_finish(content_json: String, keys: &[String]) -> String {
     serde_json::to_string(&value).unwrap_or(content_json)
 }
 
-fn with_create_time_seconds(content_json: String, create_time_seconds: u32) -> String {
+pub fn with_create_time_seconds(content_json: String, create_time_seconds: u32) -> String {
     if create_time_seconds == 0 {
         return content_json;
     }
@@ -3928,11 +3972,11 @@ impl MezonTransport {
                 error.message.trim()
             );
             let grpc_code = grpc_code_from_envelope_status(error.code);
-            return Err(api_status_error(grpc_code)).context(format!(
-                "{api_name} failed: {} (code={})",
-                error.message.trim(),
-                error.code
-            ));
+            return Err(api_status_error(grpc_code)).context(EnvelopeStatus {
+                api_name: api_name.to_string(),
+                message: error.message.trim().to_string(),
+                code: error.code,
+            });
         }
         self.log_api_ok(api_name, cid, code, response.len(), args, started);
         Ok((code, response))
@@ -4618,6 +4662,7 @@ impl MezonTransport {
             "MarkAsRead" => 208,
             "UploadBatchAttachmentFile" => 209,
             "SearchCtrlK" => 210,
+            "SearchMentionUsers" => 211,
             _ => {
                 tracing::warn!("unknown API name: {api_name}");
                 return None;
@@ -5865,23 +5910,6 @@ impl MezonTransport {
             .collect())
     }
 
-    /// List channels by user ID.
-    pub async fn list_channel_by_user_id(&self) -> Result<Vec<ApiChannelDesc>> {
-        let cid = self.generate_cid();
-        let (code, response) = self
-            .send_api_request(cid, "ListChannelByUserId", Vec::new())
-            .await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        let channel_list = api::ChannelDescList::decode(response.as_slice())?;
-        Ok(channel_list
-            .channeldesc
-            .into_iter()
-            .map(Self::channel_desc_from_proto)
-            .collect())
-    }
-
     /// Get notification settings for a clan.
     pub async fn get_notification_clan(&self, clan_id: i64) -> Result<i32> {
         let cid = self.generate_cid();
@@ -6967,6 +6995,36 @@ impl MezonTransport {
             return Err(api_status_error(code));
         }
         Ok(api::SearchCtrlKResponse::decode(response.as_slice())?)
+    }
+
+    pub async fn search_mention_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        text: &str,
+    ) -> Result<api::SearchMentionUsersResponse> {
+        let text = text.trim();
+        if !mention_search_text_accepted(text) {
+            anyhow::bail!(
+                "SearchMentionUsers text must be {MENTION_SEARCH_MIN_CHARS} to {MENTION_SEARCH_MAX_CHARS} characters"
+            );
+        }
+        let cid = self.generate_cid();
+        let body = api::SearchMentionUsersRequest {
+            clan_id,
+            channel_id,
+            text: text.to_string(),
+        }
+        .encode_to_vec();
+        let (code, response) = self
+            .send_api_request(cid, "SearchMentionUsers", body)
+            .await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        Ok(api::SearchMentionUsersResponse::decode(
+            response.as_slice(),
+        )?)
     }
 
     /// Search threads by label within a parent channel.
@@ -9399,7 +9457,10 @@ impl MezonTransport {
                 .await?
         };
         let token = meet_token_from_raw_body(code, &response)?;
-        Ok(api::GenerateMeetTokenResponse { token })
+        Ok(api::GenerateMeetTokenResponse {
+            token,
+            ..Default::default()
+        })
     }
 
     pub async fn remove_participant_mezon_meet(
@@ -9592,13 +9653,39 @@ impl MezonTransport {
         hide_editted: bool,
         create_time_seconds: u32,
     ) -> Result<()> {
-        let cid = self.generate_cid();
         let sent = build_send_content(content, &mentions, &hashtags, &emojis);
-        let mut content_json = sent.json;
-        if create_time_seconds > 0 {
-            content_json = with_create_time_seconds(content_json, create_time_seconds);
-        }
-        let mentions = sent.mentions;
+        self.update_channel_message_content(
+            clan_id,
+            channel_id,
+            message_id,
+            with_create_time_seconds(sent.json, create_time_seconds),
+            &sent.mentions,
+            mode,
+            is_public,
+            topic_id,
+            is_update_msg_topic,
+            hide_editted,
+            create_time_seconds,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_channel_message_content(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        content_json: String,
+        mentions: &[OutgoingMention],
+        mode: i32,
+        is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
+        hide_editted: bool,
+        create_time_seconds: u32,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
         let proto_mentions: Vec<api::MessageMention> = mentions
             .iter()
             .filter_map(OutgoingMention::to_proto)
@@ -9623,40 +9710,6 @@ impl MezonTransport {
             .await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-        Ok(())
-    }
-
-    pub async fn update_channel_message_structured(
-        &self,
-        clan_id: i64,
-        channel_id: i64,
-        message_id: i64,
-        content_json: String,
-        mode: i32,
-        create_time_seconds: u32,
-    ) -> Result<()> {
-        let cid = self.generate_cid();
-        let body = realtime::ChannelMessageUpdate {
-            clan_id,
-            channel_id,
-            message_id,
-            content: content_json,
-            mode,
-            is_public: false,
-            hide_editted: true,
-            create_time_seconds,
-            ..Default::default()
-        }
-        .encode_to_vec();
-        let (code, _) = self
-            .send_api_request(cid, "UpdateChannelMessage", body)
-            .await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!(
-                "update_channel_message_structured error: code={}",
-                code
-            ));
         }
         Ok(())
     }
@@ -10205,27 +10258,29 @@ fn api_response_or_realtime_error(code: u32, api_name: &str) -> Result<()> {
     Ok(())
 }
 
+const MEET_TOKEN_PROTOBUF_TAG: u8 = 0x0A;
+
 fn meet_token_from_raw_body(code: u32, body: &[u8]) -> Result<String> {
     if code != 0 {
         tracing::error!(target: "socket", "GenerateMeetToken failed: code={code}");
         return Err(api_status_error(code))
             .context(format!("GenerateMeetToken failed (code={code})"));
     }
-    if body.is_empty() {
+    let Some(&first_byte) = body.first() else {
         anyhow::bail!("GenerateMeetToken failed: empty body (code=0)");
-    }
-    if let Some(jwt) = bare_jwt(body) {
-        return Ok(jwt);
-    }
-    if let Ok(wrapped) = api::GenerateMeetTokenResponse::decode(body)
-        && !wrapped.token.is_empty()
-    {
-        return Ok(wrapped.token);
-    }
-    tracing::error!(target: "socket", "GenerateMeetToken failed: response is not a JWT (code=0)");
-    Err(anyhow::anyhow!(
-        "GenerateMeetToken failed: response is not a JWT (code=0)"
-    ))
+    };
+    let token = if first_byte == MEET_TOKEN_PROTOBUF_TAG {
+        api::GenerateMeetTokenResponse::decode(body)
+            .ok()
+            .map(|response| response.token)
+            .filter(|token| !token.is_empty())
+    } else {
+        bare_jwt(body)
+    };
+    token.ok_or_else(|| {
+        tracing::error!(target: "socket", "GenerateMeetToken failed: response is not a JWT (code=0)");
+        anyhow::anyhow!("GenerateMeetToken failed: response is not a JWT (code=0)")
+    })
 }
 
 fn bare_jwt(body: &[u8]) -> Option<String> {
@@ -11759,6 +11814,42 @@ mod tests {
     }
 
     #[test]
+    fn only_a_socket_404_marks_an_api_the_server_does_not_know() {
+        let unknown: anyhow::Error = Err::<(), _>(api_status_error(ApiStatusError::NOT_FOUND))
+            .context(EnvelopeStatus {
+                api_name: "SearchMentionUsers".to_string(),
+                message: "Not found.".to_string(),
+                code: 404,
+            })
+            .unwrap_err();
+        assert!(is_unknown_api_error(&unknown));
+        assert!(is_unknown_api_error(&unknown_api_error(
+            "SearchMentionUsers"
+        )));
+        assert_eq!(
+            unknown.to_string(),
+            "SearchMentionUsers failed: Not found. (code=404)"
+        );
+        assert_eq!(
+            api_status_from_error(&unknown).map(|status| status.code),
+            Some(ApiStatusError::NOT_FOUND)
+        );
+        let handler_not_found = api_status_error(ApiStatusError::NOT_FOUND);
+        assert!(!is_unknown_api_error(&handler_not_found));
+    }
+
+    #[test]
+    fn mention_search_text_matches_server_rune_bounds() {
+        assert!(!mention_search_text_accepted(""));
+        assert!(!mention_search_text_accepted("a"));
+        assert!(!mention_search_text_accepted("  a  "));
+        assert!(mention_search_text_accepted("ab"));
+        assert!(mention_search_text_accepted("đă"));
+        assert!(mention_search_text_accepted(&"ư".repeat(64)));
+        assert!(!mention_search_text_accepted(&"a".repeat(65)));
+    }
+
+    #[test]
     fn api_index_pins_known_names_and_rejects_unknown() {
         let t = transport(true);
         assert_eq!(t.get_api_index("ListChannelDescs"), Some(0));
@@ -11766,6 +11857,8 @@ mod tests {
         assert_eq!(t.get_api_index("ListClanDescs"), Some(2));
         assert_eq!(t.get_api_index("ListChannelMessages"), Some(30));
         assert_eq!(t.get_api_index("UploadBatchAttachmentFile"), Some(209));
+        assert_eq!(t.get_api_index("SearchCtrlK"), Some(210));
+        assert_eq!(t.get_api_index("SearchMentionUsers"), Some(211));
         assert_eq!(t.get_api_index("DefinitelyNotAnApi"), None);
     }
 
@@ -12111,14 +12204,44 @@ mod tests {
     }
 
     #[test]
-    fn a_protobuf_token_wrapper_is_unwrapped_as_a_fallback() {
+    fn a_protobuf_body_is_decoded_by_its_leading_tag() {
         let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
         let encoded = api::GenerateMeetTokenResponse {
             token: jwt.to_owned(),
+            ..Default::default()
         }
         .encode_to_vec();
-        assert_eq!(bare_jwt(&encoded), None);
+        assert_eq!(encoded[0], MEET_TOKEN_PROTOBUF_TAG);
         assert_eq!(meet_token_from_raw_body(0, &encoded).unwrap(), jwt);
+    }
+
+    #[test]
+    fn a_protobuf_body_with_an_sfu_url_still_yields_the_token() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
+        let url = "wss://sfu.mezon.vn/ws";
+        let mut encoded = vec![MEET_TOKEN_PROTOBUF_TAG, jwt.len() as u8];
+        encoded.extend_from_slice(jwt.as_bytes());
+        encoded.extend_from_slice(&[0x12, url.len() as u8]);
+        encoded.extend_from_slice(url.as_bytes());
+        assert_eq!(meet_token_from_raw_body(0, &encoded).unwrap(), jwt);
+    }
+
+    #[test]
+    fn a_malformed_protobuf_body_is_rejected() {
+        let truncated = meet_token_from_raw_body(0, &[MEET_TOKEN_PROTOBUF_TAG, 0x05, b'e']);
+        assert!(
+            truncated
+                .unwrap_err()
+                .to_string()
+                .contains("response is not a JWT")
+        );
+        let empty_token = meet_token_from_raw_body(0, &[MEET_TOKEN_PROTOBUF_TAG, 0x00]);
+        assert!(
+            empty_token
+                .unwrap_err()
+                .to_string()
+                .contains("response is not a JWT")
+        );
     }
 
     #[test]

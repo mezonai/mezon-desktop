@@ -310,6 +310,17 @@ impl Shell {
         cx.notify();
     }
 
+    pub fn show_modal_restoring_focus(
+        &mut self,
+        view: AnyView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let previous_focus = window.focused(cx);
+        self.show_modal(view, cx);
+        self.modal_restore_focus = previous_focus;
+    }
+
     pub fn show_modal_keyboard_dismiss_only(&mut self, view: AnyView, cx: &mut Context<Self>) {
         self.show_modal(view, cx);
         self.modal_backdrop_dismissible = false;
@@ -373,7 +384,7 @@ impl Shell {
     /// user clears an inline edit to empty, or picks Delete from the message context menu.
     pub fn confirm_delete_message(
         &mut self,
-        message_id: mezon_store::MessageId,
+        target: mezon_store::MessageRef,
         locale: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -395,7 +406,7 @@ impl Shell {
             .into();
         let view = cx.new(|cx| ConfirmDeleteMessageModal {
             focus_handle: cx.focus_handle(),
-            message_id,
+            target,
             title,
             description,
             cancel_label,

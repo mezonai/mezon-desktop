@@ -3269,6 +3269,7 @@
   "message.actions.unPinMessage": "Désépingler le message",
   "message.addAMessage": "Ajouter un message (facultatif)",
   "message.attachment.uploading": "Téléchargement en cours...",
+  "message.attachment.uploadFailed": "Échec du téléchargement",
   "message.attachments.attachment": "Pièce jointe",
   "message.attachments.audio": "Message vocal",
   "message.attachments.contact": "Carte de visite",
@@ -4774,5 +4775,8 @@
   "screenShare.modeVideoDescription": "Vidéo plus fluide ; la netteté peut baisser sur une connexion lente.",
   "chat.activityStrip.latestPin": "Dernier épinglage",
   "chat.activityStrip.latestTopicMessage": "Dernier message du sujet",
-  "chat.activityStrip.messageFrom": "Message de {{name}} : {{message}}"
+  "chat.activityStrip.messageFrom": "Message de {{name}} : {{message}}",
+  "chat.activityStrip.hideAction": "Masquer la barre des épingles et sujets",
+  "chat.activityStrip.hideConfirm.title": "Masquer la barre des épingles et sujets",
+  "chat.activityStrip.hideConfirm.description": "Masquer la barre des épingles et sujets de ce canal ? Elle réapparaîtra automatiquement lors d’une nouvelle épingle ou d’un nouveau sujet."
 }

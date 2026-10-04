@@ -1,4 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#[cfg(any(target_os = "linux", test))]
+mod hang_probe;
 mod mcp;
 
 use anyhow::Result;
@@ -489,7 +491,15 @@ fn capture_hang_sample(stalled_secs: u64) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+fn capture_hang_sample(stalled_secs: u64) {
+    for line in hang_probe::report(stalled_secs) {
+        eprintln!("{line}");
+        tracing::error!("{line}");
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn capture_hang_sample(_stalled_secs: u64) {}
 
 fn install_panic_hook() {
@@ -963,6 +973,7 @@ fn open_main_window(
     mezon_store::InboxStore::init(api.clone(), cx);
     mezon_store::TopicsStore::init(api.clone(), cx);
     mezon_store::TopicBadgeStore::init(api.clone(), auth_state.clone(), cx);
+    mezon_store::BuzzStore::init(cx);
     mezon_store::PinnedMessagesStore::init(api.clone(), cx);
     mezon_store::CanvasStore::init(api.clone(), cx);
     mezon_store::PresenceStore::init(api.clone(), cx);
@@ -981,6 +992,7 @@ fn open_main_window(
     mezon_store::ChannelRolePermissionsStore::init(api.clone(), cx);
     mezon_store::GroupMembersStore::init(api.clone(), cx);
     mezon_store::UsersByUserStore::init(api.clone(), cx);
+    mezon_store::MentionSearchStore::init(api.clone(), cx);
     mezon_store::RolesStore::init(api.clone(), cx);
     mezon_store::WebhookStore::init(api.clone(), cx);
     mezon_store::EventsStore::init(api.clone(), cx);

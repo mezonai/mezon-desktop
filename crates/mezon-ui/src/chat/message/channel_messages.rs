@@ -19,10 +19,10 @@ use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelPermissionsEvent, ChannelPermissionsStore, ClanId,
     ClanList, ClanMembersStore, DirectMessageStore, EmbedDatePicker, EmbedInput, EmbedTextInput,
-    Emoji, EmojiStore, GroupMembersStore, MessageCode, MessageId, MessagesEvent, MessagesStore,
-    PERMISSION_DELETE_MESSAGE, PERMISSION_MANAGE_THREAD, PERMISSION_SEND_MESSAGE, PermissionStore,
-    ProfileContext, QUICK_MENU_TYPE_QUICK, QuickMenuStore, RolesEvent, RolesStore, Settings,
-    SpriteAtlas, TopicBadgeEvent, TopicBadgeStore, TopicsEvent, TopicsStore, UserId,
+    Emoji, EmojiStore, GroupMembersStore, MessageCode, MessageId, MessageRef, MessagesEvent,
+    MessagesStore, PERMISSION_DELETE_MESSAGE, PERMISSION_MANAGE_THREAD, PERMISSION_SEND_MESSAGE,
+    PermissionStore, ProfileContext, QUICK_MENU_TYPE_QUICK, QuickMenuStore, RolesEvent, RolesStore,
+    Settings, SpriteAtlas, TopicBadgeEvent, TopicBadgeStore, TopicsEvent, TopicsStore, UserId,
     UsersByUserStore,
     message::{Message, markdown_edit_source},
 };
@@ -1716,7 +1716,8 @@ impl ChannelMessages {
                 | MessagesEvent::ForwardFinished { .. }
                 | MessagesEvent::ShareContactFinished { .. }
                 | MessagesEvent::AnonymousModeChanged
-                | MessagesEvent::SendFailedWithoutRow => return,
+                | MessagesEvent::SendFailedWithoutRow
+                | MessagesEvent::OgpRemoveFailed => return,
                 MessagesEvent::TopicUpdated { .. } => {}
             }
             if structural {
@@ -2400,7 +2401,7 @@ impl ChannelMessages {
         message_id: MessageId,
         sender_id: &str,
         cx: &App,
-    ) -> Vec<MessageId> {
+    ) -> Vec<MessageRef> {
         let messages = Self::collect_topic_messages(cx);
         let start = topic_row_index(&messages, message_id, active_topic_bucket(cx)).unwrap_or(0);
         message_context_menu::resolve_forward_group_in(&messages[start..], message_id, sender_id)
@@ -2448,13 +2449,16 @@ impl ChannelMessages {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let target = self
+            .find_local_message(message_id, cx)
+            .map_or(MessageRef::unbucketed(message_id), |m| m.message_ref());
         let picker = cx.new(|cx| ReactionPicker::new(window, cx));
         let focus_handle = picker.read(cx).focus_handle(cx);
         window.focus(&focus_handle, cx);
         self._reaction_picker_sub = Some(cx.subscribe(&picker, move |this, _picker, event, cx| {
             let ReactionPickerEvent::Picked { emoji_id, emoji } = event;
             MessagesStore::global(cx).update(cx, |store, cx| {
-                store.add_reaction(message_id, emoji_id.clone(), emoji.clone(), cx);
+                store.add_reaction(target, emoji_id.clone(), emoji.clone(), cx);
             });
             this.reaction_picker = None;
             this._reaction_picker_sub = None;
@@ -2582,19 +2586,21 @@ impl ChannelMessages {
         let payload = input.update(cx, |input, cx| input.take_payload(window, cx));
         let store = MessagesStore::global(cx);
 
+        let local = self.find_local_message(message_id, cx);
+        let target = local
+            .as_ref()
+            .map_or(MessageRef::unbucketed(message_id), Message::message_ref);
         let Some((text, content_tokens, _attachments, _ogp)) = payload else {
             store.update(cx, |store, cx| store.cancel_edit(cx));
             let locale = self.cached_locale.clone();
             Shell::global(cx).update(cx, |shell, cx| {
-                shell.confirm_delete_message(message_id, &locale, window, cx);
+                shell.confirm_delete_message(target, &locale, window, cx);
             });
             cx.notify();
             return;
         };
 
-        let original = self
-            .find_local_message(message_id, cx)
-            .map(|m| m.content.clone());
+        let original = local.map(|m| m.content);
 
         if original.as_deref() == Some(text.as_str()) {
             store.update(cx, |store, cx| store.cancel_edit(cx));
@@ -2604,7 +2610,7 @@ impl ChannelMessages {
         }
 
         store.update(cx, |store, cx| {
-            store.edit_message(message_id, text, content_tokens, cx)
+            store.edit_message(target, text, content_tokens, cx)
         });
         cx.emit(ChannelMessagesEvent::EditClosed);
         cx.notify();

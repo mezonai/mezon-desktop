@@ -56,6 +56,7 @@ pub(super) enum SidebarItem {
         name: String,
         channel_type: ChannelType,
         unread: bool,
+        buzz: bool,
         private: bool,
         age_restricted: i32,
         selected: bool,

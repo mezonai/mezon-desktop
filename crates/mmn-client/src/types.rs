@@ -14,6 +14,7 @@ pub const TX_TYPE_USER_CONTENT: u8 = 2;
 
 pub const DECIMALS: u32 = 6;
 pub const DECIMAL_FACTOR: i128 = 10i128.pow(DECIMALS);
+pub const MAX_MEMO_BYTES: usize = 512;
 
 const REDACTED: &str = "<redacted>";
 

@@ -10,11 +10,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::router::{Route, Router};
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, DismissEvent, Div, Entity, EventEmitter,
-    Focusable, FontWeight, HighlightStyle, Hsla, Image, ImageFormat, IntoElement, KeyBinding,
-    MouseButton, PathPromptOptions, Pixels, Rgba, ScrollStrategy, SharedString, Stateful,
-    StyledText, Subscription, Task, UniformListScrollHandle, Window, actions, canvas, deferred,
-    div, img, prelude::*, px, uniform_list,
+    AnyElement, AnyWindowHandle, App, Bounds, ClipboardItem, Context, DismissEvent, Div, Entity,
+    EventEmitter, Focusable, FontWeight, HighlightStyle, Hsla, Image, ImageFormat, IntoElement,
+    KeyBinding, MouseButton, MouseMoveEvent, PathPromptOptions, Pixels, Rgba, ScrollStrategy,
+    SharedString, Stateful, StyledText, Subscription, Task, UniformListScrollHandle, Window,
+    actions, canvas, deferred, div, img, prelude::*, px, uniform_list,
 };
 use mezon_client::transport::QUICK_MENU_TYPE_FLASH;
 use mezon_store::{
@@ -23,12 +23,14 @@ use mezon_store::{
     ClanId, ClanList, ClanMembersEvent, ClanMembersStore, CommandInvocation, CommandStatus,
     ComposeDraft, ComposeStore, ComposeToken, ComposeTokenKind, DirectEvent, DirectMessageStore,
     Emoji, EmojiEvent, EmojiStore, GroupMembersEvent, GroupMembersStore, LoginStore,
-    MENTION_HERE_USER_ID, MessageSpan, MessagesStore, OgpResult, OutgoingAttachment,
-    OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention, OutgoingOgp, QuickMenuStore,
-    RolesEvent, RolesStore, Settings, UserId, fetch_invite_preview, fetch_ogp,
-    first_previewable_url, internal_invite_id, is_clan_invite_url,
+    MENTION_HERE_USER_ID, MENTION_SEARCH_MAX_CHARS, MENTION_SEARCH_MIN_CHARS, MentionSearchEvent,
+    MentionSearchStore, MessageSpan, MessagesStore, OgpResult, OutgoingAttachment, OutgoingContent,
+    OutgoingEmoji, OutgoingHashtag, OutgoingMention, OutgoingOgp, QuickMenuStore, RolesEvent,
+    RolesStore, Settings, UserId, fetch_invite_preview, fetch_ogp, first_previewable_url,
+    internal_invite_id, is_clan_invite_url,
 };
 use std::time::Duration;
+use unicode_normalization::UnicodeNormalization;
 
 pub use attachments::build_pending;
 use attachments::{
@@ -40,7 +42,8 @@ use crate::app::shell::Shell;
 use crate::chat::gif_sticker_emoji::{GifStickerEmojiEvent, GifStickerEmojiPopup, SubPanel};
 use crate::chat::member_list::{
     MentionMemberRaw, MentionScope, ensure_mention_members_loaded, mention_direct_id,
-    mention_member_pool, mention_private_channel, mention_role_clan, mention_scope,
+    mention_member_from_clan_member, mention_member_pool, mention_private_channel,
+    mention_remote_search_scope, mention_role_clan, mention_scope,
 };
 use crate::chat::message::CreatePollModal;
 use crate::chat::message::MessageBuzzModal;
@@ -66,6 +69,7 @@ const RECORDING_COLOR: Rgba = Rgba {
     a: 1.0,
 };
 const MAX_SUGGESTIONS: usize = 10;
+const SLOW_SEARCH_HINT: Duration = Duration::from_secs(1);
 const MAX_EMOJI_CANDIDATES: usize = 20;
 const MENTION_HERE_DISPLAY: &str = "@here";
 const MENTION_HERE_NORM: &str = "@HERE";
@@ -439,33 +443,250 @@ fn normalized_with_offsets(text: &str) -> (String, Vec<(usize, usize)>) {
     (normalized, spans)
 }
 
-fn highlight_match_range(text: &str, query: &str) -> Option<std::ops::Range<usize>> {
-    if text.is_empty() {
-        return None;
-    }
-    let needle = normalize_search_string(query);
+fn highlight_range(
+    haystack: &str,
+    spans: &[(usize, usize)],
+    word: &str,
+    word_start: bool,
+) -> Option<std::ops::Range<usize>> {
+    let normalized = normalize_search_string(word);
+    let needle = normalized.trim();
     if needle.is_empty() {
         return None;
     }
-    let (haystack, spans) = normalized_with_offsets(text);
-    let start = haystack.find(&needle)?;
+    let start = haystack
+        .match_indices(needle)
+        .map(|(at, _)| at)
+        .find(|&at| !word_start || is_word_start(haystack, at))?;
     let end = start + needle.len();
     let from = spans.get(start)?.0;
     let to = spans.get(end - 1)?.1;
     Some(from..to)
 }
 
-fn highlighted_label(text: SharedString, query: &str) -> StyledText {
-    match highlight_match_range(&text, query) {
-        Some(range) => StyledText::new(text).with_highlights(vec![(
-            range,
-            HighlightStyle {
-                font_weight: Some(FontWeight::BOLD),
-                ..Default::default()
-            },
-        )]),
-        None => StyledText::new(text),
+fn highlight_word_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+    if text.is_empty() {
+        return Vec::new();
     }
+    let (haystack, spans) = normalized_with_offsets(text);
+    let mut ranges: Vec<std::ops::Range<usize>> = query
+        .split_whitespace()
+        .enumerate()
+        .filter_map(|(index, word)| {
+            highlight_range(&haystack, &spans, word, true).or_else(|| {
+                (index == 0)
+                    .then(|| highlight_range(&haystack, &spans, word, false))
+                    .flatten()
+            })
+        })
+        .collect();
+    ranges.sort_by_key(|range| range.start);
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
+fn highlighted_label(text: SharedString, query: &str) -> StyledText {
+    let ranges = highlight_word_ranges(&text, query);
+    if ranges.is_empty() {
+        return StyledText::new(text);
+    }
+    let style = HighlightStyle {
+        font_weight: Some(FontWeight::BOLD),
+        ..Default::default()
+    };
+    StyledText::new(text).with_highlights(ranges.into_iter().map(|range| (range, style)))
+}
+
+fn search_words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+}
+
+fn starts_with_phrase(field: &str, needle: &str) -> bool {
+    let mut field_words = search_words(field);
+    search_words(needle).all(|word| {
+        field_words
+            .next()
+            .is_some_and(|field_word| field_word.starts_with(word))
+    })
+}
+
+fn at_suggestion_starts_with(suggestion: &Suggestion, needle: &str) -> bool {
+    match suggestion {
+        Suggestion::Member(member, _) => [
+            member.display_norm.as_str(),
+            member.username_norm.as_str(),
+            member.alt_norm.as_str(),
+        ]
+        .into_iter()
+        .any(|field| !field.is_empty() && starts_with_phrase(field, needle)),
+        Suggestion::Role(role) => starts_with_phrase(&role.title_norm, needle),
+        Suggestion::Here => starts_with_phrase(MENTION_HERE_NORM, needle),
+        Suggestion::Channel(_) | Suggestion::Emoji(..) | Suggestion::SlashCommand(_) => false,
+    }
+}
+
+fn at_suggestion_matches(suggestion: &Suggestion, needle: &str) -> bool {
+    match suggestion {
+        Suggestion::Member(member, _) => member_matches(member, needle),
+        Suggestion::Role(role) => role.title_norm.contains(needle),
+        Suggestion::Here => MENTION_HERE_NORM.contains(needle),
+        Suggestion::Channel(_) | Suggestion::Emoji(..) | Suggestion::SlashCommand(_) => false,
+    }
+}
+
+fn member_matches(member: &MentionMemberRaw, needle: &str) -> bool {
+    [
+        member.display_norm.as_str(),
+        member.username_norm.as_str(),
+        member.alt_norm.as_str(),
+    ]
+    .into_iter()
+    .any(|field| !field.is_empty() && field_matches(field, needle))
+}
+
+fn is_word_start(field: &str, at: usize) -> bool {
+    field[..at]
+        .chars()
+        .next_back()
+        .is_none_or(|ch| !ch.is_alphanumeric())
+}
+
+fn more_words_follow(field: &str, end: usize) -> bool {
+    field[end..]
+        .chars()
+        .next()
+        .is_some_and(|ch| !ch.is_alphanumeric())
+}
+
+fn search_needle(query: &str) -> String {
+    let mut needle = normalize_search_string(query);
+    if !query.ends_with(' ') {
+        needle.truncate(needle.trim_end().len());
+    }
+    needle
+}
+
+fn field_matches(field: &str, needle: &str) -> bool {
+    let ends_word = needle.ends_with(' ');
+    let mut words = needle.split_whitespace().enumerate().peekable();
+    while let Some((index, word)) = words.next() {
+        let ends_here = ends_word && words.peek().is_none();
+        let starts_word = index > 0 || ends_here;
+        let found = field.match_indices(word).any(|(at, _)| {
+            (!starts_word || is_word_start(field, at))
+                && (!ends_here || more_words_follow(field, at + word.len()))
+        });
+        if !found {
+            return false;
+        }
+    }
+    true
+}
+
+fn remote_only_members(
+    local_ids: &std::collections::HashSet<&str>,
+    remote: &[Rc<MentionMemberRaw>],
+) -> Vec<Rc<MentionMemberRaw>> {
+    remote
+        .iter()
+        .filter(|member| !local_ids.contains(member.user_id.as_str()))
+        .cloned()
+        .collect()
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct RemoteSource {
+    seq: u64,
+    clan_id: ClanId,
+    channel_id: Option<ChannelId>,
+    answered_text: SharedString,
+}
+
+fn edit_at_caret(old: &str, new: &str, previous: usize, cursor: usize) -> bool {
+    if old == new {
+        return cursor == previous;
+    }
+    let (prefix, _, _) = single_edit_region(old, new);
+    prefix <= previous && cursor + old.len() == previous + new.len()
+}
+
+fn find_trigger(bytes: &[u8], cursor: usize) -> Option<(usize, Sigil)> {
+    let mut index = cursor;
+    while index > 0 {
+        index -= 1;
+        let ch = bytes[index];
+        if let Some(sigil) = Sigil::from_byte(ch)
+            && (index == 0 || bytes[index - 1] == b' ' || bytes[index - 1] == b'\n')
+        {
+            return Some((index, sigil));
+        }
+        if ch == b' ' || ch == b'\n' {
+            return None;
+        }
+    }
+    None
+}
+
+fn continued_mention_at(content: &str, cursor: usize, active_at: Option<usize>) -> Option<usize> {
+    let at = active_at?;
+    let bytes = content.as_bytes();
+    if at >= cursor
+        || bytes.get(at) != Some(&b'@')
+        || (at > 0 && !matches!(bytes[at - 1], b' ' | b'\n'))
+    {
+        return None;
+    }
+    let query = content.get(at + 1..cursor)?;
+    let continues = !query.starts_with(' ')
+        && !query.contains('\n')
+        && !query.contains("  ")
+        && ![" @", " #", " :"].iter().any(|token| query.contains(token))
+        && query.chars().count() <= MENTION_SEARCH_MAX_CHARS;
+    continues.then_some(at)
+}
+
+fn local_then_remote(
+    local: Vec<Suggestion>,
+    remote: Vec<Suggestion>,
+    query: &str,
+) -> Vec<Suggestion> {
+    let mut items = prioritize_and_limit(local, query);
+    items.extend(prioritize_and_limit(remote, query));
+    items
+}
+
+fn words_start_in_order(field: &str, needle: &str) -> bool {
+    let mut from = 0;
+    for word in needle.split_whitespace() {
+        let Some(at) = field[from..]
+            .match_indices(word)
+            .map(|(at, _)| from + at)
+            .find(|&at| is_word_start(field, at))
+        else {
+            return false;
+        };
+        from = at + word.len();
+    }
+    true
+}
+
+fn sort_by_needle(items: &mut [Suggestion], needle: &str) {
+    let whole = needle.trim_end();
+    let first_word = needle.split_whitespace().next().unwrap_or(whole);
+    items.sort_by_cached_key(|item| {
+        let display = item.norm_keys().0;
+        let exact = u8::from(display != whole);
+        let scattered = u8::from(!words_start_in_order(display, needle));
+        let index = display.find(first_word).map_or(i64::MAX, |i| i as i64);
+        (exact, scattered, index)
+    });
 }
 
 fn prioritize_and_limit(mut items: Vec<Suggestion>, query: &str) -> Vec<Suggestion> {
@@ -510,6 +731,21 @@ pub struct MentionInput {
     selected: usize,
     suggestion_scroll: UniformListScrollHandle,
     session_members: Vec<Rc<MentionMemberRaw>>,
+    remote_members: Vec<Rc<MentionMemberRaw>>,
+    remote_source: Option<RemoteSource>,
+    remote_answer: Option<bool>,
+    remote_requested: Option<(ClanId, Option<ChannelId>, SharedString)>,
+    remote_session: bool,
+    remote_pending: bool,
+    short_query_hold: bool,
+    remote_slow: bool,
+    holding_stale: bool,
+    user_selected: bool,
+    enter_pending: bool,
+    mention_cursor: Option<usize>,
+    window_handle: AnyWindowHandle,
+    _slow_search_task: Task<()>,
+    _enter_task: Task<()>,
     session_roles: Vec<Rc<RoleSuggestRaw>>,
     session_channels: Vec<Rc<ChannelSuggestRaw>>,
     session_emojis: Vec<Rc<EmojiSuggestRaw>>,
@@ -752,6 +988,14 @@ impl MentionInput {
             },
         );
         let mut store_subs = Self::subscribe_pool_sources(cx);
+        let owner = cx.entity_id().as_u64();
+        store_subs.push(cx.on_release(move |this, cx| {
+            if this.remote_session
+                && let Some(store) = MentionSearchStore::try_global(cx)
+            {
+                store.update(cx, |store, cx| store.end_session(owner, cx));
+            }
+        }));
         if let Some(login) = LoginStore::try_global(cx) {
             let auth_state = login.read(cx).auth_state();
             store_subs.push(
@@ -785,6 +1029,21 @@ impl MentionInput {
             selected: 0,
             suggestion_scroll: UniformListScrollHandle::new(),
             session_members: Vec::new(),
+            remote_members: Vec::new(),
+            remote_source: None,
+            remote_answer: None,
+            remote_requested: None,
+            remote_session: false,
+            remote_pending: false,
+            short_query_hold: false,
+            remote_slow: false,
+            holding_stale: false,
+            user_selected: false,
+            enter_pending: false,
+            mention_cursor: None,
+            window_handle: window.window_handle(),
+            _slow_search_task: Task::ready(()),
+            _enter_task: Task::ready(()),
             session_roles: Vec::new(),
             session_channels: Vec::new(),
             session_emojis: Vec::new(),
@@ -941,7 +1200,7 @@ impl MentionInput {
         } = draft;
         self.committed = committed_from_compose_tokens(&text, tokens);
         self.pending_attachments = attachments;
-        self.reset_popup();
+        self.reset_popup(cx);
         self.close_popup(window, cx);
         self.clear_suggestions(cx);
         self.clear_ephemeral(cx);
@@ -1015,7 +1274,7 @@ impl MentionInput {
         let attachments = outgoing_attachments(&std::mem::take(&mut self.pending_attachments));
         self.flash_send = self.flash_command.take();
         self.committed.clear();
-        self.reset_popup();
+        self.reset_popup(cx);
         self.close_popup(window, cx);
         self.input.update(cx, |input, cx| {
             input.set_mention_spans(Vec::new(), cx);
@@ -1280,7 +1539,7 @@ impl MentionInput {
             } else {
                 if !current.is_empty() {
                     self.committed.clear();
-                    self.reset_popup();
+                    self.reset_popup(cx);
                     self.input.update(cx, |input, cx| {
                         input.set_mention_spans(Vec::new(), cx);
                         input.set_value("", window, cx);
@@ -1338,7 +1597,7 @@ impl MentionInput {
                 // Drop the text now so the re-entered take_payload sends only the file.
                 let swallow = this.input.read(cx).pending_send_ime_token();
                 this.committed.clear();
-                this.reset_popup();
+                this.reset_popup(cx);
                 this.clear_ogp_preview(cx);
                 this.input.update(cx, |input, cx| {
                     input.set_mention_spans(Vec::new(), cx);
@@ -1609,8 +1868,17 @@ impl MentionInput {
         row.into_any_element()
     }
 
-    fn popup_open(&self) -> bool {
-        self.active_at.is_some() && !self.suggestions.is_empty()
+    fn remote_searching(&self) -> bool {
+        self.remote_pending && self.active_sigil == Sigil::At
+    }
+
+    fn waiting_for_server(&self) -> bool {
+        (self.remote_pending || self.short_query_hold) && self.active_sigil == Sigil::At
+    }
+
+    fn popup_visible(&self) -> bool {
+        self.active_at.is_some()
+            && (!self.suggestions.is_empty() || (self.remote_slow && self.remote_searching()))
     }
 
     fn close_suggestions(&mut self) {
@@ -1619,11 +1887,19 @@ impl MentionInput {
         self.active_query = SharedString::default();
         self.suggestions.clear();
         self.selected = 0;
+        self.holding_stale = false;
+        self.user_selected = false;
+        self.enter_pending = false;
+        self.mention_cursor = None;
+        self.remote_pending = false;
+        self.short_query_hold = false;
+        self.stop_slow_hint();
     }
 
-    fn reset_popup(&mut self) {
+    fn reset_popup(&mut self, cx: &mut Context<Self>) {
         self.close_suggestions();
         self.drop_pool();
+        self.end_remote_session(cx);
     }
 
     fn end_mention(&mut self, cx: &mut Context<Self>) {
@@ -1636,6 +1912,7 @@ impl MentionInput {
             self.close_suggestions();
             cx.notify();
         }
+        self.end_remote_session(cx);
     }
 
     fn clear_suggestions(&mut self, cx: &mut Context<Self>) {
@@ -1652,6 +1929,7 @@ impl MentionInput {
             Sigil::At => {
                 self.session_members = Vec::new();
                 self.session_roles = Vec::new();
+                self.clear_remote_members();
             }
             Sigil::Hash => self.session_channels = Vec::new(),
             Sigil::Colon => self.session_emojis = Vec::new(),
@@ -1669,11 +1947,99 @@ impl MentionInput {
     }
 
     fn on_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.popup_open() {
+        self.enter_pending = false;
+        let waiting = self.active_at.is_some() && self.remote_searching();
+        if self.popup_visible() || waiting {
+            if self.active_sigil == Sigil::At && self.active_query.contains(' ') {
+                if self.accept_spaced(window, cx) {
+                    return;
+                }
+            } else {
+                if self.accept_best(window, cx) {
+                    return;
+                }
+                if waiting && !self.remote_slow {
+                    self.enter_pending = true;
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+        cx.emit(MentionInputEvent::Submit);
+    }
+
+    fn accept_spaced(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.accept_user_selection(window, cx) {
+            return true;
+        }
+        if self.active_query.ends_with(' ') {
+            return false;
+        }
+        self.flush_held(cx);
+        let needle = search_needle(&self.active_query);
+        let starts = self
+            .suggestions
+            .get(self.selected)
+            .is_some_and(|suggestion| at_suggestion_starts_with(suggestion, &needle));
+        if starts {
             self.accept(self.selected, window, cx);
-        } else {
+        }
+        starts
+    }
+
+    fn finish_enter_when_ready(&mut self, deadline: bool, cx: &mut Context<Self>) {
+        if !self.enter_pending
+            || (!deadline && self.remote_searching() && self.suggestions.is_empty())
+        {
+            return;
+        }
+        let window_handle = self.window_handle;
+        self._enter_task = cx.spawn(async move |this, cx| {
+            let _ = cx.update_window(window_handle, |_, window, cx| {
+                this.update(cx, |this, cx| {
+                    if std::mem::take(&mut this.enter_pending) {
+                        this.resolve_kept_enter(window, cx);
+                    }
+                })
+            });
+        });
+    }
+
+    fn resolve_kept_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_at.is_none() || !self.input.read(cx).focus_handle(cx).is_focused(window) {
+            return;
+        }
+        if !self.accept_best(window, cx) {
             cx.emit(MentionInputEvent::Submit);
         }
+    }
+
+    fn selection_matches_query(&self) -> bool {
+        let needle = search_needle(&self.active_query);
+        self.suggestions
+            .get(self.selected)
+            .is_some_and(|suggestion| at_suggestion_matches(suggestion, &needle))
+    }
+
+    fn accept_user_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let valid = self.user_selected
+            && self.selected < self.suggestions.len()
+            && (!self.holding_stale || self.selection_matches_query());
+        if valid {
+            self.accept(self.selected, window, cx);
+        }
+        valid
+    }
+
+    fn accept_best(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !(self.holding_stale && self.user_selected && self.selection_matches_query()) {
+            self.flush_held(cx);
+        }
+        if self.suggestions.is_empty() {
+            return false;
+        }
+        self.accept(self.selected, window, cx);
+        true
     }
 
     fn on_change(&mut self, cx: &mut Context<Self>) {
@@ -1683,6 +2049,7 @@ impl MentionInput {
     }
 
     fn after_content_change(&mut self, content: SharedString, cx: &mut Context<Self>) {
+        self.enter_pending = false;
         self.check_trigger(&content, cx);
         if self
             .flash_command
@@ -1917,22 +2284,16 @@ impl MentionInput {
             return;
         }
 
-        let bytes = content.as_bytes();
-        let mut found = None;
-        let mut index = cursor;
-        while index > 0 {
-            index -= 1;
-            let ch = bytes[index];
-            if let Some(sigil) = Sigil::from_byte(ch)
-                && (index == 0 || bytes[index - 1] == b' ' || bytes[index - 1] == b'\n')
-            {
-                found = Some((index, sigil));
-                break;
-            }
-            if ch == b' ' || ch == b'\n' {
-                break;
-            }
-        }
+        let typed_at_mention = self
+            .mention_cursor
+            .is_some_and(|previous| edit_at_caret(&self.last_content, content, previous, cursor));
+        let continued = match self.active_sigil {
+            Sigil::At if typed_at_mention => continued_mention_at(content, cursor, self.active_at),
+            Sigil::At | Sigil::Hash | Sigil::Colon | Sigil::Slash => None,
+        };
+        let found = continued
+            .map(|at| (at, Sigil::At))
+            .or_else(|| find_trigger(content.as_bytes(), cursor));
 
         let Some((at, sigil)) = found else {
             self.end_mention(cx);
@@ -1956,15 +2317,30 @@ impl MentionInput {
             self.pooled[sigil.slot()] = (!self.pool_is_empty(sigil)).then_some(scope);
         }
         self.active_at = Some(at);
+        self.mention_cursor = Some(cursor);
         self.active_sigil = sigil;
         self.query_len = query.len() + 1;
         self.active_query = SharedString::from(query.to_string());
+        if sigil == Sigil::At {
+            self.request_remote_members(query, cx);
+        }
         self.build_suggestions(query, cx);
+        if self.spaced_query_exhausted() {
+            self.end_mention(cx);
+            return;
+        }
         if self.suggestions.is_empty() {
             self.clear_suggestions(cx);
-        } else {
-            cx.notify();
         }
+        cx.notify();
+    }
+
+    fn spaced_query_exhausted(&self) -> bool {
+        self.active_sigil == Sigil::At
+            && self.active_query.contains(' ')
+            && self.suggestions.is_empty()
+            && !self.remote_searching()
+            && self.remote_answer != Some(false)
     }
 
     fn subscribe_pool_sources(cx: &mut Context<Self>) -> Vec<Subscription> {
@@ -2053,12 +2429,203 @@ impl MentionInput {
                 this.invalidate_pool(Sigil::Slash, cx);
             }));
         }
+        if let Some(store) = MentionSearchStore::try_global(cx) {
+            subs.push(cx.subscribe(&store, |this, _, _: &MentionSearchEvent, cx| {
+                this.on_remote_members_settled(cx)
+            }));
+        }
         subs
+    }
+
+    fn clear_remote_members(&mut self) {
+        self.remote_members = Vec::new();
+        self.remote_source = None;
+        self.remote_answer = None;
+    }
+
+    fn end_remote_session(&mut self, cx: &mut Context<Self>) {
+        self.remote_requested = None;
+        self.clear_remote_members();
+        self.remote_pending = false;
+        self.short_query_hold = false;
+        self.stop_slow_hint();
+        if std::mem::take(&mut self.remote_session)
+            && let Some(store) = MentionSearchStore::try_global(cx)
+        {
+            let owner = cx.entity_id().as_u64();
+            store.update(cx, |store, cx| store.end_session(owner, cx));
+        }
+    }
+
+    fn request_remote_members(&mut self, query: &str, cx: &mut Context<Self>) {
+        let scope = mention_remote_search_scope(cx);
+        let requested = scope.map(|(clan_id, channel_id)| {
+            (clan_id, channel_id, SharedString::from(query.to_string()))
+        });
+        let changed = requested.is_some() && self.remote_requested != requested;
+        if changed {
+            self.stop_slow_hint();
+        }
+        if let Some((clan_id, channel_id)) = scope
+            && let Some(store) = MentionSearchStore::try_global(cx)
+        {
+            self.remote_session = true;
+            if changed {
+                self.remote_requested = requested;
+                let owner = cx.entity_id().as_u64();
+                store.update(cx, |store, cx| {
+                    store.search(owner, clan_id, channel_id, query, cx)
+                });
+            }
+        }
+        self.sync_remote_members(scope, query, cx);
+        self.sync_remote_pending(scope, query, cx);
+        let typed = query.trim().nfc().filter(|ch| !ch.is_control()).count();
+        self.short_query_hold = scope.is_some() && (1..MENTION_SEARCH_MIN_CHARS).contains(&typed);
+        self.update_slow_hint(cx);
+    }
+
+    fn stop_slow_hint(&mut self) {
+        self.remote_slow = false;
+        self._slow_search_task = Task::ready(());
+    }
+
+    fn update_slow_hint(&mut self, cx: &mut Context<Self>) {
+        if !self.remote_pending && !self.short_query_hold {
+            self.stop_slow_hint();
+            return;
+        }
+        if self.remote_slow {
+            return;
+        }
+        self._slow_search_task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SLOW_SEARCH_HINT).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.remote_pending || this.short_query_hold {
+                    this.remote_slow = true;
+                    if this.active_at.is_some() && this.rebuild_keeping_selection(cx) {
+                        this.finish_enter_when_ready(true, cx);
+                    }
+                    cx.notify();
+                }
+            });
+        });
+    }
+
+    fn sync_remote_pending(
+        &mut self,
+        scope: Option<(ClanId, Option<ChannelId>)>,
+        query: &str,
+        cx: &Context<Self>,
+    ) -> bool {
+        let owner = cx.entity_id().as_u64();
+        let pending = scope.is_some_and(|(clan_id, channel_id)| {
+            MentionSearchStore::try_global(cx).is_some_and(|store| {
+                store
+                    .read(cx)
+                    .is_searching(owner, clan_id, channel_id, query)
+            })
+        });
+        let changed = pending != self.remote_pending;
+        self.remote_pending = pending;
+        changed
+    }
+
+    fn sync_remote_members(
+        &mut self,
+        scope: Option<(ClanId, Option<ChannelId>)>,
+        query: &str,
+        cx: &App,
+    ) -> bool {
+        let Some((clan_id, channel_id)) = scope else {
+            let changed = !self.remote_members.is_empty();
+            self.clear_remote_members();
+            return changed;
+        };
+        let Some(store) = MentionSearchStore::try_global(cx) else {
+            return false;
+        };
+        let store = store.read(cx);
+        self.remote_answer = store.answer_complete(clan_id, channel_id, query);
+        let (answered_text, seq, hits) = store
+            .results(clan_id, channel_id, query)
+            .unwrap_or_default();
+        if self.remote_source.as_ref().is_some_and(|source| {
+            source.seq == seq
+                && source.clan_id == clan_id
+                && source.channel_id == channel_id
+                && source.answered_text.as_ref() == answered_text
+        }) {
+            return false;
+        }
+        self.remote_members = hits
+            .iter()
+            .map(|member| Rc::new(mention_member_from_clan_member(member)))
+            .collect();
+        self.remote_source = Some(RemoteSource {
+            seq,
+            clan_id,
+            channel_id,
+            answered_text: SharedString::from(answered_text.to_string()),
+        });
+        true
+    }
+
+    fn on_remote_members_settled(&mut self, cx: &mut Context<Self>) {
+        if self.active_at.is_none() || self.active_sigil != Sigil::At {
+            return;
+        }
+        let query = self.active_query.clone();
+        let scope = mention_remote_search_scope(cx);
+        let members_changed = self.sync_remote_members(scope, &query, cx);
+        let pending_changed = self.sync_remote_pending(scope, &query, cx);
+        if !self.remote_pending && !self.short_query_hold {
+            self.stop_slow_hint();
+        } else if pending_changed {
+            self.update_slow_hint(cx);
+        }
+        if !members_changed && !pending_changed {
+            return;
+        }
+        if self.rebuild_keeping_selection(cx) {
+            self.finish_enter_when_ready(false, cx);
+        }
+        cx.notify();
+    }
+
+    fn rebuild_keeping_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        let selected = self
+            .user_selected
+            .then(|| self.suggestions.get(self.selected))
+            .flatten()
+            .map(|suggestion| {
+                let (kind, id) = suggestion.item_key();
+                (kind, id.to_string())
+            });
+        let query = self.active_query.clone();
+        self.build_suggestions(&query, cx);
+        if self.spaced_query_exhausted() {
+            self.end_mention(cx);
+            return false;
+        }
+        if let Some((kind, id)) = selected
+            && let Some(index) = self
+                .suggestions
+                .iter()
+                .position(|suggestion| suggestion.item_key() == (kind, id.as_str()))
+        {
+            self.selected = index;
+            self.user_selected = true;
+            self.suggestion_scroll
+                .scroll_to_item(index, ScrollStrategy::Nearest);
+        }
+        true
     }
 
     fn drop_pool(&mut self) {
         self.pooled = [None; 4];
         self.session_members = Vec::new();
+        self.clear_remote_members();
         self.session_roles = Vec::new();
         self.session_channels = Vec::new();
         self.session_emojis = Vec::new();
@@ -2118,24 +2685,63 @@ impl MentionInput {
             .collect()
     }
 
+    fn showing_member_rows(&self) -> bool {
+        !self.suggestions.is_empty()
+            && self.suggestions.iter().all(|suggestion| {
+                matches!(
+                    suggestion,
+                    Suggestion::Member(..) | Suggestion::Role(_) | Suggestion::Here
+                )
+            })
+    }
+
     fn build_suggestions(&mut self, query: &str, cx: &App) {
+        if self.waiting_for_server() && !self.remote_slow {
+            self.holding_stale = self.showing_member_rows();
+            if self.holding_stale {
+                return;
+            }
+            if self.remote_searching() {
+                self.suggestions.clear();
+                self.selected = 0;
+                return;
+            }
+        }
+        self.compute_suggestions(query, cx);
+    }
+
+    fn flush_held(&mut self, cx: &App) {
+        if self.holding_stale || (self.suggestions.is_empty() && self.remote_searching()) {
+            let query = self.active_query.clone();
+            self.compute_suggestions(&query, cx);
+        }
+    }
+
+    fn compute_suggestions(&mut self, query: &str, cx: &App) {
         let mut candidates = match self.active_sigil {
             Sigil::At => self.at_candidates(query),
             Sigil::Hash => self.hash_candidates(query),
             Sigil::Colon => self.colon_candidates(query, cx),
             Sigil::Slash => self.slash_candidates(query),
         };
+        let mut remote = match self.active_sigil {
+            Sigil::At => self.remote_candidates(query, &candidates),
+            Sigil::Hash | Sigil::Colon | Sigil::Slash => Vec::new(),
+        };
         if self.ephemeral_mode && self.active_sigil == Sigil::At {
             let self_id = BadgeService::try_global(cx)
                 .and_then(|badge| badge.read(cx).current_user_id(cx))
                 .map(|uid| uid.to_string());
-            candidates.retain(|suggestion| match suggestion {
+            let keep = |suggestion: &Suggestion| match suggestion {
                 Suggestion::Here => false,
                 Suggestion::Member(member, _) => Some(&member.user_id) != self_id.as_ref(),
                 _ => true,
-            });
+            };
+            candidates.retain(|suggestion| keep(suggestion));
+            remote.retain(|suggestion| keep(suggestion));
         }
-        let mut suggestions = prioritize_and_limit(candidates, query);
+        let mut suggestions = local_then_remote(candidates, remote, query);
+        self.holding_stale = false;
         resolve_suggestion_media(&mut suggestions, cx);
         let same_items = suggestions.len() == self.suggestions.len()
             && suggestions
@@ -2144,6 +2750,7 @@ impl MentionInput {
                 .all(|(new, old)| new.item_key() == old.item_key());
         if !same_items || self.selected >= suggestions.len() {
             self.selected = 0;
+            self.user_selected = false;
         }
         self.suggestions = suggestions;
         self.suggestion_scroll
@@ -2167,9 +2774,9 @@ impl MentionInput {
             out.push(Suggestion::Here);
             return out;
         }
-        let needle = normalize_search_string(query);
+        let needle = search_needle(query);
         for member in &self.session_members {
-            if member.display_norm.contains(&needle) || member.username_norm.contains(&needle) {
+            if member_matches(member, &needle) {
                 out.push(Suggestion::Member(member.clone(), SharedString::default()));
             }
         }
@@ -2182,13 +2789,32 @@ impl MentionInput {
             out.push(Suggestion::Here);
         }
         if !needle.is_empty() {
-            out.sort_by_cached_key(|item| {
-                let display = item.norm_keys().0;
-                let exact = u8::from(display != needle);
-                let index = display.find(&needle).map_or(i64::MAX, |i| i as i64);
-                (exact, index)
-            });
+            sort_by_needle(&mut out, &needle);
         }
+        out
+    }
+
+    fn remote_candidates(&self, query: &str, local: &[Suggestion]) -> Vec<Suggestion> {
+        if query.is_empty()
+            || self.remote_members.is_empty()
+            || (self.remote_searching() && self.remote_answer.is_none())
+        {
+            return Vec::new();
+        }
+        let needle = search_needle(query);
+        let local_ids = local
+            .iter()
+            .filter_map(|suggestion| match suggestion {
+                Suggestion::Member(member, _) => Some(member.user_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let mut out: Vec<Suggestion> = remote_only_members(&local_ids, &self.remote_members)
+            .into_iter()
+            .filter(|member| member_matches(member, &needle))
+            .map(|member| Suggestion::Member(member, SharedString::default()))
+            .collect();
+        sort_by_needle(&mut out, &needle);
         out
     }
 
@@ -2237,7 +2863,7 @@ impl MentionInput {
                     input.replace_range(at..replace_end, "@", window, cx)
                 });
                 self.ephemeral_mode = true;
-                self.reset_popup();
+                self.reset_popup(cx);
                 self.sync_ranges(cx);
                 cx.notify();
             } else if let Some(action_msg) = command.action_msg.as_ref() {
@@ -2245,7 +2871,7 @@ impl MentionInput {
                     input.replace_range(at..replace_end, action_msg.as_ref(), window, cx)
                 });
                 self.flash_command = command.bot_command(action_msg);
-                self.reset_popup();
+                self.reset_popup(cx);
                 self.sync_ranges(cx);
                 cx.notify();
             }
@@ -2261,7 +2887,7 @@ impl MentionInput {
                     input.replace_range(at..replace_end, "", window, cx)
                 });
                 self.apply_ephemeral_placeholder(cx);
-                self.reset_popup();
+                self.reset_popup(cx);
                 self.sync_ranges(cx);
                 cx.notify();
                 return;
@@ -2315,7 +2941,7 @@ impl MentionInput {
             start: at,
             end,
         });
-        self.reset_popup();
+        self.reset_popup(cx);
         self.sync_ranges(cx);
         self.sync_history_payload(cx);
         cx.notify();
@@ -2356,7 +2982,7 @@ impl MentionInput {
             cx.notify();
             return;
         }
-        self.reset_popup();
+        self.reset_popup(cx);
         self.open_popup(tab, window, cx);
         cx.notify();
     }
@@ -2500,7 +3126,15 @@ impl MentionInput {
             .iter()
             .map(|suggestion| suggestion.sort_keys().0.to_string())
             .collect();
-        (self.popup_open(), self.selected, labels)
+        (self.popup_visible(), self.selected, labels)
+    }
+
+    pub(crate) fn probe_searching(&self) -> bool {
+        self.active_at.is_some() && self.remote_searching()
+    }
+
+    pub(crate) fn probe_holding_stale(&self) -> bool {
+        self.holding_stale
     }
 
     pub(crate) fn probe_accept(
@@ -2509,7 +3143,7 @@ impl MentionInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.popup_open() || index >= self.suggestions.len() {
+        if !self.popup_visible() || index >= self.suggestions.len() {
             return false;
         }
         self.accept(index, window, cx);
@@ -2583,8 +3217,17 @@ impl MentionInput {
     }
 
     fn on_nav_up(&mut self, cx: &mut Context<Self>) {
-        if self.popup_open() {
+        self.enter_pending = false;
+        if self.popup_visible() {
+            if !self.holding_stale {
+                self.flush_held(cx);
+            }
+            if self.suggestions.is_empty() {
+                cx.notify();
+                return;
+            }
             self.selected = self.selected.saturating_sub(1);
+            self.user_selected = true;
             self.suggestion_scroll
                 .scroll_to_item(self.selected, ScrollStrategy::Nearest);
             cx.notify();
@@ -2599,8 +3242,17 @@ impl MentionInput {
     }
 
     fn on_nav_down(&mut self, cx: &mut Context<Self>) {
-        if self.popup_open() {
+        self.enter_pending = false;
+        if self.popup_visible() {
+            if !self.holding_stale {
+                self.flush_held(cx);
+            }
+            if self.suggestions.is_empty() {
+                cx.notify();
+                return;
+            }
             self.selected = (self.selected + 1).min(self.suggestions.len() - 1);
+            self.user_selected = true;
             self.suggestion_scroll
                 .scroll_to_item(self.selected, ScrollStrategy::Nearest);
             cx.notify();
@@ -2619,13 +3271,13 @@ impl MentionInput {
     }
 
     fn on_accept(&mut self, _: &MentionAccept, window: &mut Window, cx: &mut Context<Self>) {
-        if self.popup_open() {
-            self.accept(self.selected, window, cx);
+        if self.popup_visible() && !self.accept_best(window, cx) {
+            cx.notify();
         }
     }
 
     fn on_dismiss(&mut self, _: &MentionDismiss, window: &mut Window, cx: &mut Context<Self>) {
-        if self.popup_open() {
+        if self.popup_visible() || (self.active_at.is_some() && self.remote_searching()) {
             self.hide(cx);
         } else if self.file_menu_open {
             self.file_menu_open = false;
@@ -2736,6 +3388,7 @@ impl MentionInput {
                                 .image_cache(&self.emoji_cache)
                                 .id("suggestion-emoji-frames")
                                 .size(px(22.))
+                                .aspect_square()
                                 .into_any_element(),
                         )
                     };
@@ -2777,17 +3430,16 @@ impl MentionInput {
             .rounded(px(8.))
             .cursor_pointer()
             .when(is_selected, |row| row.bg(selected_bg))
-            .on_hover({
+            .on_mouse_move({
                 let entity = entity.clone();
-                move |hovered: &bool, _window: &mut Window, cx: &mut App| {
-                    if *hovered {
-                        entity.update(cx, |this, cx| {
-                            if this.selected != index {
-                                this.selected = index;
-                                cx.notify();
-                            }
-                        });
-                    }
+                move |_event: &MouseMoveEvent, _window: &mut Window, cx: &mut App| {
+                    entity.update(cx, |this, cx| {
+                        if this.selected != index {
+                            this.selected = index;
+                            this.user_selected = true;
+                            cx.notify();
+                        }
+                    });
                 }
             })
             .on_click({
@@ -2864,39 +3516,11 @@ impl MentionInput {
         let theme = cx.theme();
         let popup_bg = theme.tokens.bg_ping_member;
         let border = theme.border;
+        let muted = theme.tokens.text_secondary;
         let entity = cx.entity();
         let count = self.suggestions.len();
-        let list_h = (count as f32 * MENTION_ROW_PX).min(MENTION_POPUP_MAX_PX);
         let locale = self.locale(cx);
         let header_title = self.active_sigil.category_title(&locale);
-        let list = uniform_list(
-            "mention-suggestion-list",
-            count,
-            move |range, _window, cx| {
-                let theme = cx.theme();
-                let channels = ChannelList::global(cx).read(cx);
-                let this = entity.read(cx);
-                range
-                    .map(|ix| match this.suggestions.get(ix) {
-                        Some(suggestion) => {
-                            let voice_busy = match suggestion {
-                                Suggestion::Channel(channel) => channels
-                                    .channel(channel.clan_id, channel.id)
-                                    .is_some_and(Channel::voice_busy),
-                                _ => false,
-                            };
-                            this.render_suggestion_row(
-                                theme, &locale, ix, suggestion, voice_busy, &entity,
-                            )
-                        }
-                        None => div().h(px(MENTION_ROW_PX)).into_any_element(),
-                    })
-                    .collect::<Vec<_>>()
-            },
-        )
-        .track_scroll(&self.suggestion_scroll)
-        .h(px(list_h))
-        .w_full();
         let header = div()
             .flex()
             .items_center()
@@ -2910,6 +3534,48 @@ impl MentionInput {
                     .text_color(theme.tokens.text_theme_primary)
                     .child(header_title),
             );
+        let body = if count == 0 {
+            div()
+                .flex()
+                .items_center()
+                .px_3()
+                .h(px(MENTION_ROW_PX))
+                .text_size(px(14.))
+                .text_color(muted)
+                .child(mezon_i18n::t(&locale, "searchMessageChannel.searching"))
+                .into_any_element()
+        } else {
+            let list_h = (count as f32 * MENTION_ROW_PX).min(MENTION_POPUP_MAX_PX);
+            uniform_list(
+                "mention-suggestion-list",
+                count,
+                move |range, _window, cx| {
+                    let theme = cx.theme();
+                    let channels = ChannelList::global(cx).read(cx);
+                    let this = entity.read(cx);
+                    range
+                        .map(|ix| match this.suggestions.get(ix) {
+                            Some(suggestion) => {
+                                let voice_busy = match suggestion {
+                                    Suggestion::Channel(channel) => channels
+                                        .channel(channel.clan_id, channel.id)
+                                        .is_some_and(Channel::voice_busy),
+                                    _ => false,
+                                };
+                                this.render_suggestion_row(
+                                    theme, &locale, ix, suggestion, voice_busy, &entity,
+                                )
+                            }
+                            None => div().h(px(MENTION_ROW_PX)).into_any_element(),
+                        })
+                        .collect::<Vec<_>>()
+                },
+            )
+            .track_scroll(&self.suggestion_scroll)
+            .h(px(list_h))
+            .w_full()
+            .into_any_element()
+        };
         deferred(
             div()
                 .image_cache(self.avatar_cache.clone())
@@ -2927,13 +3593,13 @@ impl MentionInput {
                 .occlude()
                 .on_mouse_down_out(cx.listener(|this, _event, _window, cx| this.hide(cx)))
                 .child(header)
-                .child(list),
+                .child(body),
         )
         .into_any_element()
     }
 
     fn render_compact(&self, cx: &mut Context<Self>) -> AnyElement {
-        let open = self.popup_open();
+        let open = self.popup_visible();
         let popup = open.then(|| self.build_suggestion_popup(cx));
         let previews =
             (!self.pending_attachments.is_empty()).then(|| self.render_attachment_previews(cx));
@@ -3221,7 +3887,7 @@ impl Render for MentionInput {
         if self.compact {
             return self.render_compact(cx);
         }
-        let open = self.popup_open();
+        let open = self.popup_visible();
         let active_tab = self.popup.as_ref().map(|p| p.read(cx).active_tab());
         let theme = cx.theme().clone();
         let toggle_color = if active_tab == Some(SubPanel::Emoji) {
@@ -3676,8 +4342,8 @@ mod suggest_tests {
 #[cfg(test)]
 mod suggestion_order_tests {
     use super::{
-        MentionMemberRaw, RoleSuggestRaw, Suggestion, highlight_match_range, prioritize_and_limit,
-        role_fallback_color,
+        MentionMemberRaw, RoleSuggestRaw, Suggestion, highlight_word_ranges, local_then_remote,
+        prioritize_and_limit, remote_only_members, role_fallback_color,
     };
     use gpui::SharedString;
     use std::rc::Rc;
@@ -3693,6 +4359,7 @@ mod suggestion_order_tests {
                 username_lc: display.to_lowercase(),
                 display_norm: display.to_uppercase(),
                 username_norm: display.to_uppercase(),
+                alt_norm: String::new(),
             }),
             SharedString::default(),
         )
@@ -3721,6 +4388,52 @@ mod suggestion_order_tests {
             .collect()
     }
 
+    fn raw(user_id: &str, display: &str, username: &str) -> Rc<MentionMemberRaw> {
+        Rc::new(MentionMemberRaw {
+            user_id: user_id.to_string(),
+            display: display.to_string(),
+            username: username.to_string(),
+            avatar_raw: String::new(),
+            display_lc: display.to_lowercase(),
+            username_lc: username.to_lowercase(),
+            display_norm: display.to_lowercase(),
+            username_norm: username.to_lowercase(),
+            alt_norm: String::new(),
+        })
+    }
+
+    fn ids(members: &[Rc<MentionMemberRaw>]) -> Vec<&str> {
+        members.iter().map(|m| m.user_id.as_str()).collect()
+    }
+
+    fn local_ids(members: &[Rc<MentionMemberRaw>]) -> std::collections::HashSet<&str> {
+        members.iter().map(|m| m.user_id.as_str()).collect()
+    }
+
+    #[test]
+    fn remote_hits_for_the_query_skip_members_already_listed_locally() {
+        let local = vec![raw("1", "nguyen a", "nga")];
+        let remote = vec![
+            raw("1", "nguyen a", "nga"),
+            raw("3", "Boss", "user3"),
+            raw("4", "nguyen c", "ngc"),
+        ];
+        assert_eq!(
+            ids(&remote_only_members(&local_ids(&local), &remote)),
+            vec!["3", "4"]
+        );
+    }
+
+    #[test]
+    fn server_hits_are_appended_below_local_hits_even_when_they_match_better() {
+        let local = vec![member("member 0001")];
+        let remote = vec![member("0001 legacy")];
+        assert_eq!(
+            labels(&local_then_remote(local, remote, "0001")),
+            vec!["member 0001", "0001 legacy"]
+        );
+    }
+
     #[test]
     fn roles_rank_above_members_and_here() {
         let items = vec![
@@ -3747,17 +4460,18 @@ mod suggestion_order_tests {
 
     #[test]
     fn highlight_spans_the_query_inside_the_label() {
-        assert_eq!(highlight_match_range("Moderator", "der"), Some(2..5));
-        assert_eq!(highlight_match_range("Moderator", "MOD"), Some(0..3));
-        assert_eq!(highlight_match_range("Moderator", "zz"), None);
-        assert_eq!(highlight_match_range("Moderator", ""), None);
+        assert_eq!(highlight_word_ranges("Moderator", "der"), vec![2..5]);
+        assert_eq!(highlight_word_ranges("Moderator", "MOD"), vec![0..3]);
+        assert!(highlight_word_ranges("Moderator", "zz").is_empty());
+        assert!(highlight_word_ranges("Moderator", "").is_empty());
     }
 
     #[test]
     fn highlight_range_is_byte_safe_for_accented_labels() {
         let label = "Quản trị viên";
-        let range = highlight_match_range(label, "tri").expect("accent-insensitive match");
-        assert_eq!(&label[range], "trị");
+        let ranges = highlight_word_ranges(label, "tri");
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(&label[ranges[0].clone()], "trị");
     }
 }
 
@@ -3846,5 +4560,214 @@ mod draft_tests {
         assert!(matches!(restored[0].kind, TokenKind::Mention { .. }));
         assert!(matches!(restored[1].kind, TokenKind::Hashtag { .. }));
         assert!(matches!(restored[2].kind, TokenKind::Emoji { .. }));
+    }
+}
+
+#[cfg(test)]
+mod mention_trigger_tests {
+    use super::{
+        MENTION_SEARCH_MAX_CHARS, MentionMemberRaw, Sigil, Suggestion, at_suggestion_matches,
+        at_suggestion_starts_with, continued_mention_at, edit_at_caret, field_matches,
+        find_trigger, highlight_word_ranges, member_matches, search_needle, words_start_in_order,
+    };
+    use crate::util::text_utils::normalize_search_string;
+    use gpui::SharedString;
+    use std::rc::Rc;
+
+    fn trigger(content: &str) -> Option<(usize, Sigil)> {
+        find_trigger(content.as_bytes(), content.len())
+    }
+
+    #[test]
+    fn a_fresh_trigger_still_stops_at_a_space() {
+        assert!(matches!(trigger("@old"), Some((0, Sigil::At))));
+        assert!(matches!(trigger("hi @old"), Some((3, Sigil::At))));
+        assert!(trigger("@old timer").is_none());
+        assert!(trigger("mail@old").is_none());
+    }
+
+    #[test]
+    fn an_open_mention_continues_across_single_spaces() {
+        assert_eq!(continued_mention_at("@Old Timer", 10, Some(0)), Some(0));
+        assert_eq!(
+            continued_mention_at("hi @Old Timer 012", 17, Some(3)),
+            Some(3)
+        );
+        assert_eq!(continued_mention_at("@Old Timer", 6, Some(0)), Some(0));
+    }
+
+    #[test]
+    fn a_mention_does_not_continue_past_what_ends_it() {
+        assert_eq!(continued_mention_at("@Old Timer", 10, None), None);
+        assert_eq!(continued_mention_at("@ Old", 5, Some(0)), None);
+        assert_eq!(continued_mention_at("@Old  Timer", 11, Some(0)), None);
+        assert_eq!(continued_mention_at("@Old\nTimer", 10, Some(0)), None);
+        assert_eq!(continued_mention_at("x@Old Timer", 11, Some(1)), None);
+        assert_eq!(continued_mention_at("#Old Timer", 10, Some(0)), None);
+        assert_eq!(continued_mention_at("@Old", 0, Some(0)), None);
+        let long = format!("@{}", "a b".repeat(MENTION_SEARCH_MAX_CHARS / 2));
+        assert_eq!(continued_mention_at(&long, long.len(), Some(0)), None);
+    }
+
+    fn raw(display: &str, username: &str) -> Rc<MentionMemberRaw> {
+        Rc::new(MentionMemberRaw {
+            user_id: username.to_string(),
+            display: display.to_string(),
+            username: username.to_string(),
+            avatar_raw: String::new(),
+            display_lc: display.to_lowercase(),
+            username_lc: username.to_lowercase(),
+            display_norm: normalize_search_string(display),
+            username_norm: normalize_search_string(username),
+            alt_norm: String::new(),
+        })
+    }
+
+    #[test]
+    fn a_mention_continues_only_through_edits_made_at_its_caret() {
+        assert!(edit_at_caret("@ng", "@ngu", 3, 4));
+        assert!(edit_at_caret("@ngu", "@ng", 4, 3));
+        assert!(edit_at_caret("@Nu", "@Nư", 3, 4));
+        assert!(edit_at_caret("@Le Nguyen", "@Le Nguyễn", 10, 12));
+        assert!(edit_at_caret("@tran", "@tràn", 5, 6));
+        assert!(edit_at_caret("@Old ", "@Old Nguyễn", 5, 13));
+        assert!(edit_at_caret("@ng", "@ng", 3, 3));
+        assert!(!edit_at_caret("@ngworld is big", "@ngworld is big!", 3, 16));
+        assert!(!edit_at_caret("@ng", "@ng", 3, 1));
+    }
+
+    #[test]
+    fn words_rank_higher_when_each_starts_a_word_in_order() {
+        assert!(words_start_in_order("NGUYEN VAN A", "NG VAN"));
+        assert!(!words_start_in_order("DANG VAN A", "NG VAN"));
+        assert!(!words_start_in_order("NGUYEN VAN A", "VAN NG"));
+        assert!(words_start_in_order("AN NGUYEN", "AN"));
+        assert!(!words_start_in_order("TUAN NGUYEN", "AN"));
+    }
+
+    #[test]
+    fn every_query_word_is_highlighted() {
+        assert_eq!(
+            highlight_word_ranges("Nguyễn Văn A", "ng van"),
+            vec![0..2, 9..13]
+        );
+        assert!(highlight_word_ranges("Nguyen", "zz").is_empty());
+        assert_eq!(highlight_word_ranges("Tuan An", "x an"), vec![5..7]);
+    }
+
+    #[test]
+    fn a_new_trigger_after_a_space_ends_the_open_mention() {
+        assert_eq!(continued_mention_at("@ng #gen", 8, Some(0)), None);
+        assert_eq!(continued_mention_at("@ng :smile", 10, Some(0)), None);
+        assert_eq!(continued_mention_at("@ng @bo", 7, Some(0)), None);
+        assert_eq!(continued_mention_at("@ng van", 7, Some(0)), Some(0));
+    }
+
+    #[test]
+    fn every_word_must_match_and_a_trailing_space_ends_the_last_word() {
+        assert!(field_matches("NGUYEN VAN A", "NG VAN"));
+        assert!(field_matches("NGUYEN VAN A", "VAN NG"));
+        assert!(field_matches("NGUYEN VAN A", "UYEN VA"));
+        assert!(!field_matches("NGUYEN CHI NAM", "NAM HI"));
+        assert!(!field_matches("NGUYEN VAN A", "VAN GUY"));
+        assert!(field_matches("NGUYEN VAN A", "NGUYEN"));
+        assert!(!field_matches("NGUYEN VAN A", "NG "));
+        assert!(!field_matches("HOANG NAM", "NG "));
+        assert!(!field_matches("TUAN NGUYEN", "AN "));
+        assert!(field_matches("AN NGUYEN", "AN "));
+        assert!(field_matches("LE AN BINH", "AN "));
+        assert!(field_matches("JOHN SMITH", "JOHN "));
+        assert!(!field_matches("JOHN", "JOHN "));
+        assert!(field_matches("ANYONE", ""));
+    }
+
+    #[test]
+    fn a_member_also_matches_on_the_display_name_behind_a_clan_nick() {
+        let mut boss = (*raw("Boss", "user3")).clone();
+        boss.alt_norm = normalize_search_string("Alice Nguyen");
+        assert!(member_matches(&boss, &normalize_search_string("alice")));
+        assert!(member_matches(&boss, &normalize_search_string("boss")));
+        assert!(!member_matches(&boss, &normalize_search_string("carol")));
+        assert!(member_matches(&boss, &normalize_search_string("alice ng")));
+    }
+
+    #[test]
+    fn letters_without_a_decomposition_fold_like_the_server() {
+        assert_eq!(normalize_search_string("Đặng Văn A"), "DANG VAN A");
+        assert_eq!(normalize_search_string("đức"), "DUC");
+        assert!(field_matches(
+            &normalize_search_string("Đặng Văn A"),
+            &normalize_search_string("dang")
+        ));
+    }
+
+    #[test]
+    fn the_first_word_is_highlighted_where_it_starts_a_word() {
+        assert_eq!(highlight_word_ranges("Tuan An", "an"), vec![5..7]);
+        assert_eq!(highlight_word_ranges("Tuan Binh", "an"), vec![2..4]);
+    }
+
+    #[test]
+    fn any_punctuation_separates_words() {
+        assert!(field_matches("HUY/QA", "HUY QA"));
+        assert!(field_matches("NAM (DEV)", "NAM DEV"));
+        assert!(field_matches("TRAN,BINH", "TRAN BINH"));
+        assert!(field_matches("NGUYEN.123", "NGUYEN 12"));
+        assert!(field_matches("[NCC] TUAN", "TUAN NCC"));
+        assert!(field_matches("HUY/QA", "HUY "));
+        assert!(!field_matches("TUAN NGUYEN", "AN "));
+        assert!(words_start_in_order("HUY/QA", "HUY QA"));
+    }
+
+    #[test]
+    fn only_a_typed_space_ends_the_last_word() {
+        assert_eq!(search_needle("timer_"), "TIMER");
+        assert_eq!(search_needle("an-"), "AN");
+        assert_eq!(search_needle("an "), "AN ");
+        let old_timer = raw("Old Timer 005", "oldtimer_05");
+        assert!(member_matches(&old_timer, &search_needle("timer_")));
+        assert!(member_matches(&old_timer, &search_needle("timer_0")));
+        assert!(!member_matches(&old_timer, &search_needle("timer_9")));
+    }
+
+    #[test]
+    fn a_row_matches_only_the_query_it_still_answers() {
+        let row = Suggestion::Member(
+            raw("Old Timer 002", "oldtimer_002"),
+            SharedString::default(),
+        );
+        assert!(at_suggestion_matches(&row, &search_needle("oldtimer_0")));
+        assert!(!at_suggestion_matches(&row, &search_needle("oldtimer_09")));
+        assert!(at_suggestion_matches(
+            &Suggestion::Here,
+            &search_needle("he")
+        ));
+        assert!(!at_suggestion_matches(
+            &Suggestion::Here,
+            &search_needle("an chao")
+        ));
+    }
+
+    #[test]
+    fn enter_on_a_phrase_picks_only_a_name_that_starts_with_it() {
+        let row = |display: &str, username: &str| {
+            Suggestion::Member(raw(display, username), SharedString::default())
+        };
+        let starts = |suggestion: &Suggestion, query: &str| {
+            at_suggestion_starts_with(suggestion, &search_needle(query))
+        };
+        assert!(starts(&row("Old Timer 012", "oldtimer_012"), "old timer 0"));
+        assert!(starts(&row("Nguyễn Văn A", "nva"), "nguyen v"));
+        assert!(starts(&row("Ng Van", "x"), "ng van"));
+        assert!(!starts(&row("Le Huy Anh", "lehuyanh"), "huy ạ"));
+        assert!(!starts(&row("Le Huy Anh", "lehuyanh"), "huy anh"));
+        assert!(!starts(&row("Nguyen Van An", "nva"), "an ạ"));
+        assert!(starts(&row("Huy/QA", "huyqa"), "huy q"));
+        assert!(starts(&row("Boss", "oldtimer_007"), "oldtimer 0"));
+    }
+
+    #[test]
+    fn a_trailing_separator_is_not_highlighted_as_a_space() {
+        assert_eq!(highlight_word_ranges("Timeriel", "timer_"), vec![0..5]);
     }
 }

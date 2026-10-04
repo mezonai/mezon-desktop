@@ -13,6 +13,7 @@ use crate::presence::{PresenceStore, USER_STATUS_INVISIBLE, USER_STATUS_ONLINE};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const ONLINE_FETCH_LIMIT: i32 = 500;
+const LIST_CLAN_USERS_CAP: usize = 1000;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct User {
@@ -76,6 +77,7 @@ impl ClanMembersEvent {
 struct ClanBucket {
     by_id: HashMap<UserId, ClanMember>,
     ids: Vec<UserId>,
+    cut_by_server: bool,
 }
 
 impl ClanBucket {
@@ -194,6 +196,16 @@ impl ClanMembersStore {
         self.cache.get(&clan_id)?.by_id.get(&user_id)
     }
 
+    pub fn find_user(&self, user_id: UserId) -> Option<&User> {
+        self.cache.iter().find_map(|(_, bucket)| {
+            bucket
+                .by_id
+                .get(&user_id)
+                .map(|member| &member.user)
+                .filter(|user| !user.username.is_empty())
+        })
+    }
+
     pub fn members(&self, clan_id: ClanId) -> Vec<&ClanMember> {
         match self.cache.get(&clan_id) {
             Some(bucket) => bucket
@@ -207,6 +219,12 @@ impl ClanMembersStore {
 
     pub fn count(&self, clan_id: ClanId) -> usize {
         self.cache.get(&clan_id).map(|b| b.ids.len()).unwrap_or(0)
+    }
+
+    pub fn roster_capped(&self, clan_id: ClanId) -> bool {
+        self.cache
+            .get(&clan_id)
+            .is_some_and(|bucket| bucket.cut_by_server)
     }
 
     fn refresh_active(&mut self, cx: &mut Context<Self>) {
@@ -336,7 +354,10 @@ impl ClanMembersStore {
                                 (previous_online_ids(&this.cache, clan_id), Vec::new())
                             }
                         };
-                        let mut bucket = ClanBucket::default();
+                        let mut bucket = ClanBucket {
+                            cut_by_server: roster_cut_by_server(users.len()),
+                            ..ClanBucket::default()
+                        };
                         for cu in users {
                             if let Some(mut member) = clan_member_from_proto(cu) {
                                 member.online = online_ids.contains(&member.user.id.0);
@@ -471,6 +492,10 @@ fn apply_add_member(
         }
         None => false,
     }
+}
+
+fn roster_cut_by_server(rows: usize) -> bool {
+    rows >= LIST_CLAN_USERS_CAP
 }
 
 fn apply_remove_members(
@@ -893,6 +918,20 @@ mod tests {
         let mut by_clan = bucket_with(vec![member(1, "a"), member(2, "b")]);
         assert!(apply_remove_members(&mut by_clan, ClanId(1), &[UserId(1)]));
         assert_eq!(by_clan.get(&ClanId(1)).unwrap().ids, vec![UserId(2)]);
+    }
+
+    #[test]
+    fn roster_is_cut_only_when_the_server_returned_its_full_page() {
+        assert!(!roster_cut_by_server(999));
+        assert!(roster_cut_by_server(LIST_CLAN_USERS_CAP));
+    }
+
+    #[test]
+    fn a_cut_roster_stays_cut_after_realtime_removals() {
+        let mut by_clan = bucket_with(vec![member(1, "a"), member(2, "b")]);
+        by_clan.get_mut(&ClanId(1)).unwrap().cut_by_server = true;
+        assert!(apply_remove_members(&mut by_clan, ClanId(1), &[UserId(1)]));
+        assert!(by_clan.get(&ClanId(1)).unwrap().cut_by_server);
     }
 
     #[test]

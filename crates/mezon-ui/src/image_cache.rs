@@ -733,6 +733,14 @@ impl LruImageCache {
             })
     }
 
+    pub fn ready_render_image(&self, resource: &Resource) -> Option<Arc<RenderImage>> {
+        match &self.cache.get(&hash(resource))?.item {
+            ImageCacheItem::Loaded(Ok(image)) => Some(image.clone()),
+            ImageCacheItem::Loading(task) => task.clone().now_or_never().and_then(Result::ok),
+            ImageCacheItem::Loaded(Err(_)) => None,
+        }
+    }
+
     pub fn cached_bitmap_size(&self, src: &str) -> Option<(u32, u32)> {
         if src.is_empty() {
             return None;
@@ -2747,6 +2755,40 @@ mod tests {
                     "a cache whose view never sweeps must still protect the images the \
                      current frame requested, or budget eviction blinks them"
                 );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_finished_load_is_ready_before_layout_polls_it(cx: &mut gpui::TestAppContext) {
+        let (abort, _reg) = AbortHandle::new_pair();
+        let image = Arc::new(RenderImage::new(vec![image::Frame::new(
+            image::RgbaImage::new(48, 96),
+        )]));
+        let finished = Resource::Uri("https://cdn.example/finished.webp".into());
+        let missing = Resource::Uri("https://cdn.example/missing.webp".into());
+        cx.update(|cx| {
+            let cache = cx.new(|cx| LruImageCache::new(4, 1 << 20, cx));
+            cache.update(cx, |cache, _| {
+                cache.cache.insert(
+                    hash(&finished),
+                    CacheEntry {
+                        item: ImageCacheItem::Loading(
+                            gpui::Task::ready(Ok(image.clone())).shared(),
+                        ),
+                        abort,
+                        bytes: None,
+                        touched_epoch: 0,
+                        last_used: Instant::now(),
+                        failed_at: None,
+                    },
+                );
+                assert!(cache.cached_render_image(&finished).is_none());
+                assert_eq!(
+                    cache.ready_render_image(&finished).map(|ready| ready.id),
+                    Some(image.id)
+                );
+                assert!(cache.ready_render_image(&missing).is_none());
             });
         });
     }

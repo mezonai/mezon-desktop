@@ -3270,6 +3270,7 @@
   "message.actions.unPinMessage": "Desafixar mensagem",
   "message.addAMessage": "Adicionar uma mensagem (Opcional)",
   "message.attachment.uploading": "Enviando...",
+  "message.attachment.uploadFailed": "Falha no envio",
   "message.attachments.attachment": "Anexo",
   "message.attachments.audio": "Mensagem de voz",
   "message.attachments.contact": "Contato",
@@ -4775,5 +4776,8 @@
   "screenShare.modeVideoDescription": "Vídeo mais fluido; pode perder nitidez em conexões lentas.",
   "chat.activityStrip.latestPin": "Fixação mais recente",
   "chat.activityStrip.latestTopicMessage": "Mensagem mais recente do tópico",
-  "chat.activityStrip.messageFrom": "Mensagem de {{name}}: {{message}}"
+  "chat.activityStrip.messageFrom": "Mensagem de {{name}}: {{message}}",
+  "chat.activityStrip.hideAction": "Ocultar barra de fixados e tópicos",
+  "chat.activityStrip.hideConfirm.title": "Ocultar barra de fixados e tópicos",
+  "chat.activityStrip.hideConfirm.description": "Ocultar a barra de fixados e tópicos deste canal? Ela reaparecerá automaticamente quando houver um novo item fixado ou tópico."
 }

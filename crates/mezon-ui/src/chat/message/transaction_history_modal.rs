@@ -4,11 +4,15 @@ use std::time::Duration;
 use chrono::{Local, TimeZone as _};
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, ClickEvent, ClipboardItem, Context, FocusHandle,
-    Focusable, FontWeight, ListAlignment, ListState, SharedString, Transformation, WeakEntity,
-    Window, div, ease_in_out, img, linear_color_stop, linear_gradient, list, percentage,
-    prelude::*, px, relative, rgb, rgba,
+    Focusable, FontWeight, ListAlignment, ListState, SharedString, Subscription, Transformation,
+    WeakEntity, Window, div, ease_in_out, img, linear_color_stop, linear_gradient, list,
+    percentage, prelude::*, px, relative, rgb, rgba,
 };
-use mezon_store::{TransactionCursor, UserId, UsersByUserStore, WalletStore, WalletTransaction};
+use mezon_store::{
+    AccountEvent, AccountStore, BadgeService, ClanMembersEvent, ClanMembersStore, DirectEvent,
+    DirectMessageStore, FriendEvent, FriendStore, TransactionCursor, UserId, UsersByUserEvent,
+    UsersByUserStore, WalletStore, WalletTransaction, cached_username,
+};
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::app::shell::Shell;
@@ -97,9 +101,11 @@ pub struct TransactionHistoryModal {
     error: Option<SharedString>,
     expanded: Option<SharedString>,
     detail: Option<TxDetail>,
+    detail_transaction: Option<WalletTransaction>,
     detail_loading: bool,
     req_generation: u64,
     detail_generation: u64,
+    _name_source_subs: Vec<Subscription>,
 }
 
 impl Focusable for TransactionHistoryModal {
@@ -136,9 +142,11 @@ impl TransactionHistoryModal {
                 error: None,
                 expanded: None,
                 detail: None,
+                detail_transaction: None,
                 detail_loading: false,
                 req_generation: 0,
                 detail_generation: 0,
+                _name_source_subs: Self::subscribe_name_sources(cx),
             };
             if address.is_empty() {
                 this.error = Some(mezon_i18n::t(&locale, "token.history.walletUnavailable").into());
@@ -150,6 +158,69 @@ impl TransactionHistoryModal {
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
         Shell::global(cx).update(cx, |shell, cx| shell.show_modal(view.into(), cx));
+    }
+
+    fn subscribe_name_sources(cx: &mut Context<Self>) -> Vec<Subscription> {
+        let mut subs = Vec::new();
+        if let Some(store) = FriendStore::try_global(cx) {
+            subs.push(cx.subscribe(&store, |this, _, event: &FriendEvent, cx| {
+                if matches!(event, FriendEvent::Changed) {
+                    this.refresh_detail_names(cx);
+                }
+            }));
+        }
+        if let Some(store) = UsersByUserStore::try_global(cx) {
+            subs.push(
+                cx.subscribe(&store, |this, _, event: &UsersByUserEvent, cx| {
+                    if matches!(event, UsersByUserEvent::Changed) {
+                        this.refresh_detail_names(cx);
+                    }
+                }),
+            );
+        }
+        if let Some(store) = ClanMembersStore::try_global(cx) {
+            subs.push(cx.subscribe(&store, |this, _, _: &ClanMembersEvent, cx| {
+                this.refresh_detail_names(cx);
+            }));
+        }
+        if let Some(store) = DirectMessageStore::try_global(cx) {
+            subs.push(cx.subscribe(&store, |this, _, event: &DirectEvent, cx| {
+                if matches!(event, DirectEvent::Changed { .. }) {
+                    this.refresh_detail_names(cx);
+                }
+            }));
+        }
+        if let Some(store) = AccountStore::try_global(cx) {
+            subs.push(cx.subscribe(&store, |this, _, event: &AccountEvent, cx| {
+                if matches!(event, AccountEvent::AccountLoaded) {
+                    this.refresh_detail_names(cx);
+                }
+            }));
+        }
+        subs
+    }
+
+    fn refresh_detail_names(&mut self, cx: &mut Context<Self>) {
+        let (Some(transaction), Some(detail)) = (&self.detail_transaction, &mut self.detail) else {
+            return;
+        };
+        let unknown = mezon_i18n::t(
+            &self.locale,
+            "transactionHistory.transactionDetail.unknownUser",
+        );
+        if detail.sender.as_ref() != unknown && detail.receiver.as_ref() != unknown {
+            return;
+        }
+        let fresh = build_detail(transaction, &self.locale, cx);
+        if fresh.sender == detail.sender && fresh.receiver == detail.receiver {
+            return;
+        }
+        detail.sender = fresh.sender;
+        detail.receiver = fresh.receiver;
+        if let Some(index) = self.rows.iter().position(|row| row.hash == detail.hash) {
+            self.list_state.splice(index..index + 1, 1);
+        }
+        cx.notify();
     }
 
     fn close(cx: &mut App) {
@@ -180,6 +251,7 @@ impl TransactionHistoryModal {
         self.error = None;
         self.expanded = None;
         self.detail = None;
+        self.detail_transaction = None;
         self.fetch(false, cx);
         cx.notify();
     }
@@ -261,10 +333,12 @@ impl TransactionHistoryModal {
         if self.expanded.as_ref() == Some(&hash) {
             self.expanded = None;
             self.detail = None;
+            self.detail_transaction = None;
             self.detail_loading = false;
         } else {
             self.expanded = Some(hash.clone());
             self.detail = None;
+            self.detail_transaction = None;
             self.detail_loading = true;
             self.fetch_detail(hash, cx);
         }
@@ -289,6 +363,7 @@ impl TransactionHistoryModal {
                 this.detail_loading = false;
                 if let Ok(transaction) = result {
                     this.detail = Some(build_detail(&transaction, &locale, cx));
+                    this.detail_transaction = Some(transaction);
                 }
                 if let Some(index) = this.rows.iter().position(|row| row.hash == hash) {
                     this.list_state.splice(index..index + 1, 1);
@@ -1048,21 +1123,32 @@ fn build_detail(transaction: &WalletTransaction, locale: &SharedString, cx: &App
     };
     TxDetail {
         hash: transaction.hash.clone().into(),
-        sender: resolve_username(transaction.sender_user_id.as_deref(), unknown, cx).into(),
+        sender: resolve_party(
+            transaction.sent,
+            transaction.sender_user_id.as_deref(),
+            unknown,
+            cx,
+        )
+        .into(),
         amount: format!("{} {symbol}", format_amount(&transaction.value)).into(),
-        receiver: resolve_username(transaction.receiver_user_id.as_deref(), unknown, cx).into(),
+        receiver: resolve_party(
+            !transaction.sent,
+            transaction.receiver_user_id.as_deref(),
+            unknown,
+            cx,
+        )
+        .into(),
         note: note.into(),
         created: format_date(transaction.timestamp).into(),
     }
 }
 
-fn resolve_username(user_id: Option<&str>, fallback: &'static str, cx: &App) -> String {
-    let Some(store) = UsersByUserStore::try_global(cx) else {
-        return fallback.to_string();
-    };
-    user_id
-        .and_then(|id| id.parse::<UserId>().ok())
-        .and_then(|id| store.read(cx).user(id).map(|user| user.username.clone()))
+fn resolve_party(is_me: bool, user_id: Option<&str>, fallback: &'static str, cx: &App) -> String {
+    let me = is_me
+        .then(|| BadgeService::try_global(cx).and_then(|badge| badge.read(cx).current_user_id(cx)))
+        .flatten();
+    me.or_else(|| user_id.and_then(|id| id.parse::<UserId>().ok()))
+        .and_then(|id| cached_username(id, cx))
         .unwrap_or_else(|| fallback.to_string())
 }
 

@@ -3269,6 +3269,7 @@
   "message.actions.unPinMessage": "Bericht losmaken",
   "message.addAMessage": "Voeg een bericht toe (Optioneel)",
   "message.attachment.uploading": "Aan het uploaden...",
+  "message.attachment.uploadFailed": "Uploaden mislukt",
   "message.attachments.attachment": "Bijlage",
   "message.attachments.audio": "Stembericht",
   "message.attachments.contact": "Contactkaartje",
@@ -4774,5 +4775,8 @@
   "screenShare.modeVideoDescription": "Vloeiendere video; bij een trage verbinding kan de scherpte afnemen.",
   "chat.activityStrip.latestPin": "Laatste pin",
   "chat.activityStrip.latestTopicMessage": "Laatste bericht in topic",
-  "chat.activityStrip.messageFrom": "Bericht van {{name}}: {{message}}"
+  "chat.activityStrip.messageFrom": "Bericht van {{name}}: {{message}}",
+  "chat.activityStrip.hideAction": "Balk met vastgezette berichten en onderwerpen verbergen",
+  "chat.activityStrip.hideConfirm.title": "Balk met vastgezette berichten en onderwerpen verbergen",
+  "chat.activityStrip.hideConfirm.description": "De balk met vastgezette berichten en onderwerpen voor dit kanaal verbergen? Deze verschijnt automatisch opnieuw bij een nieuwe pin of een nieuw onderwerp."
 }

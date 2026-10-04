@@ -22,6 +22,12 @@ fn push_search_normalized_part(part: char, out: &mut String) {
     }
     match part {
         '-' | '_' | '+' => out.push(' '),
+        '\u{0110}' | '\u{0111}' | '\u{00d0}' | '\u{00f0}' => out.push('D'),
+        '\u{0141}' | '\u{0142}' => out.push('L'),
+        '\u{00d8}' | '\u{00f8}' => out.push('O'),
+        '\u{00c6}' | '\u{00e6}' => out.push_str("AE"),
+        '\u{0152}' | '\u{0153}' => out.push_str("OE"),
+        '\u{00de}' | '\u{00fe}' => out.push_str("TH"),
         _ => out.extend(part.to_uppercase()),
     }
 }

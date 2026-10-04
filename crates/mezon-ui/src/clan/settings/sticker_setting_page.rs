@@ -426,6 +426,7 @@ fn render_sticker_card(
                     img(sticker.src.clone())
                         .id(SharedString::from(format!("sticker-thumb-{}", sticker.id)))
                         .size(px(STICKER_IMAGE_SIZE))
+                        .aspect_square()
                         .object_fit(gpui::ObjectFit::Contain),
                 ),
         )

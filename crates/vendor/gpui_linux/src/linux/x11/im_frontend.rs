@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::os::fd::{AsFd, BorrowedFd, RawFd};
+use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -12,6 +13,8 @@ use dbus::{Message, Path as DbusPath};
 use gpui::ImeSurroundingText;
 
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_millis(200);
+pub(crate) const IM_CONNECT_WAIT: Duration = Duration::from_millis(250);
+const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
 const KEY_TIMEOUT: Duration = Duration::from_millis(80);
 const MODIFIER_TIMEOUT: Duration = Duration::from_millis(16);
 const SIGNAL_WAIT: Duration = Duration::from_millis(16);
@@ -110,6 +113,43 @@ enum FcitxKeyMode {
     Single,
 }
 
+pub(crate) enum ImConnectAttempt {
+    Ready(Option<X11ImContext>),
+    Pending(PendingImConnect, calloop::ping::PingSource),
+}
+
+pub(crate) struct PendingImConnect(mpsc::Receiver<Option<X11ImContext>>);
+
+struct ConnectSignal {
+    result: Option<mpsc::Sender<Option<X11ImContext>>>,
+    ping: calloop::ping::Ping,
+}
+
+impl ConnectSignal {
+    fn send(&mut self, im: Option<X11ImContext>) {
+        if let Some(result) = self.result.take() {
+            let _ = result.send(im);
+        }
+    }
+}
+
+impl Drop for ConnectSignal {
+    fn drop(&mut self) {
+        self.result.take();
+        self.ping.ping();
+    }
+}
+
+impl PendingImConnect {
+    pub(crate) fn try_take(&self) -> Option<Option<X11ImContext>> {
+        match self.0.try_recv() {
+            Ok(im) => Some(im),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(None),
+        }
+    }
+}
+
 pub(crate) struct DbusWatchFd(RawFd);
 
 impl AsFd for DbusWatchFd {
@@ -133,6 +173,32 @@ impl X11ImContext {
             }
         }
         None
+    }
+
+    pub(crate) fn connect_within(wait: Duration) -> ImConnectAttempt {
+        let Ok((ping, source)) = calloop::ping::make_ping() else {
+            return ImConnectAttempt::Ready(None);
+        };
+        let (tx, rx) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("gpui-ime-connect".into())
+            .spawn(move || {
+                let mut signal = ConnectSignal {
+                    result: Some(tx),
+                    ping,
+                };
+                signal.send(Self::connect());
+            });
+        if spawned.is_err() {
+            return ImConnectAttempt::Ready(None);
+        }
+        match rx.recv_timeout(wait) {
+            Ok(im) => ImConnectAttempt::Ready(im),
+            Err(RecvTimeoutError::Timeout) => {
+                ImConnectAttempt::Pending(PendingImConnect(rx), source)
+            }
+            Err(RecvTimeoutError::Disconnected) => ImConnectAttempt::Ready(None),
+        }
     }
 
     pub(crate) fn kind(&self) -> ImKind {
@@ -683,7 +749,7 @@ fn ibus_connection() -> Result<(Connection, String, RawFd), String> {
         let (conn, watch) = open_address(&address)?;
         return Ok((conn, IBUS_DEST.to_string(), watch));
     }
-    if let Ok(session) = Connection::new_session()
+    if let Ok((session, _)) = open_session()
         && name_has_owner(&session, IBUS_DEST)
     {
         let address = session
@@ -706,16 +772,44 @@ fn ibus_connection() -> Result<(Connection, String, RawFd), String> {
 }
 
 fn open_session() -> Result<(Connection, RawFd), String> {
-    watched_connection(Channel::get_private(BusType::Session).map_err(|error| error.to_string())?)
+    match session_bus_address() {
+        Some(address) => open_address(&address),
+        None => watched_connection(
+            Channel::get_private(BusType::Session).map_err(|error| error.to_string())?,
+        ),
+    }
+}
+
+fn session_bus_address() -> Option<String> {
+    std::env::var("DBUS_SESSION_BUS_ADDRESS")
+        .ok()
+        .filter(|address| !address.is_empty())
+        .or_else(|| {
+            let bus = std::path::Path::new(&std::env::var("XDG_RUNTIME_DIR").ok()?).join("bus");
+            bus.exists().then(|| format!("unix:path={}", bus.display()))
+        })
 }
 
 fn open_address(address: &str) -> Result<(Connection, RawFd), String> {
     let decoded = percent_decode_dbus_address(address);
-    let mut channel = Channel::open_private(&decoded)
+    let channel = Channel::open_private(&decoded)
         .or_else(|_| Channel::open_private(address))
         .map_err(|error| error.to_string())?;
-    channel.register().map_err(|error| error.to_string())?;
+    say_hello(&channel)?;
     watched_connection(channel)
+}
+
+fn say_hello(channel: &Channel) -> Result<(), String> {
+    let hello = Message::new_method_call(
+        "org.freedesktop.DBus",
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus",
+        "Hello",
+    )?;
+    channel
+        .send_with_reply_and_block(hello, HELLO_TIMEOUT)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn watched_connection(mut channel: Channel) -> Result<(Connection, RawFd), String> {

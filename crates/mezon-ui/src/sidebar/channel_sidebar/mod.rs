@@ -8,9 +8,10 @@ use gpui::{
     WeakEntity, Window, div, ease_in_out, list, prelude::*, px, relative,
 };
 use mezon_store::{
-    BadgeService, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
-    EventsStore, FAVOR_CATE_ID, OnboardingStore, PERMISSION_ADMINISTRATOR, PERMISSION_MANAGE_CLAN,
-    PermissionStore, Settings, SidebarOrderKey, StreamMember, StreamStore, VoiceMember,
+    BadgeService, BuzzStore, ChannelId, ChannelList, ChannelType, ClanId, ClanList,
+    ClanMembersStore, EventsStore, FAVOR_CATE_ID, OnboardingStore, PERMISSION_ADMINISTRATOR,
+    PERMISSION_MANAGE_CLAN, PermissionStore, Settings, SidebarOrderKey, StreamMember, StreamStore,
+    VoiceMember,
 };
 
 use crate::channel_app::launch_channel_app_from_store;
@@ -148,6 +149,7 @@ pub struct ChannelSidebar {
     _members_observe: Subscription,
     _events_observe: Subscription,
     _stream_observe: Subscription,
+    _buzz_observe: Subscription,
     _permissions_observe: Subscription,
     _channel_permissions_observe: Subscription,
     _notification_setting_observe: Subscription,
@@ -347,6 +349,11 @@ impl ChannelSidebar {
                 cx.notify();
             }
         });
+        let buzz_observe = cx.observe(&BuzzStore::global(cx), |this, _, cx| {
+            if this.rebuild_items(cx) {
+                cx.notify();
+            }
+        });
         let permissions_observe = cx.observe(&PermissionStore::global(cx), |_, _, cx| cx.notify());
         let onboarding_observe = cx.observe(&OnboardingStore::global(cx), |_, _, cx| cx.notify());
         let channel_permissions_observe = cx.subscribe(
@@ -413,6 +420,7 @@ impl ChannelSidebar {
             _members_observe: members_observe,
             _events_observe: events_observe,
             _stream_observe: stream_observe,
+            _buzz_observe: buzz_observe,
             _permissions_observe: permissions_observe,
             _channel_permissions_observe: channel_permissions_observe,
             _notification_setting_observe: notification_setting_observe,
@@ -669,6 +677,8 @@ impl ChannelSidebar {
         }
         let clans = self.clan_list.read(cx);
         let channels = self.channel_list.read(cx);
+        let buzz_store = BuzzStore::global(cx);
+        let buzz = buzz_store.read(cx);
 
         let new_clan_id = clans.active_clan_id;
         let clan_changed = self.active_clan_id != new_clan_id;
@@ -822,6 +832,7 @@ impl ChannelSidebar {
                                 name: truncate_channel_label(&ch.name),
                                 channel_type: ch.channel_type,
                                 unread: ch.is_unread(),
+                                buzz: buzz.has_buzz(ch.id),
                                 private: ch.private,
                                 age_restricted: ch.age_restricted,
                                 selected: active_channel_id == Some(ch.id),
@@ -853,8 +864,7 @@ impl ChannelSidebar {
                         let mut parents_with_unread_thread: HashSet<ChannelId> = HashSet::new();
                         for ch in &ch_slice {
                             if let Some(pid) = ch.parent_id
-                                && ch.is_unread()
-                                && !ch.muted
+                                && ((ch.is_unread() && !ch.muted) || buzz.has_buzz(ch.id))
                             {
                                 parents_with_unread_thread.insert(pid);
                             }
@@ -863,7 +873,9 @@ impl ChannelSidebar {
                         for ch in ch_slice {
                             let is_thread = !is_favorites && ch.parent_id.is_some();
                             if is_thread {
-                                if (ch.is_unread() && !ch.muted) || active_channel_id == Some(ch.id)
+                                if (ch.is_unread() && !ch.muted)
+                                    || buzz.has_buzz(ch.id)
+                                    || active_channel_id == Some(ch.id)
                                 {
                                     kept.push((ch, Vec::new(), true));
                                 }
@@ -877,6 +889,7 @@ impl ChannelSidebar {
                             let has_members_in_voice =
                                 is_voice_or_streaming && !sidebar_members.is_empty();
                             let should_show = (ch.is_unread() && !is_voice_or_streaming)
+                                || buzz.has_buzz(ch.id)
                                 || active_channel_id == Some(ch.id)
                                 || active_parent_id == Some(ch.id)
                                 || parents_with_unread_thread.contains(&ch.id)
@@ -923,6 +936,7 @@ impl ChannelSidebar {
                                 name: truncate_channel_label(&ch.name),
                                 channel_type: ch.channel_type,
                                 unread: ch.is_unread(),
+                                buzz: buzz.has_buzz(ch.id),
                                 private: ch.private,
                                 age_restricted: ch.age_restricted,
                                 selected: active_channel_id == Some(ch.id),
@@ -2410,7 +2424,12 @@ fn render_banner_and_events(
             let icon_el: AnyElement = if let Some(logo) = &slot.app_logo {
                 div()
                     .image_cache(icon_cache.clone())
-                    .child(gpui::img(logo.clone()).w(px(24.)).h(px(24.)))
+                    .child(
+                        gpui::img(logo.clone())
+                            .w(px(24.))
+                            .h(px(24.))
+                            .aspect_square(),
+                    )
                     .into_any_element()
             } else {
                 gpui::svg()
@@ -2743,6 +2762,7 @@ fn render_sidebar_item(
             name,
             channel_type,
             unread,
+            buzz,
             private,
             age_restricted,
             selected,
@@ -2820,7 +2840,8 @@ fn render_sidebar_item(
                             })
                         } else {
                             None
-                        });
+                        })
+                        .buzz(*buzz);
                 if show_settings_gear {
                     let gear_hover: gpui::Hsla = theme.tokens.bg_icon_theme_active.into();
                     element = element.trailing_action(Some(ChannelRowTrailingAction {
@@ -2877,6 +2898,7 @@ fn render_sidebar_item(
                     } else {
                         None
                     })
+                    .buzz(*buzz)
                     .connector(Some(ThreadConnector {
                         line_above: *line_above,
                         line_below: *line_below,

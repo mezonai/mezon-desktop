@@ -3278,6 +3278,7 @@
   "message.actions.unPinMessage": "Хәбәрне төяп куюдан алу",
   "message.addAMessage": "Хәбәр өстәү (мәҗбүри түгел)",
   "message.attachment.uploading": "Йөкләү...",
+  "message.attachment.uploadFailed": "Йөкләп булмады",
   "message.attachments.attachment": "Кушымта",
   "message.attachments.audio": "Аудио",
   "message.attachments.contact": "Контакт",
@@ -4787,5 +4788,8 @@
   "screenShare.modeVideoDescription": "Видео шомарак; әкрен тоташуда ачыклык кимергә мөмкин.",
   "chat.activityStrip.latestPin": "Соңгы беркетмә",
   "chat.activityStrip.latestTopicMessage": "Темадагы соңгы хәбәр",
-  "chat.activityStrip.messageFrom": "{{name}} кулланучысыннан хәбәр: {{message}}"
+  "chat.activityStrip.messageFrom": "{{name}} кулланучысыннан хәбәр: {{message}}",
+  "chat.activityStrip.hideAction": "Беркетмәләр һәм темалар панелен яшерү",
+  "chat.activityStrip.hideConfirm.title": "Беркетмәләр һәм темалар панелен яшерү",
+  "chat.activityStrip.hideConfirm.description": "Бу канал өчен беркетмәләр һәм темалар панелен яшерергәме? Яңа беркетмә яки тема булганда ул автоматик рәвештә яңадан күренәчәк."
 }

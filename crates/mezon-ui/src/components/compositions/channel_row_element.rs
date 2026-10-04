@@ -32,6 +32,11 @@ const BADGE_WIDTH_NARROW: Pixels = px(16.);
 const BADGE_WIDTH_WIDE: Pixels = px(22.);
 const BADGE_RIGHT_GAP: Pixels = px(12.);
 const BADGE_FONT_SIZE: Pixels = px(12.);
+const BUZZ_HORIZONTAL_PADDING: Pixels = px(4.);
+const BUZZ_CORNER_RADIUS: Pixels = px(4.);
+const BUZZ_GAP: Pixels = px(4.);
+pub(crate) const BUZZ_LABEL: &str = "Buzz!!";
+pub(crate) const BUZZ_COLOR: u32 = 0xef_44_44;
 const FALLBACK_WIDTH: Pixels = px(240.);
 const THREAD_ROW_HEIGHT: Pixels = px(34.);
 const THREAD_CONNECTOR_X: Pixels = px(24.);
@@ -83,6 +88,7 @@ pub struct ChannelRowElement {
     muted: bool,
     unread_nub: Option<Hsla>,
     badge: Option<ChannelRowBadge>,
+    buzz: bool,
     connector: Option<ThreadConnector>,
     trailing_action: Option<ChannelRowTrailingAction>,
     on_click: Option<ClickHandler>,
@@ -105,6 +111,7 @@ impl ChannelRowElement {
             muted: false,
             unread_nub: None,
             badge: None,
+            buzz: false,
             connector: None,
             trailing_action: None,
             on_click: None,
@@ -150,6 +157,11 @@ impl ChannelRowElement {
         self
     }
 
+    pub fn buzz(mut self, buzz: bool) -> Self {
+        self.buzz = buzz;
+        self
+    }
+
     pub fn connector(mut self, connector: Option<ThreadConnector>) -> Self {
         self.connector = connector;
         self
@@ -186,6 +198,14 @@ fn muted_color(mut color: Hsla, muted: bool) -> Hsla {
         color.a *= 0.7;
     }
     color
+}
+
+fn count_badge_width(count: u32) -> Pixels {
+    if count >= 10 {
+        BADGE_WIDTH_WIDE
+    } else {
+        BADGE_WIDTH_NARROW
+    }
 }
 
 fn gear_bounds(row_bounds: Bounds<Pixels>) -> Bounds<Pixels> {
@@ -395,9 +415,37 @@ impl Element for ChannelRowElement {
                 } else {
                     px(0.)
                 };
-                let name_max_width =
-                    (width - name_left - NAME_RIGHT_RESERVE - trailing_reserve).max(px(0.));
                 let text_system = window.text_system().clone();
+                let buzz_pill = self.buzz.then(|| {
+                    let mut buzz_run = window.text_style().to_run(BUZZ_LABEL.len());
+                    buzz_run.color = gpui::white();
+                    buzz_run.font.weight = FontWeight::BOLD;
+                    let buzz_line = text_system.shape_line(
+                        SharedString::new_static(BUZZ_LABEL),
+                        BADGE_FONT_SIZE,
+                        &[buzz_run],
+                        None,
+                    );
+                    let pill_width = buzz_line.width() + BUZZ_HORIZONTAL_PADDING * 2.;
+                    let count_reserve = BADGE_RIGHT_GAP
+                        + self
+                            .badge
+                            .as_ref()
+                            .map_or(px(0.), |badge| count_badge_width(badge.count) + BUZZ_GAP);
+                    let gear_reserve = if self.trailing_action.is_some() && !is_thread {
+                        GEAR_RIGHT_GAP + GEAR_SIZE + BUZZ_GAP
+                    } else {
+                        px(0.)
+                    };
+                    let pill_x = left + width - count_reserve.max(gear_reserve) - pill_width;
+                    (buzz_line, pill_x, pill_width)
+                });
+                let mut name_max_width =
+                    (width - name_left - NAME_RIGHT_RESERVE - trailing_reserve).max(px(0.));
+                if let Some((_, pill_x, _)) = &buzz_pill {
+                    name_max_width =
+                        name_max_width.min((*pill_x - BUZZ_GAP - left - name_left).max(px(0.)));
+                }
                 let mut name_run = window.text_style().to_run(self.name.len());
                 name_run.color = name_color;
                 name_run.font.weight = self.name_weight;
@@ -429,17 +477,12 @@ impl Element for ChannelRowElement {
                 });
 
                 if !hovered && let Some(badge) = &self.badge {
-                    let wide = badge.count >= 10;
                     let label = if badge.count >= 100 {
                         SharedString::from("99+")
                     } else {
                         SharedString::from(badge.count.to_string())
                     };
-                    let badge_width = if wide {
-                        BADGE_WIDTH_WIDE
-                    } else {
-                        BADGE_WIDTH_NARROW
-                    };
+                    let badge_width = count_badge_width(badge.count);
                     let badge_x = left + width - BADGE_RIGHT_GAP - badge_width;
                     let badge_y = top + (row_height - BADGE_HEIGHT) / 2.;
                     let badge_bounds = Bounds {
@@ -457,6 +500,26 @@ impl Element for ChannelRowElement {
                     let badge_text_x = badge_x + (badge_width - badge_line.width()) / 2.;
                     let _ = badge_line.paint(
                         point(badge_text_x, badge_y),
+                        BADGE_HEIGHT,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                }
+
+                if let Some((buzz_line, pill_x, pill_width)) = buzz_pill {
+                    let pill_y = top + (row_height - BADGE_HEIGHT) / 2.;
+                    let pill_bounds = Bounds {
+                        origin: point(pill_x, pill_y),
+                        size: size(pill_width, BADGE_HEIGHT),
+                    };
+                    window.paint_quad(
+                        fill(pill_bounds, gpui::rgb(BUZZ_COLOR))
+                            .corner_radii(Corners::all(BUZZ_CORNER_RADIUS)),
+                    );
+                    let _ = buzz_line.paint(
+                        point(pill_x + BUZZ_HORIZONTAL_PADDING, pill_y),
                         BADGE_HEIGHT,
                         TextAlign::Left,
                         None,

@@ -7,8 +7,8 @@ use gpui::{
     div, prelude::*, px, relative, size, uniform_list,
 };
 use mezon_store::{
-    AccountStore, BadgeService, DirectMessageStore, FriendStore, UserId, UsersByUserEvent,
-    UsersByUserStore, WalletStore,
+    AccountStore, BadgeService, DirectMessageStore, FriendStore, TOKEN_NOTE_MAX_BYTES, UserId,
+    UsersByUserEvent, UsersByUserStore, WalletStore,
 };
 
 use crate::app::shell::Shell;
@@ -97,9 +97,11 @@ impl SendTokenModal {
                     .validate(|candidate, _| digit_count(candidate) <= MAX_AMOUNT_DIGITS)
             });
             let note = cx.new(|cx| {
-                InputState::new(window, cx).placeholder(tr(
-                    "userProfile.statusProfile.sendTokenModal.placeholders.notePlaceholder",
-                ))
+                InputState::new(window, cx)
+                    .placeholder(tr(
+                        "userProfile.statusProfile.sendTokenModal.placeholders.notePlaceholder",
+                    ))
+                    .max_bytes(TOKEN_NOTE_MAX_BYTES)
             });
             let default_note = tr("common.transferFunds");
             let search_sub = cx.subscribe(

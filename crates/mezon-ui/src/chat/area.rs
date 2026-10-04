@@ -3,17 +3,18 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    AnyView, App, Context, Entity, ExternalPaths, FontWeight, ObjectFit, SharedString,
-    StyleRefinement, Subscription, Task, Window, div, img, prelude::*, px, rgb, rgba,
+    AnyView, App, Context, Entity, ExternalPaths, FocusHandle, FontWeight, ObjectFit, SharedString,
+    StyleRefinement, Subscription, Task, WeakEntity, Window, div, img, prelude::*, px, rgb, rgba,
 };
 use mezon_store::{
-    BannedUsersStore, ChannelId, ChannelList, ChannelPermissionsStore, ClanId, ClanList,
-    DirectEvent, DirectKind, DirectMessageStore, FriendEvent, FriendStore, InVoiceInfo, MessageId,
-    MessagesEvent, MessagesStore, OnboardingStore, PERMISSION_SEND_MESSAGE, PinnedMessagesStore,
-    ProfileContext, Settings, TopicBadgeStore, TopicDiscussion, TopicsEvent, TopicsStore, UserId,
-    resolve_user_profile,
+    ActivityStripDismissal, BadgeService, BannedUsersStore, ChannelId, ChannelList,
+    ChannelPermissionsStore, ClanId, ClanList, DirectEvent, DirectKind, DirectMessageStore,
+    FriendEvent, FriendStore, InVoiceInfo, MessageId, MessagesEvent, MessagesStore,
+    OnboardingStore, PERMISSION_SEND_MESSAGE, PinnedMessagesStore, ProfileContext, Settings,
+    TopicBadgeStore, TopicDiscussion, TopicsStore, UserId, resolve_user_profile,
+    schedule_settings_save,
 };
-use ui::PopoverMenuHandle;
+use ui::{PopoverMenuHandle, Tooltip};
 
 use crate::chat::CanvasPopoverPanel;
 use crate::chat::ReplyTarget;
@@ -31,7 +32,9 @@ use crate::chat::message_search::{MESSAGE_SEARCH_PANEL_WIDTH, MessageSearchPanel
 use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::chat::user_profile_popover::UserProfilePopover;
 use crate::components::compositions::channel_row::ChannelIcon;
-use crate::components::primitives::{Avatar, Icon, IconName, InputState};
+use crate::components::primitives::{
+    Avatar, Button, ButtonVariants, Icon, IconName, InputState, Sizable, Size, h_flex, v_flex,
+};
 use crate::image_cache::LruImageCache;
 use crate::router::{Route, Router, navigate};
 use crate::theme::ActiveTheme;
@@ -295,8 +298,272 @@ fn latest_activity_topic(clan_id: &str, cx: &App) -> Option<TopicDiscussion> {
         })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ActivityStripContext {
+    user_id: UserId,
+    clan_id: ClanId,
+    channel_id: ChannelId,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ActivityStripGeneration {
+    newest_topic_id: Option<i64>,
+    pin_record_ids: Vec<i64>,
+}
+
+impl ActivityStripGeneration {
+    fn has_new_activity_since(&self, previous: &Self) -> bool {
+        self.newest_topic_id > previous.newest_topic_id
+            || self
+                .pin_record_ids
+                .iter()
+                .any(|record_id| !previous.pin_record_ids.contains(record_id))
+    }
+}
+
+fn persisted_activity_strip_generation(
+    settings: &Settings,
+    context: ActivityStripContext,
+) -> Option<ActivityStripGeneration> {
+    let dismissal = settings
+        .activity_strip_dismissals
+        .iter()
+        .find(|dismissal| {
+            dismissal.user_id == context.user_id.get()
+                && dismissal.clan_id == context.clan_id.get()
+                && dismissal.channel_id == context.channel_id.get()
+        })?;
+    let mut pin_record_ids = dismissal.pin_record_ids.clone();
+    pin_record_ids.sort_unstable();
+    pin_record_ids.dedup();
+    Some(ActivityStripGeneration {
+        newest_topic_id: dismissal.newest_topic_id,
+        pin_record_ids,
+    })
+}
+
+fn persisted_activity_strip_dismissal(
+    context: ActivityStripContext,
+    generation: &ActivityStripGeneration,
+) -> ActivityStripDismissal {
+    ActivityStripDismissal {
+        user_id: context.user_id.get(),
+        clan_id: context.clan_id.get(),
+        channel_id: context.channel_id.get(),
+        newest_topic_id: generation.newest_topic_id,
+        pin_record_ids: generation.pin_record_ids.clone(),
+    }
+}
+
+#[cfg(test)]
+mod activity_strip_generation_tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_generation_stays_dismissed() {
+        let generation = ActivityStripGeneration {
+            newest_topic_id: Some(10),
+            pin_record_ids: vec![30],
+        };
+        assert!(!generation.has_new_activity_since(&generation));
+    }
+
+    #[test]
+    fn reply_in_existing_topic_does_not_restore_strip() {
+        let dismissed = ActivityStripGeneration {
+            newest_topic_id: Some(10),
+            pin_record_ids: Vec::new(),
+        };
+        let after_reply = ActivityStripGeneration {
+            newest_topic_id: Some(10),
+            pin_record_ids: Vec::new(),
+        };
+        assert!(!after_reply.has_new_activity_since(&dismissed));
+    }
+
+    #[test]
+    fn new_topic_restores_strip() {
+        let dismissed = ActivityStripGeneration {
+            newest_topic_id: Some(20),
+            pin_record_ids: Vec::new(),
+        };
+        let current = ActivityStripGeneration {
+            newest_topic_id: Some(21),
+            pin_record_ids: Vec::new(),
+        };
+        assert!(current.has_new_activity_since(&dismissed));
+    }
+
+    #[test]
+    fn new_pin_restores_strip() {
+        let dismissed = ActivityStripGeneration {
+            newest_topic_id: None,
+            pin_record_ids: vec![30],
+        };
+        let current = ActivityStripGeneration {
+            newest_topic_id: None,
+            pin_record_ids: vec![5, 30],
+        };
+        assert!(current.has_new_activity_since(&dismissed));
+    }
+
+    #[test]
+    fn topic_created_from_an_older_message_restores_strip() {
+        let dismissed = ActivityStripGeneration {
+            newest_topic_id: Some(300),
+            pin_record_ids: Vec::new(),
+        };
+        let current = ActivityStripGeneration {
+            newest_topic_id: Some(301),
+            pin_record_ids: Vec::new(),
+        };
+        assert!(current.has_new_activity_since(&dismissed));
+    }
+
+    #[test]
+    fn refetching_the_same_pin_does_not_restore_strip() {
+        let dismissed = ActivityStripGeneration {
+            newest_topic_id: None,
+            pin_record_ids: vec![30],
+        };
+        let current = ActivityStripGeneration {
+            newest_topic_id: None,
+            pin_record_ids: vec![30],
+        };
+        assert!(!current.has_new_activity_since(&dismissed));
+    }
+
+    #[test]
+    fn removing_activity_does_not_restore_strip() {
+        let dismissed = ActivityStripGeneration {
+            newest_topic_id: Some(10),
+            pin_record_ids: vec![30],
+        };
+        assert!(!ActivityStripGeneration::default().has_new_activity_since(&dismissed));
+    }
+
+    #[test]
+    fn repinning_the_same_message_restores_strip() {
+        let dismissed = ActivityStripGeneration {
+            newest_topic_id: None,
+            pin_record_ids: vec![30],
+        };
+        let repinned = ActivityStripGeneration {
+            newest_topic_id: None,
+            pin_record_ids: vec![31],
+        };
+        assert!(repinned.has_new_activity_since(&dismissed));
+    }
+
+    #[test]
+    fn persisted_marker_round_trips_and_is_account_scoped() {
+        let context = ActivityStripContext {
+            user_id: UserId::new(1),
+            clan_id: ClanId::new(2),
+            channel_id: ChannelId::new(3),
+        };
+        let generation = ActivityStripGeneration {
+            newest_topic_id: Some(10),
+            pin_record_ids: vec![20],
+        };
+        let mut settings = Settings::default();
+        settings
+            .activity_strip_dismissals
+            .push(persisted_activity_strip_dismissal(context, &generation));
+
+        assert_eq!(
+            persisted_activity_strip_generation(&settings, context),
+            Some(generation)
+        );
+        assert_eq!(
+            persisted_activity_strip_generation(
+                &settings,
+                ActivityStripContext {
+                    user_id: UserId::new(9),
+                    ..context
+                }
+            ),
+            None
+        );
+    }
+}
+
+fn active_activity_strip_context(cx: &App) -> Option<ActivityStripContext> {
+    let messages = MessagesStore::global(cx).read(cx);
+    let user_id = BadgeService::try_global(cx)?.read(cx).current_user_id(cx)?;
+    let clan_id = messages.active_clan_id()?;
+    let channel_id = messages.active_channel_id()?;
+    if clan_id.is_zero() || channel_id.is_zero() {
+        return None;
+    }
+    Some(ActivityStripContext {
+        user_id,
+        clan_id,
+        channel_id,
+    })
+}
+
+fn activity_strip_generation(
+    context: ActivityStripContext,
+    cx: &App,
+) -> Option<ActivityStripGeneration> {
+    let clan_id = context.clan_id.to_string();
+    let channel_id = context.channel_id.to_string();
+    let topics = TopicsStore::global(cx).read(cx);
+    let messages = MessagesStore::global(cx).read(cx);
+    let pinned = PinnedMessagesStore::global(cx).read(cx);
+
+    if !topics.is_ready_for(&clan_id) || !pinned.is_loaded_for(context.clan_id, context.channel_id)
+    {
+        return None;
+    }
+
+    let stored_topic_id = topics
+        .topics_for(&clan_id)
+        .iter()
+        .filter(|topic| topic.channel_id == channel_id)
+        .filter_map(|topic| topic.id.parse::<i64>().ok())
+        .max();
+    let buffered_topic_id = (messages.active_clan_id() == Some(context.clan_id)
+        && messages.active_channel_id() == Some(context.channel_id))
+    .then(|| {
+        messages
+            .messages()
+            .iter()
+            .filter_map(|message| message.topic_id)
+            .map(ChannelId::get)
+            .max()
+    })
+    .flatten();
+    let mut pin_record_ids = if pinned.clan_id() == Some(context.clan_id)
+        && pinned.channel_id() == Some(context.channel_id)
+    {
+        pinned
+            .pinned()
+            .iter()
+            .filter_map(|pin| pin.id.parse().ok())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    pin_record_ids.sort_unstable();
+    pin_record_ids.dedup();
+
+    Some(ActivityStripGeneration {
+        newest_topic_id: stored_topic_id.max(buffered_topic_id),
+        pin_record_ids,
+    })
+}
+
 /// Compact activity rail owned by the message column (never the member/topic sidebars).
-fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::AnyElement {
+fn latest_activity_strip(
+    locale: &str,
+    clan_id: &str,
+    context: ActivityStripContext,
+    generation: ActivityStripGeneration,
+    strip: WeakEntity<LatestActivityStripView>,
+    cx: &mut App,
+) -> gpui::AnyElement {
     let messages_store = MessagesStore::global(cx);
     let messages = messages_store.read(cx);
     let active_channel_id = messages.active_channel_id();
@@ -853,6 +1120,28 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
             })
         });
 
+    let dismiss_tooltip: SharedString =
+        mezon_i18n::t(locale, "chat.activityStrip.hideAction").into();
+    let dismiss_locale = locale.to_string();
+    let dismiss_button = Button::new("hide-channel-activity-strip")
+        .icon(
+            Icon::new(IconName::PinList)
+                .size(px(25.))
+                .text_color(theme.text_secondary),
+        )
+        .with_size(Size::Small)
+        .ghost()
+        .on_click(move |_, window, cx| {
+            open_hide_activity_strip_modal(
+                strip.clone(),
+                context,
+                generation.clone(),
+                dismiss_locale.clone(),
+                window,
+                cx,
+            );
+        });
+
     div()
         .id("channel-latest-activity-strip")
         .flex()
@@ -890,47 +1179,160 @@ fn latest_activity_strip(locale: &str, clan_id: &str, cx: &mut App) -> gpui::Any
                                     .bg(theme.text_muted),
                             )
                         })
-                        .when(has_pin, |row| row.child(pin_cell)),
+                        .when(has_pin, |row| row.child(pin_cell))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(2.))
+                                .h(px(30.))
+                                .rounded_full()
+                                .bg(theme.text_muted),
+                        )
+                        .child(
+                            div()
+                                .id("hide-channel-activity-strip-tooltip")
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .px_2()
+                                .tooltip(Tooltip::text(dismiss_tooltip))
+                                .child(dismiss_button),
+                        ),
                 ),
         )
         .into_any_element()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActivityStripSnapshot {
+    context: ActivityStripContext,
+    generation: ActivityStripGeneration,
+    visible: bool,
+}
+
 struct LatestActivityStripView {
     settings: Entity<Settings>,
+    snapshot: Option<ActivityStripSnapshot>,
     _topics_sub: Subscription,
     _pinned_sub: Subscription,
     _messages_sub: Subscription,
     _settings_sub: Subscription,
+    _badge_sub: Option<Subscription>,
 }
 
 impl LatestActivityStripView {
     fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
-        let topics_sub = cx.subscribe(&TopicsStore::global(cx), |_, _, event, cx| {
-            if matches!(event, TopicsEvent::Updated) {
-                cx.notify();
-            }
+        let topics_sub = cx.observe(&TopicsStore::global(cx), |this, _, cx| {
+            this.refresh_snapshot(cx)
         });
-        let pinned_sub = cx.subscribe(&PinnedMessagesStore::global(cx), |_, _, event, cx| {
-            if matches!(event, mezon_store::PinnedEvent::Updated) {
-                cx.notify();
-            }
+        let pinned_sub = cx.observe(&PinnedMessagesStore::global(cx), |this, _, cx| {
+            this.refresh_snapshot(cx)
         });
-        let messages_sub = cx.subscribe(&MessagesStore::global(cx), |_, _, event, cx| {
+        let messages_sub = cx.subscribe(&MessagesStore::global(cx), |this, _, event, cx| {
             if matches!(
                 event,
                 MessagesEvent::Reset { .. } | MessagesEvent::TopicUpdated { .. }
             ) {
-                cx.notify();
+                this.refresh_snapshot(cx);
             }
         });
-        let settings_sub = cx.observe(&settings, |_, _, cx| cx.notify());
-        Self {
+        let settings_sub = cx.observe(&settings, |this, _, cx| this.refresh_snapshot(cx));
+        let badge_sub = BadgeService::try_global(cx)
+            .map(|badge| cx.observe(&badge, |this, _, cx| this.refresh_snapshot(cx)));
+        let mut view = Self {
             settings,
+            snapshot: None,
             _topics_sub: topics_sub,
             _pinned_sub: pinned_sub,
             _messages_sub: messages_sub,
             _settings_sub: settings_sub,
+            _badge_sub: badge_sub,
+        };
+        view.refresh_snapshot(cx);
+        view
+    }
+
+    fn refresh_snapshot(&mut self, cx: &mut Context<Self>) {
+        let Some(context) = active_activity_strip_context(cx) else {
+            if self.snapshot.take().is_some() {
+                cx.notify();
+            }
+            return;
+        };
+        let Some(generation) = activity_strip_generation(context, cx) else {
+            if self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.context != context)
+            {
+                self.snapshot = None;
+                cx.notify();
+            }
+            return;
+        };
+        let persisted = persisted_activity_strip_generation(self.settings.read(cx), context);
+        let visible = match persisted {
+            Some(previous) if generation.has_new_activity_since(&previous) => {
+                self.clear_dismissal(context, cx);
+                true
+            }
+            Some(_) => false,
+            None => true,
+        };
+        let next = Some(ActivityStripSnapshot {
+            context,
+            generation,
+            visible,
+        });
+        if self.snapshot != next {
+            self.snapshot = next;
+            cx.notify();
+        }
+    }
+
+    fn dismiss_if_current(
+        &mut self,
+        context: ActivityStripContext,
+        generation: ActivityStripGeneration,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.context == context && snapshot.generation == generation && snapshot.visible
+        }) {
+            return false;
+        }
+        self.settings.update(cx, |settings, _| {
+            settings.activity_strip_dismissals.retain(|dismissal| {
+                dismissal.user_id != context.user_id.get()
+                    || dismissal.clan_id != context.clan_id.get()
+                    || dismissal.channel_id != context.channel_id.get()
+            });
+            settings
+                .activity_strip_dismissals
+                .push(persisted_activity_strip_dismissal(context, &generation));
+        });
+        schedule_settings_save(&self.settings, cx);
+        if let Some(snapshot) = self.snapshot.as_mut() {
+            snapshot.visible = false;
+        }
+        cx.notify();
+        true
+    }
+
+    fn clear_dismissal(&mut self, context: ActivityStripContext, cx: &mut Context<Self>) {
+        let mut removed = false;
+        self.settings.update(cx, |settings, _| {
+            let before = settings.activity_strip_dismissals.len();
+            settings.activity_strip_dismissals.retain(|dismissal| {
+                dismissal.user_id != context.user_id.get()
+                    || dismissal.clan_id != context.clan_id.get()
+                    || dismissal.channel_id != context.channel_id.get()
+            });
+            removed = settings.activity_strip_dismissals.len() != before;
+        });
+        if removed {
+            schedule_settings_save(&self.settings, cx);
         }
     }
 }
@@ -938,15 +1340,212 @@ impl LatestActivityStripView {
 impl Render for LatestActivityStripView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let locale = self.settings.read(cx).language.clone();
-        let clan_id = MessagesStore::global(cx)
-            .read(cx)
-            .active_clan_id()
-            .filter(|clan_id| !clan_id.is_zero())
-            .map(|clan_id| clan_id.to_string());
-        clan_id
-            .map(|clan_id| latest_activity_strip(&locale, &clan_id, cx))
-            .unwrap_or_else(|| div().hidden().into_any_element())
+        let Some(snapshot) = self.snapshot.clone() else {
+            return div().hidden().into_any_element();
+        };
+        if !snapshot.visible {
+            return div().hidden().into_any_element();
+        }
+        latest_activity_strip(
+            &locale,
+            &snapshot.context.clan_id.to_string(),
+            snapshot.context,
+            snapshot.generation,
+            cx.weak_entity(),
+            cx,
+        )
     }
+}
+
+fn activity_strip_snapshot_matches(
+    strip: &WeakEntity<LatestActivityStripView>,
+    context: ActivityStripContext,
+    generation: &ActivityStripGeneration,
+    cx: &App,
+) -> bool {
+    strip
+        .read_with(cx, |strip, _| {
+            strip.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.context == context
+                    && snapshot.generation == *generation
+                    && snapshot.visible
+            })
+        })
+        .unwrap_or(false)
+}
+
+struct HideActivityStripModal {
+    focus_handle: FocusHandle,
+    strip: WeakEntity<LatestActivityStripView>,
+    context: ActivityStripContext,
+    generation: ActivityStripGeneration,
+    title: SharedString,
+    description: SharedString,
+    cancel_label: SharedString,
+    confirm_label: SharedString,
+    _messages_sub: Subscription,
+    _topics_sub: Subscription,
+    _pinned_sub: Subscription,
+}
+
+impl HideActivityStripModal {
+    fn new(
+        strip: WeakEntity<LatestActivityStripView>,
+        context: ActivityStripContext,
+        generation: ActivityStripGeneration,
+        locale: &str,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let owner = cx.entity_id();
+        let messages_sub = cx.subscribe(&MessagesStore::global(cx), move |this, _, event, cx| {
+            if matches!(
+                event,
+                MessagesEvent::Reset { .. } | MessagesEvent::TopicUpdated { .. }
+            ) && (active_activity_strip_context(cx) != Some(this.context)
+                || !activity_strip_snapshot_matches(
+                    &this.strip,
+                    this.context,
+                    &this.generation,
+                    cx,
+                ))
+            {
+                Shell::global(cx).update(cx, |shell, cx| {
+                    shell.close_modal_if_current(owner, cx);
+                });
+            }
+        });
+        let topics_sub = cx.observe(&TopicsStore::global(cx), move |this, _, cx| {
+            if !activity_strip_snapshot_matches(&this.strip, this.context, &this.generation, cx) {
+                Shell::global(cx).update(cx, |shell, cx| {
+                    shell.close_modal_if_current(owner, cx);
+                });
+            }
+        });
+        let pinned_sub = cx.observe(&PinnedMessagesStore::global(cx), move |this, _, cx| {
+            if !activity_strip_snapshot_matches(&this.strip, this.context, &this.generation, cx) {
+                Shell::global(cx).update(cx, |shell, cx| {
+                    shell.close_modal_if_current(owner, cx);
+                });
+            }
+        });
+        let hide_label: SharedString =
+            mezon_i18n::t(locale, "chat.activityStrip.hideConfirm.title").into();
+        Self {
+            focus_handle: cx.focus_handle(),
+            strip,
+            context,
+            generation,
+            title: hide_label.clone(),
+            description: mezon_i18n::t(locale, "chat.activityStrip.hideConfirm.description").into(),
+            cancel_label: mezon_i18n::t(locale, "common.cancel").into(),
+            confirm_label: hide_label,
+            _messages_sub: messages_sub,
+            _topics_sub: topics_sub,
+            _pinned_sub: pinned_sub,
+        }
+    }
+
+    fn close(window: &mut Window, cx: &mut App) {
+        Shell::global(cx).update(cx, |shell, cx| shell.dismiss_modal(window, cx));
+    }
+
+    fn confirm(&mut self, window: &mut Window, cx: &mut App) {
+        if activity_strip_snapshot_matches(&self.strip, self.context, &self.generation, cx) {
+            let context = self.context;
+            let generation = self.generation.clone();
+            let _ = self.strip.update(cx, |strip, cx| {
+                strip.dismiss_if_current(context, generation, cx);
+            });
+        }
+        Self::close(window, cx);
+    }
+}
+
+impl Render for HideActivityStripModal {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let tokens = &theme.tokens;
+        div()
+            .rounded(px(12.))
+            .overflow_hidden()
+            .bg(tokens.theme_setting_primary)
+            .shadow_lg()
+            .child(
+                v_flex()
+                    .track_focus(&self.focus_handle)
+                    .key_context("menu")
+                    .on_action(|_: &::menu::Cancel, window, cx| Self::close(window, cx))
+                    .occlude()
+                    .w(px(440.))
+                    .max_w(px(440.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_4()
+                            .px(px(16.))
+                            .pt(px(16.))
+                            .pb(px(20.))
+                            .rounded_t(px(12.))
+                            .bg(tokens.theme_setting_primary)
+                            .child(
+                                div()
+                                    .text_xl()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(tokens.text_theme_message)
+                                    .child(self.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(tokens.text_theme_primary)
+                                    .child(self.description.clone()),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_end()
+                            .gap_4()
+                            .p(px(16.))
+                            .rounded_b(px(12.))
+                            .bg(tokens.theme_setting_nav)
+                            .child(
+                                Button::new("hide-activity-strip-cancel")
+                                    .label(self.cancel_label.clone())
+                                    .ghost()
+                                    .on_click(|_, window, cx| Self::close(window, cx)),
+                            )
+                            .child(
+                                Button::new("hide-activity-strip-confirm")
+                                    .label(self.confirm_label.clone())
+                                    .danger()
+                                    .on_click(
+                                        cx.listener(|this, _, window, cx| this.confirm(window, cx)),
+                                    ),
+                            ),
+                    ),
+            )
+    }
+}
+
+fn open_hide_activity_strip_modal(
+    strip: WeakEntity<LatestActivityStripView>,
+    context: ActivityStripContext,
+    generation: ActivityStripGeneration,
+    locale: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if !activity_strip_snapshot_matches(&strip, context, &generation, cx) {
+        return;
+    }
+    let modal = cx.new(|cx| HideActivityStripModal::new(strip, context, generation, &locale, cx));
+    let focus_handle = modal.read(cx).focus_handle.clone();
+    Shell::global(cx).update(cx, |shell, cx| {
+        shell.show_modal_restoring_focus(modal.into(), window, cx)
+    });
+    window.focus(&focus_handle, cx);
 }
 
 fn open_latest_topic(topic: TopicDiscussion, cx: &mut App) {
@@ -1288,10 +1887,14 @@ impl ChatArea {
                 &MessagesStore::global(cx),
                 window,
                 |this: &mut crate::ChatLayout, store, event: &MessagesEvent, window, cx| {
-                    if matches!(event, MessagesEvent::SendFailedWithoutRow) {
+                    let failure_key = match event {
+                        MessagesEvent::SendFailedWithoutRow => Some("message.toast.sendFailed"),
+                        MessagesEvent::OgpRemoveFailed => Some("message.toast.closeOgpFailed"),
+                        _ => None,
+                    };
+                    if let Some(key) = failure_key {
                         let locale = this.chat_area.settings.read(cx).language.clone();
-                        let message =
-                            SharedString::from(mezon_i18n::t(&locale, "message.toast.sendFailed"));
+                        let message = SharedString::from(mezon_i18n::t(&locale, key));
                         Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
                         return;
                     }

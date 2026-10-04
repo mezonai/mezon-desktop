@@ -291,6 +291,7 @@ impl Render for SoundPanel {
                     btn = btn.child(
                         img(cat.logo.clone())
                             .size(px(RAIL_LOGO_PX))
+                            .aspect_square()
                             .rounded_full()
                             .object_fit(gpui::ObjectFit::Cover),
                     );
@@ -432,6 +433,7 @@ fn render_header(
     let logo: AnyElement = if !cat.logo.is_empty() {
         img(cat.logo.clone())
             .size(px(16.))
+            .aspect_square()
             .rounded_full()
             .object_fit(gpui::ObjectFit::Cover)
             .into_any_element()

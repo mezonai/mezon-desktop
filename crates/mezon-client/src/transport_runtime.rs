@@ -581,17 +581,6 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
-    pub async fn list_channel_by_user_id(&self) -> Result<Vec<crate::transport::ApiChannelDesc>> {
-        tracing::debug!("TransportClient::list_channel_by_user_id() called");
-
-        let transport = self.inner.clone();
-
-        runtime()
-            .spawn(async move { transport.list_channel_by_user_id().await })
-            .await
-            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
-    }
-
     pub async fn list_dm_channel_descs(
         &self,
         page: i32,
@@ -1027,33 +1016,6 @@ impl TransportClient {
             .spawn(async move {
                 transport
                     .make_call_push(receiver_id, json_data, channel_id, caller_id)
-                    .await
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
-    }
-
-    pub async fn update_channel_message_structured(
-        &self,
-        clan_id: i64,
-        channel_id: i64,
-        message_id: i64,
-        content_json: String,
-        mode: i32,
-        create_time_seconds: u32,
-    ) -> Result<()> {
-        let transport = self.inner.clone();
-        runtime()
-            .spawn(async move {
-                transport
-                    .update_channel_message_structured(
-                        clan_id,
-                        channel_id,
-                        message_id,
-                        content_json,
-                        mode,
-                        create_time_seconds,
-                    )
                     .await
             })
             .await
@@ -1790,6 +1752,25 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn search_mention_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        text: &str,
+    ) -> Result<mezon_proto::api::SearchMentionUsersResponse> {
+        let transport = self.inner.clone();
+        let text = text.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .search_mention_users(clan_id, channel_id, &text)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn join_chat(
         &self,
         clan_id: i64,
@@ -1878,6 +1859,44 @@ impl TransportClient {
                         mentions,
                         hashtags,
                         emojis,
+                        mode,
+                        is_public,
+                        topic_id,
+                        is_update_msg_topic,
+                        hide_editted,
+                        create_time_seconds,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_channel_message_content(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        content_json: String,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        mode: i32,
+        is_public: bool,
+        topic_id: i64,
+        is_update_msg_topic: bool,
+        hide_editted: bool,
+        create_time_seconds: u32,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .update_channel_message_content(
+                        clan_id,
+                        channel_id,
+                        message_id,
+                        content_json,
+                        &mentions,
                         mode,
                         is_public,
                         topic_id,

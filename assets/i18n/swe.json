@@ -3270,6 +3270,7 @@
   "message.actions.unPinMessage": "Avspika meddelande",
   "message.addAMessage": "Lägg till ett meddelande (Valfritt)",
   "message.attachment.uploading": "Laddar upp...",
+  "message.attachment.uploadFailed": "Uppladdningen misslyckades",
   "message.attachments.attachment": "Bilaga",
   "message.attachments.audio": "Röstmeddelande",
   "message.attachments.contact": "Visitekort",
@@ -4775,5 +4776,8 @@
   "screenShare.modeVideoDescription": "Smidigare video; skärpan kan minska vid en långsam anslutning.",
   "chat.activityStrip.latestPin": "Senast fäst",
   "chat.activityStrip.latestTopicMessage": "Senaste meddelandet i ämnet",
-  "chat.activityStrip.messageFrom": "Meddelande från {{name}}: {{message}}"
+  "chat.activityStrip.messageFrom": "Meddelande från {{name}}: {{message}}",
+  "chat.activityStrip.hideAction": "Dölj fältet för fästa meddelanden och ämnen",
+  "chat.activityStrip.hideConfirm.title": "Dölj fältet för fästa meddelanden och ämnen",
+  "chat.activityStrip.hideConfirm.description": "Dölj fältet för fästa meddelanden och ämnen i den här kanalen? Det visas automatiskt igen vid en ny fästning eller ett nytt ämne."
 }

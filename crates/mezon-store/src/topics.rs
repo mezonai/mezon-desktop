@@ -19,7 +19,8 @@ use crate::messages::{
 };
 use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
-use crate::{CACHE_TTL, ChannelId, ClanId, Message, MessageId, UserId};
+use crate::upload_jobs::UploadJob;
+use crate::{CACHE_TTL, ChannelId, ClanId, Message, MessageId, MessageRef, UserId};
 
 const TOPICS_LIMIT: i32 = 50;
 const STREAM_MODE_CHANNEL: i32 = 2;
@@ -533,11 +534,8 @@ impl TopicsStore {
         self.reply_target.as_ref()
     }
 
-    pub fn set_reply_to(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
-        let Some(draft) = MessagesStore::global(cx)
-            .read(cx)
-            .reply_draft_for(message_id)
-        else {
+    pub fn set_reply_to(&mut self, target: MessageRef, cx: &mut Context<Self>) {
+        let Some(draft) = MessagesStore::global(cx).read(cx).reply_draft_for(target) else {
             return;
         };
         self.reply_target = Some(draft);
@@ -1365,45 +1363,29 @@ impl TopicsStore {
             else {
                 return;
             };
-            let (on_complete, mut completions) =
-                tokio::sync::mpsc::unbounded_channel::<AttachmentUploadOutcome>();
-            let drain_this = this.clone();
-            cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-                while let Some(outcome) = completions.recv().await {
-                    if drain_this.upgrade().is_none() {
-                        return;
-                    }
-                    cx.update(|cx| {
-                        MessagesStore::global(cx).update(cx, |store, cx| {
-                            store.apply_topic_attachment_outcome(
-                                topic_id,
-                                MessageId(real_message_id),
-                                outcome,
-                                cx,
-                            );
-                        });
-                    });
-                }
-            })
-            .detach();
-            api.upload_presigned_and_patch(
+            let user_id = cx
+                .update(|cx| crate::messages::viewer_user_id(cx))
+                .unwrap_or(UserId(0));
+            let job = UploadJob {
+                user_id,
                 clan_id,
+                channel_id: topic_id,
+                parent_channel_id,
                 topic_id,
-                real_message_id,
-                &content,
-                update_mentions,
-                update_hashtags,
-                update_emojis,
-                create_time_seconds,
-                presigned,
-                keys,
+                message_id: real_message_id,
                 mode,
                 is_public,
-                topic_id,
-                true,
-                on_complete,
-            )
-            .await;
+                content: content.clone(),
+                mentions: update_mentions,
+                hashtags: update_hashtags,
+                emojis: update_emojis,
+                create_time_seconds,
+                started_at: unix_now_seconds(),
+                finished: Vec::new(),
+                pending: crate::messages::upload_job_files(&presigned, &keys),
+                sync_failures: 0,
+            };
+            crate::messages::run_upload_job(api.clone(), job, presigned, cx).await;
         })
         .detach();
     }
@@ -1792,6 +1774,11 @@ impl TopicsStore {
 
     pub fn is_loading(&self) -> bool {
         self.loading
+    }
+
+    pub fn is_ready_for(&self, clan_id: &str) -> bool {
+        self.clan_id.as_deref() == Some(clan_id)
+            && (self.fetched_at.is_some() || self.fetch_failures >= MAX_TOPIC_FETCH_FAILURES)
     }
 
     pub fn has_more(&self) -> bool {

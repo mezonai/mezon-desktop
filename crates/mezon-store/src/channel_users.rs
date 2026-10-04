@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
-use mezon_client::{AppApi, ConnectionStatus};
+use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 use mezon_proto::api;
 
 use crate::ids::{ChannelId, UserId};
+use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::{CACHE_TTL, KeyedCache};
 use crate::{ChannelEvent, ChannelList};
 
@@ -21,6 +22,7 @@ const CHANNEL_USER_FETCH_LIMIT: i32 = 1000;
 #[derive(Debug, Clone)]
 pub enum ChannelUsersEvent {
     Changed { channel_id: ChannelId },
+    MembershipChanged { channel_id: ChannelId },
 }
 
 /// Identity the channel-user listing carries for each member. The clan roster is the
@@ -61,6 +63,7 @@ impl ChannelUsersStore {
     }
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
+        Self::register_realtime(cx);
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
         let channel_list_sub = ChannelList::try_global(cx).map(|channels| {
             cx.subscribe(&channels, |this, _, event: &ChannelEvent, cx| {
@@ -97,6 +100,35 @@ impl ChannelUsersStore {
         self.cache.clear();
         self.loading.clear();
         cx.notify();
+    }
+
+    fn register_realtime(cx: &mut Context<Self>) {
+        let entity = cx.entity();
+        RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
+            for kind in [
+                RealtimeKind::UserChannelAdded,
+                RealtimeKind::UserChannelRemoved,
+            ] {
+                dispatch.on(kind, &entity, |this, event, cx| {
+                    this.handle_realtime(event, cx)
+                });
+            }
+            dispatch.on_lagged(&entity, |this, _| this.invalidate());
+        });
+    }
+
+    fn handle_realtime(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let channel_id = match event {
+            RealtimeEvent::UserChannelAdded(event) => event
+                .channel_desc
+                .as_ref()
+                .map(|desc| ChannelId(desc.channel_id)),
+            RealtimeEvent::UserChannelRemoved(event) => Some(ChannelId(event.channel_id)),
+            _ => None,
+        };
+        if let Some(channel_id) = channel_id.filter(|id| !id.is_zero()) {
+            self.apply_membership_change(channel_id, cx);
+        }
     }
 
     fn spawn_connection_watch(api: Arc<AppApi>, cx: &mut Context<Self>) -> Task<()> {
@@ -211,6 +243,12 @@ impl ChannelUsersStore {
         cx.notify();
     }
 
+    fn apply_membership_change(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        self.loading.remove(&channel_id);
+        self.cache.mark_stale(&channel_id);
+        cx.emit(ChannelUsersEvent::MembershipChanged { channel_id });
+    }
+
     #[cfg(test)]
     pub(crate) fn seed_users_for_test(&mut self, channel_id: ChannelId, user_ids: &[UserId]) {
         let users = ChannelUsers {
@@ -301,6 +339,9 @@ fn apply_remove(existing: &mut ChannelUsers, user_ids: &[UserId]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use super::*;
 
     fn users(ids: &[i64]) -> ChannelUsers {
@@ -315,7 +356,95 @@ mod tests {
             Arc::new(mezon_client::TransportClient::new(String::new())),
             String::new(),
         ));
+        RealtimeDispatch::init(api.clone(), cx);
         ChannelUsersStore::init(api, cx)
+    }
+
+    fn user_added(channel_id: i64) -> RealtimeEvent {
+        RealtimeEvent::UserChannelAdded(mezon_proto::realtime::UserChannelAdded {
+            channel_desc: Some(api::ChannelDescription {
+                channel_id,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+    }
+
+    fn user_removed(channel_id: i64) -> RealtimeEvent {
+        RealtimeEvent::UserChannelRemoved(mezon_proto::realtime::UserChannelRemoved {
+            channel_id,
+            ..Default::default()
+        })
+    }
+
+    #[gpui::test]
+    fn a_membership_event_marks_a_cached_member_list_stale(cx: &mut gpui::TestAppContext) {
+        let store = cx.update(init_store);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _sub = cx.update(|cx| {
+            let seen = seen.clone();
+            cx.subscribe(&store, move |_, event: &ChannelUsersEvent, _| {
+                if let ChannelUsersEvent::MembershipChanged { channel_id } = event {
+                    seen.borrow_mut().push(*channel_id);
+                }
+            })
+        });
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.seed_users_for_test(ChannelId(1), &[UserId(5)]);
+                store.handle_realtime(&user_added(1), cx);
+                assert!(!store.is_loading(ChannelId(1)));
+                assert_eq!(store.user_ids(ChannelId(1)), &[UserId(5)]);
+                store.ensure_loaded(ChannelId(1), cx);
+                assert!(store.is_loading(ChannelId(1)));
+            });
+        });
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                let fetch = store.loading[&ChannelId(1)];
+                store.finish_fetch(ChannelId(1), fetch, Ok(listing(&[5, 6])), cx);
+                assert_eq!(store.user_ids(ChannelId(1)), &[UserId(5), UserId(6)]);
+                store.handle_realtime(&user_removed(1), cx);
+                store.ensure_loaded(ChannelId(1), cx);
+                assert!(store.is_loading(ChannelId(1)));
+            });
+        });
+        assert_eq!(*seen.borrow(), vec![ChannelId(1), ChannelId(1)]);
+    }
+
+    #[gpui::test]
+    fn a_membership_event_discards_a_fetch_already_in_flight(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                store.ensure_loaded(ChannelId(1), cx);
+                let stale_fetch = store.loading[&ChannelId(1)];
+                store.handle_realtime(&user_added(1), cx);
+                assert!(!store.is_loading(ChannelId(1)));
+                store.finish_fetch(ChannelId(1), stale_fetch, Ok(listing(&[5])), cx);
+                assert!(!store.is_loaded(ChannelId(1)));
+                store.ensure_loaded(ChannelId(1), cx);
+                let fresh_fetch = store.loading[&ChannelId(1)];
+                assert_ne!(stale_fetch, fresh_fetch);
+                store.finish_fetch(ChannelId(1), fresh_fetch, Ok(listing(&[5, 9])), cx);
+                assert_eq!(store.user_ids(ChannelId(1)), &[UserId(5), UserId(9)]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_membership_event_leaves_uncached_channels_unfetched(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                store.handle_realtime(&user_added(2), cx);
+                store.handle_realtime(&user_removed(3), cx);
+                store.handle_realtime(&user_added(0), cx);
+                assert!(!store.is_loading(ChannelId(2)));
+                assert!(!store.is_loading(ChannelId(3)));
+                assert!(!store.is_loaded(ChannelId(2)));
+            });
+        });
     }
 
     #[gpui::test]

@@ -49,6 +49,7 @@ pub fn app_list_popover_overlay(
             gpui::img(logo.clone())
                 .w(px(28.))
                 .h(px(28.))
+                .aspect_square()
                 .into_any_element()
         } else {
             gpui::svg()

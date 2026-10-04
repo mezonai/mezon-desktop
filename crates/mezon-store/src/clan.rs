@@ -368,11 +368,9 @@ impl ClanOverviewDraft {
 /// Keep the live rail counts across a clan-list refetch.
 ///
 /// `ListClanDescs` carries no badge, so a plain reload would paint every clan
-/// read. `authoritative` says the incoming rows came from `ListClanBadgeCount`
-/// instead — server truth, which also knows about reads made on other devices —
-/// and then it must win, or a reconnect could never correct a stale count.
-fn carry_live_badges(previous: &[Clan], next: &mut [Clan], authoritative: bool) {
-    if previous.is_empty() || authoritative {
+/// read.
+fn carry_live_badges(previous: &[Clan], next: &mut [Clan]) {
+    if previous.is_empty() {
         return;
     }
     let live: std::collections::HashMap<ClanId, (u32, bool)> = previous
@@ -384,6 +382,21 @@ fn carry_live_badges(previous: &[Clan], next: &mut [Clan], authoritative: bool) 
             clan.badge_count = badge_count;
             clan.has_unread = has_unread;
         }
+    }
+}
+
+fn apply_clan_badges(clans: &mut [Clan], counts: Vec<(String, i32, bool)>) {
+    let counts: HashMap<String, (i32, bool)> = counts
+        .into_iter()
+        .map(|(id, badge, has_unread)| (id, (badge, has_unread)))
+        .collect();
+    for clan in clans {
+        let (badge, has_unread) = counts
+            .get(&clan.id.to_string())
+            .copied()
+            .unwrap_or((0, false));
+        clan.badge_count = badge.max(0) as u32;
+        clan.has_unread = has_unread;
     }
 }
 
@@ -466,6 +479,8 @@ pub struct ClanList {
     loading: bool,
     listed: bool,
     badges_loaded: bool,
+    badge_generation: u64,
+    badges_in_flight: Option<u64>,
     reload_pending: bool,
     reset_generation: u64,
     saved_order: Vec<ClanId>,
@@ -508,6 +523,7 @@ impl ClanList {
         self.loading = false;
         self.listed = false;
         self.badges_loaded = false;
+        self.badges_in_flight = None;
         self.reload_pending = false;
         self.joining_invite_urls.clear();
         self.invite_join_failed_urls.clear();
@@ -539,6 +555,8 @@ impl ClanList {
             loading: false,
             listed: false,
             badges_loaded: false,
+            badge_generation: 0,
+            badges_in_flight: None,
             reload_pending: false,
             reset_generation: 0,
             saved_order: Vec::new(),
@@ -604,6 +622,7 @@ impl ClanList {
     /// clan to be joined.
     pub fn reload_badges(&mut self, cx: &mut Context<Self>) {
         self.badges_loaded = false;
+        self.badge_generation = self.badge_generation.wrapping_add(1);
         self.reload(cx);
     }
 
@@ -615,20 +634,12 @@ impl ClanList {
         self.loading = true;
         let api = self.api.clone();
         let generation = self.reset_generation;
-        let fetch_badges = !self.badges_loaded;
         cx.spawn(async move |this, cx| {
             const MAX_RETRIES: u32 = 3;
             let mut attempt = 0u32;
-            let (clans, badges_result) = loop {
-                let (clans_result, badges_result) = if fetch_badges {
-                    let (clans, badges) =
-                        tokio::join!(api.list_clan_descs(), api.list_clan_badge_count());
-                    (clans, Some(badges))
-                } else {
-                    (api.list_clan_descs().await, None)
-                };
-                match clans_result {
-                    Ok(c) => break (c, badges_result),
+            let clans = loop {
+                match api.list_clan_descs().await {
+                    Ok(c) => break c,
                     Err(e) if attempt < MAX_RETRIES => {
                         attempt += 1;
                         tracing::warn!("Failed to load clans (attempt {attempt}): {e}, retrying");
@@ -647,47 +658,59 @@ impl ClanList {
                     }
                 }
             };
-            let mut badges_fetched = false;
-            let badge_map: std::collections::HashMap<String, (i32, bool)> = match badges_result {
-                Some(Ok(list)) => {
-                    badges_fetched = true;
-                    list.into_iter()
-                        .map(|(id, badge, has_unread)| (id, (badge, has_unread)))
-                        .collect()
-                }
-                Some(Err(e)) => {
-                    tracing::warn!("clan badge count fetch failed: {e}");
-                    std::collections::HashMap::new()
-                }
-                None => std::collections::HashMap::new(),
-            };
-            let mapped: Vec<Clan> = clans
-                .into_iter()
-                .map(|c| {
-                    let mut clan = Clan::from(c);
-                    if let Some(&(badge, has_unread)) = badge_map.get(&clan.id.to_string()) {
-                        clan.badge_count = badge.max(0) as u32;
-                        clan.has_unread = has_unread;
-                    }
-                    clan
-                })
-                .collect();
+            let mapped: Vec<Clan> = clans.into_iter().map(Clan::from).collect();
             let _ = this.update(cx, |this, cx| {
                 if this.reset_generation != generation {
                     return;
                 }
                 this.loading = false;
                 this.listed = true;
-                this.badges_loaded = this.badges_loaded || badges_fetched;
-                this.update_clans_inner(mapped, badges_fetched, cx);
+                this.update_clans_inner(mapped, cx);
                 // No `clan_join` from here. The clan listing has not been fetched
                 // yet at this point, and a join that lands before it leaves the
                 // clan's private channels and threads unsubscribed for the whole
                 // gateway session — `ChannelList::ensure_clan_joined` owns the
                 // join and waits for the structure first.
+                if !this.badges_loaded {
+                    this.fetch_badges(cx);
+                }
                 if this.reload_pending {
                     this.reload_pending = false;
                     this.reload(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn fetch_badges(&mut self, cx: &mut Context<Self>) {
+        if self.badges_in_flight.is_some() {
+            return;
+        }
+        let generation = self.badge_generation;
+        self.badges_in_flight = Some(generation);
+        let reset_generation = self.reset_generation;
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let result = api.list_clan_badge_count().await;
+            let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != reset_generation {
+                    return;
+                }
+                this.badges_in_flight = None;
+                if this.badge_generation != generation {
+                    if !this.badges_loaded && this.listed && !this.loading {
+                        this.fetch_badges(cx);
+                    }
+                    return;
+                }
+                match result {
+                    Ok(counts) => {
+                        apply_clan_badges(&mut this.clans, counts);
+                        this.badges_loaded = true;
+                        cx.notify();
+                    }
+                    Err(e) => tracing::warn!("clan badge count fetch failed: {e}"),
                 }
             });
         })
@@ -1022,22 +1045,17 @@ impl ClanList {
 
     pub fn update_clans(&mut self, clans: Vec<Clan>, cx: &mut Context<Self>) {
         self.listed = true;
-        self.update_clans_inner(clans, false, cx);
+        self.update_clans_inner(clans, cx);
     }
 
-    fn update_clans_inner(
-        &mut self,
-        mut clans: Vec<Clan>,
-        authoritative_badges: bool,
-        cx: &mut Context<Self>,
-    ) {
+    fn update_clans_inner(&mut self, mut clans: Vec<Clan>, cx: &mut Context<Self>) {
         let prev_active = self.active_clan_id;
         let previous: HashMap<ClanId, UserId> = self
             .clans
             .iter()
             .map(|clan| (clan.id, clan.creator_id))
             .collect();
-        carry_live_badges(&self.clans, &mut clans, authoritative_badges);
+        carry_live_badges(&self.clans, &mut clans);
         self.clans = clans;
         self.apply_saved_order_internal();
         let active_missing = self
@@ -1914,7 +1932,7 @@ mod tests {
         previous[0].badge_count = 4;
         previous[0].has_unread = true;
         let mut refetched = clans();
-        carry_live_badges(&previous, &mut refetched, false);
+        carry_live_badges(&previous, &mut refetched);
         assert_eq!(refetched[0].badge_count, 4);
         assert!(refetched[0].has_unread);
         assert_eq!(refetched[1].badge_count, 0);
@@ -1925,23 +1943,19 @@ mod tests {
         let mut fresh = clans();
         fresh[0].badge_count = 7;
         fresh[0].has_unread = true;
-        carry_live_badges(&[], &mut fresh, false);
+        carry_live_badges(&[], &mut fresh);
         assert_eq!(fresh[0].badge_count, 7);
         assert!(fresh[0].has_unread);
     }
 
     #[test]
     fn a_badge_count_refetch_outranks_the_live_carry() {
-        let mut previous = clans();
-        previous[0].badge_count = 4;
-        previous[0].has_unread = true;
-        let mut refetched = clans();
-        refetched[0].badge_count = 1;
-        refetched[0].has_unread = true;
-        // Reconnect: ListClanBadgeCount ran, so the rows are server truth and must
-        // land — otherwise a count read on another device could never clear here.
-        carry_live_badges(&previous, &mut refetched, true);
-        assert_eq!(refetched[0].badge_count, 1);
+        let mut rail = clans();
+        rail[0].badge_count = 4;
+        rail[0].has_unread = true;
+        apply_clan_badges(&mut rail, vec![("1".to_string(), 1, true)]);
+        assert_eq!(rail[0].badge_count, 1);
+        assert!(rail[0].has_unread);
     }
 
     #[test]
@@ -1949,30 +1963,34 @@ mod tests {
         let previous = vec![make_clan(1, "One", None)];
         let mut refetched = clans();
         refetched[1].badge_count = 9;
-        carry_live_badges(&previous, &mut refetched, false);
+        carry_live_badges(&previous, &mut refetched);
         assert_eq!(refetched[0].badge_count, 0);
         assert_eq!(refetched[1].badge_count, 9);
     }
 
     #[test]
-    fn badge_map_applies_to_clans_on_reload() {
-        let mut c = clans();
-        let badge_map: std::collections::HashMap<String, (i32, bool)> = [
-            ("1".to_string(), (3_i32, true)),
-            ("99".to_string(), (5_i32, false)),
-        ]
-        .into_iter()
-        .collect();
-        for clan in &mut c {
-            if let Some(&(badge, has_unread)) = badge_map.get(&clan.id.to_string()) {
-                clan.badge_count = badge.max(0) as u32;
-                clan.has_unread = has_unread;
-            }
-        }
-        assert_eq!(c[0].badge_count, 3);
-        assert!(c[0].has_unread);
-        assert_eq!(c[1].badge_count, 0);
-        assert!(!c[1].has_unread);
+    fn clan_badge_counts_apply_to_listed_clans_and_clear_the_rest() {
+        let mut rail = clans();
+        rail[1].badge_count = 6;
+        rail[1].has_unread = true;
+        apply_clan_badges(
+            &mut rail,
+            vec![("1".to_string(), 3, true), ("99".to_string(), 5, false)],
+        );
+        assert_eq!(rail[0].badge_count, 3);
+        assert!(rail[0].has_unread);
+        assert_eq!(
+            rail[1].badge_count, 0,
+            "a clan the server left out has nothing unread"
+        );
+        assert!(!rail[1].has_unread);
+    }
+
+    #[test]
+    fn a_negative_clan_badge_count_clamps_to_zero() {
+        let mut rail = clans();
+        apply_clan_badges(&mut rail, vec![("1".to_string(), -2, false)]);
+        assert_eq!(rail[0].badge_count, 0);
     }
 
     #[test]

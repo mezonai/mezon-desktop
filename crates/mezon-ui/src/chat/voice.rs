@@ -1501,6 +1501,7 @@ fn reaction_float(r: &DisplayedReaction) -> AnyElement {
                     img(r.emoji_src.clone())
                         .id(("voice-reaction-frames", seq))
                         .size(px(40.))
+                        .aspect_square()
                         .object_fit(ObjectFit::Contain)
                         .with_animation(
                             ("voice-reaction-scale", seq),

@@ -1,6 +1,9 @@
-use gpui::{AnyElement, App, ElementId, Pixels, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, App, ElementId, FontWeight, Pixels, SharedString, Window, div, prelude::*, px,
+};
 use mezon_store::{ChannelId, DirectKind, DmAvatarPresence};
 
+use crate::components::compositions::channel_row_element::{BUZZ_COLOR, BUZZ_LABEL};
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::router::{Route, navigate};
 use crate::theme::Theme;
@@ -24,6 +27,7 @@ pub struct DmRow {
     kind: DirectKind,
     selected: bool,
     unread: bool,
+    buzz: bool,
     presence_badge: DmAvatarPresence,
     avatar_src: SharedString,
     avatar_raw: SharedString,
@@ -64,6 +68,7 @@ impl DmRow {
             kind,
             selected: false,
             unread: false,
+            buzz: false,
             presence_badge: DmAvatarPresence::None,
             avatar_src: SharedString::from(""),
             avatar_raw: SharedString::from(""),
@@ -94,6 +99,11 @@ impl DmRow {
 
     pub fn unread(mut self, unread: bool) -> Self {
         self.unread = unread;
+        self
+    }
+
+    pub fn buzz(mut self, buzz: bool) -> Self {
+        self.buzz = buzz;
         self
     }
 
@@ -240,6 +250,22 @@ impl DmRow {
                     }
                     None => name_el.flex_1().min_w_0().into_any_element(),
                 }
+            })
+            .when(self.buzz, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .h(px(16.))
+                        .px(px(4.))
+                        .rounded(px(4.))
+                        .bg(gpui::rgb(BUZZ_COLOR))
+                        .text_color(gpui::white())
+                        .text_xs()
+                        .font_weight(FontWeight::BOLD)
+                        .child(BUZZ_LABEL),
+                )
             })
             .child(close_btn)
     }

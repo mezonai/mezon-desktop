@@ -738,11 +738,13 @@ fn preview_image(
     match preview {
         Some(EmoticonPreview::Local(path)) => img(path.clone())
             .size(px(72.))
+            .aspect_square()
             .object_fit(gpui::ObjectFit::Contain)
             .rounded_md()
             .into_any_element(),
         Some(EmoticonPreview::Remote(url)) => img(url.clone())
             .size(px(72.))
+            .aspect_square()
             .object_fit(gpui::ObjectFit::Contain)
             .rounded_md()
             .into_any_element(),

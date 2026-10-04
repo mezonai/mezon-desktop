@@ -376,9 +376,67 @@ pub fn marked_caret_range(
     }
 }
 
+pub fn clip_insert_to_byte_limit(
+    current_len: usize,
+    replaced_len: usize,
+    new_text: &str,
+    max_bytes: usize,
+) -> &str {
+    let kept = current_len.saturating_sub(replaced_len);
+    let budget = max_bytes.saturating_sub(kept);
+    &new_text[..floor_char_boundary(new_text, budget)]
+}
+
+pub fn clipped_edit_is_rejected(requested: &str, clipped: &str, composing: bool) -> bool {
+    clipped.is_empty() && !requested.is_empty() && !composing
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_insert_that_fits_is_kept_whole() {
+        assert_eq!(clip_insert_to_byte_limit(10, 0, "abc", 512), "abc");
+        assert_eq!(clip_insert_to_byte_limit(509, 0, "abc", 512), "abc");
+    }
+
+    #[test]
+    fn an_insert_past_the_limit_is_cut_to_the_remaining_budget() {
+        assert_eq!(
+            clip_insert_to_byte_limit(505, 0, "bbbbbbbbbb", 512),
+            "bbbbbbb"
+        );
+        assert_eq!(clip_insert_to_byte_limit(512, 0, "b", 512), "");
+        assert_eq!(clip_insert_to_byte_limit(600, 0, "b", 512), "");
+    }
+
+    #[test]
+    fn replaced_bytes_free_up_budget() {
+        assert_eq!(clip_insert_to_byte_limit(512, 3, "abcd", 512), "abc");
+        assert_eq!(
+            clip_insert_to_byte_limit(14, 14, &"a".repeat(600), 512).len(),
+            512
+        );
+    }
+
+    #[test]
+    fn an_edit_with_nothing_left_to_insert_is_rejected_unless_it_commits_a_preedit() {
+        assert!(clipped_edit_is_rejected("ê", "", false));
+        assert!(!clipped_edit_is_rejected("ê", "", true));
+        assert!(!clipped_edit_is_rejected("ê", "ê", false));
+        assert!(!clipped_edit_is_rejected("", "", false));
+    }
+
+    #[test]
+    fn a_multibyte_char_is_never_split_at_the_limit() {
+        assert_eq!(clip_insert_to_byte_limit(510, 0, "ệa", 512), "");
+        assert_eq!(clip_insert_to_byte_limit(509, 0, "ệa", 512), "ệ");
+        assert_eq!(
+            clip_insert_to_byte_limit(0, 0, &"ệ".repeat(200), 512),
+            "ệ".repeat(170)
+        );
+    }
 
     #[test]
     fn previous_word_boundary_skips_trailing_space_then_word() {

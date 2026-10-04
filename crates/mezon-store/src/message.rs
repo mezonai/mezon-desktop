@@ -9,7 +9,7 @@ use mezon_client::transport::{
 
 use crate::album_layout::AlbumLayout;
 use crate::config::AppConfig;
-use crate::ids::{ChannelId, MessageId, UserId};
+use crate::ids::{ChannelId, MessageId, MessageRef, UserId};
 use crate::message_time::{format_local_time_hhmm, local_datetime, local_day_key};
 
 #[derive(Debug, Clone, Default)]
@@ -760,6 +760,7 @@ pub struct Message {
     pub local_date: Option<chrono::NaiveDate>,
     pub code: MessageCode,
     pub is_edited: bool,
+    pub hide_editted: bool,
     pub is_forwarded: bool,
     pub show_forwarded_label: bool,
     pub combined_with_prev: bool,
@@ -1808,6 +1809,7 @@ impl Message {
             local_date: local_datetime(create_time).map(|dt| dt.date_naive()),
             code: MessageCode::Chat,
             is_edited: false,
+            hide_editted: false,
             is_forwarded: false,
             show_forwarded_label: false,
             combined_with_prev: false,
@@ -1851,6 +1853,14 @@ impl Message {
     pub fn with_raw_content(mut self, raw: &str) -> Self {
         self.raw_content = (!raw.is_empty()).then(|| Arc::from(raw));
         self
+    }
+
+    pub fn is_sent_by(&self, user_id: &str) -> bool {
+        !user_id.is_empty() && self.sender_id == user_id
+    }
+
+    pub fn message_ref(&self) -> MessageRef {
+        MessageRef::new(self.channel_id, self.id)
     }
 
     pub fn is_sending(&self) -> bool {
@@ -1930,6 +1940,7 @@ impl Message {
 
     pub fn with_edited(mut self, update_time: i64, hide_editted: bool) -> Self {
         self.update_time = update_time;
+        self.hide_editted = hide_editted;
         self.is_edited = update_time > 0 && update_time > self.create_time && !hide_editted;
         self
     }

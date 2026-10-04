@@ -48,7 +48,7 @@ pub fn render_command_card(msg: &Message, command: &CommandInvocation, ctx: &Row
 
 fn render_command_line(msg: &Message, command: &CommandInvocation, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
-    let message_id = msg.id;
+    let target = msg.message_ref();
     let hover_bg = theme.bg_hover;
     div()
         .flex()
@@ -91,7 +91,7 @@ fn render_command_line(msg: &Message, command: &CommandInvocation, ctx: &RowCtx)
                 )
                 .on_click(move |_, _, cx| {
                     MessagesStore::global(cx)
-                        .update(cx, |store, cx| store.dismiss_local_message(message_id, cx));
+                        .update(cx, |store, cx| store.dismiss_local_message(target, cx));
                 }),
         )
         .into_any_element()

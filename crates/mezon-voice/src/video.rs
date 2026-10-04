@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use libwebrtc::video_frame::VideoRotation;
 use parking_lot::Mutex;
 use tokio::sync::watch;
 
@@ -449,6 +450,39 @@ pub(crate) fn try_i420_to_bgra_into(
         out, y_plane, u_plane, v_plane, stride_y, stride_u, stride_v, width, height,
     );
     true
+}
+
+pub fn rotate_bgra_into(
+    out: &mut Vec<u8>,
+    src: &[u8],
+    width: u32,
+    height: u32,
+    rotation: VideoRotation,
+) -> (u32, u32) {
+    let (rotated_width, rotated_height) = match rotation {
+        VideoRotation::VideoRotation90 | VideoRotation::VideoRotation270 => (height, width),
+        VideoRotation::VideoRotation0 | VideoRotation::VideoRotation180 => (width, height),
+    };
+    let (width, height) = (width as usize, height as usize);
+    out.clear();
+    out.resize(width * height * 4, 0);
+    if width == 0 || height == 0 {
+        return (rotated_width, rotated_height);
+    }
+    let rotated_row = rotated_width as usize;
+    for (y, row) in src.chunks_exact(width * 4).take(height).enumerate() {
+        for (x, pixel) in row.chunks_exact(4).enumerate() {
+            let (to_x, to_y) = match rotation {
+                VideoRotation::VideoRotation0 => (x, y),
+                VideoRotation::VideoRotation90 => (height - 1 - y, x),
+                VideoRotation::VideoRotation180 => (width - 1 - x, height - 1 - y),
+                VideoRotation::VideoRotation270 => (y, width - 1 - x),
+            };
+            let at = (to_y * rotated_row + to_x) * 4;
+            out[at..at + 4].copy_from_slice(pixel);
+        }
+    }
+    (rotated_width, rotated_height)
 }
 
 #[allow(clippy::too_many_arguments)]

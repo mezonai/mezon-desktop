@@ -2145,6 +2145,7 @@ impl ChatLayout {
         clan_id: &str,
         parent_id: &str,
         label: &str,
+        private: Option<bool>,
         cx: &mut Context<Self>,
     ) {
         let Ok(channel_id) = channel_id.parse::<ChannelId>() else {
@@ -2169,7 +2170,8 @@ impl ChatLayout {
             ),
             None => (CHANNEL_ACTIVE_JOINED, false),
         };
-        let private = threads.thread_channel_private(&channel_key).map(|p| p != 0);
+        let private =
+            private.or_else(|| threads.thread_channel_private(&channel_key).map(|p| p != 0));
         self.channel_list.update(cx, |list, cx| {
             if let Some(parent) = parent {
                 list.ensure_thread_with_parent_active(
@@ -2207,9 +2209,12 @@ impl ChatLayout {
             ThreadsEvent::ThreadCreated {
                 channel_id,
                 clan_id,
+                parent_id,
+                name,
+                private,
             } => {
                 self.close_create_thread(cx);
-                self.navigate_to_thread(channel_id, clan_id, "", "", cx);
+                self.navigate_to_thread(channel_id, clan_id, parent_id, name, Some(*private), cx);
                 ThreadsStore::global(cx).update(cx, |store, cx| store.refresh(cx));
             }
             ThreadsEvent::CreateFailed { .. } | ThreadsEvent::LeaveFailed => {}
@@ -2425,6 +2430,21 @@ impl ChatLayout {
             return None;
         };
         self.direct_store.read(cx).find(direct_id).cloned()
+    }
+
+    fn with_call_panel(&self, dm_chat: gpui::AnyElement) -> gpui::AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .w_full()
+            .h_full()
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
+            .child(self.call_panel.clone())
+            .child(dm_chat)
+            .into_any_element()
     }
 
     fn is_dm_route(&self, cx: &Context<Self>) -> bool {
@@ -2840,24 +2860,13 @@ impl ChatLayout {
                         cx,
                     )
                     .into_any_element();
-                return div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .w_full()
-                    .h_full()
-                    .min_w_0()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .child(self.call_panel.clone())
-                    .child(dm_chat)
-                    .into_any_element();
+                return self.with_call_panel(dm_chat);
             }
             if matches!(
                 Router::global(cx).read(cx).route(),
                 Route::DirectMessage { .. }
             ) {
-                return self
+                let dm_chat = self
                     .chat_area
                     .render(
                         &locale,
@@ -2888,6 +2897,7 @@ impl ChatLayout {
                         cx,
                     )
                     .into_any_element();
+                return self.with_call_panel(dm_chat);
             }
             return self.friends_page.clone().into_any_element();
         }

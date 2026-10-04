@@ -3269,6 +3269,7 @@
   "message.actions.unPinMessage": "Відкріпити повідомлення",
   "message.addAMessage": "Додати повідомлення (необов'язково)",
   "message.attachment.uploading": "Завантаження...",
+  "message.attachment.uploadFailed": "Не вдалося завантажити",
   "message.attachments.attachment": "Вкладення",
   "message.attachments.audio": "Голосове повідомлення",
   "message.attachments.contact": "Контакт",
@@ -4774,5 +4775,8 @@
   "screenShare.modeVideoDescription": "Плавніше відео; за повільного з’єднання чіткість може знизитися.",
   "chat.activityStrip.latestPin": "Останнє закріплення",
   "chat.activityStrip.latestTopicMessage": "Останнє повідомлення в темі",
-  "chat.activityStrip.messageFrom": "Повідомлення від {{name}}: {{message}}"
+  "chat.activityStrip.messageFrom": "Повідомлення від {{name}}: {{message}}",
+  "chat.activityStrip.hideAction": "Приховати панель закріплень і тем",
+  "chat.activityStrip.hideConfirm.title": "Приховати панель закріплень і тем",
+  "chat.activityStrip.hideConfirm.description": "Приховати панель закріплень і тем для цього каналу? Вона автоматично з’явиться знову після нового закріплення або нової теми."
 }

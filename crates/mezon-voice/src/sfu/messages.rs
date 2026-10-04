@@ -130,6 +130,8 @@ pub struct SnapshotMember {
     #[serde(default)]
     pub camera_active: bool,
     #[serde(default)]
+    pub screen_requested: Option<bool>,
+    #[serde(default)]
     pub screen_active: bool,
     #[serde(default, deserialize_with = "flexible_mid")]
     pub mid_audio: u32,
@@ -140,6 +142,10 @@ pub struct SnapshotMember {
 }
 
 impl SnapshotMember {
+    pub fn is_sharing_screen(&self) -> bool {
+        self.screen_active && self.screen_requested.unwrap_or(true)
+    }
+
     pub fn is_audience(&self) -> bool {
         self.role == "audience"
     }

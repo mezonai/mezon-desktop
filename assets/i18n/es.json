@@ -3303,6 +3303,7 @@
   "message.addAMessage": "Añadir un mensaje (Opcional)",
   "message.addReaction": "Añadir reacción",
   "message.attachment.uploading": "Subiendo...",
+  "message.attachment.uploadFailed": "Error al subir",
   "message.attachments.attachment": "Adjunto",
   "message.attachments.audio": "Voz",
   "message.attachments.contact": "Contacto",
@@ -4813,5 +4814,8 @@
   "screenShare.modeVideoDescription": "Vídeo más fluido; puede perder nitidez con una conexión lenta.",
   "chat.activityStrip.latestPin": "Último mensaje fijado",
   "chat.activityStrip.latestTopicMessage": "Último mensaje del tema",
-  "chat.activityStrip.messageFrom": "Mensaje de {{name}}: {{message}}"
+  "chat.activityStrip.messageFrom": "Mensaje de {{name}}: {{message}}",
+  "chat.activityStrip.hideAction": "Ocultar barra de fijados y temas",
+  "chat.activityStrip.hideConfirm.title": "Ocultar barra de fijados y temas",
+  "chat.activityStrip.hideConfirm.description": "¿Ocultar la barra de fijados y temas de este canal? Volverá a aparecer automáticamente cuando haya un nuevo fijado o tema."
 }

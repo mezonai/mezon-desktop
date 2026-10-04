@@ -4,7 +4,7 @@ use gpui::{
 };
 use mezon_store::{
     AccountStore, BadgeService, ChannelId, ClanId, ClanList, ClanMembersStore, DirectKind,
-    DirectMessageStore, GroupMembersStore, MessageId, MessagesEvent, MessagesStore, UserId,
+    DirectMessageStore, GroupMembersStore, MessageRef, MessagesEvent, MessagesStore, UserId,
 };
 
 use crate::components::primitives::{Avatar, Icon, IconName};
@@ -14,7 +14,7 @@ use crate::theme::ActiveTheme;
 const HEADER_EMOJI_SOURCE_PX: u32 = 40;
 
 pub struct UserReactionPanel {
-    message_id: MessageId,
+    target: MessageRef,
     emoji_id: SharedString,
     emoji: SharedString,
     image_cache: Entity<LruImageCache>,
@@ -23,7 +23,7 @@ pub struct UserReactionPanel {
 
 impl UserReactionPanel {
     pub fn new(
-        message_id: MessageId,
+        target: MessageRef,
         emoji_id: SharedString,
         emoji: SharedString,
         image_cache: Entity<LruImageCache>,
@@ -32,13 +32,13 @@ impl UserReactionPanel {
         let store = MessagesStore::global(cx);
         let messages_sub = cx.subscribe(&store, |this, _store, event: &MessagesEvent, cx| {
             if let MessagesEvent::Updated { message_id } = event
-                && (message_id.is_none() || *message_id == Some(this.message_id))
+                && (message_id.is_none() || *message_id == Some(this.target.id))
             {
                 cx.notify();
             }
         });
         Self {
-            message_id,
+            target,
             emoji_id,
             emoji,
             image_cache,
@@ -53,7 +53,7 @@ impl Render for UserReactionPanel {
         let theme = cx.theme();
         let (count, senders) = MessagesStore::global(cx)
             .read(cx)
-            .reaction_view(self.message_id, &self.emoji_id, &self.emoji)
+            .reaction_view(self.target, &self.emoji_id, &self.emoji)
             .unwrap_or((0, Vec::new()));
         let emoji_src =
             crate::util::imgproxy::emoji_url_sized(cx, &self.emoji_id, HEADER_EMOJI_SOURCE_PX);
@@ -107,6 +107,7 @@ impl Render for UserReactionPanel {
                 .image_cache(&emoji_cache)
                 .id("reaction-panel-emoji-frames")
                 .size(px(20.))
+                .aspect_square()
                 .object_fit(ObjectFit::ScaleDown)
                 .with_fallback(emoji_error_fallback(px(20.), theme.text_muted))
                 .into_any_element()
@@ -171,7 +172,7 @@ impl Render for UserReactionPanel {
 
             let is_own = current_uid.is_some_and(|u| u.get().to_string() == *sender_id);
             let remove = if is_own {
-                let message_id = self.message_id;
+                let target = self.target;
                 let emoji_id = self.emoji_id.clone();
                 let emoji = self.emoji.clone();
                 Some(
@@ -186,7 +187,7 @@ impl Render for UserReactionPanel {
                         .on_click(move |_, _, cx| {
                             MessagesStore::global(cx).update(cx, |store, cx| {
                                 store.remove_reaction(
-                                    message_id,
+                                    target,
                                     emoji_id.to_string(),
                                     emoji.to_string(),
                                     cx,

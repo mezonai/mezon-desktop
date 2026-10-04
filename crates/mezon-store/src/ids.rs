@@ -123,6 +123,22 @@ impl MessageId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MessageRef {
+    pub bucket: ChannelId,
+    pub id: MessageId,
+}
+
+impl MessageRef {
+    pub fn new(bucket: ChannelId, id: MessageId) -> Self {
+        Self { bucket, id }
+    }
+
+    pub fn unbucketed(id: MessageId) -> Self {
+        Self::new(ChannelId(0), id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

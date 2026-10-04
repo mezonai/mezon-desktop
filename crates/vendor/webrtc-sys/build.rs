@@ -2,6 +2,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::{env, path, process::Command};
 
+mod build_symbols;
+
 fn main() {
     if env::var("DOCS_RS").is_ok() {
         return;
@@ -117,7 +119,12 @@ fn main() {
         builder.define(key.as_str(), value);
     }
 
-    println!("cargo:rustc-link-lib=static=webrtc");
+    let isolate_symbols = target_os == "linux" && target_arch == "x86_64";
+    if isolate_symbols {
+        println!("cargo:rustc-link-lib=static=mezon_webrtc");
+    } else {
+        println!("cargo:rustc-link-lib=static=webrtc");
+    }
     match target_os.as_str() {
         "windows" => {
             println!("cargo:rustc-link-lib=dylib=msdmo");
@@ -348,6 +355,12 @@ fn main() {
 
     builder.define("MEZON_RTC_TEST", None);
     builder.warnings(false).compile("webrtcsys-cxx");
+
+    if isolate_symbols {
+        let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+        build_symbols::isolate_dependencies(&webrtc_lib.join("libwebrtc.a"), &out_dir);
+    }
+    println!("cargo:rerun-if-changed=build_symbols.rs");
 
     for entry in glob::glob("./src/**/*.cpp").unwrap() {
         println!("cargo:rerun-if-changed={}", entry.unwrap().display());

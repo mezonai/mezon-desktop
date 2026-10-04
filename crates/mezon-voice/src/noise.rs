@@ -93,7 +93,7 @@ impl NoiseProcessor {
                             } else {
                                 let mut config = MezonNSConfig::default();
                                 config.suppression_intensity = WEB_SUPPRESSION_INTENSITY;
-                                config.enable_noise_gate = 1;
+                                config.enable_noise_gate = 0;
                                 config.attenuation_limit_db = MAX_ATTENUATION_DB;
                                 MezonNSEngine::create_embedded(Some(config))
                                     .and_then(|mut engine| {

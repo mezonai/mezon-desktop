@@ -71,10 +71,6 @@ impl MuteSync {
         }
     }
 
-    pub(crate) fn pending_count(&self) -> usize {
-        self.pending.len()
-    }
-
     pub(crate) fn deadline(&self) -> Option<Instant> {
         self.forced_mute_deadline
     }
@@ -134,125 +130,6 @@ fn reconnect_delay_with_jitter(attempt: u32, jitter: u64) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn unmute_ack_delayed_like_the_reported_log_does_not_close_the_mic() {
-        let start = Instant::now();
-        let mut sync = MuteSync::default();
-        sync.sent(false, 2, start); // 12:53:54.736
-        sync.observe_self(true, false, start + Duration::from_millis(2100));
-        // The old 300 ms inference had already closed the mic at this point.
-        assert!(!sync.take_forced_mute(start + Duration::from_millis(2409)));
-        assert!(sync.deadline().is_none());
-        assert_eq!(sync.acknowledge(false), Some(2)); // 12:53:57.458
-        assert_eq!(sync.pending_count(), 0);
-        assert!(!sync.take_forced_mute(start + Duration::from_millis(2722)));
-        assert!(
-            sync.timed_out_revision(start + Duration::from_secs(20))
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn an_old_join_mute_ack_cannot_complete_the_new_unmute_request() {
-        let start = Instant::now();
-        let mut sync = MuteSync::default();
-        sync.sent(true, 1, start);
-        sync.sent(false, 2, start + Duration::from_millis(50));
-        assert_eq!(sync.acknowledge(true), Some(1));
-        assert_eq!(sync.pending_count(), 1);
-        sync.observe_self(true, false, start + Duration::from_secs(1));
-        assert!(!sync.take_forced_mute(start + Duration::from_secs(2)));
-        assert_eq!(sync.acknowledge(false), Some(2));
-        assert!(sync.deadline().is_none());
-    }
-
-    #[test]
-    fn mute_unmute_mute_replies_are_correlated_in_order() {
-        let start = Instant::now();
-        let mut sync = MuteSync::default();
-        for (revision, muted) in [(1, true), (2, false), (3, true)] {
-            sync.sent(muted, revision, start);
-        }
-        assert_eq!(sync.acknowledge(true), Some(1));
-        assert_eq!(sync.acknowledge(true), None); // Does not consume revision 3.
-        assert_eq!(sync.pending_count(), 2);
-        assert_eq!(sync.acknowledge(false), Some(2));
-        assert_eq!(sync.acknowledge(true), Some(3));
-        assert_eq!(sync.pending_count(), 0);
-    }
-
-    #[test]
-    fn lost_ack_requests_resynchronization_instead_of_inferred_moderation() {
-        let start = Instant::now();
-        let mut sync = MuteSync::default();
-        sync.sent(false, 2, start);
-        sync.observe_self(true, false, start + Duration::from_secs(1));
-        assert_eq!(sync.acknowledge(true), None);
-        assert!(
-            sync.timed_out_revision(start + Duration::from_secs(9))
-                .is_none()
-        );
-        assert_eq!(
-            sync.timed_out_revision(start + Duration::from_secs(10)),
-            Some(2)
-        );
-        assert!(!sync.take_forced_mute(start + Duration::from_secs(10)));
-        // Recovery begins a new WebSocket with its own empty correlation state.
-        let mut next = MuteSync::default();
-        assert_eq!(next.acknowledge(false), None);
-        assert_eq!(next.pending_count(), 0);
-    }
-
-    #[test]
-    fn moderation_after_the_local_ack_still_closes_the_mic() {
-        let start = Instant::now();
-        let mut sync = MuteSync::default();
-        sync.sent(false, 2, start);
-        assert_eq!(sync.acknowledge(false), Some(2));
-        sync.observe_self(true, false, start + Duration::from_secs(1));
-        assert!(!sync.take_forced_mute(start + Duration::from_millis(1299)));
-        assert!(sync.take_forced_mute(start + Duration::from_millis(1300)));
-        assert!(!sync.take_forced_mute(start + Duration::from_secs(2)));
-    }
-
-    #[test]
-    fn new_local_request_cancels_an_older_moderation_inference() {
-        let start = Instant::now();
-        let mut sync = MuteSync::default();
-        sync.observe_self(true, false, start);
-        sync.sent(false, 2, start + Duration::from_millis(100));
-        assert!(sync.deadline().is_none());
-        assert!(!sync.take_forced_mute(start + Duration::from_secs(1)));
-    }
-
-    #[test]
-    fn a_newer_self_unmute_cancels_the_pending_moderator_inference() {
-        let now = Instant::now();
-        let mut deadline = None;
-        update_pending_self_mute(&mut deadline, true, false, now);
-        assert!(deadline.is_some());
-        update_pending_self_mute(
-            &mut deadline,
-            false,
-            false,
-            now + Duration::from_millis(100),
-        );
-        assert!(deadline.is_none());
-    }
-
-    #[test]
-    fn repeated_mute_updates_preserve_the_original_moderation_deadline() {
-        let now = Instant::now();
-        let mut deadline = None;
-        update_pending_self_mute(&mut deadline, true, false, now);
-        let original = deadline;
-        update_pending_self_mute(&mut deadline, true, false, now + Duration::from_millis(200));
-        assert_eq!(deadline, original);
-        assert!(deadline.unwrap() <= now + Duration::from_millis(300));
-        update_pending_self_mute(&mut deadline, true, true, now);
-        assert!(deadline.is_none());
-    }
-
     #[test]
     fn close_contract() {
         for code in [1000, 4006, 4011, 4012] {

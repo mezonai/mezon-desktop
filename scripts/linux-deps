@@ -75,6 +75,7 @@ install_dnf() {
     gcc
     gcc-c++
     make
+    perl
     pkg-config
     cmake
     clang

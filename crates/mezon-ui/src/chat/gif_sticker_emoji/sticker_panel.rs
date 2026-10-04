@@ -478,6 +478,7 @@ fn render_sticker_row(
                         img(cell.src.clone())
                             .id(cell.img_id.clone())
                             .size(px(img_px))
+                            .aspect_square()
                             .object_fit(gpui::ObjectFit::Contain),
                     )
                 })
@@ -502,6 +503,7 @@ fn category_logo(
     if !logo.is_empty() {
         return img(logo.clone())
             .size(px(size))
+            .aspect_square()
             .rounded_full()
             .object_fit(gpui::ObjectFit::Cover)
             .into_any_element();

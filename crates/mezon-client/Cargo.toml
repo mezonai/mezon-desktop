@@ -46,3 +46,4 @@ windows.workspace = true
 
 [features]
 dev-session = []
+test-support = []
