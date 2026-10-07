@@ -3534,6 +3534,8 @@
   "modalControls.kickMember.reasonLabel": "Powód wyrzucenia",
   "modalControls.kickMember.title": "Wyrzuć {{username}} z {{clanName}}",
   "nav.chat": "Czat",
+  "nav.historyBack": "Wstecz",
+  "nav.historyForward": "Do przodu",
   "notification.andYou": "i Ty",
   "notification.attachmentMessage": "[Załącznik]",
   "notification.comeBackNotify": "Wróć, aby otrzymywać powiadomienia o wydarzeniach i więcej",

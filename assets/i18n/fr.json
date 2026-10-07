@@ -3534,6 +3534,8 @@
   "modalControls.kickMember.reasonLabel": "Raison de l'expulsion",
   "modalControls.kickMember.title": "Expulser {{username}} de {{clanName}}",
   "nav.chat": "Conversation",
+  "nav.historyBack": "Retour",
+  "nav.historyForward": "Avancer",
   "notification.andYou": "et vous",
   "notification.attachmentMessage": "[Pièce jointe]",
   "notification.comeBackNotify": "Revenez pour recevoir des notifications sur les événements et plus encore",

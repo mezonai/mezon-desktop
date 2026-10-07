@@ -3535,6 +3535,8 @@
   "modalControls.kickMember.reasonLabel": "킥 이유",
   "modalControls.kickMember.title": "{{clanName}} 에서 @{{username}} 킥",
   "nav.chat": "채팅",
+  "nav.historyBack": "뒤로",
+  "nav.historyForward": "앞으로",
   "notification.andYou": "그리고 당신",
   "notification.attachmentMessage": "[첨부파일]",
   "notification.comeBackNotify": "이벤트 및 더 많은 알림을 받기 위해 돌아오세요",

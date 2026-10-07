@@ -541,6 +541,22 @@ fn at_suggestion_matches(suggestion: &Suggestion, needle: &str) -> bool {
     }
 }
 
+pub(crate) fn filter_members_for_search<'a>(
+    members: &'a [MentionMemberRaw],
+    query_needle: &str,
+    limit: usize,
+) -> Vec<&'a MentionMemberRaw> {
+    if query_needle.is_empty() {
+        return members.iter().take(limit).collect();
+    }
+    let needle = search_needle(query_needle);
+    members
+        .iter()
+        .filter(|member| member_matches(member, &needle))
+        .take(limit)
+        .collect()
+}
+
 fn member_matches(member: &MentionMemberRaw, needle: &str) -> bool {
     [
         member.display_norm.as_str(),

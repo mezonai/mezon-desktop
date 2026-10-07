@@ -3533,6 +3533,8 @@
   "modalControls.kickMember.reasonLabel": "Reason for Kick",
   "modalControls.kickMember.title": "Kick {{username}} from {{clanName}}",
   "nav.chat": "Chat",
+  "nav.historyBack": "Go back",
+  "nav.historyForward": "Go forward",
   "notification.andYou": "and you",
   "notification.comeBackNotify": "Come back for notifications on events , streams and more",
   "notification.enablePushNotifications": "Enable push notifications",

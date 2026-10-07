@@ -3535,6 +3535,8 @@
   "modalControls.kickMember.reasonLabel": "Anledning att sparka",
   "modalControls.kickMember.title": "Sparka {{username}} från {{clanName}}",
   "nav.chat": "Chatt",
+  "nav.historyBack": "Tillbaka",
+  "nav.historyForward": "Framåt",
   "notification.andYou": "och du",
   "notification.attachmentMessage": "[Bilaga]",
   "notification.comeBackNotify": "Kom tillbaka för att få notiser om händelser och mer",

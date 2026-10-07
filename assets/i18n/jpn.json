@@ -3537,6 +3537,8 @@
   "modalControls.kickMember.reasonLabel": "キックの理由",
   "modalControls.kickMember.title": "{{username}} を{{clanName}} からキック",
   "nav.chat": "チャット",
+  "nav.historyBack": "戻る",
+  "nav.historyForward": "進む",
   "notification.andYou": "とあなた",
   "notification.attachmentMessage": "[添付ファイル]",
   "notification.comeBackNotify": "イベントとそれ以上の通知を受け取るために戻ってきてください",

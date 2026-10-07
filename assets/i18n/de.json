@@ -3535,6 +3535,8 @@
   "modalControls.kickMember.reasonLabel": "Grund für das Entfernen",
   "modalControls.kickMember.title": "{{username}} aus {{clanName}} entfernen",
   "nav.chat": "Chat",
+  "nav.historyBack": "Zurück",
+  "nav.historyForward": "Vorwärts",
   "notification.andYou": "und du",
   "notification.attachmentMessage": "[Anhang]",
   "notification.comeBackNotify": "Komm zurück, um Benachrichtigungen über Ereignisse und mehr zu erhalten",
