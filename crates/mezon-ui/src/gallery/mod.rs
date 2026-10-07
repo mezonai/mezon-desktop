@@ -1,4 +1,4 @@
-use chrono::NaiveDate;
+use chrono::{Local, NaiveDate};
 use gpui::{
     App, AppContext, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
     ListAlignment, ListState, MouseButton, MouseDownEvent, Render, SharedString, Subscription,
@@ -345,18 +345,19 @@ impl GalleryModal {
     }
 
     fn clear_date_filter(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let (draft_from, draft_to) = date_filter_draft(None, None, Local::now().date_naive());
         self.applied_from_date = None;
         self.applied_to_date = None;
         self.date_validation_error = None;
         self.from_date_picker.update(cx, |picker, cx| {
-            picker.set_selected_silent(None, cx);
+            picker.set_selected_silent(draft_from, cx);
             picker.set_min(Some(GALLERY_MIN_DATE), cx);
-            picker.set_max(None, cx);
+            picker.set_max(draft_to, cx);
             picker.close(cx);
         });
         self.to_date_picker.update(cx, |picker, cx| {
-            picker.set_selected_silent(None, cx);
-            picker.set_min(None, cx);
+            picker.set_selected_silent(draft_to, cx);
+            picker.set_min(draft_from, cx);
             picker.set_max(None, cx);
             picker.close(cx);
         });
@@ -371,17 +372,22 @@ impl GalleryModal {
         self.date_filter_open = !self.date_filter_open;
         if self.date_filter_open {
             let locale = self.locale(cx);
+            let (draft_from, draft_to) = date_filter_draft(
+                self.applied_from_date,
+                self.applied_to_date,
+                Local::now().date_naive(),
+            );
             self.from_date_picker.update(cx, |picker, cx| {
                 picker.set_locale(locale.clone());
-                picker.set_selected_silent(self.applied_from_date, cx);
+                picker.set_selected_silent(draft_from, cx);
                 picker.set_min(Some(GALLERY_MIN_DATE), cx);
-                picker.set_max(self.applied_to_date, cx);
+                picker.set_max(draft_to, cx);
                 picker.close(cx);
             });
             self.to_date_picker.update(cx, |picker, cx| {
                 picker.set_locale(locale);
-                picker.set_selected_silent(self.applied_to_date, cx);
-                picker.set_min(self.applied_from_date, cx);
+                picker.set_selected_silent(draft_to, cx);
+                picker.set_min(draft_from, cx);
                 picker.set_max(None, cx);
                 picker.close(cx);
             });
@@ -1076,6 +1082,18 @@ fn calculate_timestamps(
     }
 }
 
+fn date_filter_draft(
+    applied_from: Option<NaiveDate>,
+    applied_to: Option<NaiveDate>,
+    today: NaiveDate,
+) -> (Option<NaiveDate>, Option<NaiveDate>) {
+    if applied_from.is_none() && applied_to.is_none() {
+        (Some(today), Some(today))
+    } else {
+        (applied_from, applied_to)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1115,5 +1133,28 @@ mod tests {
             GalleryRow::Images(vec![tile(10), tile(11), tile(12)]),
         ];
         assert_eq!(gallery_rows_common_prefix(&old, &new), 0);
+    }
+
+    #[test]
+    fn unopened_date_filter_uses_the_displayed_current_date_as_its_draft() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 5).unwrap();
+        let draft = date_filter_draft(None, None, today);
+
+        assert_eq!(draft, (Some(today), Some(today)));
+        assert_eq!(
+            calculate_timestamps(draft.0, draft.1),
+            (Some(start_of_day_ts(today)), Some(end_of_day_ts(today)))
+        );
+    }
+
+    #[test]
+    fn reopening_date_filter_preserves_an_applied_partial_range() {
+        let applied_from = NaiveDate::from_ymd_opt(2026, 9, 1);
+        let today = NaiveDate::from_ymd_opt(2026, 10, 5).unwrap();
+
+        assert_eq!(
+            date_filter_draft(applied_from, None, today),
+            (applied_from, None)
+        );
     }
 }

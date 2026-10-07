@@ -16,8 +16,12 @@ use crate::{
 const CHECK_NAME_TYPE_CHANNEL: i32 = 2;
 const CHECK_NAME_TYPE_NICKNAME: i32 = 4;
 
+const UPLOAD_NAME_MAX_LEN: usize = 100;
+const UPLOAD_EXTENSION_MAX_LEN: usize = 16;
+
 pub fn sanitize_upload_filename(name: &str) -> String {
-    name.chars()
+    let clean: String = name
+        .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '.' {
                 c
@@ -25,7 +29,20 @@ pub fn sanitize_upload_filename(name: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    if clean.len() <= UPLOAD_NAME_MAX_LEN {
+        return clean;
+    }
+    match clean.rfind('.') {
+        Some(dot) if clean.len() - dot <= UPLOAD_EXTENSION_MAX_LEN => {
+            let extension = &clean[dot..];
+            format!(
+                "{}{extension}",
+                &clean[..UPLOAD_NAME_MAX_LEN - extension.len()]
+            )
+        }
+        _ => clean[..UPLOAD_NAME_MAX_LEN].to_string(),
+    }
 }
 
 pub fn upload_attachment_type(filetype: &str) -> &'static str {
@@ -70,7 +87,7 @@ fn attachment_cdn_url(base_img_url: &str, filename: &str) -> Result<String> {
 fn emoticon_id_from_filename(filename: &str) -> Option<i64> {
     let file_name = filename.rsplit('/').next().filter(|s| !s.is_empty())?;
     let stem = file_name.rsplit_once('.').map(|(stem, _)| stem)?;
-    stem.parse().ok()
+    stem.split_once('_').map_or(stem, |(id, _)| id).parse().ok()
 }
 
 fn image_dimensions(data: &[u8]) -> (i32, i32) {
@@ -126,6 +143,7 @@ pub struct UploadFile {
     pub height: i32,
     pub duration: i32,
     pub thumbnail: Option<UploadThumbnail>,
+    pub channel_id: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -587,6 +605,10 @@ impl AppApi {
         self.transport
             .search_mention_users(clan_id, channel_id, text)
             .await
+    }
+
+    pub async fn generate_cdn_signature(&self, channel_id: i64) -> Result<String> {
+        self.transport.generate_cdn_signature(channel_id).await
     }
 
     pub async fn check_duplicate_thread_name(
@@ -1591,7 +1613,7 @@ impl AppApi {
         };
         let upload = self
             .transport
-            .upload_attachment_file(&filename, filetype, size, width, height)
+            .upload_attachment_file(&filename, filetype, size, width, height, 0)
             .await?;
         crate::transport_runtime::put_bytes_to_content_type(&upload.url, data, filetype).await?;
         let resolved_id = emoticon_id_from_filename(&upload.filename).ok_or_else(|| {
@@ -1967,7 +1989,7 @@ impl AppApi {
             let api = self.clone();
             futures::stream::iter(media_urls.iter().cloned().map(move |url| {
                 let api = api.clone();
-                async move { api.upload_media_from_url(&url).await }
+                async move { api.upload_media_from_url(&url, channel_id).await }
             }))
             .buffer_unordered(4)
             .collect::<Vec<_>>()
@@ -2002,6 +2024,7 @@ impl AppApi {
             height,
             duration,
             thumbnail,
+            channel_id,
         } = file;
         let upload_name = sanitize_upload_filename(&filename);
         let upload_type = upload_attachment_type(&filetype);
@@ -2009,7 +2032,7 @@ impl AppApi {
         let size = i32::try_from(raw_size)
             .map_err(|_| anyhow::anyhow!("attachment too large to upload: {raw_size} bytes"))?;
         let thumbnail_url = match thumbnail {
-            Some(thumb) => self.upload_thumbnail(thumb).await,
+            Some(thumb) => self.upload_thumbnail(thumb, channel_id).await,
             None => String::new(),
         };
         let (url, plan) = if size as u64 >= MULTIPART_MIN_FILE_SIZE {
@@ -2023,6 +2046,7 @@ impl AppApi {
                     width,
                     height,
                     part_count: ranges.len() as i32,
+                    channel_id,
                 })
                 .await?;
             if started.urls.len() != ranges.len() {
@@ -2047,7 +2071,7 @@ impl AppApi {
         } else {
             let upload = self
                 .transport
-                .upload_attachment_file(&upload_name, upload_type, size, width, height)
+                .upload_attachment_file(&upload_name, upload_type, size, width, height, channel_id)
                 .await?;
             let url = attachment_cdn_url(&self.base_img_url, &upload.filename)?;
             (
@@ -2547,7 +2571,7 @@ impl AppApi {
         Ok(sent)
     }
 
-    async fn upload_thumbnail(&self, thumbnail: UploadThumbnail) -> String {
+    async fn upload_thumbnail(&self, thumbnail: UploadThumbnail, channel_id: i64) -> String {
         let filename = sanitize_upload_filename(&thumbnail.filename);
         let size = clamp_i32(thumbnail.data.len());
         match self
@@ -2559,6 +2583,7 @@ impl AppApi {
                 0,
                 0,
                 thumbnail.data,
+                channel_id,
             )
             .await
         {
@@ -2585,10 +2610,11 @@ impl AppApi {
         width: i32,
         height: i32,
         data: Vec<u8>,
+        channel_id: i64,
     ) -> Result<String> {
         let upload = self
             .transport
-            .upload_attachment_file(filename, filetype, size, width, height)
+            .upload_attachment_file(filename, filetype, size, width, height, channel_id)
             .await?;
         crate::transport_runtime::put_bytes_to_content_type(&upload.url, data, content_type)
             .await?;
@@ -2598,6 +2624,7 @@ impl AppApi {
     async fn upload_media_from_url(
         &self,
         url: &str,
+        channel_id: i64,
     ) -> Result<mezon_proto::api::MessageAttachment> {
         let (data, content_type) = crate::transport_runtime::fetch_bytes(url).await?;
         let filetype = content_type.unwrap_or_else(|| "application/octet-stream".to_string());
@@ -2637,6 +2664,7 @@ impl AppApi {
                 width,
                 height,
                 data,
+                channel_id,
             )
             .await?;
 
@@ -2713,9 +2741,10 @@ impl AppApi {
         size: i32,
         width: i32,
         height: i32,
+        channel_id: i64,
     ) -> Result<mezon_proto::api::UploadAttachment> {
         self.transport
-            .upload_attachment_file(filename, filetype, size, width, height)
+            .upload_attachment_file(filename, filetype, size, width, height, channel_id)
             .await
     }
 
@@ -2806,7 +2835,7 @@ impl AppApi {
         );
 
         let permanent_url = self
-            .upload_bytes(&filename, filetype, filetype, size, width, height, data)
+            .upload_bytes(&filename, filetype, filetype, size, width, height, data, 0)
             .await?;
 
         tracing::info!("Avatar upload complete: url={}", permanent_url);
@@ -3252,8 +3281,29 @@ impl AppApi {
 mod tests {
     use super::{
         MULTIPART_PART_SIZE, PresignedAttachment, ResumableUpload, UploadPlan, attachment_cdn_url,
-        multipart_part_ranges, sanitize_upload_filename, upload_attachment_type,
+        emoticon_id_from_filename, multipart_part_ranges, sanitize_upload_filename,
+        upload_attachment_type,
     };
+
+    #[test]
+    fn emoticon_id_is_the_server_snowflake_in_every_key_layout() {
+        assert_eq!(
+            emoticon_id_from_filename("emojis/2107140000000000000.webp"),
+            Some(2107140000000000000)
+        );
+        assert_eq!(
+            emoticon_id_from_filename("1767478432163199777/2107140000000000001.mp3"),
+            Some(2107140000000000001)
+        );
+        assert_eq!(
+            emoticon_id_from_filename("0000000000000000/2107140000000000002_1840651253227.mp3"),
+            Some(2107140000000000002)
+        );
+        assert_eq!(
+            emoticon_id_from_filename("0000000000000000/sound_clip.mp3"),
+            None
+        );
+    }
 
     fn presigned(plan: UploadPlan) -> PresignedAttachment {
         PresignedAttachment {
@@ -3345,6 +3395,12 @@ mod tests {
     fn upload_filename_keeps_ascii_stem_and_extension() {
         assert_eq!(sanitize_upload_filename("report-v2.pdf"), "report_v2.pdf");
         assert_eq!(sanitize_upload_filename("a b.PNG"), "a_b.PNG");
+        let long = format!("{}.pdf", "x".repeat(150));
+        let cut = sanitize_upload_filename(&long);
+        assert_eq!(cut.len(), 100);
+        assert!(cut.ends_with(".pdf"), "{cut}");
+        let no_extension = "y".repeat(150);
+        assert_eq!(sanitize_upload_filename(&no_extension).len(), 100);
     }
 
     #[test]

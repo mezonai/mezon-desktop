@@ -389,8 +389,14 @@ impl CanvasStore {
     ) -> Task<Result<UploadedCanvasImage, String>> {
         let api = self.api.clone();
         let base_img_url = AppConfig::global(cx).base_img_url.clone();
+        let channel_id = self
+            .channel_id
+            .as_deref()
+            .and_then(|id| id.parse::<i64>().ok())
+            .unwrap_or(0);
         cx.background_executor().spawn(async move {
-            upload_canvas_image_bytes(&api, &base_img_url, data, &filetype, &filename).await
+            upload_canvas_image_bytes(&api, &base_img_url, data, &filetype, &filename, channel_id)
+                .await
         })
     }
 
@@ -533,11 +539,12 @@ async fn upload_canvas_image_bytes(
     data: Vec<u8>,
     filetype: &str,
     filename: &str,
+    channel_id: i64,
 ) -> Result<UploadedCanvasImage, String> {
     let size = i32::try_from(data.len()).map_err(|_| "Image file is too large".to_string())?;
     let (width, height) = image_dimensions_from_bytes(&data);
     let upload = api
-        .upload_attachment_file(filename, filetype, size, width, height)
+        .upload_attachment_file(filename, filetype, size, width, height, channel_id)
         .await
         .map_err(|e| e.to_string())?;
     mezon_client::transport_runtime::put_bytes_to_content_type(&upload.url, data, filetype)

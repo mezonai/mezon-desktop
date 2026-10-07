@@ -616,7 +616,7 @@ impl IntegrationsTab {
             .font_weight(FontWeight::SEMIBOLD)
             .gap_1()
             .bg(theme.brand)
-            .text_color(theme.text_primary)
+            .text_color(gpui::white())
             .when(creating, |el| el.opacity(0.6))
             .when(!creating, |el| {
                 el.cursor_pointer()

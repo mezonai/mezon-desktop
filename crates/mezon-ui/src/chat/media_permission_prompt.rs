@@ -9,6 +9,7 @@ use crate::theme::{ActiveTheme, Theme};
 use crate::util::assets::APP_ICON;
 
 const BADGE_TEXT: u32 = 0x1e1f22;
+const WINDOWS_ACCENT: u32 = 0x0078d4;
 
 pub fn media_access_missing(device: MediaDevice, cx: &App) -> bool {
     MediaPermissionStore::try_global(cx).is_some_and(|store| !store.read(cx).is_granted(device))
@@ -269,7 +270,18 @@ fn request_card(
 }
 
 fn blocked_steps(device: MediaDevice, locale: &str) -> [&'static str; 2] {
-    let (open_key, enable_key) = if cfg!(target_os = "windows") {
+    let (open_key, enable_key) = if mezon_store::running_packaged() {
+        match device {
+            MediaDevice::Microphone => (
+                "channelVoice.mediaPermission.windowsStepOpen.microphone",
+                "channelVoice.mediaPermission.windowsStoreStepEnable.microphone",
+            ),
+            MediaDevice::Camera => (
+                "channelVoice.mediaPermission.windowsStepOpen.camera",
+                "channelVoice.mediaPermission.windowsStoreStepEnable.camera",
+            ),
+        }
+    } else if cfg!(target_os = "windows") {
         match device {
             MediaDevice::Microphone => (
                 "channelVoice.mediaPermission.windowsStepOpen.microphone",
@@ -387,33 +399,30 @@ fn blocked_card(
 }
 
 fn settings_illustration(theme: &Theme, device: MediaDevice, locale: &str) -> AnyElement {
-    let dot = |color: u32| {
-        div()
-            .size(px(7.))
-            .rounded_full()
-            .bg(if cfg!(target_os = "macos") {
-                rgb(color).into()
-            } else {
-                Hsla::from(theme.tokens.text_secondary).opacity(0.4)
-            })
+    let settings_window = v_flex()
+        .w_full()
+        .overflow_hidden()
+        .rounded_md()
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.bg_floating)
+        .shadow_md();
+    let settings_window = if cfg!(target_os = "windows") {
+        settings_window
+            .child(windows_title_bar(theme))
+            .child(settings_pane_header(theme, device, locale))
+            .children(windows_consent_rows(theme, device, locale))
+    } else {
+        settings_window
+            .child(mac_title_bar(theme))
+            .child(settings_pane_header(theme, device, locale))
+            .child(consent_row(
+                theme,
+                true,
+                app_label(theme),
+                toggle_switch(theme.status_online.into()),
+            ))
     };
-    let device_label = mezon_i18n::t(
-        locale,
-        match device {
-            MediaDevice::Microphone => "channelVoice.mediaPermission.microphone",
-            MediaDevice::Camera => "channelVoice.mediaPermission.camera",
-        },
-    );
-    let toggle = div()
-        .flex()
-        .items_center()
-        .justify_end()
-        .w(px(28.))
-        .h(px(16.))
-        .p(px(2.))
-        .rounded_full()
-        .bg(theme.status_online)
-        .child(div().size(px(12.)).rounded_full().bg(rgb(0xffffff)));
     div()
         .flex()
         .flex_none()
@@ -424,64 +433,148 @@ fn settings_illustration(theme: &Theme, device: MediaDevice, locale: &str) -> An
         .p_4()
         .rounded_lg()
         .bg(theme.bg_tertiary)
-        .child(
-            v_flex()
-                .w_full()
-                .overflow_hidden()
-                .rounded_md()
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.bg_floating)
-                .shadow_md()
-                .child(
-                    h_flex()
-                        .gap(px(4.))
-                        .px_2()
-                        .py(px(6.))
-                        .bg(theme.bg_secondary)
-                        .child(dot(0xff5f57))
-                        .child(dot(0xfebc2e))
-                        .child(dot(0x28c840)),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .px_2()
-                        .py_2()
-                        .border_b_1()
-                        .border_color(theme.border)
-                        .child(
-                            Icon::new(device_icon(device))
-                                .size(px(14.))
-                                .text_color(theme.tokens.text_secondary),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.tokens.text_theme_primary)
-                                .child(device_label),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .justify_between()
-                        .m_1()
-                        .px_2()
-                        .py(px(6.))
-                        .rounded_md()
-                        .border_1()
-                        .border_color(theme.brand)
-                        .child(
-                            h_flex().gap_2().child(img(APP_ICON).size(px(16.))).child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.tokens.text_theme_primary)
-                                    .child("Mezon"),
-                            ),
-                        )
-                        .child(toggle),
-                ),
-        )
+        .child(settings_window)
         .into_any_element()
+}
+
+fn mac_title_bar(theme: &Theme) -> gpui::Div {
+    let dot = |color: u32| {
+        div()
+            .size(px(7.))
+            .rounded_full()
+            .bg(if cfg!(target_os = "macos") {
+                rgb(color).into()
+            } else {
+                Hsla::from(theme.tokens.text_secondary).opacity(0.4)
+            })
+    };
+    h_flex()
+        .gap(px(4.))
+        .px_2()
+        .py(px(6.))
+        .bg(theme.bg_secondary)
+        .child(dot(0xff5f57))
+        .child(dot(0xfebc2e))
+        .child(dot(0x28c840))
+}
+
+fn windows_title_bar(theme: &Theme) -> gpui::Div {
+    let glyph = Hsla::from(theme.tokens.text_secondary);
+    h_flex()
+        .justify_end()
+        .gap(px(10.))
+        .px_2()
+        .py(px(5.))
+        .bg(theme.bg_secondary)
+        .child(div().w(px(7.)).h(px(1.)).bg(glyph))
+        .child(div().size(px(7.)).border_1().border_color(glyph))
+        .child(Icon::new(IconName::Close).size(px(9.)).text_color(glyph))
+}
+
+fn settings_pane_header(theme: &Theme, device: MediaDevice, locale: &str) -> gpui::Div {
+    let device_label = mezon_i18n::t(
+        locale,
+        match device {
+            MediaDevice::Microphone => "channelVoice.mediaPermission.microphone",
+            MediaDevice::Camera => "channelVoice.mediaPermission.camera",
+        },
+    );
+    h_flex()
+        .gap_2()
+        .px_2()
+        .py_2()
+        .border_b_1()
+        .border_color(theme.border)
+        .child(
+            Icon::new(device_icon(device))
+                .size(px(14.))
+                .text_color(theme.tokens.text_secondary),
+        )
+        .child(
+            div()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.tokens.text_theme_primary)
+                .child(device_label),
+        )
+}
+
+fn windows_consent_rows(theme: &Theme, device: MediaDevice, locale: &str) -> Vec<gpui::Div> {
+    let (access_key, apps_key, desktop_apps_key) = match device {
+        MediaDevice::Microphone => (
+            "channelVoice.mediaPermission.windowsToggle.access.microphone",
+            "channelVoice.mediaPermission.windowsToggle.apps.microphone",
+            "channelVoice.mediaPermission.windowsToggle.desktopApps.microphone",
+        ),
+        MediaDevice::Camera => (
+            "channelVoice.mediaPermission.windowsToggle.access.camera",
+            "channelVoice.mediaPermission.windowsToggle.apps.camera",
+            "channelVoice.mediaPermission.windowsToggle.desktopApps.camera",
+        ),
+    };
+    let label = |key| consent_label(theme, mezon_i18n::t(locale, key));
+    let toggle = || toggle_switch(rgb(WINDOWS_ACCENT).into());
+    if mezon_store::running_packaged() {
+        vec![
+            consent_row(theme, false, label(access_key), toggle()),
+            consent_row(theme, false, label(apps_key), toggle()),
+            consent_row(theme, true, app_label(theme), toggle()),
+        ]
+    } else {
+        vec![
+            consent_row(theme, false, label(access_key), toggle()),
+            consent_row(theme, true, label(desktop_apps_key), toggle()),
+        ]
+    }
+}
+
+fn consent_row(theme: &Theme, highlighted: bool, label: gpui::Div, toggle: gpui::Div) -> gpui::Div {
+    let border = if highlighted {
+        Hsla::from(theme.brand)
+    } else {
+        gpui::transparent_black()
+    };
+    h_flex()
+        .justify_between()
+        .gap_2()
+        .m_1()
+        .px_2()
+        .py(px(6.))
+        .rounded_md()
+        .border_1()
+        .border_color(border)
+        .child(label)
+        .child(toggle)
+}
+
+fn consent_label(theme: &Theme, text: &'static str) -> gpui::Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .text_xs()
+        .text_color(theme.tokens.text_theme_primary)
+        .child(text)
+}
+
+fn app_label(theme: &Theme) -> gpui::Div {
+    h_flex().gap_2().child(img(APP_ICON).size(px(16.))).child(
+        div()
+            .text_xs()
+            .text_color(theme.tokens.text_theme_primary)
+            .child("Mezon"),
+    )
+}
+
+fn toggle_switch(track: Hsla) -> gpui::Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_end()
+        .w(px(28.))
+        .h(px(16.))
+        .p(px(2.))
+        .rounded_full()
+        .bg(track)
+        .child(div().size(px(12.)).rounded_full().bg(rgb(0xffffff)))
 }

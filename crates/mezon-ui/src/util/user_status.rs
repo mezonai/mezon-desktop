@@ -1,11 +1,61 @@
 use gpui::{AnyElement, Hsla, Pixels, Rgba, div, prelude::*, px, rgba};
-use mezon_store::{DmAvatarPresence, UserPresence};
+use mezon_store::{DmAvatarPresence, InVoiceInfo, UserPresence};
 
 use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
 
 pub const PRESENCE_DOT_SIZE: Pixels = px(12.);
 const PRESENCE_IDLE_ICON_SIZE: Pixels = px(10.);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VoiceActivityBadge {
+    InVoice,
+    SharingScreen,
+}
+
+impl From<InVoiceInfo> for VoiceActivityBadge {
+    fn from(info: InVoiceInfo) -> Self {
+        if info.sharing_screen {
+            Self::SharingScreen
+        } else {
+            Self::InVoice
+        }
+    }
+}
+
+impl VoiceActivityBadge {
+    pub fn icon(self) -> IconName {
+        match self {
+            Self::InVoice => IconName::Speaker,
+            Self::SharingScreen => IconName::VoiceScreenShareIcon,
+        }
+    }
+
+    pub fn member_label_key(self) -> &'static str {
+        match self {
+            Self::InVoice => "memberPage.inVoice",
+            Self::SharingScreen => "memberPage.shareScreen",
+        }
+    }
+
+    pub fn member_label<'a>(
+        self,
+        in_voice: &'a gpui::SharedString,
+        sharing_screen: &'a gpui::SharedString,
+    ) -> &'a gpui::SharedString {
+        match self {
+            Self::InVoice => in_voice,
+            Self::SharingScreen => sharing_screen,
+        }
+    }
+
+    pub fn topbar_label_key(self) -> &'static str {
+        match self {
+            Self::InVoice => "channelTopbar.invoice",
+            Self::SharingScreen => "channelTopbar.shareScreen",
+        }
+    }
+}
 
 pub fn in_voice_icon_color(theme: &Theme) -> Rgba {
     theme.status_online
@@ -241,6 +291,45 @@ mod tests {
                     presence == UserPresence::Invisible,
                     "{presence:?} offline-color mismatch"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn voice_activity_badge_keeps_icon_and_label_semantics_together() {
+        assert_eq!(VoiceActivityBadge::InVoice.icon(), IconName::Speaker);
+        assert_eq!(
+            VoiceActivityBadge::InVoice.member_label_key(),
+            "memberPage.inVoice"
+        );
+        assert_eq!(
+            VoiceActivityBadge::InVoice.topbar_label_key(),
+            "channelTopbar.invoice"
+        );
+        assert_eq!(
+            VoiceActivityBadge::SharingScreen.icon(),
+            IconName::VoiceScreenShareIcon
+        );
+        assert_eq!(
+            VoiceActivityBadge::SharingScreen.member_label_key(),
+            "memberPage.shareScreen"
+        );
+        assert_eq!(
+            VoiceActivityBadge::SharingScreen.topbar_label_key(),
+            "channelTopbar.shareScreen"
+        );
+    }
+
+    #[test]
+    fn voice_activity_labels_exist_in_every_locale() {
+        for locale in LOCALES {
+            for badge in [
+                VoiceActivityBadge::InVoice,
+                VoiceActivityBadge::SharingScreen,
+            ] {
+                for key in [badge.member_label_key(), badge.topbar_label_key()] {
+                    assert_ne!(mezon_i18n::t(locale, key), key, "missing {key} in {locale}");
+                }
             }
         }
     }

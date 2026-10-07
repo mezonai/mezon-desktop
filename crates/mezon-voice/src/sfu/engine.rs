@@ -33,6 +33,7 @@ use crate::{SfuCloseAction, sfu_close_action, sfu_reconnect_delay};
 
 use super::messages::{ClientMessage, IceServerSpec, ServerMessage, SnapshotMember};
 use super::mid::{self, MID_AUDIO, MID_CAMERA, MID_SCREEN, RemoteKind};
+use super::network_quality::NetworkQuality;
 use super::screen_adaptation::{
     ScreenAdaptation, ScreenProfile, ScreenStats, TEXT_TIERS, VIDEO_TIERS,
 };
@@ -232,6 +233,7 @@ pub enum SfuEvent {
         key: u64,
     },
     PttActive(bool),
+    NetworkWeak(bool),
     Reconnecting,
     Reconnected,
     Disconnected {
@@ -1033,16 +1035,15 @@ async fn session_loop(
 
     let mut membership = Membership::default();
     let mut audio_recovery: HashMap<u64, AudioRecoveryProgress> = HashMap::new();
-    // Several silent receivers can request recovery at once. Share one bounded
-    // stats read across them, including failures, to keep signaling responsive.
     let mut recovery_stats: Option<(Instant, Option<Vec<RtcStats>>)> = None;
     let mut screen_recovery = ScreenRecovery::default();
     let (transport_state_tx, transport_state_rx) = flume::unbounded::<PeerConnectionState>();
     let (ice_state_tx, ice_state_rx) = flume::unbounded::<IceConnectionState>();
-    // Coalesce track notifications without blocking WebRTC's callback thread.
     let (remote_media_tx, remote_media_rx) = flume::bounded::<()>(1);
     let mut stats_timer = tokio::time::interval(MEDIA_STATS_INTERVAL);
     stats_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut network_quality = NetworkQuality::default();
+    let mut network_weak = false;
     let mut pending_offer: Option<(u64, String)> = None;
     let mut offer_reissue_deadline: Option<tokio::time::Instant> = None;
     let mut mute_sync = MuteSync::default();
@@ -1226,7 +1227,6 @@ async fn session_loop(
                         }
                     }
                     ServerMessage::Offer { offer_generation, sdp } => {
-                        tracing::debug!(generation = offer_generation, bytes = sdp.len(), "sfu offer");
                         pending_offer = Some((offer_generation, sdp));
                         offer_reissue_deadline = None;
                     }
@@ -1589,8 +1589,10 @@ async fn session_loop(
                             waited_ms = waited.as_millis(),
                             "sfu media transport stalled; dropping the session to reconnect"
                         );
-                        if let Some(pc) = pc.as_ref() {
-                            let _ = log_media_stats(pc).await;
+                        if let Some(pc) = pc.as_ref()
+                            && let Some(stats) = read_media_stats(pc).await
+                        {
+                            log_media_stats(&stats);
                         }
                         return SessionOutcome::Dropped { joined, reason: reason.into() };
                     }
@@ -1614,7 +1616,17 @@ async fn session_loop(
                         PeerConnectionState::Connected => disconnected_since = None,
                         _ => {}
                     }
-                    let stats = log_media_stats(&peer_connection).await;
+                    let media_stats = read_media_stats(&peer_connection).await;
+                    let stats = media_stats.as_deref().and_then(log_media_stats);
+                    if peer_connection.connection_state() == PeerConnectionState::Connected
+                        && let Some(media_stats) = media_stats.as_deref()
+                    {
+                        let weak = network_quality.update(media_stats);
+                        if weak != network_weak {
+                            network_weak = weak;
+                            let _ = evt_tx.send(SfuEvent::NetworkWeak(weak));
+                        }
+                    }
                     if let (Some(stats), Some(screen)) = (stats, local.screen.as_ref()) {
                         let profile = screen_profile(screen.mode);
                         if let Some((next, sample)) = screen_adaptation.update(tiers.screen, profile, stats) {
@@ -1736,7 +1748,6 @@ async fn session_loop(
                 .and_then(|result| result)
                 {
                     Ok(()) => {
-                        tracing::debug!(generation, "sfu answer sent");
                         sync_remote_media(&peer_connection, &mut membership, evt_tx, None);
                         if !membership.live_tracks.is_empty()
                             && let Some(previous) = retiring.take()
@@ -1926,14 +1937,17 @@ fn close_reason(code: Option<CloseCode>, frame_reason: Option<&str>) -> String {
         .unwrap_or_else(|| "server closed link".to_owned())
 }
 
-async fn log_media_stats(pc: &PeerConnection) -> Option<ScreenStats> {
+async fn read_media_stats(pc: &PeerConnection) -> Option<Vec<RtcStats>> {
     let Ok(Ok(stats)) = tokio::time::timeout(STATS_TIMEOUT, pc.get_stats()).await else {
         tracing::warn!("sfu media stats unavailable or timed out");
         return None;
     };
+    Some(stats)
+}
 
+fn log_media_stats(stats: &[RtcStats]) -> Option<ScreenStats> {
     let mut codecs: HashMap<String, String> = HashMap::new();
-    for stat in &stats {
+    for stat in stats {
         if let RtcStats::Codec(codec) = stat {
             let mime = codec
                 .codec
@@ -1954,7 +1968,7 @@ async fn log_media_stats(pc: &PeerConnection) -> Option<ScreenStats> {
     let mut screen_stats = None;
     let mut screen_transport_id = None;
     let mut lines: Vec<String> = Vec::new();
-    for stat in &stats {
+    for stat in stats {
         match stat {
             RtcStats::OutboundRtp(out) => {
                 if out.outbound.mid == MID_SCREEN
@@ -2073,7 +2087,7 @@ async fn log_media_stats(pc: &PeerConnection) -> Option<ScreenStats> {
     }
 
     let mut candidates: HashMap<String, String> = HashMap::new();
-    for stat in &stats {
+    for stat in stats {
         match stat {
             RtcStats::LocalCandidate(c) => {
                 candidates.insert(c.rtc.id.clone(), describe_candidate(&c.local_candidate));
@@ -2091,8 +2105,6 @@ async fn log_media_stats(pc: &PeerConnection) -> Option<ScreenStats> {
             .cloned()
             .unwrap_or_else(|| "?".to_owned())
     };
-    // Only the selected pair belongs to the current screen transport; an old
-    // nominated pair can retain a stale, optimistic bandwidth estimate.
     let selected_pair_id = stats.iter().find_map(|stat| match stat {
         RtcStats::Transport(t) if Some(t.rtc.id.as_str()) == screen_transport_id => {
             Some(t.transport.selected_candidate_pair_id.as_str())
@@ -2101,7 +2113,7 @@ async fn log_media_stats(pc: &PeerConnection) -> Option<ScreenStats> {
     });
     let mut bwe_kbps: u32 = 0;
     let mut pairs: Vec<String> = Vec::new();
-    for stat in &stats {
+    for stat in stats {
         match stat {
             RtcStats::Transport(t) => tracing::info!(
                 dtls = ?t.transport.dtls_state,
@@ -2142,7 +2154,7 @@ async fn log_media_stats(pc: &PeerConnection) -> Option<ScreenStats> {
 
     if let Some(screen) = screen_stats.as_mut() {
         screen.bwe_kbps = bwe_kbps;
-        for stat in &stats {
+        for stat in stats {
             if let RtcStats::OutboundRtp(out) = stat {
                 if out.outbound.mid != MID_SCREEN
                     && Some(out.stream.transport_id.as_str()) == screen_transport_id
@@ -2176,21 +2188,6 @@ fn describe_candidate(candidate: &libwebrtc::stats::dictionaries::IceCandidateSt
     format!("{kind}/{} {address}", candidate.protocol)
 }
 
-fn transceiver_summary(pc: &PeerConnection) -> String {
-    pc.transceivers()
-        .iter()
-        .enumerate()
-        .map(|(index, transceiver)| {
-            format!(
-                "#{index}:{}={:?}",
-                transceiver.mid().unwrap_or_else(|| "-".to_owned()),
-                transceiver.direction(),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn negotiate(
     pc: &PeerConnection,
@@ -2207,26 +2204,11 @@ async fn negotiate(
     let stabilized = sdp::stabilize_inactive_video_sections(offer_sdp, previous.as_deref());
     let hinted = sdp::munge_uplink_start_bitrate(&stabilized, UPLINK_START_KBPS);
 
-    tracing::debug!(
-        generation,
-        directions = %sdp::direction_summary(&stabilized),
-        codecs = %sdp::codec_summary(&stabilized),
-        ufrag = %sdp::ice_ufrags(&stabilized),
-        setup = %sdp::setup_roles(&stabilized),
-        "offer m-lines"
-    );
-
     let offer = SessionDescription::parse(&hinted, SdpType::Offer)
         .map_err(|e| anyhow::anyhow!("parse offer: {e}"))?;
     pc.set_remote_description(offer)
         .await
         .context("set remote description")?;
-
-    tracing::debug!(
-        generation,
-        transceivers = %transceiver_summary(pc),
-        "transceivers after remote offer"
-    );
 
     attach_local_tracks(Some(pc), local, role);
     open_uplink_directions(pc, &stabilized);
@@ -2238,12 +2220,6 @@ async fn negotiate(
 
     let derived = answer.to_string();
     let opened = sdp::force_uplink_sendonly(&derived, &stabilized);
-    tracing::debug!(
-        generation,
-        derived = %sdp::direction_summary(&derived),
-        opened = %sdp::direction_summary(&opened),
-        "answer uplinks reopened"
-    );
     let answer = SessionDescription::parse(&opened, SdpType::Answer)
         .map_err(|e| anyhow::anyhow!("parse patched answer: {e}"))?;
 
@@ -2254,25 +2230,10 @@ async fn negotiate(
     tune_uplinks(pc, local, tiers);
     local.apply_audio_gate(Some(pc), role);
 
-    tracing::debug!(
-        generation,
-        transceivers = %transceiver_summary(pc),
-        "transceivers after local answer"
-    );
-
     let local_sdp = pc
         .current_local_description()
         .map(|d| d.to_string())
         .context("local description missing after set_local_description")?;
-
-    tracing::debug!(
-        generation,
-        directions = %sdp::direction_summary(&local_sdp),
-        codecs = %sdp::codec_summary(&local_sdp),
-        ufrag = %sdp::ice_ufrags(&local_sdp),
-        setup = %sdp::setup_roles(&local_sdp),
-        "answer m-lines"
-    );
 
     membership.absorb_msids(offer_sdp);
     tracing::info!(generation, directions = %sdp::direction_summary(&local_sdp),
@@ -2406,23 +2367,14 @@ fn open_uplink_directions(pc: &PeerConnection, offer_sdp: &str) {
         if !invited || transceiver.direction() == RtpTransceiverDirection::SendOnly {
             continue;
         }
-        match transceiver.set_direction(RtpTransceiverDirection::SendOnly) {
-            Ok(()) => tracing::debug!(mid = %mid, "uplink opened for sending"),
-            Err(e) => tracing::warn!("uplink mid {mid} could not be opened for sending: {e}"),
+        if let Err(e) = transceiver.set_direction(RtpTransceiverDirection::SendOnly) {
+            tracing::warn!("uplink mid {mid} could not be opened for sending: {e}");
         }
     }
 }
 
 fn attach_local_tracks(pc: Option<&PeerConnection>, local: &LocalTracks, role: SfuRole) {
     let Some(pc) = pc else { return };
-
-    tracing::debug!(
-        role = role.wire(),
-        audio = local.audio.is_some(),
-        camera = local.camera.is_some(),
-        screen = local.screen.is_some(),
-        "attaching local tracks to the sfu uplinks"
-    );
 
     let publishes_video = role == SfuRole::Speaker;
 
@@ -2446,13 +2398,8 @@ fn attach_local_tracks(pc: Option<&PeerConnection>, local: &LocalTracks, role: S
         };
 
         let Some(track) = wanted else { continue };
-        match transceiver.sender().set_track(Some(track)) {
-            Ok(()) => tracing::debug!(
-                mid = %mid,
-                direction = ?transceiver.direction(),
-                "local track attached"
-            ),
-            Err(e) => tracing::warn!("failed to attach local track on mid {mid}: {e}"),
+        if let Err(e) = transceiver.sender().set_track(Some(track)) {
+            tracing::warn!("failed to attach local track on mid {mid}: {e}");
         }
     }
 

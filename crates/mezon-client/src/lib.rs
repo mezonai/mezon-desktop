@@ -5,6 +5,7 @@ pub mod abridged_tcp_adapter;
 pub mod app_api;
 pub mod attachment_download;
 pub mod auth;
+pub mod cdn_signature;
 pub mod channel_app_launch;
 pub mod data_image;
 pub mod endpoint_health;

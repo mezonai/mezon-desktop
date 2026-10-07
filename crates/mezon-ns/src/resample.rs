@@ -68,21 +68,26 @@ impl Mezon48k {
         for (out, input) in down_work[TAPS - 1..].iter_mut().zip(frame.iter()) {
             *out = *input as f32 / 32768.0;
         }
-        let mut narrow_in = [0.0f32; FRAME_SIZE];
+        let mut narrow_in = [0i16; FRAME_SIZE];
         for (m, out) in narrow_in.iter_mut().enumerate() {
             let at = TAPS - 1 + 3 * m;
-            *out = (0..TAPS).map(|k| self.taps[k] * down_work[at - k]).sum();
+            let sample: f32 = (0..TAPS).map(|k| self.taps[k] * down_work[at - k]).sum();
+            *out = (sample * 32768.0)
+                .round()
+                .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
         }
         self.down_history
             .copy_from_slice(&down_work[FRAME_SIZE_48K..]);
 
-        let mut narrow_out = [0.0f32; FRAME_SIZE];
+        let mut narrow_out = [0i16; FRAME_SIZE];
         self.engine
-            .process_frame_float(&narrow_in, &mut narrow_out)?;
+            .process_frame_int16(&narrow_in, &mut narrow_out)?;
 
         let mut up_work = [0.0f32; PHASE_TAPS - 1 + FRAME_SIZE];
         up_work[..PHASE_TAPS - 1].copy_from_slice(&self.up_history);
-        up_work[PHASE_TAPS - 1..].copy_from_slice(&narrow_out);
+        for (out, sample) in up_work[PHASE_TAPS - 1..].iter_mut().zip(narrow_out.iter()) {
+            *out = *sample as f32 / 32768.0;
+        }
         for q in 0..FRAME_SIZE {
             let at = PHASE_TAPS - 1 + q;
             for p in 0..3 {

@@ -20,8 +20,4 @@ fn main() {
     }
     build.compile("mezon_ns");
     println!("cargo:rerun-if-changed={}", native.display());
-    println!(
-        "cargo:rerun-if-changed={}",
-        root.join("assets/mezon_ns_asym_babble.onnx").display()
-    );
 }

@@ -14,7 +14,7 @@ use libwebrtc::peer_connection_factory::{
 use libwebrtc::rtp_transceiver::RtpTransceiverDirection;
 use libwebrtc::session_description::{SdpType, SessionDescription};
 use mezon_voice::{
-    SfuCloseAction, StreamAudioOutput, sfu_close_action, sfu_reconnect_delay,
+    AudioFormat, SfuCloseAction, StreamAudioOutput, sfu_close_action, sfu_reconnect_delay,
     stabilize_inactive_video_sections,
 };
 use parking_lot::Mutex;
@@ -28,6 +28,8 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 const HEALTHY_CONNECTION: Duration = Duration::from_secs(30);
 const MAX_RECONNECT_ATTEMPTS: u32 = 4;
 const MAX_TOKEN_REFRESH_ATTEMPTS: u32 = 3;
+const OUTPUT_RECOVERY_DELAY: Duration = Duration::from_millis(500);
+const MAX_OUTPUT_RECOVERY_DELAY: Duration = Duration::from_secs(5);
 
 pub type StreamTokenProvider =
     Arc<dyn Fn() -> futures::future::BoxFuture<'static, Result<String>> + Send + Sync + 'static>;
@@ -45,6 +47,7 @@ pub enum StreamEvent {
     Live,
     NoBroadcast,
     RemoteAudio(bool),
+    OutputDevice(Option<String>),
     PlaybackBlocked,
     Error(String),
     Disconnected,
@@ -53,6 +56,7 @@ pub enum StreamEvent {
 pub struct StreamSession {
     stop_tx: Sender<()>,
     event_rx: Receiver<StreamEvent>,
+    output_device_tx: Sender<Option<String>>,
     audio: Arc<Mutex<Option<Arc<StreamAudioOutput>>>>,
 }
 
@@ -65,6 +69,7 @@ impl StreamSession {
     ) -> Self {
         let (stop_tx, stop_rx) = flume::bounded(1);
         let (event_tx, event_rx) = flume::unbounded();
+        let (output_device_tx, output_device_rx) = flume::unbounded();
         let audio = Arc::new(Mutex::new(None));
         let audio_for_thread = audio.clone();
         std::thread::spawn(move || {
@@ -77,6 +82,7 @@ impl StreamSession {
                 }
             };
             *audio_for_thread.lock() = Some(audio_output.clone());
+            let _ = event_tx.send(StreamEvent::OutputDevice(audio_output.device_id()));
 
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -86,13 +92,24 @@ impl StreamSession {
                 let _ = event_tx.send(StreamEvent::Disconnected);
                 return;
             };
+            let output_follower = runtime.spawn(follow_output_device(
+                audio_output.clone(),
+                output_device_rx,
+                event_tx.clone(),
+            ));
             runtime.block_on(run_session(config, audio_output, stop_rx, event_tx));
+            output_follower.abort();
         });
         Self {
             stop_tx,
             event_rx,
+            output_device_tx,
             audio,
         }
+    }
+
+    pub fn set_output_device(&self, output_device_id: Option<String>) {
+        let _ = self.output_device_tx.send(output_device_id);
     }
 
     pub fn audio(&self) -> Option<Arc<StreamAudioOutput>> {
@@ -112,6 +129,65 @@ impl Drop for StreamSession {
     fn drop(&mut self) {
         self.disconnect();
     }
+}
+
+enum OutputTask {
+    Switch(Option<String>),
+    Recover(u32),
+}
+
+async fn follow_output_device(
+    audio: Arc<StreamAudioOutput>,
+    requests: Receiver<Option<String>>,
+    event_tx: Sender<StreamEvent>,
+) {
+    let failures = audio.failures();
+    let mut recovery: Option<u32> = None;
+    loop {
+        let task = tokio::select! {
+            request = requests.recv_async() => {
+                let Ok(mut output_device_id) = request else {
+                    break;
+                };
+                while let Ok(newer) = requests.try_recv() {
+                    output_device_id = newer;
+                }
+                OutputTask::Switch(output_device_id)
+            }
+            Ok(()) = failures.recv_async(), if recovery.is_none() => {
+                recovery = Some(0);
+                continue;
+            }
+            _ = tokio::time::sleep(output_recovery_delay(recovery.unwrap_or(0))), if recovery.is_some() => {
+                OutputTask::Recover(recovery.unwrap_or(0))
+            }
+        };
+        let recovering = match task {
+            OutputTask::Recover(attempt) => Some(attempt),
+            OutputTask::Switch(_) => None,
+        };
+        let worker = audio.clone();
+        let outcome = tokio::task::spawn_blocking(move || match task {
+            OutputTask::Switch(output_device_id) => worker.set_output_device(output_device_id),
+            OutputTask::Recover(attempt) => worker.recover(attempt),
+        })
+        .await;
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "stream audio output switch failed"),
+            Err(error) => tracing::warn!(%error, "stream audio output switch task failed"),
+        }
+        recovery = audio
+            .is_failed()
+            .then(|| recovering.map_or(0, |attempt| attempt.saturating_add(1)));
+        let _ = event_tx.send(StreamEvent::OutputDevice(audio.device_id()));
+    }
+}
+
+fn output_recovery_delay(attempt: u32) -> Duration {
+    OUTPUT_RECOVERY_DELAY
+        .saturating_mul(2u32.saturating_pow(attempt))
+        .min(MAX_OUTPUT_RECOVERY_DELAY)
 }
 
 async fn run_session(
@@ -467,11 +543,13 @@ impl AudioPumpRegistry {
         let weak_registry = Arc::downgrade(self);
         let registry = Arc::clone(self);
         let handle = runtime.spawn(async move {
-            let format = audio.format();
-            let mut stream =
-                NativeAudioStream::new(track, format.sample_rate as i32, format.channels as i32);
+            let mut format = audio.format();
+            let mut stream = track_stream(&track, format);
             while let Some(frame) = stream.next().await {
-                audio.push_track(key, &frame.data);
+                if !audio.push_track(key, format, &frame.data) {
+                    format = audio.format();
+                    stream = track_stream(&track, format);
+                }
             }
             audio.clear_track(key);
             let _ = event_tx.send(StreamEvent::RemoteAudio(false));
@@ -490,6 +568,17 @@ impl AudioPumpRegistry {
             pump.abort();
         }
     }
+}
+
+fn track_stream(
+    track: &libwebrtc::audio_track::RtcAudioTrack,
+    format: AudioFormat,
+) -> NativeAudioStream {
+    NativeAudioStream::new(
+        track.clone(),
+        format.sample_rate as i32,
+        format.channels as i32,
+    )
 }
 
 struct PeerConnectionGuard {
@@ -757,6 +846,15 @@ fn build_ws_url(base: &str, token: &str) -> Result<url::Url> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_recovery_backs_off_up_to_a_cap() {
+        assert_eq!(output_recovery_delay(0), Duration::from_millis(500));
+        assert_eq!(output_recovery_delay(1), Duration::from_secs(1));
+        assert_eq!(output_recovery_delay(2), Duration::from_secs(2));
+        assert_eq!(output_recovery_delay(4), Duration::from_secs(5));
+        assert_eq!(output_recovery_delay(40), Duration::from_secs(5));
+    }
 
     const OFFER: &str = concat!(
         "v=0\r\n",

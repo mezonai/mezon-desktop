@@ -17,6 +17,11 @@ objc.workspace = true
 core-foundation.workspace = true
 core-foundation-sys.workspace = true
 core-video.workspace = true
+matroska-demuxer = "0.7"
+oxideav-vp8 = "0.2"
+parking_lot.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+yuv = { workspace = true }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 gpui.workspace = true
@@ -34,6 +39,11 @@ mp4 = "0.14"
 openh264 = "0.9"
 
 [target.'cfg(windows)'.dependencies]
+matroska-demuxer = "0.7"
+oxideav-vp8 = "0.2"
+parking_lot.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+yuv = { workspace = true }
 windows-core.workspace = true
 windows = { workspace = true, features = [
     "Win32_Foundation",

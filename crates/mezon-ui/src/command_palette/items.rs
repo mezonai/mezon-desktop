@@ -991,7 +991,7 @@ pub fn render_palette_row(
         .py(px(4.))
         .rounded(px(6.))
         .cursor_pointer()
-        .when(selected, |row| row.bg(theme.tokens.bg_item_theme_hover))
+        .when(selected, |row| row.bg(theme.tokens.bg_click_highlight))
         .when(!selected, |row| {
             row.hover(|s| s.bg(theme.tokens.bg_item_theme_hover))
         })

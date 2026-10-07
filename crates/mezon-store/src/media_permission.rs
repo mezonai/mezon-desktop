@@ -28,7 +28,6 @@ pub struct MediaPermissionStore {
     camera: MediaPermission,
     prompt: Option<MediaPermissionPrompt>,
     on_granted: Option<GrantedAction>,
-    denial_blocks: bool,
     epoch: u64,
     _changes: Task<()>,
     _refresh: Option<Task<()>>,
@@ -70,7 +69,6 @@ impl MediaPermissionStore {
             camera: MediaPermission::Granted,
             prompt: None,
             on_granted: None,
-            denial_blocks: mezon_voice::MEDIA_DENIAL_IS_AUTHORITATIVE,
             epoch: 0,
             _changes: changes_task,
             _refresh: None,
@@ -93,14 +91,6 @@ impl MediaPermissionStore {
     pub fn warn_if_denied_global(device: MediaDevice, cx: &mut App) -> bool {
         Self::try_global(cx)
             .is_some_and(|store| store.update(cx, |store, cx| store.warn_if_denied(device, cx)))
-    }
-
-    pub fn blocked_global(device: MediaDevice, cx: &mut App) -> bool {
-        Self::try_global(cx).is_some_and(|store| {
-            store.update(cx, |store, cx| {
-                store.denial_blocks && store.warn_if_denied(device, cx)
-            })
-        })
     }
 
     pub fn status(&self, device: MediaDevice) -> MediaPermission {
@@ -164,7 +154,6 @@ impl MediaPermissionStore {
         self.apply_live(device, status, cx);
         let prompt = match status {
             MediaPermission::Granted => return true,
-            MediaPermission::Denied if !self.denial_blocks => return true,
             MediaPermission::Undetermined => MediaPermissionPrompt::Request {
                 device,
                 requesting: false,
@@ -277,20 +266,12 @@ mod tests {
     use super::*;
 
     fn idle_store(cx: &mut gpui::TestAppContext) -> Entity<MediaPermissionStore> {
-        store_with(true, cx)
-    }
-
-    fn store_with(
-        denial_blocks: bool,
-        cx: &mut gpui::TestAppContext,
-    ) -> Entity<MediaPermissionStore> {
         cx.update(|cx| {
             cx.new(|_| MediaPermissionStore {
                 microphone: MediaPermission::Undetermined,
                 camera: MediaPermission::Granted,
                 prompt: None,
                 on_granted: None,
-                denial_blocks,
                 epoch: 0,
                 _changes: Task::ready(()),
                 _refresh: None,
@@ -497,25 +478,43 @@ mod tests {
     }
 
     #[gpui::test]
-    fn an_advisory_denial_lets_the_device_start(cx: &mut gpui::TestAppContext) {
-        let store = store_with(false, cx);
-        let ran = Rc::new(Cell::new(false));
-        assert!(ensure(
+    fn a_denied_microphone_stays_off_until_granted(cx: &mut gpui::TestAppContext) {
+        let store = idle_store(cx);
+        apply(
             &store,
-            MediaDevice::Camera,
+            MediaDevice::Microphone,
+            MediaPermission::Granted,
+            cx,
+        );
+        let ran = Rc::new(Cell::new(false));
+        assert!(!ensure(
+            &store,
+            MediaDevice::Microphone,
             MediaPermission::Denied,
             &ran,
             cx
         ));
-        assert_eq!(prompt(&store, cx), None);
+        assert_eq!(
+            prompt(&store, cx),
+            Some(MediaPermissionPrompt::Blocked(MediaDevice::Microphone))
+        );
+        cx.update(|cx| store.update(cx, |store, cx| store.dismiss(cx)));
         assert!(cx.update(|cx| {
             store.update(cx, |store, cx| {
-                store.warn_with_status(MediaDevice::Camera, MediaPermission::Denied, cx)
+                store.warn_with_status(MediaDevice::Microphone, MediaPermission::Denied, cx)
             })
         }));
         assert_eq!(
             prompt(&store, cx),
-            Some(MediaPermissionPrompt::Blocked(MediaDevice::Camera))
+            Some(MediaPermissionPrompt::Blocked(MediaDevice::Microphone))
         );
+        apply(
+            &store,
+            MediaDevice::Microphone,
+            MediaPermission::Granted,
+            cx,
+        );
+        assert_eq!(prompt(&store, cx), None);
+        assert!(!ran.get());
     }
 }

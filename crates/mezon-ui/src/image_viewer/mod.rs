@@ -12,8 +12,8 @@ use gpui::{
 };
 use mezon_store::{
     AppConfig, ChannelAttachment, ChannelId, ChannelList, ClanId, DirectMessageStore, GalleryStore,
-    PlatformStore, Settings, UploaderInfo, fetch_channel_attachments, initial_page_has_more,
-    next_page_has_more, resolve_attachment_uploader,
+    Settings, UploaderInfo, fetch_channel_attachments, initial_page_has_more, next_page_has_more,
+    open_media_url_external, resolve_attachment_uploader,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -956,9 +956,8 @@ impl ImageViewer {
     }
 
     fn open_in_browser(&self, cx: &mut App) {
-        if let (Some(att), Some(platform)) = (self.current(), PlatformStore::try_global(cx)) {
-            let url = att.url.clone();
-            let _ = platform.read(cx).open_url_external(&url);
+        if let Some(att) = self.current() {
+            open_media_url_external(att.url.to_string(), cx);
         }
     }
 

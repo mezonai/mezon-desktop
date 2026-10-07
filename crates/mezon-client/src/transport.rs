@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, watch};
 
 const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
-const CHANNEL_DESC_FETCH_LIMIT: i32 = 1000;
+pub const CHANNEL_DESC_FETCH_LIMIT: i32 = 1000;
+pub const SEARCH_CTRL_K_MAX_TEXT_BYTES: usize = 255;
 const DEFAULT_CONNECT_GATE_MS: u64 = 5000;
 const DEFAULT_PING_TIMEOUT_MS: u64 = 5000;
 const MULTIPART_OP_TIMEOUT_MS: u64 = 120000;
@@ -45,6 +46,7 @@ pub struct ApiStatusError {
 impl ApiStatusError {
     pub const INVALID_ARGUMENT: u32 = 3;
     pub const NOT_FOUND: u32 = 5;
+    pub const ALREADY_EXISTS: u32 = 6;
     pub const PERMISSION_DENIED: u32 = 7;
     pub const RESOURCE_EXHAUSTED: u32 = 8;
     pub const OUT_OF_RANGE: u32 = 11;
@@ -57,6 +59,10 @@ impl ApiStatusError {
 
     pub fn is_invalid_argument(self) -> bool {
         self.code == Self::INVALID_ARGUMENT
+    }
+
+    pub fn is_already_exists(self) -> bool {
+        self.code == Self::ALREADY_EXISTS
     }
 
     pub fn is_permission_denied(self) -> bool {
@@ -95,8 +101,6 @@ pub fn api_status_from_error(err: &anyhow::Error) -> Option<ApiStatusError> {
 pub fn is_channel_limit_api_error(err: &anyhow::Error) -> bool {
     api_status_from_error(err).is_some_and(|status| status.is_create_channel_limit_exceeded())
 }
-
-const API_CODE_ALREADY_EXISTS: u32 = 6;
 
 fn api_status_error(code: u32) -> anyhow::Error {
     ApiStatusError { code }.into()
@@ -3490,6 +3494,37 @@ pub fn build_send_content(
     }
 }
 
+pub fn build_send_content_with_code(
+    text: &str,
+    mentions: &[OutgoingMention],
+    hashtags: &[OutgoingHashtag],
+    emojis: &[OutgoingEmoji],
+    message_code: i32,
+) -> SendContent {
+    if message_code != MESSAGE_BUZZ_CODE {
+        return build_send_content(text, mentions, hashtags, emojis);
+    }
+    let markdowns: Vec<OutgoingMarkdown> = detect_markdown(text)
+        .into_iter()
+        .filter(|token| is_link_markdown_kind(&token.kind))
+        .collect();
+    let json = build_message_content_json(text, mentions, hashtags, emojis, &markdowns);
+    let cvtt = canvas_titles_for_text(text);
+    let json = if cvtt.is_empty() {
+        json
+    } else {
+        with_cvtt(json, &cvtt)
+    };
+    SendContent {
+        json,
+        text: text.to_string(),
+        mentions: mentions.to_vec(),
+        hashtags: hashtags.to_vec(),
+        emojis: emojis.to_vec(),
+        markdowns,
+    }
+}
+
 fn build_presign_finish_content(
     content: &str,
     mentions: &[OutgoingMention],
@@ -4427,10 +4462,14 @@ impl MezonTransport {
 
     fn pin_message_from_proto(pin: api::PinMessage) -> ApiPinMessage {
         let content = pin.content;
-        let content_text = serde_json::from_str::<serde_json::Value>(&content)
-            .ok()
-            .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
-            .unwrap_or_else(|| content.clone());
+        let content_text = match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(serde_json::Value::Object(fields)) => match fields.get("t") {
+                Some(serde_json::Value::String(text)) => text.clone(),
+                Some(_) => content.clone(),
+                None => String::new(),
+            },
+            _ => content.clone(),
+        };
         let attachments = parse_message_attachments(&pin.attachment);
 
         ApiPinMessage {
@@ -4663,6 +4702,7 @@ impl MezonTransport {
             "UploadBatchAttachmentFile" => 209,
             "SearchCtrlK" => 210,
             "SearchMentionUsers" => 211,
+            "GenerateCDNSignature" => 212,
             _ => {
                 tracing::warn!("unknown API name: {api_name}");
                 return None;
@@ -5606,7 +5646,7 @@ impl MezonTransport {
                 markdowns: Vec::new(),
             }
         } else {
-            build_send_content(content, &mentions, &hashtags, &emojis)
+            build_send_content_with_code(content, &mentions, &hashtags, &emojis, flags.message_code)
         };
         let content_json = sent.json.clone();
         let content_json = match &presign_finish {
@@ -6981,8 +7021,8 @@ impl MezonTransport {
         if text.is_empty() {
             anyhow::bail!("SearchCtrlK text must not be empty");
         }
-        if text.len() > 255 {
-            anyhow::bail!("SearchCtrlK text exceeds 255 bytes");
+        if text.len() > SEARCH_CTRL_K_MAX_TEXT_BYTES {
+            anyhow::bail!("SearchCtrlK text exceeds {SEARCH_CTRL_K_MAX_TEXT_BYTES} bytes");
         }
         let cid = self.generate_cid();
         let body = api::SearchCtrlKRequest {
@@ -7025,6 +7065,21 @@ impl MezonTransport {
         Ok(api::SearchMentionUsersResponse::decode(
             response.as_slice(),
         )?)
+    }
+
+    pub async fn generate_cdn_signature(&self, channel_id: i64) -> Result<String> {
+        if channel_id == 0 {
+            anyhow::bail!("GenerateCDNSignature needs a channel id");
+        }
+        let cid = self.generate_cid();
+        let body = api::GenerateCdnSignatureRequest { channel_id }.encode_to_vec();
+        let (code, response) = self
+            .send_api_request_with_http_fallback(cid, "GenerateCDNSignature", body)
+            .await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        Ok(api::GenerateCdnSignatureResponse::decode(response.as_slice())?.signature)
     }
 
     /// Search threads by label within a parent channel.
@@ -7485,7 +7540,7 @@ impl MezonTransport {
         let body = request.encode_to_vec();
         let (code, _) = self.send_api_request(cid, "UpdateClanDesc", body).await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
         Ok(())
     }
@@ -8056,6 +8111,7 @@ impl MezonTransport {
         size: i32,
         width: i32,
         height: i32,
+        channel_id: i64,
     ) -> Result<api::UploadAttachment> {
         let cid = self.generate_cid();
         let body = api::UploadAttachmentRequest {
@@ -8065,6 +8121,7 @@ impl MezonTransport {
             width,
             height,
             part_count: 0,
+            channel_id,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -10111,7 +10168,7 @@ impl MezonTransport {
             .send_api_request(cid, "LinkSMS", body)
             .await
             .map_err(|error| LinkPhoneError::Transport(error.to_string()))?;
-        if code == API_CODE_ALREADY_EXISTS {
+        if code == ApiStatusError::ALREADY_EXISTS {
             return Err(LinkPhoneError::AlreadyLinked);
         }
         if code != 0 {
@@ -10633,6 +10690,42 @@ mod tests {
             parsed.mentions[0].user_id.as_deref(),
             Some(MENTION_HERE_USER_ID)
         );
+    }
+
+    #[test]
+    fn buzz_content_keeps_markdown_markers_as_plain_text() {
+        let sent = build_send_content_with_code("```jb```", &[], &[], &[], MESSAGE_BUZZ_CODE);
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("wire content json");
+        assert_eq!(sent.text, "```jb```");
+        assert_eq!(parsed.t, "```jb```");
+        assert!(parsed.mk.is_empty());
+    }
+
+    #[test]
+    fn buzz_content_keeps_links_and_canvas_titles() {
+        let text = "```jb``` https://mezon.ai/chat/clans/1/channels/2/canvas/abc";
+        let sent = build_send_content_with_code(text, &[], &[], &[], MESSAGE_BUZZ_CODE);
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("wire content json");
+        assert_eq!(parsed.t, text);
+        assert_eq!(parsed.mk.len(), 1);
+        assert!(
+            parsed.mk[0]
+                .kind
+                .as_deref()
+                .is_some_and(is_link_markdown_kind)
+        );
+        assert_eq!(parsed.cvtt.get("abc").map(String::as_str), Some("Untitled"));
+    }
+
+    #[test]
+    fn regular_content_still_parses_markdown() {
+        let sent = build_send_content_with_code("```jb```", &[], &[], &[], 0);
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("wire content json");
+        assert_eq!(sent.text, "jb");
+        assert!(!parsed.mk.is_empty());
     }
 
     #[test]
@@ -11457,11 +11550,36 @@ mod tests {
                 let counters = counters.clone();
                 tokio::spawn(async move {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    let mut buf = vec![0u8; 8192];
-                    let Ok(n) = stream.read(&mut buf).await else {
-                        return;
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let (head_end, body_len) = loop {
+                        let Ok(n) = stream.read(&mut chunk).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+                            let len = head
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length:"))
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            break (end + 4, len);
+                        }
                     };
-                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    while buf.len() < head_end + body_len {
+                        let Ok(n) = stream.read(&mut chunk).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
                     let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
                     *counters.lock().entry(path.clone()).or_insert(0) += 1;
 
@@ -11472,6 +11590,13 @@ mod tests {
                         out.extend_from_slice(jwt.as_bytes());
                         out.extend_from_slice(&[0x1a, 0x03, b'n', b'e', b'w']);
                         out
+                    } else if path.ends_with("GenerateCDNSignature") {
+                        let request =
+                            api::GenerateCdnSignatureRequest::decode(&buf[head_end..]).unwrap();
+                        api::GenerateCdnSignatureResponse {
+                            signature: format!("1700000000-{}", request.channel_id),
+                        }
+                        .encode_to_vec()
                     } else if path.ends_with("SendChannelMessage") {
                         realtime::ChannelMessageAck {
                             message_id: 42,
@@ -11493,6 +11618,35 @@ mod tests {
             }
         });
         (port, hits)
+    }
+
+    #[tokio::test]
+    async fn cdn_signature_asks_for_the_given_channel_and_returns_the_signature() {
+        let (port, hits) = fake_api().await;
+        let t = MezonTransport::new(Box::new(ClosedAdapter), String::new());
+        let mut fallback = expired_fallback(port);
+        fallback.token = fake_jwt_expiring_in(600);
+        fallback.expires_at = crate::server_clock::now_secs() + 600;
+        t.set_http_fallback(Some(fallback));
+
+        let signature = t
+            .generate_cdn_signature(2087764882924507136)
+            .await
+            .expect("the signature request should succeed");
+        assert_eq!(signature, "1700000000-2087764882924507136");
+        assert_eq!(
+            hits.lock().get("/mezon.api.Mezon/GenerateCDNSignature"),
+            Some(&1)
+        );
+    }
+
+    #[tokio::test]
+    async fn cdn_signature_for_channel_zero_is_refused_before_any_request() {
+        let error = transport(false)
+            .generate_cdn_signature(0)
+            .await
+            .expect_err("channel 0 has no signature");
+        assert!(error.to_string().contains("channel id"), "{error}");
     }
 
     fn fake_jwt_expiring_in(secs: i64) -> String {
@@ -11859,6 +12013,7 @@ mod tests {
         assert_eq!(t.get_api_index("UploadBatchAttachmentFile"), Some(209));
         assert_eq!(t.get_api_index("SearchCtrlK"), Some(210));
         assert_eq!(t.get_api_index("SearchMentionUsers"), Some(211));
+        assert_eq!(t.get_api_index("GenerateCDNSignature"), Some(212));
         assert_eq!(t.get_api_index("DefinitelyNotAnApi"), None);
     }
 
@@ -12380,5 +12535,49 @@ mod tests {
         assert_eq!(bare_jwt(b"eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ."), None);
         assert_eq!(bare_jwt(b"not a token"), None);
         assert_eq!(bare_jwt(&[0xff, 0xfe, 0x00]), None);
+    }
+
+    #[test]
+    fn pin_message_from_proto_hides_attachment_metadata_without_text() {
+        for content in [
+            r#"{"presign_finish":["photo-1","photo-2"],"create_time_seconds":1790856620}"#,
+            r#"{"presign_finish":["photo-1","photo-2"],"create_time_seconds":1790856620,"fwd":true}"#,
+        ] {
+            let pin = api::PinMessage {
+                content: content.into(),
+                ..Default::default()
+            };
+            let parsed = MezonTransport::pin_message_from_proto(pin);
+            assert!(parsed.content_text.is_empty());
+            assert_eq!(parsed.content, content);
+        }
+    }
+
+    #[test]
+    fn pin_message_from_proto_preserves_visible_text_behavior() {
+        let json_pin = api::PinMessage {
+            content: r#"{"t":"caption","presign_finish":["photo"]}"#.into(),
+            ..Default::default()
+        };
+        let plain_pin = api::PinMessage {
+            content: "legacy plain text".into(),
+            ..Default::default()
+        };
+        let invalid_text_pin = api::PinMessage {
+            content: r#"{"t":123}"#.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            MezonTransport::pin_message_from_proto(json_pin).content_text,
+            "caption"
+        );
+        assert_eq!(
+            MezonTransport::pin_message_from_proto(plain_pin).content_text,
+            "legacy plain text"
+        );
+        assert_eq!(
+            MezonTransport::pin_message_from_proto(invalid_text_pin).content_text,
+            r#"{"t":123}"#
+        );
     }
 }

@@ -14,6 +14,15 @@ pub fn normalize_presign_key(key: &str) -> String {
     }
 }
 
+fn upload_snowflake(key: &str) -> Option<&str> {
+    let (head, _) = key.split_once('_')?;
+    (!head.is_empty() && head.bytes().all(|b| b.is_ascii_digit())).then_some(head)
+}
+
+pub fn presign_keys_match(a: &str, b: &str) -> bool {
+    a == b || upload_snowflake(a).is_some_and(|id| upload_snowflake(b) == Some(id))
+}
+
 pub fn parse_presign_finish_keys(content: &str) -> Option<Vec<String>> {
     let value: serde_json::Value = serde_json::from_str(content).ok()?;
     let keys = value.as_object()?.get("presign_finish")?.as_array()?;
@@ -59,7 +68,7 @@ pub fn presign_pending(url: &str, keys: Option<&[String]>, base_img_url: &str) -
     let Some(key) = presign_key_from_url(url) else {
         return false;
     };
-    !keys.iter().any(|k| k == &key)
+    !keys.iter().any(|k| presign_keys_match(k, &key))
 }
 
 pub fn all_presign_finished(presignable_count: usize, finish_key_count: usize) -> bool {
@@ -187,6 +196,32 @@ mod tests {
     use super::*;
 
     const CDN: &str = "https://cdn.example";
+
+    #[test]
+    fn a_key_cut_at_the_first_dot_still_clears_its_upload() {
+        let url = format!("{CDN}/1cf93b197d401000/2107310745128538112_Screen_Shot_10.17.15.png");
+        let web_key = "2107310745128538112_Screen_Shot_10".to_string();
+        assert!(!presign_pending(&url, Some(&[web_key]), CDN));
+        let other_upload = "2107310745128538113_Screen_Shot_10".to_string();
+        assert!(presign_pending(&url, Some(&[other_upload]), CDN));
+    }
+
+    #[test]
+    fn keys_without_a_snowflake_prefix_must_match_exactly() {
+        assert!(presign_keys_match(
+            "2107310745128538112",
+            "2107310745128538112"
+        ));
+        assert!(!presign_keys_match(
+            "2107310745128538112",
+            "2107310745128538113"
+        ));
+        assert!(!presign_keys_match("photo_a", "photo_b"));
+        assert!(presign_keys_match(
+            "2107310745128538112_a.b",
+            "2107310745128538112_a"
+        ));
+    }
 
     #[test]
     fn a_key_moves_from_uploading_to_uploaded_or_failed_until_settled() {

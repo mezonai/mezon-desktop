@@ -3,10 +3,10 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, ClickEvent, ClipboardItem, Context,
-    CursorStyle, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontFeatures,
+    CursorStyle, DismissEvent, Div, Entity, EventEmitter, FocusHandle, Focusable, FontFeatures,
     FontWeight, Hsla, Image, ImageFormat, IntoElement, MouseButton, MouseDownEvent, ObjectFit,
-    Pixels, RenderOnce, Rgba, ScrollHandle, SharedString, StyledImage, Subscription, Window,
-    canvas, deferred, div, img, point, prelude::*, px, relative, rems, svg,
+    Pixels, RenderOnce, Rgba, ScrollHandle, SharedString, Stateful, StyledImage, Subscription,
+    Window, canvas, deferred, div, img, point, prelude::*, px, relative, rems, svg,
 };
 use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, DeviceKind, DeviceMenuKind, DisplayedFlower,
@@ -1739,12 +1739,7 @@ fn render_in_call(
                 theme.status_idle.into(),
                 true,
             )),
-            VoiceCallStatus::WeakNetwork => Some((
-                SharedString::from(mezon_i18n::t(locale, "channelVoice.weakNetwork").to_string()),
-                theme.status_idle.into(),
-                false,
-            )),
-            VoiceCallStatus::Stable => None,
+            VoiceCallStatus::WeakNetwork | VoiceCallStatus::Stable => None,
         }
     };
 
@@ -3074,6 +3069,8 @@ fn control_bar(
     let can_record = store.can_record();
     let is_audience = store.is_audience();
     let ptt_active = store.push_to_talk_active();
+    let network_weak = matches!(store.call_status(), VoiceCallStatus::WeakNetwork);
+    let show_network_warning = network_weak && !store.network_warning_dismissed();
     let has_active_interactive_apps =
         store.has_active_interactive_apps() || store.has_opened_interactive_apps();
 
@@ -3154,6 +3151,12 @@ fn control_bar(
         DeviceMenuKind::Microphone,
         cx,
     );
+    let mic_button = div()
+        .relative()
+        .child(mic_button)
+        .children(network_weak_dot(theme, network_weak, cx))
+        .children(show_network_warning.then(|| render_network_warning_callout(locale, voice)))
+        .into_any_element();
     let camera_button = device_control(
         camera_button.into_any_element(),
         theme,
@@ -3230,8 +3233,12 @@ fn control_bar(
             ),
             voice,
         );
-        let callout = (!store.ptt_hint_dismissed())
-            .then(|| render_ptt_hint_callout(theme, locale, ptt_active, voice));
+        let callout = if show_network_warning {
+            Some(render_network_warning_callout(locale, voice))
+        } else {
+            (!store.ptt_hint_dismissed())
+                .then(|| render_ptt_hint_callout(theme, locale, ptt_active, voice))
+        };
         div()
             .relative()
             .child(button)
@@ -3240,6 +3247,7 @@ fn control_bar(
                 Some(MediaDevice::Microphone),
                 cx,
             ))
+            .children(network_weak_dot(theme, network_weak, cx))
             .children(callout)
     });
 
@@ -3591,6 +3599,88 @@ fn control_bar(
 
 const PTT_HINT_WIDTH_PX: f32 = 320.;
 const PTT_HINT_CARET_PX: f32 = 12.;
+const NETWORK_WARNING_BG: u32 = 0xfde8d7;
+const NETWORK_WARNING_TEXT: u32 = 0x202124;
+
+fn render_network_warning_callout(locale: &str, voice: &Entity<VoiceStore>) -> AnyElement {
+    let card_bg: Hsla = gpui::rgb(NETWORK_WARNING_BG).into();
+    let text_color: Hsla = gpui::rgb(NETWORK_WARNING_TEXT).into();
+    let message = mezon_i18n::t(locale, "channelVoice.networkWarning");
+    let dismiss = voice.clone();
+    div()
+        .id("voice-network-warning")
+        .occlude()
+        .absolute()
+        .bottom(px(44. + PTT_HINT_CARET_PX / 2.))
+        .left(px(-16.))
+        .w(px(PTT_HINT_WIDTH_PX))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .w_full()
+                .rounded(px(16.))
+                .bg(card_bg)
+                .shadow_lg()
+                .p_4()
+                .pl_2()
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .text_left()
+                        .text_color(text_color)
+                        .child(message),
+                )
+                .child(
+                    div()
+                        .id("voice-network-warning-close")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(24.))
+                        .rounded_full()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(gpui::rgba(0x0000000d)))
+                        .child(
+                            Icon::new(IconName::Close)
+                                .size(px(16.))
+                                .text_color(with_alpha(text_color, 0.7)),
+                        )
+                        .on_click(move |_, _, cx| {
+                            dismiss.update(cx, |store, cx| store.dismiss_network_warning(cx));
+                        }),
+                ),
+        )
+        .child(
+            svg()
+                .ml(px(16. + 22. - PTT_HINT_CARET_PX / 2.))
+                .w(px(PTT_HINT_CARET_PX))
+                .h(px(PTT_HINT_CARET_PX / 2.))
+                .path("icons/tour-caret-down.svg")
+                .text_color(card_bg),
+        )
+        .into_any_element()
+}
+
+fn network_weak_dot(theme: &Theme, network_weak: bool, cx: &App) -> Option<gpui::Div> {
+    (network_weak && !media_access_missing(MediaDevice::Microphone, cx)).then(|| {
+        div()
+            .absolute()
+            .top(px(-2.))
+            .right(px(-2.))
+            .size(px(14.))
+            .rounded_full()
+            .border_2()
+            .border_color(theme.bg_tertiary)
+            .bg(theme.status_idle)
+    })
+}
 
 fn render_ptt_hint_callout(
     theme: &Theme,
@@ -4369,10 +4459,7 @@ fn device_list_panel(
     let voice = voice.clone();
     let hover_bg = theme.bg_hover;
     let text_color = theme.text_primary;
-    let active_present = entries
-        .iter()
-        .any(|(id, _)| id.as_deref() == active_id.as_deref());
-    let effective_active = if active_present { active_id } else { None };
+    let effective_active = selected_device_id(&entries, active_id.as_deref());
     div()
         .id(SharedString::from(format!(
             "voice-device-list-{}",
@@ -4391,51 +4478,81 @@ fn device_list_panel(
         .border_color(theme.border)
         .shadow_lg()
         .children(entries.into_iter().map(move |(id, name)| {
-            let selected = id.as_deref() == effective_active.as_deref();
-            let slug = id.as_deref().unwrap_or("default").to_string();
-            let radio = device_radio(theme, selected);
+            let selected = id == effective_active;
+            let row_id = SharedString::from(format!(
+                "dev-{}-{}",
+                kind_slug(kind),
+                id.as_deref().unwrap_or("default")
+            ));
             let voice = voice.clone();
-            div()
-                .id(SharedString::from(format!(
-                    "dev-{}-{}",
-                    kind_slug(kind),
-                    slug
-                )))
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .w_full()
-                .px_3()
-                .py_2()
-                .rounded(px(4.))
-                .cursor_pointer()
-                .hover(move |s| s.bg(hover_bg))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .truncate()
-                        .text_sm()
-                        .text_color(text_color)
-                        .child(name),
-                )
-                .child(radio)
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    let id = id.clone();
-                    voice.update(cx, |store, cx| match kind {
-                        DeviceKind::AudioInput => store.set_input_device(id, cx),
-                        DeviceKind::AudioOutput => store.set_output_device(id, cx),
-                        DeviceKind::VideoInput => store.set_camera_device(id, cx),
-                    });
-                })
+            device_option_row(
+                row_id,
+                name,
+                device_radio(theme.tokens.text_secondary, selected),
+                text_color,
+                hover_bg,
+            )
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                let id = id.clone();
+                match kind {
+                    DeviceKind::AudioOutput => mezon_store::set_output_device(id, cx),
+                    DeviceKind::AudioInput => {
+                        voice.update(cx, |store, cx| store.set_input_device(id, cx))
+                    }
+                    DeviceKind::VideoInput => {
+                        voice.update(cx, |store, cx| store.set_camera_device(id, cx))
+                    }
+                }
+            })
         }))
         .into_any_element()
 }
 
-fn device_radio(theme: &Theme, selected: bool) -> AnyElement {
+pub(crate) fn selected_device_id(
+    entries: &[(Option<String>, String)],
+    active_id: Option<&str>,
+) -> Option<String> {
+    entries
+        .iter()
+        .find(|(id, _)| id.as_deref() == active_id)
+        .and_then(|(id, _)| id.clone())
+}
+
+pub(crate) fn device_option_row(
+    id: SharedString,
+    name: String,
+    radio: AnyElement,
+    text_color: impl Into<Hsla>,
+    hover_bg: impl Into<Hsla>,
+) -> Stateful<Div> {
+    let hover_bg = hover_bg.into();
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .w_full()
+        .px_3()
+        .py_2()
+        .rounded(px(4.))
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover_bg))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .truncate()
+                .text_sm()
+                .text_color(text_color.into())
+                .child(name),
+        )
+        .child(radio)
+}
+
+pub(crate) fn device_radio(ring: impl Into<Hsla>, selected: bool) -> AnyElement {
     if selected {
         div()
             .flex_shrink_0()
@@ -4453,7 +4570,7 @@ fn device_radio(theme: &Theme, selected: bool) -> AnyElement {
             .size(px(16.))
             .rounded_full()
             .border_2()
-            .border_color(theme.text_muted)
+            .border_color(ring.into())
             .into_any_element()
     }
 }
@@ -4464,38 +4581,47 @@ fn device_entries(
     locale: &str,
     cx: &App,
 ) -> Vec<(Option<String>, String)> {
-    let system_default = || mezon_i18n::t(locale, "channelVoice.device.systemDefault").to_string();
     match kind {
-        DeviceKind::AudioInput | DeviceKind::AudioOutput => {
-            let mut entries = Vec::new();
-            if let Some(audio) = AudioStore::try_global(cx) {
-                let audio = audio.read(cx);
-                let (devices, default_name) = if matches!(kind, DeviceKind::AudioInput) {
-                    (&audio.input_devices, &audio.default_input_name)
-                } else {
-                    (&audio.output_devices, &audio.default_output_name)
-                };
-                let default_label = match default_name {
-                    Some(name) => format!("Default - {name}"),
-                    None => system_default(),
-                };
-                entries.push((None, default_label));
-                for device in devices {
-                    entries.push((Some(device.id.clone()), device.name.clone()));
-                }
-            } else {
-                entries.push((None, system_default()));
-            }
-            entries
-        }
+        DeviceKind::AudioInput | DeviceKind::AudioOutput => audio_device_entries(kind, locale, cx),
         DeviceKind::VideoInput => {
-            let mut entries = vec![(None, system_default())];
+            let mut entries = vec![(None, system_default_label(locale))];
             for device in store.camera_devices() {
                 entries.push((Some(device.id.clone()), device.name.clone()));
             }
             entries
         }
     }
+}
+
+pub(crate) fn audio_device_entries(
+    kind: DeviceKind,
+    locale: &str,
+    cx: &App,
+) -> Vec<(Option<String>, String)> {
+    let mut entries = Vec::new();
+    if let Some(audio) = AudioStore::try_global(cx) {
+        let audio = audio.read(cx);
+        let (devices, default_name) = if matches!(kind, DeviceKind::AudioInput) {
+            (&audio.input_devices, &audio.default_input_name)
+        } else {
+            (&audio.output_devices, &audio.default_output_name)
+        };
+        let default_label = match default_name {
+            Some(name) => format!("Default - {name}"),
+            None => system_default_label(locale),
+        };
+        entries.push((None, default_label));
+        for device in devices {
+            entries.push((Some(device.id.clone()), device.name.clone()));
+        }
+    } else {
+        entries.push((None, system_default_label(locale)));
+    }
+    entries
+}
+
+fn system_default_label(locale: &str) -> String {
+    mezon_i18n::t(locale, "channelVoice.device.systemDefault").to_string()
 }
 
 fn device_kind_label(kind: DeviceKind, locale: &str) -> String {
@@ -4562,7 +4688,7 @@ mod carousel_tests {
 
 #[cfg(test)]
 mod device_menu_tests {
-    use super::active_device_name;
+    use super::{active_device_name, selected_device_id};
 
     fn entries() -> Vec<(Option<String>, String)> {
         vec![
@@ -4591,6 +4717,24 @@ mod device_menu_tests {
             active_device_name(&entries(), &Some("gone".to_string())),
             "System default"
         );
+    }
+
+    #[test]
+    fn selects_the_chosen_device() {
+        assert_eq!(
+            selected_device_id(&entries(), Some("b")),
+            Some("b".to_string())
+        );
+    }
+
+    #[test]
+    fn selects_default_when_nothing_was_chosen() {
+        assert_eq!(selected_device_id(&entries(), None), None);
+    }
+
+    #[test]
+    fn selects_default_when_the_chosen_device_is_gone() {
+        assert_eq!(selected_device_id(&entries(), Some("gone")), None);
     }
 }
 

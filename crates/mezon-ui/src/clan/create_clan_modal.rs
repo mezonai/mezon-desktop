@@ -3,7 +3,7 @@ use gpui::{
     Subscription, Task, Window, div, img, prelude::*, px, rgb,
 };
 use mezon_store::{
-    ClanImageMimeType, ClanList, CreateClanError, MAX_CLAN_LOGO_BYTES, Settings, is_valid_clan_name,
+    ClanImageMimeType, ClanList, ClanSaveError, MAX_CLAN_LOGO_BYTES, Settings, is_valid_clan_name,
 };
 
 use crate::app::shell::Shell;
@@ -240,14 +240,14 @@ impl CreateClanModal {
                     Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
                 });
             }
-            Err(CreateClanError::DuplicateName) => {
+            Err(ClanSaveError::DuplicateName) => {
                 let _ = this.update(cx, |this, cx| {
                     this.validation = Validation::DuplicateName;
                     this.creating = false;
                     cx.notify();
                 });
             }
-            Err(CreateClanError::Other(msg)) => {
+            Err(ClanSaveError::Other(msg)) => {
                 tracing::error!("create clan failed: {msg}");
                 let _ = this.update(cx, |this, cx| {
                     this.creating = false;

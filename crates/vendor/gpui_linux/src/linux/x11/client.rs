@@ -902,6 +902,10 @@ impl X11Client {
             }
 
             for event in events.into_iter() {
+                if self.key_event_skips_ime(&event) {
+                    self.handle_event(event);
+                    continue;
+                }
                 if self.try_dbus_im_event(&event) {
                     continue;
                 }
@@ -1141,6 +1145,17 @@ impl X11Client {
             }
             state.ximc = Some(ximc);
         }
+    }
+
+    fn key_event_skips_ime(&self, event: &Event) -> bool {
+        let (Event::KeyPress(key) | Event::KeyRelease(key)) = event else {
+            return false;
+        };
+        if self.0.borrow().composing {
+            return false;
+        }
+        self.get_window(key.event)
+            .is_some_and(|window| !window.has_input_handler())
     }
 
     fn try_dbus_im_event(&self, event: &Event) -> bool {

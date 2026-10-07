@@ -657,7 +657,7 @@ impl Render for SoundPicker {
                                             IconName::AudioPlay
                                         })
                                         .size(px(16.0))
-                                        .text_color(theme.text_primary),
+                                        .text_color(gpui::white()),
                                     ),
                             )
                             .child(self.render_preview_playbar(previewing, &theme, cx)),

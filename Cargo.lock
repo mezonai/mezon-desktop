@@ -5406,6 +5406,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
+name = "matroska-demuxer"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb23384e6bf1431427b45e7db9574146e948ef0cd975018693e6f53eb6d44199"
+
+[[package]]
 name = "maybe-rayon"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5511,7 +5517,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-active-windows"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -5524,7 +5530,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-app"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -5555,7 +5561,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-audio"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "anyhow",
  "flume",
@@ -5570,7 +5576,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-call"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5588,7 +5594,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-canvas"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5610,7 +5616,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-cli"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -5626,7 +5632,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-client"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5663,14 +5669,14 @@ dependencies = [
 
 [[package]]
 name = "mezon-i18n"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "mezon-mcp"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -5691,7 +5697,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-native"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "anyhow",
  "auto-launch",
@@ -5728,7 +5734,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-pdf"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "anyhow",
  "core-graphics 0.24.0",
@@ -5741,7 +5747,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-proto"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "prost",
  "prost-build",
@@ -5752,7 +5758,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-record"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -5775,7 +5781,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-store"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5809,7 +5815,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-stream"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "anyhow",
  "flume",
@@ -5826,7 +5832,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-theme"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "gpui",
  "theme",
@@ -5834,7 +5840,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-ui"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5879,7 +5885,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-updater"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5900,7 +5906,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-video"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -5912,19 +5918,24 @@ dependencies = [
  "gstreamer-app",
  "gstreamer-video",
  "image",
+ "matroska-demuxer",
  "mp4",
  "objc",
  "openh264",
+ "oxideav-vp8",
+ "parking_lot",
  "smallvec",
  "thiserror 2.0.18",
  "tracing",
+ "ureq",
  "windows 0.61.3",
  "windows-core 0.61.2",
+ "yuv",
 ]
 
 [[package]]
 name = "mezon-voice"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5934,6 +5945,7 @@ dependencies = [
  "core-video",
  "cosmic-text",
  "cpal",
+ "dirs 5.0.1",
  "flume",
  "futures",
  "image",
@@ -5953,6 +5965,7 @@ dependencies = [
  "screencapturekit-sys",
  "serde",
  "serde_json",
+ "sha2",
  "tiny-skia",
  "tokio",
  "tokio-tungstenite",
@@ -5962,12 +5975,13 @@ dependencies = [
  "windows-core 0.61.2",
  "xcb",
  "yuv",
+ "zed-reqwest",
  "zed-scap",
 ]
 
 [[package]]
 name = "mezon-widgets"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "gpui",
  "mezon-store",
@@ -6032,7 +6046,7 @@ dependencies = [
 
 [[package]]
 name = "mmn-client"
-version = "2.1.8"
+version = "2.1.9"
 dependencies = [
  "base64 0.22.1",
  "bs58",
@@ -7021,6 +7035,26 @@ dependencies = [
  "sha2",
  "tar",
  "ureq",
+]
+
+[[package]]
+name = "oxideav-core"
+version = "0.1.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8de32b40e24dd0f22ec37a0cb723ad499c05b43aa391971b7621c9a1c96fb15"
+dependencies = [
+ "bytemuck",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "oxideav-vp8"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "506f2495a728488c2fee1ee54bc7f819ca934dc3246369b4100c83848f057852"
+dependencies = [
+ "oxideav-core",
 ]
 
 [[package]]
@@ -10529,11 +10563,13 @@ dependencies = [
  "log",
  "native-tls",
  "percent-encoding",
+ "rustls",
  "rustls-pki-types",
  "socks",
  "ureq-proto",
  "utf8-zero",
  "webpki-root-certs 1.0.8",
+ "webpki-roots 1.0.8",
 ]
 
 [[package]]

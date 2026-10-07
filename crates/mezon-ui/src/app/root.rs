@@ -540,7 +540,7 @@ impl Render for RootView {
         }
 
         let locale = self.cached_locale.as_str();
-        let base_font_family = ::theme::theme_settings(cx).ui_font(cx).family.clone();
+        let base_font_family = crate::theme::ui_font_family(cx);
         let theme = cx.theme();
 
         let mut preview_bar = None;

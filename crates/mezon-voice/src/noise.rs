@@ -6,9 +6,29 @@ use mezon_ns::{Mezon48k, MezonNSConfig, MezonNSEngine};
 
 use crate::VoiceEvent;
 
-const WEB_SUPPRESSION_INTENSITY: f32 = 1.6;
+mod model;
+mod output_gain;
+
+const SUPPRESSION_INTENSITY: f32 = 1.0;
 const MODEL_INPUT_TARGET_DBFS: f32 = -20.0;
 const MAX_ATTENUATION_DB: f32 = 15.0;
+
+fn create_filter(model: &[u8]) -> Result<Mezon48k, String> {
+    let mut config = MezonNSConfig::default();
+    config.suppression_intensity = SUPPRESSION_INTENSITY;
+    config.enable_noise_gate = 0;
+    config.attenuation_limit_db = MAX_ATTENUATION_DB;
+    MezonNSEngine::create_from_memory(model, Some(config))
+        .and_then(|mut engine| {
+            let input = [0i16; mezon_ns::FRAME_SIZE];
+            let mut output = [0i16; mezon_ns::FRAME_SIZE];
+            engine.process_frame_int16(&input, &mut output)?;
+            engine.reset();
+            engine.set_model_input_target_dbfs(MODEL_INPUT_TARGET_DBFS);
+            Ok(Mezon48k::new(engine))
+        })
+        .map_err(|e| e.to_string())
+}
 
 enum Setting {
     Enabled { enabled: bool, generation: u64 },
@@ -31,6 +51,7 @@ pub(super) struct NoiseProcessor {
 
 impl NoiseProcessor {
     pub fn start(events: flume::Sender<VoiceEvent>) -> Self {
+        model::prefetch_model();
         let requested = Arc::new(AtomicBool::new(false));
         let generation = Arc::new(AtomicU64::new(0));
         let ready = Arc::new(AtomicBool::new(false));
@@ -88,24 +109,12 @@ impl NoiseProcessor {
                             }
                             let result = if let Some(filter) = &mut filter {
                                 filter.reset();
-                                filter.set_suppression_intensity(WEB_SUPPRESSION_INTENSITY);
+                                filter.set_suppression_intensity(SUPPRESSION_INTENSITY);
                                 Ok(())
                             } else {
-                                let mut config = MezonNSConfig::default();
-                                config.suppression_intensity = WEB_SUPPRESSION_INTENSITY;
-                                config.enable_noise_gate = 0;
-                                config.attenuation_limit_db = MAX_ATTENUATION_DB;
-                                MezonNSEngine::create_embedded(Some(config))
-                                    .and_then(|mut engine| {
-                                        let input = [0i16; mezon_ns::FRAME_SIZE];
-                                        let mut output = [0i16; mezon_ns::FRAME_SIZE];
-                                        engine.process_frame_int16(&input, &mut output)?;
-                                        engine.reset();
-                                        engine.set_model_input_target_dbfs(MODEL_INPUT_TARGET_DBFS);
-                                        filter = Some(Mezon48k::new(engine));
-                                        Ok(())
-                                    })
-                                    .map_err(|e| e.to_string())
+                                model::model_bytes()
+                                    .and_then(|model| create_filter(&model))
+                                    .map(|created| filter = Some(created))
                             };
                             if result.is_err() {
                                 enabled = false;
@@ -133,6 +142,8 @@ impl NoiseProcessor {
                             }
                             let Some(filter) = &mut filter else { continue };
                             let mut failed = None;
+                            // Apply fixed makeup gain only after denoising succeeds.
+                            // Adaptive gain would follow the mask and pump speech volume.
                             for chunk in samples.chunks_mut(mezon_ns::FRAME_SIZE_48K) {
                                 let mut block = [0i16; mezon_ns::FRAME_SIZE_48K];
                                 block[..chunk.len()].copy_from_slice(chunk);
@@ -151,6 +162,7 @@ impl NoiseProcessor {
                                 });
                                 continue;
                             }
+                            output_gain::apply(&mut samples);
                             match output_tx.try_send(FilteredFrame {
                                 samples,
                                 generation: active_generation,

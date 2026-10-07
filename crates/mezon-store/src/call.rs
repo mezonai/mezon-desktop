@@ -476,7 +476,7 @@ impl CallStore {
             video,
             "call: accepting incoming offer"
         );
-        MediaPermissionStore::warn_if_denied_global(MediaDevice::Microphone, cx);
+        let mic_allowed = !MediaPermissionStore::warn_if_denied_global(MediaDevice::Microphone, cx);
         self.self_id = self_id;
         self.self_name = self_name;
         self.self_avatar = self_avatar;
@@ -487,7 +487,7 @@ impl CallStore {
             MediaKind::Audio
         };
         self.local = MediaFlags {
-            mic_on: true,
+            mic_on: mic_allowed,
             cam_on: video,
         };
         self.phase = CallPhase::Connecting;
@@ -505,6 +505,9 @@ impl CallStore {
         };
         self.spawn_engine(config, cx);
         if let Some(engine) = &self.engine {
+            if !mic_allowed {
+                engine.send(EngineCommand::SetMicEnabled(false));
+            }
             engine.send(EngineCommand::ApplyRemoteOffer(offer_sdp));
         }
         self.start_timeout(cx);
@@ -543,6 +546,19 @@ impl CallStore {
             engine.send(EngineCommand::SetMicEnabled(self.local.mic_on));
         }
         let status = serde_json::json!({ "micEnabled": self.local.mic_on }).to_string();
+        self.send_to_peer(WEBRTC_SDP_STATUS_REMOTE_MEDIA, status, cx);
+        cx.notify();
+    }
+
+    fn turn_off_denied_mic(&mut self, cx: &mut Context<Self>) {
+        if !self.local.mic_on {
+            return;
+        }
+        self.local.mic_on = false;
+        if let Some(engine) = &self.engine {
+            engine.send(EngineCommand::SetMicEnabled(false));
+        }
+        let status = serde_json::json!({ "micEnabled": false }).to_string();
         self.send_to_peer(WEBRTC_SDP_STATUS_REMOTE_MEDIA, status, cx);
         cx.notify();
     }
@@ -772,7 +788,9 @@ impl CallStore {
                 self.end_call(EndReason::Failed, cx);
             }
             EngineEvent::MicUnavailable => {
-                if !MediaPermissionStore::warn_if_denied_global(MediaDevice::Microphone, cx) {
+                if MediaPermissionStore::warn_if_denied_global(MediaDevice::Microphone, cx) {
+                    self.turn_off_denied_mic(cx);
+                } else {
                     self.mic_unavailable = true;
                     cx.notify();
                 }

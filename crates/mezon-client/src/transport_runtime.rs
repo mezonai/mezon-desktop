@@ -112,12 +112,8 @@ pub async fn fetch_bytes(url: &str) -> Result<(Vec<u8>, Option<String>)> {
     let url = url.to_string();
     runtime()
         .spawn(async move {
-            let request = http::Request::builder()
-                .method(http::Method::GET)
-                .uri(&url)
-                .body(AsyncBody::empty())?;
             match tokio::time::timeout(HTTP_TRANSFER_TIMEOUT, async move {
-                let mut response = http_client().send(request).await?;
+                let mut response = send_get(&url).await?;
                 let status = response.status();
                 if !status.is_success() {
                     anyhow::bail!("HTTP GET failed with status {}", status);
@@ -343,23 +339,29 @@ pub async fn download_to(
         .map_err(|e| anyhow::anyhow!("download task failed: {e}"))?
 }
 
+async fn send_get(url: &str) -> Result<http::Response<AsyncBody>> {
+    crate::cdn_signature::send(url, |url| async move {
+        let request = http::Request::builder()
+            .method(http::Method::GET)
+            .uri(url)
+            .body(AsyncBody::empty())?;
+        http_client().send(request).await
+    })
+    .await
+}
+
 async fn stream_to_file(
     url: &str,
     dest: &std::path::Path,
     on_progress: impl Fn(u64, Option<u64>),
 ) -> Result<()> {
-    let request = http::Request::builder()
-        .method(http::Method::GET)
-        .uri(url)
-        .body(AsyncBody::empty())?;
-    let mut response =
-        match tokio::time::timeout(HTTP_TRANSFER_TIMEOUT, http_client().send(request)).await {
-            Ok(result) => result?,
-            Err(_) => anyhow::bail!(
-                "download request timed out after {}s",
-                HTTP_TRANSFER_TIMEOUT.as_secs()
-            ),
-        };
+    let mut response = match tokio::time::timeout(HTTP_TRANSFER_TIMEOUT, send_get(url)).await {
+        Ok(result) => result?,
+        Err(_) => anyhow::bail!(
+            "download request timed out after {}s",
+            HTTP_TRANSFER_TIMEOUT.as_secs()
+        ),
+    };
     let status = response.status();
     if !status.is_success() {
         anyhow::bail!("HTTP GET failed with status {status}");
@@ -1767,6 +1769,15 @@ impl TransportClient {
                     .search_mention_users(clan_id, channel_id, &text)
                     .await
             })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn generate_cdn_signature(&self, channel_id: i64) -> Result<String> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.generate_cdn_signature(channel_id).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
@@ -3414,6 +3425,7 @@ impl TransportClient {
         size: i32,
         width: i32,
         height: i32,
+        channel_id: i64,
     ) -> Result<mezon_proto::api::UploadAttachment> {
         let transport = self.inner.clone();
         let filename = filename.to_string();
@@ -3422,7 +3434,7 @@ impl TransportClient {
         runtime()
             .spawn(async move {
                 transport
-                    .upload_attachment_file(&filename, &filetype, size, width, height)
+                    .upload_attachment_file(&filename, &filetype, size, width, height, channel_id)
                     .await
             })
             .await

@@ -28,7 +28,7 @@ mod fallback {
 mod linux {
     use std::cell::RefCell;
     use std::collections::{HashMap, HashSet};
-    use std::rc::Rc;
+    use std::rc::{Rc, Weak};
     use std::thread::JoinHandle;
 
     use pipewire as pw;
@@ -56,13 +56,31 @@ mod linux {
         channel: String,
     }
 
+    struct NodeWatch {
+        // Remove the listener before releasing its proxy.
+        _listener: pw::node::NodeListener,
+        _node: pw::node::Node,
+        client: Option<u32>,
+        own: Option<bool>,
+        ready: bool,
+    }
+
+    struct ClientWatch {
+        _listener: pw::client::ClientListener,
+        _client: pw::client::Client,
+        own: Option<bool>,
+    }
+
     struct Graph {
+        process_identity_fix: bool,
         own_pid: String,
         own_binary: Option<String>,
         core: pw::core::Core,
         own_node: Option<u32>,
         own_ports: HashMap<String, u32>,
         app_nodes: HashSet<u32>,
+        nodes: HashMap<u32, NodeWatch>,
+        clients: HashMap<u32, ClientWatch>,
         ports: HashMap<u32, PortInfo>,
         links: HashMap<u32, Vec<pw::link::Link>>,
     }
@@ -70,6 +88,12 @@ mod linux {
     impl Graph {
         fn new(core: pw::core::Core) -> Self {
             Self {
+                // Resolve full process identity on both X11 and Wayland.
+                // Retain the original X11 flag as a rollback alias.
+                process_identity_fix: std::env::var("MEZON_PIPEWIRE_SCREEN_AUDIO_FIX")
+                    .or_else(|_| std::env::var("MEZON_X11_SCREEN_AUDIO_FIX"))
+                    .as_deref()
+                    != Ok("0"),
                 own_pid: std::process::id().to_string(),
                 own_binary: std::env::current_exe().ok().and_then(|path| {
                     path.file_name()
@@ -79,6 +103,8 @@ mod linux {
                 own_node: None,
                 own_ports: HashMap::new(),
                 app_nodes: HashSet::new(),
+                nodes: HashMap::new(),
+                clients: HashMap::new(),
                 ports: HashMap::new(),
                 links: HashMap::new(),
             }
@@ -98,35 +124,166 @@ mod linux {
             self.link_pending();
         }
 
-        fn global_added(&mut self, global: &GlobalObject<&DictRef>) {
+        fn global_added(
+            &mut self,
+            registry: &pw::registry::Registry,
+            global: &GlobalObject<&DictRef>,
+            graph: Weak<RefCell<Self>>,
+        ) {
             let Some(props) = global.props else { return };
             match global.type_ {
-                ObjectType::Node => self.node_added(global.id, props),
+                ObjectType::Node => {
+                    if props.get(*pw::keys::MEDIA_CLASS) != Some(OUTPUT_STREAM_CLASS) {
+                        return;
+                    }
+                    if !self.process_identity_fix {
+                        self.node_added(global.id, props);
+                        return;
+                    }
+                    // Registry globals omit process identity. Wait for full node
+                    // info before linking, or Mezon's own playback is captured.
+                    let node: pw::node::Node = match registry.bind(global) {
+                        Ok(node) => node,
+                        Err(e) => {
+                            tracing::warn!(id = global.id, "screen audio node bind failed: {e}");
+                            return;
+                        }
+                    };
+                    let id = global.id;
+                    let listener = node
+                        .add_listener_local()
+                        .info(move |info| {
+                            if let (Some(graph), Some(props)) = (graph.upgrade(), info.props()) {
+                                graph.borrow_mut().node_added(id, props);
+                            }
+                        })
+                        .register();
+                    self.nodes.insert(
+                        id,
+                        NodeWatch {
+                            _listener: listener,
+                            _node: node,
+                            client: props
+                                .get(*pw::keys::CLIENT_ID)
+                                .and_then(|id| id.parse().ok()),
+                            own: None,
+                            ready: false,
+                        },
+                    );
+                }
+                ObjectType::Client => {
+                    if !self.process_identity_fix {
+                        return;
+                    }
+                    let client: pw::client::Client = match registry.bind(global) {
+                        Ok(client) => client,
+                        Err(e) => {
+                            tracing::warn!(id = global.id, "screen audio client bind failed: {e}");
+                            return;
+                        }
+                    };
+                    let id = global.id;
+                    let listener = client
+                        .add_listener_local()
+                        .info(move |info| {
+                            if let (Some(graph), Some(props)) = (graph.upgrade(), info.props()) {
+                                graph.borrow_mut().client_info(id, props);
+                            }
+                        })
+                        .register();
+                    self.clients.insert(
+                        id,
+                        ClientWatch {
+                            _listener: listener,
+                            _client: client,
+                            own: None,
+                        },
+                    );
+                }
                 ObjectType::Port => self.port_added(global.id, props),
                 _ => {}
             }
         }
 
+        fn owner(&self, props: &DictRef) -> Option<bool> {
+            let pid = props
+                .get(*pw::keys::APP_PROCESS_ID)
+                .filter(|value| !value.is_empty());
+            let binary = props
+                .get(*pw::keys::APP_PROCESS_BINARY)
+                .filter(|value| !value.is_empty());
+            if pid == Some(self.own_pid.as_str())
+                || (binary.is_some() && binary == self.own_binary.as_deref())
+            {
+                Some(true)
+            } else if pid.is_some() || binary.is_some() {
+                Some(false)
+            } else {
+                None
+            }
+        }
+
+        fn client_info(&mut self, id: u32, props: &DictRef) {
+            let own = self.owner(props);
+            if let Some(client) = self.clients.get_mut(&id) {
+                client.own = own;
+            }
+            let nodes: Vec<u32> = self
+                .nodes
+                .iter()
+                .filter(|(_, node)| node.client == Some(id))
+                .map(|(&id, _)| id)
+                .collect();
+            for node in nodes {
+                self.refresh_node(node);
+            }
+        }
+
         fn node_added(&mut self, id: u32, props: &DictRef) {
-            if props.get(*pw::keys::MEDIA_CLASS) != Some(OUTPUT_STREAM_CLASS) {
+            let own = self.owner(props);
+            if !self.process_identity_fix {
+                if own != Some(true) {
+                    self.app_nodes.insert(id);
+                    self.link_pending();
+                }
                 return;
             }
-            let pid = props.get(*pw::keys::APP_PROCESS_ID);
-            let binary = props.get(*pw::keys::APP_PROCESS_BINARY);
-            let own = pid == Some(self.own_pid.as_str())
-                || (binary.is_some() && binary == self.own_binary.as_deref());
-            tracing::debug!(
-                id,
-                app = props.get(*pw::keys::APP_NAME).unwrap_or("?"),
-                pid = pid.unwrap_or("?"),
-                binary = binary.unwrap_or("?"),
-                own,
-                "screen audio output stream seen"
-            );
-            if own {
-                return;
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.own = own;
+                node.ready = true;
+                if let Some(client) = props.get(*pw::keys::CLIENT_ID) {
+                    node.client = client.parse().ok();
+                }
             }
-            self.app_nodes.insert(id);
+            self.refresh_node(id);
+        }
+
+        fn refresh_node(&mut self, id: u32) {
+            let Some(node) = self.nodes.get(&id) else {
+                return;
+            };
+            let client_own = node
+                .client
+                .and_then(|id| self.clients.get(&id))
+                .and_then(|c| c.own);
+            // A PulseAudio proxy client may be foreign even when its node is
+            // Mezon. An own-process match from either source always wins.
+            let allowed = node.ready
+                && node.own != Some(true)
+                && client_own != Some(true)
+                && (node.own == Some(false) || client_own == Some(false));
+            if allowed {
+                if self.app_nodes.insert(id) {
+                    tracing::info!(id, "screen audio external output allowed");
+                }
+            } else {
+                self.app_nodes.remove(&id);
+                for (&port, info) in &self.ports {
+                    if info.node == id {
+                        self.links.remove(&port);
+                    }
+                }
+            }
             self.link_pending();
         }
 
@@ -157,6 +314,21 @@ mod linux {
         }
 
         fn global_removed(&mut self, id: u32) {
+            self.nodes.remove(&id);
+            if self.clients.remove(&id).is_some() {
+                let nodes: Vec<u32> = self
+                    .nodes
+                    .iter()
+                    .filter(|(_, node)| node.client == Some(id))
+                    .map(|(&id, _)| id)
+                    .collect();
+                for node in nodes {
+                    if let Some(watch) = self.nodes.get_mut(&node) {
+                        watch.ready = false;
+                    }
+                    self.refresh_node(node);
+                }
+            }
             if self.own_node == Some(id) {
                 self.own_node = None;
                 self.own_ports.clear();
@@ -212,7 +384,6 @@ mod linux {
                         },
                     ) {
                         Ok(link) => {
-                            tracing::debug!(port, target, "screen audio app port linked");
                             created.push(link);
                         }
                         Err(e) => tracing::warn!("screen audio link {port}->{target} failed: {e}"),
@@ -294,9 +465,10 @@ mod linux {
             move |_| mainloop.quit()
         });
 
-        let registry = core
-            .get_registry()
-            .map_err(|e| format!("pipewire registry: {e}"))?;
+        let registry = Rc::new(
+            core.get_registry()
+                .map_err(|e| format!("pipewire registry: {e}"))?,
+        );
         let graph = Rc::new(RefCell::new(Graph::new(core.clone())));
 
         let props = properties! {
@@ -374,7 +546,12 @@ mod linux {
             .add_listener_local()
             .global({
                 let graph = graph.clone();
-                move |global| graph.borrow_mut().global_added(global)
+                let registry = registry.clone();
+                move |global| {
+                    graph
+                        .borrow_mut()
+                        .global_added(&registry, global, Rc::downgrade(&graph))
+                }
             })
             .global_remove({
                 let graph = graph.clone();

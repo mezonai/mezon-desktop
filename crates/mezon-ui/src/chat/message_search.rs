@@ -1556,6 +1556,7 @@ pub fn render_header_search_bar(
                 .px_2()
                 .cursor_pointer()
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    cx.stop_propagation();
                     if let Some(layout) = layout_for_click.upgrade() {
                         layout.update(cx, |layout, cx| layout.expand_message_search(window, cx));
                     }
@@ -2246,4 +2247,80 @@ pub fn init(cx: &mut App) {
         };
         layout.update(cx, |layout, cx| layout.select_prev_search_dropdown_item(cx));
     });
+}
+
+#[cfg(test)]
+mod header_search_bar_tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use gpui::prelude::*;
+    use gpui::{
+        Context, Modifiers, MouseButton, Render, VisualTestContext, WeakEntity, Window, div, point,
+        px, size,
+    };
+
+    use super::{SEARCH_BAR_WIDTH_COLLAPSED, render_header_search_bar};
+    use crate::chat::layout::ChatLayout;
+    use crate::theme::Theme;
+
+    struct DragAreaHost {
+        pressed_behind: Rc<Cell<bool>>,
+    }
+
+    impl Render for DragAreaHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let pressed_behind = self.pressed_behind.clone();
+            div()
+                .size_full()
+                .child(
+                    div()
+                        .absolute()
+                        .size_full()
+                        .on_mouse_down(MouseButton::Left, move |_, _, _| pressed_behind.set(true)),
+                )
+                .child(render_header_search_bar(
+                    &Theme::dark(),
+                    "en",
+                    None,
+                    false,
+                    false,
+                    WeakEntity::<ChatLayout>::new_invalid(),
+                    cx,
+                ))
+        }
+    }
+
+    fn draw_over_drag_area(cx: &mut VisualTestContext, pressed_behind: Rc<Cell<bool>>) {
+        cx.draw(
+            point(px(0.), px(0.)),
+            size(px(400.), px(50.)),
+            move |_, cx| {
+                cx.new(|_| DragAreaHost { pressed_behind })
+                    .into_any_element()
+            },
+        );
+    }
+
+    #[gpui::test]
+    fn a_press_in_the_search_bar_never_reaches_the_window_drag_area(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let pressed_behind = Rc::new(Cell::new(false));
+
+        draw_over_drag_area(cx, pressed_behind.clone());
+        cx.simulate_mouse_down(
+            point(px(20.), px(16.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        assert!(!pressed_behind.get());
+
+        draw_over_drag_area(cx, pressed_behind.clone());
+        cx.simulate_mouse_down(
+            point(px(SEARCH_BAR_WIDTH_COLLAPSED + 20.), px(16.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        assert!(pressed_behind.get());
+    }
 }
