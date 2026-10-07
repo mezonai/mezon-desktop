@@ -35,10 +35,17 @@ use items::{
     build_palette_items_from_ctrlk, ensure_palette_sources_loaded, render_palette_row,
 };
 
-const FILTER_DEBOUNCE_MS: u64 = 300;
+pub(crate) const FILTER_DEBOUNCE_MS: u64 = 300;
 pub(crate) const KEY_CONTEXT: &str = "CommandPalette";
 
 actions!(mezon_command_palette, [PaletteMoveUp, PaletteMoveDown]);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecomputeMode {
+    QueryChanged,
+    SearchSettled,
+    DataRefresh,
+}
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
@@ -184,7 +191,7 @@ impl CommandPaletteModal {
                     });
                 }
                 this._router_observe = cx.observe(&Router::global(cx), |this, _, cx| {
-                    this.recompute_filtered(cx);
+                    this.recompute_filtered(RecomputeMode::DataRefresh, cx);
                     cx.notify();
                 });
                 this._ctrlk_observe = cx.observe(&CtrlKSearchStore::global(cx), |this, _, cx| {
@@ -192,7 +199,7 @@ impl CommandPaletteModal {
                     if api_text.is_empty() {
                         return;
                     }
-                    this.recompute_filtered(cx);
+                    this.recompute_filtered(RecomputeMode::SearchSettled, cx);
                     cx.notify();
                 });
                 if let Some(store) = AccountStore::try_global(cx) {
@@ -210,6 +217,9 @@ impl CommandPaletteModal {
 
     pub fn close(cx: &mut App) {
         Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+        if let Some(store) = CtrlKSearchStore::try_global(cx) {
+            store.update(cx, |store, cx| store.clear(cx));
+        }
     }
 
     pub fn try_toggle_authenticated(cx: &mut App) {
@@ -259,49 +269,52 @@ impl CommandPaletteModal {
                 .timer(Duration::from_millis(FILTER_DEBOUNCE_MS))
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.debounced_query = this.search_input.read(cx).value().to_string();
-                if this.debounced_query.trim().is_empty() {
-                    CtrlKSearchStore::global(cx).update(cx, |store, cx| store.clear(cx));
-                    this.recompute_filtered(cx);
-                    this.scroll
-                        .scroll_to_item(this.selected_visible, ScrollStrategy::Top);
-                    cx.notify();
-                    return;
-                }
-                let (text, search_type) = parse_ctrlk_query(&this.debounced_query);
-                if text.is_empty() {
-                    CtrlKSearchStore::global(cx).update(cx, |store, cx| store.clear(cx));
-                    this.recompute_filtered(cx);
-                    this.scroll
-                        .scroll_to_item(this.selected_visible, ScrollStrategy::Top);
-                    cx.notify();
-                    return;
-                }
-                CtrlKSearchStore::global(cx).update(cx, |store, cx| {
-                    store.search(text, search_type, cx);
-                });
-                this.recompute_filtered(cx);
-                this.scroll
-                    .scroll_to_item(this.selected_visible, ScrollStrategy::Top);
-                cx.notify();
+                this.apply_debounced_query(cx);
             });
         });
     }
 
-    fn recompute_filtered(&mut self, cx: &App) {
-        let previous_selection = self.selected_item_id();
+    fn apply_debounced_query(&mut self, cx: &mut Context<Self>) {
+        let next = self.search_input.read(cx).value().to_string();
+        if self.debounced_query != next {
+            self.debounced_query.clone_from(&next);
+        }
+        let (text, search_type) = parse_ctrlk_query(&self.debounced_query);
+        if text.is_empty() {
+            CtrlKSearchStore::global(cx).update(cx, |store, cx| store.clear(cx));
+        } else {
+            CtrlKSearchStore::global(cx).update(cx, |store, cx| {
+                store.search(text, search_type, cx);
+            });
+        }
+        self.recompute_filtered(RecomputeMode::QueryChanged, cx);
+        cx.notify();
+    }
+
+    fn recompute_filtered(&mut self, mode: RecomputeMode, cx: &App) {
         let query = self.debounced_query.trim();
+        let reset_selection = matches!(
+            mode,
+            RecomputeMode::QueryChanged | RecomputeMode::SearchSettled
+        );
+        let previous_selection = if reset_selection {
+            None
+        } else {
+            self.selected_item_id()
+        };
         let (api_text, _) = parse_ctrlk_query(query);
         if query.is_empty() || api_text.is_empty() {
             self.items = Rc::new(build_palette_items(cx));
             self.recompute_local_filtered(cx, previous_selection);
+            self.finish_selection(reset_selection);
             return;
         }
 
         let ctrlk = CtrlKSearchStore::global(cx);
-        if !ctrlk.read(cx).has_settled_response() {
+        if !ctrlk.read(cx).matches_settled_query(query) {
             self.items = Rc::new(build_palette_items(cx));
             self.recompute_local_filtered(cx, previous_selection);
+            self.finish_selection(reset_selection);
             return;
         }
 
@@ -326,11 +339,8 @@ impl CommandPaletteModal {
             None,
             &section_labels(&self.locale),
         ));
-        self.selected_visible = previous_selection
-            .and_then(|id| {
-                find_visible_row_by_item_id(self.display_rows.as_ref(), self.items.as_ref(), id)
-            })
-            .unwrap_or_else(|| first_selectable_row(self.display_rows.as_ref()));
+        self.apply_selection(previous_selection);
+        self.finish_selection(reset_selection);
     }
 
     fn recompute_local_filtered(&mut self, cx: &App, previous_selection: Option<PaletteItemId>) {
@@ -354,11 +364,26 @@ impl CommandPaletteModal {
             browse_context,
             &section_labels(&self.locale),
         ));
+        self.apply_selection(previous_selection);
+    }
+
+    fn apply_selection(&mut self, previous_selection: Option<PaletteItemId>) {
         self.selected_visible = previous_selection
             .and_then(|id| {
                 find_visible_row_by_item_id(self.display_rows.as_ref(), self.items.as_ref(), id)
             })
             .unwrap_or_else(|| first_selectable_row(self.display_rows.as_ref()));
+    }
+
+    fn finish_selection(&mut self, reset_selection: bool) {
+        if !reset_selection {
+            return;
+        }
+        self.keyboard_nav = true;
+        if self.display_rows.is_empty() {
+            return;
+        }
+        self.scroll.scroll_to_item(0, ScrollStrategy::Top);
     }
 
     fn selected_item_id(&self) -> Option<PaletteItemId> {
@@ -378,7 +403,7 @@ impl CommandPaletteModal {
             items::ensure_palette_clans_loaded(store, cx);
         });
         self.items_dirty = false;
-        self.recompute_filtered(cx);
+        self.recompute_filtered(RecomputeMode::DataRefresh, cx);
         cx.notify();
     }
 

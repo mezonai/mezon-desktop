@@ -52,6 +52,18 @@ fn named_host(host: Option<String>) -> Option<String> {
     host.filter(|host| !host.is_empty())
 }
 
+fn endpoint_id_or_host_index(reported_id: i32, host: &str) -> i32 {
+    if reported_id > 0 {
+        return reported_id;
+    }
+    let first_label = host.split('.').next().unwrap_or_default();
+    match first_label.strip_prefix("sock") {
+        Some("") => 1,
+        Some(index) => index.parse::<u16>().map(i32::from).unwrap_or_default(),
+        None => 0,
+    }
+}
+
 pub(crate) fn deserialize_endpoint_id<'de, D>(deserializer: D) -> Result<i32, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -277,7 +289,7 @@ impl Session {
             return None;
         }
         Some(RealtimeEndpoint {
-            id: self.endpoint_id,
+            id: endpoint_id_or_host_index(self.endpoint_id, &host),
             host,
             port: self.realtime_port(default_port),
         })
@@ -655,6 +667,71 @@ mod tests {
         };
         assert!(session.apply_healthy_endpoint(&moved, Some(4433)));
         assert_eq!(session.endpoint_id, 0);
+    }
+
+    #[test]
+    fn a_node_the_gateway_did_not_number_is_numbered_by_its_sock_host() {
+        let cases = [
+            ("sock.mezon.ai", 1),
+            ("sock2.mezon.ai", 2),
+            ("sock3.mezon.ai", 3),
+            ("dev-mezon-sock.nccsoft.vn", 0),
+            ("socket.mezon.ai", 0),
+            ("sock-1.mezon.ai", 0),
+            ("127.0.0.1", 0),
+        ];
+        for (host, expected) in cases {
+            let session = Session {
+                tcp_host: Some(host.into()),
+                ..Default::default()
+            };
+            let endpoint = session.realtime_endpoint("", Some(443)).expect("a node");
+            assert_eq!(endpoint.id, expected, "{host}");
+        }
+    }
+
+    #[test]
+    fn each_move_reports_the_node_it_landed_on() {
+        let mut session = Session {
+            user_id: "7".into(),
+            tcp_url: Some("sock.mezon.ai".into()),
+            tcp_host: Some("sock.mezon.ai".into()),
+            ..Default::default()
+        };
+        let current_id = |session: &Session| {
+            session
+                .realtime_endpoint("", Some(443))
+                .map(|endpoint| endpoint.id)
+        };
+        assert_eq!(current_id(&session), Some(1));
+
+        let to_sock3 = HealthyEndpointSession {
+            user_id: "7".into(),
+            tcp_url: Some("sock3.mezon.ai".into()),
+            ..Default::default()
+        };
+        assert!(session.apply_healthy_endpoint(&to_sock3, Some(443)));
+        assert_eq!(current_id(&session), Some(3));
+
+        let back_to_sock = HealthyEndpointSession {
+            user_id: "7".into(),
+            tcp_url: Some("sock.mezon.ai".into()),
+            ..Default::default()
+        };
+        assert!(session.apply_healthy_endpoint(&back_to_sock, Some(443)));
+        assert_eq!(current_id(&session), Some(1));
+    }
+
+    #[test]
+    fn an_id_the_gateway_sent_wins_over_the_host_number() {
+        let session = Session {
+            endpoint_id: 5,
+            tcp_host: Some("sock2.mezon.ai".into()),
+            ..Default::default()
+        };
+
+        let endpoint = session.realtime_endpoint("", Some(443)).expect("a node");
+        assert_eq!(endpoint.id, 5);
     }
 
     #[test]

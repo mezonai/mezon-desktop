@@ -89,6 +89,15 @@ struct EndpointRefreshRequest {
     generation: u64,
 }
 
+impl EndpointRefreshRequest {
+    fn reported_endpoint_id(&self) -> i32 {
+        match self.reason {
+            HealthyEndpointReason::Unreachable => self.endpoint.id,
+            HealthyEndpointReason::HighLatency => 0,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HealthyEndpointCredential {
     Jwt,
@@ -335,7 +344,7 @@ impl ConnectionStore {
                     last_endpoint_refresh_at = Some(Instant::now());
                     tracing::info!(
                         "Asking the gateway for a node: current_endpoint_id={} reason_code={}",
-                        request.endpoint.id,
+                        request.reported_endpoint_id(),
                         request.reason as i32
                     );
                     if healthy_endpoint_credential(&session).is_none()
@@ -369,7 +378,7 @@ impl ConnectionStore {
                         &exec,
                         &auth_client,
                         healthy_endpoint_credential_value(&session, credential),
-                        request.endpoint.id,
+                        request.reported_endpoint_id(),
                         request.reason,
                     )
                     .await;
@@ -400,7 +409,7 @@ impl ConnectionStore {
                                 &exec,
                                 &auth_client,
                                 healthy_endpoint_credential_value(&session, fallback),
-                                request.endpoint.id,
+                                request.reported_endpoint_id(),
                                 request.reason,
                             )
                             .await;
@@ -2431,6 +2440,28 @@ mod tests {
         assert!(!healthy_endpoint_auth_rejected(&anyhow::anyhow!(
             "network error"
         )));
+    }
+
+    #[test]
+    fn only_an_unreachable_report_names_the_node_it_is_leaving() {
+        let endpoint = RealtimeEndpoint {
+            id: 1,
+            host: "sock.mezon.ai".into(),
+            port: 443,
+        };
+        let unreachable = EndpointRefreshRequest {
+            endpoint: endpoint.clone(),
+            reason: HealthyEndpointReason::Unreachable,
+            generation: 0,
+        };
+        let slow = EndpointRefreshRequest {
+            endpoint,
+            reason: HealthyEndpointReason::HighLatency,
+            generation: 0,
+        };
+
+        assert_eq!(unreachable.reported_endpoint_id(), 1);
+        assert_eq!(slow.reported_endpoint_id(), 0);
     }
 
     #[test]

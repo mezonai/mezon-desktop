@@ -1264,7 +1264,7 @@ impl ThreadsStore {
                 )
                 .await
             } else {
-                match upload_attachments_now(&api, attachments).await {
+                match upload_attachments_now(&api, attachments, thread_id).await {
                     Ok(uploaded) => {
                         api.send_presigned_message(
                             clan_id_i64,

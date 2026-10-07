@@ -14,8 +14,6 @@ pub enum MediaPermission {
     Denied,
 }
 
-pub const MEDIA_DENIAL_IS_AUTHORITATIVE: bool = cfg!(target_os = "macos");
-
 type ChangeChannel = (flume::Sender<MediaDevice>, flume::Receiver<MediaDevice>);
 
 static CHANGES: LazyLock<ChangeChannel> = LazyLock::new(flume::unbounded);
@@ -34,6 +32,10 @@ pub fn request_media_permission(device: MediaDevice) {
 
 pub fn media_privacy_settings_url(device: MediaDevice) -> Option<&'static str> {
     platform::settings_url(device)
+}
+
+pub fn running_packaged() -> bool {
+    platform::packaged()
 }
 
 #[cfg(target_os = "macos")]
@@ -116,6 +118,10 @@ mod platform {
         }
     }
 
+    pub(super) fn packaged() -> bool {
+        false
+    }
+
     pub(super) fn settings_url(device: MediaDevice) -> Option<&'static str> {
         Some(match device {
             MediaDevice::Microphone => {
@@ -132,51 +138,51 @@ mod platform {
 mod platform {
     use std::sync::LazyLock;
 
-    use windows::Win32::Foundation::NO_ERROR;
+    use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
+    use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFamilyName;
     use windows::Win32::System::Registry::{
-        HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW,
+        HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegGetValueW,
     };
-    use windows::core::{PCWSTR, w};
+    use windows::core::{HSTRING, PWSTR, w};
 
     use super::{MediaDevice, MediaPermission, publish_change};
 
-    static PACKAGED: LazyLock<bool> = LazyLock::new(|| {
-        std::env::current_exe().is_ok_and(|exe| {
-            exe.to_string_lossy()
-                .to_ascii_lowercase()
-                .contains("\\windowsapps\\")
-        })
-    });
+    static PACKAGE_FAMILY: LazyLock<Option<String>> = LazyLock::new(current_package_family);
 
-    fn device_key(device: MediaDevice) -> PCWSTR {
+    fn current_package_family() -> Option<String> {
+        let mut len = 0u32;
+        if unsafe { GetCurrentPackageFamilyName(&mut len, None) } != ERROR_INSUFFICIENT_BUFFER {
+            return None;
+        }
+        let mut buffer = vec![0u16; len as usize];
+        let result =
+            unsafe { GetCurrentPackageFamilyName(&mut len, Some(PWSTR(buffer.as_mut_ptr()))) };
+        if result != NO_ERROR {
+            return None;
+        }
+        buffer.truncate((len as usize).saturating_sub(1));
+        Some(String::from_utf16_lossy(&buffer))
+    }
+
+    fn consent_key(device: MediaDevice) -> &'static str {
         match device {
-            MediaDevice::Microphone => w!(
+            MediaDevice::Microphone => {
                 r"SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
-            ),
-            MediaDevice::Camera => w!(
+            }
+            MediaDevice::Camera => {
                 r"SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam"
-            ),
+            }
         }
     }
 
-    fn desktop_apps_key(device: MediaDevice) -> PCWSTR {
-        match device {
-            MediaDevice::Microphone => w!(
-                r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\NonPackaged"
-            ),
-            MediaDevice::Camera => w!(
-                r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam\NonPackaged"
-            ),
-        }
-    }
-
-    fn consent_denied(root: HKEY, key: PCWSTR) -> bool {
+    fn consent_denied(root: HKEY, key: &str) -> bool {
+        let key = HSTRING::from(key);
         let mut buffer = [0u16; 16];
         let mut size = std::mem::size_of_val(&buffer) as u32;
         let result = unsafe {
             RegGetValueW(
                 root,
-                key,
+                &key,
                 w!("Value"),
                 RRF_RT_REG_SZ,
                 None,
@@ -191,9 +197,48 @@ mod platform {
         String::from_utf16_lossy(&buffer[..len]).eq_ignore_ascii_case("Deny")
     }
 
+    fn forced_by_policy(device: MediaDevice) -> Option<bool> {
+        let value_name = match device {
+            MediaDevice::Microphone => w!("LetAppsAccessMicrophone"),
+            MediaDevice::Camera => w!("LetAppsAccessCamera"),
+        };
+        let mut value = 0u32;
+        let mut size = std::mem::size_of_val(&value) as u32;
+        let result = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                w!(r"SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"),
+                value_name,
+                RRF_RT_REG_DWORD,
+                None,
+                Some((&mut value as *mut u32).cast()),
+                Some(&mut size),
+            )
+        };
+        match (result == NO_ERROR, value) {
+            (true, 1) => Some(true),
+            (true, 2) => Some(false),
+            _ => None,
+        }
+    }
+
+    pub(super) fn packaged() -> bool {
+        PACKAGE_FAMILY.is_some()
+    }
+
     pub(super) fn status(device: MediaDevice) -> MediaPermission {
-        let denied = consent_denied(HKEY_LOCAL_MACHINE, device_key(device))
-            || (!*PACKAGED && consent_denied(HKEY_CURRENT_USER, desktop_apps_key(device)));
+        let key = consent_key(device);
+        let denied = consent_denied(HKEY_LOCAL_MACHINE, key)
+            || match PACKAGE_FAMILY.as_deref() {
+                Some(family) => match forced_by_policy(device) {
+                    Some(allowed) => !allowed,
+                    None => {
+                        consent_denied(HKEY_CURRENT_USER, key)
+                            || consent_denied(HKEY_CURRENT_USER, &format!(r"{key}\{family}"))
+                    }
+                },
+                None => consent_denied(HKEY_CURRENT_USER, &format!(r"{key}\NonPackaged")),
+            };
         if denied {
             MediaPermission::Denied
         } else {
@@ -225,6 +270,10 @@ mod platform {
     pub(super) fn request(device: MediaDevice, on_done: impl Fn(bool) + Send + 'static) {
         on_done(true);
         publish_change(device);
+    }
+
+    pub(super) fn packaged() -> bool {
+        false
     }
 
     pub(super) fn settings_url(_device: MediaDevice) -> Option<&'static str> {

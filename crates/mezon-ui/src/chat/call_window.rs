@@ -621,13 +621,11 @@ impl CallPanelView {
             })
             .on_click(move |_, _, cx| {
                 let id = id.clone();
-                call.update(cx, |store, cx| {
-                    if is_input {
-                        store.set_input_device(id, cx);
-                    } else {
-                        store.set_output_device(id, cx);
-                    }
-                });
+                if is_input {
+                    call.update(cx, |store, cx| store.set_input_device(id, cx));
+                } else {
+                    mezon_store::set_output_device(id, cx);
+                }
                 view.update(cx, |this, cx| {
                     this.device_menu_open = false;
                     cx.notify();

@@ -1,17 +1,21 @@
 use gpui::{
-    AnyElement, App, Entity, FocusHandle, FontWeight, ObjectFit, Rgba, SharedString, Window, div,
-    img, prelude::*, px, relative,
+    Anchor, AnyElement, App, ClickEvent, Context, CursorStyle, DismissEvent, Entity, EventEmitter,
+    FocusHandle, Focusable, FontWeight, MouseDownEvent, ObjectFit, Rgba, SharedString,
+    Subscription, Window, div, img, point, prelude::*, px, relative,
 };
 use mezon_store::{
-    AppConfig, AuthState, Channel, ChannelId, ChannelList, ClanId, ClanList, StreamMember,
-    StreamPhase, StreamStore,
+    AppConfig, AudioStore, AuthState, Channel, ChannelId, ChannelList, ClanId, ClanList,
+    DeviceKind, StreamMember, StreamPhase, StreamStore,
 };
 
 use crate::chat::layout::ChatLayout;
+use crate::chat::voice::{
+    audio_device_entries, device_option_row, device_radio, selected_device_id,
+};
 use crate::components::primitives::{Avatar, Icon, IconName, Slider, SliderState};
-use crate::theme::Theme;
+use crate::theme::{ActiveTheme, Theme};
 use crate::util::assets::STREAM_THUMBNAIL;
-use ui::Tooltip;
+use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable, Tooltip};
 
 const MEMBER_AVATAR_SIZE: f32 = 40.;
 
@@ -34,6 +38,7 @@ pub fn render_stream_channel(
     auth: &Entity<AuthState>,
     _chat: &Entity<ChatLayout>,
     volume_slider: &Entity<SliderState>,
+    output_menu: &PopoverMenuHandle<StreamOutputMenu>,
     output_device_id: Option<String>,
     window_width: f32,
     cx: &App,
@@ -81,6 +86,7 @@ pub fn render_stream_channel(
             show_chat,
             stream_entity.clone(),
             volume_slider,
+            output_menu,
             cx,
         )
     } else {
@@ -157,6 +163,7 @@ fn join_stream_action(
 pub fn render_stream_fullscreen_overlay(
     window: &mut Window,
     theme: &Theme,
+    locale: &str,
     store: &StreamStore,
     stream: Entity<StreamStore>,
     volume_slider: &Entity<SliderState>,
@@ -170,10 +177,12 @@ pub fn render_stream_fullscreen_overlay(
     let player = render_stream_player(
         window,
         theme,
+        locale,
         &channel,
         store,
         stream.clone(),
         volume_slider,
+        None,
         cx,
         true,
     );
@@ -627,6 +636,7 @@ fn render_joined(
     show_chat: bool,
     stream: Entity<StreamStore>,
     volume_slider: &Entity<SliderState>,
+    output_menu: &PopoverMenuHandle<StreamOutputMenu>,
     cx: &App,
 ) -> AnyElement {
     let show_members = store.show_members();
@@ -645,10 +655,12 @@ fn render_joined(
     let player = render_stream_player(
         window,
         theme,
+        locale,
         channel,
         store,
         stream.clone(),
         volume_slider,
+        Some(output_menu),
         cx,
         false,
     );
@@ -864,10 +876,12 @@ fn render_members_toggle_button(
 fn render_stream_player(
     window: &mut Window,
     _theme: &Theme,
+    locale: &str,
     channel: &Channel,
     store: &StreamStore,
     stream: Entity<StreamStore>,
     volume_slider: &Entity<SliderState>,
+    output_menu: Option<&PopoverMenuHandle<StreamOutputMenu>>,
     cx: &App,
     always_show_controls: bool,
 ) -> AnyElement {
@@ -883,9 +897,11 @@ fn render_stream_player(
         .child(div().size_full().overflow_hidden().child(media))
         .child(render_controls_bar(
             window,
+            locale,
             store,
             stream,
             volume_slider,
+            output_menu,
             cx,
             always_show_controls,
         ))
@@ -894,9 +910,11 @@ fn render_stream_player(
 
 fn render_controls_bar(
     _window: &mut Window,
+    locale: &str,
     store: &StreamStore,
     stream: Entity<StreamStore>,
     volume_slider: &Entity<SliderState>,
+    output_menu: Option<&PopoverMenuHandle<StreamOutputMenu>>,
     _cx: &App,
     always_show: bool,
 ) -> AnyElement {
@@ -908,6 +926,8 @@ fn render_controls_bar(
     let stream_fullscreen = stream.clone();
     let volume_slider_mute = volume_slider.clone();
     let icon_color = gpui::rgba(0xaeaeaeff);
+    let output_menu_open = output_menu.is_some_and(PopoverMenuHandle::is_deployed);
+    let output_picker = render_output_picker(locale, stream, output_menu, icon_color);
 
     div()
         .absolute()
@@ -920,7 +940,7 @@ fn render_controls_bar(
         .justify_between()
         .p_2()
         .bg(gpui::rgba(0x00000080))
-        .when(!always_show, |el| {
+        .when(!always_show && !output_menu_open, |el| {
             el.opacity(0.)
                 .group_hover("stream-player", |s| s.opacity(100.))
         })
@@ -959,24 +979,215 @@ fn render_controls_bar(
         )
         .child(
             div()
-                .id("stream-fullscreen-toggle")
-                .p_1()
-                .cursor_pointer()
-                .hover(move |s| s.opacity(0.8))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(output_picker)
                 .child(
-                    Icon::new(if fullscreen {
-                        IconName::ExitFullScreen
-                    } else {
-                        IconName::FullScreen
-                    })
-                    .size(px(18.))
-                    .text_color(icon_color),
-                )
-                .on_click(move |_, _, cx| {
-                    stream_fullscreen.update(cx, |store, cx| store.toggle_fullscreen(cx));
-                }),
+                    div()
+                        .id("stream-fullscreen-toggle")
+                        .p_1()
+                        .cursor_pointer()
+                        .hover(move |s| s.opacity(0.8))
+                        .child(
+                            Icon::new(if fullscreen {
+                                IconName::ExitFullScreen
+                            } else {
+                                IconName::FullScreen
+                            })
+                            .size(px(18.))
+                            .text_color(icon_color),
+                        )
+                        .on_click(move |_, _, cx| {
+                            stream_fullscreen.update(cx, |store, cx| store.toggle_fullscreen(cx));
+                        }),
+                ),
         )
         .into_any_element()
+}
+
+fn render_output_picker(
+    locale: &str,
+    stream: Entity<StreamStore>,
+    output_menu: Option<&PopoverMenuHandle<StreamOutputMenu>>,
+    icon_color: Rgba,
+) -> AnyElement {
+    let label = SharedString::from(mezon_i18n::t(locale, "channelVoice.device.outputDevice"));
+    let locale = locale.to_string();
+    let picker = PopoverMenu::new("stream-output-popover")
+        .anchor(Anchor::BottomRight)
+        .attach(Anchor::TopRight)
+        .offset(point(px(0.), -px(8.)))
+        .menu(move |window, cx| {
+            let stream = stream.clone();
+            let locale = locale.clone();
+            Some(cx.new(|cx| StreamOutputMenu::new(stream, locale, window, cx)))
+        })
+        .trigger(StreamOutputTrigger::new(icon_color, label));
+    picker
+        .when_some(output_menu, |picker, handle| {
+            picker.with_handle(handle.clone())
+        })
+        .into_any_element()
+}
+
+#[derive(IntoElement)]
+struct StreamOutputTrigger {
+    open: bool,
+    icon_color: Rgba,
+    label: SharedString,
+    on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
+}
+
+impl StreamOutputTrigger {
+    fn new(icon_color: Rgba, label: SharedString) -> Self {
+        Self {
+            open: false,
+            icon_color,
+            label,
+            on_click: None,
+        }
+    }
+}
+
+impl Toggleable for StreamOutputTrigger {
+    fn toggle_state(mut self, selected: bool) -> Self {
+        self.open = selected;
+        self
+    }
+}
+
+impl Clickable for StreamOutputTrigger {
+    fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+
+    fn cursor_style(self, _cursor_style: CursorStyle) -> Self {
+        self
+    }
+}
+
+impl RenderOnce for StreamOutputTrigger {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let trigger = div()
+            .id("stream-output-toggle")
+            .p_1()
+            .rounded_sm()
+            .cursor_pointer()
+            .hover(|s| s.opacity(0.8))
+            .when(self.open, |el| el.bg(gpui::rgba(0xffffff26)))
+            .when(!self.open, |el| el.tooltip(Tooltip::text(self.label)))
+            .child(
+                Icon::new(IconName::Settings)
+                    .size(px(18.))
+                    .text_color(self.icon_color),
+            );
+        match self.on_click {
+            Some(on_click) => trigger.on_click(on_click),
+            None => trigger,
+        }
+    }
+}
+
+pub struct StreamOutputMenu {
+    stream: Entity<StreamStore>,
+    locale: String,
+    focus_handle: FocusHandle,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl StreamOutputMenu {
+    fn new(
+        stream: Entity<StreamStore>,
+        locale: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let focus_handle = cx.focus_handle();
+        let mut subscriptions =
+            vec![cx.on_blur(&focus_handle, window, |_, _, cx| cx.emit(DismissEvent))];
+        if let Some(audio) = AudioStore::try_global(cx) {
+            subscriptions.push(cx.observe(&audio, |_, _, cx| cx.notify()));
+            AudioStore::refresh_devices(&audio, cx);
+        }
+        Self {
+            stream,
+            locale,
+            focus_handle,
+            _subscriptions: subscriptions,
+        }
+    }
+}
+
+impl Focusable for StreamOutputMenu {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl EventEmitter<DismissEvent> for StreamOutputMenu {}
+
+impl Render for StreamOutputMenu {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let tokens = &theme.tokens;
+        let entries = audio_device_entries(DeviceKind::AudioOutput, &self.locale, cx);
+        let selected_id = selected_device_id(&entries, self.stream.read(cx).output_device_id());
+        let rows = entries.into_iter().map(|(id, name)| {
+            let selected = id == selected_id;
+            let row_id = SharedString::from(format!(
+                "stream-output-{}",
+                id.as_deref().unwrap_or("default")
+            ));
+            device_option_row(
+                row_id,
+                name,
+                device_radio(tokens.text_secondary, selected),
+                tokens.text_theme_message,
+                tokens.bg_item_hover,
+            )
+            .on_click(cx.listener(move |_, _, _, cx| {
+                mezon_store::set_output_device(id.clone(), cx);
+                cx.emit(DismissEvent);
+            }))
+        });
+
+        div()
+            .id("stream-output-menu")
+            .key_context("menu")
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|_, _: &::menu::Cancel, _, cx| cx.emit(DismissEvent)))
+            .on_mouse_down_out(cx.listener(|_, _: &MouseDownEvent, _, cx| cx.emit(DismissEvent)))
+            .occlude()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .w(px(280.))
+            .max_h(px(320.))
+            .overflow_y_scroll()
+            .p_1()
+            .rounded_md()
+            .border_1()
+            .border_color(tokens.border_primary)
+            .bg(tokens.theme_setting_primary)
+            .shadow_lg()
+            .child(
+                div()
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(tokens.text_secondary)
+                    .child(mezon_i18n::t(
+                        &self.locale,
+                        "channelVoice.device.outputDevice",
+                    )),
+            )
+            .children(rows)
+    }
 }
 
 fn volume_icon(volume: f32, muted: bool) -> IconName {

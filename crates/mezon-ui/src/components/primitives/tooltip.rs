@@ -19,6 +19,7 @@ impl Tooltip {
 impl Render for Tooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .font_family(crate::theme::ui_font_family(cx))
             .px(px(8.))
             .py(px(4.))
             .rounded_md()

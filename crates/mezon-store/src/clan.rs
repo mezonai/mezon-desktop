@@ -884,11 +884,12 @@ impl ClanList {
     }
 
     pub fn sync_has_unread_from_channels(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
-        let channel_list = ChannelList::global(cx).read(cx);
-        if !channel_list.is_clan_cache_loaded(clan_id) {
+        let Some(has_unread) = ChannelList::global(cx)
+            .read(cx)
+            .clan_has_any_unread(clan_id)
+        else {
             return;
-        }
-        let has_unread = channel_list.clan_has_any_unread(clan_id);
+        };
         self.set_has_unread(clan_id, has_unread, cx);
     }
 
@@ -1087,27 +1088,27 @@ impl ClanList {
         name: String,
         logo: String,
         cx: &mut Context<Self>,
-    ) -> Task<Result<String, CreateClanError>> {
+    ) -> Task<Result<String, ClanSaveError>> {
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let trimmed = name.trim().to_string();
             let is_dup = api
                 .check_duplicate_clan_name(&trimmed, "0")
                 .await
-                .map_err(|e| CreateClanError::Other(e.to_string()))?;
+                .map_err(|e| ClanSaveError::Other(e.to_string()))?;
             if is_dup {
-                return Err(CreateClanError::DuplicateName);
+                return Err(ClanSaveError::DuplicateName);
             }
             let desc = api
                 .create_clan_desc(&trimmed, &logo, "")
                 .await
-                .map_err(|e| CreateClanError::Other(e.to_string()))?;
+                .map_err(|e| ClanSaveError::Other(e.to_string()))?;
             let clan_id = desc.clan_id;
             this.update(cx, |this, cx| {
                 apply_created_clan(&mut this.clans, desc);
                 this.select_clan(ClanId(clan_id), cx);
             })
-            .map_err(|_| CreateClanError::Other("store dropped".into()))?;
+            .map_err(|_| ClanSaveError::Other("store dropped".into()))?;
             Ok(clan_id.to_string())
         })
     }
@@ -1189,37 +1190,50 @@ impl ClanList {
         &mut self,
         clan_id: ClanId,
         draft: ClanOverviewDraft,
+        saved_name: &str,
         cx: &mut Context<Self>,
-    ) -> Task<Result<(), String>> {
+    ) -> Task<Result<(), ClanSaveError>> {
         let api = self.api.clone();
         let clan = self.clans.iter().find(|c| c.id == clan_id).cloned();
         let Some(clan) = clan else {
-            return cx.spawn(async move |_, _| Err("clan not found".into()));
+            return cx.spawn(async move |_, _| Err(ClanSaveError::Other("clan not found".into())));
         };
-        let request = draft.update_request(clan_id, &clan);
         let trimmed_name = draft.clan_name.trim().to_string();
-        let previous_name = clan.name.clone();
-        let local_update = draft.clan_update(&clan, trimmed_name.clone());
+        let change = name_change(&trimmed_name, saved_name, &clan.name);
+        let name_edited = change != NameChange::Unchanged;
+        let mut request = draft.update_request(clan_id, &clan);
+        if !name_edited {
+            request.clan_name.clear();
+        }
+        let check_name = change == NameChange::Renamed;
         cx.spawn(async move |this, cx| {
-            if trimmed_name != previous_name.trim() {
+            if check_name {
                 let is_duplicate = api
                     .check_duplicate_clan_name(&trimmed_name, "0")
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| ClanSaveError::Other(e.to_string()))?;
                 if is_duplicate {
-                    return Err("Duplicate clan name".into());
+                    return Err(ClanSaveError::DuplicateName);
                 }
             }
 
             api.update_clan_desc(request)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|err| clan_update_error(err, name_edited))?;
 
             this.update(cx, |this, cx| {
-                let _ = update_clan(&mut this.clans, clan_id, local_update);
+                if let Some(current) = this.clans.iter().find(|c| c.id == clan_id).cloned() {
+                    let name = if name_edited {
+                        trimmed_name
+                    } else {
+                        current.name.clone()
+                    };
+                    let _ =
+                        update_clan(&mut this.clans, clan_id, draft.clan_update(&current, name));
+                }
                 cx.notify();
             })
-            .map_err(|_| "store dropped".to_string())?;
+            .map_err(|_| ClanSaveError::Other("store dropped".into()))?;
             Ok(())
         })
     }
@@ -1531,7 +1545,7 @@ pub(crate) async fn upload_image_to_cdn(
     let (width, height) = image_dimensions(&data);
 
     let upload = api
-        .upload_attachment_file(&filename, filetype, size, width, height)
+        .upload_attachment_file(&filename, filetype, size, width, height, 0)
         .await
         .map_err(|e| e.to_string())?;
     mezon_client::transport_runtime::put_bytes_to_content_type(&upload.url, data, filetype)
@@ -1625,13 +1639,50 @@ fn update_clan(clans: &mut [Clan], clan_id: ClanId, update: ClanUpdate) -> bool 
     true
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum NameChange {
+    Unchanged,
+    OwnName,
+    Renamed,
+}
+
+fn name_change(new_name: &str, saved_name: &str, current_name: &str) -> NameChange {
+    if new_name == saved_name.trim() {
+        NameChange::Unchanged
+    } else if clan_names_match(new_name, current_name) {
+        NameChange::OwnName
+    } else {
+        NameChange::Renamed
+    }
+}
+
+fn clan_names_match(a: &str, b: &str) -> bool {
+    fn folded(name: &str) -> impl Iterator<Item = char> + '_ {
+        name.trim()
+            .chars()
+            .map(|c| c.to_lowercase().next().unwrap_or(c))
+    }
+    folded(a).eq(folded(b))
+}
+
+fn clan_update_error(err: anyhow::Error, name_sent: bool) -> ClanSaveError {
+    if name_sent
+        && mezon_client::api_status_from_error(&err)
+            .is_some_and(|status| status.is_already_exists())
+    {
+        ClanSaveError::DuplicateName
+    } else {
+        ClanSaveError::Other(err.to_string())
+    }
+}
+
 #[derive(Debug)]
-pub enum CreateClanError {
+pub enum ClanSaveError {
     DuplicateName,
     Other(String),
 }
 
-impl std::fmt::Display for CreateClanError {
+impl std::fmt::Display for ClanSaveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DuplicateName => write!(f, "A clan with that name already exists."),
@@ -2130,8 +2181,56 @@ mod tests {
     }
 
     #[test]
-    fn create_clan_error_display_duplicate_name() {
-        let err = CreateClanError::DuplicateName;
+    fn clan_names_match_ignores_case_and_surrounding_spaces() {
+        assert!(clan_names_match("mezon", "Mezon"));
+        assert!(clan_names_match(" DM ", "dm"));
+        assert!(!clan_names_match("mezon", "mezon 2"));
+    }
+
+    #[test]
+    fn an_untouched_name_is_not_sent_even_after_a_rename_elsewhere() {
+        assert_eq!(name_change("Foo", "Foo", "Bar"), NameChange::Unchanged);
+    }
+
+    #[test]
+    fn typing_the_clans_current_name_skips_the_duplicate_check() {
+        assert_eq!(name_change("Bar", "Foo", "Bar"), NameChange::OwnName);
+        assert_eq!(name_change("foo", "Foo", "Foo"), NameChange::OwnName);
+    }
+
+    #[test]
+    fn a_new_name_is_checked() {
+        assert_eq!(name_change("Baz", "Foo", "Foo"), NameChange::Renamed);
+    }
+
+    #[test]
+    fn clan_names_match_lowercases_letter_by_letter() {
+        assert!(clan_names_match("İzmir", "izmir"));
+        assert!(clan_names_match("ΟΔΟΣ", "οδοσ"));
+    }
+
+    #[test]
+    fn a_name_the_server_rejects_as_taken_is_a_duplicate() {
+        let taken = || anyhow::Error::from(mezon_client::ApiStatusError { code: 6 });
+        assert!(matches!(
+            clan_update_error(taken(), true),
+            ClanSaveError::DuplicateName
+        ));
+        assert!(matches!(
+            clan_update_error(taken(), false),
+            ClanSaveError::Other(_)
+        ));
+
+        let internal = anyhow::Error::from(mezon_client::ApiStatusError { code: 13 });
+        assert!(matches!(
+            clan_update_error(internal, true),
+            ClanSaveError::Other(_)
+        ));
+    }
+
+    #[test]
+    fn clan_save_error_display_duplicate_name() {
+        let err = ClanSaveError::DuplicateName;
         let msg = format!("{err}");
         assert!(msg.contains("already exists"));
     }
@@ -2163,8 +2262,8 @@ mod tests {
     }
 
     #[test]
-    fn create_clan_error_display_other() {
-        let err = CreateClanError::Other("network timeout".into());
+    fn clan_save_error_display_other() {
+        let err = ClanSaveError::Other("network timeout".into());
         let msg = format!("{err}");
         assert_eq!(msg, "network timeout");
     }

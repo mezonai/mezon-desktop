@@ -632,7 +632,7 @@ fn render_sound_card(
                                 IconName::AudioPlay
                             })
                             .size(px(16.0))
-                            .text_color(theme.text_primary),
+                            .text_color(gpui::white()),
                         )
                         .on_click({
                             let play_entity = entity.clone();

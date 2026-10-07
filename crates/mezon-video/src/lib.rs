@@ -18,6 +18,10 @@ mod poster_fallback;
 mod render_frame;
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod unsupported;
+#[cfg(target_os = "macos")]
+mod webm_frame_macos;
+#[cfg(any(windows, target_os = "macos"))]
+mod webm_player;
 #[cfg(windows)]
 #[path = "windows.rs"]
 mod windows_impl;
@@ -112,6 +116,28 @@ pub fn scaled_image_decode_path(_path: &std::path::Path, _max_px: u32) -> Option
     None
 }
 
+pub fn is_webm_url(url: &str) -> bool {
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        webm_player::is_webm_source(url)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = url;
+        false
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+pub struct PreparedWebm(webm_player::WebmPlayerImpl);
+
+#[cfg(any(windows, target_os = "macos"))]
+impl PreparedWebm {
+    pub fn open(url: &str, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
+        Ok(Self(webm_player::WebmPlayerImpl::open(url, max_size)?))
+    }
+}
+
 pub struct VideoPlayer {
     inner: platform::PlayerImpl,
 }
@@ -119,6 +145,22 @@ pub struct VideoPlayer {
 impl VideoPlayer {
     pub fn open(url: &str, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
         let inner = platform::PlayerImpl::open(url, max_size)?;
+        Ok(Self { inner })
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    pub fn from_prepared_webm(prepared: PreparedWebm) -> Self {
+        Self {
+            inner: platform::PlayerImpl::from_webm(prepared.0),
+        }
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    pub fn open_webm_bytes(
+        bytes: Vec<u8>,
+        max_size: Option<(u32, u32)>,
+    ) -> Result<Self, PlayerError> {
+        let inner = platform::PlayerImpl::from_webm_bytes(bytes, max_size)?;
         Ok(Self { inner })
     }
 
@@ -169,4 +211,9 @@ impl VideoPlayer {
     pub fn failed(&self) -> bool {
         self.inner.failed()
     }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+pub fn load_webm_bytes(url: &str) -> Result<Vec<u8>, PlayerError> {
+    webm_player::load_webm_bytes(url)
 }

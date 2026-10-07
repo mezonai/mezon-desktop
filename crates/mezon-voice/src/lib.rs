@@ -54,8 +54,8 @@ pub use camera::{
 pub use linux_session::record_wayland_session;
 pub use mezon_record::{RecordError, RecordStats};
 pub use permission::{
-    MEDIA_DENIAL_IS_AUTHORITATIVE, MediaDevice, MediaPermission, media_permission,
-    media_permission_changes, media_privacy_settings_url, request_media_permission,
+    MediaDevice, MediaPermission, media_permission, media_permission_changes,
+    media_privacy_settings_url, request_media_permission, running_packaged,
 };
 pub use record::{
     RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter, RecordTaps,
@@ -487,6 +487,7 @@ async fn session_main(
     let (audio_ready_tx, audio_ready_rx) = flume::bounded::<Result<audio::AudioIo>>(1);
     let mut audio_ready_rx = Some(audio_ready_rx);
     let noise_requested = noise.requested();
+    let noise_ready = noise.ready();
     runtime::runtime().spawn(async move {
         let started = tokio::task::spawn_blocking(move || {
             audio::AudioIo::start_with_noise(
@@ -494,6 +495,7 @@ async fn session_main(
                 output_device_id,
                 session_record_taps,
                 noise_requested,
+                noise_ready,
             )
         })
         .await
@@ -621,6 +623,13 @@ async fn session_main(
                         }
                         let _ = evt_tx.send(VoiceEvent::PushToTalkActive(active));
                         emit!();
+                    }
+                    SfuEvent::NetworkWeak(weak) => {
+                        let _ = evt_tx.send(if weak {
+                            VoiceEvent::NetworkWeak
+                        } else {
+                            VoiceEvent::NetworkRecovered
+                        });
                     }
                     SfuEvent::Reconnecting => {
                         for (key, task) in audio_tracks.drain() {
@@ -1055,12 +1064,15 @@ async fn uplink_pump(
     // that wait off the microphone/Mezon-NS pump so it can service both queues.
     let (uplink_tx, uplink_rx) = flume::bounded::<UplinkFrame>(10);
     let sender_noise_requested = noise_requested.clone();
+    let sender_noise_ready = noise_ready.clone();
     let sender_noise_generation = noise_generation.clone();
     let sender_mic_enabled = mic_enabled.clone();
     let _sender_task = AbortOnDrop(runtime::runtime().spawn(async move {
         let mut seen_noise_generation = sender_noise_generation.load(Ordering::Acquire);
         while let Ok(frame) = uplink_rx.recv_async().await {
             let generation = sender_noise_generation.load(Ordering::Acquire);
+            let filtering = sender_noise_requested.load(Ordering::Acquire)
+                && sender_noise_ready.load(Ordering::Acquire);
             if generation != seen_noise_generation {
                 source.clear_buffer();
                 seen_noise_generation = generation;
@@ -1069,10 +1081,9 @@ async fn uplink_pump(
                 && (!sender_mic_enabled.load(Ordering::Relaxed)
                     || match frame.filtered_generation {
                         Some(filtered_generation) => {
-                            !sender_noise_requested.load(Ordering::Acquire)
-                                || filtered_generation != generation
+                            !filtering || filtered_generation != generation
                         }
-                        None => sender_noise_requested.load(Ordering::Acquire),
+                        None => filtering,
                     })
             {
                 continue;
@@ -1086,7 +1097,7 @@ async fn uplink_pump(
     let mut meter = ScreenAudioMeter::default();
     let mut noise_overload = NoiseOverload::new();
     let mut uplink_overruns = 0u64;
-    let mut last_mic_frame = Instant::now();
+    let mut mic_clock = MicAudioClock::new(Instant::now());
     let mut tick = tokio::time::interval(UPLINK_TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -1096,6 +1107,7 @@ async fn uplink_pump(
             filtered = noise_output.recv_async() => {
                 let Ok(mut frame) = filtered else { break };
                 if !noise_requested.load(Ordering::Acquire)
+                    || !noise_ready.load(Ordering::Acquire)
                     || frame.generation != noise_generation.load(Ordering::Acquire) {
                     continue;
                 }
@@ -1133,11 +1145,12 @@ async fn uplink_pump(
             }
             captured = mic_rx.recv_async() => {
                 let Ok(samples) = captured else { break };
-                last_mic_frame = Instant::now();
                 let Some(in_fmt) = current_in_fmt else { continue };
 
                 let live = mic_enabled.load(Ordering::Relaxed);
-                let filtering = noise_requested.load(Ordering::Acquire);
+                // Keep sending normal microphone audio while the model loads or fails.
+                let filtering = noise_requested.load(Ordering::Acquire)
+                    && noise_ready.load(Ordering::Acquire);
                 if live && !filtering {
                     record_taps.push(
                         mezon_record::AudioSource::Mic,
@@ -1152,6 +1165,7 @@ async fn uplink_pump(
                 if mic_out.is_empty() {
                     continue;
                 }
+                mic_clock.observe(Instant::now(), mic_out.len());
                 if filtering {
                     let sent = if live && noise_ready.load(Ordering::Acquire) {
                         match noise_frames.try_send(std::mem::take(&mut mic_out)) {
@@ -1204,7 +1218,7 @@ async fn uplink_pump(
                 );
             }
             _ = tick.tick() => {
-                if last_mic_frame.elapsed() < MICROPHONE_SILENCE_GRACE {
+                if !mic_clock.fallback_due(Instant::now()) {
                     continue;
                 }
                 let shared = take_screen_audio(&screen_audio, UPLINK_TICK_SAMPLES * 3);
@@ -1220,6 +1234,30 @@ async fn uplink_pump(
                 );
             }
         }
+    }
+}
+
+struct MicAudioClock {
+    covered_until: Instant,
+}
+
+impl MicAudioClock {
+    fn new(now: Instant) -> Self {
+        Self { covered_until: now }
+    }
+
+    fn observe(&mut self, now: Instant, samples: usize) {
+        // Capture callbacks can deliver 40 ms as four consecutive 10 ms frames.
+        // Account for all that audio before starting the silence grace period;
+        // timing only the last callback inserts extra screen-only frames between
+        // normal capture bursts and overfills the WebRTC uplink queue.
+        let duration =
+            Duration::from_nanos(samples as u64 * 1_000_000_000 / u64::from(UPLINK_SAMPLE_RATE));
+        self.covered_until = self.covered_until.max(now) + duration;
+    }
+
+    fn fallback_due(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.covered_until) >= MICROPHONE_SILENCE_GRACE
     }
 }
 
@@ -1828,6 +1866,62 @@ fn emit_participants(
     }
     last.clone_from(&participants);
     let _ = evt_tx.send(VoiceEvent::Participants(participants));
+}
+
+#[cfg(test)]
+mod uplink_timing_tests {
+    use super::{MicAudioClock, UPLINK_TICK_SAMPLES};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn continuous_mic_batches_do_not_insert_extra_screen_frames() {
+        let start = Instant::now();
+        for callback_ms in [10, 20, 40, 80] {
+            let mut clock = MicAudioClock::new(start);
+            let mut sent_samples = 0;
+            for elapsed_ms in (0..2_000).step_by(10) {
+                let now = start + Duration::from_millis(elapsed_ms);
+                if elapsed_ms % callback_ms == 0 {
+                    // The capture worker splits a device callback into 10 ms frames.
+                    for _ in 0..callback_ms / 10 {
+                        clock.observe(now, UPLINK_TICK_SAMPLES);
+                        sent_samples += UPLINK_TICK_SAMPLES;
+                    }
+                }
+                if clock.fallback_due(now) {
+                    sent_samples += UPLINK_TICK_SAMPLES * 3;
+                }
+            }
+            assert_eq!(sent_samples, 96_000, "callback interval: {callback_ms} ms");
+        }
+    }
+
+    #[test]
+    fn screen_audio_continues_when_the_mic_never_starts() {
+        let start = Instant::now();
+        let clock = MicAudioClock::new(start);
+        assert!(clock.fallback_due(start + Duration::from_millis(30)));
+    }
+
+    #[test]
+    fn screen_audio_resumes_after_the_last_mic_batch_is_covered() {
+        let start = Instant::now();
+        let mut clock = MicAudioClock::new(start);
+        for _ in 0..4 {
+            clock.observe(start, UPLINK_TICK_SAMPLES);
+        }
+        assert!(!clock.fallback_due(start + Duration::from_millis(30)));
+        assert!(!clock.fallback_due(start + Duration::from_millis(60)));
+        assert!(clock.fallback_due(start + Duration::from_millis(70)));
+
+        // A resumed callback starts from the current time, not an expired deadline.
+        let resumed = start + Duration::from_secs(1);
+        for _ in 0..4 {
+            clock.observe(resumed, UPLINK_TICK_SAMPLES);
+        }
+        assert!(!clock.fallback_due(resumed + Duration::from_millis(30)));
+        assert!(clock.fallback_due(resumed + Duration::from_millis(70)));
+    }
 }
 
 #[cfg(test)]

@@ -1014,6 +1014,7 @@ impl OnboardingSettingPage {
                     .px_3()
                     .rounded_md()
                     .bg(theme.brand)
+                    .text_color(gpui::white())
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.brand_hover))
                     .child(action)
@@ -1021,7 +1022,7 @@ impl OnboardingSettingPage {
                         button.child(
                             Icon::new(IconName::LongArrowRight)
                                 .size_4()
-                                .text_color(theme.text_primary),
+                                .text_color(gpui::white()),
                         )
                     })
                     .on_click(on_click),

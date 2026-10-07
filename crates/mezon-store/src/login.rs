@@ -231,6 +231,7 @@ impl LoginStore {
             e.update(cx, |s, cx| s.reset(cx));
         }
         crate::clear_tour_progress(cx);
+        mezon_client::cdn_signature::clear();
     }
 }
 

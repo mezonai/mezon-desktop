@@ -6,8 +6,9 @@ use gpui::{
     Window, div, point, prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, DirectKind, DirectMessageStore, DmAvatarPresence, FriendEvent, FriendStore,
-    InVoiceInfo, PinnedMessagesStore, Settings, StreamStore, ThreadsStore,
+    ChannelEvent, ChannelId, ChannelList, DirectKind, DirectMessageStore, DmAvatarPresence,
+    FriendEvent, FriendStore, InVoiceInfo, PinnedMessagesStore, Settings, StreamStore,
+    ThreadsStore,
 };
 use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable, Tooltip};
 
@@ -27,6 +28,7 @@ use crate::components::primitives::{Avatar, Divider, Icon, IconName, InputState}
 use crate::components::{Button, ButtonVariant, ButtonVariants, Sizable, Size};
 use crate::sidebar::create_message_group_modal::CreateMessageGroupModal;
 use crate::theme::{ActiveTheme, Theme};
+use crate::util::user_status::VoiceActivityBadge;
 
 type ToggleHandler = Arc<dyn Fn(&mut Window, &mut App)>;
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -62,7 +64,7 @@ pub struct ChannelHeader {
     dm_header: Option<DmHeaderInfo>,
     create_group_handle: Option<PopoverMenuHandle<CreateMessageGroupModal>>,
     muted: bool,
-    in_voice: Option<(SharedString, InVoiceInfo)>,
+    in_voice: Option<InVoiceInfo>,
     members_action: bool,
     members_active: bool,
     on_toggle_members: Option<ToggleHandler>,
@@ -143,8 +145,8 @@ impl ChannelHeader {
         self
     }
 
-    pub fn in_voice(mut self, label: SharedString, info: InVoiceInfo) -> Self {
-        self.in_voice = Some((label, info));
+    pub fn in_voice(mut self, info: InVoiceInfo) -> Self {
+        self.in_voice = Some(info);
         self
     }
 
@@ -468,7 +470,14 @@ impl ChannelHeader {
                                 .into_any_element()
                         } else {
                             match in_voice {
-                                Some((label, info)) => div()
+                                Some(info) => {
+                                    let badge = VoiceActivityBadge::from(info);
+                                    let locale = Settings::try_global(cx)
+                                        .map(|settings| settings.read(cx).language.clone())
+                                        .unwrap_or_else(|| "en".to_string());
+                                    let label: SharedString =
+                                        mezon_i18n::t(&locale, badge.topbar_label_key()).into();
+                                    div()
                                     .flex()
                                     .flex_col()
                                     .min_w_0()
@@ -494,23 +503,23 @@ impl ChannelHeader {
                                                     },
                                                 )
                                             })
-                                            .child(
-                                                Icon::new(IconName::Speaker)
-                                                    .size(px(12.))
-                                                    .text_color(
-                                                    crate::util::user_status::in_voice_icon_color(
-                                                        theme,
-                                                    ),
+                                            .child(Icon::new(badge.icon()).size(px(12.)).text_color(
+                                                crate::util::user_status::in_voice_icon_color(
+                                                    theme,
                                                 ),
-                                            )
+                                            ))
                                             .child(
                                                 div()
+                                                     .flex_1()
+                                                     .min_w_0()
+                                                     .truncate()
                                                     .text_xs()
                                                     .text_color(theme.text_primary)
                                                     .child(label),
                                             ),
                                     )
-                                    .into_any_element(),
+                                    .into_any_element()
+                                }
                                 None => name_el.into_any_element(),
                             }
                         }
@@ -1143,6 +1152,7 @@ pub struct ChatHeader {
     _group_members_observe: Subscription,
     _presence_subscribe: Subscription,
     _account_subscribe: Subscription,
+    _channel_subscribe: Subscription,
 }
 
 impl ChatHeader {
@@ -1216,6 +1226,14 @@ impl ChatHeader {
                 }
             },
         );
+        let _channel_subscribe = cx.subscribe(
+            &ChannelList::global(cx),
+            |this, _, event: &ChannelEvent, cx| {
+                if matches!(event, ChannelEvent::InVoiceChanged) {
+                    this.refresh_dm_in_voice(cx);
+                }
+            },
+        );
         Self {
             name: SharedString::default(),
             icon: None,
@@ -1252,6 +1270,7 @@ impl ChatHeader {
             _group_members_observe,
             _presence_subscribe,
             _account_subscribe,
+            _channel_subscribe,
         }
     }
 
@@ -1364,6 +1383,28 @@ impl ChatHeader {
         }
     }
 
+    fn current_dm_in_voice(cx: &App) -> Option<InVoiceInfo> {
+        let crate::router::Route::DirectMessage { direct_id, .. } =
+            crate::router::Router::global(cx).read(cx).route()
+        else {
+            return None;
+        };
+        let direct = DirectMessageStore::try_global(cx)?;
+        let user_id = direct.read(cx).find(direct_id)?.peer_user_id?;
+        ChannelList::global(cx).read(cx).in_voice_status(user_id)
+    }
+
+    fn refresh_dm_in_voice(&mut self, cx: &mut Context<Self>) {
+        if !self.dm {
+            return;
+        }
+        let next = Self::current_dm_in_voice(cx);
+        if self.in_voice != next {
+            self.in_voice = next;
+            cx.notify();
+        }
+    }
+
     pub fn sync(
         &mut self,
         name: Option<&str>,
@@ -1416,6 +1457,11 @@ impl ChatHeader {
             self.dm_header.clone()
         } else {
             Self::compute_dm_header(dm, locale.unwrap_or("en"), cx)
+        };
+        let in_voice = if dm {
+            Self::current_dm_in_voice(cx)
+        } else {
+            in_voice
         };
         let inbox_badge = clan_id
             .as_deref()
@@ -1607,8 +1653,7 @@ impl Render for ChatHeader {
         if self.dm
             && let Some(info) = self.in_voice
         {
-            let label: SharedString = mezon_i18n::t(&locale, "channelTopbar.invoice").into();
-            header = header.in_voice(label, info);
+            header = header.in_voice(info);
         }
         if show_search_bar {
             let search_bar = crate::chat::message_search::render_header_search_bar(

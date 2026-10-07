@@ -72,7 +72,7 @@ impl RenderOnce for Checkbox {
                         .path("icons/check.svg")
                         .size(px(12.))
                         .flex_none()
-                        .text_color(theme.text_primary),
+                        .text_color(gpui::white()),
                 )
             });
 

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::AppApi;
+pub use mezon_client::transport::SEARCH_CTRL_K_MAX_TEXT_BYTES;
 
 use crate::ids::{ChannelId, ClanId, UserId};
 
@@ -102,8 +103,10 @@ impl CtrlKSearchStore {
         &self.state
     }
 
-    pub fn has_settled_response(&self) -> bool {
-        self.last_response_query.is_some()
+    pub fn matches_settled_query(&self, query: &str) -> bool {
+        self.last_response_query
+            .as_deref()
+            .is_some_and(|settled| settled == query.trim())
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
@@ -149,6 +152,21 @@ impl CtrlKSearchStore {
                 cx.notify();
             });
         });
+    }
+
+    pub fn search_channels(
+        &self,
+        query: String,
+        cx: &App,
+    ) -> Task<anyhow::Result<Vec<CtrlKChannel>>> {
+        let api = self.api.clone();
+        cx.background_spawn(async move {
+            let response = api
+                .search_ctrl_k(&query, CtrlKSearchType::Channels.as_raw())
+                .await
+                .inspect_err(|err| tracing::warn!("SearchCtrlK channels failed: {err}"))?;
+            Ok(map_channels(response.channels))
+        })
     }
 
     fn cancel_pending(&mut self) {

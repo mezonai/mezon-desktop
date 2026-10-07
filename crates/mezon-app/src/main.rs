@@ -556,6 +556,19 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
         transport.clone(),
         app_config.base_img_url.clone(),
     ));
+    let signer_api = api.clone();
+    mezon_client::cdn_signature::install(mezon_client::cdn_signature::CdnSigner::new(
+        app_config
+            .media_origins()
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        vec![app_config.imgproxy_base_url.clone()],
+        Arc::new(move |channel_id| {
+            let api = signer_api.clone();
+            Box::pin(async move { api.generate_cdn_signature(channel_id).await })
+        }),
+    ));
     let initial_auth_state = mezon_store::resolve_initial_auth_state();
 
     // Subscribe to screen lock/unlock events.
@@ -658,6 +671,16 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             } else {
                 tracing::info!("Registered gg sans font ({} weights)", gg_sans_paths.len());
             }
+        }
+
+        #[cfg(target_os = "linux")]
+        if let Err(e) = cx
+            .text_system()
+            .add_fonts(vec![Cow::Borrowed(include_bytes!(
+                "../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf"
+            ))])
+        {
+            tracing::error!("Failed to register IBM Plex Sans: {e}");
         }
 
         init_ui(cx);

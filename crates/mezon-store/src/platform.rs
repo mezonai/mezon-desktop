@@ -163,6 +163,23 @@ pub fn copy_image_url_to_clipboard(
     .detach();
 }
 
+pub fn open_media_url_external(url: String, cx: &mut App) {
+    if url.is_empty() {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        let url = mezon_client::cdn_signature::sign(&url)
+            .await
+            .map_or(url, |signed| signed.url);
+        cx.update(|cx| {
+            if let Some(store) = PlatformStore::try_global(cx) {
+                let _ = store.read(cx).open_url_external(&url);
+            }
+        });
+    })
+    .detach();
+}
+
 pub type OpenUrlFn = Arc<dyn Fn(&str) -> anyhow::Result<()> + Send + Sync>;
 pub type OpenManagedAppWindowFn = Arc<dyn Fn(&str, &str) -> anyhow::Result<()> + Send + Sync>;
 /// Download `url` and save it locally under the given suggested filename.

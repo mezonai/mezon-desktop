@@ -7,7 +7,7 @@ use gpui::{
     Window, WindowBounds, WindowHandle, WindowOptions, div, img, prelude::*, px, size,
 };
 use mezon_pdf::{PdfDocument, fit_page_pixels};
-use mezon_store::{PlatformStore, Settings};
+use mezon_store::{Settings, open_media_url_external};
 
 use crate::app::main_window::{
     activate_main_window, apply_overlay_bounds, handle as main_window_handle,
@@ -431,9 +431,7 @@ impl PdfViewer {
 }
 
 fn open_externally(url: &str, cx: &mut App) {
-    if let Some(store) = PlatformStore::try_global(cx) {
-        let _ = store.read(cx).open_url_external(url);
-    }
+    open_media_url_external(url.to_string(), cx);
 }
 
 async fn fetch_pdf(client: Arc<dyn HttpClient>, url: String) -> anyhow::Result<Vec<u8>> {
