@@ -3535,6 +3535,8 @@
   "modalControls.kickMember.reasonLabel": "Lý do đuổi",
   "modalControls.kickMember.title": "Đuổi {{username}} khỏi {{clanName}}",
   "nav.chat": "Trò chuyện",
+  "nav.historyBack": "Quay lại",
+  "nav.historyForward": "Tiến tới",
   "notification.andYou": "và bạn",
   "notification.attachmentMessage": "[Tệp đính kèm]",
   "notification.comeBackNotify": "Quay lại để nhận thông báo về sự kiện và nhiều hơn thế nữa",

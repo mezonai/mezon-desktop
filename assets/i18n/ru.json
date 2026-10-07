@@ -3773,6 +3773,8 @@
   "modalControls.kickMember.reasonLabel": "Причина кика",
   "modalControls.kickMember.title": "Исключить {{username}} из {{clanName}}",
   "nav.chat": "Чат",
+  "nav.historyBack": "Назад",
+  "nav.historyForward": "Вперёд",
   "notification.andYou": "и Вы",
   "notification.attachmentMessage": "[Вложение]",
   "notification.comeBackNotify": "Вернитесь за уведомлениями о событиях, стримах и многом другом",

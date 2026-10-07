@@ -23,6 +23,7 @@ use ui::WithScrollbar;
 use crate::chat::inbox::render_message_head;
 use crate::chat::layout::ChatLayout;
 use crate::chat::member_list::{MentionMemberRaw, mention_member_pool};
+use crate::chat::mention_input::filter_members_for_search;
 use crate::chat::message::{
     RichRunPalette, code_block_copy_overlay, format_message_time, open_message_link,
     render_ogp_preview, render_poll_card_readonly, rich_run_highlight_with_link_underline,
@@ -68,7 +69,6 @@ pub enum SearchDropdownItem {
     Member {
         trigger: char,
         display: String,
-        username: String,
         user_id: String,
     },
     Has {
@@ -90,23 +90,21 @@ pub fn search_dropdown_items(query: &str, cx: &App) -> Vec<SearchDropdownItem> {
             .map(SearchDropdownItem::Prefix)
             .collect(),
         SearchDropdownMode::FromUser | SearchDropdownMode::PlainMembers => {
-            filter_members_for_from(&mention_member_pool(cx), &needle, 3)
+            filter_members_for_search(&mention_member_pool(cx), &needle, 3)
                 .into_iter()
                 .map(|member| SearchDropdownItem::Member {
                     trigger: '>',
-                    display: member.username.clone(),
-                    username: member.username.clone(),
+                    display: member.display.clone(),
                     user_id: member.user_id.clone(),
                 })
                 .collect()
         }
         SearchDropdownMode::Mentions => {
-            filter_members_for_mentions(&mention_member_pool(cx), &needle, 3)
+            filter_members_for_search(&mention_member_pool(cx), &needle, 3)
                 .into_iter()
                 .map(|member| SearchDropdownItem::Member {
                     trigger: '~',
                     display: member.display.clone(),
-                    username: member.username.clone(),
                     user_id: member.user_id.clone(),
                 })
                 .collect()
@@ -131,11 +129,11 @@ pub fn apply_search_dropdown_item(
         }
         SearchDropdownItem::Member {
             trigger,
-            username,
+            display,
             user_id,
             ..
         } => {
-            layout.insert_search_filter_markup(*trigger, username, user_id, window, cx);
+            layout.insert_search_filter_markup(*trigger, display, user_id, window, cx);
         }
         SearchDropdownItem::Has { value } => {
             layout.insert_search_filter_markup('&', value, value, window, cx);
@@ -1491,8 +1489,7 @@ pub fn render_header_search_bar(
     let search_input_for_close = search_input.cloned();
     let selected_index = layout
         .upgrade()
-        .map(|layout| layout.read(cx).search_dropdown_index())
-        .unwrap_or(0);
+        .and_then(|layout| layout.read(cx).search_dropdown_index());
 
     let options_dropdown = show_options.then(|| {
         render_search_options(theme, locale, &query, layout_for_option, selected_index, cx)
@@ -1621,7 +1618,7 @@ fn render_search_options(
     locale: &str,
     query: &str,
     layout: WeakEntity<ChatLayout>,
-    selected_index: usize,
+    selected_index: Option<usize>,
     cx: &App,
 ) -> gpui::AnyElement {
     let mode = search_dropdown_mode(query);
@@ -1703,7 +1700,7 @@ fn render_search_options(
         }
         SearchDropdownMode::FromUser | SearchDropdownMode::PlainMembers => {
             let pool = mention_member_pool(cx);
-            let members = filter_members_for_from(&pool, &needle, 3);
+            let members = filter_members_for_search(&pool, &needle, 3);
             if !members.is_empty() {
                 sections.push(render_member_suggestions(
                     theme,
@@ -1720,7 +1717,7 @@ fn render_search_options(
         }
         SearchDropdownMode::Mentions => {
             let pool = mention_member_pool(cx);
-            let members = filter_members_for_mentions(&pool, &needle, 3);
+            let members = filter_members_for_search(&pool, &needle, 3);
             if !members.is_empty() {
                 sections.push(render_member_suggestions(
                     theme,
@@ -1780,7 +1777,7 @@ fn render_default_search_options(
     theme: &Theme,
     locale: &str,
     layout: WeakEntity<ChatLayout>,
-    selected_index: usize,
+    selected_index: Option<usize>,
     item_index: &mut usize,
 ) -> gpui::AnyElement {
     let options = [
@@ -1827,7 +1824,7 @@ fn render_default_search_options(
             options
                 .into_iter()
                 .map(|(prefix, content)| {
-                    let selected = *item_index == selected_index;
+                    let selected = selected_index == Some(*item_index);
                     *item_index += 1;
                     render_prefix_option_row(theme, prefix, content, layout.clone(), selected)
                 })
@@ -1896,7 +1893,7 @@ fn render_member_suggestions(
     trigger: char,
     members: Vec<&MentionMemberRaw>,
     layout: WeakEntity<ChatLayout>,
-    selected_index: usize,
+    selected_index: Option<usize>,
     item_index: &mut usize,
 ) -> gpui::AnyElement {
     let group_name = mezon_i18n::t(locale, group_key).to_string();
@@ -1920,12 +1917,12 @@ fn render_member_suggestions(
             members
                 .into_iter()
                 .map(|member| {
-                    let selected = *item_index == selected_index;
+                    let selected = selected_index == Some(*item_index);
                     *item_index += 1;
                     let layout = layout.clone();
                     let user_id = member.user_id.clone();
-                    let username_for_insert = member.username.clone();
-                    let username_for_label = member.username.clone();
+                    let display_for_insert = member.display.clone();
+                    let display_for_label = member.display.clone();
                     div()
                         .px_2()
                         .py_1()
@@ -1940,7 +1937,7 @@ fn render_member_suggestions(
                                 layout.update(cx, |layout, cx| {
                                     layout.insert_search_filter_markup(
                                         trigger,
-                                        &username_for_insert,
+                                        &display_for_insert,
                                         &user_id,
                                         window,
                                         cx,
@@ -1964,7 +1961,7 @@ fn render_member_suggestions(
                                     div()
                                         .text_size(px(14.))
                                         .text_color(theme.tokens.text_theme_primary)
-                                        .child(username_for_label),
+                                        .child(display_for_label),
                                 ),
                         )
                         .into_any_element()
@@ -1979,7 +1976,7 @@ fn render_has_suggestions(
     locale: &str,
     needle: &str,
     layout: WeakEntity<ChatLayout>,
-    selected_index: usize,
+    selected_index: Option<usize>,
     item_index: &mut usize,
 ) -> gpui::AnyElement {
     let group_name = mezon_i18n::t(locale, "searchMessageChannel.hasContent").to_string();
@@ -2008,7 +2005,7 @@ fn render_has_suggestions(
             options
                 .into_iter()
                 .map(|(option, label)| {
-                    let selected = *item_index == selected_index;
+                    let selected = selected_index == Some(*item_index);
                     *item_index += 1;
                     let layout = layout.clone();
                     let option_id = option;
@@ -2088,49 +2085,6 @@ fn has_option_label(locale: &str, option: &str) -> String {
         _ => return option.to_string(),
     };
     mezon_i18n::t(locale, key).to_string()
-}
-
-fn filter_members_for_from<'a>(
-    members: &'a [MentionMemberRaw],
-    needle: &str,
-    limit: usize,
-) -> Vec<&'a MentionMemberRaw> {
-    if needle.is_empty() {
-        return members.iter().take(limit).collect();
-    }
-    let needle_lc = needle.to_lowercase();
-    let mut exact = Vec::new();
-    let mut partial = Vec::new();
-    for member in members {
-        if member.username_lc == needle_lc {
-            exact.push(member);
-        } else if member.username_lc.contains(&needle_lc) {
-            partial.push(member);
-        }
-    }
-    exact.into_iter().chain(partial).take(limit).collect()
-}
-
-fn filter_members_for_mentions<'a>(
-    members: &'a [MentionMemberRaw],
-    needle: &str,
-    limit: usize,
-) -> Vec<&'a MentionMemberRaw> {
-    if needle.is_empty() {
-        return members.iter().take(limit).collect();
-    }
-    let needle_lc = needle.to_lowercase();
-    let mut exact = Vec::new();
-    let mut partial = Vec::new();
-    for member in members {
-        if member.username_lc == needle_lc || member.display_lc == needle_lc {
-            exact.push(member);
-        } else if member.username_lc.contains(&needle_lc) || member.display_lc.contains(&needle_lc)
-        {
-            partial.push(member);
-        }
-    }
-    exact.into_iter().chain(partial).take(limit).collect()
 }
 
 fn jump_route_for_hit(hit: &SearchHit) -> Route {

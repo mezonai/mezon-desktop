@@ -90,7 +90,7 @@ pub struct ChatLayout {
     message_search_panel: Option<Entity<MessageSearchPanel>>,
     message_search_input: Option<Entity<InputState>>,
     message_search_context: Option<(ChannelId, ClanId, bool)>,
-    search_dropdown_index: usize,
+    search_dropdown_index: Option<usize>,
     search_mention_ids: HashMap<String, String>,
     _message_search_input_sub: Option<Subscription>,
     inbox_handle: PopoverMenuHandle<InboxPopoverPanel>,
@@ -551,7 +551,7 @@ impl ChatLayout {
             message_search_panel: None,
             message_search_input: None,
             message_search_context: None,
-            search_dropdown_index: 0,
+            search_dropdown_index: None,
             search_mention_ids: HashMap::new(),
             _message_search_input_sub: None,
             inbox_handle: PopoverMenuHandle::default(),
@@ -593,13 +593,13 @@ impl ChatLayout {
         this
     }
 
-    pub(crate) fn search_dropdown_index(&self) -> usize {
+    pub(crate) fn search_dropdown_index(&self) -> Option<usize> {
         self.search_dropdown_index
     }
 
     fn reset_search_dropdown_index(&mut self, cx: &mut Context<Self>) {
-        if self.search_dropdown_index != 0 {
-            self.search_dropdown_index = 0;
+        if self.search_dropdown_index.is_some() {
+            self.search_dropdown_index = None;
             cx.notify();
         }
     }
@@ -609,14 +609,24 @@ impl ChatLayout {
             return;
         };
         let query = input.read(cx).value().to_string();
+        if matches!(
+            mezon_store::search_dropdown_mode(&query),
+            mezon_store::SearchDropdownMode::PlainMembers
+        ) {
+            return;
+        }
         let count = crate::chat::message_search::search_dropdown_item_count(&query, cx);
         if count == 0 {
             return;
         }
-        let next =
-            (self.search_dropdown_index as isize + delta).rem_euclid(count as isize) as usize;
-        if next != self.search_dropdown_index {
-            self.search_dropdown_index = next;
+        let next = match self.search_dropdown_index {
+            None if delta > 0 => 0,
+            None if delta < 0 => count - 1,
+            None => return,
+            Some(current) => (current as isize + delta).rem_euclid(count as isize) as usize,
+        };
+        if self.search_dropdown_index != Some(next) {
+            self.search_dropdown_index = Some(next);
             cx.notify();
         }
     }
@@ -646,6 +656,9 @@ impl ChatLayout {
         };
         let query = input.read(cx).value().to_string();
         let mode = mezon_store::search_dropdown_mode(&query);
+        if matches!(mode, mezon_store::SearchDropdownMode::PlainMembers) {
+            return false;
+        }
         if matches!(
             mode,
             mezon_store::SearchDropdownMode::FromUser
@@ -659,7 +672,7 @@ impl ChatLayout {
         if items.is_empty() {
             return false;
         }
-        let index = self.search_dropdown_index.min(items.len() - 1);
+        let index = self.search_dropdown_index.unwrap_or(0).min(items.len() - 1);
         apply_search_dropdown_item(self, &items[index], window, cx);
         true
     }

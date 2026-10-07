@@ -3534,6 +3534,8 @@
   "modalControls.kickMember.reasonLabel": "Reden van verwijderen",
   "modalControls.kickMember.title": "@{{username}} verwijderen uit {{clanName}}",
   "nav.chat": "Chat",
+  "nav.historyBack": "Terug",
+  "nav.historyForward": "Vooruit",
   "notification.andYou": "en jij",
   "notification.attachmentMessage": "[Bijlage]",
   "notification.comeBackNotify": "Kom terug om meldingen over evenementen en meer te ontvangen",

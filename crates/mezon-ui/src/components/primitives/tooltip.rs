@@ -14,6 +14,11 @@ impl Tooltip {
     pub fn build(text: impl Into<SharedString>, cx: &mut App) -> AnyView {
         cx.new(|_| Tooltip::new(text)).into()
     }
+
+    pub fn text(title: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView {
+        let title = title.into();
+        move |_, cx| Self::build(title.clone(), cx)
+    }
 }
 
 impl Render for Tooltip {

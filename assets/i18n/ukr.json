@@ -3534,6 +3534,8 @@
   "modalControls.kickMember.reasonLabel": "Причина викидання",
   "modalControls.kickMember.title": "Викинути {{username}} з {{clanName}}",
   "nav.chat": "Чат",
+  "nav.historyBack": "Назад",
+  "nav.historyForward": "Вперед",
   "notification.andYou": "та ви",
   "notification.attachmentMessage": "[Вкладення]",
   "notification.comeBackNotify": "Поверніться, щоб отримувати сповіщення про події та інше",

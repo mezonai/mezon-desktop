@@ -3543,6 +3543,8 @@
   "modalControls.kickMember.reasonLabel": "Куып чыгару сәбәбе",
   "modalControls.kickMember.title": "{{username}} {{clanName}}нан куып чыгару",
   "nav.chat": "Чат",
+  "nav.historyBack": "Кире кайту",
+  "nav.historyForward": "Алга",
   "notification.andYou": "һәм сез",
   "notification.attachmentMessage": "[Кушымта]",
   "notification.comeBackNotify": "Вакыйгалар, стримнар һәм башкалар турында белдермәләр өчен кире кайтыгыз",
