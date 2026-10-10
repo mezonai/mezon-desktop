@@ -17,13 +17,13 @@ use gpui::{
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use mezon_store::{
-    BadgeService, ChannelId, ChannelList, ChannelPermissionsEvent, ChannelPermissionsStore, ClanId,
-    ClanList, ClanMembersStore, DirectMessageStore, EmbedDatePicker, EmbedInput, EmbedTextInput,
-    Emoji, EmojiStore, GroupMembersStore, MessageCode, MessageId, MessageRef, MessagesEvent,
-    MessagesStore, PERMISSION_DELETE_MESSAGE, PERMISSION_MANAGE_THREAD, PERMISSION_SEND_MESSAGE,
-    PermissionStore, ProfileContext, QUICK_MENU_TYPE_QUICK, QuickMenuStore, RolesEvent, RolesStore,
-    Settings, SpriteAtlas, TopicBadgeEvent, TopicBadgeStore, TopicsEvent, TopicsStore, UserId,
-    UsersByUserStore,
+    BadgeService, ChannelEvent, ChannelId, ChannelList, ChannelPermissionsEvent,
+    ChannelPermissionsStore, ClanId, ClanList, ClanMembersStore, DirectMessageStore,
+    EmbedDatePicker, EmbedInput, EmbedTextInput, Emoji, EmojiStore, GroupMembersStore, MessageCode,
+    MessageId, MessageRef, MessagesEvent, MessagesStore, PERMISSION_DELETE_MESSAGE,
+    PERMISSION_MANAGE_THREAD, PERMISSION_SEND_MESSAGE, PermissionStore, ProfileContext,
+    QUICK_MENU_TYPE_QUICK, QuickMenuStore, RolesEvent, RolesStore, Settings, SpriteAtlas,
+    TopicBadgeEvent, TopicBadgeStore, TopicsEvent, TopicsStore, UserId, UsersByUserStore,
     message::{Message, markdown_edit_source},
 };
 
@@ -1344,6 +1344,8 @@ pub struct ChannelMessages {
     _highlight_timer: Option<Task<()>>,
     last_seen_at_bottom: Option<MessageId>,
     fab_scroll_pending: bool,
+    reopen_read_armed: bool,
+    reopen_read_pending: bool,
     scroll_anchors: HashMap<ChannelId, SavedScrollAnchor>,
     last_scroll_sync: Option<(ChannelId, usize, u32, usize, u32, u32, bool)>,
     current_channel: Option<ChannelId>,
@@ -1369,6 +1371,8 @@ pub struct ChannelMessages {
     edit_input: Option<(MessageId, Entity<MentionInput>)>,
     _edit_input_sub: Option<Subscription>,
     context_menu_target: Option<(MessageId, Point<Pixels>)>,
+    pending_context_image: Option<(MessageId, String)>,
+    context_menu_image: Option<String>,
     context_menu_forward_all: bool,
     reaction_submenu_open: bool,
     quick_menu_submenu_open: bool,
@@ -1445,6 +1449,14 @@ impl ChannelMessages {
         subs.push(cx.observe(&audio_meta, |_, _, cx| cx.notify()));
 
         let channel_list = ChannelList::global(cx);
+        subs.push(
+            cx.subscribe(&channel_list, |this, _, event: &ChannelEvent, cx| {
+                if let ChannelEvent::LinkedChannelResolved(_) = event {
+                    this.row_memo.borrow_mut().selection_layouts.clear();
+                    cx.notify();
+                }
+            }),
+        );
         let channel_list_observe = cx.observe(&channel_list, |this, _, cx| {
             this.row_memo.borrow_mut().selection_layouts.clear();
             this.reconcile_cold(cx);
@@ -1996,6 +2008,8 @@ impl ChannelMessages {
             _highlight_timer: None,
             last_seen_at_bottom: None,
             fab_scroll_pending: false,
+            reopen_read_armed: false,
+            reopen_read_pending: false,
             scroll_anchors: HashMap::new(),
             last_scroll_sync: None,
             current_channel: None,
@@ -2021,6 +2035,8 @@ impl ChannelMessages {
             edit_input: None,
             _edit_input_sub: None,
             context_menu_target: None,
+            pending_context_image: None,
+            context_menu_image: None,
             context_menu_forward_all: false,
             reaction_submenu_open: false,
             quick_menu_submenu_open: false,
@@ -2659,8 +2675,17 @@ impl ChannelMessages {
                 store.ensure_loaded(channel_id, QUICK_MENU_TYPE_QUICK, cx);
             });
         }
+        self.context_menu_image = self
+            .pending_context_image
+            .take()
+            .filter(|(id, _)| *id == message_id)
+            .map(|(_, url)| url);
         self.context_menu_target = Some((message_id, position));
         cx.notify();
+    }
+
+    pub(crate) fn note_context_image(&mut self, message_id: MessageId, url: String) {
+        self.pending_context_image = Some((message_id, url));
     }
 
     pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
@@ -2799,6 +2824,9 @@ impl ChannelMessages {
                     self.sync_topic_seen(cx);
                 }
                 return;
+            }
+            if std::mem::take(&mut self.reopen_read_pending) {
+                MessagesStore::global(cx).update(cx, |store, cx| store.note_reopened_seen(cx));
             }
             if self
                 .list_state
@@ -2964,13 +2992,21 @@ impl ChannelMessages {
                 let image_count = message
                     .attachments
                     .iter()
-                    .filter(|att| !att.is_unsupported_media() && !att.is_video() && att.is_image())
+                    .filter(|att| {
+                        !att.is_unsupported_media()
+                            && !att.is_video()
+                            && att.is_image()
+                            && !att.source_denied
+                    })
                     .count();
                 if image_count >= 2 && message.album_layout.is_some() {
                     continue;
                 }
                 let first_image = message.attachments.iter().enumerate().find(|(_, att)| {
-                    !att.is_unsupported_media() && !att.is_video() && att.is_image()
+                    !att.is_unsupported_media()
+                        && !att.is_video()
+                        && att.is_image()
+                        && !att.source_denied
                 });
                 if let Some((att_ix, att)) = first_image
                     && let Some(mp4) = att.tenor_mp4.clone()
@@ -3588,6 +3624,8 @@ impl ChannelMessages {
         let new_channel = store.read(cx).active_channel_id();
         if new_channel != self.current_channel {
             self.last_seen_at_bottom = None;
+            self.reopen_read_armed = true;
+            self.reopen_read_pending = false;
         }
         let is_loading = store.read(cx).is_loading();
         let transition = reset_transition(new_channel, self.fab_scroll_pending);
@@ -3639,6 +3677,27 @@ impl ChannelMessages {
             }
             self.sync_channel_seen(cx);
         }
+        let (mark_read, still_armed) = reopen_read_after_reset(self.reopen_read_armed, decision);
+        self.reopen_read_armed = still_armed;
+        if mark_read && !self.is_topic_box {
+            self.mark_reopened_channel_read(store, cx);
+        }
+    }
+
+    fn mark_reopened_channel_read(
+        &mut self,
+        store: &Entity<MessagesStore>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.last_seen_at_bottom.is_none() {
+            self.last_seen_at_bottom = store.read(cx).last_read_message_id();
+        }
+        if cx.active_window().is_none() {
+            self.reopen_read_pending = true;
+            return;
+        }
+        self.reopen_read_pending = false;
+        store.update(cx, |store, cx| store.note_reopened_seen(cx));
     }
 
     fn sync_header(&mut self, is_empty: bool, has_more_top: bool) {
@@ -4905,16 +4964,18 @@ impl ChannelMessages {
                             .into_any_element();
                     }
                     let row_ix = ix - usize::from(header_shown);
-                    let probe_urls = {
+                    let (probe_urls, linked_channels) = {
                         let topic = entity.read(cx);
                         match topic.topic_messages.get(row_ix) {
-                            Some(message) => {
-                                super::audio_meta::urls_needing_probe(&message.attachments, cx)
-                            }
-                            None => Vec::new(),
+                            Some(message) => (
+                                super::audio_meta::urls_needing_probe(&message.attachments, cx),
+                                super::content::channel_links_needing_detail(&message.spans, cx),
+                            ),
+                            None => (Vec::new(), Vec::new()),
                         }
                     };
                     super::audio_meta::defer_audio_probe(probe_urls, cx);
+                    super::content::defer_linked_channel_resolve(linked_channels, cx);
                     let ctx = RowCtx {
                         app: cx,
                         theme: cx.theme(),
@@ -5026,6 +5087,7 @@ impl ChannelMessages {
                     self.reaction_submenu_open,
                     self.quick_menu_submenu_open,
                     selected_text,
+                    self.context_menu_image.as_deref(),
                     cx.entity().downgrade(),
                     cx,
                 );
@@ -5304,16 +5366,18 @@ impl Render for ChannelMessages {
                             .into_any_element();
                     }
                     let msg_ix = ix - usize::from(header_shown);
-                    let probe_urls = {
+                    let (probe_urls, linked_channels) = {
                         let messages = store.read(cx);
                         match messages.viewport_messages().get(msg_ix) {
-                            Some(message) => {
-                                super::audio_meta::urls_needing_probe(&message.attachments, cx)
-                            }
-                            None => Vec::new(),
+                            Some(message) => (
+                                super::audio_meta::urls_needing_probe(&message.attachments, cx),
+                                super::content::channel_links_needing_detail(&message.spans, cx),
+                            ),
+                            None => (Vec::new(), Vec::new()),
                         }
                     };
                     super::audio_meta::defer_audio_probe(probe_urls, cx);
+                    super::content::defer_linked_channel_resolve(linked_channels, cx);
                     let ctx = RowCtx {
                         app: cx,
                         theme: cx.theme(),
@@ -5429,6 +5493,7 @@ impl Render for ChannelMessages {
                     self.reaction_submenu_open,
                     self.quick_menu_submenu_open,
                     selected_text,
+                    self.context_menu_image.as_deref(),
                     cx.entity().downgrade(),
                     cx,
                 );
@@ -5533,6 +5598,14 @@ enum ResetScroll {
     },
     ToBottom,
     Defer,
+}
+
+fn reopen_read_after_reset(armed: bool, decision: ResetScroll) -> (bool, bool) {
+    match decision {
+        ResetScroll::Defer => (false, armed),
+        ResetScroll::Restore { .. } => (armed, false),
+        ResetScroll::ToBottom => (false, false),
+    }
 }
 
 fn decide_reset_scroll(
@@ -6015,7 +6088,8 @@ mod topic_row_tests {
 mod scroll_restore_tests {
     use super::{
         AnchorUpdate, ResetScroll, ResetTransition, SavedScrollAnchor, capture_anchor,
-        decide_reset_scroll, reset_transition, saved_message_scroll_anchor, shifted_scroll_anchor,
+        decide_reset_scroll, reopen_read_after_reset, reset_transition,
+        saved_message_scroll_anchor, shifted_scroll_anchor,
     };
     use gpui::{ListOffset, px};
     use mezon_store::{ChannelId, Message, MessageId};
@@ -6044,6 +6118,24 @@ mod scroll_restore_tests {
             item_ix,
             offset_in_item: px(offset_in_item),
         }
+    }
+
+    #[test]
+    fn reopening_at_a_saved_position_marks_read_once() {
+        let restore = ResetScroll::Restore {
+            item_ix: 2,
+            offset_in_item: px(7.),
+        };
+        assert_eq!(
+            reopen_read_after_reset(true, ResetScroll::Defer),
+            (false, true)
+        );
+        assert_eq!(reopen_read_after_reset(true, restore), (true, false));
+        assert_eq!(reopen_read_after_reset(false, restore), (false, false));
+        assert_eq!(
+            reopen_read_after_reset(true, ResetScroll::ToBottom),
+            (false, false)
+        );
     }
 
     #[test]

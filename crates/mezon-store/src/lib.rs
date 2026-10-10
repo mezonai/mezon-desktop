@@ -10,6 +10,7 @@ pub mod buzz;
 pub mod cache;
 pub mod call;
 pub mod canvas;
+pub mod cdn_access;
 pub mod channel;
 pub mod channel_media;
 pub mod channel_members;
@@ -56,6 +57,7 @@ pub mod presence;
 pub mod presign;
 pub mod quick_menu;
 pub mod realtime;
+pub mod realtime_server;
 pub mod roles;
 pub mod sprite_atlas;
 pub mod sticker;
@@ -113,6 +115,7 @@ pub use buzz::BuzzStore;
 pub use cache::{Freshness, KeyedCache};
 pub use call::{CallPeer, CallPhase, CallStore, MediaFlags, MediaKind};
 pub use canvas::{CanvasDetail, CanvasStore, CanvasSummary, UploadedCanvasImage, canvas_web_link};
+pub use cdn_access::{CdnAccess, hides_media};
 pub use channel::*;
 pub use channel_media::{
     CHANNEL_MEDIA_CACHE_TTL, CHANNEL_MEDIA_PAGE_SIZE, ChannelMediaEvent, ChannelMediaStore,
@@ -234,8 +237,9 @@ pub use pinned::{PinnedEvent, PinnedMessage, PinnedMessagesStore};
 pub use platform::{
     CliInstallHooks, CliInstallStateFn, CliInstallToggleFn, CliInstallVisibleFn,
     DesktopNotification, DownloadEvent, McpServerHooks, McpServerStatus, McpSetPortFn, McpStartFn,
-    McpStatusFn, McpStopFn, NotifyFn, OpenManagedAppWindowFn, OpenUrlFn, PlatformStore,
-    copy_image_url_to_clipboard, download_url_with_dialog, open_media_url_external,
+    McpStatusFn, McpStopFn, NotificationTopicReply, NotifyFn, OpenManagedAppWindowFn, OpenUrlFn,
+    PlatformStore, copy_image_url_to_clipboard, copy_media_url_to_clipboard,
+    download_url_with_dialog, open_media_url_external,
 };
 pub use presence::*;
 pub use quick_menu::{
@@ -244,6 +248,7 @@ pub use quick_menu::{
     name_exists,
 };
 pub use realtime::{RealtimeDispatch, RealtimeKind};
+pub use realtime_server::RealtimeServer;
 pub use roles::{
     ClanRoleDetail, DEFAULT_ROLE_COLOR, MAX_ROLE_ICON_BYTES, Role, RoleDraft, RolePermission,
     RoleStyle, RoleUser, RolesEvent, RolesStore, everyone_slug, parse_role_color,
@@ -498,6 +503,10 @@ pub struct Settings {
     pub screen_capture_access_requested: bool,
     #[serde(default)]
     pub activity_strip_dismissals: Vec<ActivityStripDismissal>,
+    #[serde(default)]
+    pub realtime_server: RealtimeServer,
+    #[serde(default)]
+    pub agent_hint_dismissed: bool,
 }
 
 impl Default for Settings {
@@ -530,6 +539,8 @@ impl Default for Settings {
             tour_eligible: None,
             screen_capture_access_requested: false,
             activity_strip_dismissals: Vec::new(),
+            realtime_server: RealtimeServer::Auto,
+            agent_hint_dismissed: false,
         }
     }
 }
@@ -727,6 +738,40 @@ impl AuthState {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod cdn_test_signer {
+    use futures::FutureExt;
+    use std::sync::{Arc, Once};
+
+    pub(crate) const SIGNATURE: &str = "1791259679-mac";
+    pub(crate) const DENIED_CHANNEL: i64 = 0x1cb1_64db_dac0_1001;
+
+    pub(crate) fn install() {
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            mezon_client::cdn_signature::install(mezon_client::cdn_signature::CdnSigner::new(
+                vec!["https://cdn.example/".to_string()],
+                Vec::new(),
+                Arc::new(|channel_id| {
+                    async move {
+                        if channel_id == DENIED_CHANNEL {
+                            Err(anyhow::Error::new(
+                                mezon_client::transport::ApiStatusError {
+                                    code:
+                                        mezon_client::transport::ApiStatusError::PERMISSION_DENIED,
+                                },
+                            ))
+                        } else {
+                            Ok(SIGNATURE.to_string())
+                        }
+                    }
+                    .boxed()
+                }),
+            ));
+        });
     }
 }
 

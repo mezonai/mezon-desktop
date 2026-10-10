@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, Global, Subscription, Task};
 use mezon_client::gotify::{BACKOFF_BASE, next_backoff, with_jitter};
-use mezon_client::{AppApi, GotifyNotification, StreamEnd};
+use mezon_client::{AppApi, GotifyExtras, GotifyNotification, StreamEnd};
 
 use crate::channel::ChannelList;
 use crate::clan::ClanList;
@@ -10,7 +10,7 @@ use crate::config::AppConfig;
 use crate::connection::ConnectionStore;
 use crate::ids::ChannelId;
 use crate::messages::MessagesStore;
-use crate::platform::{DesktopNotification, PlatformStore};
+use crate::platform::{DesktopNotification, NotificationTopicReply, PlatformStore};
 use crate::presence::PresenceStore;
 use crate::{AuthState, Settings};
 
@@ -235,6 +235,7 @@ struct PreparedNotification {
     channel_id: Option<String>,
     clan_id: Option<String>,
     link: Option<String>,
+    topic_reply: Option<NotificationTopicReply>,
     icon_url: Option<String>,
 }
 
@@ -294,7 +295,7 @@ fn prepare(cx: &App, user_id: &str, n: &GotifyNotification) -> Option<PreparedNo
     let hide_content = Settings::try_global(cx)
         .map(|s| s.read(cx).notifications_hide_content)
         .unwrap_or(false);
-    let (channel_id, clan_id) = route_ids(cx, &n.channel_id);
+    let (channel_id, clan_id) = route_ids(cx, n.effective_channel_id());
     Some(PreparedNotification {
         title: n.title.clone(),
         body: if hide_content {
@@ -305,7 +306,16 @@ fn prepare(cx: &App, user_id: &str, n: &GotifyNotification) -> Option<PreparedNo
         channel_id,
         clan_id,
         link: Some(n.extras.link.clone()).filter(|l| !l.is_empty()),
+        topic_reply: topic_reply(&n.extras),
         icon_url: sender_avatar_url(cx, &n.image),
+    })
+}
+
+fn topic_reply(extras: &GotifyExtras) -> Option<NotificationTopicReply> {
+    let present = |id: &str| !id.is_empty() && id != "0";
+    (present(&extras.topic_id) && present(&extras.message_id)).then(|| NotificationTopicReply {
+        topic_id: extras.topic_id.clone(),
+        message_id: extras.message_id.clone(),
     })
 }
 
@@ -321,6 +331,7 @@ fn show_prepared(cx: &App, p: PreparedNotification, icon_path: Option<String>) {
         channel_id: p.channel_id,
         clan_id: p.clan_id,
         link: p.link,
+        topic_reply: p.topic_reply,
         icon_path,
     });
 }

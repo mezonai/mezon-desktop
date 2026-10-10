@@ -67,6 +67,8 @@ pub enum ServerMessage {
         peer: Option<SnapshotMember>,
     },
     PeerLeft {
+        #[serde(default, deserialize_with = "flexible_generation")]
+        assignment_generation: u64,
         #[serde(default)]
         peer_id: u32,
         #[serde(default, deserialize_with = "flexible_mid")]
@@ -75,6 +77,12 @@ pub enum ServerMessage {
         mid_video: u32,
         #[serde(default, deserialize_with = "flexible_mid")]
         mid_screen: u32,
+    },
+    SlotAssigned(SlotAssignment),
+    SlotReleased {
+        slot: u32,
+        #[serde(deserialize_with = "flexible_generation")]
+        generation: u64,
     },
     MuteChanged {
         #[serde(default)]
@@ -117,8 +125,12 @@ pub struct IceServerSpec {
     pub credential: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct SnapshotMember {
+    #[serde(default, alias = "remote_slot")]
+    pub slot: Option<u32>,
+    #[serde(default, deserialize_with = "flexible_generation")]
+    pub assignment_generation: u64,
     #[serde(default)]
     pub peer_id: u32,
     #[serde(default)]
@@ -139,6 +151,57 @@ pub struct SnapshotMember {
     pub mid_video: u32,
     #[serde(default, deserialize_with = "flexible_mid")]
     pub mid_screen: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SlotAssignment {
+    pub slot: u32,
+    #[serde(deserialize_with = "flexible_generation")]
+    pub generation: u64,
+    pub peer_id: u32,
+    #[serde(default)]
+    pub user_id: String,
+    #[serde(default, deserialize_with = "flexible_mid")]
+    pub mid_audio: u32,
+    #[serde(default, deserialize_with = "flexible_mid")]
+    pub mid_video: u32,
+    #[serde(default, deserialize_with = "flexible_mid")]
+    pub mid_screen: u32,
+    pub audio_active: bool,
+    pub video_active: bool,
+    pub screen_active: bool,
+}
+
+impl SlotAssignment {
+    pub fn mids(&self) -> Option<[u32; 3]> {
+        let base = self.slot.checked_mul(3)?.checked_add(3)?;
+        let expected = [base, base.checked_add(1)?, base.checked_add(2)?];
+        let supplied = [self.mid_audio, self.mid_video, self.mid_screen];
+        (self.generation > 0
+            && self.peer_id != 0
+            && supplied
+                .iter()
+                .zip(expected)
+                .all(|(value, mid)| *value == 0 || *value == mid))
+        .then_some(expected)
+    }
+}
+
+fn flexible_generation<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Num(u64),
+        Str(String),
+    }
+    match Option::<Repr>::deserialize(deserializer)? {
+        Some(Repr::Num(n)) => Ok(n),
+        Some(Repr::Str(s)) => s.parse().map_err(serde::de::Error::custom),
+        None => Ok(0),
+    }
 }
 
 impl SnapshotMember {
@@ -354,6 +417,7 @@ mod tests {
         assert_eq!(
             msg,
             ServerMessage::PeerLeft {
+                assignment_generation: 1,
                 peer_id: 4,
                 mid_audio: 6,
                 mid_video: 7,
@@ -371,6 +435,7 @@ mod tests {
         assert_eq!(
             msg,
             ServerMessage::PeerLeft {
+                assignment_generation: 0,
                 peer_id: 4,
                 mid_audio: 6,
                 mid_video: 7,

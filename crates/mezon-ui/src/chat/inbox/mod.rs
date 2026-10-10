@@ -1,7 +1,7 @@
 mod panel;
 mod row;
 
-pub use panel::{InboxPopoverPanel, clan_has_inbox_badge};
+pub use panel::{InboxPopoverPanel, clan_has_inbox_badge, open_topic_reply};
 pub use row::{
     FOR_YOU_ROW_HEIGHT, MENTION_ROW_HEIGHT, MESSAGE_ROW_HEIGHT, ROW_HEIGHT, TOPIC_ROW_HEIGHT,
 };

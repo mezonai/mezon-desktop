@@ -26,8 +26,8 @@ use mezon_store::{
     MENTION_HERE_USER_ID, MENTION_SEARCH_MAX_CHARS, MENTION_SEARCH_MIN_CHARS, MentionSearchEvent,
     MentionSearchStore, MessageSpan, MessagesStore, OgpResult, OutgoingAttachment, OutgoingContent,
     OutgoingEmoji, OutgoingHashtag, OutgoingMention, OutgoingOgp, QuickMenuStore, RolesEvent,
-    RolesStore, Settings, UserId, fetch_invite_preview, fetch_ogp, first_previewable_url,
-    internal_invite_id, is_clan_invite_url,
+    RolesStore, Settings, TopicsStore, UserId, fetch_invite_preview, fetch_ogp,
+    first_previewable_url, internal_invite_id, is_clan_invite_url,
 };
 use std::time::Duration;
 use unicode_normalization::UnicodeNormalization;
@@ -100,7 +100,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-g", OpenMessageBuzz, None),
     ]);
     cx.on_action(|_: &ToggleAnonymous, cx: &mut App| {
-        toggle_anonymous_shortcut(cx);
+        toggle_anonymous_shortcut(false, cx);
     });
     cx.on_action(|_: &OpenMessageBuzz, cx: &mut App| {
         let Some(window_handle) =
@@ -116,7 +116,7 @@ pub fn init(cx: &mut App) {
     });
 }
 
-fn toggle_anonymous_shortcut(cx: &mut App) {
+pub(crate) fn toggle_anonymous_shortcut(in_topic: bool, cx: &mut App) {
     if matches!(
         Router::global(cx).read(cx).route(),
         Route::DirectMessage { .. } | Route::Direct | Route::Friends
@@ -131,7 +131,7 @@ fn toggle_anonymous_shortcut(cx: &mut App) {
     {
         return;
     }
-    MessagesStore::global(cx).update(cx, |store, cx| store.toggle_anonymous_mode(cx));
+    MessagesStore::global(cx).update(cx, |store, cx| store.toggle_anonymous_mode(in_topic, cx));
 }
 
 fn open_message_buzz(for_topic: bool, window: &mut Window, cx: &mut App) {
@@ -2374,6 +2374,7 @@ impl MentionInput {
                     ChannelEvent::Unread(_) | ChannelEvent::InVoiceChanged => {}
                     ChannelEvent::ArchivedByAdministrator { .. }
                     | ChannelEvent::AccessLost(_)
+                    | ChannelEvent::LinkedChannelResolved(_)
                     | ChannelEvent::PrivacyChanged { .. } => {}
                 },
             ),
@@ -3286,6 +3287,22 @@ impl MentionInput {
         open_message_buzz(true, window, cx);
     }
 
+    fn on_toggle_anonymous(
+        &mut self,
+        _: &ToggleAnonymous,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.for_topic {
+            cx.propagate();
+            return;
+        }
+        if TopicsStore::global(cx).read(cx).active_topic_id().is_none() {
+            return;
+        }
+        toggle_anonymous_shortcut(cx);
+    }
+
     fn on_accept(&mut self, _: &MentionAccept, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup_visible() && !self.accept_best(window, cx) {
             cx.notify();
@@ -3625,6 +3642,7 @@ impl MentionInput {
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(Self::on_accept))
             .on_action(cx.listener(Self::on_dismiss))
+            .on_action(cx.listener(Self::on_toggle_anonymous))
             .when_some(previews, |this, previews| this.child(previews))
             .child(MentionInputField::new(&self.input))
             .when_some(popup, |this, popup| this.child(popup))
@@ -3693,10 +3711,13 @@ fn role_suggest_pool(cx: &App) -> Vec<RoleSuggestRaw> {
     let Some(store) = RolesStore::try_global(cx) else {
         return Vec::new();
     };
+    let store = store.read(cx);
+    // everyone-mention: the Everyone role is hidden from suggestions for now (it notifies like @here); drop this filter to restore it.
+    let everyone_role_id = store.everyone_role_id(clan_id);
     store
-        .read(cx)
         .roles_in_clan(clan_id)
         .into_iter()
+        .filter(|(role_id, _)| Some(*role_id) != everyone_role_id)
         .map(|(role_id, role)| RoleSuggestRaw {
             role_id: role_id.to_string(),
             title: role.name.clone(),
@@ -3862,6 +3883,7 @@ fn committed_from_spans(content: &str, spans: &[MessageSpan]) -> Vec<CommittedTo
             MessageSpan::Hashtag {
                 display,
                 channel_id,
+                ..
             } => (
                 display.to_string(),
                 TokenKind::Hashtag {
@@ -3938,6 +3960,7 @@ impl Render for MentionInput {
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(Self::on_dismiss))
             .on_action(cx.listener(Self::on_open_buzz))
+            .on_action(cx.listener(Self::on_toggle_anonymous))
             .when(open, |this| this.on_action(cx.listener(Self::on_accept)))
             .child(MentionInputField::new(&self.input))
             .child(

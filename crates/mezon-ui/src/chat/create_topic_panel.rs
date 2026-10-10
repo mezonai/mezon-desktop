@@ -10,7 +10,9 @@ use crate::app::window_controls::APP_HEADER_HEIGHT;
 use crate::chat::ReplyTarget;
 use crate::chat::channel_typing::ChannelTyping;
 use crate::chat::input_bar::{InputBar, ReplyClearSource};
-use crate::chat::mention_input::{MentionInput, MentionInputEvent};
+use crate::chat::mention_input::{
+    MentionInput, MentionInputEvent, ToggleAnonymous, toggle_anonymous_shortcut,
+};
 use crate::chat::message::{ChannelMessages, ChannelMessagesEvent};
 use crate::components::primitives::{Icon, IconName, h_flex, v_flex};
 use crate::theme::ActiveTheme;
@@ -403,6 +405,9 @@ impl Render for TopicPanel {
                     TopicsStore::global(cx).update(cx, |store, cx| store.close_panel(cx));
                 }
             }))
+            .on_action(|_: &ToggleAnonymous, _window, cx| {
+                toggle_anonymous_shortcut(true, cx);
+            })
             .child(header)
             .child(drop_body)
     }

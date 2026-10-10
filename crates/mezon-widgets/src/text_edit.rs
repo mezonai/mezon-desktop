@@ -4,7 +4,8 @@ use std::rc::Rc;
 
 use gpui::SharedString;
 
-pub const MAX_UNDO_HISTORY: usize = 256;
+const MAX_UNDO_HISTORY: usize = 256;
+const MAX_UNDO_HISTORY_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CharKind {
@@ -178,15 +179,15 @@ pub struct HistoryEntry {
     pub payload: Option<Rc<dyn Any>>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum EditKind {
-    Insert,
-    Delete,
-    Other,
-}
-
-pub fn should_coalesce(last: Option<EditKind>, kind: EditKind) -> bool {
-    matches!(kind, EditKind::Insert | EditKind::Delete) && last == Some(kind)
+pub fn push_undo_entry(stack: &mut Vec<HistoryEntry>, entry: HistoryEntry) {
+    stack.push(entry);
+    let mut dropped = stack.len().saturating_sub(MAX_UNDO_HISTORY);
+    let mut bytes: usize = stack[dropped..].iter().map(|kept| kept.content.len()).sum();
+    while bytes > MAX_UNDO_HISTORY_BYTES && dropped + 1 < stack.len() {
+        bytes -= stack[dropped].content.len();
+        dropped += 1;
+    }
+    stack.drain(..dropped);
 }
 
 pub fn floor_char_boundary(text: &str, index: usize) -> usize {
@@ -394,6 +395,57 @@ pub fn clipped_edit_is_rejected(requested: &str, clipped: &str, composing: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(content: String) -> HistoryEntry {
+        HistoryEntry {
+            content: content.into(),
+            selected_range: 0..0,
+            selection_reversed: false,
+            payload: None,
+        }
+    }
+
+    #[test]
+    fn undo_history_keeps_only_the_newest_steps() {
+        let mut stack = Vec::new();
+        for step in 0..MAX_UNDO_HISTORY + 10 {
+            push_undo_entry(&mut stack, entry(step.to_string()));
+        }
+        assert_eq!(stack.len(), MAX_UNDO_HISTORY);
+        assert_eq!(stack[0].content.as_ref(), "10");
+        assert_eq!(
+            stack[MAX_UNDO_HISTORY - 1].content.to_string(),
+            (MAX_UNDO_HISTORY + 9).to_string()
+        );
+    }
+
+    #[test]
+    fn undo_history_drops_the_oldest_steps_past_the_byte_budget() {
+        let mut stack = Vec::new();
+        let step_len = 100_000;
+        for step in 0..MAX_UNDO_HISTORY {
+            push_undo_entry(&mut stack, entry(step.to_string().repeat(step_len / 3)));
+        }
+        let bytes: usize = stack.iter().map(|kept| kept.content.len()).sum();
+        assert!(bytes <= MAX_UNDO_HISTORY_BYTES);
+        assert!(stack.len() < MAX_UNDO_HISTORY);
+        assert!(
+            stack
+                .last()
+                .unwrap()
+                .content
+                .starts_with(&(MAX_UNDO_HISTORY - 1).to_string())
+        );
+    }
+
+    #[test]
+    fn a_single_step_larger_than_the_budget_is_still_kept() {
+        let mut stack = Vec::new();
+        push_undo_entry(&mut stack, entry("a".repeat(16)));
+        push_undo_entry(&mut stack, entry("b".repeat(MAX_UNDO_HISTORY_BYTES + 1)));
+        assert_eq!(stack.len(), 1);
+        assert!(stack[0].content.starts_with('b'));
+    }
 
     #[test]
     fn an_insert_that_fits_is_kept_whole() {

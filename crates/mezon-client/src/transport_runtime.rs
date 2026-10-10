@@ -955,7 +955,7 @@ impl TransportClient {
         channel_id: &str,
         room_name: &str,
         metadata: &str,
-    ) -> Result<String> {
+    ) -> Result<mezon_proto::api::GenerateMeetTokenResponse> {
         let transport = self.inner.clone();
         let channel_id = channel_id
             .parse::<i64>()
@@ -967,7 +967,6 @@ impl TransportClient {
                 transport
                     .generate_meet_token(channel_id, &room_name, &metadata)
                     .await
-                    .map(|resp| resp.token)
             })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
@@ -1848,7 +1847,7 @@ impl TransportClient {
         message_id: i64,
         content: &str,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         mode: i32,
         is_public: bool,
@@ -2136,7 +2135,7 @@ impl TransportClient {
         is_public: bool,
         mode: i32,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         attachments: Vec<mezon_proto::api::MessageAttachment>,
         reply: Option<crate::transport::OutgoingReply>,
@@ -2176,7 +2175,7 @@ impl TransportClient {
         is_public: bool,
         mode: i32,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         attachments: Vec<mezon_proto::api::MessageAttachment>,
         reply: Option<crate::transport::OutgoingReply>,
@@ -2383,7 +2382,7 @@ impl TransportClient {
         is_public: bool,
         mode: i32,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         ogp: Option<crate::transport::OutgoingOgp>,
         flags: crate::transport::OutgoingMessageFlags,
@@ -2796,7 +2795,7 @@ impl TransportClient {
         is_public: bool,
         mode: i32,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         ogp: Option<crate::transport::OutgoingOgp>,
     ) -> Result<crate::transport::ApiMessage> {
@@ -2826,7 +2825,7 @@ impl TransportClient {
         mode: i32,
         topic_id: i64,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         reply: Option<crate::transport::OutgoingReply>,
         flags: crate::transport::OutgoingMessageFlags,
@@ -2858,7 +2857,7 @@ impl TransportClient {
         topic_id: i64,
         attachments: Vec<mezon_proto::api::MessageAttachment>,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
         reply: Option<crate::transport::OutgoingReply>,
@@ -2901,7 +2900,7 @@ impl TransportClient {
         mode: i32,
         reply: crate::transport::OutgoingReply,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         ogp: Option<crate::transport::OutgoingOgp>,
         flags: crate::transport::OutgoingMessageFlags,
@@ -2932,7 +2931,7 @@ impl TransportClient {
         attachments: Vec<mezon_proto::api::MessageAttachment>,
         reply: Option<crate::transport::OutgoingReply>,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
         flags: crate::transport::OutgoingMessageFlags,
@@ -2971,7 +2970,7 @@ impl TransportClient {
         message_id: i64,
         content: &str,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         presign_finish: Vec<String>,
         create_time_seconds: u32,

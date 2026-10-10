@@ -20,7 +20,7 @@ use crate::messages::{
 use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::upload_jobs::UploadJob;
-use crate::{CACHE_TTL, ChannelId, ClanId, Message, MessageId, MessageRef, UserId};
+use crate::{AppConfig, CACHE_TTL, ChannelId, ClanId, Message, MessageId, MessageRef, UserId};
 
 const TOPICS_LIMIT: i32 = 50;
 const STREAM_MODE_CHANNEL: i32 = 2;
@@ -535,7 +535,10 @@ impl TopicsStore {
     }
 
     pub fn set_reply_to(&mut self, target: MessageRef, cx: &mut Context<Self>) {
-        let Some(draft) = MessagesStore::global(cx).read(cx).reply_draft_for(target) else {
+        let Some(draft) = MessagesStore::global(cx)
+            .read(cx)
+            .reply_draft_for_with_config(target, AppConfig::try_global(cx))
+        else {
             return;
         };
         self.reply_target = Some(draft);
@@ -1141,11 +1144,15 @@ impl TopicsStore {
             .into_iter()
             .map(OutgoingMention::into_transport)
             .collect();
-        let transport_hashtags: Vec<mezon_client::transport::OutgoingHashtag> = content_tokens
-            .hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect();
+        let transport_hashtags = crate::messages::outgoing_hashtags(
+            &content,
+            content_tokens
+                .hashtags
+                .into_iter()
+                .map(OutgoingHashtag::into_transport)
+                .collect(),
+            cx,
+        );
         let transport_emojis: Vec<mezon_client::transport::OutgoingEmoji> = content_tokens
             .emojis
             .into_iter()
@@ -1377,7 +1384,8 @@ impl TopicsStore {
                 is_public,
                 content: content.clone(),
                 mentions: update_mentions,
-                hashtags: update_hashtags,
+                hashtags: update_hashtags.tokens,
+                hashtag_channels: update_hashtags.channels,
                 emojis: update_emojis,
                 create_time_seconds,
                 started_at: unix_now_seconds(),
@@ -1433,11 +1441,15 @@ impl TopicsStore {
             .into_iter()
             .map(OutgoingMention::into_transport)
             .collect();
-        let transport_hashtags: Vec<mezon_client::transport::OutgoingHashtag> = content_tokens
-            .hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect();
+        let transport_hashtags = crate::messages::outgoing_hashtags(
+            &content,
+            content_tokens
+                .hashtags
+                .into_iter()
+                .map(OutgoingHashtag::into_transport)
+                .collect(),
+            cx,
+        );
         let transport_emojis: Vec<mezon_client::transport::OutgoingEmoji> = content_tokens
             .emojis
             .into_iter()
@@ -2040,6 +2052,28 @@ fn sd_topic_from_event(ev: &realtime::SdTopicEvent) -> api::SdTopic {
 mod tests {
     use super::*;
     use crate::message::MessageCode;
+
+    #[gpui::test]
+    fn anonymous_send_requires_an_existing_topic(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            crate::channel::ChannelList::init(api.clone(), cx);
+            crate::account::AccountStore::init(api.clone(), cx);
+            let messages = MessagesStore::init(api, cx);
+            messages.update(cx, |store, cx| {
+                store.set_active_topic(Some(77), cx);
+                store.toggle_anonymous_mode(cx);
+            });
+
+            assert!(!topic_anonymous_send(None, 9, cx));
+            assert!(topic_anonymous_send(Some(77), 9, cx));
+        });
+    }
 
     fn pending_jump(requested_at: Instant) -> PendingInboxTopicJump {
         PendingInboxTopicJump {

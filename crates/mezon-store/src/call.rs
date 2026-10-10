@@ -142,6 +142,7 @@ pub struct CallStore {
     selected_input: Option<String>,
     selected_output: Option<String>,
     incoming_offer: Option<String>,
+    caller_session_id: Option<String>,
     engine: Option<CallEngine>,
     frame_store: Option<Arc<VideoFrameStore>>,
     started_at: Option<Instant>,
@@ -195,6 +196,7 @@ impl CallStore {
             selected_input: None,
             selected_output: None,
             incoming_offer: None,
+            caller_session_id: None,
             engine: None,
             frame_store: None,
             started_at: None,
@@ -708,6 +710,9 @@ impl CallStore {
     fn on_engine_event(&mut self, event: EngineEvent, cx: &mut Context<Self>) {
         match event {
             EngineEvent::LocalOffer(sdp) => {
+                if self.is_caller && self.caller_session_id.is_none() {
+                    self.caller_session_id = sdp_session_id(&sdp).map(str::to_owned);
+                }
                 let payload = OfferPayload {
                     kind: "offer".to_string(),
                     sdp,
@@ -830,7 +835,10 @@ impl CallStore {
                 self.peer.as_ref().map(|p| p.user_id)
             );
         }
-        let from_peer = self.peer.as_ref().map(|p| p.user_id) == Some(caller_id);
+        let from_peer = self.peer.as_ref().is_some_and(|peer| {
+            peer.user_id == caller_id
+                && (channel_id == 0 || peer.channel_id == 0 || peer.channel_id == channel_id)
+        });
         if matches!(self.phase, CallPhase::Incoming)
             && from_peer
             && fwd.data_type == WEBRTC_SDP_INIT
@@ -850,12 +858,15 @@ impl CallStore {
             WEBRTC_SDP_ANSWER => self.on_remote_answer(caller_id, &fwd.json_data, cx),
             WEBRTC_ICE_CANDIDATE => self.on_remote_ice(caller_id, &fwd.json_data),
             WEBRTC_SDP_QUIT => {
-                if from_peer && !matches!(self.phase, CallPhase::Idle) {
-                    self.forward(caller_id, WEBRTC_CLEAR_CALL, String::new(), channel_id, cx);
-                }
-                self.on_remote_end(caller_id, EndReason::RemoteQuit, cx);
+                self.on_remote_end(caller_id, channel_id, EndReason::RemoteQuit, cx);
             }
-            WEBRTC_CLEAR_CALL => self.on_remote_end(caller_id, EndReason::RemoteQuit, cx),
+            WEBRTC_CLEAR_CALL => {
+                if matches!(self.phase, CallPhase::Incoming)
+                    && self.matches_ring_sync(&fwd.json_data)
+                {
+                    self.on_remote_end(caller_id, channel_id, EndReason::RemoteQuit, cx);
+                }
+            }
             WEBRTC_SDP_TIMEOUT => {
                 if let Some(started) = self.started_at
                     && started.elapsed() < NO_ANSWER_TIMEOUT
@@ -865,7 +876,7 @@ impl CallStore {
                         started.elapsed().as_millis()
                     );
                 } else {
-                    self.on_remote_end(caller_id, EndReason::Timeout, cx);
+                    self.on_remote_end(caller_id, channel_id, EndReason::Timeout, cx);
                 }
             }
             WEBRTC_SDP_JOINED_OTHER_CALL => {
@@ -875,7 +886,7 @@ impl CallStore {
                         self.phase
                     );
                 } else {
-                    self.on_remote_end(caller_id, EndReason::Busy, cx);
+                    self.on_remote_end(caller_id, channel_id, EndReason::Busy, cx);
                 }
             }
             WEBRTC_SDP_STATUS_REMOTE_MEDIA => {
@@ -932,6 +943,7 @@ impl CallStore {
         }
         if matches!(self.phase, CallPhase::Incoming)
             && self.peer.as_ref().map(|p| p.channel_id) == Some(channel_id)
+            && self.matches_ring_sync(json)
         {
             tracing::info!("call: incoming cancelled/answered elsewhere -> dismiss");
             self.reset_state();
@@ -1023,6 +1035,18 @@ impl CallStore {
         cx.notify();
     }
 
+    fn matches_ring_sync(&self, json: &str) -> bool {
+        let session_id = serde_json::from_str::<serde_json::Value>(json)
+            .ok()
+            .and_then(|value| value.get("callSessionId")?.as_str().map(str::to_owned));
+        match session_id.as_deref() {
+            Some(id) if !id.is_empty() => {
+                self.incoming_offer.as_deref().and_then(sdp_session_id) == Some(id)
+            }
+            _ => true,
+        }
+    }
+
     fn is_known_peer_session(&self, peer_id: i64, sdp: &str) -> bool {
         let Some(session_id) = sdp_session_id(sdp) else {
             return false;
@@ -1096,8 +1120,17 @@ impl CallStore {
         }
     }
 
-    fn on_remote_end(&mut self, caller_id: i64, reason: EndReason, cx: &mut Context<Self>) {
-        if self.peer.as_ref().map(|p| p.user_id) != Some(caller_id) {
+    fn on_remote_end(
+        &mut self,
+        caller_id: i64,
+        channel_id: i64,
+        reason: EndReason,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.peer.as_ref().is_some_and(|peer| {
+            peer.user_id == caller_id
+                && (channel_id == 0 || peer.channel_id == 0 || peer.channel_id == channel_id)
+        }) {
             tracing::info!(
                 "call: {} signal from {caller_id} ignored (active peer {:?})",
                 reason.label(),
@@ -1166,9 +1199,7 @@ impl CallStore {
             engine.send(EngineCommand::Hangup);
         }
         self.write_terminal_log(reason, cx);
-        if self.is_caller {
-            self.send_call_push_cancel(self.connected_at.is_some(), cx);
-        }
+        self.sync_outgoing_call_end(cx);
         match reason {
             EndReason::Busy => self.play_tone(ToneSlot::Busy, BUSYTONE_SOUND, false, cx),
             _ => self.play_tone(ToneSlot::End, ENDCALL_SOUND, false, cx),
@@ -1187,6 +1218,7 @@ impl CallStore {
         self.remote = MediaFlags::default();
         self.mic_unavailable = false;
         self.incoming_offer = None;
+        self.caller_session_id = None;
         self.pending_remote_ice.clear();
         self.pending_local_ice.clear();
         self.engine = None;
@@ -1460,6 +1492,7 @@ impl CallStore {
         };
         let body = serde_json::json!({
             "offer": "CANCEL_CALL",
+            "callSessionId": self.caller_session_id,
             "isConnected": is_connected,
             "isVideo": self.media == MediaKind::Video,
             "callerName": caller_name,
@@ -1481,6 +1514,19 @@ impl CallStore {
                 }
             })
             .detach();
+    }
+
+    fn sync_outgoing_call_end(&self, cx: &Context<Self>) {
+        if !self.is_caller {
+            return;
+        }
+        let data = serde_json::json!({
+            "callSessionId": self.caller_session_id,
+            "sentAt": now_ms().to_string(),
+        })
+        .to_string();
+        self.send_to_peer(WEBRTC_CLEAR_CALL, data, cx);
+        self.send_call_push_cancel(false, cx);
     }
 
     fn play_tone(

@@ -11,6 +11,7 @@ mod password_modal;
 mod phone_modal;
 mod profile_page;
 mod screen;
+mod server_page;
 mod voice_page;
 
 pub use screen::{SettingsPage, SettingsScreen};

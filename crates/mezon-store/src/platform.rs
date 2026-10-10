@@ -163,19 +163,34 @@ pub fn copy_image_url_to_clipboard(
     .detach();
 }
 
+async fn signed_media_url(url: String) -> String {
+    mezon_client::cdn_signature::sign(&url)
+        .await
+        .map_or(url, |signed| signed.url)
+}
+
 pub fn open_media_url_external(url: String, cx: &mut App) {
     if url.is_empty() {
         return;
     }
     cx.spawn(async move |cx| {
-        let url = mezon_client::cdn_signature::sign(&url)
-            .await
-            .map_or(url, |signed| signed.url);
+        let url = signed_media_url(url).await;
         cx.update(|cx| {
             if let Some(store) = PlatformStore::try_global(cx) {
                 let _ = store.read(cx).open_url_external(&url);
             }
         });
+    })
+    .detach();
+}
+
+pub fn copy_media_url_to_clipboard(url: String, cx: &mut App) {
+    if url.is_empty() {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        let url = signed_media_url(url).await;
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string(url)));
     })
     .detach();
 }
@@ -218,12 +233,19 @@ pub struct CliInstallHooks {
     pub toggle: CliInstallToggleFn,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationTopicReply {
+    pub topic_id: String,
+    pub message_id: String,
+}
+
 pub struct DesktopNotification {
     pub title: String,
     pub body: String,
     pub channel_id: Option<String>,
     pub clan_id: Option<String>,
     pub link: Option<String>,
+    pub topic_reply: Option<NotificationTopicReply>,
     /// Local path to a downloaded sender-avatar image, attached as the icon.
     pub icon_path: Option<String>,
 }
@@ -624,5 +646,26 @@ mod tests {
 
         TEST_DOWNLOAD_DIR.with(|slot| *slot.borrow_mut() = None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn media_links_carry_the_cdn_signature_of_their_channel() {
+        crate::cdn_test_signer::install();
+
+        let signed = futures::executor::block_on(signed_media_url(
+            "https://cdn.example/1cb164dbdac01000/2107444226227703808_a.png".to_string(),
+        ));
+        assert_eq!(
+            signed,
+            "https://cdn.example/1cb164dbdac01000/2107444226227703808_a.png?1791259679-mac"
+        );
+
+        let legacy = futures::executor::block_on(signed_media_url(
+            "https://cdn.example/1840673171137630208/2097582928409137152.png".to_string(),
+        ));
+        assert_eq!(
+            legacy,
+            "https://cdn.example/1840673171137630208/2097582928409137152.png"
+        );
     }
 }

@@ -91,8 +91,10 @@ fn should_increment_dm_unread(cx: &App, channel_id: ChannelId, from_me: bool) ->
     }
     let messages = MessagesStore::global(cx).read(cx);
     let app_focused = cx.active_window().is_some();
-    let viewing_this_dm =
-        messages.is_dm() && messages.active_channel_id() == Some(channel_id) && app_focused;
+    let viewing_this_dm = messages.is_dm()
+        && messages.active_channel_id() == Some(channel_id)
+        && app_focused
+        && messages.is_reading_live_tail(channel_id);
     !viewing_this_dm
 }
 
@@ -112,6 +114,9 @@ fn is_clan_message_seen(cx: &App, m: &ChannelMessage, from_me: bool) -> bool {
     };
     let badge_id = badge_channel_id(m);
     let parent_id = ChannelId(m.channel_id);
+    if active == badge_id && badge_id == parent_id {
+        return messages.is_reading_live_tail(active);
+    }
     active == badge_id || active == parent_id
 }
 

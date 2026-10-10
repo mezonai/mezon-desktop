@@ -385,6 +385,7 @@ impl ClanEventsModal {
             .map(|store| store.read(cx).clan_settings_permissions(self.clan_id, cx));
         let can_end_event = permissions.is_some_and(|permissions| permissions.is_clan_owner);
         let share_link = self.event_link(event, cx);
+        let has_context_menu = self.can_modify_event(event, cx) || !share_link.is_empty();
         let external_link_copied = self.copied_external_event_id == Some(event.id);
         let share_channel_name = voice_name.unwrap_or_else(|| location.clone());
         let event_for_end = event.clone();
@@ -456,36 +457,38 @@ impl ClanEventsModal {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .child(
-                                        div()
-                                            .id(("event-menu-button", event_id as usize))
-                                            .group("event-three-dot")
-                                            .px_2()
-                                            .text_color(theme.text_secondary)
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(
-                                                move |this, event: &ClickEvent, _, cx| {
-                                                    cx.stop_propagation();
-                                                    let opening =
-                                                        this.menu_event_id != Some(event_id);
-                                                    this.menu_event_id =
-                                                        opening.then_some(event_id);
-                                                    this.menu_position = opening.then(|| {
-                                                        let position = event.position();
-                                                        point(position.x + px(10.), position.y)
-                                                    });
-                                                    cx.notify();
-                                                },
-                                            ))
-                                            .child(
-                                                Icon::new(IconName::ThreeDot)
-                                                    .size(px(20.))
-                                                    .text_color(theme.text_secondary)
-                                                    .group_hover("event-three-dot", |style| {
-                                                        style.text_color(theme.text_primary)
-                                                    }),
-                                            ),
-                                    )
+                                    .when(has_context_menu, |actions| {
+                                        actions.child(
+                                            div()
+                                                .id(("event-menu-button", event_id as usize))
+                                                .group("event-three-dot")
+                                                .px_2()
+                                                .text_color(theme.text_secondary)
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(
+                                                    move |this, event: &ClickEvent, _, cx| {
+                                                        cx.stop_propagation();
+                                                        let opening =
+                                                            this.menu_event_id != Some(event_id);
+                                                        this.menu_event_id =
+                                                            opening.then_some(event_id);
+                                                        this.menu_position = opening.then(|| {
+                                                            let position = event.position();
+                                                            point(position.x + px(10.), position.y)
+                                                        });
+                                                        cx.notify();
+                                                    },
+                                                ))
+                                                .child(
+                                                    Icon::new(IconName::ThreeDot)
+                                                        .size(px(20.))
+                                                        .text_color(theme.text_secondary)
+                                                        .group_hover("event-three-dot", |style| {
+                                                            style.text_color(theme.text_primary)
+                                                        }),
+                                                ),
+                                        )
+                                    })
                                     .when(!is_location && !share_link.is_empty(), |actions| {
                                         actions.child(
                                             action(
@@ -759,14 +762,7 @@ impl ClanEventsModal {
         cx: &Context<Self>,
     ) -> AnyElement {
         let locale = self.settings.read(cx).language.clone();
-        let current_user = BadgeService::global(cx).read(cx).current_user_id(cx);
-        let can_modify = current_user == Some(event.creator_id)
-            || PermissionStore::try_global(cx).is_some_and(|store| {
-                let permissions = store.read(cx).clan_settings_permissions(self.clan_id, cx);
-                permissions.is_clan_owner
-                    || permissions.has_manage_clan
-                    || permissions.has_administrator
-            });
+        let can_modify = self.can_modify_event(event, cx);
         let event_link = self.event_link(event, cx);
         let weak = cx.weak_entity();
         let mut menu = ContextMenu::new().min_width(px(200.));
@@ -842,6 +838,21 @@ impl ClanEventsModal {
         });
 
         context_menu_at(position, menu).into_any_element()
+    }
+
+    fn can_modify_event(&self, event: &ClanEventItem, cx: &App) -> bool {
+        let current_user = BadgeService::global(cx).read(cx).current_user_id(cx);
+        current_user == Some(event.creator_id)
+            || PermissionStore::try_global(cx).is_some_and(|store| {
+                let permissions = store.read(cx).clan_settings_permissions(self.clan_id, cx);
+                permissions.is_clan_owner
+                    || permissions.has_manage_clan
+                    || permissions.has_administrator
+            })
+    }
+
+    fn has_event_context_actions(&self, event: &ClanEventItem, cx: &App) -> bool {
+        self.can_modify_event(event, cx) || !self.event_link(event, cx).is_empty()
     }
 
     fn event_detail(&self, event: &ClanEventItem, cx: &Context<Self>) -> AnyElement {
@@ -1160,6 +1171,7 @@ impl Render for ClanEventsModal {
                     events
                         .iter()
                         .find(|event| event.id == event_id)
+                        .filter(|event| self.has_event_context_actions(event, cx))
                         .map(|event| self.event_context_menu(event, position, cx))
                 });
         if events.is_empty() {

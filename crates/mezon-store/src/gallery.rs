@@ -262,16 +262,34 @@ pub async fn fetch_channel_attachments(
         .await?;
     let raw_count = list.len();
     let oldest_create_time = list.last().map(|a| a.create_time_seconds);
-    let attachments = list
+    let media: Vec<ChannelAttachment> = list
         .into_iter()
         .map(|a| ChannelAttachment::from_api(a, channel_id, clan_id, &cfg))
         .filter(ChannelAttachment::is_media)
         .collect();
+    let attachments = drop_denied_foreign_media(channel_id, media).await;
     Ok(FetchedChannelAttachments {
         attachments,
         raw_count,
         oldest_create_time,
     })
+}
+
+async fn drop_denied_foreign_media(
+    channel_id: ChannelId,
+    media: Vec<ChannelAttachment>,
+) -> Vec<ChannelAttachment> {
+    let denied = futures::future::join_all(media.iter().map(|attachment| async move {
+        mezon_client::cdn_signature::channel_of_url(&attachment.url)
+            .is_some_and(|source| source != channel_id.0)
+            && mezon_client::cdn_signature::access_denied(&attachment.url).await
+    }))
+    .await;
+    media
+        .into_iter()
+        .zip(denied)
+        .filter_map(|(attachment, denied)| (!denied).then_some(attachment))
+        .collect()
 }
 
 pub fn initial_page_has_more(raw_count: usize, limit: i32) -> bool {
@@ -754,6 +772,7 @@ impl GalleryStore {
                             }
                         })
                         .await;
+                    let mapped = drop_denied_foreign_media(channel_id, mapped).await;
                     Ok((mapped, raw_count))
                 }
                 Err(e) => Err(e),
@@ -1084,6 +1103,36 @@ mod tests {
             "application/pdf",
             "https://cdn.example/a.pdf"
         ));
+    }
+
+    #[test]
+    fn denied_media_from_another_channel_is_dropped_but_a_channels_own_media_stays() {
+        crate::cdn_test_signer::install();
+        let with_url = |id: i64, url: &str| ChannelAttachment {
+            url: url.to_string(),
+            ..att(id, 1, "image/png")
+        };
+        let open_channel = ChannelId(0x1cb1_64db_dac0_1000);
+        let kept = futures::executor::block_on(drop_denied_foreign_media(
+            open_channel,
+            vec![
+                with_url(1, "https://cdn.example/1cb164dbdac01000/1_own.png"),
+                with_url(2, "https://cdn.example/1cb164dbdac01001/2_forwarded.png"),
+                with_url(3, "https://cdn.example/1cb164dbdac01002/3_forwarded.png"),
+                with_url(4, "https://cdn.example/1840673171137630208/4_legacy.png"),
+            ],
+        ));
+        assert_eq!(kept.iter().map(|a| a.id).collect::<Vec<_>>(), vec![1, 3, 4]);
+
+        let denied_channel = ChannelId(crate::cdn_test_signer::DENIED_CHANNEL);
+        let own = futures::executor::block_on(drop_denied_foreign_media(
+            denied_channel,
+            vec![with_url(
+                5,
+                "https://cdn.example/1cb164dbdac01001/5_own.png",
+            )],
+        ));
+        assert_eq!(own.len(), 1, "a channel's own media is never filtered");
     }
 
     #[test]

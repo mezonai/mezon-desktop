@@ -20,7 +20,7 @@ use parking_lot::Mutex;
 
 use crate::login::{session_credentials, spawn_session_logout};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
-use crate::{AppConfig, AuthState};
+use crate::{AppConfig, AuthState, RealtimeServer, Settings};
 
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 const CONNECT_CONFIRM_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
@@ -109,6 +109,11 @@ enum HealthyEndpointCredential {
 pub struct ConnectionStore {
     online: bool,
     connecting_attempt: u32,
+    realtime_host: Option<String>,
+    realtime_connected: bool,
+    auth_state: Entity<AuthState>,
+    endpoint_health: Arc<Mutex<EndpointHealth>>,
+    tcp_default_port: Option<u16>,
     transport: Arc<TransportClient>,
     wake: Arc<tokio::sync::Notify>,
     /// Bumped whenever the live connection is replaced. Callbacks captured by an
@@ -120,6 +125,7 @@ pub struct ConnectionStore {
     _heartbeat: Task<()>,
     _token_watch: Task<()>,
     _online_watch: Task<()>,
+    _status_watch: Task<()>,
     _network: NetworkMonitor,
 }
 
@@ -146,6 +152,54 @@ impl ConnectionStore {
 
     pub fn connecting_attempt(&self) -> u32 {
         self.connecting_attempt
+    }
+
+    pub fn realtime_host(&self) -> Option<&str> {
+        self.realtime_host.as_deref()
+    }
+
+    pub fn is_realtime_connected(&self) -> bool {
+        self.realtime_connected
+    }
+
+    pub fn select_realtime_server(&mut self, server: RealtimeServer, cx: &mut Context<Self>) {
+        let Some(settings) = Settings::try_global(cx) else {
+            return;
+        };
+        if settings.read(cx).realtime_server == server {
+            return;
+        }
+        settings.update(cx, |settings, cx| {
+            settings.realtime_server = server;
+            cx.notify();
+        });
+        crate::schedule_settings_save(&settings, cx);
+        let next = self
+            .session_endpoint(cx)
+            .map(|endpoint| RealtimeServer::current(cx).steer(endpoint));
+        let current = self.endpoint_health.lock().target_endpoint();
+        match (current, next) {
+            (Some(current), Some(next)) if current.is_same_node(&next) => {}
+            (current, Some(next)) => {
+                tracing::info!(
+                    "Realtime server choice moved us from {} to {} — reconnecting",
+                    current.map(|endpoint| endpoint.label()).unwrap_or_default(),
+                    next.label()
+                );
+                self.reconnect(cx);
+            }
+            (_, None) => {}
+        }
+        cx.notify();
+    }
+
+    fn session_endpoint(&self, cx: &App) -> Option<RealtimeEndpoint> {
+        match self.auth_state.read(cx) {
+            AuthState::Connecting(session) | AuthState::Authenticated(session) => {
+                session.realtime_endpoint(DEFAULT_WS_HOST, self.tcp_default_port)
+            }
+            _ => None,
+        }
     }
 
     pub fn global(cx: &App) -> Entity<Self> {
@@ -190,6 +244,7 @@ impl ConnectionStore {
             let wake = wake.clone();
             move |_, _, _| wake.notify_one()
         });
+        let auth_state_handle = auth_state.clone();
 
         // The OS signal drives the "no internet" toast and nothing else. Reconnect reads the
         // connect outcome instead: an `Unreachable` is the network answering, and a refusal means
@@ -225,6 +280,8 @@ impl ConnectionStore {
 
         let token_watch = Self::spawn_token_watch(api.clone(), auth_state.clone(), cx);
         let endpoint_health = Arc::new(Mutex::new(EndpointHealth::default()));
+        let endpoint_health_handle = endpoint_health.clone();
+        let status_watch = Self::spawn_status_watch(&api, endpoint_health.clone(), cx);
         let connection_generation = Arc::new(AtomicU64::new(0));
         let (endpoint_refresh_tx, endpoint_refresh_rx) = tokio::sync::mpsc::unbounded_channel();
         let heartbeat = Self::spawn_heartbeat(
@@ -288,6 +345,7 @@ impl ConnectionStore {
                     }
                 });
 
+                let realtime_server = cx.update(|cx| RealtimeServer::current(cx));
                 let Some(mut session) = session else {
                     api.set_http_fallback(None);
                     endpoint_health.lock().set_endpoint(None);
@@ -323,6 +381,14 @@ impl ConnectionStore {
                         continue;
                     }
                     pending_endpoint_refresh = Some(request);
+                }
+                if realtime_server != RealtimeServer::Auto
+                    && let Some(request) = pending_endpoint_refresh.take()
+                {
+                    tracing::debug!(
+                        "Staying on the pinned realtime server instead of asking the gateway about {}",
+                        request.endpoint.label()
+                    );
                 }
 
                 let endpoint_refresh_wait = endpoint_refresh_retry_in(
@@ -732,7 +798,9 @@ impl ConnectionStore {
                     }
                 }
 
-                let Some(endpoint) = session.realtime_endpoint(DEFAULT_WS_HOST, tcp_default_port)
+                let Some(endpoint) = session
+                    .realtime_endpoint(DEFAULT_WS_HOST, tcp_default_port)
+                    .map(|endpoint| realtime_server.steer(endpoint))
                 else {
                     tracing::warn!("This session names no realtime node — retrying");
                     promote_connecting_to_authenticated(&auth_state, cx);
@@ -1008,11 +1076,8 @@ impl ConnectionStore {
                     || (refused && use_jwt && jwt_refusals >= JWT_REFUSALS_BEFORE_PROBE);
                 if node_is_not_serving {
                     endpoint_health.lock().record_disconnected();
-                    pending_endpoint_refresh = Some(EndpointRefreshRequest {
-                        endpoint: endpoint.clone(),
-                        reason: HealthyEndpointReason::Unreachable,
-                        generation,
-                    });
+                    pending_endpoint_refresh =
+                        unreachable_report(realtime_server, &endpoint, generation);
                 }
 
                 if reached_failure_limit(consecutive_failures) {
@@ -1044,6 +1109,11 @@ impl ConnectionStore {
         Self {
             online,
             connecting_attempt: 0,
+            realtime_host: None,
+            realtime_connected: false,
+            auth_state: auth_state_handle,
+            endpoint_health: endpoint_health_handle,
+            tcp_default_port,
             transport: transport_handle,
             wake: wake_handle,
             connection_generation: connection_generation_handle,
@@ -1052,6 +1122,7 @@ impl ConnectionStore {
             _heartbeat: heartbeat,
             _token_watch: token_watch,
             _online_watch: online_watch,
+            _status_watch: status_watch,
             _network: network,
         }
     }
@@ -1106,6 +1177,33 @@ impl ConnectionStore {
                         }
                     })
                     .await;
+            }
+        })
+    }
+
+    fn spawn_status_watch(
+        api: &Arc<AppApi>,
+        endpoint_health: Arc<Mutex<EndpointHealth>>,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        let mut status_rx = api.status();
+        cx.spawn(async move |this, cx| {
+            loop {
+                let connected = *status_rx.borrow_and_update() == ConnectionStatus::Connected;
+                let host = endpoint_health
+                    .lock()
+                    .target_endpoint()
+                    .map(|endpoint| endpoint.host);
+                let updated = this.update(cx, |store, cx| {
+                    if store.realtime_connected != connected || store.realtime_host != host {
+                        store.realtime_connected = connected;
+                        store.realtime_host = host;
+                        cx.notify();
+                    }
+                });
+                if updated.is_err() || status_rx.changed().await.is_err() {
+                    break;
+                }
             }
         })
     }
@@ -1750,6 +1848,18 @@ fn backoff_delay(secs: u64) -> Duration {
     Duration::from_millis(base_ms + jitter_ms)
 }
 
+fn unreachable_report(
+    realtime_server: RealtimeServer,
+    endpoint: &RealtimeEndpoint,
+    generation: u64,
+) -> Option<EndpointRefreshRequest> {
+    (realtime_server == RealtimeServer::Auto).then(|| EndpointRefreshRequest {
+        endpoint: endpoint.clone(),
+        reason: HealthyEndpointReason::Unreachable,
+        generation,
+    })
+}
+
 /// Wait out a reconnect backoff, but wake early if auth/connection state changes.
 async fn backoff_wait(exec: &BackgroundExecutor, wake: &tokio::sync::Notify, secs: u64) {
     wait_or_wake(exec, wake, backoff_delay(secs)).await;
@@ -1916,6 +2026,23 @@ mod tests {
             worst <= Duration::from_secs(RECONNECT_BACKOFF_CAP_SECS * 5 / 4),
             "worst-case recovery stretched to {worst:?}; jitter is meant to stay within a quarter"
         );
+    }
+
+    #[test]
+    fn a_pinned_server_never_queues_a_gateway_report() {
+        let endpoint = RealtimeEndpoint {
+            id: 3,
+            host: "sock3.mezon.ai".to_string(),
+            port: 443,
+        };
+        for pinned in [RealtimeServer::Vn1, RealtimeServer::Vn2, RealtimeServer::Us] {
+            assert!(unreachable_report(pinned, &endpoint, 7).is_none());
+        }
+        let report = unreachable_report(RealtimeServer::Auto, &endpoint, 7)
+            .expect("auto asks the gateway about a node that is not serving");
+        assert_eq!(report.endpoint, endpoint);
+        assert_eq!(report.reason, HealthyEndpointReason::Unreachable);
+        assert_eq!(report.generation, 7);
     }
 
     #[test]

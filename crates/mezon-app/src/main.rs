@@ -300,7 +300,10 @@ fn main() -> Result<()> {
     configure_linux_session();
 
     install_panic_hook();
-    if let Some(exit_code) = mezon_cli::try_run(std::env::args())? {
+    let args: Vec<String> = std::env::args().collect();
+    if mezon_cli::is_cli_invocation(&args)
+        && let Some(exit_code) = mezon_cli::try_run(&args)?
+    {
         std::process::exit(exit_code);
     }
 
@@ -986,6 +989,7 @@ fn open_main_window(
     mezon_store::ChannelSettingsStore::init(api.clone(), cx);
     mezon_store::DirectMessageStore::init(api.clone(), cx);
     mezon_store::FriendStore::init(api.clone(), cx);
+    mezon_store::CdnAccess::init(cx);
     mezon_store::ActivityStore::init(api.clone(), settings_entity.clone(), cx);
     mezon_store::BadgeService::init(auth_state.clone(), cx);
     mezon_store::MessagesStore::init(api.clone(), cx);
@@ -1065,6 +1069,12 @@ fn open_main_window(
                 channel_id: n.channel_id,
                 clan_id: n.clan_id,
                 link: n.link,
+                topic_reply: n
+                    .topic_reply
+                    .map(|reply| mezon_native::notifications::TopicReply {
+                        topic_id: reply.topic_id,
+                        message_id: reply.message_id,
+                    }),
                 icon_path: n.icon_path,
             });
         }),
@@ -1108,7 +1118,13 @@ fn open_main_window(
                     );
                     match notification_route(&target) {
                         Some(route) => {
-                            mezon_ui::app::shell::Shell::navigate_from_external_trigger(cx, route)
+                            let topic_reply = notification_topic_reply(&target, &route);
+                            mezon_ui::app::shell::Shell::navigate_from_external_trigger(cx, route);
+                            if let Some((channel_id, topic_id, reply_id)) = topic_reply {
+                                mezon_ui::chat::inbox::open_topic_reply(
+                                    cx, channel_id, topic_id, reply_id,
+                                );
+                            }
                         }
                         None => tracing::warn!("notification click with unroutable target"),
                     }
@@ -1365,6 +1381,19 @@ fn notification_route(
     }
 }
 
+fn notification_topic_reply(
+    target: &mezon_native::notifications::NotificationTarget,
+    route: &mezon_ui::Route,
+) -> Option<(mezon_store::ChannelId, i64, mezon_store::MessageId)> {
+    let mezon_ui::Route::Channel { channel_id, .. } = route else {
+        return None;
+    };
+    let reply = target.topic_reply.as_ref()?;
+    let topic_id = reply.topic_id.parse::<i64>().ok().filter(|id| *id > 0)?;
+    let reply_id = reply.message_id.parse::<mezon_store::MessageId>().ok()?;
+    Some((*channel_id, topic_id, reply_id))
+}
+
 struct TrayGlobal(#[allow(dead_code)] mezon_native::tray::MezonTray);
 impl gpui::Global for TrayGlobal {}
 
@@ -1459,7 +1488,50 @@ fn save_attachment(url: &str, filename: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::badge_total;
+    use super::{badge_total, notification_route, notification_topic_reply};
+    use mezon_native::notifications::{NotificationTarget, TopicReply};
+
+    fn target(link: &str, topic_reply: Option<(&str, &str)>) -> NotificationTarget {
+        NotificationTarget {
+            clan_id: Some("1".into()),
+            channel_id: "2".into(),
+            link: Some(link.into()),
+            topic_reply: topic_reply.map(|(topic_id, message_id)| TopicReply {
+                topic_id: topic_id.into(),
+                message_id: message_id.into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_topic_notification_opens_its_reply_in_the_linked_channel() {
+        let target = target(
+            "https://mezon.ai/chat/clans/1/channels/2",
+            Some(("88", "99")),
+        );
+        let route = notification_route(&target).unwrap();
+        assert_eq!(
+            notification_topic_reply(&target, &route),
+            Some((mezon_store::ChannelId(2), 88, mezon_store::MessageId(99)))
+        );
+    }
+
+    #[test]
+    fn a_channel_notification_only_opens_the_channel() {
+        let target = target("https://mezon.ai/chat/clans/1/channels/2", None);
+        let route = notification_route(&target).unwrap();
+        assert_eq!(notification_topic_reply(&target, &route), None);
+    }
+
+    #[test]
+    fn a_topic_reply_outside_a_clan_channel_is_ignored() {
+        let target = target(
+            "https://mezon.ai/chat/direct/message/2/3",
+            Some(("88", "99")),
+        );
+        let route = notification_route(&target).unwrap();
+        assert_eq!(notification_topic_reply(&target, &route), None);
+    }
 
     #[test]
     fn badge_total_sums_clan_dm_and_friend_requests() {

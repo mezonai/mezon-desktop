@@ -250,7 +250,7 @@ fn meet_token_metadata_from_candidates(names: &[&str], avatars: &[&str]) -> Stri
 struct CachedMeetToken {
     channel_id: String,
     metadata: String,
-    token: String,
+    token: mezon_proto::api::GenerateMeetTokenResponse,
     fetched_at: Instant,
 }
 
@@ -904,7 +904,11 @@ impl VoiceStore {
         )
     }
 
-    fn cached_token_for(&self, channel_id: &str, metadata: &str) -> Option<String> {
+    fn cached_token_for(
+        &self,
+        channel_id: &str,
+        metadata: &str,
+    ) -> Option<mezon_proto::api::GenerateMeetTokenResponse> {
         let cached = self.cached_meet_token.as_ref()?;
         if cached.channel_id == channel_id
             && cached.metadata == metadata
@@ -3061,8 +3065,8 @@ impl VoiceStore {
     #[allow(clippy::too_many_arguments)]
     fn start_session(
         &mut self,
-        ws_url: String,
-        token: String,
+        configured_ws_url: String,
+        token: mezon_proto::api::GenerateMeetTokenResponse,
         channel_id: String,
         mic_enabled: bool,
         input_device_id: Option<String>,
@@ -3073,6 +3077,18 @@ impl VoiceStore {
         if self.connection.active_channel_id() != Some(channel_id.as_str()) {
             return;
         }
+        let sfu_from_backend = !token.url.is_empty();
+        let ws_url = if sfu_from_backend {
+            token.url
+        } else {
+            configured_ws_url
+        };
+        tracing::info!(
+            channel_id = %channel_id,
+            sfu_url = %ws_url,
+            sfu_from_backend,
+            "voice session starting"
+        );
 
         self.flush_recording(cx);
         self.recording = RecordingState::Idle;
@@ -3115,7 +3131,7 @@ impl VoiceStore {
         let refresh_channel = channel_id.clone();
         let session = VoiceSession::connect(VoiceConnectOptions {
             url: ws_url,
-            token,
+            token: token.token,
             room: channel_id.clone(),
             role: self.role,
             local_user_id,
@@ -3136,7 +3152,7 @@ impl VoiceStore {
                         .generate_meet_token(&channel_id, SFU_TOKEN_ROOM_NAME, &metadata)
                         .await
                     {
-                        Ok(token) => Some(token),
+                        Ok(token) => Some(token.token),
                         Err(e) => {
                             tracing::warn!("voice token refresh failed: {e:#}");
                             None
@@ -3145,7 +3161,6 @@ impl VoiceStore {
                 }
             })),
         });
-        // Reapply the current choice to each new session, including reconnects.
         self.noise_suppression_generation = self.noise_suppression_generation.wrapping_add(1);
         self.noise_suppression_status = None;
         self.noise_suppression_started = None;
@@ -3403,7 +3418,7 @@ impl VoiceStore {
         &mut self,
         generation: u64,
         snapshot: VoiceReconnectSnapshot,
-        token: String,
+        token: mezon_proto::api::GenerateMeetTokenResponse,
         cx: &mut Context<Self>,
     ) {
         if self.active_connection_ids()
@@ -3412,8 +3427,6 @@ impl VoiceStore {
             return;
         }
 
-        // Fetching the token is asynchronous. A mute/unmute, moderator action,
-        // or media toggle during that wait must win over the earlier snapshot.
         let Some(current) = self.reconnect_snapshot(cx) else {
             return;
         };
