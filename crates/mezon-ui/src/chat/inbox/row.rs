@@ -1615,9 +1615,14 @@ fn render_attachment_preview(
     let link = view.attachment_link.as_str();
     let filetype = view.attachment_type.as_str();
     let media = view.media.clone();
-    let preview = if attachment_link_is_image(link, filetype) {
+    let viewing_channel = media.as_ref().map_or(0, |media| media.channel_id.0);
+    let is_image = attachment_link_is_image(link, filetype);
+    let is_video = !is_image && attachment_link_is_video(link, filetype);
+    let preview = if (is_image || is_video) && mezon_store::hides_media(link, viewing_channel) {
+        crate::chat::message::parts::render_private_media_tile(theme, 150., 150.)
+    } else if is_image {
         render_inbox_image(link, image_cache, media)
-    } else if attachment_link_is_video(link, filetype) {
+    } else if is_video {
         render_inbox_video(theme, link, &view.attachment_thumbnail, image_cache, media)
     } else {
         render_inbox_file_card(

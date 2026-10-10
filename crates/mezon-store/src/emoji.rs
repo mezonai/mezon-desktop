@@ -21,6 +21,20 @@ const LAG_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(30);
 const EMOJI_ACTION_CREATED: i32 = 1;
 const EMOJI_ACTION_UPDATE: i32 = 2;
 const EMOJI_ACTION_DELETE: i32 = 3;
+const GLOBAL_EMOJI_CLAN_ID: &str = "0";
+const GLOBAL_EMOJI_CATEGORIES: &[&str] = &[
+    "Recent",
+    "Frequently",
+    "People",
+    "Nature",
+    "Food",
+    "Activities",
+    "Travel",
+    "Objects",
+    "Symbols",
+    "Flags",
+    "forsale",
+];
 
 pub const MAX_EMOJI_BYTES: u64 = 256 * 1024;
 pub const MAX_STICKER_BYTES: u64 = 512 * 1024;
@@ -616,7 +630,12 @@ fn by_category_in<'a>(
     order: &'a [String],
     active_clan_id: Option<&str>,
 ) -> Vec<(String, Vec<&'a Emoji>)> {
-    let mut ordered: Vec<&Emoji> = ordered_emojis(by_id, order).collect();
+    let mut ordered: Vec<&Emoji> = ordered_emojis(by_id, order)
+        .filter(|emoji| {
+            emoji.clan_id != GLOBAL_EMOJI_CLAN_ID
+                || GLOBAL_EMOJI_CATEGORIES.contains(&emoji.category.as_str())
+        })
+        .collect();
     if let Some(active) = active_clan_id {
         ordered.sort_by_key(|emoji| u8::from(emoji.clan_id != active));
     }
@@ -1297,6 +1316,36 @@ mod tests {
         assert_eq!(ids(groups[0].1.clone()), vec!["2"]);
         assert_eq!(groups[1].0, "ClanB");
         assert_eq!(ids(groups[1].1.clone()), vec!["1", "3"]);
+    }
+
+    #[test]
+    fn by_category_hides_non_picker_global_categories_in_dm_and_clan_views() {
+        let (by_id, order) = store_with(vec![
+            emoji("1", "dm_only", "DM", GLOBAL_EMOJI_CLAN_ID),
+            emoji("2", "smile", "People", GLOBAL_EMOJI_CLAN_ID),
+            emoji("3", "wave", "ClanA", "A"),
+            emoji("4", "invalid", "", GLOBAL_EMOJI_CLAN_ID),
+        ]);
+
+        let dm_groups = by_category_in(&by_id, &order, None);
+        assert_eq!(
+            dm_groups
+                .iter()
+                .map(|(category, _)| category.as_str())
+                .collect::<Vec<_>>(),
+            vec!["People", "ClanA"]
+        );
+        assert_eq!(ids(dm_groups[0].1.clone()), vec!["2"]);
+        assert_eq!(ids(dm_groups[1].1.clone()), vec!["3"]);
+
+        let clan_groups = by_category_in(&by_id, &order, Some("A"));
+        assert_eq!(
+            clan_groups
+                .iter()
+                .map(|(category, _)| category.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ClanA", "People"]
+        );
     }
 
     #[test]

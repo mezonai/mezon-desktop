@@ -21,7 +21,7 @@ pub type SignatureFetcher =
 
 enum Entry {
     Signed { signature: String, at: Instant },
-    Refused { at: Instant },
+    Refused { at: Instant, denied: bool },
 }
 
 pub struct SignedUrl {
@@ -39,6 +39,7 @@ pub struct CdnSigner {
     entries: Mutex<HashMap<i64, Entry>>,
     flights: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
     generation: AtomicU64,
+    access: tokio::sync::watch::Sender<u64>,
 }
 
 static SIGNER: OnceLock<Arc<CdnSigner>> = OnceLock::new();
@@ -59,6 +60,47 @@ pub fn clear() {
     if let Some(signer) = installed() {
         signer.clear();
     }
+}
+
+pub fn is_denied(url: &str) -> bool {
+    installed().is_some_and(|signer| signer.denies(url))
+}
+
+pub async fn access_denied(url: &str) -> bool {
+    let Some(signer) = installed() else {
+        return false;
+    };
+    signer.sign(url).await;
+    signer.denies(url)
+}
+
+pub fn channel_of_url(url: &str) -> Option<i64> {
+    installed()?.signed_channel_of(url)
+}
+
+pub fn check_access(url: &str) {
+    let Some(signer) = installed() else {
+        return;
+    };
+    let Some(channel_id) = signer.signed_channel_of(url) else {
+        return;
+    };
+    if signer.cached(channel_id).is_some() {
+        return;
+    }
+    crate::transport_runtime::handle().spawn(async move {
+        signer.signature(channel_id).await;
+    });
+}
+
+pub fn forget_denial(channel_id: i64) {
+    if let Some(signer) = installed() {
+        signer.forget_denial(channel_id);
+    }
+}
+
+pub fn access_changes() -> Option<tokio::sync::watch::Receiver<u64>> {
+    installed().map(|signer| signer.access.subscribe())
 }
 
 pub fn forget(signed: &SignedUrl) -> bool {
@@ -103,13 +145,51 @@ impl CdnSigner {
             entries: Mutex::new(HashMap::new()),
             flights: Mutex::new(HashMap::new()),
             generation: AtomicU64::new(0),
+            access: tokio::sync::watch::Sender::new(0),
         }
     }
 
     pub fn clear(&self) {
         let mut entries = self.entries.lock();
         self.generation.fetch_add(1, Ordering::AcqRel);
+        let had_denied = entries
+            .values()
+            .any(|entry| matches!(entry, Entry::Refused { denied: true, .. }));
         entries.clear();
+        drop(entries);
+        if had_denied {
+            self.access.send_modify(|version| *version += 1);
+        }
+    }
+
+    pub fn forget_denial(&self, channel_id: i64) {
+        let mut entries = self.entries.lock();
+        if !matches!(
+            entries.get(&channel_id),
+            Some(Entry::Refused { denied: true, .. })
+        ) {
+            return;
+        }
+        entries.remove(&channel_id);
+        drop(entries);
+        self.access.send_modify(|version| *version += 1);
+    }
+
+    pub fn denies(&self, url: &str) -> bool {
+        let Some(channel_id) = self.signed_channel_of(url) else {
+            return false;
+        };
+        matches!(
+            self.entries.lock().get(&channel_id),
+            Some(Entry::Refused { denied: true, .. })
+        )
+    }
+
+    fn signed_channel_of(&self, url: &str) -> Option<i64> {
+        self.channel_of(url).or_else(|| {
+            self.rendition_source(url)
+                .and_then(|(_, source, _)| self.channel_of(source))
+        })
     }
 
     pub fn channel_of(&self, url: &str) -> Option<i64> {
@@ -207,7 +287,7 @@ impl CdnSigner {
             Entry::Signed { signature, at } if at.elapsed() < self.refresh_after => {
                 Some(Some(signature.clone()))
             }
-            Entry::Refused { at } if at.elapsed() < REFUSED_RETRY_AFTER => Some(None),
+            Entry::Refused { at, .. } if at.elapsed() < REFUSED_RETRY_AFTER => Some(None),
             _ => None,
         }
     }
@@ -231,6 +311,7 @@ impl CdnSigner {
         let fetched = crate::transport_runtime::handle()
             .spawn(async move { tokio::time::timeout(SIGNATURE_FETCH_TIMEOUT, fetch).await })
             .await;
+        let mut denied = false;
         let signature = match fetched {
             Ok(Ok(Ok(signature))) if !signature.is_empty() => Some(signature),
             Ok(Ok(Ok(_))) => {
@@ -238,7 +319,9 @@ impl CdnSigner {
                 None
             }
             Ok(Ok(Err(error))) => {
-                tracing::debug!(channel_id, "CDN signature refused: {error:#}");
+                denied = crate::transport::api_status_from_error(&error)
+                    .is_some_and(|status| status.is_permission_denied());
+                tracing::debug!(channel_id, denied, "CDN signature refused: {error:#}");
                 None
             }
             Ok(Err(_)) => {
@@ -250,19 +333,28 @@ impl CdnSigner {
                 None
             }
         };
+        let mut entries = self.entries.lock();
+        if self.generation.load(Ordering::Acquire) != generation {
+            return None;
+        }
+        let was_denied = matches!(
+            entries.get(&channel_id),
+            Some(Entry::Refused { denied: true, .. })
+        );
+        let denied = denied || (signature.is_none() && was_denied);
         let at = Instant::now();
         let entry = match &signature {
             Some(signature) => Entry::Signed {
                 signature: signature.clone(),
                 at,
             },
-            None => Entry::Refused { at },
+            None => Entry::Refused { at, denied },
         };
-        let mut entries = self.entries.lock();
-        if self.generation.load(Ordering::Acquire) != generation {
-            return None;
-        }
         entries.insert(channel_id, entry);
+        drop(entries);
+        if was_denied != denied {
+            self.access.send_modify(|version| *version += 1);
+        }
         signature
     }
 }
@@ -632,5 +724,84 @@ mod tests {
         let foreign = "https://imgproxy.komu.vn/k/rs:fill:80:80:1/mb:2097152/plain/https://media.tenor.com/a.gif@webp";
         assert!(!signer.wants(foreign));
         assert!(signer.sign(foreign).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_channel_the_server_will_not_sign_for_this_user_is_denied() {
+        let (fetch, calls) = counting_fetcher(|_| {
+            Err(anyhow::Error::new(crate::transport::ApiStatusError {
+                code: crate::transport::ApiStatusError::PERMISSION_DENIED,
+            }))
+        });
+        let signer = signer_for(fetch);
+        let mut changes = signer.access.subscribe();
+        assert!(!signer.denies(FILE));
+
+        assert!(signer.sign(FILE).await.is_none());
+        assert!(signer.denies(FILE));
+        assert!(
+            signer.denies(&format!(
+                "https://imgproxy.komu.vn/k/rs:fit:1600:900/plain/{FILE}@webp"
+            )),
+            "a rendition of a denied file is denied too"
+        );
+        assert!(changes.has_changed().unwrap());
+        changes.mark_unchanged();
+
+        signer.sign(FILE).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the refusal is remembered");
+        assert!(!changes.has_changed().unwrap());
+
+        signer.clear();
+        assert!(!signer.denies(FILE));
+        assert!(changes.has_changed().unwrap());
+    }
+
+    #[tokio::test]
+    async fn joining_the_channel_forgets_its_denial_and_signs_again() {
+        let refuse = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let answer = refuse.clone();
+        let (fetch, calls) = counting_fetcher(move |_| {
+            if answer.load(Ordering::SeqCst) {
+                Err(anyhow::Error::new(crate::transport::ApiStatusError {
+                    code: crate::transport::ApiStatusError::PERMISSION_DENIED,
+                }))
+            } else {
+                Ok(SIGNATURE.to_string())
+            }
+        });
+        let signer = signer_for(fetch);
+        assert!(signer.sign(FILE).await.is_none());
+        assert!(signer.denies(FILE));
+        let mut changes = signer.access.subscribe();
+        changes.mark_unchanged();
+
+        refuse.store(false, Ordering::SeqCst);
+        signer.forget_denial(GENERAL);
+        assert!(!signer.denies(FILE));
+        assert!(changes.has_changed().unwrap());
+        assert!(signer.sign(FILE).await.is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        changes.mark_unchanged();
+        signer.forget_denial(GENERAL);
+        assert!(
+            !changes.has_changed().unwrap(),
+            "a signed channel has nothing to forget"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failure_that_is_not_a_refusal_does_not_deny_the_channel() {
+        let (fetch, _) = counting_fetcher(|_| {
+            Err(anyhow::Error::new(crate::transport::ApiStatusError {
+                code: crate::transport::ApiStatusError::INTERNAL,
+            }))
+        });
+        let signer = signer_for(fetch);
+        let changes = signer.access.subscribe();
+        assert!(signer.sign(FILE).await.is_none());
+        assert!(!signer.denies(FILE));
+        assert!(!changes.has_changed().unwrap());
     }
 }

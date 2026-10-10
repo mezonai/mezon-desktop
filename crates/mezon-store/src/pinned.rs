@@ -58,6 +58,48 @@ impl PinnedMessage {
         }
         &self.attachments
     }
+
+    pub fn compact_preview_text(&self) -> Option<String> {
+        let content = self.content.trim();
+        if !content.is_empty() {
+            return Some(content.to_string());
+        }
+
+        if let Some(layout) = self.rich_layout.as_ref() {
+            let text = layout.text.trim();
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+        }
+
+        for embed in self.embeds.iter() {
+            let title = embed.title.trim();
+            let description = build_rich_layout(&embed.description_spans)
+                .map(|layout| layout.text.trim().to_string())
+                .filter(|description| !description.is_empty());
+            match ((!title.is_empty()).then_some(title), description) {
+                (Some(title), Some(description)) => {
+                    return Some(format!("{title} {description}"));
+                }
+                (Some(title), None) => return Some(title.to_string()),
+                (None, Some(description)) => return Some(description),
+                (None, None) => {}
+            }
+        }
+
+        if let Some(ogp) = self.ogp.as_ref() {
+            let title = ogp.title.trim();
+            if !title.is_empty() {
+                return Some(title.to_string());
+            }
+            let description = ogp.description.trim();
+            if !description.is_empty() {
+                return Some(description.to_string());
+            }
+        }
+
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -855,6 +897,7 @@ fn rebuild_pin_content_json(msg: &Message) -> String {
             MessageSpan::Hashtag {
                 display,
                 channel_id,
+                meta,
             } => {
                 let start = pin_utf16_len(&t);
                 t.push_str(display);
@@ -863,6 +906,17 @@ fn rebuild_pin_content_json(msg: &Message) -> String {
                 item.insert("e".into(), pin_utf16_len(&t).into());
                 if let Some(channel_id) = channel_id.as_ref().filter(|id| !id.is_empty()) {
                     item.insert("channelId".into(), channel_id.clone().into());
+                }
+                if let Some(meta) = meta {
+                    item.insert("clanId".into(), meta.clan_id.get().to_string().into());
+                    item.insert("channelLabel".into(), meta.label.to_string().into());
+                    item.insert("channelType".into(), meta.channel_type.as_raw().into());
+                    if let Some(parent_id) = meta.parent_id {
+                        item.insert("parentId".into(), parent_id.get().to_string().into());
+                    }
+                    if meta.private {
+                        item.insert("channelPrivate".into(), 1.into());
+                    }
                 }
                 hg.push(serde_json::Value::Object(item));
             }
@@ -1431,6 +1485,92 @@ mod tests {
 
         assert!(body.text.is_empty());
         assert_eq!(body.embeds.len(), 1);
+    }
+
+    #[test]
+    fn embed_only_pin_provides_a_compact_preview() {
+        let pin = pinned_from_api(
+            ApiPinMessage {
+                id: "1".into(),
+                message_id: "42".into(),
+                content: r#"{"embed":[{"title":"BẢN TÓM TẮT CUỘC HỘI THOẠI","description":"Thursday, Oct 8, 2026"}]}"#.into(),
+                content_text: String::new(),
+                sender_id: "7".into(),
+                sender_name: "pm-assistant-bot".into(),
+                avatar: String::new(),
+                create_time: 0,
+                attachments: Vec::new(),
+            },
+            None,
+        );
+        assert_eq!(
+            pin.compact_preview_text().as_deref(),
+            Some("BẢN TÓM TẮT CUỘC HỘI THOẠI — Thursday, Oct 8, 2026")
+        );
+    }
+
+    #[test]
+    fn compact_pin_preview_keeps_plain_text_behavior() {
+        let pin = pinned_from_api(
+            ApiPinMessage {
+                id: "1".into(),
+                message_id: "42".into(),
+                content: r#"{"t":"hello"}"#.into(),
+                content_text: String::new(),
+                sender_id: "7".into(),
+                sender_name: "user".into(),
+                avatar: String::new(),
+                create_time: 0,
+                attachments: Vec::new(),
+            },
+            None,
+        );
+        assert_eq!(pin.compact_preview_text().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn compact_pin_preview_uses_embed_description_when_title_is_empty() {
+        let pin = pinned_from_api(
+            ApiPinMessage {
+                id: "1".into(),
+                message_id: "42".into(),
+                content: r#"{"embed":[{"title":"","description":"Meeting summary"}]}"#.into(),
+                content_text: String::new(),
+                sender_id: "7".into(),
+                sender_name: "pm-assistant-bot".into(),
+                avatar: String::new(),
+                create_time: 0,
+                attachments: Vec::new(),
+            },
+            None,
+        );
+        assert_eq!(
+            pin.compact_preview_text().as_deref(),
+            Some("Meeting summary")
+        );
+    }
+
+    #[test]
+    fn compact_pin_preview_stays_empty_for_attachment_only_pin() {
+        let pin = pinned_from_api(
+            ApiPinMessage {
+                id: "1".into(),
+                message_id: "42".into(),
+                content: r#"{"t":""}"#.into(),
+                content_text: String::new(),
+                sender_id: "7".into(),
+                sender_name: "user".into(),
+                avatar: String::new(),
+                create_time: 0,
+                attachments: vec![mezon_client::transport::ApiAttachment {
+                    url: "https://cdn.example/image.png".into(),
+                    filetype: "image/png".into(),
+                    ..Default::default()
+                }],
+            },
+            None,
+        );
+        assert_eq!(pin.compact_preview_text(), None);
     }
 
     #[test]

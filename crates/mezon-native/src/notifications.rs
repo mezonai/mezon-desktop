@@ -16,8 +16,15 @@ pub struct Notification {
     pub clan_id: Option<String>,
     /// Server-rendered navigation path (React `extras.link`); the click target.
     pub link: Option<String>,
+    pub topic_reply: Option<TopicReply>,
     /// Local file path to the sender-avatar image, shown as the notification icon.
     pub icon_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopicReply {
+    pub topic_id: String,
+    pub message_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +32,7 @@ pub struct NotificationTarget {
     pub clan_id: Option<String>,
     pub channel_id: String,
     pub link: Option<String>,
+    pub topic_reply: Option<TopicReply>,
 }
 
 type ClickHandler = Box<dyn Fn(NotificationTarget) + Send + Sync + 'static>;
@@ -48,9 +56,26 @@ fn remember_link(identifier: &str, link: &str) {
     }
 }
 
+static TOPIC_REPLY_BY_ID: std::sync::Mutex<Option<std::collections::HashMap<String, TopicReply>>> =
+    std::sync::Mutex::new(None);
+
+fn remember_topic_reply(identifier: &str, topic_reply: Option<&TopicReply>) {
+    if let Ok(mut guard) = TOPIC_REPLY_BY_ID.lock() {
+        let replies = guard.get_or_insert_with(std::collections::HashMap::new);
+        match topic_reply {
+            Some(reply) => replies.insert(identifier.to_owned(), reply.clone()),
+            None => replies.remove(identifier),
+        };
+    }
+}
+
 fn build_target(identifier: &str) -> Option<NotificationTarget> {
     let mut target = decode_identifier(identifier)?;
     target.link = LINK_BY_ID
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|m| m.get(identifier).cloned()));
+    target.topic_reply = TOPIC_REPLY_BY_ID
         .lock()
         .ok()
         .and_then(|g| g.as_ref().and_then(|m| m.get(identifier).cloned()));
@@ -92,6 +117,7 @@ fn decode_identifier(identifier: &str) -> Option<NotificationTarget> {
         clan_id: Some(clan.to_owned()).filter(|c| c != "0" && !c.is_empty()),
         link: None,
         channel_id: channel.to_owned(),
+        topic_reply: None,
     })
 }
 
@@ -113,8 +139,11 @@ pub fn show(notification: &Notification) {
         "Showing desktop notification"
     );
 
-    if let (Some(key), Some(link)) = (replacement_key(notification), notification.link.as_deref()) {
-        remember_link(&key, link);
+    if let Some(key) = replacement_key(notification) {
+        if let Some(link) = notification.link.as_deref() {
+            remember_link(&key, link);
+        }
+        remember_topic_reply(&key, notification.topic_reply.as_ref());
     }
 
     #[cfg(target_os = "macos")]
@@ -768,6 +797,7 @@ mod tests {
             channel_id: channel_id.map(str::to_owned),
             clan_id: clan_id.map(str::to_owned),
             link: None,
+            topic_reply: None,
             icon_path: None,
         }
     }
@@ -800,6 +830,7 @@ mod tests {
                 clan_id: Some("77".into()),
                 channel_id: "12345".into(),
                 link: None,
+                topic_reply: None,
             })
         );
     }
@@ -814,8 +845,22 @@ mod tests {
                 clan_id: None,
                 channel_id: "12345".into(),
                 link: None,
+                topic_reply: None,
             })
         );
+    }
+
+    #[test]
+    fn a_click_reopens_the_topic_reply_until_the_channel_posts_outside_it() {
+        let reply = TopicReply {
+            topic_id: "2088098374732484608".into(),
+            message_id: "1840651254099873792".into(),
+        };
+        let key = "mezon-notify-77-424242";
+        remember_topic_reply(key, Some(&reply));
+        assert_eq!(build_target(key).unwrap().topic_reply, Some(reply));
+        remember_topic_reply(key, None);
+        assert_eq!(build_target(key).unwrap().topic_reply, None);
     }
 
     #[test]

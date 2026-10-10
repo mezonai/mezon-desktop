@@ -31,7 +31,9 @@ use crate::video::track_frame_key;
 use crate::{IceServerConfig, MEET_TOKEN_RETRY_LIMIT, ScreenShareMode, TokenRefresher};
 use crate::{SfuCloseAction, sfu_close_action, sfu_reconnect_delay};
 
-use super::messages::{ClientMessage, IceServerSpec, ServerMessage, SnapshotMember};
+use super::messages::{
+    ClientMessage, IceServerSpec, ServerMessage, SlotAssignment, SnapshotMember,
+};
 use super::mid::{self, MID_AUDIO, MID_CAMERA, MID_SCREEN, RemoteKind};
 use super::network_quality::NetworkQuality;
 use super::screen_adaptation::{
@@ -339,8 +341,15 @@ fn remote_frame_key(mid: &str) -> u64 {
     track_frame_key("__sfu_remote__", mid)
 }
 
+struct SlotState {
+    generation: u64,
+    assignment: Option<SlotAssignment>,
+}
+
 #[derive(Default)]
 struct Membership {
+    fixed_pool: bool,
+    slots: HashMap<u32, SlotState>,
     self_peer_id: u32,
     by_peer: HashMap<u32, SnapshotMember>,
     peer_by_mid: HashMap<String, u32>,
@@ -352,6 +361,21 @@ struct Membership {
 
 impl Membership {
     fn apply(&mut self, mut member: SnapshotMember) {
+        let seeded = member
+            .slot
+            .filter(|slot| *slot != u32::MAX)
+            .map(|slot| SlotAssignment {
+                slot,
+                generation: member.assignment_generation,
+                peer_id: member.peer_id,
+                user_id: member.user_id.clone(),
+                mid_audio: member.mid_audio,
+                mid_video: member.mid_video,
+                mid_screen: member.mid_screen,
+                audio_active: true,
+                video_active: member.camera_active,
+                screen_active: member.is_sharing_screen(),
+            });
         let [audio, camera, screen] = self.mids_of(member.peer_id);
         if member.mid_audio == 0 {
             member.mid_audio = audio;
@@ -366,12 +390,130 @@ impl Membership {
         let user_id = member.user_id.clone();
         let mids = member_mids(&member);
         self.by_peer.insert(peer_id, member);
+        if let Some(assignment) = seeded {
+            self.assign_slot(assignment, true);
+        }
+        if self.fixed_pool {
+            self.sync_slot_members();
+            return;
+        }
         for (mid, _) in mids {
             self.claim(peer_id, &mid);
             if !user_id.is_empty() {
                 self.user_by_mid.insert(mid, user_id.clone());
             }
         }
+    }
+
+    fn assign_slot(&mut self, assignment: SlotAssignment, membership: bool) -> bool {
+        if assignment.mids().is_none() {
+            return false;
+        }
+        if let Some(previous) = self.slots.get(&assignment.slot) {
+            if previous.generation > assignment.generation
+                || (membership && previous.generation == assignment.generation)
+                || (previous.generation == assignment.generation
+                    && previous.assignment.as_ref().map(|a| a.peer_id) != Some(assignment.peer_id))
+            {
+                return false;
+            }
+        }
+        if !membership {
+            self.fixed_pool = true;
+        }
+        let member = self
+            .by_peer
+            .entry(assignment.peer_id)
+            .or_insert_with(|| SnapshotMember {
+                peer_id: assignment.peer_id,
+                ..Default::default()
+            });
+        if !assignment.user_id.is_empty() {
+            member.user_id = assignment.user_id.clone();
+        }
+        self.slots.insert(
+            assignment.slot,
+            SlotState {
+                generation: assignment.generation,
+                assignment: Some(assignment),
+            },
+        );
+        if self.fixed_pool {
+            self.sync_slot_members();
+        }
+        true
+    }
+
+    fn release_slot(&mut self, slot: u32, generation: u64) -> bool {
+        if generation == 0
+            || slot > (u32::MAX - 5) / 3
+            || self
+                .slots
+                .get(&slot)
+                .is_some_and(|previous| previous.generation > generation)
+        {
+            return false;
+        }
+        self.fixed_pool = true;
+        self.slots.insert(
+            slot,
+            SlotState {
+                generation,
+                assignment: None,
+            },
+        );
+        self.sync_slot_members();
+        true
+    }
+
+    fn sync_slot_members(&mut self) {
+        self.peer_by_mid.clear();
+        self.user_by_mid.clear();
+        self.retired_mids.clear();
+        for member in self.by_peer.values_mut() {
+            member.mid_audio = 0;
+            member.mid_video = 0;
+            member.mid_screen = 0;
+        }
+        for state in self.slots.values() {
+            let Some(a) = &state.assignment else {
+                continue;
+            };
+            let Some(mids) = a.mids() else {
+                continue;
+            };
+            let Some(member) = self.by_peer.get_mut(&a.peer_id) else {
+                continue;
+            };
+            for mid in mids {
+                self.peer_by_mid.insert(mid.to_string(), a.peer_id);
+                self.user_by_mid
+                    .insert(mid.to_string(), member.user_id.clone());
+            }
+            member.mid_audio = if a.audio_active { mids[0] } else { 0 };
+            member.mid_video = if a.video_active { mids[1] } else { 0 };
+            member.mid_screen = if a.screen_active { mids[2] } else { 0 };
+            member.camera_active = a.video_active;
+            member.screen_active = a.screen_active;
+            member.screen_requested = Some(a.screen_active);
+        }
+    }
+
+    fn slot_active(&self, mid: &str) -> bool {
+        let Some(remote) = mid::classify(mid) else {
+            return false;
+        };
+        let Ok(number) = mid.parse::<u32>() else {
+            return false;
+        };
+        let Some(a) = self
+            .slots
+            .get(&((number - 3) / 3))
+            .and_then(|state| state.assignment.as_ref())
+        else {
+            return false;
+        };
+        [a.audio_active, a.video_active, a.screen_active][kind_index(remote.kind)]
     }
 
     fn mids_of(&self, peer_id: u32) -> [u32; 3] {
@@ -433,6 +575,13 @@ impl Membership {
     }
 
     fn absorb_msids(&mut self, sdp: &str) {
+        if sdp.lines().any(|line| line.starts_with("a=msid:slot-")) {
+            self.fixed_pool = true;
+        }
+        if self.fixed_pool {
+            self.sync_slot_members();
+            return;
+        }
         for (mid, occupant) in mid::parse_msid_occupants(sdp) {
             if self.retired_mids.get(&mid).is_some_and(|retired| {
                 retired.blocks_reactivation(&occupant, self.peer_by_mid.get(&mid).copied())
@@ -1245,11 +1394,13 @@ async fn session_loop(
                         }
                         let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
                         camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                        if membership.fixed_pool && let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
                         let _ = evt_tx.send(SfuEvent::RoomSnapshot);
                     }
                     ServerMessage::PeerJoined { peer } => {
                         if let Some(peer) = peer {
                             membership.apply(peer);
+                            if membership.fixed_pool && let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
                             let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
                             camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
                         }
@@ -1260,11 +1411,42 @@ async fn session_loop(
                                 mute_sync.observe_self(peer.is_mute, local.muted, Instant::now());
                             }
                             membership.apply(peer);
+                            if membership.fixed_pool && let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
                             let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
                             camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
                         }
                     }
-                    ServerMessage::PeerLeft { peer_id, mid_audio, mid_video, mid_screen } => {
+                    ServerMessage::SlotAssigned(assignment) => {
+                        if membership.assign_slot(assignment, false) {
+                            if let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
+                            let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                            camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                        }
+                    }
+                    ServerMessage::SlotReleased { slot, generation } => {
+                        if membership.release_slot(slot, generation) {
+                            if let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
+                            let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                            camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                        }
+                    }
+                    ServerMessage::PeerLeft { peer_id, mid_audio, mid_video, mid_screen, assignment_generation } => {
+                        if membership.fixed_pool {
+                            if assignment_generation > 0 && membership.slots.values().any(|state| {
+                                state.generation > assignment_generation && state.assignment.as_ref().is_some_and(|a| a.peer_id == peer_id)
+                            }) { continue; }
+                            let slots: Vec<_> = membership.slots.iter().filter_map(|(slot, state)| {
+                                (state.assignment.as_ref().is_some_and(|a| a.peer_id == peer_id)
+                                    && (assignment_generation == 0 || state.generation == assignment_generation))
+                                    .then_some((*slot, state.generation))
+                            }).collect();
+                            for (slot, generation) in slots { membership.release_slot(slot, generation); }
+                            membership.by_peer.remove(&peer_id);
+                            if let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
+                            let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                            camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                            continue;
+                        }
                         let released = membership.remove_peer(peer_id, [mid_audio, mid_video, mid_screen]);
                         tracing::info!(peer_id, ?released, remaining_peers = membership.by_peer.len(),
                             "sfu peer left; retiring only its remote media");
@@ -2431,13 +2613,22 @@ fn sync_remote_media(
             negotiated,
             RtpTransceiverDirection::Inactive | RtpTransceiverDirection::Stopped
         );
-        let live = transceiver.receiver().track().filter(|track| {
-            !idle
+        let receiver_track = transceiver.receiver().track();
+        let assigned = !membership.fixed_pool || membership.slot_active(&mid);
+        if membership.fixed_pool
+            && let Some(MediaStreamTrack::Audio(audio)) = &receiver_track
+        {
+            audio.set_enabled(assigned && !idle);
+        }
+        let live = receiver_track.filter(|track| {
+            assigned
+                && !idle
                 && !membership.retired_mids.contains_key(&mid)
                 && track.state() == RtcTrackState::Live
         });
 
         let Some(track) = live else {
+            membership.video_receipts.remove(&key);
             if membership.live_tracks.remove(&key).is_some() {
                 tracing::info!(mid = %mid, key, "remote media dropped");
                 let _ = evt_tx.send(SfuEvent::RemoteGone { key });
@@ -2451,6 +2642,10 @@ fn sync_remote_media(
             user_id: membership.user_by_mid.get(&mid).cloned(),
         };
         let unchanged = membership.live_tracks.get(&key) == Some(&binding);
+        if membership.fixed_pool && !unchanged && membership.live_tracks.contains_key(&key) {
+            membership.video_receipts.remove(&key);
+            let _ = evt_tx.send(SfuEvent::RemoteGone { key });
+        }
         let recovery = unchanged && refresh_audio == Some(key) && remote.kind == RemoteKind::Audio;
         if unchanged && !recovery {
             continue;
@@ -2675,6 +2870,8 @@ mod tests {
 
     fn member(peer_id: u32, user_id: &str, mids: [u32; 3]) -> SnapshotMember {
         SnapshotMember {
+            slot: None,
+            assignment_generation: 0,
             peer_id,
             user_id: user_id.to_owned(),
             role: "speaker".to_owned(),

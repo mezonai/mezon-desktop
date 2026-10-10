@@ -66,6 +66,7 @@ pub struct ChatArea {
     _send_permission_channel_sub: Subscription,
     _send_permission_direct_sub: Subscription,
     _send_permission_friend_sub: Subscription,
+    _cdn_access_sub: Option<Subscription>,
     _send_permission_debounce: Option<Task<()>>,
     drop_title_cache: Option<(SharedString, SharedString, SharedString)>,
     drop_body_cache: Option<(SharedString, SharedString)>,
@@ -735,7 +736,14 @@ fn latest_activity_strip(
                 mezon_i18n::t(locale, "notifications.empty.topics.description").into()
             }
         });
+    let viewing_channel = active_channel_id.map_or(0, |channel_id| channel_id.0);
     let topic_media = topic_attachment.as_ref().map(|attachment| {
+        if (attachment.is_image() || attachment.is_video())
+            && (attachment.source_denied
+                || mezon_store::hides_media(&attachment.url, viewing_channel))
+        {
+            return crate::chat::message::parts::render_private_media_tile(theme, 32., 32.);
+        }
         if attachment.is_image() {
             if let Some(path) = attachment.local_source.clone() {
                 return div()
@@ -928,7 +936,7 @@ fn latest_activity_strip(
                             mezon_i18n::t(locale, "message.poll.pollLabel")
                         )
                     })
-                    .or_else(|| Some(pin.content.trim().to_string()))
+                    .or_else(|| pin.compact_preview_text())
             })
             .filter(|text| !text.trim().is_empty())
             // Pinned code blocks and long text commonly contain newlines. A compact rail must
@@ -1669,6 +1677,7 @@ impl ChatArea {
             _send_permission_channel_sub: send_permission_channel_sub,
             _send_permission_direct_sub: send_permission_direct_sub,
             _send_permission_friend_sub: send_permission_friend_sub,
+            _cdn_access_sub: crate::chat::message::parts::observe_cdn_access(cx),
             _send_permission_debounce: None,
             drop_title_cache: None,
             drop_body_cache: None,
@@ -2348,19 +2357,38 @@ impl ChatArea {
             .as_ref()
             .is_some_and(|panel| panel.read(cx).profile_popover_open());
 
-        let message_column = div()
-            .relative()
-            .group("chat-drop-zone")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .overflow_hidden()
-            .when(!media_channel_view, |col| {
-                let drop_input = mention_input;
-                let input_visible = !send_denied && !banned;
-                col.on_drop(
+        let message_column = if media_channel_view {
+            if let Some(panel) = self.media_channel_panel.clone() {
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(div().size_full().child(AnyView::from(panel)))
+            } else {
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_hidden()
+            }
+        } else {
+            let drop_input = mention_input;
+            let input_visible = !send_denied && !banned;
+            let drop_body = div()
+                .relative()
+                .group("chat-drop-zone")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .overflow_hidden()
+                .on_drop(
                     move |paths: &ExternalPaths, window: &mut Window, cx: &mut App| {
                         if let Some(drop_input) = drop_input.clone()
                             && input_visible
@@ -2368,23 +2396,18 @@ impl ChatArea {
                             let dropped: Vec<PathBuf> = paths.paths().to_vec();
                             drop_input.update(cx, |input, cx| {
                                 input.focus_input(window, cx);
-                                input.add_dropped_paths(dropped, window, cx)
+                                input.add_dropped_paths(dropped, window, cx);
                             });
                         }
                     },
                 )
-            })
-            .when(media_channel_view, |col| {
-                if let Some(panel) = self.media_channel_panel.clone() {
-                    col.child(div().size_full().child(AnyView::from(panel)))
-                } else {
-                    col
-                }
-            })
-            .when(!media_channel_view, |col| {
-                col.when_some(activity_strip, |col, strip| col.child(strip))
-                    .child(div().flex_1().min_h_0().overflow_hidden().child(
-                        if timeline_popover_open {
+                .when_some(activity_strip, |col, strip| col.child(strip))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .child(if timeline_popover_open {
                             div()
                                 .size_full()
                                 .child(AnyView::from(self.timeline.clone()))
@@ -2393,31 +2416,36 @@ impl ChatArea {
                             AnyView::from(self.timeline.clone())
                                 .cached(StyleRefinement::default().size_full())
                                 .into_any_element()
-                        },
-                    ))
-                    .when_some(ban_notice, |col, notice| col.child(notice))
-                    .when(send_denied, |col| col.child(no_permission_notice))
-                    .when(!banned && !send_denied, |col| {
-                        col.children(onboarding_mission)
-                            .when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
-                            .when_some(app_channel_bar.as_ref(), |col, target| {
-                                col.child(render_channel_app_bar(
-                                    locale,
-                                    target.clone(),
-                                    cx.theme(),
-                                ))
-                            })
-                            .child(
-                                AnyView::from(self.typing.clone()).cached(
-                                    StyleRefinement::default()
-                                        .w_full()
-                                        .h(px(16.))
-                                        .flex_shrink_0(),
-                                ),
-                            )
-                    })
-                    .when_some(drop_overlay, |col, overlay| col.child(overlay))
-            });
+                        }),
+                )
+                .when_some(ban_notice, |col, notice| col.child(notice))
+                .when(send_denied, |col| col.child(no_permission_notice))
+                .when(!banned && !send_denied, |col| {
+                    col.children(onboarding_mission)
+                        .when_some(input_bar.clone(), |col, input_bar| col.child(input_bar))
+                        .when_some(app_channel_bar.as_ref(), |col, target| {
+                            col.child(render_channel_app_bar(locale, target.clone(), cx.theme()))
+                        })
+                        .child(
+                            AnyView::from(self.typing.clone()).cached(
+                                StyleRefinement::default()
+                                    .w_full()
+                                    .h(px(16.))
+                                    .flex_shrink_0(),
+                            ),
+                        )
+                })
+                .when_some(drop_overlay, |col, overlay| col.child(overlay));
+
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .overflow_hidden()
+                .child(drop_body)
+        };
 
         let has_search_panel = show_results_panel && message_search_panel.is_some();
         let member_visible = show_member_panel && !has_search_panel && !media_channel_view;

@@ -553,9 +553,14 @@ async fn upload_canvas_image_bytes(
     if upload.filename.is_empty() {
         return Err("UploadAttachmentFile returned empty filename".into());
     }
-    let base = base_img_url.trim_end_matches('/');
+    let url = mezon_client::attachment_cdn_url_for_upload(
+        upload.type_cdn,
+        base_img_url,
+        &upload.filename,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(UploadedCanvasImage {
-        url: format!("{base}/{}", upload.filename),
+        url,
         width: width.max(0) as u32,
         height: height.max(0) as u32,
     })

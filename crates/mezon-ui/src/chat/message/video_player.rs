@@ -183,7 +183,7 @@ impl VideoPlayerView {
             Ok(player) => {
                 let duration = player.duration();
                 let player = Rc::new(player);
-                let should_play = self.autoplay_when_ready && duration > 0.0;
+                let should_play = self.autoplay_when_ready;
                 if should_play {
                     player.play();
                 }

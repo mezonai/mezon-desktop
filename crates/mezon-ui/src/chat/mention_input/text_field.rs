@@ -29,10 +29,10 @@ use crate::components::primitives::text_actions::{
 };
 use crate::theme::ActiveTheme;
 use crate::util::text_edit::{
-    EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, extend_range_for_granularity,
-    granularity_for_click, home_target, ime_replace_range, line_end, line_start,
-    marked_caret_range, marked_range_after_delete, next_word_boundary, previous_word_boundary,
-    range_for_granularity, should_coalesce, splice_out_byte_range, surrounding_delete_range,
+    HistoryEntry, SelectGranularity, extend_range_for_granularity, granularity_for_click,
+    home_target, ime_replace_range, line_end, line_start, marked_caret_range,
+    marked_range_after_delete, next_word_boundary, previous_word_boundary, push_undo_entry,
+    range_for_granularity, splice_out_byte_range, surrounding_delete_range,
     swallow_discarded_ime_commit,
 };
 
@@ -228,7 +228,6 @@ pub(crate) struct MentionInputState {
     caret_blink: CaretBlink,
     undo_stack: Vec<HistoryEntry>,
     redo_stack: Vec<HistoryEntry>,
-    last_edit_kind: Option<EditKind>,
     history_payload: Option<Rc<dyn Any>>,
     _window_activation_sub: Subscription,
 }
@@ -278,7 +277,6 @@ impl MentionInputState {
             caret_blink: CaretBlink::new(window.is_window_active()),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            last_edit_kind: None,
             history_payload: None,
             _window_activation_sub: window_activation_sub,
         };
@@ -350,12 +348,13 @@ impl MentionInputState {
     ) {
         let start = range.start.min(self.content.len());
         let end = range.end.min(self.content.len()).max(start);
-        self.record_history(EditKind::Other);
+        let before = self.history_snapshot();
         let mut next = String::with_capacity(self.content.len() - (end - start) + text.len());
         next.push_str(&self.content[..start]);
         next.push_str(text);
         next.push_str(&self.content[end..]);
         self.set_content(next);
+        self.record_history(before);
         let caret = start + text.len();
         self.selected_range = caret..caret;
         self.selection_reversed = false;
@@ -633,17 +632,12 @@ impl MentionInputState {
         self.history_payload.clone()
     }
 
-    fn record_history(&mut self, kind: EditKind) {
-        let coalesce = should_coalesce(self.last_edit_kind, kind);
-        self.redo_stack.clear();
-        if !coalesce {
-            self.undo_stack.push(self.history_snapshot());
-            if self.undo_stack.len() > MAX_UNDO_HISTORY {
-                let overflow = self.undo_stack.len() - MAX_UNDO_HISTORY;
-                self.undo_stack.drain(..overflow);
-            }
+    fn record_history(&mut self, before: HistoryEntry) {
+        if before.content == self.content {
+            return;
         }
-        self.last_edit_kind = Some(kind);
+        self.redo_stack.clear();
+        push_undo_entry(&mut self.undo_stack, before);
     }
 
     fn restore_history(&mut self, entry: HistoryEntry, cx: &mut Context<Self>) {
@@ -652,7 +646,6 @@ impl MentionInputState {
         self.selected_range = entry.selected_range;
         self.selection_reversed = entry.selection_reversed;
         self.marked_range = None;
-        self.last_edit_kind = None;
         self.history_payload = entry.payload;
         self.pending_caret_reveal = true;
         self.pause_caret_blink(cx);
@@ -663,7 +656,6 @@ impl MentionInputState {
     fn clear_history(&mut self) {
         self.undo_stack.clear();
         self.redo_stack.clear();
-        self.last_edit_kind = None;
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -777,7 +769,6 @@ impl MentionInputState {
         self.select_anchor = range.clone();
         self.selection_reversed = false;
         self.selected_range = range;
-        self.last_edit_kind = None;
         self.pending_caret_reveal = true;
         self.caret_blink.pause_blinking(cx);
         cx.notify();
@@ -808,7 +799,6 @@ impl MentionInputState {
         }
         self.selected_range = range;
         self.selection_reversed = reversed;
-        self.last_edit_kind = None;
         self.pending_caret_reveal = true;
         self.caret_blink.pause_blinking(cx);
         cx.notify();
@@ -893,7 +883,6 @@ impl MentionInputState {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
-        self.last_edit_kind = None;
         self.pending_caret_reveal = true;
         self.pause_caret_blink(cx);
         cx.notify()
@@ -1026,7 +1015,6 @@ impl MentionInputState {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
-        self.last_edit_kind = None;
         self.extend_selection(offset, cx);
     }
 
@@ -1156,17 +1144,11 @@ impl EntityInputHandler for MentionInputState {
         let range = self.clamp_range(range);
         let prior_marked = self.marked_range.clone();
 
-        let kind = if new_text.is_empty() {
-            EditKind::Delete
-        } else if self.marked_range.is_some() || (range.is_empty() && !new_text.contains('\n')) {
-            EditKind::Insert
-        } else {
-            EditKind::Other
-        };
-        self.record_history(kind);
+        let before = self.history_snapshot();
 
         let next = self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
         self.set_content(next);
+        self.record_history(before);
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         if new_text.is_empty() {
             self.marked_range = marked_range_after_delete(prior_marked.as_ref(), &range);
@@ -1204,12 +1186,11 @@ impl EntityInputHandler for MentionInputState {
             .unwrap_or(self.selected_range.clone());
         let range = self.clamp_range(range);
 
-        if self.marked_range.is_none() {
-            self.record_history(EditKind::Insert);
-        }
+        let before = self.history_snapshot();
 
         let next = self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
         self.set_content(next);
+        self.record_history(before);
         if !new_text.is_empty() {
             self.marked_range = Some(range.start..range.start + new_text.len());
         } else {
@@ -2128,5 +2109,57 @@ mod tests {
         let explorer = clipboard(vec![files(&["/tmp/a.pdf"])]);
         assert!(paste_events(cx, false, explorer).is_empty());
         assert!(paste_events(cx, false, ClipboardItem::new_image(&bitmap())).is_empty());
+    }
+
+    #[gpui::test]
+    fn every_composer_edit_is_its_own_undo_step(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let field = cx.update(|window, cx| cx.new(|cx| MentionInputState::new(window, cx)));
+        let (undone, redone) = field.update_in(cx, |field, window, cx| {
+            for ch in ["h", "i", " ", "y", "o"] {
+                field.replace_text_in_range(None, ch, window, cx);
+            }
+            field.replace_range(3..5, "@bob ", window, cx);
+            let mut undone = Vec::new();
+            for _ in 0..7 {
+                field.undo(&Undo, window, cx);
+                undone.push(field.value().to_string());
+            }
+            let mut redone = Vec::new();
+            for _ in 0..2 {
+                field.redo(&Redo, window, cx);
+                redone.push(field.value().to_string());
+            }
+            (undone, redone)
+        });
+        assert_eq!(undone, ["hi yo", "hi y", "hi ", "hi", "h", "", ""]);
+        assert_eq!(redone, ["h", "hi"]);
+    }
+
+    #[gpui::test]
+    fn a_composition_committed_by_a_click_leaves_the_next_word_at_the_new_caret(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let field = cx.update(|window, cx| cx.new(|cx| MentionInputState::new(window, cx)));
+        let (value, caret, composing) = field.update_in(cx, |field, window, cx| {
+            field.set_value("dùn bấm -> dùng", window, cx);
+            field.move_to("dùn bấm -> ".len(), cx);
+            for preedit in ["n", "ng", "ngu", "ngươ", "người "] {
+                field.replace_and_mark_text_in_range(None, preedit, None, window, cx);
+            }
+            field.replace_text_in_range(None, "người ", window, cx);
+            field.move_to("dùn".len(), cx);
+            field.replace_and_mark_text_in_range(None, "g", None, window, cx);
+            field.replace_text_in_range(None, "g", window, cx);
+            (
+                field.value().to_string(),
+                field.selected_range.clone(),
+                field.is_composing(),
+            )
+        });
+        assert_eq!(value, "dùng bấm -> người dùng");
+        assert_eq!(caret, "dùng".len().."dùng".len());
+        assert!(!composing);
     }
 }

@@ -3378,6 +3378,7 @@ impl ChatLayout {
             | Route::SettingsNotifications
             | Route::SettingsLanguage
             | Route::SettingsVoice
+            | Route::SettingsServer
             | Route::SettingsAdvanced
             | Route::ClanSettings { .. }
             | Route::ChannelSettings { .. }

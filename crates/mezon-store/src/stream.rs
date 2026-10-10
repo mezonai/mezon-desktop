@@ -469,6 +469,7 @@ impl StreamStore {
             Box::pin(async move {
                 api.generate_meet_token(&room, &room, "")
                     .await
+                    .map(|response| response.token)
                     .map_err(|error| anyhow!("{error:#}"))
             })
         });
@@ -483,8 +484,8 @@ impl StreamStore {
                 {
                     return;
                 }
-                let token = match token {
-                    Ok(token) if !token.is_empty() => token,
+                let meet_token = match token {
+                    Ok(meet_token) if !meet_token.token.is_empty() => meet_token,
                     Ok(_) => {
                         this.fail_stream("SFU returned an empty meet token".into(), cx);
                         return;
@@ -495,8 +496,12 @@ impl StreamStore {
                     }
                 };
                 let session_config = StreamSessionConfig {
-                    ws_url,
-                    token,
+                    ws_url: if meet_token.url.is_empty() {
+                        ws_url
+                    } else {
+                        meet_token.url
+                    },
+                    token: meet_token.token,
                     room,
                     token_provider: provider,
                 };

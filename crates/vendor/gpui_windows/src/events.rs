@@ -482,6 +482,7 @@ impl WindowsWindowInner {
         lparam: LPARAM,
     ) -> Option<isize> {
         unsafe { SetCapture(handle) };
+        self.complete_ime_composition(handle);
 
         let Some(mut func) = self.state.callbacks.input.take() else {
             return Some(1);
@@ -685,6 +686,26 @@ impl WindowsWindowInner {
             )
             .ok()
             .log_err();
+        }
+    }
+
+    // mezon vendor edit: commit an in-progress IME composition before a mouse-down is
+    // dispatched, as AppKit's inputContext.handleEvent does on macOS, so the next key does
+    // not keep composing at the old caret.
+    fn complete_ime_composition(&self, handle: HWND) {
+        let composing = self
+            .with_input_handler(|input_handler| input_handler.marked_text_range())
+            .flatten()
+            .is_some();
+        if !composing || unsafe { GetFocus() } != handle {
+            return;
+        }
+        if let Some(ctx) = ImeContext::get(handle) {
+            unsafe {
+                ImmNotifyIME(*ctx, NI_COMPOSITIONSTR, CPS_COMPLETE, 0)
+                    .ok()
+                    .log_err();
+            }
         }
     }
 

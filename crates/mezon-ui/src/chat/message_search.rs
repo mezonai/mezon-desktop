@@ -179,6 +179,7 @@ pub struct MessageSearchPanel {
     rows_cache_fp: Option<(u64, u64, i32)>,
     observed_store_fp: Option<(u64, u64, i32)>,
     _subs: [Subscription; 1],
+    _cdn_access_sub: Option<Subscription>,
 }
 
 impl Focusable for MessageSearchPanel {
@@ -243,6 +244,7 @@ impl MessageSearchPanel {
             }),
             ogp_image_cache: crate::image_cache::ogp_aux_cache("message-search-ogp", cx),
             _subs: subs,
+            _cdn_access_sub: crate::chat::message::parts::observe_cdn_access(cx),
         }
     }
 
@@ -822,6 +824,16 @@ fn render_search_row(
         };
         let width = width.clamp(1., 280.);
         let height = height.clamp(1., 200.);
+        if mezon_store::hides_media(image.proxied_src.as_ref(), hit.channel_id.0) {
+            return Some(
+                div()
+                    .mt_1()
+                    .child(crate::chat::message::parts::render_private_media_tile(
+                        theme, width, height,
+                    ))
+                    .into_any_element(),
+            );
+        }
         let fit = if image.contain {
             ObjectFit::Contain
         } else {
