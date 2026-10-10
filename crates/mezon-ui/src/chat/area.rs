@@ -6,12 +6,13 @@ use gpui::{
     AnyView, App, Context, Entity, ExternalPaths, FocusHandle, FontWeight, ObjectFit, SharedString,
     StyleRefinement, Subscription, Task, WeakEntity, Window, div, img, prelude::*, px, rgb, rgba,
 };
+use mezon_store::message_time::normalize_unix_seconds;
 use mezon_store::{
     ActivityStripDismissal, BadgeService, BannedUsersStore, ChannelId, ChannelList,
     ChannelPermissionsStore, ClanId, ClanList, DirectEvent, DirectKind, DirectMessageStore,
     FriendEvent, FriendStore, InVoiceInfo, MessageId, MessagesEvent, MessagesStore,
     OnboardingStore, PERMISSION_SEND_MESSAGE, PinnedMessagesStore, ProfileContext, Settings,
-    TopicBadgeStore, TopicDiscussion, TopicsStore, UserId, resolve_user_profile,
+    TopicBadgeStore, TopicDiscussion, TopicSeenMarker, TopicsStore, UserId, resolve_user_profile,
     schedule_settings_save,
 };
 use ui::{PopoverMenuHandle, Tooltip};
@@ -33,7 +34,8 @@ use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::chat::user_profile_popover::UserProfilePopover;
 use crate::components::compositions::channel_row::ChannelIcon;
 use crate::components::primitives::{
-    Avatar, Button, ButtonVariants, Icon, IconName, InputState, Sizable, Size, h_flex, v_flex,
+    Avatar, Button, ButtonVariants, Icon, IconName, InputState, Sizable, Size, h_flex,
+    mention_count_badge, v_flex,
 };
 use crate::image_cache::LruImageCache;
 use crate::router::{Route, Router, navigate};
@@ -311,6 +313,74 @@ struct ActivityStripGeneration {
     pin_record_ids: Vec<i64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TopicSeenDecision {
+    seen_timestamp: u32,
+    unread: bool,
+    persist: bool,
+}
+
+fn topic_seen_decision(
+    persisted_timestamp: Option<u32>,
+    latest_timestamp: u32,
+    mark_seen: bool,
+) -> TopicSeenDecision {
+    if latest_timestamp == 0 {
+        return TopicSeenDecision {
+            seen_timestamp: persisted_timestamp.unwrap_or(0),
+            unread: false,
+            persist: false,
+        };
+    }
+    match persisted_timestamp {
+        None => TopicSeenDecision {
+            seen_timestamp: latest_timestamp,
+            unread: false,
+            persist: true,
+        },
+        Some(seen_timestamp) if mark_seen && latest_timestamp > seen_timestamp => {
+            TopicSeenDecision {
+                seen_timestamp: latest_timestamp,
+                unread: false,
+                persist: true,
+            }
+        }
+        Some(seen_timestamp) => TopicSeenDecision {
+            seen_timestamp,
+            unread: !mark_seen && latest_timestamp > seen_timestamp,
+            persist: false,
+        },
+    }
+}
+
+fn latest_message_is_own(
+    latest_sender: Option<(u32, UserId)>,
+    latest_topic_timestamp: u32,
+    current_user_id: UserId,
+) -> bool {
+    latest_sender.is_some_and(|(timestamp, sender_id)| {
+        timestamp == latest_topic_timestamp && sender_id == current_user_id
+    })
+}
+
+fn persisted_topic_seen_timestamp(
+    settings: &Settings,
+    context: ActivityStripContext,
+    topic_id: i64,
+) -> Option<u32> {
+    settings
+        .topic_seen_markers
+        .iter()
+        .find(|marker| {
+            marker.user_id == context.user_id.get()
+                && marker.clan_id == context.clan_id.get()
+                && marker.channel_id == context.channel_id.get()
+                && marker.topic_id == topic_id
+        })
+        .map(|marker| marker.last_seen_timestamp)
+        .filter(|timestamp| *timestamp > 0)
+}
+
 impl ActivityStripGeneration {
     fn has_new_activity_since(&self, previous: &Self) -> bool {
         self.newest_topic_id > previous.newest_topic_id
@@ -486,6 +556,103 @@ mod activity_strip_generation_tests {
             None
         );
     }
+
+    #[test]
+    fn persisted_topic_timestamp_restores_unread_after_restart() {
+        assert_eq!(
+            topic_seen_decision(Some(100), 200, false),
+            TopicSeenDecision {
+                seen_timestamp: 100,
+                unread: true,
+                persist: false,
+            }
+        );
+    }
+
+    #[test]
+    fn first_topic_observation_seeds_without_showing_unread() {
+        assert_eq!(
+            topic_seen_decision(None, 200, false),
+            TopicSeenDecision {
+                seen_timestamp: 200,
+                unread: false,
+                persist: true,
+            }
+        );
+    }
+
+    #[test]
+    fn incomplete_topic_timestamp_is_not_persisted() {
+        assert_eq!(
+            topic_seen_decision(None, 0, false),
+            TopicSeenDecision {
+                seen_timestamp: 0,
+                unread: false,
+                persist: false,
+            }
+        );
+        assert_eq!(
+            topic_seen_decision(Some(100), 0, true),
+            TopicSeenDecision {
+                seen_timestamp: 100,
+                unread: false,
+                persist: false,
+            }
+        );
+    }
+
+    #[test]
+    fn persisted_zero_topic_timestamp_is_treated_as_missing() {
+        let context = ActivityStripContext {
+            user_id: UserId::new(1),
+            clan_id: ClanId::new(2),
+            channel_id: ChannelId::new(3),
+        };
+        let settings = Settings {
+            topic_seen_markers: vec![TopicSeenMarker {
+                user_id: 1,
+                clan_id: 2,
+                channel_id: 3,
+                topic_id: 4,
+                last_seen_timestamp: 0,
+            }],
+            ..Settings::default()
+        };
+        assert_eq!(persisted_topic_seen_timestamp(&settings, context, 4), None);
+    }
+
+    #[test]
+    fn opening_or_sending_to_a_topic_advances_seen_timestamp() {
+        assert_eq!(
+            topic_seen_decision(Some(100), 200, true),
+            TopicSeenDecision {
+                seen_timestamp: 200,
+                unread: false,
+                persist: true,
+            }
+        );
+    }
+
+    #[test]
+    fn incomplete_topic_metadata_cannot_mark_a_message_as_own() {
+        let current_user = UserId::new(7);
+        assert!(!latest_message_is_own(None, 200, current_user));
+        assert!(!latest_message_is_own(
+            Some((100, current_user)),
+            200,
+            current_user
+        ));
+        assert!(!latest_message_is_own(
+            Some((200, UserId::new(8))),
+            200,
+            current_user
+        ));
+        assert!(latest_message_is_own(
+            Some((200, current_user)),
+            200,
+            current_user
+        ));
+    }
 }
 
 fn active_activity_strip_context(cx: &App) -> Option<ActivityStripContext> {
@@ -561,6 +728,7 @@ fn latest_activity_strip(
     clan_id: &str,
     context: ActivityStripContext,
     generation: ActivityStripGeneration,
+    topic_has_persisted_unread: bool,
     strip: WeakEntity<LatestActivityStripView>,
     cx: &mut App,
 ) -> gpui::AnyElement {
@@ -695,6 +863,14 @@ fn latest_activity_strip(
 
     let theme = cx.theme();
     let hover = theme.bg_hover;
+    let topic_badge_count = latest_topic
+        .as_ref()
+        .map(|topic| {
+            TopicBadgeStore::global(cx)
+                .read(cx)
+                .topic_badge_count(&topic.id)
+        })
+        .unwrap_or(0);
 
     let topic_title: SharedString = topic_title
         .map(|text| SharedString::from(text.split_whitespace().collect::<Vec<_>>().join(" ")))
@@ -828,6 +1004,7 @@ fn latest_activity_strip(
         // A stable semantic icon avoids remounting an image while clan/topic data resolves.
         .child(
             div()
+                .relative()
                 .flex()
                 .flex_none()
                 .items_center()
@@ -837,6 +1014,28 @@ fn latest_activity_strip(
                     Icon::new(IconName::TopicIcon)
                         .size(px(22.))
                         .text_color(theme.interactive_active),
+                )
+                .when(topic_badge_count > 0, |icon| {
+                    icon.child(
+                        mention_count_badge(topic_badge_count)
+                            .absolute()
+                            .top(px(-4.))
+                            .right(px(-4.)),
+                    )
+                })
+                .when(
+                    topic_badge_count == 0 && topic_has_persisted_unread,
+                    |icon| {
+                        icon.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .right_0()
+                                .size(px(7.))
+                                .rounded_full()
+                                .bg(theme.mention_badge),
+                        )
+                    },
                 ),
         )
         .child(
@@ -1208,6 +1407,7 @@ fn latest_activity_strip(
 struct ActivityStripSnapshot {
     context: ActivityStripContext,
     generation: ActivityStripGeneration,
+    topic_has_persisted_unread: bool,
     visible: bool,
 }
 
@@ -1219,6 +1419,7 @@ struct LatestActivityStripView {
     _messages_sub: Subscription,
     _settings_sub: Subscription,
     _badge_sub: Option<Subscription>,
+    _topic_badge_sub: Subscription,
 }
 
 impl LatestActivityStripView {
@@ -1240,6 +1441,7 @@ impl LatestActivityStripView {
         let settings_sub = cx.observe(&settings, |this, _, cx| this.refresh_snapshot(cx));
         let badge_sub = BadgeService::try_global(cx)
             .map(|badge| cx.observe(&badge, |this, _, cx| this.refresh_snapshot(cx)));
+        let topic_badge_sub = cx.observe(&TopicBadgeStore::global(cx), |_, _, cx| cx.notify());
         let mut view = Self {
             settings,
             snapshot: None,
@@ -1248,6 +1450,7 @@ impl LatestActivityStripView {
             _messages_sub: messages_sub,
             _settings_sub: settings_sub,
             _badge_sub: badge_sub,
+            _topic_badge_sub: topic_badge_sub,
         };
         view.refresh_snapshot(cx);
         view
@@ -1271,6 +1474,7 @@ impl LatestActivityStripView {
             }
             return;
         };
+        let topic_has_persisted_unread = self.sync_latest_topic_seen(context, cx);
         let persisted = persisted_activity_strip_generation(self.settings.read(cx), context);
         let visible = match persisted {
             Some(previous) if generation.has_new_activity_since(&previous) => {
@@ -1283,12 +1487,75 @@ impl LatestActivityStripView {
         let next = Some(ActivityStripSnapshot {
             context,
             generation,
+            topic_has_persisted_unread,
             visible,
         });
         if self.snapshot != next {
             self.snapshot = next;
             cx.notify();
         }
+    }
+
+    fn sync_latest_topic_seen(
+        &mut self,
+        context: ActivityStripContext,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(topic) = latest_activity_topic(&context.clan_id.to_string(), cx) else {
+            return false;
+        };
+        let Ok(topic_id) = topic.id.parse::<i64>() else {
+            return false;
+        };
+        let topic_is_open = {
+            let topics = TopicsStore::global(cx);
+            let topics = topics.read(cx);
+            topics.is_panel_open() && topics.active_topic_id() == Some(topic_id)
+        };
+        let latest_sender = MessagesStore::global(cx)
+            .read(cx)
+            .messages_in_channel(ChannelId(topic_id))
+            .iter()
+            .rev()
+            .find_map(|message| {
+                let timestamp = normalize_unix_seconds(message.create_time)
+                    .clamp(0, i64::from(u32::MAX)) as u32;
+                let sender_id = message
+                    .sender_user_id
+                    .or_else(|| message.sender_id.parse::<UserId>().ok())?;
+                Some((timestamp, sender_id))
+            });
+        let latest_is_own =
+            latest_message_is_own(latest_sender, topic.last_message_timestamp, context.user_id);
+        let persisted_timestamp =
+            persisted_topic_seen_timestamp(self.settings.read(cx), context, topic_id);
+        let decision = topic_seen_decision(
+            persisted_timestamp,
+            topic.last_message_timestamp,
+            topic_is_open || latest_is_own,
+        );
+        if decision.persist {
+            self.settings.update(cx, |settings, _| {
+                if let Some(marker) = settings.topic_seen_markers.iter_mut().find(|marker| {
+                    marker.user_id == context.user_id.get()
+                        && marker.clan_id == context.clan_id.get()
+                        && marker.channel_id == context.channel_id.get()
+                }) {
+                    marker.topic_id = topic_id;
+                    marker.last_seen_timestamp = decision.seen_timestamp;
+                } else {
+                    settings.topic_seen_markers.push(TopicSeenMarker {
+                        user_id: context.user_id.get(),
+                        clan_id: context.clan_id.get(),
+                        channel_id: context.channel_id.get(),
+                        topic_id,
+                        last_seen_timestamp: decision.seen_timestamp,
+                    });
+                }
+            });
+            schedule_settings_save(&self.settings, cx);
+        }
+        decision.unread
     }
 
     fn dismiss_if_current(
@@ -1351,6 +1618,7 @@ impl Render for LatestActivityStripView {
             &snapshot.context.clan_id.to_string(),
             snapshot.context,
             snapshot.generation,
+            snapshot.topic_has_persisted_unread,
             cx.weak_entity(),
             cx,
         )

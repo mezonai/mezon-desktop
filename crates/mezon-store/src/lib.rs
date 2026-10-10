@@ -436,6 +436,15 @@ pub struct ActivityStripDismissal {
     pub pin_record_ids: Vec<i64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TopicSeenMarker {
+    pub user_id: i64,
+    pub clan_id: i64,
+    pub channel_id: i64,
+    pub topic_id: i64,
+    pub last_seen_timestamp: u32,
+}
+
 /// Persistent application settings — written to ~/.config/mezon/settings.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -504,6 +513,8 @@ pub struct Settings {
     pub realtime_server: RealtimeServer,
     #[serde(default)]
     pub agent_hint_dismissed: bool,
+    #[serde(default)]
+    pub topic_seen_markers: Vec<TopicSeenMarker>,
 }
 
 impl Default for Settings {
@@ -538,6 +549,7 @@ impl Default for Settings {
             activity_strip_dismissals: Vec::new(),
             realtime_server: RealtimeServer::Auto,
             agent_hint_dismissed: false,
+            topic_seen_markers: Vec::new(),
         }
     }
 }
@@ -740,7 +752,7 @@ impl AuthState {
 
 #[cfg(test)]
 mod settings_tests {
-    use super::{ActivityStripDismissal, Settings};
+    use super::{ActivityStripDismissal, Settings, TopicSeenMarker};
 
     #[test]
     fn a_settings_file_written_before_the_tour_existed_still_parses() {
@@ -790,6 +802,23 @@ mod settings_tests {
             restored.activity_strip_dismissals,
             settings.activity_strip_dismissals
         );
+    }
+
+    #[test]
+    fn topic_seen_marker_survives_a_roundtrip() {
+        let settings = Settings {
+            topic_seen_markers: vec![TopicSeenMarker {
+                user_id: 1,
+                clan_id: 2,
+                channel_id: 3,
+                topic_id: 4,
+                last_seen_timestamp: 5,
+            }],
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).expect("encode");
+        let restored: Settings = serde_json::from_str(&json).expect("decode");
+        assert_eq!(restored.topic_seen_markers, settings.topic_seen_markers);
     }
 
     #[test]
