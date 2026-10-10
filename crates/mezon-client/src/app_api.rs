@@ -2075,6 +2075,7 @@ impl AppApi {
                     height,
                     part_count: ranges.len() as i32,
                     channel_id,
+                    transcode_hls: false,
                 })
                 .await?;
             if started.urls.len() != ranges.len() {

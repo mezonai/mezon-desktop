@@ -8251,6 +8251,7 @@ impl MezonTransport {
             height,
             part_count: 0,
             channel_id,
+            transcode_hls: false,
         }
         .encode_to_vec();
         let (code, response) = self
