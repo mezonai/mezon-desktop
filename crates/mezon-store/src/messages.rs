@@ -671,7 +671,7 @@ pub struct MessagesStore {
     api: Arc<AppApi>,
     _channel_sub: Subscription,
     _conn_watch: Task<()>,
-    _cdn_access_watch: Option<Task<()>>,
+    _cdn_access_sub: Option<Subscription>,
     pending_last_seen: HashMap<ChannelId, PendingLastSeen>,
     _last_seen_timer: Option<Task<()>>,
     last_seen_fingerprint: HashMap<ChannelId, String>,
@@ -1165,7 +1165,8 @@ impl MessagesStore {
         });
 
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
-        let cdn_access_watch = Self::spawn_cdn_access_watch(cx);
+        let cdn_access_sub = crate::CdnAccess::try_global(cx)
+            .map(|access| cx.observe(&access, |this, _, cx| this.refresh_private_source_media(cx)));
 
         Self {
             cache: KeyedCache::new(Some(MAX_CACHED_CHANNELS)),
@@ -1206,7 +1207,7 @@ impl MessagesStore {
             api,
             _channel_sub: channel_sub,
             _conn_watch: conn_watch,
-            _cdn_access_watch: cdn_access_watch,
+            _cdn_access_sub: cdn_access_sub,
             pending_last_seen: HashMap::new(),
             _last_seen_timer: None,
             last_seen_fingerprint: HashMap::new(),
@@ -2144,7 +2145,7 @@ impl MessagesStore {
                 fetched = msgs.len(),
                 "load_more: page received"
             );
-            let parsed: Vec<Message> = cx
+            let mut parsed: Vec<Message> = cx
                 .background_executor()
                 .spawn(async move {
                     msgs.into_iter()
@@ -2153,6 +2154,7 @@ impl MessagesStore {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                settle_private_source_media(&mut parsed, cx);
                 let (prepended, dropped_bottom) = {
                     let Some(channel) = this.cache.get_mut(&channel_id) else {
                         this.finish_loading_more(cx);
@@ -2275,7 +2277,7 @@ impl MessagesStore {
                 raw_max = msgs.iter().map(|m| m.message_id).max().unwrap_or(0),
                 "load_more_bottom: page received (raw server ids)"
             );
-            let parsed: Vec<Message> = cx
+            let mut parsed: Vec<Message> = cx
                 .background_executor()
                 .spawn(async move {
                     msgs.into_iter()
@@ -2284,6 +2286,7 @@ impl MessagesStore {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                settle_private_source_media(&mut parsed, cx);
                 let (added, dropped) = {
                     let Some(channel) = this.cache.get_mut(&channel_id) else {
                         this.finish_loading_more(cx);
@@ -2465,7 +2468,7 @@ impl MessagesStore {
                     return;
                 }
             };
-            let parsed: Vec<Message> = cx
+            let mut parsed: Vec<Message> = cx
                 .background_executor()
                 .spawn(async move {
                     msgs.into_iter()
@@ -2474,6 +2477,7 @@ impl MessagesStore {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                settle_private_source_media(&mut parsed, cx);
                 let mut window: Vec<Message> = parsed;
                 sort_messages(&mut window);
                 if window.len() > MAX_MESSAGES_PER_CHANNEL {
@@ -4130,11 +4134,12 @@ impl MessagesStore {
                 }
             };
             let batch_len = msgs.len();
-            let parsed: Vec<Message> = cx
+            let mut parsed: Vec<Message> = cx
                 .background_executor()
                 .spawn(async move { prepare_messages(msgs, cfg.as_ref(), viewer_id) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                settle_private_source_media(&mut parsed, cx);
                 this.topic_loading_more = false;
                 if this.active_topic_id != Some(topic_key) {
                     cx.notify();
@@ -4242,11 +4247,12 @@ impl MessagesStore {
                 }
             };
             let batch_len = msgs.len();
-            let parsed: Vec<Message> = cx
+            let mut parsed: Vec<Message> = cx
                 .background_executor()
                 .spawn(async move { prepare_messages(msgs, cfg.as_ref(), viewer_id) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                settle_private_source_media(&mut parsed, cx);
                 this.topic_loading_more = false;
                 if this.active_topic_id != Some(topic_key) {
                     cx.notify();
@@ -4539,33 +4545,14 @@ impl MessagesStore {
         }
     }
 
-    fn spawn_cdn_access_watch(cx: &mut Context<Self>) -> Option<Task<()>> {
-        let mut changes = mezon_client::cdn_signature::access_changes()?;
-        Some(cx.spawn(async move |this, cx| {
-            while changes.changed().await.is_ok() {
-                if this
-                    .update(cx, |this, cx| this.refresh_private_source_media(cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        }))
-    }
-
     fn refresh_private_source_media(&mut self, cx: &mut Context<Self>) {
         let config = AppConfig::try_global(cx).cloned();
         let mut touched = Vec::new();
         for channel in self.cache.values_mut() {
             for message in channel.messages.items.iter_mut() {
-                if !message.is_forwarded || !mark_private_source_media(&mut message.attachments) {
-                    continue;
+                if remark_private_source_media(message, config.as_ref()) {
+                    touched.push(message.id);
                 }
-                let (album_layout, viewer_media) =
-                    build_media_presentation(&message.attachments, config.as_ref());
-                message.album_layout = album_layout;
-                message.viewer_media = viewer_media;
-                touched.push(message.id);
             }
         }
         if touched.is_empty() {
@@ -10764,6 +10751,23 @@ fn parse_poll_markdown(text: &str) -> Option<ParsedPollMarkdown> {
     })
 }
 
+fn settle_private_source_media(messages: &mut [Message], cx: &App) {
+    let config = AppConfig::try_global(cx);
+    for message in messages.iter_mut() {
+        remark_private_source_media(message, config);
+    }
+}
+
+fn remark_private_source_media(message: &mut Message, cfg: Option<&AppConfig>) -> bool {
+    if !message.is_forwarded || !mark_private_source_media(&mut message.attachments) {
+        return false;
+    }
+    let (album_layout, viewer_media) = build_media_presentation(&message.attachments, cfg);
+    message.album_layout = album_layout;
+    message.viewer_media = viewer_media;
+    true
+}
+
 fn mark_private_source_media(attachments: &mut [MessageAttachment]) -> bool {
     let mut changed = false;
     for att in attachments.iter_mut().filter(|att| att.is_visual_media()) {
@@ -13755,6 +13759,35 @@ mod tests {
         assert!(original.attachments.iter().all(|a| !a.source_denied));
         assert_eq!(original.viewer_media.len(), 2);
         assert!(original.album_layout.is_some());
+    }
+
+    #[test]
+    fn a_forwarded_row_parsed_before_its_denial_landed_is_settled_before_insert() {
+        crate::cdn_test_signer::install();
+        let denied = "https://cdn.example/1cb164dbdac01001/2108799850765094915_secret.png";
+        let readable = "https://cdn.example/1cb164dbdac01000/2108799850765094916_open.png";
+        let image = |url: &str| MessageAttachment {
+            url: url.to_string(),
+            filetype: "image/png".to_string(),
+            width: 800,
+            height: 600,
+            ..Default::default()
+        };
+        let attachments = vec![image(denied), image(readable)];
+        let (album_layout, viewer_media) = build_media_presentation(&attachments, None);
+        let mut parsed = Message::new(MessageId(11), "", "1", "Alice", 0)
+            .with_forwarded(true)
+            .with_attachments(attachments)
+            .with_media_presentation(album_layout, viewer_media);
+        assert!(futures::executor::block_on(
+            mezon_client::cdn_signature::access_denied(denied)
+        ));
+
+        assert!(remark_private_source_media(&mut parsed, None));
+        assert!(parsed.attachments[0].source_denied);
+        assert_eq!(parsed.viewer_media.len(), 1);
+        assert!(parsed.album_layout.is_none());
+        assert!(!remark_private_source_media(&mut parsed, None));
     }
 
     #[test]

@@ -4216,6 +4216,13 @@ impl ChannelList {
                     return;
                 };
                 let channel_id = ChannelId(desc.channel_id);
+                let me = BadgeService::try_global(cx)
+                    .and_then(|badges| badges.read(cx).current_user_id(cx));
+                let added_ids = e.users.iter().map(|u| u.user_id).collect::<Vec<_>>();
+                let adds_me = event_targets_user(&added_ids, me);
+                if adds_me {
+                    mezon_client::cdn_signature::forget_denial(desc.channel_id);
+                }
                 if self.is_locally_archived(channel_id) {
                     return;
                 }
@@ -4223,10 +4230,7 @@ impl ChannelList {
                 if channel_type == 2 || channel_type == 3 {
                     return;
                 }
-                let me = BadgeService::try_global(cx)
-                    .and_then(|badges| badges.read(cx).current_user_id(cx));
-                let added_ids = e.users.iter().map(|u| u.user_id).collect::<Vec<_>>();
-                if !event_targets_user(&added_ids, me) {
+                if !adds_me {
                     return;
                 }
                 let clan_id = ClanId(e.clan_id);

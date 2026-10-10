@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use gpui::{
     Anchor, AnyElement, App, ClickEvent, CursorStyle, Entity, FontWeight, Hsla, MouseButton,
-    ObjectFit, SharedString, Transformation, Window, div, img, prelude::*, px, radians, rems, rgba,
+    MouseDownEvent, ObjectFit, SharedString, Transformation, Window, div, img, prelude::*, px,
+    radians, rems, rgba,
 };
 use mezon_store::{
     AccountStore, AlbumLayout, AppConfig, AttachmentSeedInput, BadgeService, ChannelId,
@@ -860,7 +861,7 @@ pub fn render_attachments(
         return None;
     }
     let theme = ctx.theme;
-    let mut videos: SmallVec<[&MessageAttachment; 2]> = SmallVec::new();
+    let mut videos: SmallVec<[(usize, &MessageAttachment); 2]> = SmallVec::new();
     let mut audios: SmallVec<[&MessageAttachment; 2]> = SmallVec::new();
     let mut images: SmallVec<[(usize, &MessageAttachment); 4]> = SmallVec::new();
     let mut documents: SmallVec<[&MessageAttachment; 2]> = SmallVec::new();
@@ -871,7 +872,7 @@ pub fn render_attachments(
         } else if att.is_unsupported_media() {
             documents.push(att);
         } else if att.is_video() {
-            videos.push(att);
+            videos.push((idx, att));
         } else if att.is_audio() {
             audios.push(att);
         } else if att.is_image() {
@@ -900,8 +901,8 @@ pub fn render_attachments(
     if private_source_hidden {
         col = col.child(render_private_source_placeholder(ctx));
     }
-    for (i, att) in videos.iter().enumerate() {
-        col = col.child(render_video(msg.id, i, att, ctx, att.uploading));
+    for &(att_index, att) in videos.iter() {
+        col = col.child(render_video(msg.id, att_index, att, ctx, att.uploading));
     }
     for (i, att) in audios.iter().enumerate() {
         col = col.child(render_audio(msg.id, i, att, ctx, att.uploading));
@@ -952,6 +953,45 @@ pub fn render_attachments(
         )
         .into_any_element(),
     )
+}
+
+fn note_context_image(
+    ctx: &RowCtx,
+    message_id: MessageId,
+    url: &str,
+) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+    let host = ctx.video_host.clone();
+    let url = url.to_string();
+    move |_, _, cx| {
+        let _ = host.update(cx, |this, _| {
+            this.note_context_image(message_id, url.clone());
+        });
+    }
+}
+
+pub(crate) fn observe_cdn_access<T: 'static>(
+    cx: &mut gpui::Context<T>,
+) -> Option<gpui::Subscription> {
+    mezon_store::CdnAccess::try_global(cx).map(|access| cx.observe(&access, |_, _, cx| cx.notify()))
+}
+
+pub(crate) fn render_private_media_tile(theme: &Theme, width: f32, height: f32) -> AnyElement {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .w(px(width))
+        .h(px(height))
+        .max_w_full()
+        .rounded_md()
+        .bg(theme.tokens.bg_secondary)
+        .child(
+            Icon::new(IconName::LockIcon)
+                .size(px((width.min(height) * 0.3).clamp(12., 24.)))
+                .text_color(theme.tokens.text_secondary),
+        )
+        .into_any_element()
 }
 
 fn render_private_source_placeholder(ctx: &RowCtx) -> AnyElement {
@@ -1226,6 +1266,10 @@ fn render_album(
         let uploader_id = viewer_uploader_id(msg);
         let mut tile_element = div()
             .id(("msg-album", index))
+            .on_mouse_down(
+                MouseButton::Right,
+                note_context_image(ctx, msg.id, &att.url),
+            )
             .absolute()
             .left(px(tile.x))
             .top(px(tile.y))
@@ -1419,6 +1463,10 @@ fn render_photo(
     if let Some(player) = gif_player {
         return div()
             .id(("msg-gif", index))
+            .on_mouse_down(
+                MouseButton::Right,
+                note_context_image(ctx, msg.id, &att.url),
+            )
             .w(px(att.display_width))
             .h(px(att.display_height))
             .max_w_full()
@@ -1437,6 +1485,10 @@ fn render_photo(
         let selection = ctx.selection.clone();
         let mut el = div()
             .id(("msg-img", index))
+            .on_mouse_down(
+                MouseButton::Right,
+                note_context_image(ctx, msg.id, &att.url),
+            )
             .relative()
             .w(px(att.display_width))
             .h(px(att.display_height))
@@ -1560,6 +1612,10 @@ fn render_photo(
     let selection = ctx.selection.clone();
     let mut el = div()
         .id(("msg-img", index))
+        .on_mouse_down(
+            MouseButton::Right,
+            note_context_image(ctx, msg.id, &att.url),
+        )
         .relative()
         .w(px(box_w))
         .h(px(box_h))

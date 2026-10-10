@@ -241,6 +241,7 @@ pub(crate) fn build(
     reaction_submenu_open: bool,
     quick_menu_submenu_open: bool,
     selected_text: Option<String>,
+    clicked_image: Option<&str>,
     host: WeakEntity<ChannelMessages>,
     cx: &App,
 ) -> ContextMenu {
@@ -269,6 +270,7 @@ pub(crate) fn build(
         reaction_submenu_open,
         quick_menu_submenu_open,
         selected_text,
+        clicked_image,
         host,
         cx,
     )
@@ -577,6 +579,7 @@ fn build_channel_menu(
     reaction_submenu_open: bool,
     quick_menu_submenu_open: bool,
     selected_text: Option<String>,
+    clicked_image: Option<&str>,
     host: WeakEntity<ChannelMessages>,
     cx: &App,
 ) -> ContextMenu {
@@ -802,11 +805,14 @@ fn build_channel_menu(
         cx,
     );
 
-    let link = first_link(msg);
-    let image = msg
-        .attachments
-        .iter()
-        .find(|a| a.is_image() && !a.source_denied)
+    let clicked = clicked_menu_image(msg, clicked_image);
+    let link = if clicked.is_some() {
+        None
+    } else {
+        first_link(msg)
+    };
+    let image = clicked
+        .or_else(|| first_menu_image(msg))
         .map(|a| (a.url.clone(), a.filename.clone()));
     if link.is_some() || image.is_some() || !is_own_message {
         menu = menu.separator();
@@ -899,6 +905,56 @@ fn build_channel_menu(
     }
 
     menu.on_submenu_close(close_quick_menu_submenu(host))
+}
+
+fn clicked_menu_image<'a>(
+    msg: &'a Message,
+    clicked_image: Option<&str>,
+) -> Option<&'a mezon_store::MessageAttachment> {
+    let url = clicked_image?;
+    msg.attachments
+        .iter()
+        .find(|a| a.url == url && a.is_image() && !a.source_denied)
+}
+
+fn first_menu_image(msg: &Message) -> Option<&mezon_store::MessageAttachment> {
+    msg.attachments
+        .iter()
+        .find(|a| a.is_image() && !a.source_denied)
+}
+
+#[cfg(test)]
+mod menu_image_tests {
+    use super::{clicked_menu_image, first_menu_image};
+    use mezon_store::{Message, MessageAttachment, MessageId};
+
+    fn image(url: &str, source_denied: bool) -> MessageAttachment {
+        MessageAttachment {
+            url: url.to_string(),
+            filetype: "image/png".to_string(),
+            source_denied,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_right_clicked_image_wins_over_the_first_one() {
+        let msg = Message::new(MessageId(1), "", "1", "Alice", 0).with_attachments(vec![
+            image("https://cdn/a.png", false),
+            image("https://cdn/b.png", false),
+            image("https://cdn/c.png", true),
+        ]);
+        let pick = |clicked| {
+            clicked_menu_image(&msg, clicked)
+                .or_else(|| first_menu_image(&msg))
+                .map(|a| a.url.as_str())
+        };
+        assert_eq!(pick(Some("https://cdn/b.png")), Some("https://cdn/b.png"));
+        assert_eq!(pick(None), Some("https://cdn/a.png"));
+        assert_eq!(pick(Some("https://cdn/c.png")), Some("https://cdn/a.png"));
+        assert_eq!(pick(Some("https://other/x.png")), Some("https://cdn/a.png"));
+        assert!(clicked_menu_image(&msg, Some("https://cdn/c.png")).is_none());
+    }
 }
 
 #[cfg(test)]

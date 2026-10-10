@@ -49,6 +49,7 @@ pub struct InboxPopoverPanel {
     _channel_obs: Subscription,
     _topic_badge_sub: Subscription,
     _users_sub: Subscription,
+    _cdn_access_sub: Option<Subscription>,
 }
 
 impl InboxPopoverPanel {
@@ -165,6 +166,7 @@ impl InboxPopoverPanel {
             _channel_obs,
             _topic_badge_sub,
             _users_sub,
+            _cdn_access_sub: crate::chat::message::parts::observe_cdn_access(cx),
         };
         this.sync_from_store(cx, false);
         this

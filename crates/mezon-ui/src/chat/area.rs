@@ -66,6 +66,7 @@ pub struct ChatArea {
     _send_permission_channel_sub: Subscription,
     _send_permission_direct_sub: Subscription,
     _send_permission_friend_sub: Subscription,
+    _cdn_access_sub: Option<Subscription>,
     _send_permission_debounce: Option<Task<()>>,
     drop_title_cache: Option<(SharedString, SharedString, SharedString)>,
     drop_body_cache: Option<(SharedString, SharedString)>,
@@ -735,7 +736,14 @@ fn latest_activity_strip(
                 mezon_i18n::t(locale, "notifications.empty.topics.description").into()
             }
         });
+    let viewing_channel = active_channel_id.map_or(0, |channel_id| channel_id.0);
     let topic_media = topic_attachment.as_ref().map(|attachment| {
+        if (attachment.is_image() || attachment.is_video())
+            && (attachment.source_denied
+                || mezon_store::hides_media(&attachment.url, viewing_channel))
+        {
+            return crate::chat::message::parts::render_private_media_tile(theme, 32., 32.);
+        }
         if attachment.is_image() {
             if let Some(path) = attachment.local_source.clone() {
                 return div()
@@ -1669,6 +1677,7 @@ impl ChatArea {
             _send_permission_channel_sub: send_permission_channel_sub,
             _send_permission_direct_sub: send_permission_direct_sub,
             _send_permission_friend_sub: send_permission_friend_sub,
+            _cdn_access_sub: crate::chat::message::parts::observe_cdn_access(cx),
             _send_permission_debounce: None,
             drop_title_cache: None,
             drop_body_cache: None,

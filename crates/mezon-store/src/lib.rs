@@ -10,6 +10,7 @@ pub mod buzz;
 pub mod cache;
 pub mod call;
 pub mod canvas;
+pub mod cdn_access;
 pub mod channel;
 pub mod channel_media;
 pub mod channel_members;
@@ -114,6 +115,7 @@ pub use buzz::BuzzStore;
 pub use cache::{Freshness, KeyedCache};
 pub use call::{CallPeer, CallPhase, CallStore, MediaFlags, MediaKind};
 pub use canvas::{CanvasDetail, CanvasStore, CanvasSummary, UploadedCanvasImage, canvas_web_link};
+pub use cdn_access::{CdnAccess, hides_media};
 pub use channel::*;
 pub use channel_media::{
     CHANNEL_MEDIA_CACHE_TTL, CHANNEL_MEDIA_PAGE_SIZE, ChannelMediaEvent, ChannelMediaStore,

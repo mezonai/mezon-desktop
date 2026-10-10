@@ -74,11 +74,15 @@ pub async fn access_denied(url: &str) -> bool {
     signer.denies(url)
 }
 
+pub fn channel_of_url(url: &str) -> Option<i64> {
+    installed()?.signed_channel_of(url)
+}
+
 pub fn check_access(url: &str) {
     let Some(signer) = installed() else {
         return;
     };
-    let Some(channel_id) = signer.channel_of(url) else {
+    let Some(channel_id) = signer.signed_channel_of(url) else {
         return;
     };
     if signer.cached(channel_id).is_some() {
@@ -87,6 +91,12 @@ pub fn check_access(url: &str) {
     crate::transport_runtime::handle().spawn(async move {
         signer.signature(channel_id).await;
     });
+}
+
+pub fn forget_denial(channel_id: i64) {
+    if let Some(signer) = installed() {
+        signer.forget_denial(channel_id);
+    }
 }
 
 pub fn access_changes() -> Option<tokio::sync::watch::Receiver<u64>> {
@@ -150,6 +160,19 @@ impl CdnSigner {
         if had_denied {
             self.access.send_modify(|version| *version += 1);
         }
+    }
+
+    pub fn forget_denial(&self, channel_id: i64) {
+        let mut entries = self.entries.lock();
+        if !matches!(
+            entries.get(&channel_id),
+            Some(Entry::Refused { denied: true, .. })
+        ) {
+            return;
+        }
+        entries.remove(&channel_id);
+        drop(entries);
+        self.access.send_modify(|version| *version += 1);
     }
 
     pub fn denies(&self, url: &str) -> bool {
@@ -732,6 +755,40 @@ mod tests {
         signer.clear();
         assert!(!signer.denies(FILE));
         assert!(changes.has_changed().unwrap());
+    }
+
+    #[tokio::test]
+    async fn joining_the_channel_forgets_its_denial_and_signs_again() {
+        let refuse = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let answer = refuse.clone();
+        let (fetch, calls) = counting_fetcher(move |_| {
+            if answer.load(Ordering::SeqCst) {
+                Err(anyhow::Error::new(crate::transport::ApiStatusError {
+                    code: crate::transport::ApiStatusError::PERMISSION_DENIED,
+                }))
+            } else {
+                Ok(SIGNATURE.to_string())
+            }
+        });
+        let signer = signer_for(fetch);
+        assert!(signer.sign(FILE).await.is_none());
+        assert!(signer.denies(FILE));
+        let mut changes = signer.access.subscribe();
+        changes.mark_unchanged();
+
+        refuse.store(false, Ordering::SeqCst);
+        signer.forget_denial(GENERAL);
+        assert!(!signer.denies(FILE));
+        assert!(changes.has_changed().unwrap());
+        assert!(signer.sign(FILE).await.is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        changes.mark_unchanged();
+        signer.forget_denial(GENERAL);
+        assert!(
+            !changes.has_changed().unwrap(),
+            "a signed channel has nothing to forget"
+        );
     }
 
     #[tokio::test]

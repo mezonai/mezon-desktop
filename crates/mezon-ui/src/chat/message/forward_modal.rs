@@ -194,12 +194,15 @@ fn build_shared_content(sources: &[MessageRef], cx: &App) -> SharedContent {
     for attachment in attachments {
         if attachment.is_image() {
             content.images += 1;
-            if content.thumbnail.is_none() {
+            if content.thumbnail.is_none() && !attachment.source_denied {
                 content.thumbnail = Some(attachment.proxied_src.clone());
             }
         } else if attachment.is_video() {
             content.videos += 1;
-            if content.thumbnail.is_none() && !attachment.thumbnail_proxied.is_empty() {
+            if content.thumbnail.is_none()
+                && !attachment.source_denied
+                && !attachment.thumbnail_proxied.is_empty()
+            {
                 content.thumbnail = Some(attachment.thumbnail_proxied.clone());
                 content.thumbnail_is_video = true;
             }

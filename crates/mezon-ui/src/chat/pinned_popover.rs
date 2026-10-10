@@ -319,7 +319,10 @@ impl PinnedPopoverPanel {
             pin_cards: Vec::new(),
             selection: MessageSelectionState::new_shared(),
             shell_modal_open,
-            _subs: subs,
+            _subs: subs
+                .into_iter()
+                .chain(crate::chat::message::parts::observe_cdn_access(cx))
+                .collect(),
         };
         panel.pin_cards = panel.compute_pin_cards(cx);
         panel.probe_pin_audio(cx);
@@ -1261,11 +1264,24 @@ fn render_pin_body(
         ),
         None => render_pin_text_body(pin, text_spans, selectable_text, theme, selection.clone()),
     };
+    let viewing_channel = MessagesStore::try_global(cx)
+        .and_then(|store| store.read(cx).active_channel_id())
+        .map_or(0, |channel_id| channel_id.0);
     let image_preview = pin
         .attachments
         .iter()
         .find(|att| pin_image_attachment_has_src(att))
         .map(|att| {
+            if att.source_denied || mezon_store::hides_media(&att.url, viewing_channel) {
+                return div()
+                    .mt_1()
+                    .child(crate::chat::message::parts::render_private_media_tile(
+                        theme,
+                        ATTACHMENT_PREVIEW_SIZE,
+                        ATTACHMENT_PREVIEW_SIZE,
+                    ))
+                    .into_any_element();
+            }
             render_pin_image_attachment(
                 att,
                 pin,

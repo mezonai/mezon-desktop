@@ -1371,6 +1371,8 @@ pub struct ChannelMessages {
     edit_input: Option<(MessageId, Entity<MentionInput>)>,
     _edit_input_sub: Option<Subscription>,
     context_menu_target: Option<(MessageId, Point<Pixels>)>,
+    pending_context_image: Option<(MessageId, String)>,
+    context_menu_image: Option<String>,
     context_menu_forward_all: bool,
     reaction_submenu_open: bool,
     quick_menu_submenu_open: bool,
@@ -2033,6 +2035,8 @@ impl ChannelMessages {
             edit_input: None,
             _edit_input_sub: None,
             context_menu_target: None,
+            pending_context_image: None,
+            context_menu_image: None,
             context_menu_forward_all: false,
             reaction_submenu_open: false,
             quick_menu_submenu_open: false,
@@ -2671,8 +2675,17 @@ impl ChannelMessages {
                 store.ensure_loaded(channel_id, QUICK_MENU_TYPE_QUICK, cx);
             });
         }
+        self.context_menu_image = self
+            .pending_context_image
+            .take()
+            .filter(|(id, _)| *id == message_id)
+            .map(|(_, url)| url);
         self.context_menu_target = Some((message_id, position));
         cx.notify();
+    }
+
+    pub(crate) fn note_context_image(&mut self, message_id: MessageId, url: String) {
+        self.pending_context_image = Some((message_id, url));
     }
 
     pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
@@ -5074,6 +5087,7 @@ impl ChannelMessages {
                     self.reaction_submenu_open,
                     self.quick_menu_submenu_open,
                     selected_text,
+                    self.context_menu_image.as_deref(),
                     cx.entity().downgrade(),
                     cx,
                 );
@@ -5479,6 +5493,7 @@ impl Render for ChannelMessages {
                     self.reaction_submenu_open,
                     self.quick_menu_submenu_open,
                     selected_text,
+                    self.context_menu_image.as_deref(),
                     cx.entity().downgrade(),
                     cx,
                 );
