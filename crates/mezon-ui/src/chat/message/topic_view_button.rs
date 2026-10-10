@@ -2,11 +2,11 @@ use super::context::RowCtx;
 use super::parts::resolve_message_display_name;
 use super::time::format_relative_time_from_seconds;
 use crate::components::primitives::{
-    Icon, IconName, avatar_color, avatar_text_color, initials_tile, mention_count_badge,
+    Icon, IconName, avatar_color, avatar_text_color, buzz_pill, initials_tile, mention_count_badge,
     name_initials,
 };
 use gpui::{AnyElement, App, ObjectFit, SharedString, div, img, prelude::*, px};
-use mezon_store::{ClanMembersStore, Message, TopicBadgeStore, TopicsStore};
+use mezon_store::{BuzzStore, ClanMembersStore, Message, TopicBadgeStore, TopicsStore};
 
 const AVATAR_SIZE: f32 = 28.0;
 const AVATAR_ROUNDING: f32 = 6.0;
@@ -58,6 +58,10 @@ pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
                 .map(|store| store.read(ctx.app).topic_badge_count(&topic_id.to_string()))
         })
         .unwrap_or(0);
+    let buzzed = msg.topic_id.is_some_and(|topic_id| {
+        BuzzStore::try_global(ctx.app)
+            .is_some_and(|store| store.read(ctx.app).has_topic_buzz(msg.channel_id, topic_id))
+    });
 
     let meta = div()
         .flex()
@@ -118,6 +122,7 @@ pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
             });
         })
         .child(left)
+        .when(buzzed, |button| button.child(buzz_pill()))
         .child(
             Icon::new(IconName::ArrowRight)
                 .size(px(16.))

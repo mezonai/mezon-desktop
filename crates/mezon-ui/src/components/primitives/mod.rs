@@ -1,5 +1,6 @@
 mod avatar;
 mod badge;
+mod buzz_pill;
 mod checkbox;
 mod context_menu;
 mod copy_button;
@@ -58,6 +59,8 @@ pub(crate) use avatar::{
     initials_tile_identified, name_initials,
 };
 pub use badge::Badge;
+pub use buzz_pill::buzz_pill;
+pub(crate) use buzz_pill::{BUZZ_COLOR, BUZZ_LABEL};
 pub use checkbox::{Checkbox, Radio};
 pub use context_menu::{ContextMenu, SubmenuOption, context_menu_at};
 pub use copy_button::CopyButton;
