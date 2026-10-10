@@ -3300,7 +3300,7 @@ impl MentionInput {
         if TopicsStore::global(cx).read(cx).active_topic_id().is_none() {
             return;
         }
-        toggle_anonymous_shortcut(cx);
+        toggle_anonymous_shortcut(true, cx);
     }
 
     fn on_accept(&mut self, _: &MentionAccept, window: &mut Window, cx: &mut Context<Self>) {
