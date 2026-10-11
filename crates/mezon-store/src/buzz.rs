@@ -18,11 +18,21 @@ struct BuzzMark {
     clan_id: ClanId,
     in_channel: Option<MessageId>,
     topics: HashMap<ChannelId, MessageId>,
+    acknowledged_topics: HashMap<ChannelId, MessageId>,
 }
 
 impl BuzzMark {
     fn is_empty(&self) -> bool {
         self.in_channel.is_none() && self.topics.is_empty()
+    }
+
+    fn has_unacknowledged(&self) -> bool {
+        self.in_channel.is_some()
+            || self.topics.iter().any(|(topic_id, buzz)| {
+                self.acknowledged_topics
+                    .get(topic_id)
+                    .is_none_or(|acknowledged| snowflake_seq(*buzz) > snowflake_seq(*acknowledged))
+            })
     }
 }
 
@@ -75,13 +85,30 @@ impl BuzzStore {
     }
 
     pub fn has_buzz(&self, channel_id: ChannelId) -> bool {
-        self.marks.contains_key(&channel_id)
+        self.marks
+            .get(&channel_id)
+            .is_some_and(BuzzMark::has_unacknowledged)
+    }
+
+    pub fn has_topic_buzz(&self, channel_id: ChannelId, topic_id: ChannelId) -> bool {
+        self.marks
+            .get(&channel_id)
+            .is_some_and(|mark| mark.topics.contains_key(&topic_id))
     }
 
     pub fn clear_opened(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
-        if self.marks.remove(&channel_id).is_some() {
+        if self.open(channel_id) {
             cx.notify();
         }
+    }
+
+    fn open(&mut self, channel_id: ChannelId) -> bool {
+        let was_shown = self.has_buzz(channel_id);
+        self.unmark_channel(channel_id);
+        if let Some(mark) = self.marks.get_mut(&channel_id) {
+            mark.acknowledged_topics = mark.topics.clone();
+        }
+        was_shown
     }
 
     pub fn clear_seen(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
@@ -157,6 +184,7 @@ impl BuzzStore {
     ) -> bool {
         let mark = self.marks.entry(channel_id).or_default();
         mark.clan_id = clan_id;
+        let was_shown = mark.has_unacknowledged();
         let previous = match topic_id {
             Some(topic_id) => mark.topics.get(&topic_id).copied(),
             None => mark.in_channel,
@@ -170,7 +198,7 @@ impl BuzzStore {
             }
             None => mark.in_channel = Some(latest),
         }
-        previous.is_none()
+        previous.is_none() || (!was_shown && mark.has_unacknowledged())
     }
 
     fn unmark_channel(&mut self, channel_id: ChannelId) -> bool {
@@ -611,6 +639,37 @@ mod tests {
     }
 
     #[gpui::test]
+    fn opening_the_parent_channel_keeps_the_topic_buzz_for_its_root_message(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let (store, messages, _) = init_stores(cx);
+            deliver(
+                &store,
+                Incoming::buzz(CLAN, OFF_TOPIC, STREAM_MODE_CHANNEL, 1).in_topic(),
+                cx,
+            );
+            messages.update(cx, |messages, cx| {
+                messages.open_channel_in_clan(CLAN, channel(OFF_TOPIC), cx)
+            });
+            assert!(!store.read(cx).has_buzz(channel(OFF_TOPIC)));
+            assert!(
+                store
+                    .read(cx)
+                    .has_topic_buzz(channel(OFF_TOPIC), channel(TOPIC))
+            );
+            messages.update(cx, |messages, cx| {
+                messages.note_topic_viewport_seen(channel(TOPIC), message(1), 1, true, cx)
+            });
+            assert!(
+                !store
+                    .read(cx)
+                    .has_topic_buzz(channel(OFF_TOPIC), channel(TOPIC))
+            );
+        });
+    }
+
+    #[gpui::test]
     fn marking_a_channel_read_anywhere_clears_it_and_its_threads(cx: &mut gpui::TestAppContext) {
         let (store, _, api) = cx.update(init_stores);
         cx.run_until_parked();
@@ -701,6 +760,72 @@ mod tests {
         assert!(!store.unmark_topic(channel(8)));
         assert!(store.unmark_topic(channel(TOPIC)));
         assert!(!store.has_buzz(channel(1)));
+    }
+
+    #[test]
+    fn opening_the_channel_hides_its_row_but_keeps_the_topic_buzz_until_the_topic_is_seen() {
+        let mut store = BuzzStore::default();
+        store.mark(CLAN, channel(1), None, message(1));
+        store.mark(CLAN, channel(1), Some(channel(TOPIC)), message(2));
+        assert!(store.open(channel(1)));
+        assert!(!store.has_buzz(channel(1)));
+        assert!(store.has_topic_buzz(channel(1), channel(TOPIC)));
+        assert!(!store.open(channel(1)));
+        assert!(store.unmark_topic(channel(TOPIC)));
+        assert!(!store.has_topic_buzz(channel(1), channel(TOPIC)));
+        assert!(store.marks.is_empty());
+    }
+
+    #[test]
+    fn a_new_topic_buzz_after_opening_shows_the_row_again() {
+        let mut store = BuzzStore::default();
+        store.mark(CLAN, channel(1), Some(channel(TOPIC)), message(1));
+        store.open(channel(1));
+        assert!(store.mark(CLAN, channel(1), Some(channel(TOPIC)), message(2)));
+        assert!(store.has_buzz(channel(1)));
+        assert!(store.has_topic_buzz(channel(1), channel(TOPIC)));
+    }
+
+    #[test]
+    fn clearing_a_later_channel_buzz_hides_the_row_over_an_acknowledged_topic() {
+        let mut store = BuzzStore::default();
+        store.mark(CLAN, channel(1), Some(channel(TOPIC)), message(1));
+        store.open(channel(1));
+        assert!(store.mark(CLAN, channel(1), None, message(1)));
+        assert!(store.has_buzz(channel(1)));
+        assert!(store.unmark_channel(channel(1)));
+        assert!(!store.has_buzz(channel(1)));
+        assert!(store.has_topic_buzz(channel(1), channel(TOPIC)));
+    }
+
+    #[test]
+    fn seeing_a_newly_buzzed_topic_hides_the_row_over_an_acknowledged_one() {
+        let mut store = BuzzStore::default();
+        store.mark(CLAN, channel(1), Some(channel(TOPIC)), message(5));
+        store.open(channel(1));
+        assert!(store.mark(CLAN, channel(1), Some(channel(8)), message(1)));
+        assert!(store.has_buzz(channel(1)));
+        assert!(store.unmark_topic(channel(8)));
+        assert!(!store.has_buzz(channel(1)));
+        assert!(store.has_topic_buzz(channel(1), channel(TOPIC)));
+    }
+
+    #[test]
+    fn a_late_older_topic_buzz_does_not_bring_the_row_back() {
+        let mut store = BuzzStore::default();
+        store.mark(CLAN, channel(1), Some(channel(TOPIC)), message(2));
+        store.open(channel(1));
+        assert!(!store.mark(CLAN, channel(1), Some(channel(TOPIC)), message(1)));
+        assert!(!store.has_buzz(channel(1)));
+    }
+
+    #[test]
+    fn opening_a_channel_with_only_its_own_buzz_forgets_it() {
+        let mut store = BuzzStore::default();
+        store.mark(CLAN, channel(1), None, message(1));
+        assert!(store.open(channel(1)));
+        assert!(store.marks.is_empty());
+        assert!(!store.open(channel(1)));
     }
 
     #[test]

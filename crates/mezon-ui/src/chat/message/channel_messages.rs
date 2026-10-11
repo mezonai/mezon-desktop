@@ -17,7 +17,7 @@ use gpui::{
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use mezon_store::{
-    BadgeService, ChannelEvent, ChannelId, ChannelList, ChannelPermissionsEvent,
+    BadgeService, BuzzStore, ChannelEvent, ChannelId, ChannelList, ChannelPermissionsEvent,
     ChannelPermissionsStore, ClanId, ClanList, ClanMembersStore, DirectMessageStore,
     EmbedDatePicker, EmbedInput, EmbedTextInput, Emoji, EmojiStore, GroupMembersStore, MessageCode,
     MessageId, MessageRef, MessagesEvent, MessagesStore, PERMISSION_DELETE_MESSAGE,
@@ -1546,6 +1546,13 @@ impl ChannelMessages {
             this.notify_if_topics_viewport_changed(cx);
         });
         subs.push(topic_badge_sub);
+        if let Some(buzz) = BuzzStore::try_global(cx) {
+            subs.push(cx.observe(&buzz, |this, _, cx| {
+                if !this.is_topic_box {
+                    this.notify_if_topics_viewport_changed(cx);
+                }
+            }));
+        }
 
         let store = MessagesStore::global(cx);
         subs.push(cx.subscribe(&store, |this, _store, event, cx| {
@@ -2120,6 +2127,8 @@ impl ChannelMessages {
         use std::hash::{Hash, Hasher};
         let topics = TopicsStore::global(cx).read(cx);
         let badges = TopicBadgeStore::try_global(cx);
+        let buzz = BuzzStore::try_global(cx);
+        let buzz = buzz.as_ref().map(|store| store.read(cx));
         let messages = MessagesStore::global(cx).read(cx);
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         let mut any_topic = false;
@@ -2138,6 +2147,8 @@ impl ChannelMessages {
                 .map(|store| store.read(cx).topic_badge_count(&topic_id.to_string()))
                 .unwrap_or(0);
             badge.hash(&mut hasher);
+            buzz.is_some_and(|store| store.has_topic_buzz(msg.channel_id, topic_id))
+                .hash(&mut hasher);
         }
         if !any_topic {
             return;
