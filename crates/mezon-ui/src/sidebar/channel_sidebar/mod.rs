@@ -831,7 +831,7 @@ impl ChannelSidebar {
                                 id: ch.id.to_string(),
                                 name: truncate_channel_label(&ch.name),
                                 channel_type: ch.channel_type,
-                                unread: ch.is_unread(),
+                                unread: channels.channel_activity_unread(ch),
                                 buzz: buzz.has_buzz(ch.id),
                                 private: ch.private,
                                 age_restricted: ch.age_restricted,
@@ -864,7 +864,8 @@ impl ChannelSidebar {
                         let mut parents_with_unread_thread: HashSet<ChannelId> = HashSet::new();
                         for ch in &ch_slice {
                             if let Some(pid) = ch.parent_id
-                                && ((ch.is_unread() && !ch.muted) || buzz.has_buzz(ch.id))
+                                && ((channels.channel_activity_unread(ch) && !ch.muted)
+                                    || buzz.has_buzz(ch.id))
                             {
                                 parents_with_unread_thread.insert(pid);
                             }
@@ -873,7 +874,7 @@ impl ChannelSidebar {
                         for ch in ch_slice {
                             let is_thread = !is_favorites && ch.parent_id.is_some();
                             if is_thread {
-                                if (ch.is_unread() && !ch.muted)
+                                if (channels.channel_activity_unread(&ch) && !ch.muted)
                                     || buzz.has_buzz(ch.id)
                                     || active_channel_id == Some(ch.id)
                                 {
@@ -888,7 +889,8 @@ impl ChannelSidebar {
                             );
                             let has_members_in_voice =
                                 is_voice_or_streaming && !sidebar_members.is_empty();
-                            let should_show = (ch.is_unread() && !is_voice_or_streaming)
+                            let should_show = (channels.channel_activity_unread(&ch)
+                                && !is_voice_or_streaming)
                                 || buzz.has_buzz(ch.id)
                                 || active_channel_id == Some(ch.id)
                                 || active_parent_id == Some(ch.id)
@@ -935,7 +937,7 @@ impl ChannelSidebar {
                                 id: ch.id.to_string(),
                                 name: truncate_channel_label(&ch.name),
                                 channel_type: ch.channel_type,
-                                unread: ch.is_unread(),
+                                unread: channels.channel_activity_unread(&ch),
                                 buzz: buzz.has_buzz(ch.id),
                                 private: ch.private,
                                 age_restricted: ch.age_restricted,

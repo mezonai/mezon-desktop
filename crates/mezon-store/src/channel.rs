@@ -620,6 +620,11 @@ struct TopicParentBadge {
     count: u32,
 }
 
+struct ParentTopicUnread {
+    clan_id: ClanId,
+    topics: HashSet<ChannelId>,
+}
+
 struct ClanExtras {
     voice_map: Option<HashMap<ChannelId, Vec<VoiceMember>>>,
     app_channels: Option<Vec<AppChannel>>,
@@ -664,6 +669,7 @@ pub struct ChannelList {
     app_channels_cache: HashMap<ClanId, Vec<AppChannel>>,
     favorites: HashMap<ClanId, HashSet<ChannelId>>,
     topic_parent_badges: HashMap<ChannelId, TopicParentBadge>,
+    parent_topic_unreads: HashMap<ChannelId, ParentTopicUnread>,
     pending_channel_badges: HashMap<ChannelId, PendingBadge>,
     pending_badge_seed: HashMap<ClanId, HashMap<ChannelId, ChannelUnreadSeed>>,
     want_extras: HashSet<ClanId>,
@@ -988,6 +994,7 @@ impl ChannelList {
             app_channels_cache: HashMap::new(),
             favorites: HashMap::new(),
             topic_parent_badges: HashMap::new(),
+            parent_topic_unreads: HashMap::new(),
             pending_channel_badges: HashMap::new(),
             pending_badge_seed: HashMap::new(),
             want_extras: HashSet::new(),
@@ -1084,6 +1091,8 @@ impl ChannelList {
         self.cache.remove(&clan_id);
         self.app_channels_cache.remove(&clan_id);
         self.favorites.remove(&clan_id);
+        self.parent_topic_unreads
+            .retain(|_, unread| unread.clan_id != clan_id);
         self.pending_badge_seed.remove(&clan_id);
         self.want_extras.remove(&clan_id);
         self.extras_loaded.remove(&clan_id);
@@ -1449,7 +1458,14 @@ impl ChannelList {
             );
         }
         self.pending_badge_seed.insert(clan_id, seed);
+        let rail_unread = ClanList::global(cx)
+            .read(cx)
+            .clan(clan_id)
+            .is_some_and(|clan| clan.has_unread || clan.badge_count > 0);
         self.sync_clan_after_read(clan_id, 0, cx);
+        if rail_unread {
+            self.persist_clan_read_if_settled(clan_id, cx);
+        }
         if applied {
             self.notify_channel_list(clan_id, cx);
         }
@@ -2494,7 +2510,7 @@ impl ChannelList {
             .filter(|ch| seen.insert(ch.id))
         {
             tally.total += ch.badge_count;
-            tally.any_unread |= ch.is_unread();
+            tally.any_unread |= self.channel_activity_unread(ch);
         }
         Some(tally)
     }
@@ -2527,6 +2543,10 @@ impl ChannelList {
         tracing::debug!(target: "badge_flow", clan = clan_id.get(), "apply_mark_as_read_clan");
         let mut cleared_badge = 0;
         let mut should_notify = false;
+        let had_topic_unread = self
+            .parent_topic_unreads
+            .values()
+            .any(|unread| unread.clan_id == clan_id);
         self.pending_badge_seed.remove(&clan_id);
         if let Some(categories) = self.cache.get_mut(&clan_id) {
             for category in categories.iter_mut() {
@@ -2538,7 +2558,9 @@ impl ChannelList {
         }
         self.drop_pending_badges_for_clan(clan_id);
         clear_topic_badges_for_clan(&mut self.topic_parent_badges, clan_id);
-        if should_notify {
+        self.parent_topic_unreads
+            .retain(|_, unread| unread.clan_id != clan_id);
+        if should_notify || had_topic_unread {
             self.notify_channel_list(clan_id, cx);
         }
         self.sync_clan_after_read(clan_id, cleared_badge, cx);
@@ -2587,7 +2609,12 @@ impl ChannelList {
         }
         self.topic_parent_badges
             .retain(|_, tracked| !parent_ids.contains(&tracked.parent_id));
-        if should_notify {
+        let had_topic_unread = parent_ids
+            .iter()
+            .any(|id| self.parent_has_topic_unread(*id));
+        self.parent_topic_unreads
+            .retain(|id, _| !parent_ids.contains(id));
+        if should_notify || had_topic_unread {
             self.notify_channel_list(clan_id, cx);
         }
         self.sync_clan_after_read(clan_id, cleared_badge, cx);
@@ -2960,6 +2987,12 @@ impl ChannelList {
 
     pub fn apply_clan_read(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         let mut changed = false;
+        let had_topic_unread = self
+            .parent_topic_unreads
+            .values()
+            .any(|unread| unread.clan_id == clan_id);
+        self.parent_topic_unreads
+            .retain(|_, unread| unread.clan_id != clan_id);
         self.pending_badge_seed.remove(&clan_id);
         if let Some(categories) = self.cache.get_mut(&clan_id) {
             for category in categories.iter_mut() {
@@ -2972,7 +3005,7 @@ impl ChannelList {
             }
         }
         self.drop_pending_badges_for_clan(clan_id);
-        if changed {
+        if changed || had_topic_unread {
             self.notify_channel_list(clan_id, cx);
         }
     }
@@ -2994,6 +3027,23 @@ impl ChannelList {
     pub fn mark_clan_as_read(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         self.apply_clan_read(clan_id, cx);
         ClanList::global(cx).update(cx, |cl, cx| cl.apply_badge_read(clan_id, cx));
+        self.persist_clan_read(clan_id, cx);
+    }
+
+    pub fn persist_clan_read_if_settled(&self, clan_id: ClanId, cx: &mut Context<Self>) {
+        let Some(tally) = self.clan_badge_tally(clan_id) else {
+            return;
+        };
+        if tally.any_unread || tally.total > 0 {
+            return;
+        }
+        self.persist_clan_read(clan_id, cx);
+    }
+
+    fn persist_clan_read(&self, clan_id: ClanId, cx: &mut Context<Self>) {
+        if clan_id.is_zero() {
+            return;
+        }
         let api = self.api.clone();
         let id = clan_id.get();
         cx.spawn(async move |_, _| {
@@ -3015,6 +3065,7 @@ impl ChannelList {
             .get(&clan_id)
             .map(|categories| thread_ids_of(categories, channel_id))
             .unwrap_or_default();
+        self.clear_parent_topic_unreads_for_channel(channel_id, cx);
         self.apply_read(clan_id, channel_id, cx);
         for thread_id in thread_ids {
             self.apply_read(clan_id, thread_id, cx);
@@ -3860,8 +3911,8 @@ impl ChannelList {
                 false
             }
         };
+        record_topic_parent_badge(&mut self.topic_parent_badges, clan_id, parent_id, topic_id);
         if changed {
-            record_topic_parent_badge(&mut self.topic_parent_badges, clan_id, parent_id, topic_id);
             self.notify_channel_list(clan_id, cx);
         }
         if let Some(parent) = self.channel(clan_id, parent_id).cloned() {
@@ -3871,9 +3922,90 @@ impl ChannelList {
         }
     }
 
-    pub fn apply_topic_read(&mut self, topic_id: ChannelId, cx: &mut Context<Self>) {
-        let Some(tracked) = self.topic_parent_badges.remove(&topic_id) else {
+    pub fn channel_activity_unread(&self, channel: &Channel) -> bool {
+        channel.is_unread() || self.parent_has_topic_unread(channel.id)
+    }
+
+    pub fn parent_has_topic_unread(&self, parent_id: ChannelId) -> bool {
+        self.parent_topic_unreads
+            .get(&parent_id)
+            .is_some_and(|unread| !unread.topics.is_empty())
+    }
+
+    pub fn note_parent_topic_unread(
+        &mut self,
+        clan_id: ClanId,
+        parent_id: ChannelId,
+        topic_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        if parent_id.is_zero() || topic_id.is_zero() {
             return;
+        }
+        let unread = self
+            .parent_topic_unreads
+            .entry(parent_id)
+            .or_insert_with(|| ParentTopicUnread {
+                clan_id,
+                topics: HashSet::new(),
+            });
+        if !unread.topics.insert(topic_id) {
+            return;
+        }
+        self.notify_channel_list(clan_id, cx);
+    }
+
+    pub fn clear_parent_topic_unreads_for_channel(
+        &mut self,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(unread) = self.parent_topic_unreads.remove(&channel_id) else {
+            return;
+        };
+        if !unread.topics.is_empty() {
+            self.notify_channel_list(unread.clan_id, cx);
+        }
+    }
+
+    pub fn clear_parent_topic_unread(
+        &mut self,
+        topic_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let parent_id = self
+            .parent_topic_unreads
+            .iter()
+            .find_map(|(parent_id, unread)| {
+                unread.topics.contains(&topic_id).then_some(*parent_id)
+            });
+        let Some(parent_id) = parent_id else {
+            return false;
+        };
+        let clan_id = self
+            .parent_topic_unreads
+            .get(&parent_id)
+            .map(|unread| unread.clan_id);
+        if let Some(unread) = self.parent_topic_unreads.get_mut(&parent_id) {
+            unread.topics.remove(&topic_id);
+        }
+        if self
+            .parent_topic_unreads
+            .get(&parent_id)
+            .is_some_and(|unread| unread.topics.is_empty())
+        {
+            self.parent_topic_unreads.remove(&parent_id);
+        }
+        if let Some(clan_id) = clan_id {
+            self.notify_channel_list(clan_id, cx);
+        }
+        true
+    }
+
+    pub fn apply_topic_read(&mut self, topic_id: ChannelId, cx: &mut Context<Self>) -> bool {
+        let cleared_topic = self.clear_parent_topic_unread(topic_id, cx);
+        let Some(tracked) = self.topic_parent_badges.remove(&topic_id) else {
+            return cleared_topic;
         };
         let cleared = match self.cache.get_mut(&tracked.clan_id) {
             Some(categories) => {
@@ -3883,9 +4015,12 @@ impl ChannelList {
         };
         if cleared > 0 {
             self.notify_channel_list(tracked.clan_id, cx);
-            self.sync_clan_after_read(tracked.clan_id, cleared, cx);
+        }
+        if tracked.count > 0 {
+            self.sync_clan_after_read(tracked.clan_id, tracked.count, cx);
             self.reseed_unknown_clan(tracked.clan_id, cx);
         }
+        true
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {

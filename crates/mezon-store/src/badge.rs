@@ -112,12 +112,18 @@ fn is_clan_message_seen(cx: &App, m: &ChannelMessage, from_me: bool) -> bool {
     let Some(active) = messages.active_channel_id() else {
         return false;
     };
-    let badge_id = badge_channel_id(m);
     let parent_id = ChannelId(m.channel_id);
-    if active == badge_id && badge_id == parent_id {
+    if m.topic_id != 0 {
+        let topic_id = ChannelId(m.topic_id);
+        return messages.active_channel_id() == Some(parent_id)
+            && messages.active_topic_id() == Some(topic_id)
+            && messages.is_reading_live_tail(topic_id);
+    }
+    let badge_id = badge_channel_id(m);
+    if active == badge_id {
         return messages.is_reading_live_tail(active);
     }
-    active == badge_id || active == parent_id
+    false
 }
 
 fn mention_check_policy(
@@ -415,18 +421,32 @@ impl BadgeService {
                         skip = skip_unread_activity,
                         "socket ChannelMessage decision"
                     );
-                    if m.topic_id == 0 && !skip_unread_activity {
-                        ChannelList::global(cx).update(cx, |cl, cx| {
-                            cl.note_channel_message(
-                                clan_id,
-                                channel_id,
-                                badge_mention,
-                                seen,
-                                ts,
-                                message_id,
-                                cx,
-                            )
-                        });
+                    if !skip_unread_activity {
+                        if m.topic_id != 0 {
+                            let parent_id = ChannelId(m.channel_id);
+                            let topic_id = ChannelId(m.topic_id);
+                            if !from_me && !seen && !already_seen {
+                                ChannelList::global(cx).update(cx, |cl, cx| {
+                                    cl.note_parent_topic_unread(clan_id, parent_id, topic_id, cx);
+                                });
+                            } else if seen {
+                                ChannelList::global(cx).update(cx, |cl, cx| {
+                                    cl.clear_parent_topic_unread(topic_id, cx);
+                                });
+                            }
+                        } else {
+                            ChannelList::global(cx).update(cx, |cl, cx| {
+                                cl.note_channel_message(
+                                    clan_id,
+                                    channel_id,
+                                    badge_mention,
+                                    seen,
+                                    ts,
+                                    message_id,
+                                    cx,
+                                )
+                            });
+                        }
                         if seen {
                             MessagesStore::global(cx).update(cx, |store, _| {
                                 store.set_last_read_message(channel_id, message_id);
@@ -506,8 +526,8 @@ impl BadgeService {
                 } else if e.channel_id != 0 {
                     let channel_id = ChannelId(e.channel_id);
                     ChannelList::global(cx).update(cx, |cl, cx| {
+                        cl.clear_parent_topic_unreads_for_channel(channel_id, cx);
                         cl.apply_read(clan_id, channel_id, cx);
-                        cl.apply_topic_read(channel_id, cx);
                     });
                 } else if e.category_id != 0 {
                     ChannelList::global(cx).update(cx, |cl, cx| {
@@ -540,7 +560,9 @@ impl BadgeService {
                             seen_message_id,
                             cx,
                         );
-                        cl.apply_topic_read(channel_id, cx);
+                    });
+                    ClanList::global(cx).update(cx, |cls, cx| {
+                        cls.sync_has_unread_from_channels(clan_id, cx);
                     });
                 }
                 if !seen_message_id.is_zero() {

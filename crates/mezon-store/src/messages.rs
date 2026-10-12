@@ -39,6 +39,7 @@ use crate::channel::{
     ChannelEvent, ChannelList, ChannelType, STREAM_MODE_THREAD, joins_through_clan_stream,
 };
 use crate::channel_members::ChannelMembersStore;
+use crate::clan::ClanList;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::{DirectChannel, DirectKind, DirectMessageStore};
 use crate::group_members::GroupMembersStore;
@@ -1591,6 +1592,9 @@ impl MessagesStore {
         let Some(clan_id) = self.active_clan_id else {
             return;
         };
+        let Some(channel_id) = self.active_channel_id else {
+            return;
+        };
         if let Some(buzz) = BuzzStore::try_global(cx) {
             buzz.update(cx, |buzz, cx| buzz.clear_topic_seen(topic_id, cx));
         }
@@ -1603,9 +1607,28 @@ impl MessagesStore {
                 store.clear_topic(&topic_key, cx);
             });
         }
-        ChannelList::global(cx).update(cx, |cl, cx| {
-            cl.apply_topic_read(topic_id, cx);
+        let rail_unread = ClanList::global(cx)
+            .read(cx)
+            .clan(clan_id)
+            .is_some_and(|clan| clan.has_unread || clan.badge_count > 0);
+        let cleared =
+            ChannelList::global(cx).update(cx, |cl, cx| cl.apply_topic_read(topic_id, cx));
+        ClanList::global(cx).update(cx, |cls, cx| {
+            cls.sync_has_unread_from_channels(clan_id, cx);
         });
+        if cleared || rail_unread {
+            ChannelList::global(cx).update(cx, |cl, cx| {
+                cl.persist_clan_read_if_settled(clan_id, cx);
+            });
+        }
+        let parent_last_sent = ChannelList::global(cx)
+            .read(cx)
+            .channel(clan_id, channel_id)
+            .map(|channel| channel.last_sent_message_id)
+            .filter(|id| !id.is_zero());
+        if parent_last_sent.is_some_and(|sent| message_id < sent) {
+            return;
+        }
         if !should_write_last_seen(
             self.known_last_seen_id(topic_id, cx),
             self.last_message_by_channel.get(&topic_id).copied(),
@@ -1613,14 +1636,16 @@ impl MessagesStore {
         ) {
             return;
         }
+        let parent_badge = self.channel_badge_count(channel_id, clan_id, cx);
         let badge_count = self
             .pending_last_seen
-            .get(&topic_id)
-            .map(|p| p.badge_count.max(live_badge))
-            .unwrap_or(live_badge);
+            .get(&channel_id)
+            .map(|p| p.badge_count.max(parent_badge))
+            .unwrap_or(parent_badge)
+            .max(live_badge);
         let pending = PendingLastSeen {
             clan_id,
-            channel_id: topic_id,
+            channel_id,
             message_id,
             create_time,
             mode: self.mode,
