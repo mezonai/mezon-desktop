@@ -1803,8 +1803,15 @@ impl ChannelMessages {
                 this.mark_scroll_activity(cx);
 
                 if this.is_topic_box {
-                    if at_bottom_changed && at_bottom {
-                        this.sync_topic_seen(cx);
+                    if at_bottom_changed {
+                        if let Some(topic_id) = TopicsStore::global(cx).read(cx).active_topic_id() {
+                            MessagesStore::global(cx).update(cx, |store, _cx| {
+                                store.set_viewing_older(ChannelId(topic_id), !at_bottom);
+                            });
+                        }
+                        if at_bottom {
+                            this.sync_topic_seen(cx);
+                        }
                     }
                     if visible_range_changed {
                         this.schedule_pagination_check(window, cx);

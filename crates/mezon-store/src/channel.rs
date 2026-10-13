@@ -878,6 +878,7 @@ impl ChannelList {
         self.app_channels_cache.clear();
         self.favorites.clear();
         self.topic_parent_badges.clear();
+        self.parent_topic_unreads.clear();
         self.pending_channel_badges.clear();
         self.pending_badge_seed.clear();
         self.want_extras.clear();
@@ -1458,14 +1459,7 @@ impl ChannelList {
             );
         }
         self.pending_badge_seed.insert(clan_id, seed);
-        let rail_unread = ClanList::global(cx)
-            .read(cx)
-            .clan(clan_id)
-            .is_some_and(|clan| clan.has_unread || clan.badge_count > 0);
         self.sync_clan_after_read(clan_id, 0, cx);
-        if rail_unread {
-            self.persist_clan_read_if_settled(clan_id, cx);
-        }
         if applied {
             self.notify_channel_list(clan_id, cx);
         }
@@ -3027,23 +3021,6 @@ impl ChannelList {
     pub fn mark_clan_as_read(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         self.apply_clan_read(clan_id, cx);
         ClanList::global(cx).update(cx, |cl, cx| cl.apply_badge_read(clan_id, cx));
-        self.persist_clan_read(clan_id, cx);
-    }
-
-    pub fn persist_clan_read_if_settled(&self, clan_id: ClanId, cx: &mut Context<Self>) {
-        let Some(tally) = self.clan_badge_tally(clan_id) else {
-            return;
-        };
-        if tally.any_unread || tally.total > 0 {
-            return;
-        }
-        self.persist_clan_read(clan_id, cx);
-    }
-
-    fn persist_clan_read(&self, clan_id: ClanId, cx: &mut Context<Self>) {
-        if clan_id.is_zero() {
-            return;
-        }
         let api = self.api.clone();
         let id = clan_id.get();
         cx.spawn(async move |_, _| {
@@ -3968,11 +3945,7 @@ impl ChannelList {
         }
     }
 
-    pub fn clear_parent_topic_unread(
-        &mut self,
-        topic_id: ChannelId,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    pub fn clear_parent_topic_unread(&mut self, topic_id: ChannelId, cx: &mut Context<Self>) {
         let parent_id = self
             .parent_topic_unreads
             .iter()
@@ -3980,7 +3953,7 @@ impl ChannelList {
                 unread.topics.contains(&topic_id).then_some(*parent_id)
             });
         let Some(parent_id) = parent_id else {
-            return false;
+            return;
         };
         let clan_id = self
             .parent_topic_unreads
@@ -3999,14 +3972,28 @@ impl ChannelList {
         if let Some(clan_id) = clan_id {
             self.notify_channel_list(clan_id, cx);
         }
-        true
     }
 
-    pub fn apply_topic_read(&mut self, topic_id: ChannelId, cx: &mut Context<Self>) -> bool {
-        let cleared_topic = self.clear_parent_topic_unread(topic_id, cx);
+    pub fn apply_topic_read(&mut self, topic_id: ChannelId, cx: &mut Context<Self>) {
+        let unread_clan_id = self
+            .parent_topic_unreads
+            .values()
+            .find_map(|unread| unread.topics.contains(&topic_id).then_some(unread.clan_id));
+        self.clear_parent_topic_unread(topic_id, cx);
         let Some(tracked) = self.topic_parent_badges.remove(&topic_id) else {
-            return cleared_topic;
+            if let Some(clan_id) = unread_clan_id {
+                if let Some(any_unread) = self.clan_has_any_unread(clan_id) {
+                    ClanList::global(cx).update(cx, |cls, cx| {
+                        cls.apply_unread_from_channel_state(clan_id, any_unread, cx)
+                    });
+                }
+            }
+            return;
         };
+        let channel_row_exists = self
+            .cache
+            .get(&tracked.clan_id)
+            .is_some_and(|categories| find_channel_in(categories, tracked.parent_id).is_some());
         let cleared = match self.cache.get_mut(&tracked.clan_id) {
             Some(categories) => {
                 subtract_channel_badge(categories, tracked.parent_id, tracked.count)
@@ -4016,11 +4003,19 @@ impl ChannelList {
         if cleared > 0 {
             self.notify_channel_list(tracked.clan_id, cx);
         }
-        if tracked.count > 0 {
-            self.sync_clan_after_read(tracked.clan_id, tracked.count, cx);
+        let decrement_amount = if channel_row_exists {
+            cleared
+        } else {
+            tracked.count
+        };
+        if decrement_amount > 0 {
+            self.sync_clan_after_read(tracked.clan_id, decrement_amount, cx);
             self.reseed_unknown_clan(tracked.clan_id, cx);
+        } else if let Some(any_unread) = self.clan_has_any_unread(tracked.clan_id) {
+            ClanList::global(cx).update(cx, |cls, cx| {
+                cls.apply_unread_from_channel_state(tracked.clan_id, any_unread, cx)
+            });
         }
-        true
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
@@ -10218,6 +10213,44 @@ mod tests {
                 clan_badge(cx, ClanId(1)),
                 Some(0),
                 "react decrements the clan badge by the leaving channel's unread count"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn reading_a_topic_without_a_tracked_badge_does_not_panic_on_reentrancy(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let topic_id = ChannelId(500);
+        cx.update(|cx| {
+            let channels = init_authenticated_channel_list(cx);
+            cx.set_global(GlobalChannelList(channels.clone()));
+            crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
+                clans.update_clans(vec![test_clan(ClanId(1), "One")], cx);
+            });
+            channels.update(cx, |channels, cx| {
+                channels.seed_clan_channels_for_test(ClanId(1), categories());
+                channels.badge_seeds.insert(
+                    ClanId(1),
+                    BadgeSeed {
+                        current: true,
+                        complete: true,
+                    },
+                );
+                channels.note_parent_topic_unread(ClanId(1), PARENT_CHANNEL, topic_id, cx);
+            });
+            assert!(channels.read(cx).parent_has_topic_unread(PARENT_CHANNEL));
+
+            ChannelList::global(cx).update(cx, |cl, cx| cl.apply_topic_read(topic_id, cx));
+
+            assert!(!channels.read(cx).parent_has_topic_unread(PARENT_CHANNEL));
+            assert_eq!(
+                crate::clan::ClanList::global(cx)
+                    .read(cx)
+                    .clan(ClanId(1))
+                    .map(|clan| clan.has_unread),
+                Some(false),
+                "clearing the only unread topic must clear the clan's rail dot too"
             );
         });
     }

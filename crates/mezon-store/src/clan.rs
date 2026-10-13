@@ -884,13 +884,23 @@ impl ClanList {
     }
 
     pub fn sync_has_unread_from_channels(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
-        let Some(has_unread) = ChannelList::global(cx)
+        let Some(any_unread) = ChannelList::global(cx)
             .read(cx)
             .clan_has_any_unread(clan_id)
         else {
             return;
         };
-        self.set_has_unread(clan_id, has_unread, cx);
+        self.apply_unread_from_channel_state(clan_id, any_unread, cx);
+    }
+
+    pub fn apply_unread_from_channel_state(
+        &mut self,
+        clan_id: ClanId,
+        any_unread: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let badge_count = self.clan(clan_id).map_or(0, |clan| clan.badge_count);
+        self.set_has_unread(clan_id, any_unread || badge_count > 0, cx);
     }
 
     pub fn decrement_badge(&mut self, clan_id: ClanId, amount: u32, cx: &mut Context<Self>) {

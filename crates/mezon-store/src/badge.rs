@@ -115,7 +115,7 @@ fn is_clan_message_seen(cx: &App, m: &ChannelMessage, from_me: bool) -> bool {
     let parent_id = ChannelId(m.channel_id);
     if m.topic_id != 0 {
         let topic_id = ChannelId(m.topic_id);
-        return messages.active_channel_id() == Some(parent_id)
+        return active == parent_id
             && messages.active_topic_id() == Some(topic_id)
             && messages.is_reading_live_tail(topic_id);
     }
@@ -425,7 +425,7 @@ impl BadgeService {
                         if m.topic_id != 0 {
                             let parent_id = ChannelId(m.channel_id);
                             let topic_id = ChannelId(m.topic_id);
-                            if !from_me && !seen && !already_seen {
+                            if !from_me && is_new_message && !seen && !already_seen {
                                 ChannelList::global(cx).update(cx, |cl, cx| {
                                     cl.note_parent_topic_unread(clan_id, parent_id, topic_id, cx);
                                 });
