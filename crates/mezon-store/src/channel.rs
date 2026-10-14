@@ -2477,6 +2477,18 @@ impl ChannelList {
         self.clan_badge_tally(clan_id).map(|tally| tally.any_unread)
     }
 
+    pub(crate) fn clan_rail_has_unread(
+        &self,
+        clan_id: ClanId,
+        rail_badge_count: u32,
+    ) -> Option<bool> {
+        let tally = self.clan_badge_tally(clan_id)?;
+        if !tally.complete {
+            return None;
+        }
+        Some(tally.any_unread || rail_badge_count > 0)
+    }
+
     fn mark_channels_read(channels: &mut [Channel]) -> u32 {
         let mut cleared_badge = 0;
         for ch in channels {
@@ -2488,7 +2500,7 @@ impl ChannelList {
         cleared_badge
     }
 
-    fn clan_badge_tally(&self, clan_id: ClanId) -> Option<ClanBadgeTally> {
+    pub(crate) fn clan_badge_tally(&self, clan_id: ClanId) -> Option<ClanBadgeTally> {
         let complete = self.badge_seeds.get(&clan_id)?.complete;
         let categories = self.cache.get(&clan_id)?;
         let mut seen = HashSet::new();
@@ -3045,6 +3057,7 @@ impl ChannelList {
         self.clear_parent_topic_unreads_for_channel(channel_id, cx);
         self.apply_read(clan_id, channel_id, cx);
         for thread_id in thread_ids {
+            self.clear_parent_topic_unreads_for_channel(thread_id, cx);
             self.apply_read(clan_id, thread_id, cx);
         }
     }
@@ -3826,6 +3839,12 @@ impl ChannelList {
             seen_ts,
             "apply_last_seen (realtime LastSeenUpdated)"
         );
+        if !seen_message_id.is_zero() {
+            self.reconcile_parent_topic_unreads_from_seen_message(channel_id, seen_message_id, cx);
+        }
+        if self.channel_has_unread_topics(clan_id, channel_id) {
+            return;
+        }
         self.pending_channel_badges.remove(&channel_id);
         self.drop_seeded_badge(clan_id, channel_id);
         let mut visible_changed = false;
@@ -3871,6 +3890,31 @@ impl ChannelList {
         }
     }
 
+    fn reconcile_parent_topic_unreads_from_seen_message(
+        &mut self,
+        parent_id: ChannelId,
+        seen_message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(topics) = self
+            .parent_topic_unreads
+            .get(&parent_id)
+            .map(|unread| unread.topics.iter().copied().collect::<Vec<_>>())
+        else {
+            return;
+        };
+        for topic_id in topics {
+            let covered = crate::messages::MessagesStore::try_global(cx).is_some_and(|store| {
+                store
+                    .read(cx)
+                    .topic_seen_message_covers(topic_id, seen_message_id)
+            });
+            if covered {
+                self.clear_parent_topic_unread(topic_id, cx);
+            }
+        }
+    }
+
     pub fn increment_channel_for_topic(
         &mut self,
         clan_id: ClanId,
@@ -3907,6 +3951,18 @@ impl ChannelList {
         self.parent_topic_unreads
             .get(&parent_id)
             .is_some_and(|unread| !unread.topics.is_empty())
+    }
+
+    pub(crate) fn channel_has_unread_topics(&self, clan_id: ClanId, channel_id: ChannelId) -> bool {
+        if self.parent_has_topic_unread(channel_id) {
+            return true;
+        }
+        let Some(channel) = self.channel(clan_id, channel_id) else {
+            return false;
+        };
+        channel
+            .parent_id
+            .is_some_and(|parent_id| self.parent_has_topic_unread(parent_id))
     }
 
     pub fn note_parent_topic_unread(
@@ -4000,6 +4056,9 @@ impl ChannelList {
             }
             None => 0,
         };
+        if !channel_row_exists {
+            self.pending_channel_badges.remove(&tracked.parent_id);
+        }
         if cleared > 0 {
             self.notify_channel_list(tracked.clan_id, cx);
         }
@@ -10238,6 +10297,9 @@ mod tests {
                     },
                 );
                 channels.note_parent_topic_unread(ClanId(1), PARENT_CHANNEL, topic_id, cx);
+            });
+            crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
+                clans.set_has_unread(ClanId(1), true, cx);
             });
             assert!(channels.read(cx).parent_has_topic_unread(PARENT_CHANNEL));
 

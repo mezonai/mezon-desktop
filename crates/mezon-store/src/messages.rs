@@ -126,6 +126,7 @@ struct PendingSendPayload {
 struct PendingLastSeen {
     clan_id: ClanId,
     channel_id: ChannelId,
+    read_cursor_channel: ChannelId,
     message_id: MessageId,
     create_time: i64,
     mode: i32,
@@ -1448,7 +1449,9 @@ impl MessagesStore {
         message_id: MessageId,
         own: bool,
     ) -> bool {
-        if own || message_id.is_optimistic() || self.active_channel_id != Some(storage_id) {
+        let viewing =
+            self.active_topic_id == Some(storage_id) || self.active_channel_id == Some(storage_id);
+        if own || message_id.is_optimistic() || !viewing {
             return false;
         }
         let pending = self.pending_below_by_channel.entry(storage_id).or_default();
@@ -1466,7 +1469,7 @@ impl MessagesStore {
     /// reader was away from the tail, so the scroll-down button has to count
     /// them even though no row exists for them yet.
     pub fn pending_below_count(&self, counted_from: Option<MessageId>) -> u32 {
-        let Some(channel_id) = self.active_channel_id else {
+        let Some(channel_id) = self.active_topic_id.or(self.active_channel_id) else {
             return 0;
         };
         let Some(pending) = self.pending_below_by_channel.get(&channel_id) else {
@@ -1547,6 +1550,11 @@ impl MessagesStore {
         ) {
             return;
         }
+        if ChannelList::try_global(cx)
+            .is_some_and(|cl| cl.read(cx).channel_has_unread_topics(clan_id, channel_id))
+        {
+            return;
+        }
         let live_badge = self.channel_badge_count(channel_id, clan_id, cx);
         let badge_count = self
             .pending_last_seen
@@ -1564,6 +1572,7 @@ impl MessagesStore {
         let pending = PendingLastSeen {
             clan_id,
             channel_id,
+            read_cursor_channel: channel_id,
             message_id,
             create_time,
             mode: self.mode,
@@ -1591,7 +1600,7 @@ impl MessagesStore {
         let Some(clan_id) = self.active_clan_id else {
             return;
         };
-        let Some(channel_id) = self.active_channel_id else {
+        let Some(parent_id) = self.active_topic_parent.or(self.active_channel_id) else {
             return;
         };
         if let Some(buzz) = BuzzStore::try_global(cx) {
@@ -1604,25 +1613,35 @@ impl MessagesStore {
             });
         }
         ChannelList::global(cx).update(cx, |cl, cx| cl.apply_topic_read(topic_id, cx));
+        let topic_tail = self.last_message_by_channel.get(&topic_id).copied();
         if !should_write_last_seen(
             self.known_last_seen_id(topic_id, cx),
-            self.last_message_by_channel.get(&topic_id).copied(),
+            topic_tail,
             message_id,
         ) {
             return;
         }
-        let parent_badge = self.channel_badge_count(channel_id, clan_id, cx);
+        let parent_last_seen = ChannelList::global(cx)
+            .read(cx)
+            .channel(clan_id, parent_id)
+            .map(|ch| ch.last_seen_message_id)
+            .unwrap_or(MessageId(0));
+        if !should_write_topic_parent_last_seen(parent_last_seen, message_id, topic_tail) {
+            return;
+        }
+        let parent_badge = self.channel_badge_count(parent_id, clan_id, cx);
         let badge_count = self
             .pending_last_seen
-            .get(&channel_id)
+            .get(&topic_id)
             .map(|p| p.badge_count.max(parent_badge))
             .unwrap_or(parent_badge);
         let pending = PendingLastSeen {
             clan_id,
-            channel_id,
+            channel_id: parent_id,
+            read_cursor_channel: topic_id,
             message_id,
             create_time,
-            mode: self.mode,
+            mode: STREAM_MODE_THREAD,
             badge_count,
         };
         self.set_last_read_message(topic_id, message_id);
@@ -1681,6 +1700,7 @@ impl MessagesStore {
         let pending = PendingLastSeen {
             clan_id,
             channel_id,
+            read_cursor_channel: channel_id,
             message_id: tail_id,
             create_time: tail_ts,
             mode: self.mode,
@@ -1717,6 +1737,11 @@ impl MessagesStore {
         ) {
             return;
         }
+        if ChannelList::try_global(cx)
+            .is_some_and(|cl| cl.read(cx).channel_has_unread_topics(clan_id, channel_id))
+        {
+            return;
+        }
         tracing::debug!(
             target: "badge_flow",
             clan = clan_id.get(),
@@ -1728,6 +1753,7 @@ impl MessagesStore {
         let pending = PendingLastSeen {
             clan_id,
             channel_id,
+            read_cursor_channel: channel_id,
             message_id,
             create_time,
             mode: self.mode,
@@ -1814,20 +1840,22 @@ impl MessagesStore {
     }
 
     fn set_pending_last_seen(&mut self, pending: PendingLastSeen, cx: &mut Context<Self>) {
+        let debounce_key = pending.read_cursor_channel;
         if self
             .pending_last_seen
-            .get(&pending.channel_id)
+            .get(&debounce_key)
             .is_some_and(|existing| {
                 existing.message_id == pending.message_id
                     && existing.badge_count == pending.badge_count
                     && existing.create_time == pending.create_time
                     && existing.mode == pending.mode
                     && existing.clan_id == pending.clan_id
+                    && existing.channel_id == pending.channel_id
             })
         {
             return;
         }
-        self.pending_last_seen.insert(pending.channel_id, pending);
+        self.pending_last_seen.insert(debounce_key, pending);
         self.arm_last_seen_debounce(cx);
     }
 
@@ -1869,7 +1897,8 @@ impl MessagesStore {
             pending.create_time,
             pending.message_id.get()
         );
-        if self.last_seen_fingerprint.get(&pending.channel_id) == Some(&fingerprint) {
+        let dedupe_key = pending.read_cursor_channel;
+        if self.last_seen_fingerprint.get(&dedupe_key) == Some(&fingerprint) {
             return;
         }
 
@@ -1888,13 +1917,12 @@ impl MessagesStore {
         );
         let newer_than_tracked = self
             .last_read_message_by_channel
-            .get(&pending.channel_id)
+            .get(&dedupe_key)
             .is_none_or(|cur| snowflake_seq(pending.message_id) >= snowflake_seq(*cur));
         if newer_than_tracked {
-            self.set_last_read_message(pending.channel_id, pending.message_id);
+            self.set_last_read_message(dedupe_key, pending.message_id);
         }
-        self.last_seen_fingerprint
-            .insert(pending.channel_id, fingerprint);
+        self.last_seen_fingerprint.insert(dedupe_key, fingerprint);
 
         let api = self.api.clone();
         let clan_id = pending.clan_id.get();
@@ -1905,6 +1933,7 @@ impl MessagesStore {
         let timestamp_seconds = u32::try_from(ts).unwrap_or(u32::MAX);
         let badge_count = i32::try_from(pending.badge_count).unwrap_or(i32::MAX);
         let generation = self.reset_generation;
+        let retry_pending = pending;
 
         cx.spawn(async move |this, cx| {
             let result = api
@@ -1927,15 +1956,9 @@ impl MessagesStore {
                     if this.reset_generation != generation {
                         return;
                     }
-                    this.last_seen_fingerprint.remove(&ChannelId(channel_id));
-                    this.queued_last_seen.push(PendingLastSeen {
-                        clan_id: ClanId(clan_id),
-                        channel_id: ChannelId(channel_id),
-                        message_id: MessageId(message_id),
-                        create_time: ts,
-                        mode,
-                        badge_count: badge_count.max(0) as u32,
-                    });
+                    this.last_seen_fingerprint
+                        .remove(&retry_pending.read_cursor_channel);
+                    this.queued_last_seen.push(retry_pending);
                 })
                 .ok();
             }
@@ -1944,7 +1967,7 @@ impl MessagesStore {
     }
 
     fn apply_local_last_seen(&mut self, pending: &PendingLastSeen, cx: &mut Context<Self>) {
-        self.set_last_read_message(pending.channel_id, pending.message_id);
+        self.set_last_read_message(pending.read_cursor_channel, pending.message_id);
         let ts = pending.create_time.max(0);
         if self.is_dm {
             DirectMessageStore::global(cx).update(cx, |dm, cx| {
@@ -1953,6 +1976,9 @@ impl MessagesStore {
         } else if !pending.clan_id.is_zero() {
             let clan_id = pending.clan_id;
             let channel_id = pending.channel_id;
+            let topics_still_unread = ChannelList::global(cx)
+                .read(cx)
+                .channel_has_unread_topics(clan_id, channel_id);
             ChannelList::global(cx).update(cx, |cl, cx| {
                 cl.note_channel_message(
                     clan_id,
@@ -1963,8 +1989,20 @@ impl MessagesStore {
                     pending.message_id,
                     cx,
                 );
-                cl.apply_read(clan_id, channel_id, cx);
+                if !topics_still_unread {
+                    cl.apply_read(clan_id, channel_id, cx);
+                }
             });
+            if topics_still_unread {
+                if let Some(any_unread) = ChannelList::global(cx)
+                    .read(cx)
+                    .clan_has_any_unread(clan_id)
+                {
+                    crate::clan::ClanList::global(cx).update(cx, |cls, cx| {
+                        cls.apply_unread_from_channel_state(clan_id, any_unread, cx);
+                    });
+                }
+            }
         }
     }
 
@@ -2017,6 +2055,23 @@ impl MessagesStore {
 
     pub fn active_topic_id(&self) -> Option<ChannelId> {
         self.active_topic_id
+    }
+
+    pub(crate) fn topic_seen_message_covers(
+        &self,
+        topic_id: ChannelId,
+        seen_message_id: MessageId,
+    ) -> bool {
+        if self
+            .cache
+            .get(&topic_id)
+            .is_some_and(|bucket| bucket.messages.contains_id(seen_message_id))
+        {
+            return true;
+        }
+        self.last_message_by_channel
+            .get(&topic_id)
+            .is_some_and(|tail| snowflake_seq(seen_message_id) >= snowflake_seq(*tail))
     }
 
     /// Stream mode of the active channel (`STREAM_MODE_CHANNEL` / `STREAM_MODE_THREAD`).
@@ -8583,6 +8638,20 @@ pub(crate) fn snowflake_seq(id: MessageId) -> i64 {
     id.get() >> SNOWFLAKE_TIME_SHIFT
 }
 
+fn should_write_topic_parent_last_seen(
+    parent_last_seen: MessageId,
+    viewport_id: MessageId,
+    topic_tail: Option<MessageId>,
+) -> bool {
+    if parent_last_seen.is_zero() {
+        return true;
+    }
+    if snowflake_seq(viewport_id) >= snowflake_seq(parent_last_seen) {
+        return true;
+    }
+    topic_tail == Some(viewport_id)
+}
+
 fn last_seen_retries(
     queue: Vec<PendingLastSeen>,
     last_read: &HashMap<ChannelId, MessageId>,
@@ -8590,14 +8659,14 @@ fn last_seen_retries(
     let mut newest: Vec<PendingLastSeen> = Vec::new();
     for pending in queue {
         let superseded = last_read
-            .get(&pending.channel_id)
+            .get(&pending.read_cursor_channel)
             .is_some_and(|read| snowflake_seq(pending.message_id) < snowflake_seq(*read));
         if superseded {
             continue;
         }
         match newest
             .iter_mut()
-            .find(|queued| queued.channel_id == pending.channel_id)
+            .find(|queued| queued.read_cursor_channel == pending.read_cursor_channel)
         {
             Some(queued)
                 if snowflake_seq(pending.message_id) >= snowflake_seq(queued.message_id) =>
@@ -17520,6 +17589,7 @@ mod tests {
                     let pending = |id| PendingLastSeen {
                         clan_id: CLAN,
                         channel_id: LEFT_SCROLLED_UP,
+                        read_cursor_channel: LEFT_SCROLLED_UP,
                         message_id: id,
                         create_time: 0,
                         mode: 2,
@@ -17538,6 +17608,7 @@ mod tests {
             let pending = |channel: ChannelId, seq: i64| PendingLastSeen {
                 clan_id: CLAN,
                 channel_id: channel,
+                read_cursor_channel: channel,
                 message_id: msg(seq),
                 create_time: seq * 100,
                 mode: 2,

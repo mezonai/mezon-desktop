@@ -115,9 +115,12 @@ fn is_clan_message_seen(cx: &App, m: &ChannelMessage, from_me: bool) -> bool {
     let parent_id = ChannelId(m.channel_id);
     if m.topic_id != 0 {
         let topic_id = ChannelId(m.topic_id);
-        return active == parent_id
-            && messages.active_topic_id() == Some(topic_id)
-            && messages.is_reading_live_tail(topic_id);
+        if active != parent_id {
+            return false;
+        }
+        return messages
+            .active_topic_id()
+            .is_none_or(|open| open != topic_id || messages.is_reading_live_tail(topic_id));
     }
     let badge_id = badge_channel_id(m);
     if active == badge_id {
@@ -430,9 +433,17 @@ impl BadgeService {
                                     cl.note_parent_topic_unread(clan_id, parent_id, topic_id, cx);
                                 });
                             } else if seen {
-                                ChannelList::global(cx).update(cx, |cl, cx| {
-                                    cl.clear_parent_topic_unread(topic_id, cx);
-                                });
+                                let reading_this_topic =
+                                    MessagesStore::global(cx).read(cx).active_topic_id()
+                                        == Some(topic_id)
+                                        && MessagesStore::global(cx)
+                                            .read(cx)
+                                            .is_reading_live_tail(topic_id);
+                                if reading_this_topic {
+                                    ChannelList::global(cx).update(cx, |cl, cx| {
+                                        cl.clear_parent_topic_unread(topic_id, cx);
+                                    });
+                                }
                             }
                         } else {
                             ChannelList::global(cx).update(cx, |cl, cx| {
@@ -447,7 +458,7 @@ impl BadgeService {
                                 )
                             });
                         }
-                        if seen {
+                        if seen && m.topic_id == 0 {
                             MessagesStore::global(cx).update(cx, |store, _| {
                                 store.set_last_read_message(channel_id, message_id);
                             });

@@ -707,6 +707,7 @@ impl ClanList {
                 match result {
                     Ok(counts) => {
                         apply_clan_badges(&mut this.clans, counts);
+                        this.reconcile_rail_has_unread_from_channel_cache(cx);
                         this.badges_loaded = true;
                         cx.notify();
                     }
@@ -869,6 +870,23 @@ impl ClanList {
             clan.badge_count = clan.badge_count.saturating_add(1);
             if was_badge != clan.badge_count {
                 cx.notify();
+            }
+        }
+    }
+
+    fn reconcile_rail_has_unread_from_channel_cache(&mut self, cx: &App) {
+        let Some(channels) = ChannelList::try_global(cx) else {
+            return;
+        };
+        let channels = channels.read(cx);
+        for clan in &mut self.clans {
+            if clan.muted {
+                continue;
+            }
+            if let Some(has_unread) = channels.clan_rail_has_unread(clan.id, clan.badge_count) {
+                clan.has_unread = has_unread;
+            } else if clan.badge_count == 0 {
+                clan.has_unread = false;
             }
         }
     }
