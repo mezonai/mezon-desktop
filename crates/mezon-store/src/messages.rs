@@ -1469,7 +1469,19 @@ impl MessagesStore {
     /// reader was away from the tail, so the scroll-down button has to count
     /// them even though no row exists for them yet.
     pub fn pending_below_count(&self, counted_from: Option<MessageId>) -> u32 {
-        let Some(channel_id) = self.active_topic_id.or(self.active_channel_id) else {
+        self.pending_below_for(self.active_channel_id, counted_from)
+    }
+
+    pub fn topic_pending_below_count(&self, counted_from: Option<MessageId>) -> u32 {
+        self.pending_below_for(self.active_topic_id, counted_from)
+    }
+
+    fn pending_below_for(
+        &self,
+        channel_id: Option<ChannelId>,
+        counted_from: Option<MessageId>,
+    ) -> u32 {
+        let Some(channel_id) = channel_id else {
             return 0;
         };
         let Some(pending) = self.pending_below_by_channel.get(&channel_id) else {

@@ -3574,7 +3574,13 @@ impl ChannelMessages {
                 .rev()
                 .map(|message| message.id),
         )
-        .saturating_add(store.read(cx).pending_below_count(self.last_seen_at_bottom));
+        .saturating_add(if self.is_topic_box {
+            store
+                .read(cx)
+                .topic_pending_below_count(self.last_seen_at_bottom)
+        } else {
+            store.read(cx).pending_below_count(self.last_seen_at_bottom)
+        });
         if welcome == self.welcome
             && onboarding == self.onboarding
             && unread == self.cached_unread_boundary

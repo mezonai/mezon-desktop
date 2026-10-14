@@ -2500,7 +2500,7 @@ impl ChannelList {
         cleared_badge
     }
 
-    pub(crate) fn clan_badge_tally(&self, clan_id: ClanId) -> Option<ClanBadgeTally> {
+    fn clan_badge_tally(&self, clan_id: ClanId) -> Option<ClanBadgeTally> {
         let complete = self.badge_seeds.get(&clan_id)?.complete;
         let categories = self.cache.get(&clan_id)?;
         let mut seen = HashSet::new();
@@ -3945,6 +3945,17 @@ impl ChannelList {
 
     pub fn channel_activity_unread(&self, channel: &Channel) -> bool {
         channel.is_unread() || self.parent_has_topic_unread(channel.id)
+    }
+
+    pub fn tracks_topic(&self, topic_id: ChannelId) -> bool {
+        if topic_id.is_zero() {
+            return false;
+        }
+        self.topic_parent_badges.contains_key(&topic_id)
+            || self
+                .parent_topic_unreads
+                .values()
+                .any(|unread| unread.topics.contains(&topic_id))
     }
 
     pub fn parent_has_topic_unread(&self, parent_id: ChannelId) -> bool {

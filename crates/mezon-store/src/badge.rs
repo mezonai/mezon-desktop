@@ -562,19 +562,26 @@ impl BadgeService {
                         dm.note_read(channel_id, cx);
                     });
                 } else {
+                    let tracked_topic = ChannelList::global(cx).read(cx).tracks_topic(channel_id);
                     ChannelList::global(cx).update(cx, |cl, cx| {
-                        cl.apply_last_seen(
-                            clan_id,
-                            channel_id,
-                            new_badge,
-                            seen_ts,
-                            seen_message_id,
-                            cx,
-                        );
+                        if tracked_topic {
+                            cl.apply_topic_read(channel_id, cx);
+                        } else {
+                            cl.apply_last_seen(
+                                clan_id,
+                                channel_id,
+                                new_badge,
+                                seen_ts,
+                                seen_message_id,
+                                cx,
+                            );
+                        }
                     });
-                    ClanList::global(cx).update(cx, |cls, cx| {
-                        cls.sync_has_unread_from_channels(clan_id, cx);
-                    });
+                    if !tracked_topic {
+                        ClanList::global(cx).update(cx, |cls, cx| {
+                            cls.sync_has_unread_from_channels(clan_id, cx);
+                        });
+                    }
                 }
                 if !seen_message_id.is_zero() {
                     MessagesStore::global(cx).update(cx, |store, _| {
