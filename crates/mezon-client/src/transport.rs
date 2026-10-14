@@ -524,6 +524,25 @@ pub struct OutgoingMessageFlags {
     pub message_code: i32,
 }
 
+fn varint_encoded_len(mut value: u64) -> usize {
+    let mut n = 1usize;
+    while value > 0x7f {
+        n += 1;
+        value >>= 7;
+    }
+    n
+}
+
+pub fn encoded_envelope_cid_last_len(envelope: &realtime::Envelope) -> usize {
+    let cid = envelope.cid;
+    if cid <= 0 {
+        return envelope.encoded_len();
+    }
+    let mut zero_cid = envelope.clone();
+    zero_cid.cid = 0;
+    zero_cid.encoded_len() + 1 + varint_encoded_len(cid as u64)
+}
+
 fn encode_envelope_cid_last(mut envelope: realtime::Envelope) -> Vec<u8> {
     let cid = envelope.cid;
     if cid <= 0 {
@@ -3054,6 +3073,101 @@ pub fn forward_content_json(content_raw: &str, text: &str) -> String {
     }
     obj.insert("fwd".into(), serde_json::Value::Bool(true));
     serde_json::Value::Object(obj).to_string()
+}
+
+fn url_is_inline_data(url: &str) -> bool {
+    let trimmed = url.trim();
+    trimmed
+        .as_bytes()
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"data:"))
+}
+
+fn api_attachment_to_proto(a: &ApiAttachment) -> api::MessageAttachment {
+    api::MessageAttachment {
+        url: a.url.clone(),
+        filename: a.filename.clone(),
+        filetype: a.filetype.clone(),
+        width: a.width,
+        height: a.height,
+        thumbnail: a.thumbnail.clone(),
+        duration: a.duration,
+        size: a.size,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_forward_channel_message_send(
+    clan_id: i64,
+    channel_id: i64,
+    content_raw: &str,
+    text: &str,
+    is_public: bool,
+    mode: i32,
+    attachments: &[ApiAttachment],
+    mentions: &[OutgoingMention],
+) -> realtime::ChannelMessageSend {
+    let content_json = forward_content_json(content_raw, text);
+    let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
+    let proto_mentions: Vec<api::MessageMention> = mentions
+        .iter()
+        .filter_map(OutgoingMention::to_proto)
+        .collect();
+    realtime::ChannelMessageSend {
+        clan_id,
+        channel_id,
+        content: content_json,
+        mentions: proto_mentions,
+        attachments: attachments.iter().map(api_attachment_to_proto).collect(),
+        mode,
+        is_public,
+        mention_everyone,
+        ..Default::default()
+    }
+}
+
+pub fn channel_message_send_realtime_proto_len(
+    message: &realtime::ChannelMessageSend,
+    cid: i32,
+) -> usize {
+    let envelope = realtime::Envelope {
+        cid,
+        message: Some(realtime::envelope::Message::ChannelMessageSend(
+            message.clone(),
+        )),
+    };
+    encoded_envelope_cid_last_len(&envelope)
+}
+
+pub fn forward_blocked_for_realtime_message(message: &realtime::ChannelMessageSend) -> bool {
+    if message
+        .attachments
+        .iter()
+        .any(|a| url_is_inline_data(&a.url) || url_is_inline_data(&a.thumbnail))
+    {
+        return true;
+    }
+    let proto_len = channel_message_send_realtime_proto_len(message, 1);
+    crate::abridged_tcp_adapter::proto_exceeds_realtime_abridged_cap(proto_len)
+}
+
+pub fn forward_blocked_for_realtime(
+    content_raw: &str,
+    text: &str,
+    attachments: &[ApiAttachment],
+    mentions: &[OutgoingMention],
+) -> bool {
+    let message = build_forward_channel_message_send(
+        1,
+        1,
+        content_raw,
+        text,
+        false,
+        2,
+        attachments,
+        mentions,
+    );
+    forward_blocked_for_realtime_message(&message)
 }
 
 pub fn mention_content_tokens(mentions: &[OutgoingMention]) -> Vec<ContentToken> {
@@ -6706,23 +6820,29 @@ impl MezonTransport {
         attachments: Vec<api::MessageAttachment>,
         mentions: Vec<OutgoingMention>,
     ) -> Result<()> {
-        let content_json = forward_content_json(content_raw, text);
-        let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
-        let proto_mentions: Vec<api::MessageMention> = mentions
-            .iter()
-            .filter_map(OutgoingMention::to_proto)
+        let api_attachments: Vec<ApiAttachment> = attachments
+            .into_iter()
+            .map(|a| ApiAttachment {
+                url: a.url,
+                filename: a.filename,
+                filetype: a.filetype,
+                width: a.width,
+                height: a.height,
+                thumbnail: a.thumbnail,
+                duration: a.duration,
+                size: a.size,
+            })
             .collect();
-        let message = realtime::ChannelMessageSend {
+        let message = build_forward_channel_message_send(
             clan_id,
             channel_id,
-            content: content_json,
-            mentions: proto_mentions,
-            attachments,
-            mode,
+            content_raw,
+            text,
             is_public,
-            mention_everyone,
-            ..Default::default()
-        };
+            mode,
+            &api_attachments,
+            &mentions,
+        );
         let _ack = self.write_or_http_channel_message(message).await?;
         Ok(())
     }
@@ -7886,14 +8006,14 @@ impl MezonTransport {
     pub async fn update_user_profile_by_clan(
         &self,
         clan_id: i64,
-        nick_name: &str,
+        nick_name: Option<&str>,
         avatar_url: Option<&str>,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateClanProfileRequest {
             clan_id,
-            nick_name: Some(nick_name.to_string()),
-            avatar: avatar_url.map(|s| s.to_string()),
+            nick_name: nick_name.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            avatar: avatar_url.filter(|s| !s.is_empty()).map(|s| s.to_string()),
         }
         .encode_to_vec();
         let (code, response) = self
@@ -7906,10 +8026,9 @@ impl MezonTransport {
                 code,
                 msg
             );
-            return Err(anyhow::anyhow!(
-                "API error: code={}, response={}",
-                code,
-                msg
+            return Err(api_status_error(code)).context(format!(
+                "UpdateUserProfileByClan failed (code={code}, response={})",
+                msg.trim()
             ));
         }
         Ok(())
@@ -8251,7 +8370,7 @@ impl MezonTransport {
             height,
             part_count: 0,
             channel_id,
-            transcode_hls: false,
+            transcode_hls: crate::video_source::wants_hls_transcode(filename, size),
         }
         .encode_to_vec();
         let (code, response) = self
@@ -8496,8 +8615,7 @@ impl MezonTransport {
         &self,
         message: realtime::ChannelMessageSend,
     ) -> Result<realtime::ChannelMessageAck> {
-        let has_fallback = self.http_fallback.read().is_some();
-        if has_fallback && !self.is_open().await {
+        if self.http_fallback.read().is_some() && !self.is_open().await {
             tracing::warn!(
                 target: "socket",
                 "api_socket_closed: action=ChannelMessageSend — sending over HTTP"
@@ -11121,6 +11239,78 @@ mod tests {
 
         assert_eq!(value["t"], "hello");
         assert_eq!(value["fwd"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn forward_blocked_for_inline_attachment_data_uri() {
+        let attachments = vec![ApiAttachment {
+            url: "data:image/png;base64,abcd".into(),
+            ..Default::default()
+        }];
+        let message = build_forward_channel_message_send(
+            1,
+            2,
+            r#"{"t":"hi"}"#,
+            "hi",
+            false,
+            2,
+            &attachments,
+            &[],
+        );
+        assert!(forward_blocked_for_realtime_message(&message));
+    }
+
+    #[test]
+    fn forward_realtime_ok_for_small_https_attachment() {
+        let attachments = vec![ApiAttachment {
+            url: "https://cdn.example/a.png".into(),
+            ..Default::default()
+        }];
+        let message = build_forward_channel_message_send(
+            1,
+            2,
+            r#"{"t":"hi"}"#,
+            "hi",
+            false,
+            2,
+            &attachments,
+            &[],
+        );
+        assert!(!forward_blocked_for_realtime_message(&message));
+    }
+
+    #[test]
+    fn forward_blocked_when_wire_exceeds_proto_server_cap() {
+        let pad = "x".repeat(4200);
+        let attachments = vec![ApiAttachment {
+            url: format!("https://cdn.example/{pad}.png"),
+            ..Default::default()
+        }];
+        let message = build_forward_channel_message_send(
+            1,
+            2,
+            r#"{"t":"hi"}"#,
+            "hi",
+            false,
+            2,
+            &attachments,
+            &[],
+        );
+        assert!(forward_blocked_for_realtime_message(&message));
+    }
+
+    #[test]
+    fn encoded_envelope_cid_last_len_matches_encode() {
+        let message =
+            build_forward_channel_message_send(1, 2, r#"{"t":"hi"}"#, "hi", false, 2, &[], &[]);
+        let envelope = realtime::Envelope {
+            cid: 9,
+            message: Some(realtime::envelope::Message::ChannelMessageSend(message)),
+        };
+        assert_eq!(
+            encoded_envelope_cid_last_len(&envelope),
+            encode_envelope_cid_last(envelope).len()
+        );
     }
 
     #[test]

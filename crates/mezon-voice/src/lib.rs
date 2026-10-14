@@ -150,6 +150,8 @@ pub struct VoiceParticipant {
     pub session_id: String,
     pub identity: String,
     pub name: String,
+    pub metadata_name: String,
+    pub metadata_avatar: String,
     pub is_local: bool,
     pub is_agent: bool,
     pub is_audience: bool,
@@ -188,6 +190,9 @@ pub enum VoiceEvent {
         reason: String,
     },
     MutedByModerator,
+    RoomMessage(String),
+    RoomMessageSent,
+    RoomMessageFailed,
     NoiseSuppressionReady {
         generation: u64,
         result: std::result::Result<(), String>,
@@ -207,6 +212,7 @@ enum Command {
     StopScreenShare,
     PushToTalk(bool),
     ParticipantAction(String),
+    SendRoomMessage(String),
     Disconnect,
 }
 
@@ -394,6 +400,10 @@ impl VoiceSession {
 
     pub fn participant_action(&self, token: String) {
         let _ = self.cmd_tx.send(Command::ParticipantAction(token));
+    }
+
+    pub fn send_room_message(&self, message: String) {
+        let _ = self.cmd_tx.send(Command::SendRoomMessage(message));
     }
 
     pub fn set_screen_full_res(&self, full_res: bool) {
@@ -663,6 +673,15 @@ async fn session_main(
                         emit!();
                         let _ = evt_tx.send(VoiceEvent::MutedByModerator);
                     }
+                    SfuEvent::RoomMessage(message) => {
+                        let _ = evt_tx.send(VoiceEvent::RoomMessage(message));
+                    }
+                    SfuEvent::RoomMessageSent => {
+                        let _ = evt_tx.send(VoiceEvent::RoomMessageSent);
+                    }
+                    SfuEvent::RoomMessageFailed => {
+                        let _ = evt_tx.send(VoiceEvent::RoomMessageFailed);
+                    }
                     SfuEvent::Error(message) => {
                         let _ = evt_tx.send(VoiceEvent::Error(message));
                     }
@@ -822,6 +841,7 @@ async fn session_main(
                         }
                     }
                     Ok(Command::ParticipantAction(token)) => engine.participant_action(token),
+                    Ok(Command::SendRoomMessage(message)) => engine.send_room_message(message),
                     Ok(Command::Disconnect) | Err(_) => {
                         engine.close();
                         abort_task(&mut microphone_task).await;
@@ -1817,6 +1837,34 @@ fn bounded_dimensions(width: u32, height: u32, max_width: u32, max_height: u32) 
     (width, height)
 }
 
+fn peer_display_metadata(metadata: &str) -> (String, String) {
+    fn field(value: &str) -> String {
+        let value = value.trim();
+        if value == "undefined" {
+            String::new()
+        } else {
+            value.to_owned()
+        }
+    }
+    let metadata = metadata.trim();
+    if metadata.starts_with('{')
+        && let Ok(serde_json::Value::Object(record)) = serde_json::from_str(metadata)
+    {
+        let text = |key: &str| {
+            record
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(field)
+                .unwrap_or_default()
+        };
+        return (text("username"), text("avatar"));
+    }
+    match metadata.rsplit_once(';') {
+        Some((name, avatar)) => (field(name), field(avatar)),
+        None => (field(metadata), String::new()),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_participants(
     evt_tx: &flume::Sender<VoiceEvent>,
@@ -1835,6 +1883,8 @@ fn emit_participants(
         session_id: local_user_id.to_string(),
         identity: local_user_id.to_string(),
         name: String::new(),
+        metadata_name: String::new(),
+        metadata_avatar: String::new(),
         is_local: true,
         is_agent: false,
         is_audience: local_role.is_audience(),
@@ -1846,10 +1896,13 @@ fn emit_participants(
     });
 
     for peer in peers {
+        let (metadata_name, metadata_avatar) = peer_display_metadata(&peer.metadata);
         participants.push(VoiceParticipant {
             session_id: format!("{}\u{1}peer:{}", peer.user_id, peer.peer_id),
             identity: peer.user_id.clone(),
             name: String::new(),
+            metadata_name,
+            metadata_avatar,
             is_local: false,
             is_agent: false,
             is_audience: peer.is_audience,
@@ -1937,5 +1990,43 @@ mod remote_video_tests {
     fn bounded_dimensions_cap_large_frames_evenly() {
         assert_eq!(bounded_dimensions(3840, 2160, 1920, 1080), (1920, 1080));
         assert_eq!(bounded_dimensions(2560, 1600, 1920, 1080), (1728, 1080));
+    }
+}
+
+#[cfg(test)]
+mod peer_metadata_tests {
+    use super::peer_display_metadata;
+
+    fn pair(name: &str, avatar: &str) -> (String, String) {
+        (name.to_owned(), avatar.to_owned())
+    }
+
+    #[test]
+    fn peer_metadata_splits_name_and_avatar_at_the_last_separator() {
+        assert_eq!(
+            peer_display_metadata("a;b;https://cdn/a.png"),
+            pair("a;b", "https://cdn/a.png")
+        );
+        assert_eq!(peer_display_metadata("alice"), pair("alice", ""));
+        assert_eq!(peer_display_metadata(" bob ; "), pair("bob", ""));
+    }
+
+    #[test]
+    fn json_peer_metadata_is_read_like_the_web_client() {
+        assert_eq!(
+            peer_display_metadata(r#"{"username":"Alice","avatar":"https://cdn/a.png"}"#),
+            pair("Alice", "https://cdn/a.png")
+        );
+        assert_eq!(peer_display_metadata(r#"{"extName":"x"}"#), pair("", ""));
+        assert_eq!(peer_display_metadata("{broken;x"), pair("{broken", "x"));
+    }
+
+    #[test]
+    fn an_undefined_metadata_field_is_dropped() {
+        assert_eq!(peer_display_metadata("Alice;undefined"), pair("Alice", ""));
+        assert_eq!(
+            peer_display_metadata(r#"{"username":"undefined","avatar":"https://cdn/a.png"}"#),
+            pair("", "https://cdn/a.png")
+        );
     }
 }

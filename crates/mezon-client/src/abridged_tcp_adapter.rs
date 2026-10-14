@@ -130,8 +130,38 @@ const CODE_FIN: u16 = 0xff;
 const PREFIX_RAW: u8 = 0xff;
 const PREFIX_EXTENDED: u8 = 0x7f;
 const RAW_HEADER_LENGTH: usize = 11;
-const MAX_REALTIME_FRAME_LEN: usize = 1 << 20;
+pub const PROTO_SERVER_MAX_CLIENT_WS_PAYLOAD: usize = 4096;
+const ABRIDGED_EXTENDED_HEADER_LEN: usize = 4;
+pub const MAX_REALTIME_FRAME_PAYLOAD: usize =
+    PROTO_SERVER_MAX_CLIENT_WS_PAYLOAD - ABRIDGED_EXTENDED_HEADER_LEN;
+const MAX_INBOUND_REALTIME_FRAME_PAYLOAD: usize = 1 << 20;
+const MAX_INBOUND_REALTIME_FRAME_LEN: usize = MAX_INBOUND_REALTIME_FRAME_PAYLOAD;
 const MAX_API_RESPONSE_LEN: usize = 16 << 20;
+
+pub fn abridged_padded_payload_len(proto_bytes: usize) -> usize {
+    proto_bytes + (4 - (proto_bytes % 4)) % 4
+}
+
+pub fn abridged_wire_packet_len(proto_bytes: usize) -> usize {
+    let padded = abridged_padded_payload_len(proto_bytes);
+    let len_div4 = padded / 4;
+    if len_div4 < 127 {
+        1 + padded
+    } else {
+        ABRIDGED_EXTENDED_HEADER_LEN + padded
+    }
+}
+
+pub fn proto_exceeds_realtime_abridged_cap(proto_bytes: usize) -> bool {
+    abridged_wire_packet_len(proto_bytes) > PROTO_SERVER_MAX_CLIENT_WS_PAYLOAD
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameResetReason {
+    RealtimePayloadTooLarge,
+    RawApiResponseTooLarge,
+    ProtocolViolation(&'static str),
+}
 const RESPONSE_CODE_TOO_LARGE: u32 = u16::MAX as u32;
 const ENVELOPE_CID_TAG: u8 = 0x08;
 
@@ -203,7 +233,7 @@ fn protobuf_message_len(buf: &[u8]) -> Option<usize> {
             5 => value_start + 4,
             2 => {
                 let (len, n) = read_varint(buf.get(value_start..)?)?;
-                if len as usize > MAX_REALTIME_FRAME_LEN {
+                if len as usize > MAX_INBOUND_REALTIME_FRAME_LEN {
                     return Some(pos);
                 }
                 value_start + n + len as usize
@@ -362,7 +392,7 @@ enum Frame {
 
 enum FrameStep {
     NeedMore,
-    Reset(&'static str),
+    Reset(FrameResetReason),
     Frame { consumed: usize, frame: Frame },
 }
 
@@ -392,7 +422,7 @@ fn decode_frame(buf: &[u8]) -> FrameStep {
             let code = u32::from_be_bytes([buf[3], buf[4], buf[5], buf[6]]);
             let len = u32::from_be_bytes([buf[7], buf[8], buf[9], buf[10]]) as usize;
             if len > MAX_API_RESPONSE_LEN {
-                return FrameStep::Reset("raw frame length too large");
+                return FrameStep::Reset(FrameResetReason::RawApiResponseTooLarge);
             }
             let total = RAW_HEADER_LENGTH + len;
             if buf.len() < total {
@@ -425,8 +455,8 @@ fn decode_frame(buf: &[u8]) -> FrameStep {
                 return FrameStep::NeedMore;
             }
             let payload_len = u32::from_le_bytes([buf[1], buf[2], buf[3], 0]) as usize * 4;
-            if payload_len > MAX_REALTIME_FRAME_LEN {
-                return FrameStep::Reset("extended frame length too large");
+            if payload_len > MAX_INBOUND_REALTIME_FRAME_LEN {
+                return FrameStep::Reset(FrameResetReason::RealtimePayloadTooLarge);
             }
             let total = 4 + payload_len;
             if buf.len() < total {
@@ -443,7 +473,9 @@ fn decode_frame(buf: &[u8]) -> FrameStep {
             }
             let b1 = buf[1];
             if b1 & 0x80 != 0 {
-                return FrameStep::Reset("masked websocket frame");
+                return FrameStep::Reset(FrameResetReason::ProtocolViolation(
+                    "masked websocket frame",
+                ));
             }
             let len7 = b1 as usize;
             let (header, payload_len) = if len7 < 126 {
@@ -464,8 +496,8 @@ fn decode_frame(buf: &[u8]) -> FrameStep {
                     ]) as usize,
                 )
             };
-            if payload_len > MAX_REALTIME_FRAME_LEN {
-                return FrameStep::Reset("websocket frame length too large");
+            if payload_len > MAX_INBOUND_REALTIME_FRAME_LEN {
+                return FrameStep::Reset(FrameResetReason::RealtimePayloadTooLarge);
             }
             let total = header + payload_len;
             if buf.len() < total {
@@ -476,7 +508,7 @@ fn decode_frame(buf: &[u8]) -> FrameStep {
                 frame: Frame::Realtime(buf[header..total].to_vec()),
             }
         }
-        _ => FrameStep::Reset("unexpected lead byte"),
+        _ => FrameStep::Reset(FrameResetReason::ProtocolViolation("unexpected lead byte")),
     }
 }
 
@@ -505,14 +537,24 @@ impl IoLoopState {
                     }
                     FrameStep::Reset(reason) => {
                         let abandoned: Vec<u16> = self.streams.keys().copied().collect();
+                        if reason == FrameResetReason::RealtimePayloadTooLarge {
+                            tracing::error!(
+                                target: "mezon.forward",
+                                ?reason,
+                                buffered_bytes = self.read_buffer.len(),
+                                partial_api_responses = abandoned.len(),
+                                cap = MAX_INBOUND_REALTIME_FRAME_PAYLOAD,
+                                "inbound realtime frame exceeded cap — forcing reconnect"
+                            );
+                        }
                         tracing::error!(
-                            "frame desync ({reason}); dropping {} buffered bytes and {} partial response(s) {abandoned:?} — forcing reconnect",
+                            "frame desync ({reason:?}); dropping {} buffered bytes and {} partial response(s) {abandoned:?} — forcing reconnect",
                             self.read_buffer.len(),
                             abandoned.len(),
                         );
                         self.read_buffer.clear();
                         self.streams.clear();
-                        return Err(anyhow::anyhow!("frame desync: {reason}"));
+                        return Err(anyhow::anyhow!("frame desync: {reason:?}"));
                     }
                     FrameStep::Frame { consumed, frame } => {
                         start += consumed;
@@ -866,6 +908,14 @@ impl TransportAdapter for AbridgedTcpAdapter {
             return Err(anyhow::anyhow!("Connection is not open"));
         }
         tracing::trace!("Connection is open");
+
+        if proto_exceeds_realtime_abridged_cap(message.len()) {
+            return Err(anyhow::anyhow!(
+                "realtime frame too large for abridged transport (wire {} bytes, max {})",
+                abridged_wire_packet_len(message.len()),
+                PROTO_SERVER_MAX_CLIENT_WS_PAYLOAD
+            ));
+        }
 
         let padding_needed = (4 - (message.len() % 4)) % 4;
         let mut final_payload = message;

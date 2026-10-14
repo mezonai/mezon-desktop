@@ -193,6 +193,7 @@ pub struct SfuConfig {
 pub struct SfuPeer {
     pub peer_id: u32,
     pub user_id: String,
+    pub metadata: String,
     pub muted: bool,
     pub is_audience: bool,
     pub audio: Option<u64>,
@@ -246,6 +247,9 @@ pub enum SfuEvent {
         reason: String,
     },
     MutedByModerator,
+    RoomMessage(String),
+    RoomMessageSent,
+    RoomMessageFailed,
     Error(String),
 }
 
@@ -261,6 +265,7 @@ enum EngineCommand {
     SetScreenShareMode(ScreenShareMode),
     PushToTalk(bool),
     ParticipantAction(String),
+    SendRoomMessage(String),
     Close,
 }
 
@@ -326,6 +331,10 @@ impl SfuEngine {
         let _ = self.cmd_tx.send(EngineCommand::ParticipantAction(token));
     }
 
+    pub fn send_room_message(&self, message: String) {
+        let _ = self.cmd_tx.send(EngineCommand::SendRoomMessage(message));
+    }
+
     pub(crate) fn refresh_remote_audio(&self, key: u64, recovery: PlaybackRecovery) {
         let _ = self
             .cmd_tx
@@ -387,6 +396,12 @@ impl Membership {
             member.mid_screen = screen;
         }
         let peer_id = member.peer_id;
+        if member.metadata.is_empty()
+            && let Some(previous) = self.by_peer.get(&peer_id)
+            && previous.user_id == member.user_id
+        {
+            member.metadata.clone_from(&previous.metadata);
+        }
         let user_id = member.user_id.clone();
         let mids = member_mids(&member);
         self.by_peer.insert(peer_id, member);
@@ -607,6 +622,7 @@ impl Membership {
                 SfuPeer {
                     peer_id: m.peer_id,
                     user_id: m.user_id.clone(),
+                    metadata: m.metadata.clone(),
                     muted: m.is_mute,
                     is_audience: m.is_audience(),
                     audio: (m.mid_audio != 0).then(|| remote_frame_key(&m.mid_audio.to_string())),
@@ -1014,6 +1030,9 @@ fn apply_offline_command(
                 local.ptt_active = false;
                 let _ = evt_tx.send(SfuEvent::PttActive(false));
             }
+        }
+        EngineCommand::SendRoomMessage(_) => {
+            let _ = evt_tx.send(SfuEvent::RoomMessageFailed);
         }
         EngineCommand::SetCameraActive(_)
         | EngineCommand::SetScreenActive(_)
@@ -1470,6 +1489,12 @@ async fn session_loop(
                     ServerMessage::MuteChanged { is_mute } => {
                         mute_sync.acknowledge(is_mute);
                     }
+                    ServerMessage::RoomMessage { message } => {
+                        let _ = evt_tx.send(SfuEvent::RoomMessage(message));
+                    }
+                    ServerMessage::MessageSent => {
+                        let _ = evt_tx.send(SfuEvent::RoomMessageSent);
+                    }
                     ServerMessage::KeyframeRequested { .. }
                     | ServerMessage::VisibilityChanged { .. }
                     | ServerMessage::RoleChanged { .. }
@@ -1477,6 +1502,11 @@ async fn session_loop(
                     ServerMessage::Error { message } => {
                         if screen_recovery.is_recent_request_error(&message, Instant::now()) {
                             tracing::warn!(%message, "sfu keyframe request rejected");
+                            continue;
+                        }
+                        if message == "invalid_message" {
+                            tracing::warn!("sfu rejected a room message");
+                            let _ = evt_tx.send(SfuEvent::RoomMessageFailed);
                             continue;
                         }
                         if matches!(message.as_str(), "invalid_push_to_talk" | "push_to_talk_rejected") {
@@ -1627,6 +1657,16 @@ async fn session_loop(
                         }
                         if send(&mut ws_tx, &ClientMessage::ParticipantAction { token }).await.is_err() {
                             return SessionOutcome::Dropped { joined, reason: "participant_action send failed".into() };
+                        }
+                    }
+                    EngineCommand::SendRoomMessage(message) => {
+                        if !joined {
+                            tracing::warn!("sfu room message dropped before the join completed");
+                            let _ = evt_tx.send(SfuEvent::RoomMessageFailed);
+                            continue;
+                        }
+                        if send(&mut ws_tx, &ClientMessage::SendMessage { message }).await.is_err() {
+                            return SessionOutcome::Dropped { joined, reason: "room message send failed".into() };
                         }
                     }
                     EngineCommand::PushToTalk(active) => {
@@ -2874,6 +2914,7 @@ mod tests {
             assignment_generation: 0,
             peer_id,
             user_id: user_id.to_owned(),
+            metadata: String::new(),
             role: "speaker".to_owned(),
             is_mute: false,
             camera_active: false,
@@ -2918,6 +2959,26 @@ mod tests {
             membership.user_by_mid.get("4").map(String::as_str),
             Some("7")
         );
+    }
+
+    #[test]
+    fn a_peer_update_without_metadata_keeps_the_name_it_joined_with() {
+        let mut membership = Membership::default();
+        let mut joined = member(4, "9", [3, 4, 5]);
+        joined.metadata = "alice;https://cdn/a.png".to_owned();
+        membership.apply(joined);
+        membership.apply(member(4, "9", [3, 4, 5]));
+        assert_eq!(membership.peers()[0].metadata, "alice;https://cdn/a.png");
+    }
+
+    #[test]
+    fn a_reused_peer_id_does_not_inherit_another_users_metadata() {
+        let mut membership = Membership::default();
+        let mut joined = member(4, "9", [3, 4, 5]);
+        joined.metadata = "alice;https://cdn/a.png".to_owned();
+        membership.apply(joined);
+        membership.apply(member(4, "11", [3, 4, 5]));
+        assert!(membership.peers()[0].metadata.is_empty());
     }
 
     #[test]

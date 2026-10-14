@@ -497,6 +497,10 @@ fn close_reason(code: Option<CloseCode>) -> String {
         Some(4005) => "SFU closed the session because the token is invalid".into(),
         Some(4006) => "SFU removed the stream audience session".into(),
         Some(4011) => "SFU closed the session because no publisher was present".into(),
+        Some(4012) => {
+            "Disconnected because your account joined a stream or voice channel in another session"
+                .into()
+        }
         Some(code) => format!("SFU closed the stream session (code {code})"),
         None => "SFU closed the stream session".into(),
     }

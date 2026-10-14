@@ -9,7 +9,10 @@ use gpui::{
     Context, Entity, FontWeight, PathPromptOptions, Rgba, SharedString, Subscription, Task, Window,
     div, prelude::*, px,
 };
-use mezon_store::{AccountEvent, AccountStore, ClanList, Settings};
+use mezon_store::{
+    AccountEvent, AccountStore, ClanList, ClanProfileSaveError, Settings,
+    prepare_clan_nickname_for_update,
+};
 
 use super::edit_avatar::EditAvatar;
 use crate::app::shell::Shell;
@@ -111,16 +114,37 @@ impl ClanProfileSection {
                     let message = mezon_i18n::t(&locale, "setting.clanProfile.saved");
                     Shell::global(cx).update(cx, |shell, cx| shell.success(message, cx));
                 }
-                AccountEvent::ClanProfileSaveFailed(msg) => {
+                AccountEvent::ClanProfileSaveFailed(err) => {
                     if let Some(state) = &mut this.profile {
                         state.saving = false;
+                        if matches!(err, ClanProfileSaveError::DuplicateNickname) {
+                            state.duplicate_error = true;
+                            AccountStore::global(cx).update(cx, |store, cx| {
+                                store.nickname_duplicate = true;
+                                cx.notify();
+                            });
+                        }
                     }
+                    cx.notify();
                     let locale = this.settings.read(cx).language.clone();
-                    let message = format!(
-                        "{} {}",
-                        mezon_i18n::t(&locale, "setting.clanProfile.saveFailed"),
-                        msg
-                    );
+                    let message = match &err {
+                        ClanProfileSaveError::DuplicateNickname => {
+                            mezon_i18n::t(&locale, "setting.clanProfile.nicknameExists").to_string()
+                        }
+                        ClanProfileSaveError::Api(code) => format!(
+                            "{} {}",
+                            mezon_i18n::t(&locale, "setting.clanProfile.saveFailed"),
+                            mezon_i18n::api_error(&locale, *code)
+                        ),
+                        ClanProfileSaveError::Other(msg) => {
+                            tracing::error!("clan profile save failed: {msg}");
+                            format!(
+                                "{} {}",
+                                mezon_i18n::t(&locale, "setting.clanProfile.saveFailed"),
+                                msg
+                            )
+                        }
+                    };
                     Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
                 }
                 AccountEvent::ClanProfileLoadFailed(msg) => {
@@ -284,18 +308,45 @@ impl ClanProfileSection {
         if state.saving || state.duplicate_error {
             return;
         }
+
+        let nick_changed = state.nick_name != state.original_nick_name;
+        let avatar_changed = state.avatar_url != state.original_avatar_url;
+
+        let nick_name = if nick_changed {
+            match prepare_clan_nickname_for_update(&state.nick_name) {
+                Ok(Some(prepared)) => {
+                    state.nick_name = prepared.clone().into();
+                    Some(prepared)
+                }
+                Ok(None) => None,
+                Err(_) => {
+                    let locale = self.settings.read(cx).language.clone();
+                    let message = mezon_i18n::t(&locale, "setting.clanProfile.invalidNickname");
+                    Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
         state.saving = true;
         cx.notify();
 
         let clan_id: String = state.selected_clan_id.to_string();
-        let nick_name: String = state.nick_name.to_string();
-        let avatar_url: Option<String> = state.avatar_url.as_ref().map(|s| s.to_string());
+        let avatar_url = if avatar_changed {
+            state.avatar_url.as_ref().map(|s| s.to_string())
+        } else {
+            None
+        };
 
         AccountStore::global(cx).update(cx, |store, cx| {
             store.save_clan_profile(
                 clan_id.parse().unwrap_or_default(),
                 nick_name,
                 avatar_url,
+                nick_changed,
+                avatar_changed,
                 cx,
             );
         });

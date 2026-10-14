@@ -715,6 +715,13 @@ pub struct MessagesStore {
 /// (React `MAX_FORWARD_MESSAGE_LENGTH`).
 pub const MAX_FORWARD_MESSAGE_LENGTH: usize = 2000;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardStart {
+    Started,
+    NotStarted,
+    PayloadTooLarge,
+}
+
 /// A forward destination. A friend has no channel yet — the DM is created on
 /// send (React `createDirectMessageWithUser`).
 #[derive(Debug, Clone)]
@@ -4488,21 +4495,22 @@ impl MessagesStore {
     /// the copies land in order (React awaits each `forwardToSingleDestination`).
     /// The note rides along after the last message of each destination.
     ///
-    /// Returns `false` when nothing was started — the caller must not enter a
-    /// "sending" state it would never be released from, since `ForwardProgress`
-    /// / `ForwardFinished` are only emitted for a send that actually began.
+    /// Returns [`ForwardStart::NotStarted`] or [`ForwardStart::PayloadTooLarge`]
+    /// when nothing was started — the caller must not enter a "sending" state it
+    /// would never be released from, since `ForwardProgress` / `ForwardFinished`
+    /// are only emitted for a send that actually began.
     pub fn forward(
         &mut self,
         messages: Vec<MessageRef>,
         targets: Vec<ForwardTarget>,
         note: Option<String>,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> ForwardStart {
         if messages.is_empty() || targets.is_empty() || self.forward_in_flight {
-            return false;
+            return ForwardStart::NotStarted;
         }
         let Some(source_channel_id) = self.active_channel_id else {
-            return false;
+            return ForwardStart::NotStarted;
         };
         let sources: Vec<ForwardSource> = messages
             .iter()
@@ -4510,13 +4518,22 @@ impl MessagesStore {
             .map(forward_source)
             .collect();
         if sources.is_empty() {
-            return false;
+            return ForwardStart::NotStarted;
         }
+        if sources.iter().any(|source| {
+            mezon_client::transport::forward_blocked_for_realtime(
+                &source.content_raw,
+                &source.text,
+                &source.attachments,
+                &source.mentions,
+            )
+        }) {
+            return ForwardStart::PayloadTooLarge;
+        }
+        let api = self.api.clone();
         let note = note
             .map(|n| n.trim().to_string())
             .filter(|n| !n.is_empty() && n.chars().count() <= MAX_FORWARD_MESSAGE_LENGTH);
-
-        let api = self.api.clone();
         let total = targets.len();
         start_target_clan_joins(&targets, cx);
         self.forward_in_flight = true;
@@ -4552,7 +4569,7 @@ impl MessagesStore {
             });
         });
         self.forward_task = Some(task);
-        true
+        ForwardStart::Started
     }
 
     /// Re-run the presign gate so attachments whose upload never completed are
@@ -4772,10 +4789,19 @@ impl MessagesStore {
             let probes = due.into_iter().enumerate().map(|(index, url)| {
                 let nonce = unix_now_seconds() as u64 ^ ((index as u64) << 32);
                 async move {
-                    let exists = mezon_client::transport_runtime::object_exists(
+                    let mut exists = mezon_client::transport_runtime::object_exists(
                         &presign_probe_url(&url, nonce),
                     )
                     .await;
+                    if !exists
+                        && let Some(playlist) =
+                            mezon_client::video_source::master_playlist_url(&url)
+                    {
+                        exists = mezon_client::transport_runtime::object_exists(
+                            &presign_probe_url(&playlist, nonce),
+                        )
+                        .await;
+                    }
                     tracing::debug!(url = %url, exists, "presign probe");
                     exists.then_some(url)
                 }
@@ -11620,7 +11646,7 @@ mod tests {
                     cx,
                 )
             });
-            assert!(started);
+            assert_eq!(started, ForwardStart::Started);
             let channels = channels.read(cx);
             assert!(
                 channels.is_loading_clan(ClanId(2)) && channels.is_loading_clan(ClanId(3)),
@@ -13112,6 +13138,61 @@ mod tests {
         assert_eq!(source.mentions[0].user_id, "77");
         assert_eq!(source.mentions[0].s, 4);
         assert_eq!(source.mentions[0].e, 8);
+    }
+
+    #[gpui::test]
+    fn forward_returns_payload_too_large_for_inline_data_attachment(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                store.activate(ClanId(1), ChannelId(10), true, false, 1, 2, cx);
+                let mut msg = Message::new(MessageId(1), "report", "w1", "hook", 100);
+                msg.raw_content = Some(r#"{"t":"report"}"#.into());
+                msg.attachments = vec![MessageAttachment {
+                    url: "data:image/png;base64,YWJj".into(),
+                    filename: "chart.png".into(),
+                    filetype: "image/png".into(),
+                    ..Default::default()
+                }];
+                store.set_channel(ChannelId(10), vec![msg]);
+                assert!(!store.is_forwarding());
+                let started = store.forward(
+                    vec![MessageRef {
+                        bucket: ChannelId(10),
+                        id: MessageId(1),
+                    }],
+                    vec![channel_target(ClanId(2))],
+                    None,
+                    cx,
+                );
+                assert_eq!(started, ForwardStart::PayloadTooLarge);
+                assert!(!store.is_forwarding());
+            });
+        });
+    }
+
+    #[test]
+    fn forward_preflight_uses_shared_realtime_size_estimate() {
+        let mut msg = Message::new(MessageId(1), "report", "w1", "hook", 100);
+        msg.raw_content = Some(r#"{"t":"report"}"#.into());
+        msg.attachments = vec![MessageAttachment {
+            url: "đường.png".into(),
+            filename: "chart.png".into(),
+            filetype: "image/png".into(),
+            ..Default::default()
+        }];
+        let source = forward_source(&msg);
+        let message = mezon_client::transport::build_forward_channel_message_send(
+            1,
+            1,
+            &source.content_raw,
+            &source.text,
+            false,
+            2,
+            &source.attachments,
+            &source.mentions,
+        );
+        assert!(!mezon_client::transport::forward_blocked_for_realtime_message(&message));
     }
 
     #[test]

@@ -24,6 +24,7 @@ pub mod tls_crypto;
 pub mod transport;
 pub mod transport_adapter;
 pub mod transport_runtime;
+pub mod video_source;
 
 pub use abridged_tcp_adapter::AbridgedTcpAdapter;
 pub use app_api::{
@@ -38,7 +39,9 @@ pub use attachment_download::{
 pub use auth::QrLoginId;
 pub use auth::SessionProbe;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
-pub use auth::{HealthyEndpointStatusError, MezonClient};
+pub use auth::{
+    HealthyEndpointStatusError, MeetLinkRejected, MezonClient, is_meeting_code, meeting_room_id,
+};
 pub use channel_app_launch::{ChannelAppLaunchParams, build_channel_app_url, encode_url_param};
 pub use endpoint_health::{EndpointHealth, RealtimeEndpoint};
 pub use gotify::{GotifyExtras, GotifyNotification, StreamEnd};

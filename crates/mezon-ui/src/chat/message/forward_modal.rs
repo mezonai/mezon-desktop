@@ -957,16 +957,29 @@ impl ForwardMessageModal {
             (!value.is_empty()).then_some(value)
         };
         let ids = self.sources.clone();
+        use mezon_store::ForwardStart;
         let started =
             MessagesStore::global(cx).update(cx, |store, cx| store.forward(ids, targets, note, cx));
-        if !started {
-            let locale = self.locale.clone();
-            cx.defer(move |cx| {
-                Shell::global(cx).update(cx, |shell, cx| {
-                    shell.error(mezon_i18n::t(&locale, "forwardMessage.errorMessage"), cx);
+        match started {
+            ForwardStart::Started => {}
+            ForwardStart::PayloadTooLarge => {
+                let locale = self.locale.clone();
+                cx.defer(move |cx| {
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.error(mezon_i18n::t(&locale, "forwardMessage.payloadTooLarge"), cx);
+                    });
                 });
-            });
-            return;
+                return;
+            }
+            ForwardStart::NotStarted => {
+                let locale = self.locale.clone();
+                cx.defer(move |cx| {
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.error(mezon_i18n::t(&locale, "forwardMessage.errorMessage"), cx);
+                    });
+                });
+                return;
+            }
         }
         self.submitting = true;
         self.progress = None;

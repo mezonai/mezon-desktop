@@ -99,6 +99,28 @@ pub fn is_clan_invite_url(url: &str, internal_domain: Option<&str>) -> bool {
         })
 }
 
+pub fn internal_meeting_code(url: &str, internal_domain: Option<&str>) -> Option<String> {
+    let (Some(host), Some(internal)) = (host_of(url), normalized_internal_domain(internal_domain))
+    else {
+        return None;
+    };
+    if host.trim_start_matches("www.") != internal {
+        return None;
+    }
+    let parsed = url::Url::parse(url.trim()).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let mut segments = parsed
+        .path_segments()?
+        .filter(|segment| !segment.is_empty());
+    let (Some("meeting"), Some(code), None) = (segments.next(), segments.next(), segments.next())
+    else {
+        return None;
+    };
+    mezon_client::meeting_room_id(code).map(|_| code.to_string())
+}
+
 fn normalized_internal_domain(internal_domain: Option<&str>) -> Option<String> {
     let internal = internal_domain?
         .trim()
@@ -149,6 +171,45 @@ fn host_matches(host: &str, domain: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MEETING_CODE: &str = "MTc2MDQzMjcxOTAwMDAwMDAwMDoxOTc3NTY0MTg3MzY0ODk2NzY4.c2ln";
+
+    #[test]
+    fn a_meeting_link_on_our_own_host_yields_its_code() {
+        for url in [
+            format!("https://mezon.ai/meeting/{MEETING_CODE}"),
+            format!("https://www.mezon.ai/meeting/{MEETING_CODE}/"),
+            format!("http://MEZON.ai/meeting/{MEETING_CODE}?from=chat"),
+        ] {
+            assert_eq!(
+                internal_meeting_code(&url, Some("https://mezon.ai")).as_deref(),
+                Some(MEETING_CODE),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_meeting_path_anywhere_else_is_an_ordinary_link() {
+        for url in [
+            format!("https://evil.example/meeting/{MEETING_CODE}"),
+            format!("https://app.mezon.ai/meeting/{MEETING_CODE}"),
+            format!("https://mezon.ai/chat/meeting/{MEETING_CODE}"),
+            format!("https://mezon.ai/meeting/{MEETING_CODE}/extra"),
+            "https://mezon.ai/meeting/not-a-code".to_string(),
+            "https://mezon.ai/meeting/".to_string(),
+        ] {
+            assert_eq!(
+                internal_meeting_code(&url, Some("https://mezon.ai")),
+                None,
+                "{url}"
+            );
+        }
+        assert_eq!(
+            internal_meeting_code(&format!("https://mezon.ai/meeting/{MEETING_CODE}"), None),
+            None
+        );
+    }
 
     #[test]
     fn picks_first_plain_url() {

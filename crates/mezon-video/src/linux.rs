@@ -26,10 +26,64 @@ fn ensure_gstreamer() -> Result<(), PlayerError> {
     }
 }
 
+const PLUGIN_INSTALL_COMMANDS: [(&str, &str); 4] = [
+    (
+        "/usr/bin/apt-get",
+        "sudo apt install gstreamer1.0-plugins-bad gstreamer1.0-libav",
+    ),
+    (
+        "/usr/bin/dnf",
+        "sudo dnf install gstreamer1-plugins-bad-free gstreamer1-plugin-libav gstreamer1-plugin-openh264",
+    ),
+    (
+        "/usr/bin/pacman",
+        "sudo pacman -S gst-plugins-bad gst-libav",
+    ),
+    (
+        "/usr/bin/zypper",
+        "sudo zypper install gstreamer-plugins-bad gstreamer-plugins-libav",
+    ),
+];
+
+pub fn plugin_install_command() -> Option<&'static str> {
+    PLUGIN_INSTALL_COMMANDS
+        .iter()
+        .find(|(manager, _)| std::path::Path::new(manager).exists())
+        .map(|(_, command)| *command)
+}
+
+fn plugin_install_hint() -> String {
+    let commands: Vec<&str> = PLUGIN_INSTALL_COMMANDS
+        .iter()
+        .map(|(_, command)| *command)
+        .collect();
+    format!("install the plugins with one of: {}", commands.join(" | "))
+}
+
+fn is_missing_video_decoder(structure: &gst::StructureRef) -> bool {
+    structure.name() == "missing-plugin"
+        && structure
+            .get::<&str>("type")
+            .is_ok_and(|kind| kind == "decoder")
+        && structure.get::<gst::Caps>("detail").is_ok_and(|caps| {
+            caps.structure(0)
+                .is_some_and(|caps| caps.name().starts_with("video/"))
+        })
+}
+
+pub fn rescan_plugins() {
+    if ensure_gstreamer().is_ok()
+        && let Err(error) = gst::Registry::update()
+    {
+        tracing::warn!(target: "mezon_video", %error, "gstreamer plugin rescan failed");
+    }
+}
+
 pub struct PlayerImpl {
     playbin: gst::Element,
     appsink: gst_app::AppSink,
     failed: Cell<bool>,
+    missing_plugin: Cell<bool>,
 }
 
 impl PlayerImpl {
@@ -38,6 +92,10 @@ impl PlayerImpl {
             return Err(PlayerError::InvalidUrl);
         }
         ensure_gstreamer()?;
+        if gst::ElementFactory::find("playbin").is_none() {
+            tracing::warn!(target: "mezon_video", "gstreamer playbin is missing; {}", plugin_install_hint());
+            return Err(PlayerError::MissingPlugin);
+        }
         Self::build(url, max_size).map_err(|error| {
             tracing::warn!(target: "mezon_video", %error, "failed to build gstreamer pipeline");
             PlayerError::Open
@@ -69,6 +127,7 @@ impl PlayerImpl {
             playbin,
             appsink,
             failed: Cell::new(false),
+            missing_plugin: Cell::new(false),
         })
     }
 
@@ -77,6 +136,11 @@ impl PlayerImpl {
             while let Some(message) = bus.pop() {
                 match message.view() {
                     gst::message::MessageView::Error(error) => self.note_error(error),
+                    gst::message::MessageView::Element(element)
+                        if element.structure().is_some_and(is_missing_video_decoder) =>
+                    {
+                        self.note_missing_video_decoder();
+                    }
                     gst::message::MessageView::Eos(_) => {
                         let _ = self.playbin.set_state(gst::State::Paused);
                     }
@@ -87,9 +151,24 @@ impl PlayerImpl {
     }
 
     fn note_error(&self, error: &gst::message::Error) {
+        if error.error().matches(gst::CoreError::MissingPlugin) {
+            self.missing_plugin.set(true);
+        }
         if !self.failed.replace(true) {
             log_pipeline_error(error, "playback");
         }
+    }
+
+    fn note_missing_video_decoder(&self) {
+        self.missing_plugin.set(true);
+        if !self.failed.replace(true) {
+            tracing::warn!(target: "mezon_video", "no gstreamer video decoder for this video; {}", plugin_install_hint());
+        }
+    }
+
+    pub fn missing_plugin(&self) -> bool {
+        self.drain_bus();
+        self.missing_plugin.get()
     }
 
     pub fn copy_frame(&self) -> Option<VideoFrame> {
@@ -125,6 +204,7 @@ impl PlayerImpl {
 
     pub fn is_playing(&self) -> bool {
         self.playbin.current_state() == gst::State::Playing
+            || self.playbin.pending_state() == gst::State::Playing
     }
 
     pub fn current_time(&self) -> f64 {
@@ -282,11 +362,7 @@ fn log_pipeline_error(error: &gst::message::Error, what: &str) {
         "gstreamer {what} failed"
     );
     if error.error().matches(gst::CoreError::MissingPlugin) {
-        tracing::warn!(
-            target: "mezon_video",
-            "no gstreamer decoder installed for this video: install gstreamer1.0-libav \
-             (Debian/Ubuntu), gstreamer1-plugin-libav (Fedora) or gst-libav (Arch)"
-        );
+        tracing::warn!(target: "mezon_video", "no gstreamer plugin installed for this video; {}", plugin_install_hint());
     }
 }
 

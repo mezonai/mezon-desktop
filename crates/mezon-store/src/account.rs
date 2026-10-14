@@ -6,7 +6,9 @@ use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::transport::ApiAccount;
 use mezon_client::transport::LinkPhoneError;
-use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent, RegistrationPasswordError};
+use mezon_client::{
+    AppApi, ConnectionStatus, RealtimeEvent, RegistrationPasswordError, api_status_from_error,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::Freshness;
@@ -71,7 +73,7 @@ pub enum AccountEvent {
     ClanProfileLoaded,
     ClanProfileLoadFailed(String),
     ClanProfileSaved,
-    ClanProfileSaveFailed(String),
+    ClanProfileSaveFailed(ClanProfileSaveError),
     NicknameDuplicateChecked(bool),
     StatusUpdated,
     AccountDeleted,
@@ -86,6 +88,13 @@ pub enum AccountEvent {
 pub enum PhoneLinkError {
     AlreadyLinkedToAnother,
     Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClanProfileSaveError {
+    DuplicateNickname,
+    Api(u32),
+    Other(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -893,34 +902,48 @@ impl AccountStore {
     pub fn save_clan_profile(
         &mut self,
         clan_id: ClanId,
-        nick_name: String,
+        nick_name: Option<String>,
         avatar_url: Option<String>,
+        nick_changed: bool,
+        avatar_changed: bool,
         cx: &mut Context<Self>,
     ) {
         let api = self.api.clone();
+        let nick_for_store = nick_name.clone();
         cx.spawn(async move |this, cx| {
             match api
                 .update_user_clan_profile(
                     clan_id.get(),
-                    &nick_name,
-                    Some(avatar_url.as_deref().unwrap_or_default()),
+                    nick_name.as_deref(),
+                    avatar_url.as_deref(),
                 )
                 .await
             {
                 Ok(()) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.clan_profile = Some(UserClanProfile {
-                            clan_id,
-                            nick_name: nick_name.clone(),
-                            avatar_url: avatar_url.clone(),
-                        });
+                        if this.clan_profile.as_ref().map(|p| p.clan_id) == Some(clan_id) {
+                            let mut profile = this.clan_profile.take().unwrap_or(UserClanProfile {
+                                clan_id,
+                                nick_name: String::new(),
+                                avatar_url: None,
+                            });
+                            if let Some(nick) = nick_for_store {
+                                profile.nick_name = nick;
+                            }
+                            if avatar_changed {
+                                profile.avatar_url = avatar_url.clone();
+                            }
+                            this.clan_profile = Some(profile);
+                        }
                         cx.emit(AccountEvent::ClanProfileSaved);
                         cx.notify();
                     });
                 }
                 Err(e) => {
+                    tracing::error!("save clan profile failed: {e:#}");
+                    let mapped = map_clan_profile_save_error(e, nick_changed, avatar_changed);
                     let _ = this.update(cx, |_, cx| {
-                        cx.emit(AccountEvent::ClanProfileSaveFailed(e.to_string()));
+                        cx.emit(AccountEvent::ClanProfileSaveFailed(mapped));
                         cx.notify();
                     });
                 }
@@ -950,6 +973,20 @@ impl AccountStore {
         })
         .detach();
     }
+}
+
+fn map_clan_profile_save_error(
+    err: anyhow::Error,
+    nick_changed: bool,
+    avatar_changed: bool,
+) -> ClanProfileSaveError {
+    if let Some(status) = api_status_from_error(&err) {
+        if status.is_invalid_argument() && nick_changed && !avatar_changed {
+            return ClanProfileSaveError::DuplicateNickname;
+        }
+        return ClanProfileSaveError::Api(status.code);
+    }
+    ClanProfileSaveError::Other(err.to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1293,5 +1330,32 @@ mod tests {
         });
         assert_eq!(acct.user_id, 1);
         assert_eq!(acct.display_name, "alice");
+    }
+
+    #[test]
+    fn clan_profile_save_error_maps_invalid_argument_with_nick_only_change_to_duplicate() {
+        let err = mezon_client::ApiStatusError { code: 3 }.into();
+        assert_eq!(
+            map_clan_profile_save_error(err, true, false),
+            ClanProfileSaveError::DuplicateNickname
+        );
+    }
+
+    #[test]
+    fn clan_profile_save_error_maps_invalid_argument_with_avatar_change_to_api_code() {
+        let err = mezon_client::ApiStatusError { code: 3 }.into();
+        assert_eq!(
+            map_clan_profile_save_error(err, false, true),
+            ClanProfileSaveError::Api(3)
+        );
+    }
+
+    #[test]
+    fn clan_profile_save_error_maps_internal_to_api_code() {
+        let err = mezon_client::ApiStatusError { code: 13 }.into();
+        assert_eq!(
+            map_clan_profile_save_error(err, true, false),
+            ClanProfileSaveError::Api(13)
+        );
     }
 }

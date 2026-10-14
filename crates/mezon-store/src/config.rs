@@ -479,6 +479,11 @@ impl AppConfig {
         }
     }
 
+    pub fn meeting_link(&self, code: &str) -> String {
+        let base = self.domain_url.trim_end_matches('/');
+        format!("{base}/meeting/{code}")
+    }
+
     pub fn channel_link(&self, clan_id: &str, channel_id: &str) -> String {
         let base = self.redirect_uri.trim_end_matches('/');
         format!("{base}/chat/clans/{clan_id}/channels/{channel_id}")

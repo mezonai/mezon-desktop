@@ -660,7 +660,7 @@ impl Render for RootView {
     }
 }
 
-fn voice_hold_to_talk(active: bool, window: &Window, cx: &mut App) {
+pub(crate) fn voice_hold_to_talk(active: bool, window: &Window, cx: &mut App) {
     let typing = active
         && window.context_stack().iter().any(|context| {
             context.contains(crate::components::primitives::text_actions::TEXT_INPUT_CONTEXT)

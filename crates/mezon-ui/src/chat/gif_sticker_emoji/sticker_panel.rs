@@ -285,6 +285,7 @@ impl Render for StickerPanel {
                     .items_center()
                     .justify_center()
                     .size(px(36.))
+                    .flex_shrink_0()
                     .rounded_lg()
                     .cursor_pointer()
                     .overflow_hidden();

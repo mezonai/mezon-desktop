@@ -7,7 +7,7 @@ use gpui::{
     StyleRefinement, Subscription, Task, WeakEntity, Window, div, img, prelude::*, px, rgb, rgba,
 };
 use mezon_store::{
-    ActivityStripDismissal, BadgeService, BannedUsersStore, ChannelId, ChannelList,
+    ActivityStripDismissal, BadgeService, BannedUsersStore, ChannelEvent, ChannelId, ChannelList,
     ChannelPermissionsStore, ClanId, ClanList, DirectEvent, DirectKind, DirectMessageStore,
     FriendEvent, FriendStore, InVoiceInfo, MessageId, MessagesEvent, MessagesStore,
     OnboardingStore, PERMISSION_SEND_MESSAGE, PinnedMessagesStore, ProfileContext, Settings,
@@ -33,7 +33,8 @@ use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::chat::user_profile_popover::UserProfilePopover;
 use crate::components::compositions::channel_row::ChannelIcon;
 use crate::components::primitives::{
-    Avatar, Button, ButtonVariants, Icon, IconName, InputState, Sizable, Size, h_flex, v_flex,
+    Avatar, Button, ButtonVariants, Icon, IconName, InputState, Sizable, Size, h_flex,
+    mention_count_badge, v_flex,
 };
 use crate::image_cache::LruImageCache;
 use crate::router::{Route, Router, navigate};
@@ -309,12 +310,31 @@ struct ActivityStripContext {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ActivityStripGeneration {
     newest_topic_id: Option<i64>,
+    newest_topic_timestamp: u32,
     pin_record_ids: Vec<i64>,
+}
+
+fn topic_strip_badge_state(
+    latest_sender_id: Option<UserId>,
+    current_user_id: UserId,
+    server_unread: bool,
+    server_badge_count: u32,
+    realtime_unread: bool,
+    realtime_badge_count: u32,
+) -> (bool, u32) {
+    if latest_sender_id == Some(current_user_id) {
+        return (false, 0);
+    }
+    (
+        server_unread || realtime_unread,
+        server_badge_count.max(realtime_badge_count),
+    )
 }
 
 impl ActivityStripGeneration {
     fn has_new_activity_since(&self, previous: &Self) -> bool {
         self.newest_topic_id > previous.newest_topic_id
+            || self.newest_topic_timestamp > previous.newest_topic_timestamp
             || self
                 .pin_record_ids
                 .iter()
@@ -339,6 +359,7 @@ fn persisted_activity_strip_generation(
     pin_record_ids.dedup();
     Some(ActivityStripGeneration {
         newest_topic_id: dismissal.newest_topic_id,
+        newest_topic_timestamp: dismissal.newest_topic_timestamp,
         pin_record_ids,
     })
 }
@@ -352,6 +373,7 @@ fn persisted_activity_strip_dismissal(
         clan_id: context.clan_id.get(),
         channel_id: context.channel_id.get(),
         newest_topic_id: generation.newest_topic_id,
+        newest_topic_timestamp: generation.newest_topic_timestamp,
         pin_record_ids: generation.pin_record_ids.clone(),
     }
 }
@@ -364,32 +386,37 @@ mod activity_strip_generation_tests {
     fn unchanged_generation_stays_dismissed() {
         let generation = ActivityStripGeneration {
             newest_topic_id: Some(10),
+            newest_topic_timestamp: 100,
             pin_record_ids: vec![30],
         };
         assert!(!generation.has_new_activity_since(&generation));
     }
 
     #[test]
-    fn reply_in_existing_topic_does_not_restore_strip() {
+    fn reply_in_existing_topic_restores_strip() {
         let dismissed = ActivityStripGeneration {
             newest_topic_id: Some(10),
+            newest_topic_timestamp: 100,
             pin_record_ids: Vec::new(),
         };
         let after_reply = ActivityStripGeneration {
             newest_topic_id: Some(10),
+            newest_topic_timestamp: 101,
             pin_record_ids: Vec::new(),
         };
-        assert!(!after_reply.has_new_activity_since(&dismissed));
+        assert!(after_reply.has_new_activity_since(&dismissed));
     }
 
     #[test]
     fn new_topic_restores_strip() {
         let dismissed = ActivityStripGeneration {
             newest_topic_id: Some(20),
+            newest_topic_timestamp: 100,
             pin_record_ids: Vec::new(),
         };
         let current = ActivityStripGeneration {
             newest_topic_id: Some(21),
+            newest_topic_timestamp: 100,
             pin_record_ids: Vec::new(),
         };
         assert!(current.has_new_activity_since(&dismissed));
@@ -399,10 +426,12 @@ mod activity_strip_generation_tests {
     fn new_pin_restores_strip() {
         let dismissed = ActivityStripGeneration {
             newest_topic_id: None,
+            newest_topic_timestamp: 0,
             pin_record_ids: vec![30],
         };
         let current = ActivityStripGeneration {
             newest_topic_id: None,
+            newest_topic_timestamp: 0,
             pin_record_ids: vec![5, 30],
         };
         assert!(current.has_new_activity_since(&dismissed));
@@ -412,10 +441,12 @@ mod activity_strip_generation_tests {
     fn topic_created_from_an_older_message_restores_strip() {
         let dismissed = ActivityStripGeneration {
             newest_topic_id: Some(300),
+            newest_topic_timestamp: 100,
             pin_record_ids: Vec::new(),
         };
         let current = ActivityStripGeneration {
             newest_topic_id: Some(301),
+            newest_topic_timestamp: 100,
             pin_record_ids: Vec::new(),
         };
         assert!(current.has_new_activity_since(&dismissed));
@@ -425,10 +456,12 @@ mod activity_strip_generation_tests {
     fn refetching_the_same_pin_does_not_restore_strip() {
         let dismissed = ActivityStripGeneration {
             newest_topic_id: None,
+            newest_topic_timestamp: 0,
             pin_record_ids: vec![30],
         };
         let current = ActivityStripGeneration {
             newest_topic_id: None,
+            newest_topic_timestamp: 0,
             pin_record_ids: vec![30],
         };
         assert!(!current.has_new_activity_since(&dismissed));
@@ -438,6 +471,7 @@ mod activity_strip_generation_tests {
     fn removing_activity_does_not_restore_strip() {
         let dismissed = ActivityStripGeneration {
             newest_topic_id: Some(10),
+            newest_topic_timestamp: 100,
             pin_record_ids: vec![30],
         };
         assert!(!ActivityStripGeneration::default().has_new_activity_since(&dismissed));
@@ -447,10 +481,12 @@ mod activity_strip_generation_tests {
     fn repinning_the_same_message_restores_strip() {
         let dismissed = ActivityStripGeneration {
             newest_topic_id: None,
+            newest_topic_timestamp: 0,
             pin_record_ids: vec![30],
         };
         let repinned = ActivityStripGeneration {
             newest_topic_id: None,
+            newest_topic_timestamp: 0,
             pin_record_ids: vec![31],
         };
         assert!(repinned.has_new_activity_since(&dismissed));
@@ -465,6 +501,7 @@ mod activity_strip_generation_tests {
         };
         let generation = ActivityStripGeneration {
             newest_topic_id: Some(10),
+            newest_topic_timestamp: 100,
             pin_record_ids: vec![20],
         };
         let mut settings = Settings::default();
@@ -487,6 +524,24 @@ mod activity_strip_generation_tests {
             None
         );
     }
+
+    #[test]
+    fn own_latest_topic_message_never_shows_unread_or_badge() {
+        let current_user = UserId::new(7);
+        assert_eq!(
+            topic_strip_badge_state(Some(current_user), current_user, true, 3, true, 2),
+            (false, 0)
+        );
+    }
+
+    #[test]
+    fn topic_badge_state_combines_server_and_realtime_sources() {
+        let current_user = UserId::new(7);
+        assert_eq!(
+            topic_strip_badge_state(Some(UserId::new(8)), current_user, false, 1, true, 2,),
+            (true, 2)
+        );
+    }
 }
 
 fn active_activity_strip_context(cx: &App) -> Option<ActivityStripContext> {
@@ -507,11 +562,9 @@ fn active_activity_strip_context(cx: &App) -> Option<ActivityStripContext> {
 fn activity_strip_generation(
     context: ActivityStripContext,
     cx: &App,
-) -> Option<ActivityStripGeneration> {
+) -> Option<(ActivityStripGeneration, Option<TopicDiscussion>)> {
     let clan_id = context.clan_id.to_string();
-    let channel_id = context.channel_id.to_string();
     let topics = TopicsStore::global(cx).read(cx);
-    let messages = MessagesStore::global(cx).read(cx);
     let pinned = PinnedMessagesStore::global(cx).read(cx);
 
     if !topics.is_ready_for(&clan_id) || !pinned.is_loaded_for(context.clan_id, context.channel_id)
@@ -519,23 +572,7 @@ fn activity_strip_generation(
         return None;
     }
 
-    let stored_topic_id = topics
-        .topics_for(&clan_id)
-        .iter()
-        .filter(|topic| topic.channel_id == channel_id)
-        .filter_map(|topic| topic.id.parse::<i64>().ok())
-        .max();
-    let buffered_topic_id = (messages.active_clan_id() == Some(context.clan_id)
-        && messages.active_channel_id() == Some(context.channel_id))
-    .then(|| {
-        messages
-            .messages()
-            .iter()
-            .filter_map(|message| message.topic_id)
-            .map(ChannelId::get)
-            .max()
-    })
-    .flatten();
+    let latest_topic = latest_activity_topic(&clan_id, cx);
     let mut pin_record_ids = if pinned.clan_id() == Some(context.clan_id)
         && pinned.channel_id() == Some(context.channel_id)
     {
@@ -550,25 +587,35 @@ fn activity_strip_generation(
     pin_record_ids.sort_unstable();
     pin_record_ids.dedup();
 
-    Some(ActivityStripGeneration {
-        newest_topic_id: stored_topic_id.max(buffered_topic_id),
-        pin_record_ids,
-    })
+    Some((
+        ActivityStripGeneration {
+            newest_topic_id: latest_topic
+                .as_ref()
+                .and_then(|topic| topic.id.parse::<i64>().ok()),
+            newest_topic_timestamp: latest_topic
+                .as_ref()
+                .map(|topic| topic.last_message_timestamp)
+                .unwrap_or_default(),
+            pin_record_ids,
+        },
+        latest_topic,
+    ))
 }
 
 /// Compact activity rail owned by the message column (never the member/topic sidebars).
 fn latest_activity_strip(
     locale: &str,
-    clan_id: &str,
+    latest_topic: Option<TopicDiscussion>,
     context: ActivityStripContext,
     generation: ActivityStripGeneration,
+    topic_has_persisted_unread: bool,
+    topic_badge_count: u32,
     strip: WeakEntity<LatestActivityStripView>,
     cx: &mut App,
 ) -> gpui::AnyElement {
     let messages_store = MessagesStore::global(cx);
     let messages = messages_store.read(cx);
     let active_channel_id = messages.active_channel_id();
-    let latest_topic = latest_activity_topic(clan_id, cx);
     let plain_topic_content = |content: &str| match mezon_client::topic_reply_preview(content) {
         mezon_client::TopicReplyPreview::Text(text) => Some(text),
         _ => None,
@@ -677,16 +724,10 @@ fn latest_activity_strip(
     let pinned_store = PinnedMessagesStore::global(cx);
     let pinned = pinned_store.read(cx);
     let pin_syncing = pinned.is_loading();
-    let active_clan_id = clan_id.parse::<ClanId>().ok();
+    let active_clan_id = Some(context.clan_id);
     let latest_pin = (pinned.clan_id() == active_clan_id
         && pinned.channel_id() == active_channel_id)
-        .then(|| {
-            pinned
-                .pinned()
-                .iter()
-                .max_by_key(|pin| pin.create_time)
-                .cloned()
-        })
+        .then(|| pinned.pinned().iter().max_by_key(|pin| pin.create_time))
         .flatten();
     let has_topic = latest_topic.is_some();
     let has_pin = latest_pin.is_some();
@@ -696,7 +737,6 @@ fn latest_activity_strip(
 
     let theme = cx.theme();
     let hover = theme.bg_hover;
-
     let topic_title: SharedString = topic_title
         .map(|text| SharedString::from(text.split_whitespace().collect::<Vec<_>>().join(" ")))
         .or_else(|| {
@@ -836,6 +876,7 @@ fn latest_activity_strip(
         // A stable semantic icon avoids remounting an image while clan/topic data resolves.
         .child(
             div()
+                .relative()
                 .flex()
                 .flex_none()
                 .items_center()
@@ -845,6 +886,28 @@ fn latest_activity_strip(
                     Icon::new(IconName::TopicIcon)
                         .size(px(22.))
                         .text_color(theme.interactive_active),
+                )
+                .when(topic_badge_count > 0, |icon| {
+                    icon.child(
+                        mention_count_badge(topic_badge_count)
+                            .absolute()
+                            .top(px(-4.))
+                            .right(px(-4.)),
+                    )
+                })
+                .when(
+                    topic_badge_count == 0 && topic_has_persisted_unread,
+                    |icon| {
+                        icon.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .right_0()
+                                .size(px(7.))
+                                .rounded_full()
+                                .bg(theme.mention_badge),
+                        )
+                    },
                 ),
         )
         .child(
@@ -955,6 +1018,19 @@ fn latest_activity_strip(
         .as_ref()
         .and_then(|pin| pin.message_id.parse::<MessageId>().ok());
     let pin_media = pin_attachment.as_ref().map(|attachment| {
+        if attachment.source_denied
+            || mezon_store::hides_media(&attachment.url, context.channel_id.get())
+        {
+            return div()
+                .flex_none()
+                .size(px(32.))
+                .rounded(px(7.))
+                .overflow_hidden()
+                .child(crate::chat::message::parts::render_private_media_tile(
+                    theme, 32., 32.,
+                ))
+                .into_any_element();
+        }
         if attachment.is_image() {
             let source = if !attachment.thumbnail_proxied.is_empty() {
                 attachment.thumbnail_proxied.clone()
@@ -1216,6 +1292,9 @@ fn latest_activity_strip(
 struct ActivityStripSnapshot {
     context: ActivityStripContext,
     generation: ActivityStripGeneration,
+    latest_topic: Option<TopicDiscussion>,
+    topic_has_persisted_unread: bool,
+    topic_badge_count: u32,
     visible: bool,
 }
 
@@ -1227,6 +1306,8 @@ struct LatestActivityStripView {
     _messages_sub: Subscription,
     _settings_sub: Subscription,
     _badge_sub: Option<Subscription>,
+    _channel_sub: Subscription,
+    _topic_badge_sub: Subscription,
 }
 
 impl LatestActivityStripView {
@@ -1237,17 +1318,48 @@ impl LatestActivityStripView {
         let pinned_sub = cx.observe(&PinnedMessagesStore::global(cx), |this, _, cx| {
             this.refresh_snapshot(cx)
         });
-        let messages_sub = cx.subscribe(&MessagesStore::global(cx), |this, _, event, cx| {
-            if matches!(
-                event,
-                MessagesEvent::Reset { .. } | MessagesEvent::TopicUpdated { .. }
-            ) {
-                this.refresh_snapshot(cx);
-            }
-        });
+        let messages_sub = cx.subscribe(
+            &MessagesStore::global(cx),
+            |this, _, event, cx| match event {
+                MessagesEvent::Reset { .. } | MessagesEvent::TopicUpdated { .. } => {
+                    this.refresh_snapshot(cx)
+                }
+                _ => {}
+            },
+        );
         let settings_sub = cx.observe(&settings, |this, _, cx| this.refresh_snapshot(cx));
         let badge_sub = BadgeService::try_global(cx)
             .map(|badge| cx.observe(&badge, |this, _, cx| this.refresh_snapshot(cx)));
+        let channel_sub = cx.subscribe(&ChannelList::global(cx), |this, _, event, cx| {
+            let relevant = match event {
+                ChannelEvent::Unread(channel_id) => {
+                    this.snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.latest_topic.as_ref())
+                        .and_then(|topic| topic.id.parse::<ChannelId>().ok())
+                        == Some(*channel_id)
+                }
+                ChannelEvent::ClanChannelsLoaded(clan_id) => this
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.context.clan_id == *clan_id),
+                _ => false,
+            };
+            if relevant {
+                this.refresh_snapshot(cx);
+            }
+        });
+        let topic_badge_sub = cx.subscribe(&TopicBadgeStore::global(cx), |this, _, event, cx| {
+            let mezon_store::TopicBadgeEvent::Updated { clan_id } = event;
+            let relevant = clan_id.as_ref().is_none_or(|clan_id| {
+                this.snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.context.clan_id.to_string() == *clan_id)
+            });
+            if relevant {
+                this.refresh_snapshot(cx);
+            }
+        });
         let mut view = Self {
             settings,
             snapshot: None,
@@ -1256,6 +1368,8 @@ impl LatestActivityStripView {
             _messages_sub: messages_sub,
             _settings_sub: settings_sub,
             _badge_sub: badge_sub,
+            _channel_sub: channel_sub,
+            _topic_badge_sub: topic_badge_sub,
         };
         view.refresh_snapshot(cx);
         view
@@ -1268,7 +1382,7 @@ impl LatestActivityStripView {
             }
             return;
         };
-        let Some(generation) = activity_strip_generation(context, cx) else {
+        let Some((generation, latest_topic)) = activity_strip_generation(context, cx) else {
             if self
                 .snapshot
                 .as_ref()
@@ -1279,6 +1393,32 @@ impl LatestActivityStripView {
             }
             return;
         };
+        let (topic_has_persisted_unread, topic_badge_count) = latest_topic
+            .as_ref()
+            .map(|topic| {
+                let server_state = topic
+                    .id
+                    .parse::<ChannelId>()
+                    .ok()
+                    .and_then(|topic_id| {
+                        ChannelList::global(cx)
+                            .read(cx)
+                            .channel(context.clan_id, topic_id)
+                            .map(|channel| (channel.is_unread(), channel.badge_count))
+                    })
+                    .unwrap_or_default();
+                let realtime = TopicBadgeStore::global(cx);
+                let realtime = realtime.read(cx);
+                topic_strip_badge_state(
+                    topic.last_sender_id.parse::<UserId>().ok(),
+                    context.user_id,
+                    server_state.0,
+                    server_state.1,
+                    realtime.topic_has_unread(&topic.id),
+                    realtime.topic_badge_count(&topic.id),
+                )
+            })
+            .unwrap_or_default();
         let persisted = persisted_activity_strip_generation(self.settings.read(cx), context);
         let visible = match persisted {
             Some(previous) if generation.has_new_activity_since(&previous) => {
@@ -1291,6 +1431,9 @@ impl LatestActivityStripView {
         let next = Some(ActivityStripSnapshot {
             context,
             generation,
+            latest_topic,
+            topic_has_persisted_unread,
+            topic_badge_count,
             visible,
         });
         if self.snapshot != next {
@@ -1356,9 +1499,11 @@ impl Render for LatestActivityStripView {
         }
         latest_activity_strip(
             &locale,
-            &snapshot.context.clan_id.to_string(),
+            snapshot.latest_topic,
             snapshot.context,
             snapshot.generation,
+            snapshot.topic_has_persisted_unread,
+            snapshot.topic_badge_count,
             cx.weak_entity(),
             cx,
         )

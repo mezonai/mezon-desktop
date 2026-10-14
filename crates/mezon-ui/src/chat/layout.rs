@@ -1540,7 +1540,6 @@ impl ChatLayout {
     }
 
     fn sync_voice_frame_pump(&mut self, cx: &mut Context<Self>) {
-        const VOICE_FRAME_FALLBACK: std::time::Duration = std::time::Duration::from_millis(200);
         let want_pump =
             self.is_voice_frame_relevant(cx) && self.voice_store.read(cx).has_active_video();
         if !want_pump {
@@ -1550,42 +1549,7 @@ impl ChatLayout {
         if self._voice_frame_pump.is_some() {
             return;
         }
-        self._voice_frame_pump = Some(cx.spawn(async move |this, cx| {
-            let mut last_seq = 0u64;
-            loop {
-                let store =
-                    match this.update(cx, |_, cx| VoiceStore::global(cx).read(cx).frame_store()) {
-                        Ok(store) => store,
-                        Err(_) => break,
-                    };
-                let Some(store) = store else {
-                    cx.background_executor().timer(VOICE_FRAME_FALLBACK).await;
-                    continue;
-                };
-                let mut rx = store.frame_watch();
-                loop {
-                    let seq = store.publish_seq();
-                    if seq != last_seq {
-                        last_seq = seq;
-                        if this.update(cx, |_, cx| cx.notify()).is_err() {
-                            return;
-                        }
-                    }
-                    let frame_published = {
-                        let changed = std::pin::pin!(rx.changed());
-                        let fallback =
-                            std::pin::pin!(cx.background_executor().timer(VOICE_FRAME_FALLBACK));
-                        matches!(
-                            futures::future::select(changed, fallback).await,
-                            futures::future::Either::Left((Ok(()), _))
-                        )
-                    };
-                    if !frame_published {
-                        break;
-                    }
-                }
-            }
-        }));
+        self._voice_frame_pump = Some(crate::chat::voice::spawn_voice_frame_pump(cx));
     }
 
     fn sync_stream_session(&mut self, cx: &mut Context<Self>) {
@@ -1708,6 +1672,46 @@ impl ChatLayout {
             noise_suppression_status: store.noise_suppression_status(),
         });
         true
+    }
+}
+
+impl crate::chat::voice::CallLayoutHost for ChatLayout {
+    fn record_voice_grid_size(&mut self, size: Size<Pixels>, cx: &mut Context<Self>) {
+        if self.voice_grid_size != size {
+            self.voice_grid_size = size;
+            cx.notify();
+        }
+    }
+
+    fn scroll_voice_grid_page(&mut self, delta: f32, total_pages: usize, cx: &mut Context<Self>) {
+        let page = crate::chat::voice::next_voice_grid_page(
+            self.voice_grid_page,
+            &mut self.voice_grid_wheel_accum,
+            delta,
+            total_pages,
+        );
+        if page != self.voice_grid_page {
+            self.voice_grid_page = page;
+            cx.notify();
+        }
+    }
+
+    fn record_voice_strip_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
+        if (self.voice_strip_width - width).abs() > px(0.5) {
+            self.voice_strip_width = width;
+            cx.notify();
+        }
+    }
+
+    fn toggle_voice_member_strip(&mut self, cx: &mut Context<Self>) {
+        self.voice_store
+            .clone()
+            .update(cx, |store, cx| store.toggle_member_strip(cx));
+        cx.notify();
+    }
+
+    fn toggle_voice_chat(&mut self, cx: &mut Context<Self>) {
+        ChatLayout::toggle_voice_chat(self, cx);
     }
 }
 
@@ -1924,7 +1928,7 @@ impl Render for ChatLayout {
                 &self.voice_store,
                 &self.settings,
                 self.voice_store.read(cx),
-                &chat,
+                Some(&chat),
                 cx,
             )
         } else if self.stream_store.read(cx).fullscreen() {
@@ -2501,6 +2505,7 @@ impl ChatLayout {
             .and_then(|cid| self.clan_list.read(cx).clan(cid).map(|c| c.name.clone()))
             .unwrap_or_default();
         let label = store.channel_label().to_string();
+        let meeting_code = store.external_meeting().map(|meeting| meeting.code.clone());
         let mic_enabled = store.mic_enabled();
         let camera_enabled = store.camera_enabled();
         let screen_enabled = store.screen_share_enabled();
@@ -2526,6 +2531,7 @@ impl ChatLayout {
             &clan_name,
             &channel_id,
             &clan_id,
+            meeting_code.as_deref(),
             &self.voice_store,
             &self.settings,
             connecting,
@@ -2570,13 +2576,6 @@ impl ChatLayout {
         }
     }
 
-    pub(crate) fn toggle_voice_member_strip(&mut self, cx: &mut Context<Self>) {
-        self.voice_store
-            .clone()
-            .update(cx, |store, cx| store.toggle_member_strip(cx));
-        cx.notify();
-    }
-
     pub(crate) fn toggle_voice_chat(&mut self, cx: &mut Context<Self>) {
         self.voice_show_chat = !self.voice_show_chat;
         cx.notify();
@@ -2584,44 +2583,6 @@ impl ChatLayout {
 
     pub(crate) fn voice_show_chat(&self) -> bool {
         self.voice_show_chat
-    }
-
-    pub(crate) fn record_voice_strip_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
-        if (self.voice_strip_width - width).abs() > px(0.5) {
-            self.voice_strip_width = width;
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn record_voice_grid_size(&mut self, size: Size<Pixels>, cx: &mut Context<Self>) {
-        if self.voice_grid_size != size {
-            self.voice_grid_size = size;
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn scroll_voice_grid_page(
-        &mut self,
-        delta: f32,
-        total_pages: usize,
-        cx: &mut Context<Self>,
-    ) {
-        const STEP: f32 = 100.;
-        let last_page = total_pages.saturating_sub(1);
-        self.voice_grid_wheel_accum += delta;
-        let mut page = self.voice_grid_page.min(last_page);
-        while self.voice_grid_wheel_accum <= -STEP {
-            self.voice_grid_wheel_accum += STEP;
-            page = (page + 1).min(last_page);
-        }
-        while self.voice_grid_wheel_accum >= STEP {
-            self.voice_grid_wheel_accum -= STEP;
-            page = page.saturating_sub(1);
-        }
-        if page != self.voice_grid_page {
-            self.voice_grid_page = page;
-            cx.notify();
-        }
     }
 
     pub(crate) fn toggle_voice_emoji_picker(

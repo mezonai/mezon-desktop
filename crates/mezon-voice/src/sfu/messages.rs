@@ -35,6 +35,9 @@ pub enum ClientMessage {
     ParticipantAction {
         token: String,
     },
+    SendMessage {
+        message: String,
+    },
     Pong,
 }
 
@@ -105,6 +108,11 @@ pub enum ServerMessage {
         #[serde(default)]
         role: String,
     },
+    RoomMessage {
+        #[serde(default)]
+        message: String,
+    },
+    MessageSent,
     Ping,
     Pong,
     Error {
@@ -135,6 +143,8 @@ pub struct SnapshotMember {
     pub peer_id: u32,
     #[serde(default)]
     pub user_id: String,
+    #[serde(default)]
+    pub metadata: String,
     #[serde(default)]
     pub role: String,
     #[serde(default)]
@@ -405,6 +415,55 @@ mod tests {
         assert_eq!(peer.user_id, "9");
         assert!(peer.camera_active);
         assert_eq!(peer.mid_audio, 0);
+    }
+
+    #[test]
+    fn peer_joined_carries_the_metadata_the_peer_joined_with() {
+        let msg = parse(
+            r#"{"type":"peer_joined","room_revision":2,"participant_count":2,"peer":{
+                "peer_id":4,"user_id":"1977","metadata":"alice;https://cdn/a.png",
+                "role":"speaker","is_mute":false}}"#,
+        );
+        let ServerMessage::PeerJoined { peer } = msg else {
+            panic!("expected peer_joined");
+        };
+        assert_eq!(
+            peer.expect("peer present").metadata,
+            "alice;https://cdn/a.png"
+        );
+    }
+
+    #[test]
+    fn a_room_message_carries_the_sender_payload() {
+        let msg = parse(
+            r#"{"type":"room_message","message":"{\"content\":\"hi\"}","user_id":"1977","peer_id":4}"#,
+        );
+        assert_eq!(
+            msg,
+            ServerMessage::RoomMessage {
+                message: r#"{"content":"hi"}"#.to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn the_sfu_acknowledges_a_relayed_room_message() {
+        assert_eq!(
+            parse(r#"{"type":"message_sent"}"#),
+            ServerMessage::MessageSent
+        );
+    }
+
+    #[test]
+    fn send_message_serializes_to_the_sfu_chat_frame() {
+        let frame = serde_json::to_value(ClientMessage::SendMessage {
+            message: "hello".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(
+            frame,
+            serde_json::json!({"type": "send_message", "message": "hello"})
+        );
     }
 
     #[test]

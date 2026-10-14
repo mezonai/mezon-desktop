@@ -2855,6 +2855,10 @@ pub(crate) fn open_message_link(url: String, cx: &mut App) {
     if url.is_empty() {
         return;
     }
+    if let Some(code) = meeting_code(&url, cx) {
+        crate::meeting::open_meeting_window(code, cx);
+        return;
+    }
     if let Some(invite_id) = clan_invite_id(&url, cx) {
         crate::invite::join_clan_modal::JoinClanModal::open(invite_id, cx);
         return;
@@ -2862,6 +2866,11 @@ pub(crate) fn open_message_link(url: String, cx: &mut App) {
     if let Some(store) = PlatformStore::try_global(cx) {
         let _ = store.read(cx).open_url_external(&url);
     }
+}
+
+pub(crate) fn meeting_code(url: &str, cx: &App) -> Option<String> {
+    let cfg = AppConfig::try_global(cx)?;
+    mezon_store::internal_meeting_code(url, Some(&cfg.domain_url))
 }
 
 fn clan_invite_id(url: &str, cx: &App) -> Option<String> {

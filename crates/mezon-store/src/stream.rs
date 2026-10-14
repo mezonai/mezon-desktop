@@ -18,6 +18,7 @@ const STREAMING_CHANNEL_TYPE: i32 = 6;
 const STREAM_MEMBER_STATE_ACTIVE: i32 = 1;
 const STREAM_FETCH_LIMIT: i32 = 100;
 const JOIN_TIMEOUT: Duration = Duration::from_secs(30);
+const SELF_REJOIN_GRACE: Duration = Duration::from_secs(3);
 const CONTROLS_HIDE_DELAY: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +69,7 @@ pub struct StreamStore {
     _token_task: Option<Task<()>>,
     _session_task: Option<Task<()>>,
     _join_timeout: Option<Task<()>>,
+    _self_leave_task: Option<Task<()>>,
     _controls_hide_task: Option<Task<()>>,
 }
 
@@ -117,6 +119,7 @@ impl StreamStore {
             _token_task: None,
             _session_task: None,
             _join_timeout: None,
+            _self_leave_task: None,
             _controls_hide_task: None,
         }
     }
@@ -587,6 +590,7 @@ impl StreamStore {
         }
         self._session_task = None;
         self._join_timeout = None;
+        self._self_leave_task = None;
         self.playback_blocked = false;
         self.join_started = None;
     }
@@ -669,6 +673,9 @@ impl StreamStore {
                 display_name,
             },
         );
+        if self.is_local_session_member(channel_id, user_id) {
+            self._self_leave_task = None;
+        }
         cx.notify();
     }
 
@@ -686,14 +693,31 @@ impl StreamStore {
         let user_id = UserId(user_id);
         self.members.remove(&(channel_id, user_id));
 
-        let local_session_left = self.is_session_channel(channel_id)
-            && (self.is_joined() || self.is_joining())
-            && self.session_user_id == Some(user_id);
-        if local_session_left {
-            self.leave_stream_internal(true, cx);
-            return;
+        if self.is_local_session_member(channel_id, user_id) {
+            self.leave_unless_rejoined(cx);
         }
         cx.notify();
+    }
+
+    fn is_local_session_member(&self, channel_id: ChannelId, user_id: UserId) -> bool {
+        self.is_session_channel(channel_id)
+            && (self.is_joined() || self.is_joining())
+            && self.session_user_id == Some(user_id)
+    }
+
+    fn leave_unless_rejoined(&mut self, cx: &mut Context<Self>) {
+        let session_generation = self.session_generation;
+        self._self_leave_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SELF_REJOIN_GRACE).await;
+            this.update(cx, |this, cx| {
+                if this.session_generation == session_generation
+                    && (this.is_joined() || this.is_joining())
+                {
+                    this.leave_stream_internal(true, cx);
+                }
+            })
+            .ok();
+        }));
     }
 
     fn handle_streaming_started(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
@@ -921,6 +945,10 @@ mod tests {
                 store.handle_streaming_leaved(&event, cx);
             });
         });
+        assert!(cx.update(|cx| store.read(cx).is_joined()));
+
+        cx.executor().advance_clock(SELF_REJOIN_GRACE);
+        cx.run_until_parked();
 
         cx.update(|cx| {
             let store = store.read(cx);
@@ -929,6 +957,58 @@ mod tests {
             assert!(!store.show_chat());
             assert!(store.members_for_channel(channel_id).is_empty());
             assert_eq!(store.members_for_channel(other_channel_id).len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn joining_from_another_device_keeps_the_new_session(cx: &mut gpui::TestAppContext) {
+        let channel_id = ChannelId(1);
+        let local_user_id = UserId(10);
+        let other_user_id = UserId(20);
+        let store = init_store(cx);
+        let replaced_leave =
+            RealtimeEvent::StreamingLeaved(mezon_proto::realtime::StreamingLeavedEvent {
+                streaming_channel_id: channel_id.to_string(),
+                streaming_user_id: local_user_id.to_string(),
+                ..Default::default()
+            });
+        let new_join =
+            RealtimeEvent::StreamingJoined(mezon_proto::realtime::StreamingJoinedEvent {
+                streaming_channel_id: channel_id.get(),
+                user_id: local_user_id.get(),
+                participant: "local".into(),
+                ..Default::default()
+            });
+
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.phase = StreamPhase::Joining {
+                    channel_id,
+                    clan_id: ClanId(9),
+                };
+                store.session_user_id = Some(local_user_id);
+                store.members.insert(
+                    (channel_id, local_user_id),
+                    sample_member(channel_id, local_user_id, "local"),
+                );
+                store.members.insert(
+                    (channel_id, other_user_id),
+                    sample_member(channel_id, other_user_id, "streamer"),
+                );
+
+                store.handle_streaming_leaved(&replaced_leave, cx);
+                store.handle_streaming_joined(&new_join, cx);
+            });
+        });
+
+        cx.executor().advance_clock(SELF_REJOIN_GRACE * 2);
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let store = store.read(cx);
+            assert!(store.is_joining());
+            assert_eq!(store.session_channel_id(), Some(channel_id));
+            assert_eq!(store.members_for_channel(channel_id).len(), 2);
         });
     }
 

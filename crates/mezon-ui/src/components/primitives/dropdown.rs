@@ -174,15 +174,17 @@ impl RenderOnce for Dropdown {
             .child(
                 h_flex()
                     .min_w_0()
+                    .flex_1()
                     .gap_2()
                     .when_some(selected_icon, |el, icon| {
                         el.child(Icon::new(icon).size_4().text_color(theme.text_secondary))
                     })
-                    .child(label),
+                    .child(div().min_w_0().flex_1().truncate().child(label)),
             )
             .child(
                 Icon::new(IconName::ArrowDown)
                     .size_4()
+                    .flex_shrink_0()
                     .text_color(theme.text_muted),
             );
         match trigger_style {
@@ -278,6 +280,8 @@ impl RenderOnce for Dropdown {
                                                 .hover(|s| s.bg(theme.bg_hover))
                                                 .child(
                                                     h_flex()
+                                                        .min_w_0()
+                                                        .flex_1()
                                                         .gap_2()
                                                         .when_some(
                                                             icons.get(index).copied().flatten(),
@@ -285,18 +289,26 @@ impl RenderOnce for Dropdown {
                                                                 el.child(
                                                                     Icon::new(icon)
                                                                         .size_4()
+                                                                        .flex_shrink_0()
                                                                         .text_color(
                                                                             theme.text_secondary,
                                                                         ),
                                                                 )
                                                             },
                                                         )
-                                                        .child(items[index].clone()),
+                                                        .child(
+                                                            div()
+                                                                .min_w_0()
+                                                                .flex_1()
+                                                                .truncate()
+                                                                .child(items[index].clone()),
+                                                        ),
                                                 )
                                                 .when(selected, |el| {
                                                     el.child(
                                                         Icon::new(IconName::Check)
                                                             .size_4()
+                                                            .flex_shrink_0()
                                                             .text_color(theme.brand),
                                                     )
                                                 })

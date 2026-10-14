@@ -152,6 +152,37 @@ pub async fn sleep(duration: std::time::Duration) {
         .await;
 }
 
+pub(crate) async fn fetch_prefix(
+    url: &str,
+    len: usize,
+    timeout: std::time::Duration,
+) -> Option<Vec<u8>> {
+    let url = url.to_string();
+    runtime()
+        .spawn(async move {
+            tokio::time::timeout(timeout, async move {
+                let mut response = send_get(&url).await.ok()?;
+                if !response.status().is_success() {
+                    return None;
+                }
+                let mut prefix = Vec::with_capacity(len);
+                response
+                    .body_mut()
+                    .take(len as u64)
+                    .read_to_end(&mut prefix)
+                    .await
+                    .ok()?;
+                Some(prefix)
+            })
+            .await
+            .ok()
+            .flatten()
+        })
+        .await
+        .ok()
+        .flatten()
+}
+
 /// HEAD the object and report whether it is already readable.
 ///
 /// The presign_finish patch is a single realtime event: lose it — the sender's
@@ -3479,17 +3510,21 @@ impl TransportClient {
     pub async fn update_user_profile_by_clan(
         &self,
         clan_id: i64,
-        nick_name: &str,
+        nick_name: Option<&str>,
         avatar_url: Option<&str>,
     ) -> Result<()> {
         let transport = self.inner.clone();
-        let nick_name = nick_name.to_string();
+        let nick_name = nick_name.map(str::to_string);
         let avatar_url = avatar_url.map(str::to_string);
 
         runtime()
             .spawn(async move {
                 transport
-                    .update_user_profile_by_clan(clan_id, &nick_name, avatar_url.as_deref())
+                    .update_user_profile_by_clan(
+                        clan_id,
+                        nick_name.as_deref(),
+                        avatar_url.as_deref(),
+                    )
                     .await
             })
             .await

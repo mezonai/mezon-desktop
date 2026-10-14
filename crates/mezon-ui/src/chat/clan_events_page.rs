@@ -610,7 +610,15 @@ impl ClanEventsModal {
                                                 })
                                                 .on_click(move |_, _, cx| {
                                                     cx.stop_propagation();
-                                                    if let Some(platform) =
+                                                    if let Some(code) =
+                                                        crate::chat::message::meeting_code(
+                                                            &open_link, cx,
+                                                        )
+                                                    {
+                                                        crate::meeting::open_meeting_window(
+                                                            code, cx,
+                                                        );
+                                                    } else if let Some(platform) =
                                                         PlatformStore::try_global(cx)
                                                     {
                                                         let _ = platform

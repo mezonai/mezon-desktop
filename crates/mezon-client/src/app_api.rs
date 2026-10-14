@@ -73,7 +73,7 @@ fn multipart_part_ranges(total: u64) -> Vec<(u64, usize)> {
     ranges
 }
 
-const CDN_MEZON_MINIO: &str = "https://cdn.mezon.ai";
+pub(crate) const CDN_MEZON_MINIO: &str = "https://cdn.mezon.ai";
 const CDN_R2_CLOUDFLARE: &str = "https://cdn.komu.vn";
 
 pub fn cdn_read_base_url(type_cdn: i32, fallback: &str) -> &str {
@@ -2075,7 +2075,7 @@ impl AppApi {
                     height,
                     part_count: ranges.len() as i32,
                     channel_id,
-                    transcode_hls: false,
+                    transcode_hls: crate::video_source::wants_hls_transcode(&upload_name, size),
                 })
                 .await?;
             if started.urls.len() != ranges.len() {
@@ -2814,7 +2814,7 @@ impl AppApi {
     pub async fn update_user_clan_profile(
         &self,
         clan_id: i64,
-        nick_name: &str,
+        nick_name: Option<&str>,
         avatar_url: Option<&str>,
     ) -> Result<()> {
         self.transport

@@ -16,6 +16,11 @@ pub enum DisplayNameError {
     InvalidChars,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClanNicknameError {
+    InvalidChars,
+}
+
 pub fn prepare_display_name_for_update(name: &str) -> Result<Option<String>, DisplayNameError> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -45,6 +50,21 @@ pub fn is_valid_menu_name(name: &str) -> bool {
     !name.is_empty()
         && name.chars().count() <= QUICK_MENU_NAME_MAX_RUNES
         && is_valid_name_content(name)
+}
+
+pub fn prepare_clan_nickname_for_update(name: &str) -> Result<Option<String>, ClanNicknameError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        if name.is_empty() {
+            return Ok(None);
+        }
+        return Err(ClanNicknameError::InvalidChars);
+    }
+    let normalized: String = trimmed.nfc().collect();
+    if !is_valid_menu_name(&normalized) {
+        return Err(ClanNicknameError::InvalidChars);
+    }
+    Ok(Some(normalized))
 }
 
 pub fn is_valid_clan_name(name: &str) -> bool {
@@ -158,5 +178,29 @@ mod tests {
         assert!(!is_valid_clan_name(" hello"));
         assert!(!is_valid_clan_name("it's"));
         assert!(is_valid_clan_name("hello world"));
+    }
+
+    #[test]
+    fn clan_nickname_rejects_stacked_combining_marks() {
+        let zalgo = "ค\u{0e47}".repeat(16);
+        assert!(matches!(
+            prepare_clan_nickname_for_update(&zalgo),
+            Err(ClanNicknameError::InvalidChars)
+        ));
+    }
+
+    #[test]
+    fn clan_nickname_normalizes_decomposed_vietnamese_to_nfc() {
+        let decomposed = "e\u{0302}\u{0303}";
+        let prepared = prepare_clan_nickname_for_update(decomposed).unwrap();
+        assert_eq!(prepared, Some("\u{1EC5}".into()));
+    }
+
+    #[test]
+    fn clan_nickname_rejects_whitespace_only() {
+        assert!(matches!(
+            prepare_clan_nickname_for_update("   "),
+            Err(ClanNicknameError::InvalidChars)
+        ));
     }
 }
