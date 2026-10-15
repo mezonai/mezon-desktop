@@ -15,6 +15,7 @@ theme.workspace = true
 icons.workspace = true
 menu.workspace = true
 mezon-store.workspace = true
+mezon-spellcheck.workspace = true
 mezon-canvas.workspace = true
 mezon-theme.workspace = true
 mezon-widgets.workspace = true

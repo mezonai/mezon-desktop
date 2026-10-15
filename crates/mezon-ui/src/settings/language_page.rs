@@ -1,6 +1,6 @@
-use crate::components::primitives::{Label, h_flex, v_flex};
+use crate::components::primitives::{Label, Switch, h_flex, v_flex};
 use crate::theme::{ActiveTheme, Theme};
-use gpui::{Context, Entity, FontWeight, Rgba, Window, div, img, prelude::*};
+use gpui::{Context, Entity, FontWeight, Rgba, SharedString, Window, div, img, prelude::*};
 use mezon_store::Settings;
 
 pub struct LanguagePage {
@@ -174,18 +174,80 @@ fn language_row(
         })
 }
 
+fn toggle_row(
+    id: &'static str,
+    title: SharedString,
+    description: SharedString,
+    enabled: bool,
+    toggle: fn(&mut Settings),
+    theme: &Theme,
+    cx: &mut Context<LanguagePage>,
+) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .child(
+            v_flex()
+                .min_w_0()
+                .gap_1()
+                .child(
+                    Label::new(title)
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_primary),
+                )
+                .child(
+                    Label::new(description)
+                        .text_xs()
+                        .text_color(theme.text_muted),
+                ),
+        )
+        .child(
+            Switch::new(id)
+                .checked(enabled)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings.update(cx, |settings, _| toggle(settings));
+                    mezon_store::schedule_settings_save(&this.settings, cx);
+                    cx.notify();
+                })),
+        )
+}
+
 impl Render for LanguagePage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let locale = self.settings.read(cx).language.clone();
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
         let settings = self.settings.clone();
-
+        let (spellcheck, quick_replies) = {
+            let settings = self.settings.read(cx);
+            (settings.spellcheck_enabled, settings.quick_replies_enabled)
+        };
         v_flex().gap_8().child(
             v_flex()
                 .rounded_lg()
                 .bg(theme.bg_primary)
                 .p_4()
                 .gap_4()
+                .child(toggle_row(
+                    "spellcheck",
+                    mezon_i18n::t(&locale, "setting.language.spellcheck").into(),
+                    mezon_i18n::t(&locale, "setting.language.spellcheckDesc").into(),
+                    spellcheck,
+                    |settings| settings.spellcheck_enabled = !settings.spellcheck_enabled,
+                    &theme,
+                    cx,
+                ))
+                .child(toggle_row(
+                    "quick-replies",
+                    mezon_i18n::t(&locale, "setting.language.quickReplies").into(),
+                    mezon_i18n::t(&locale, "setting.language.quickRepliesDesc").into(),
+                    quick_replies,
+                    |settings| settings.quick_replies_enabled = !settings.quick_replies_enabled,
+                    &theme,
+                    cx,
+                ))
                 .child(
                     Label::new(mezon_i18n::t(&locale, "setting.language.description"))
                         .text_sm()
@@ -201,7 +263,7 @@ impl Render for LanguagePage {
                                 mezon_i18n::t(&locale, name_key),
                                 contributor,
                                 locale == value,
-                                theme,
+                                &theme,
                                 settings.clone(),
                             )
                         },

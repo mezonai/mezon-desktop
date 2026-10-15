@@ -511,6 +511,18 @@ pub struct Settings {
     pub realtime_server: RealtimeServer,
     #[serde(default)]
     pub agent_hint_dismissed: bool,
+    #[serde(default = "spellcheck_enabled_default")]
+    pub spellcheck_enabled: bool,
+    #[serde(default = "quick_replies_enabled_default")]
+    pub quick_replies_enabled: bool,
+}
+
+fn spellcheck_enabled_default() -> bool {
+    true
+}
+
+fn quick_replies_enabled_default() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -545,6 +557,8 @@ impl Default for Settings {
             activity_strip_dismissals: Vec::new(),
             realtime_server: RealtimeServer::Auto,
             agent_hint_dismissed: false,
+            spellcheck_enabled: spellcheck_enabled_default(),
+            quick_replies_enabled: quick_replies_enabled_default(),
         }
     }
 }
@@ -790,6 +804,8 @@ mod settings_tests {
         assert_eq!(settings.tour_seen_version, 0);
         assert!(settings.tour_done_tracks.is_empty());
         assert_eq!(settings.language, "vi");
+        assert!(settings.spellcheck_enabled);
+        assert!(settings.quick_replies_enabled);
     }
 
     #[test]

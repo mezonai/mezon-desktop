@@ -3,11 +3,13 @@ use crate::chat::{MentionInput, ReplyTarget};
 use crate::components::primitives::{Icon, IconName};
 use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme};
+use std::time::Duration;
+
 use gpui::{
-    Context, Entity, FontWeight, ObjectFit, Render, SharedString, Subscription, Window, div, img,
-    prelude::*, px, radians, rgb,
+    Context, Entity, FontWeight, ObjectFit, Render, SharedString, Subscription, Task, Window, div,
+    img, prelude::*, px, radians, rgb,
 };
-use mezon_store::{MessagesEvent, MessagesStore, OgpResult, Settings, TopicsStore};
+use mezon_store::{BadgeService, MessagesEvent, MessagesStore, OgpResult, Settings, TopicsStore};
 
 const OGP_PREVIEW_MEMBER_DOT: u32 = 0x22_c5_5e;
 
@@ -26,6 +28,10 @@ pub struct InputBar {
     _settings_observe: Subscription,
     _mention_observe: Subscription,
     _messages_sub: Subscription,
+    replies: Vec<SharedString>,
+    reply_prompt: String,
+    reply_generation: u64,
+    _reply_task: Task<()>,
     ogp_image_cache: Entity<LruImageCache>,
     for_topic: bool,
 }
@@ -38,17 +44,26 @@ impl InputBar {
         for_topic: bool,
         cx: &mut Context<Self>,
     ) -> Self {
-        let settings_observe = cx.observe(settings, |_, _, cx| cx.notify());
-        let mention_observe = cx.observe(&mention_input, |_, _, cx| cx.notify());
+        let settings_observe = cx.observe(settings, |this, _, cx| {
+            this.schedule_replies(cx);
+            cx.notify();
+        });
+        let mention_observe = cx.observe(&mention_input, |this, _, cx| {
+            this.schedule_replies(cx);
+            cx.notify();
+        });
         let messages_sub = cx.subscribe(
             &MessagesStore::global(cx),
-            |_, _, event: &MessagesEvent, cx| {
+            |this, _, event: &MessagesEvent, cx| {
                 if matches!(event, MessagesEvent::AnonymousModeChanged) {
                     cx.notify();
                 }
+                if reply_source_changed(event) {
+                    this.schedule_replies(cx);
+                }
             },
         );
-        Self {
+        let mut bar = Self {
             mention_input,
             locale,
             replying_to: None,
@@ -56,9 +71,100 @@ impl InputBar {
             _settings_observe: settings_observe,
             _mention_observe: mention_observe,
             _messages_sub: messages_sub,
+            replies: Vec::new(),
+            reply_prompt: String::new(),
+            reply_generation: 0,
+            _reply_task: Task::ready(()),
             ogp_image_cache: crate::image_cache::ogp_aux_cache("composer-ogp", cx),
             for_topic,
+        };
+        bar.schedule_replies(cx);
+        bar
+    }
+
+    fn schedule_replies(&mut self, cx: &mut Context<Self>) {
+        let enabled = Settings::try_global(cx)
+            .is_some_and(|settings| settings.read(cx).quick_replies_enabled);
+        if !enabled {
+            self.reply_generation = self.reply_generation.wrapping_add(1);
+            self.replies.clear();
+            self.reply_prompt.clear();
+            return;
         }
+        let prompt = incoming_prompt(self.for_topic, cx);
+        if prompt.is_empty() {
+            self.reply_generation = self.reply_generation.wrapping_add(1);
+            self.replies.clear();
+            self.reply_prompt.clear();
+            return;
+        }
+        if prompt == self.reply_prompt {
+            return;
+        }
+        self.reply_prompt = prompt.clone();
+        self.replies.clear();
+        self.reply_generation = self.reply_generation.wrapping_add(1);
+        let generation = self.reply_generation;
+        self._reply_task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(120))
+                .await;
+            let current = this
+                .read_with(cx, |this, _| this.reply_generation == generation)
+                .unwrap_or(false);
+            if !current {
+                return;
+            }
+            let replies = cx
+                .background_executor()
+                .spawn(async move { mezon_spellcheck::quick_replies(&prompt) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.reply_generation != generation {
+                    return;
+                }
+                this.replies = replies.into_iter().map(SharedString::from).collect();
+                cx.notify();
+            });
+        });
+    }
+
+    fn reply_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let chips = self.replies.clone();
+        div()
+            .id("quick-replies")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .pb_2()
+            .overflow_x_scroll()
+            .children(chips.into_iter().enumerate().map(|(index, label)| {
+                let fill = label.to_string();
+                div()
+                    .id(("quick-reply", index))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .h(px(32.))
+                    .px_3()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(rgb(0x6264A7))
+                    .bg(theme.surfaces.surface.fill())
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.bg_hover))
+                    .text_size(px(13.))
+                    .text_color(theme.tokens.text_theme_primary)
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let text = fill.clone();
+                        this.mention_input.update(cx, |input, cx| {
+                            input.fill_suggested_reply(text, window, cx);
+                        });
+                    }))
+            }))
     }
 
     pub fn sync(
@@ -248,6 +354,14 @@ impl InputBar {
         let replying = self.replying_to.is_some();
         let reply_clear = self.reply_clear;
         let ogp_preview = self.mention_input.read(cx).ogp_preview().cloned();
+        let draft_empty = self
+            .mention_input
+            .read(cx)
+            .current_content(cx)
+            .0
+            .trim()
+            .is_empty();
+        let show_replies = draft_empty && !self.replies.is_empty();
         let store = MessagesStore::global(cx);
         let anonymous = if self.for_topic {
             store.read(cx).topic_anonymous_mode()
@@ -271,6 +385,9 @@ impl InputBar {
                     target,
                     reply_clear,
                 ))
+            })
+            .when(show_replies, |column| {
+                column.child(self.reply_row(&theme, cx))
             })
             .child(
                 div()
@@ -299,6 +416,44 @@ impl InputBar {
                     }),
             )
     }
+}
+
+fn reply_source_changed(event: &MessagesEvent) -> bool {
+    matches!(
+        event,
+        MessagesEvent::Reset { .. }
+            | MessagesEvent::Resized { .. }
+            | MessagesEvent::Shifted { .. }
+            | MessagesEvent::Updated { .. }
+            | MessagesEvent::RemovedAt { .. }
+            | MessagesEvent::TopicUpdated { .. }
+    )
+}
+
+fn incoming_prompt(for_topic: bool, cx: &mut Context<InputBar>) -> String {
+    let me = BadgeService::try_global(cx)
+        .and_then(|badges| badges.read(cx).current_user_id(cx))
+        .map(|user_id| user_id.to_string())
+        .unwrap_or_default();
+    if me.is_empty() {
+        return String::new();
+    }
+    let store = MessagesStore::global(cx).read(cx);
+    let messages = if for_topic {
+        store
+            .active_topic_id()
+            .map(|topic_id| store.messages_in_channel(topic_id))
+            .unwrap_or(&[])
+    } else {
+        store.messages()
+    };
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.code.is_user_timeline() && !message.content.trim().is_empty())
+        .filter(|message| !message.is_sent_by(&me))
+        .map(|message| message.content.trim().to_string())
+        .unwrap_or_default()
 }
 
 impl Render for InputBar {

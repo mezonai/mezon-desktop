@@ -139,8 +139,9 @@ fn build_text_runs(
     base: &TextRun,
     marked: Option<Range<usize>>,
     spans: &[ResolvedSpan],
+    spell: &[Range<usize>],
 ) -> Vec<TextRun> {
-    if marked.is_none() && spans.is_empty() {
+    if marked.is_none() && spans.is_empty() && spell.is_empty() {
         return vec![base.clone()];
     }
 
@@ -152,6 +153,10 @@ fn build_text_runs(
     for span in spans {
         bounds.push(span.range.start.min(text_len));
         bounds.push(span.range.end.min(text_len));
+    }
+    for range in spell {
+        bounds.push(range.start.min(text_len));
+        bounds.push(range.end.min(text_len));
     }
     bounds.sort_unstable();
     bounds.dedup();
@@ -183,6 +188,15 @@ fn build_text_runs(
                     thickness: px(1.0),
                     wavy: false,
                 });
+            } else if spell
+                .iter()
+                .any(|range| range.start <= start && end <= range.end)
+            {
+                run.underline = Some(UnderlineStyle {
+                    color: Some(rgb(0xDC2626).into()),
+                    thickness: px(1.0),
+                    wavy: true,
+                });
             }
             Some(run)
         })
@@ -199,6 +213,7 @@ pub(crate) enum MentionFieldEvent {
     Paste(String),
     PasteImages(Vec<Image>),
     PastePaths(Vec<PathBuf>, ClipboardItem),
+    SpellHit(usize),
 }
 
 pub(crate) struct MentionInputState {
@@ -225,6 +240,7 @@ pub(crate) struct MentionInputState {
     compact: bool,
     accepts_files: bool,
     mention_spans: Vec<MentionSpan>,
+    spell_ranges: Vec<Range<usize>>,
     caret_blink: CaretBlink,
     undo_stack: Vec<HistoryEntry>,
     redo_stack: Vec<HistoryEntry>,
@@ -274,6 +290,7 @@ impl MentionInputState {
             compact: false,
             accepts_files: true,
             mention_spans: Vec::new(),
+            spell_ranges: Vec::new(),
             caret_blink: CaretBlink::new(window.is_window_active()),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -330,6 +347,19 @@ impl MentionInputState {
 
     pub(crate) fn cursor(&self) -> usize {
         self.cursor_offset()
+    }
+
+    pub(crate) fn set_spell_ranges(&mut self, ranges: Vec<Range<usize>>, cx: &mut Context<Self>) {
+        if self.spell_ranges != ranges {
+            self.spell_ranges = ranges;
+            cx.notify();
+        }
+    }
+
+    fn spell_hit(&self, offset: usize) -> bool {
+        self.spell_ranges
+            .iter()
+            .any(|range| range.start <= offset && offset < range.end)
     }
 
     pub(crate) fn set_mention_spans(&mut self, spans: Vec<MentionSpan>, cx: &mut Context<Self>) {
@@ -762,6 +792,7 @@ impl MentionInputState {
         if self.select_granularity == SelectGranularity::Character {
             self.select_anchor = offset..offset;
             self.move_to(offset, cx);
+            self.emit_spell_hit(event, cx);
             return;
         }
 
@@ -772,6 +803,14 @@ impl MentionInputState {
         self.pending_caret_reveal = true;
         self.caret_blink.pause_blinking(cx);
         cx.notify();
+    }
+
+    fn emit_spell_hit(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        if event.click_count == 1
+            && let Some(offset) = self.spell_offset_at(event.position)
+        {
+            cx.emit(MentionFieldEvent::SpellHit(offset));
+        }
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
@@ -1012,6 +1051,32 @@ impl MentionInputState {
             .closest_index_for_position(point(rel_x, local_y), line_height)
             .unwrap_or_else(|ix| ix);
         self.display_to_content_offset(doc.start + local)
+    }
+
+    fn spell_offset_at(&self, position: Point<Pixels>) -> Option<usize> {
+        if self.spell_ranges.is_empty() {
+            return None;
+        }
+        let bounds = self.last_bounds.as_ref()?;
+        let rel_y = position.y - bounds.top() + self.scroll_offset.y;
+        let rel_x = position.x - bounds.left() + self.scroll_offset.x;
+        if rel_y < Pixels::ZERO || rel_x < Pixels::ZERO {
+            return None;
+        }
+        let doc = self
+            .last_lines
+            .iter()
+            .find(|doc| rel_y < doc.top + doc.height)?;
+        let local_y = (rel_y - doc.top).clamp(
+            Pixels::ZERO,
+            (doc.height - self.line_height).max(Pixels::ZERO),
+        );
+        let local = doc
+            .line
+            .index_for_position(point(rel_x, local_y), self.line_height)
+            .ok()?;
+        let offset = self.display_to_content_offset(doc.start + local);
+        self.spell_hit(offset).then_some(offset)
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -1498,7 +1563,14 @@ impl MentionTextElement {
             underline: None,
             strikethrough: None,
         };
-        let runs = build_text_runs(display_text.len(), &base, marked_range, &resolved_spans);
+        let spell_ranges = input.spell_ranges.clone();
+        let runs = build_text_runs(
+            display_text.len(),
+            &base,
+            marked_range,
+            &resolved_spans,
+            &spell_ranges,
+        );
         let wrapped = window
             .text_system()
             .shape_text(display_text.clone(), font_size, &runs, Some(width), None)
@@ -1625,7 +1697,13 @@ impl Element for MentionTextElement {
         let runs = if masked {
             vec![run]
         } else {
-            build_text_runs(display_text.len(), &run, marked_range, &resolved_spans)
+            build_text_runs(
+                display_text.len(),
+                &run,
+                marked_range,
+                &resolved_spans,
+                &input.spell_ranges,
+            )
         };
 
         let mut scroll_offset = input.scroll_offset;
@@ -1906,7 +1984,7 @@ mod tests {
 
     #[test]
     fn runs_without_mentions_or_marked_stay_single() {
-        let runs = build_text_runs(5, &base_run(5), None, &[]);
+        let runs = build_text_runs(5, &base_run(5), None, &[], &[]);
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].len, 5);
     }
@@ -1919,7 +1997,13 @@ mod tests {
             l: 0.5,
             a: 1.0,
         };
-        let runs = build_text_runs(10, &base_run(10), None, &[resolved(0..4, brand, false)]);
+        let runs = build_text_runs(
+            10,
+            &base_run(10),
+            None,
+            &[resolved(0..4, brand, false)],
+            &[],
+        );
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].len, 4);
         assert_eq!(runs[0].color, brand);
@@ -1930,7 +2014,7 @@ mod tests {
     #[test]
     fn runs_make_emoji_span_bold() {
         let color = rgb(EMOJI_SPAN_COLOR).into();
-        let runs = build_text_runs(10, &base_run(10), None, &[resolved(0..7, color, true)]);
+        let runs = build_text_runs(10, &base_run(10), None, &[resolved(0..7, color, true)], &[]);
         assert_eq!(runs[0].len, 7);
         assert_eq!(runs[0].color, color);
         assert_eq!(runs[0].font.weight, FontWeight::BOLD);
@@ -1939,7 +2023,7 @@ mod tests {
 
     #[test]
     fn runs_preserve_marked_underline() {
-        let runs = build_text_runs(6, &base_run(6), Some(2..4), &[]);
+        let runs = build_text_runs(6, &base_run(6), Some(2..4), &[], &[]);
         assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), 6);
         let underlined: usize = runs
             .iter()
@@ -1947,6 +2031,25 @@ mod tests {
             .map(|r| r.len)
             .sum();
         assert_eq!(underlined, 2);
+    }
+
+    #[test]
+    fn runs_draw_a_wavy_spell_underline() {
+        let runs = build_text_runs(8, &base_run(8), None, &[], &[2..6]);
+        let wavy: usize = runs
+            .iter()
+            .filter(|run| run.underline.as_ref().is_some_and(|style| style.wavy))
+            .map(|run| run.len)
+            .sum();
+        assert_eq!(wavy, 4);
+    }
+
+    #[test]
+    fn marked_text_keeps_a_straight_underline() {
+        let runs = build_text_runs(6, &base_run(6), Some(1..4), &[], &[1..4]);
+        let marked = runs.iter().find(|run| run.len == 3).expect("marked run");
+        let underline = marked.underline.as_ref().expect("underline");
+        assert!(!underline.wavy);
     }
 
     fn line_spans(text: &str) -> Vec<(usize, usize)> {

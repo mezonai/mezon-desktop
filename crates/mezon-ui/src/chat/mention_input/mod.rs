@@ -17,6 +17,7 @@ use gpui::{
     actions, canvas, deferred, div, img, prelude::*, px, uniform_list,
 };
 use mezon_client::transport::QUICK_MENU_TYPE_FLASH;
+use mezon_spellcheck::Correction as SpellCorrection;
 use mezon_store::{
     AccountEvent, AccountStore, AppConfig, AudioStore, AuthState, BadgeService, Channel,
     ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent, ChannelMembersStore, ChannelType,
@@ -797,6 +798,9 @@ pub struct MentionInput {
     ogp_url: Option<String>,
     ogp_generation: u64,
     _ogp_task: Option<Task<()>>,
+    spell_hits: Vec<SpellCorrection>,
+    spell_generation: u64,
+    _spell_task: Task<()>,
     _input_sub: Subscription,
     _store_subs: Vec<Subscription>,
 }
@@ -1001,9 +1005,11 @@ impl MentionInput {
                 MentionFieldEvent::PastePaths(paths, clipboard) => {
                     this.paste_paths(paths.clone(), clipboard.clone(), window, cx)
                 }
+                MentionFieldEvent::SpellHit(offset) => this.correct_spell_at(*offset, window, cx),
             },
         );
         let mut store_subs = Self::subscribe_pool_sources(cx);
+        store_subs.push(cx.observe(&settings, |this, _, cx| this.schedule_spell(cx)));
         let owner = cx.entity_id().as_u64();
         store_subs.push(cx.on_release(move |this, cx| {
             if this.remote_session
@@ -1095,6 +1101,9 @@ impl MentionInput {
             ogp_url: None,
             ogp_generation: 0,
             _ogp_task: None,
+            spell_hits: Vec::new(),
+            spell_generation: 0,
+            _spell_task: Task::ready(()),
             _input_sub: input_sub,
             _store_subs: store_subs,
         }
@@ -1113,6 +1122,24 @@ impl MentionInput {
         });
         self.sync_ranges(cx);
         self.sync_history_payload(cx);
+    }
+
+    pub fn fill_suggested_reply(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_draft(
+            ComposeDraft {
+                text,
+                ..ComposeDraft::default()
+            },
+            window,
+            cx,
+        );
+        self.schedule_spell(cx);
+        self.focus_input(window, cx);
     }
 
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
@@ -1962,6 +1989,82 @@ impl MentionInput {
         self.check_trigger(&content, cx);
     }
 
+    fn schedule_spell(&mut self, cx: &mut Context<Self>) {
+        self.spell_generation = self.spell_generation.wrapping_add(1);
+        self.spell_hits.clear();
+        self.input
+            .update(cx, |input, cx| input.set_spell_ranges(Vec::new(), cx));
+        let enabled = self.settings.read(cx).spellcheck_enabled;
+        let composing = self.input.read(cx).is_composing();
+        let text = self.input.read(cx).value_shared();
+        if !enabled || composing || text.is_empty() {
+            return;
+        }
+        let protected: Vec<std::ops::Range<usize>> = self
+            .committed
+            .iter()
+            .map(|token| token.start..token.end)
+            .collect();
+        let generation = self.spell_generation;
+        self._spell_task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
+            let current = this
+                .read_with(cx, |this, _| this.spell_generation == generation)
+                .unwrap_or(false);
+            if !current {
+                return;
+            }
+            let suggestions = cx
+                .background_executor()
+                .spawn(async move { mezon_spellcheck::check(&text, &protected) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.spell_generation != generation || this.input.read(cx).is_composing() {
+                    return;
+                }
+                if !this.settings.read(cx).spellcheck_enabled {
+                    return;
+                }
+                this.apply_spell(suggestions, cx);
+            });
+        });
+    }
+
+    fn apply_spell(&mut self, hits: Vec<SpellCorrection>, cx: &mut Context<Self>) {
+        let ranges = hits
+            .iter()
+            .map(|hit| hit.byte_range.clone())
+            .collect::<Vec<_>>();
+        self.spell_hits = hits;
+        self.input
+            .update(cx, |input, cx| input.set_spell_ranges(ranges, cx));
+    }
+
+    fn correct_spell_at(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.popup_visible() {
+            return;
+        }
+        let Some(index) = self
+            .spell_hits
+            .iter()
+            .position(|hit| hit.byte_range.start <= offset && offset <= hit.byte_range.end)
+        else {
+            return;
+        };
+        let hit = self.spell_hits.remove(index);
+        let ranges = self
+            .spell_hits
+            .iter()
+            .map(|hit| hit.byte_range.clone())
+            .collect::<Vec<_>>();
+        self.input.update(cx, |input, cx| {
+            input.set_spell_ranges(ranges, cx);
+            input.replace_range(hit.byte_range, &hit.replacement, window, cx);
+        });
+    }
+
     fn on_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.enter_pending = false;
         let waiting = self.active_at.is_some() && self.remote_searching();
@@ -2065,6 +2168,7 @@ impl MentionInput {
     }
 
     fn after_content_change(&mut self, content: SharedString, cx: &mut Context<Self>) {
+        self.schedule_spell(cx);
         self.enter_pending = false;
         self.check_trigger(&content, cx);
         if self

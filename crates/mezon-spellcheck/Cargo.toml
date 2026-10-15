@@ -1,0 +1,24 @@
+[package]
+name = "mezon-spellcheck"
+version.workspace = true
+license.workspace = true
+edition = "2024"
+
+[dependencies]
+ort = { version = "=2.0.0-rc.10", default-features = false, features = [
+    "std",
+    "download-binaries",
+    "copy-dylibs",
+] }
+
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+unicode-normalization.workspace = true
+
+[build-dependencies]
+openssl-sys = { version = "0.9", features = ["vendored"] }
+
+[lints]
+workspace = true
