@@ -283,7 +283,8 @@ pub use voice::{
     VoiceCallStatus, VoiceConnection, VoiceModerationError, VoiceParticipant, VoiceRenderFrame,
     VoiceStore, VoiceStoreEvent, camera_tile_id, capture_screen_share_preview,
     list_screen_share_options, peek_screen_share_options, request_screen_capture_access,
-    screen_capture_permitted, screen_tile_id, system_screen_share_pick, upload_sound_file,
+    screen_capture_permitted, screen_tile_id, system_screen_share_pick, upload_sound_bytes,
+    upload_sound_file,
     validate_sound_file,
 };
 pub use wallet::{

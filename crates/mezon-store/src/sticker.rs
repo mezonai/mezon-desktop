@@ -13,7 +13,7 @@ use crate::emoji::{
 };
 use crate::ids::ClanId;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
-use crate::voice::{MAX_SOUND_BYTES, upload_sound_file};
+use crate::voice::{MAX_SOUND_BYTES, upload_sound_bytes, upload_sound_file};
 
 pub const STICKER_MEDIA_TYPE: i32 = 0;
 pub const AUDIO_MEDIA_TYPE: i32 = 1;
@@ -411,6 +411,42 @@ impl StickerStore {
                 return Err(EmoticonErrorKind::InvalidName.into());
             }
             let (id, url) = upload_sound_file(&api, &path, MAX_SOUND_BYTES)
+                .await
+                .map_err(EmoticonError::other)?;
+            api.add_clan_sticker(
+                clan,
+                &url,
+                &shortname,
+                "Among Us",
+                id,
+                AUDIO_MEDIA_TYPE,
+                false,
+            )
+            .await
+            .map_err(|e| EmoticonError::other(e.to_string()))?;
+            this.update(cx, |this, cx| this.refresh(cx))
+                .map_err(|_| EmoticonError::other("store dropped"))?;
+            Ok(())
+        })
+    }
+
+    pub fn create_sound_from_bytes(
+        &self,
+        clan_id: ClanId,
+        bytes: Vec<u8>,
+        extension: &str,
+        shortname: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), EmoticonError>> {
+        let api = self.api.clone();
+        let extension = extension.to_string();
+        let shortname = shortname.trim().to_string();
+        let clan = clan_id.get();
+        cx.spawn(async move |this, cx| {
+            if !is_valid_emoticon_shortname(&shortname) {
+                return Err(EmoticonErrorKind::InvalidName.into());
+            }
+            let (id, url) = upload_sound_bytes(&api, bytes, &extension, MAX_SOUND_BYTES)
                 .await
                 .map_err(EmoticonError::other)?;
             api.add_clan_sticker(

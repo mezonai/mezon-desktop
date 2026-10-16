@@ -5105,6 +5105,42 @@ pub async fn upload_sound_file(
         .map_err(|e| e.to_string())
 }
 
+pub async fn upload_sound_bytes(
+    api: &AppApi,
+    data: Vec<u8>,
+    extension: &str,
+    max_bytes: u64,
+) -> Result<(i64, String), String> {
+    let filetype = validate_sound_bytes(&data, extension, max_bytes)?;
+    let extension = extension.to_ascii_lowercase();
+    let id = crate::emoji::generate_snowflake_id();
+    api.upload_emoticon("sounds", id, &extension, filetype, data)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn validate_sound_bytes(
+    data: &[u8],
+    extension: &str,
+    max_bytes: u64,
+) -> Result<&'static str, String> {
+    if data.is_empty() {
+        return Err("empty".into());
+    }
+    if data.len() as u64 > max_bytes {
+        return Err("size_limit".into());
+    }
+    let extension = extension.to_ascii_lowercase();
+    let mime =
+        mezon_audio::sniff_sound_mime(&data).ok_or_else(|| "unsupported_type".to_string())?;
+    let filetype = match extension.as_str() {
+        "wav" if mime == "audio/wav" => "audio/wav",
+        "mp3" | "mpeg" if mime == "audio/mpeg" => "audio/mpeg",
+        _ => return Err("unsupported_type".into()),
+    };
+    Ok(filetype)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -5116,12 +5152,28 @@ mod tests {
         FLOWER_DEDUP_WINDOW, INTERACTIVE_LAUNCH_DEDUP_TTL, MAX_SOUND_BYTES,
         RECORDING_AVATAR_MAX_ATTEMPTS, RecordingAvatar, VoiceConnection, flower_pair_key,
         is_duplicate_flower, is_duplicate_interactive_launch, redact_interactive_app_url,
-        release_interactive_window, solo_tile_for, validate_sound_file, voice_join_error_message,
+        release_interactive_window, solo_tile_for, validate_sound_bytes, validate_sound_file,
+        voice_join_error_message,
     };
     use crate::{VoiceInteractiveApp, VoiceInteractiveEventType};
     use gpui::RenderImage;
     use mezon_voice::VoiceEvent;
     use parking_lot::Mutex;
+
+    #[test]
+    fn processed_sound_bytes_enforce_type_and_size() {
+        let wav = b"RIFF\0\0\0\0WAVE";
+        assert_eq!(validate_sound_bytes(wav, "wav", 12), Ok("audio/wav"));
+        assert_eq!(
+            validate_sound_bytes(wav, "mp3", 12),
+            Err("unsupported_type".into())
+        );
+        assert_eq!(
+            validate_sound_bytes(wav, "wav", 11),
+            Err("size_limit".into())
+        );
+        assert_eq!(validate_sound_bytes(&[], "wav", 12), Err("empty".into()));
+    }
 
     #[test]
     fn a_closed_window_from_an_earlier_launch_does_not_release_the_current_one() {
