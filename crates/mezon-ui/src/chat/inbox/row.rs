@@ -106,15 +106,16 @@ fn format_inbox_time(ts: u32, locale: &SharedString) -> String {
 fn resolve_for_you_profile(
     notification: &InboxNotification,
     sender_id: &str,
+    profile_clan_id: Option<ClanId>,
     cx: &App,
 ) -> (String, String, Option<SharedString>, String) {
     let message = notification.message.as_ref();
     let user_id = sender_id.parse::<UserId>().ok();
     let store_user = user_id.and_then(|uid| UsersByUserStore::global(cx).read(cx).user(uid));
     let clan_profile = notification
-        .clan_id
-        .parse::<ClanId>()
-        .ok()
+        .effective_clan_id()
+        .and_then(|id| id.parse::<ClanId>().ok())
+        .or(profile_clan_id)
         .and_then(|clan| {
             user_id.and_then(|uid| resolve_user_profile(uid, ProfileContext::Clan(clan), cx))
         });
@@ -153,8 +154,10 @@ fn resolve_for_you_profile(
         .or_else(|| (!username.is_empty()).then(|| username.clone()))
         .unwrap_or_default();
 
-    let avatar = message
-        .and_then(|m| (!m.avatar.is_empty()).then(|| m.avatar.clone()))
+    let avatar = clan_profile
+        .map(|profile| profile.avatar_url)
+        .filter(|url| !url.is_empty())
+        .or_else(|| message.and_then(|m| (!m.avatar.is_empty()).then(|| m.avatar.clone())))
         .or_else(|| (!notification.avatar_url.is_empty()).then(|| notification.avatar_url.clone()))
         .or_else(|| {
             store_user
@@ -162,8 +165,12 @@ fn resolve_for_you_profile(
                 .filter(|url| !url.is_empty())
         })
         .or_else(|| {
-            clan_profile
-                .map(|profile| profile.avatar_url)
+            user_id
+                .and_then(|uid| {
+                    DirectMessageStore::try_global(cx)
+                        .and_then(|store| store.read(cx).dm_with_peer(uid))
+                        .map(|dm| dm.avatar.clone())
+                })
                 .filter(|url| !url.is_empty())
         });
 
@@ -362,6 +369,7 @@ pub(crate) fn notification_jump_route(notification: &InboxNotification, cx: &App
 pub(crate) fn build_notification_row_view(
     notification: &InboxNotification,
     locale: &SharedString,
+    profile_clan_id: Option<ClanId>,
     cx: &App,
 ) -> NotificationRowView {
     let clan_id = notification
@@ -465,7 +473,7 @@ pub(crate) fn build_notification_row_view(
 
     let for_you_line = if notification.category == InboxCategory::ForYou {
         let (display_name, _, avatar, subject_suffix) =
-            resolve_for_you_profile(notification, sender_id, cx);
+            resolve_for_you_profile(notification, sender_id, profile_clan_id, cx);
         if avatar.is_some() {
             avatar_url = avatar;
         }
@@ -1917,6 +1925,79 @@ pub fn notification_copy_text(notification: &InboxNotification) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn for_you_uses_the_matching_dm_peer_without_changing_message_avatars(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = std::sync::Arc::new(mezon_client::AppApi::new(
+                std::sync::Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            mezon_store::RealtimeDispatch::init(api.clone(), cx);
+            UsersByUserStore::init(api.clone(), cx);
+            let directs = DirectMessageStore::init(api, cx);
+            let mut notification = InboxNotification {
+                id: "1".into(),
+                category: InboxCategory::ForYou,
+                subject: String::new(),
+                sender_id: "7".into(),
+                clan_id: String::new(),
+                channel_id: String::new(),
+                topic_id: None,
+                channel_type: 0,
+                avatar_url: String::new(),
+                create_time_seconds: 0,
+                code: 0,
+                message: None,
+            };
+            let locale = "en".into();
+            assert!(
+                build_notification_row_view(&notification, &locale, None, cx)
+                    .avatar_url
+                    .is_none()
+            );
+            for (sender, channel, mode, expected) in [
+                (8, 10, 4, None),
+                (7, 11, 3, None),
+                (7, 12, 4, Some(SharedString::from("peer.png"))),
+            ] {
+                let mut event = mezon_client::RealtimeEvent::ChannelMessage(Default::default());
+                if let mezon_client::RealtimeEvent::ChannelMessage(message) = &mut event {
+                    message.sender_id = sender;
+                    message.channel_id = channel;
+                    message.mode = mode;
+                    message.avatar = "peer.png".into();
+                    directs.update(cx, |store, cx| {
+                        store.insert_from_message(message, false, false, cx);
+                    });
+                }
+                assert_eq!(
+                    build_notification_row_view(&notification, &locale, None, cx).avatar_url,
+                    expected
+                );
+            }
+            notification.avatar_url = "notification.png".into();
+            for category in [InboxCategory::ForYou, InboxCategory::Messages] {
+                notification.category = category;
+                assert_eq!(
+                    build_notification_row_view(&notification, &locale, None, cx)
+                        .avatar_url
+                        .as_deref(),
+                    Some("notification.png")
+                );
+            }
+            notification.category = InboxCategory::ForYou;
+            notification.avatar_url.clear();
+            directs.update(cx, |store, cx| store.reset(cx));
+            assert!(
+                build_notification_row_view(&notification, &locale, None, cx)
+                    .avatar_url
+                    .is_none()
+            );
+        });
+    }
 
     #[test]
     fn mention_byte_range_handles_vietnamese_utf16_offsets() {

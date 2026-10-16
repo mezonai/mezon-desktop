@@ -6,9 +6,10 @@ use gpui::{
     SharedString, Subscription, Window, div, list, prelude::*, px, rgb, svg,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, InboxCategory, InboxEvent,
-    InboxNotification, InboxStore, MessageId, MessagesStore, RolesStore, TopicBadgeEvent,
-    TopicBadgeStore, TopicDiscussion, TopicsEvent, TopicsStore, UsersByUserEvent, UsersByUserStore,
+    ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, DirectMessageStore, InboxCategory,
+    InboxEvent, InboxNotification, InboxStore, MessageId, MessagesStore, RolesStore,
+    TopicBadgeEvent, TopicBadgeStore, TopicDiscussion, TopicsEvent, TopicsStore, UsersByUserEvent,
+    UsersByUserStore,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -49,6 +50,7 @@ pub struct InboxPopoverPanel {
     _channel_obs: Subscription,
     _topic_badge_sub: Subscription,
     _users_sub: Subscription,
+    _direct_sub: Subscription,
     _cdn_access_sub: Option<Subscription>,
 }
 
@@ -126,10 +128,9 @@ impl InboxPopoverPanel {
                 cx.notify();
             }
         });
-        let _members_sub = cx.subscribe(&members_store, |this, _, event, cx| {
-            if this.clan_id == event.clan_id().to_string() {
-                cx.notify();
-            }
+        let _members_sub = cx.subscribe(&members_store, |this, _, _, cx| {
+            this.sync_from_store(cx, false);
+            cx.notify();
         });
         let _channel_obs = cx.observe(&channel_list, move |_, _, cx| {
             if panel_clan_id.parse::<ClanId>().is_ok() {
@@ -143,8 +144,15 @@ impl InboxPopoverPanel {
             }
             cx.notify();
         });
-        let _users_sub = cx.subscribe(&users_store, |_, _, event, cx| {
+        let _users_sub = cx.subscribe(&users_store, |this, _, event, cx| {
             if matches!(event, UsersByUserEvent::Changed) {
+                this.sync_from_store(cx, false);
+                cx.notify();
+            }
+        });
+        let _direct_sub = cx.subscribe(&DirectMessageStore::global(cx), |this, _, _, cx| {
+            if this.tab == InboxTab::ForYou {
+                this.sync_from_store(cx, false);
                 cx.notify();
             }
         });
@@ -166,6 +174,7 @@ impl InboxPopoverPanel {
             _channel_obs,
             _topic_badge_sub,
             _users_sub,
+            _direct_sub,
             _cdn_access_sub: crate::chat::message::parts::observe_cdn_access(cx),
         };
         this.sync_from_store(cx, false);
@@ -285,7 +294,12 @@ impl InboxPopoverPanel {
             items
                 .into_iter()
                 .map(|notification| {
-                    let view = build_notification_row_view(&notification, locale, cx);
+                    let view = build_notification_row_view(
+                        &notification,
+                        locale,
+                        clan_id.parse().ok(),
+                        cx,
+                    );
                     ListRow::Notification {
                         notification: Box::new(notification),
                         view: Box::new(view),
