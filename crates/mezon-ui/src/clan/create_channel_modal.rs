@@ -325,6 +325,9 @@ impl Render for CreateChannelModal {
                     .items_start()
                     .child(
                         h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
                             .gap_2()
                             .items_center()
                             .child(
@@ -336,6 +339,8 @@ impl Render for CreateChannelModal {
                             )
                             .child(
                                 div()
+                                    .min_w_0()
+                                    .truncate()
                                     .text_sm()
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(theme.text_link)
