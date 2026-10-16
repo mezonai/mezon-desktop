@@ -272,6 +272,10 @@ fn latest_activity_topic(clan_id: &str, cx: &App) -> Option<TopicDiscussion> {
                         channel_id: channel_id.to_string(),
                         creator_id: origin.sender_id.clone(),
                         last_sender_id: origin.sender_id.clone(),
+                        last_sender_is_authoritative: false,
+                        last_message_id: last_visible_message
+                            .map(|message| message.id.to_string())
+                            .unwrap_or_default(),
                         content: origin.content.clone(),
                         last_message_content: last_visible_message
                             .map(|message| message.content.clone())

@@ -2030,6 +2030,11 @@ impl MessagesStore {
         self.active_clan_id
     }
 
+    #[cfg(test)]
+    pub(crate) fn seed_active_clan_for_test(&mut self, clan_id: ClanId) {
+        self.active_clan_id = Some(clan_id);
+    }
+
     pub fn active_topic_id(&self) -> Option<ChannelId> {
         self.active_topic_id
     }

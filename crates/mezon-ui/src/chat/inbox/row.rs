@@ -9,7 +9,7 @@ use mezon_store::{
     AppConfig, AttachmentSeedInput, Channel, ChannelAttachment, ChannelId, ChannelList,
     ChannelType, ClanId, ClanList, ClanMembersStore, DirectMessageStore, InboxCategory,
     InboxMentionSpan, InboxNotification, MessageId, MessageSpan, ProfileContext, RolesStore,
-    Settings, TopicDiscussion, TopicReplyPreview, UserId, UsersByUserStore,
+    Settings, TopicDiscussion, TopicReplyPreview, TopicsStore, UserId, UsersByUserStore,
     attachment_link_is_image, attachment_link_is_video, format_file_size, inbox_spans_from_raw,
     message_content_is_attachment, resolve_user_profile,
 };
@@ -25,6 +25,7 @@ use crate::theme::Theme;
 use crate::util::download::save_with_progress_toast;
 
 const DEFAULT_ROLE_COLOR: u32 = 0x99_aab5;
+const TOPIC_DEFAULT_AVATAR: &str = "icons/avatar-user.svg";
 pub const FOR_YOU_ROW_HEIGHT: f32 = 76.;
 pub const MENTION_ROW_HEIGHT: f32 = 120.;
 pub const MESSAGE_ROW_HEIGHT: f32 = 128.;
@@ -523,15 +524,16 @@ pub(crate) fn build_notification_row_view(
 }
 
 pub(crate) fn build_topic_row_view(topic: &TopicDiscussion, cx: &App) -> TopicRowView {
-    let clan_id = topic.clan_id.parse::<ClanId>().ok();
-    let sender_id = if topic.last_sender_id.is_empty() {
-        topic.creator_id.as_str()
-    } else {
-        topic.last_sender_id.as_str()
-    };
-    let (avatar_name, avatar_url, _) = clan_id
-        .map(|clan| resolve_sender(clan, sender_id, "", "", cx))
-        .unwrap_or((SharedString::default(), None, false));
+    let (avatar_name, avatar_url) = TopicsStore::global(cx)
+        .read(cx)
+        .inbox_avatar(topic, cx)
+        .map(|(name, avatar)| {
+            let avatar = AppConfig::try_global(cx)
+                .map(|cfg| cfg.avatar_proxy(avatar))
+                .unwrap_or_else(|| avatar.to_string());
+            (SharedString::from(name.to_string()), avatar_from(&avatar))
+        })
+        .unwrap_or_default();
     TopicRowView {
         avatar_name,
         avatar_url,
@@ -1872,12 +1874,18 @@ pub fn render_topic_body(
         .items_start()
         .p_1()
         .pt_1()
-        .child(render_avatar(
-            &view.avatar_name,
-            view.avatar_url.as_ref(),
-            Size::Medium,
-            avatar_cache,
-        ))
+        .child(
+            Avatar::new()
+                .name(view.avatar_name.clone())
+                .src(
+                    view.avatar_url
+                        .clone()
+                        .unwrap_or_else(|| TOPIC_DEFAULT_AVATAR.into()),
+                )
+                .fallback_src(TOPIC_DEFAULT_AVATAR)
+                .with_size(Size::Medium)
+                .image_cache(avatar_cache),
+        )
         .child(
             v_flex()
                 .flex_1()

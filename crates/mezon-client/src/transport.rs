@@ -1593,6 +1593,16 @@ pub fn prioritize_avatar(clan_avatar: &str, user_avatar: &str) -> String {
     }
 }
 
+pub fn message_sender_name(message: &api::ChannelMessage) -> &str {
+    if !message.clan_nick.is_empty() {
+        &message.clan_nick
+    } else if !message.display_name.is_empty() {
+        &message.display_name
+    } else {
+        &message.username
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiEntityMention {
     pub user_id: i64,
@@ -4663,13 +4673,7 @@ impl MezonTransport {
         enrich_content_tokens(&mut content_tokens, &entity_mentions);
         let content = content_tokens.t.clone();
 
-        let sender_name = if !message.clan_nick.is_empty() {
-            message.clan_nick.clone()
-        } else if !message.display_name.is_empty() {
-            message.display_name.clone()
-        } else {
-            message.username.clone()
-        };
+        let sender_name = message_sender_name(message).to_string();
 
         let attachments = parse_message_attachments(&message.attachments);
         let references = parse_message_references(&message.references);
