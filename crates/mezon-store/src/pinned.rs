@@ -25,6 +25,35 @@ use crate::messages::{
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::user_profile::{ProfileContext, resolve_avatar_url};
 
+pub fn resolve_pin_avatar_url(
+    sender_id: &str,
+    fallback_avatar: &str,
+    clan_id: Option<ClanId>,
+    channel_id: Option<ChannelId>,
+    cx: &App,
+) -> String {
+    if crate::messages::is_anonymous_sender_id(sender_id, cx) {
+        return fallback_avatar.to_string();
+    }
+    if let Ok(user_id) = sender_id.parse::<UserId>()
+        && !user_id.is_zero()
+    {
+        if let Some(clan_id) = clan_id
+            && let Some(url) = resolve_avatar_url(user_id, ProfileContext::Clan(clan_id), cx)
+                .filter(|url| !url.is_empty())
+        {
+            return url;
+        }
+        if let Some(channel_id) = channel_id
+            && let Some(url) = resolve_avatar_url(user_id, ProfileContext::Direct(channel_id), cx)
+                .filter(|url| !url.is_empty())
+        {
+            return url;
+        }
+    }
+    fallback_avatar.to_string()
+}
+
 #[derive(Debug, Clone)]
 pub struct PinnedMessage {
     pub id: String,
@@ -392,13 +421,22 @@ impl PinnedMessagesStore {
         cx.notify();
 
         let api = self.api.clone();
+        let anonymous_user_id = AppConfig::try_global(cx)
+            .map(|cfg| cfg.anonymous_user_id.clone())
+            .unwrap_or_default();
         cx.spawn(async move |this, cx| {
             let result = api.get_pin_messages_list(&channel_id, &clan_id).await;
             let result = match result {
                 Ok(mut pins) => {
                     if let (Ok(clan), Ok(channel)) = (clan_id.parse(), channel_id.parse()) {
-                        let verified =
-                            hydrate_latest_pin_attachment(&api, clan, channel, &mut pins).await;
+                        let verified = hydrate_latest_pin_source(
+                            &api,
+                            clan,
+                            channel,
+                            &mut pins,
+                            &anonymous_user_id,
+                        )
+                        .await;
                         Ok((pins, verified))
                     } else {
                         Ok((pins, HashSet::new()))
@@ -650,24 +688,13 @@ impl PinnedMessagesStore {
         ) = if let Some(msg) = msg.as_ref() {
             let sender_id = msg.sender_id.clone();
             let sender_name = msg.sender_name.to_string();
-            let mut avatar = msg.avatar_url.to_string();
-            if let Ok(user_id) = sender_id.parse::<UserId>()
-                && !user_id.is_zero()
-            {
-                if let Some(clan_id) = clan_id_opt
-                    && let Some(url) =
-                        resolve_avatar_url(user_id, ProfileContext::Clan(clan_id), cx)
-                            .filter(|url| !url.is_empty())
-                {
-                    avatar = url;
-                } else if let Some(channel_id) = channel_id_opt
-                    && let Some(url) =
-                        resolve_avatar_url(user_id, ProfileContext::Direct(channel_id), cx)
-                            .filter(|url| !url.is_empty())
-                {
-                    avatar = url;
-                }
-            }
+            let avatar = resolve_pin_avatar_url(
+                &sender_id,
+                &msg.avatar_url,
+                clan_id_opt,
+                channel_id_opt,
+                cx,
+            );
             let content_wire = pin_content_wire(msg);
             let create_time = msg.create_time;
             let created_time_iso = chrono::DateTime::from_timestamp(create_time, 0)
@@ -860,22 +887,33 @@ fn pin_attachment_url_valid(url: &str) -> bool {
     !url.is_empty() && (url.starts_with("http://") || url.starts_with("https://"))
 }
 
-fn apply_source_attachments(pins: &mut [ApiPinMessage], sources: &[ApiMessage]) {
+fn apply_pin_sources(pins: &mut [ApiPinMessage], sources: &[ApiMessage], anonymous_user_id: &str) {
     for pin in pins {
         if let Some(source) = sources
             .iter()
             .find(|m| m.message_id.to_string() == pin.message_id)
         {
             pin.attachments = source.attachments.clone();
+            if !anonymous_user_id.is_empty()
+                && source.sender_id.to_string() == anonymous_user_id
+                && !source.avatar.is_empty()
+            {
+                pin.sender_id = source.sender_id.to_string();
+                if !source.sender_name.is_empty() {
+                    pin.sender_name = source.sender_name.clone();
+                }
+                pin.avatar = source.avatar.clone();
+            }
         }
     }
 }
 
-async fn hydrate_latest_pin_attachment(
+async fn hydrate_latest_pin_source(
     api: &AppApi,
     clan_id: i64,
     channel_id: i64,
     pins: &mut [ApiPinMessage],
+    anonymous_user_id: &str,
 ) -> HashSet<i64> {
     let mut verified = HashSet::new();
     let Some(anchor) = pins
@@ -891,7 +929,7 @@ async fn hydrate_latest_pin_attachment(
     {
         Ok(page) => {
             verified.extend(page.messages.iter().map(|source| source.message_id));
-            apply_source_attachments(pins, &page.messages);
+            apply_pin_sources(pins, &page.messages, anonymous_user_id);
         }
         Err(error) => tracing::warn!("read original pinned message failed: {error}"),
     }
@@ -1228,6 +1266,165 @@ fn context_from_active(
 mod tests {
     use super::*;
 
+    const ANONYMOUS_ID: &str = "9876";
+
+    fn anonymous_config(cx: &mut App) {
+        AppConfig::init_global(
+            Arc::new(AppConfig {
+                anonymous_user_id: ANONYMOUS_ID.into(),
+                ..Default::default()
+            }),
+            cx,
+        );
+    }
+
+    fn persona_source(id: i64, sender_id: i64, avatar: &str) -> ApiMessage {
+        ApiMessage {
+            message_id: id,
+            content: "hello".into(),
+            content_tokens: Default::default(),
+            content_raw: String::new(),
+            code: 0,
+            sender_id,
+            sender_name: "persona".into(),
+            avatar: avatar.into(),
+            create_time: 1,
+            update_time: 0,
+            hide_editted: false,
+            attachments: vec![],
+            references: vec![],
+            reactions: vec![],
+            entity_mentions: vec![],
+            topic_id: 0,
+        }
+    }
+
+    fn persona_pin(id: i64, sender_id: &str, avatar: &str) -> ApiPinMessage {
+        ApiPinMessage {
+            id: id.to_string(),
+            message_id: id.to_string(),
+            content: "hello".into(),
+            content_text: "hello".into(),
+            sender_id: sender_id.into(),
+            sender_name: "persona".into(),
+            avatar: avatar.into(),
+            create_time: 1,
+            attachments: vec![],
+        }
+    }
+
+    #[gpui::test]
+    fn anonymous_pin_avatar_never_resolves_a_shared_profile(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            anonymous_config(cx);
+            for avatar in [
+                "https://cdn.example/persona-a.webp",
+                "https://cdn.example/persona-b.webp",
+                "",
+            ] {
+                for (clan_id, channel_id) in [
+                    (Some(ClanId(1)), Some(ChannelId(2))),
+                    (Some(ClanId(3)), Some(ChannelId(4))),
+                    (None, Some(ChannelId(5))),
+                    (None, None),
+                ] {
+                    assert_eq!(
+                        resolve_pin_avatar_url(ANONYMOUS_ID, avatar, clan_id, channel_id, cx),
+                        avatar
+                    );
+                }
+            }
+            for sender_id in ["", "0", "invalid", "42"] {
+                assert_eq!(
+                    resolve_pin_avatar_url(sender_id, "message.webp", None, None, cx),
+                    "message.webp"
+                );
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn anonymous_pin_persona_survives_event_edit_cache_and_refetch(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            anonymous_config(cx);
+            let mut pin = pinned_from_last_pin_event(
+                &LastPinMessageEvent {
+                    message_id: 42,
+                    message_sender_id: ANONYMOUS_ID.into(),
+                    message_sender_username: "persona".into(),
+                    message_sender_avatar: "event.webp".into(),
+                    ..Default::default()
+                },
+                None,
+            );
+            assert_eq!(
+                resolve_pin_avatar_url(&pin.sender_id, &pin.avatar_url, Some(ClanId(1)), None, cx),
+                "event.webp"
+            );
+            let edited = Message::new(MessageId(42), "edited", ANONYMOUS_ID, "persona", 1)
+                .with_avatar("updated.webp");
+            merge_pinned_message_update(&mut pin, &edited);
+            let cached = pin.clone();
+            assert_eq!(cached.avatar_url, "updated.webp");
+            assert_eq!(cached.content, "edited");
+            let mut records = vec![persona_pin(42, ANONYMOUS_ID, "wrong-profile.webp")];
+            let source = persona_source(42, ANONYMOUS_ID.parse().unwrap(), "updated.webp");
+            apply_pin_sources(&mut records, std::slice::from_ref(&source), ANONYMOUS_ID);
+            apply_pin_sources(&mut records, &[source], ANONYMOUS_ID);
+            let restored = pinned_from_api(records.remove(0), None);
+            assert_eq!(restored.sender_name, "persona");
+            assert_eq!(
+                resolve_pin_avatar_url(
+                    &restored.sender_id,
+                    &restored.avatar_url,
+                    Some(ClanId(3)),
+                    None,
+                    cx
+                ),
+                cached.avatar_url
+            );
+        });
+    }
+
+    #[test]
+    fn pin_source_repair_preserves_other_senders_and_missing_personas() {
+        let mut pins = vec![
+            persona_pin(1, ANONYMOUS_ID, "old.webp"),
+            persona_pin(2, "42", "member.webp"),
+            persona_pin(3, ANONYMOUS_ID, "known.webp"),
+            persona_pin(4, ANONYMOUS_ID, "unavailable.webp"),
+        ];
+        let sources = vec![
+            persona_source(1, ANONYMOUS_ID.parse().unwrap(), "persona.webp"),
+            persona_source(2, 42, "account.webp"),
+            persona_source(3, ANONYMOUS_ID.parse().unwrap(), ""),
+            persona_source(999, ANONYMOUS_ID.parse().unwrap(), "unrelated.webp"),
+        ];
+        apply_pin_sources(&mut pins, &sources, "");
+        assert_eq!(pins[0].avatar, "old.webp");
+        apply_pin_sources(&mut pins, &sources, ANONYMOUS_ID);
+        let avatars: Vec<_> = pins
+            .into_iter()
+            .map(|pin| pinned_from_api(pin, None).avatar_url)
+            .collect();
+        assert_eq!(
+            avatars,
+            [
+                "persona.webp",
+                "member.webp",
+                "known.webp",
+                "unavailable.webp"
+            ]
+        );
+        let mut pins = vec![persona_pin(1, ANONYMOUS_ID, "")];
+        let mut source = persona_source(1, ANONYMOUS_ID.parse().unwrap(), "late.webp");
+        source.sender_name.clear();
+        apply_pin_sources(&mut pins, &[source], ANONYMOUS_ID);
+        let pin = pinned_from_api(pins.remove(0), None);
+        assert_eq!(pin.avatar_url, "late.webp");
+        assert_eq!(pin.sender_name, "persona");
+    }
+
     #[test]
     fn verified_source_image_and_empty_source_cannot_be_overridden_by_stale_cache() {
         let mut cached = Message::new(MessageId(42), "", "7", "user", 0);
@@ -1359,7 +1556,7 @@ mod tests {
             entity_mentions: vec![],
             topic_id: 0,
         };
-        apply_source_attachments(
+        apply_pin_sources(
             &mut pins,
             &[
                 source(43, "https://cdn.example/godzilla.jpg"),
@@ -1367,6 +1564,7 @@ mod tests {
                 source(42, "https://cdn.example/portrait.png"),
                 source(999, "https://cdn.example/unrelated.jpg"),
             ],
+            "",
         );
         let pins: Vec<_> = pins.into_iter().map(|p| pinned_from_api(p, None)).collect();
         assert_eq!(

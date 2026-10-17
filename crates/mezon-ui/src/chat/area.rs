@@ -950,6 +950,9 @@ fn latest_activity_strip(
         .and_then(|pin| pin.attachments.first())
         .cloned();
     let pin_profile = latest_pin.as_ref().and_then(|pin| {
+        if mezon_store::is_anonymous_sender_id(&pin.sender_id, cx) {
+            return None;
+        }
         let clan_id = active_clan_id?;
         let sender_id = pin.sender_id.parse::<UserId>().ok()?;
         resolve_user_profile(sender_id, ProfileContext::Clan(clan_id), cx)
@@ -1119,6 +1122,8 @@ fn latest_activity_strip(
                 .fallback_src(raw_source);
         } else if !pin.avatar_proxied.is_empty() {
             avatar = avatar.src(pin.avatar_proxied.clone());
+        } else {
+            avatar = avatar.anonymous(mezon_store::is_anonymous_sender_id(&pin.sender_id, cx));
         }
         avatar.into_any_element()
     });
@@ -1316,7 +1321,8 @@ impl LatestActivityStripView {
             this.refresh_snapshot(cx)
         });
         let pinned_sub = cx.observe(&PinnedMessagesStore::global(cx), |this, _, cx| {
-            this.refresh_snapshot(cx)
+            this.refresh_snapshot(cx);
+            cx.notify();
         });
         let messages_sub = cx.subscribe(
             &MessagesStore::global(cx),
