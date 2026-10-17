@@ -262,7 +262,7 @@ pub use threads::{
     GroupedThreadIndexes, THREAD_STATUS_ARCHIVED, THREAD_STATUS_JOINED, ThreadCreateFailReason,
     ThreadSummary, ThreadsEvent, ThreadsStore, group_threads, thread_preview_display,
 };
-pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
+pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore, TopicSeed};
 pub use topics::{TopicsEvent, TopicsStore};
 pub use ui_state::UiState;
 pub use user_profile::{

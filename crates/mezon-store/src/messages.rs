@@ -1532,6 +1532,14 @@ impl MessagesStore {
         self.last_read_message_by_channel.remove(&channel_id);
     }
 
+    pub fn has_read_message(&self, channel_id: ChannelId, message_id: MessageId) -> bool {
+        !message_id.is_zero()
+            && self
+                .last_read_message_by_channel
+                .get(&channel_id)
+                .is_some_and(|read| message_id <= *read)
+    }
+
     /// Schedule a last-seen write when the viewport tail is visible (cf. React
     /// `useChannelSeen` + `updateLastSeenMessage`).
     pub fn note_viewport_seen(
@@ -1583,7 +1591,7 @@ impl MessagesStore {
             mode: self.mode,
             badge_count,
         };
-        if live_badge > 0 || self.channel_is_unread(channel_id, clan_id, cx) {
+        if self.channel_is_unread(channel_id, clan_id, cx) {
             self.apply_local_last_seen(&pending, cx);
         } else {
             self.set_last_read_message(channel_id, message_id);
@@ -1809,11 +1817,9 @@ impl MessagesStore {
                 })
             })
         } else {
-            ChannelList::try_global(cx).is_some_and(|cl| {
-                cl.read(cx)
-                    .channel(clan_id, channel_id)
-                    .is_some_and(|c| c.is_unread())
-            })
+            ChannelList::try_global(cx)
+                .and_then(|cl| cl.read(cx).own_unread(clan_id, channel_id))
+                .is_some_and(|(_, unread)| unread)
         }
     }
 
@@ -1938,6 +1944,11 @@ impl MessagesStore {
                     message_id,
                     "write_last_seen_message failed: {e}"
                 );
+                if e.downcast_ref::<mezon_client::RealtimeControlError>()
+                    .is_some_and(mezon_client::RealtimeControlError::is_forbidden)
+                {
+                    return;
+                }
                 this.update(cx, |this, _| {
                     if this.reset_generation != generation {
                         return;
@@ -11620,6 +11631,41 @@ mod tests {
                     !store.load_more_topic(cx),
                     "a second page must not start while one is in flight"
                 );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn topic_viewport_seen_writes_the_topic_last_seen_not_the_parent(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let clan = ClanId(1);
+            let parent = ChannelId(10);
+            let topic = ChannelId(77);
+            let seen = MessageId(100);
+
+            store.update(cx, |store, cx| {
+                store.activate(clan, parent, true, false, 1, 2, cx);
+                store.set_active_topic(Some(topic.get()), cx);
+                store.note_topic_viewport_seen(topic, seen, 50, true, cx);
+            });
+
+            store.read_with(cx, |store, _| {
+                let pending = store.pending_last_seen.get(&topic).expect("pending");
+                assert_eq!(pending.channel_id, topic);
+                assert_eq!(pending.message_id, seen);
+                assert!(!store.pending_last_seen.contains_key(&parent));
+                assert_eq!(store.last_read_message_by_channel.get(&topic), Some(&seen));
             });
         });
     }

@@ -884,13 +884,17 @@ impl ClanList {
     }
 
     pub fn sync_has_unread_from_channels(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
-        let Some(has_unread) = ChannelList::global(cx)
-            .read(cx)
-            .clan_has_any_unread(clan_id)
+        let topic_unread = crate::topic_badges::TopicBadgeStore::try_global(cx)
+            .is_some_and(|store| store.read(cx).clan_has_unread_topic(clan_id));
+        let Some(has_unread) = ChannelList::try_global(cx)
+            .and_then(|channels| channels.read(cx).clan_has_any_unread(clan_id))
         else {
+            if topic_unread {
+                self.set_has_unread(clan_id, true, cx);
+            }
             return;
         };
-        self.set_has_unread(clan_id, has_unread, cx);
+        self.set_has_unread(clan_id, has_unread || topic_unread, cx);
     }
 
     pub fn decrement_badge(&mut self, clan_id: ClanId, amount: u32, cx: &mut Context<Self>) {

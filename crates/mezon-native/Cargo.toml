@@ -36,8 +36,8 @@ core-foundation.workspace = true
 windows.workspace = true
 
 [target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
-notify-rust = "4"
 zbus = "4"
+futures-lite = { workspace = true }
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
 
 [dev-dependencies]

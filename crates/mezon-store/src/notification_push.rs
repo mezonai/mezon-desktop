@@ -8,7 +8,7 @@ use crate::channel::ChannelList;
 use crate::clan::ClanList;
 use crate::config::AppConfig;
 use crate::connection::ConnectionStore;
-use crate::ids::ChannelId;
+use crate::ids::{ChannelId, ClanId};
 use crate::messages::MessagesStore;
 use crate::platform::{DesktopNotification, NotificationTopicReply, PlatformStore};
 use crate::presence::PresenceStore;
@@ -186,11 +186,19 @@ impl NotificationPushStore {
                     let prepared = this
                         .update(cx, |_, cx| {
                             note_dm_unread(cx, &user_id, &notification);
-                            prepare(cx, &user_id, &notification)
+                            let prepared = prepare(cx, &user_id, &notification)?;
+                            if let (Some(clan_id), Some(channel_id)) =
+                                (&prepared.clan_id, &prepared.channel_id)
+                            {
+                                note_incoming_toast(cx, clan_id, channel_id);
+                            }
+                            let armed =
+                                PlatformStore::arm_channel_show(prepared.channel_id.as_deref());
+                            Some((prepared, armed))
                         })
                         .ok()
                         .flatten();
-                    let Some(prepared) = prepared else {
+                    let Some((prepared, armed)) = prepared else {
                         if this.update(cx, |_, _| {}).is_err() {
                             return;
                         }
@@ -205,7 +213,15 @@ impl NotificationPushStore {
                         None => None,
                     };
                     if this
-                        .update(cx, |_, cx| show_prepared(cx, prepared, icon_path))
+                        .update(cx, |_, cx| {
+                            if PlatformStore::channel_show_cancelled(
+                                prepared.channel_id.as_deref(),
+                                armed,
+                            ) {
+                                return;
+                            }
+                            show_prepared(cx, prepared, icon_path);
+                        })
                         .is_err()
                     {
                         return;
@@ -296,6 +312,7 @@ fn prepare(cx: &App, user_id: &str, n: &GotifyNotification) -> Option<PreparedNo
         .map(|s| s.read(cx).notifications_hide_content)
         .unwrap_or(false);
     let (channel_id, clan_id) = route_ids(cx, n.effective_channel_id());
+    let clan_id = clan_id.or_else(|| clan_id_from_link(&n.extras.link));
     Some(PreparedNotification {
         title: n.title.clone(),
         body: if hide_content {
@@ -362,6 +379,33 @@ fn is_viewing_while_focused(cx: &App, channel_id: &str) -> bool {
 
 /// Resolve the clan that owns a channel so a notification click can route to it;
 /// a channel absent from the clan cache (e.g. a DM) yields `clan_id = None`.
+fn clan_id_from_link(link: &str) -> Option<String> {
+    let path = link.split(['?', '#']).next().unwrap_or(link);
+    let mut parts = path.split('/').filter(|part| !part.is_empty());
+    while let Some(part) = parts.next() {
+        if part == "clans" {
+            let id = parts.next()?;
+            return id
+                .parse::<i64>()
+                .ok()
+                .filter(|id| *id > 0)
+                .map(|id| id.to_string());
+        }
+    }
+    None
+}
+
+fn note_incoming_toast(cx: &mut App, clan_id: &str, channel_id: &str) {
+    let (Ok(clan_id), Ok(channel_id)) = (clan_id.parse::<i64>(), channel_id.parse::<i64>()) else {
+        return;
+    };
+    if let Some(list) = ChannelList::try_global(cx) {
+        list.update(cx, |list, _| {
+            list.note_notified_channel(ClanId(clan_id), ChannelId(channel_id));
+        });
+    }
+}
+
 fn route_ids(cx: &App, channel_id: &str) -> (Option<String>, Option<String>) {
     let Ok(raw) = channel_id.parse::<i64>() else {
         return (None, None);
@@ -382,4 +426,29 @@ fn route_ids(cx: &App, channel_id: &str) -> (Option<String>, Option<String>) {
         Some(channel_id.to_string()),
         clan_id.filter(|c| !c.is_zero()).map(|c| c.to_string()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clan_id_from_link;
+
+    #[test]
+    fn clan_id_from_link_reads_the_clan_out_of_a_chat_link() {
+        assert_eq!(
+            clan_id_from_link("https://mezon.ai/chat/clans/42/channels/7"),
+            Some("42".into())
+        );
+        assert_eq!(
+            clan_id_from_link("https://mezon.ai/chat/clans/42/channels/7?message=1"),
+            Some("42".into())
+        );
+        assert_eq!(
+            clan_id_from_link("https://mezon.ai/chat/direct/message/7/9"),
+            None
+        );
+        assert_eq!(
+            clan_id_from_link("https://mezon.ai/chat/clans/0/channels/7"),
+            None
+        );
+    }
 }

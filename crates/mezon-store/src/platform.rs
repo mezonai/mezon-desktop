@@ -208,6 +208,7 @@ pub type OpenManagedAppWindowFn = Arc<dyn Fn(&str, &str) -> anyhow::Result<()> +
 /// Download `url` and save it locally under the given suggested filename.
 pub type SaveAttachmentFn = Arc<dyn Fn(&str, &str) -> anyhow::Result<()> + Send + Sync>;
 pub type NotifyFn = Arc<dyn Fn(DesktopNotification) + Send + Sync>;
+pub type DismissChannelNotificationFn = Arc<dyn Fn(Option<String>, String) + Send + Sync>;
 pub type CliInstallVisibleFn = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type CliInstallStateFn = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type CliInstallToggleFn = Arc<dyn Fn() -> anyhow::Result<bool> + Send + Sync>;
@@ -258,12 +259,43 @@ pub struct DesktopNotification {
     pub icon_path: Option<String>,
 }
 
+fn channel_show_clock() -> &'static std::sync::atomic::AtomicU64 {
+    static CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    &CLOCK
+}
+
+fn channel_dismissed_at() -> &'static std::sync::Mutex<std::collections::HashMap<String, u64>> {
+    static DISMISSED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    > = std::sync::OnceLock::new();
+    DISMISSED.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn note_channel_dismissed(channel_id: &str) {
+    let seq = channel_show_clock().fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    channel_dismissed_at()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(channel_id.to_owned(), seq);
+}
+
+pub fn reset_dismissed() {
+    channel_dismissed_at()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clear();
+}
+
+pub type CloseAllNotificationsFn = Arc<dyn Fn() + Send + Sync>;
+
 pub struct PlatformStore {
     open_url: Option<OpenUrlFn>,
     open_url_app_window: Option<OpenUrlFn>,
     open_managed_app_window: Option<OpenManagedAppWindowFn>,
     save_attachment: Option<SaveAttachmentFn>,
     notifier: Option<NotifyFn>,
+    dismiss_channel_notification: Option<DismissChannelNotificationFn>,
+    close_all_notifications: Option<CloseAllNotificationsFn>,
     cli_install: Option<CliInstallHooks>,
     mcp_server: Option<McpServerHooks>,
     notification_permit: Option<NotificationPermitFn>,
@@ -278,6 +310,8 @@ impl PlatformStore {
             open_managed_app_window: None,
             save_attachment: None,
             notifier: None,
+            dismiss_channel_notification: None,
+            close_all_notifications: None,
             cli_install: None,
             mcp_server: None,
             notification_permit: None,
@@ -381,6 +415,63 @@ impl PlatformStore {
         if let Some(f) = &self.notifier {
             f(notification);
         }
+    }
+
+    pub fn set_dismiss_channel_notification(
+        entity: &Entity<Self>,
+        f: DismissChannelNotificationFn,
+        cx: &mut App,
+    ) {
+        entity.update(cx, |store, _| {
+            store.dismiss_channel_notification = Some(f);
+        });
+    }
+
+    pub fn set_close_all_notifications(
+        entity: &Entity<Self>,
+        f: CloseAllNotificationsFn,
+        cx: &mut App,
+    ) {
+        entity.update(cx, |store, _| {
+            store.close_all_notifications = Some(f);
+        });
+    }
+
+    pub fn close_all_notifications(&self) {
+        if let Some(f) = &self.close_all_notifications {
+            f();
+        }
+    }
+
+    pub fn arm_channel_show(channel_id: Option<&str>) -> u64 {
+        let _ = channel_id;
+        channel_show_clock().load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn channel_show_cancelled(channel_id: Option<&str>, armed: u64) -> bool {
+        let Some(channel_id) = channel_id.filter(|id| !id.is_empty() && *id != "0") else {
+            return false;
+        };
+        channel_dismissed_at()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(channel_id)
+            .is_some_and(|seq| *seq > armed)
+    }
+
+    pub fn dismiss_channel_notification(cx: &App, clan_id: Option<i64>, channel_id: i64) {
+        if channel_id == 0 {
+            return;
+        }
+        note_channel_dismissed(&channel_id.to_string());
+        let Some(platform) = Self::try_global(cx) else {
+            return;
+        };
+        let Some(dismiss) = platform.read(cx).dismiss_channel_notification.clone() else {
+            return;
+        };
+        let clan = clan_id.and_then(|id| (id != 0).then(|| id.to_string()));
+        dismiss(clan, channel_id.to_string());
     }
 
     pub fn set_cli_install(entity: &Entity<Self>, hooks: CliInstallHooks, cx: &mut App) {
@@ -675,5 +766,18 @@ mod tests {
             legacy,
             "https://cdn.example/1840673171137630208/2097582928409137152.png"
         );
+    }
+
+    #[test]
+    fn a_read_during_show_cancels_only_the_in_flight_notification() {
+        let channel = "dock-arm-2097582928409137152";
+        let armed = PlatformStore::arm_channel_show(Some(channel));
+        assert!(!PlatformStore::channel_show_cancelled(Some(channel), armed));
+        note_channel_dismissed(channel);
+        assert!(PlatformStore::channel_show_cancelled(Some(channel), armed));
+        let later = PlatformStore::arm_channel_show(Some(channel));
+        assert!(!PlatformStore::channel_show_cancelled(Some(channel), later));
+        assert!(!PlatformStore::channel_show_cancelled(None, armed));
+        assert!(!PlatformStore::channel_show_cancelled(Some("0"), armed));
     }
 }

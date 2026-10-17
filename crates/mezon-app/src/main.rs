@@ -1064,6 +1064,20 @@ fn open_main_window(
         std::sync::Arc::new(|url: &str, filename: &str| save_attachment(url, filename)),
         cx,
     );
+    mezon_store::PlatformStore::set_dismiss_channel_notification(
+        &platform_store,
+        std::sync::Arc::new(|clan_id, channel_id| {
+            mezon_native::notifications::close_channel(clan_id.as_deref(), &channel_id);
+        }),
+        cx,
+    );
+    mezon_store::PlatformStore::set_close_all_notifications(
+        &platform_store,
+        std::sync::Arc::new(|| {
+            mezon_native::notifications::close_all();
+        }),
+        cx,
+    );
     mezon_store::PlatformStore::set_notifier(
         &platform_store,
         std::sync::Arc::new(|n: mezon_store::DesktopNotification| {

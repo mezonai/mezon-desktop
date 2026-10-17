@@ -699,6 +699,17 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn list_topic_badge_counts(
+        &self,
+        clan_id: i64,
+    ) -> Result<Vec<crate::transport::ApiTopicBadge>> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.list_topic_badge_counts(clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_voice_channel_users(
         &self,
         clan_id: i64,

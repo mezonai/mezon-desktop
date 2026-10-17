@@ -121,11 +121,10 @@ fn is_clan_message_seen(cx: &App, m: &ChannelMessage, from_me: bool) -> bool {
         return false;
     };
     let badge_id = badge_channel_id(m);
-    let parent_id = ChannelId(m.channel_id);
-    if active == badge_id && badge_id == parent_id {
+    if active == badge_id {
         return messages.is_reading_live_tail(active);
     }
-    active == badge_id || active == parent_id
+    false
 }
 
 fn mention_check_policy(
@@ -156,8 +155,15 @@ fn is_message_already_seen(
     cx: &App,
     clan_id: ClanId,
     channel_id: ChannelId,
+    message_id: MessageId,
     msg_time: i64,
 ) -> bool {
+    if MessagesStore::global(cx)
+        .read(cx)
+        .has_read_message(channel_id, message_id)
+    {
+        return true;
+    }
     if msg_time <= 0 {
         return false;
     }
@@ -367,7 +373,8 @@ impl BadgeService {
                     let clan_id = ClanId(m.clan_id);
                     let is_new_message = !is_content_mutation(m);
                     let seen = is_clan_message_seen(cx, m, from_me);
-                    let already_seen = is_message_already_seen(cx, clan_id, channel_id, ts);
+                    let already_seen =
+                        is_message_already_seen(cx, clan_id, channel_id, message_id, ts);
                     let removed_by_other = is_chat_remove(m) && !from_me;
                     let code = MessageCode::from_raw(m.code);
                     let skip_unread_activity = matches!(
@@ -441,7 +448,7 @@ impl BadgeService {
                             });
                         }
                     }
-                    if !from_me && is_new_message && !skip_unread_activity {
+                    if !from_me && is_new_message && !seen && !skip_unread_activity {
                         ClanList::global(cx).update(cx, |cls, cx| {
                             cls.set_has_unread_message(clan_id, cx);
                         });
@@ -494,7 +501,14 @@ impl BadgeService {
                         let message_ts = deleted_message_timestamp(m);
                         let deleted_channel = ChannelId(m.channel_id);
                         let decremented = ChannelList::global(cx).update(cx, |cl, cx| {
-                            cl.decrement_channel_on_delete(clan_id, deleted_channel, message_ts, cx)
+                            cl.decrement_channel_on_delete(
+                                clan_id,
+                                deleted_channel,
+                                ChannelId(m.topic_id),
+                                MessageId(m.message_id),
+                                message_ts,
+                                cx,
+                            )
                         });
                         if decremented {
                             ClanList::global(cx).update(cx, |cls, cx| {
@@ -514,7 +528,7 @@ impl BadgeService {
                 } else if e.channel_id != 0 {
                     let channel_id = ChannelId(e.channel_id);
                     ChannelList::global(cx).update(cx, |cl, cx| {
-                        cl.apply_read(clan_id, channel_id, cx);
+                        cl.apply_mark_as_read_channel(clan_id, channel_id, cx);
                         cl.apply_topic_read(channel_id, cx);
                     });
                 } else if e.category_id != 0 {
@@ -643,7 +657,7 @@ impl BadgeService {
         } else {
             channel_id
         };
-        if is_message_already_seen(cx, clan_id, badge_channel, msg_time) {
+        if is_message_already_seen(cx, clan_id, badge_channel, message_id, msg_time) {
             tracing::debug!(
                 channel_id = badge_channel.get(),
                 msg_time,
@@ -669,17 +683,19 @@ impl BadgeService {
             message_id = message_id.get(),
             "badge: apply notification increment"
         );
-        ChannelList::global(cx).update(cx, |cl, cx| {
-            cl.note_channel_message(
-                clan_id,
-                badge_channel,
-                true,
-                false,
-                msg_time,
-                message_id,
-                cx,
-            );
-        });
+        if badge_channel == channel_id {
+            ChannelList::global(cx).update(cx, |cl, cx| {
+                cl.note_channel_message(
+                    clan_id,
+                    badge_channel,
+                    true,
+                    false,
+                    msg_time,
+                    message_id,
+                    cx,
+                );
+            });
+        }
         ClanList::global(cx).update(cx, |cls, cx| {
             cls.increment_clan_badge(clan_id, cx);
         });

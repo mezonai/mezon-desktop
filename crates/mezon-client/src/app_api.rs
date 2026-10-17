@@ -8,8 +8,8 @@ use crate::{
     transport::{
         ApiAccount, ApiAttachment, ApiCanvas, ApiCanvasDetail, ApiCategoryDesc, ApiChannelApp,
         ApiChannelAttachment, ApiChannelDesc, ApiClanDesc, ApiDirectChannel, ApiFriend, ApiMessage,
-        ApiPinMessage, ApiThreadDesc, ApiVoiceChannelUser, HttpFallbackSession, RealtimeEvent,
-        UpdateChannelDescParams,
+        ApiPinMessage, ApiThreadDesc, ApiTopicBadge, ApiVoiceChannelUser, HttpFallbackSession,
+        RealtimeEvent, UpdateChannelDescParams,
     },
 };
 
@@ -3210,6 +3210,10 @@ impl AppApi {
 
     pub async fn list_channel_badge_counts(&self, clan_id: i64) -> Result<Vec<ApiChannelDesc>> {
         self.transport.list_channel_badge_counts(clan_id).await
+    }
+
+    pub async fn list_topic_badge_counts(&self, clan_id: i64) -> Result<Vec<ApiTopicBadge>> {
+        self.transport.list_topic_badge_counts(clan_id).await
     }
 
     pub async fn list_voice_channel_users(&self, clan_id: i64) -> Result<Vec<ApiVoiceChannelUser>> {
