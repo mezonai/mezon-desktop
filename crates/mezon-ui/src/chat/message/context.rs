@@ -143,6 +143,7 @@ pub struct RowMemo {
     /// store the way message spans are, so without this the imgproxy url for
     /// every pill of every visible message is rebuilt on every frame.
     pub reaction_srcs: HashMap<SharedString, SharedString>,
+    pub reaction_srcs_generation: u64,
     pub rich_text: HashMap<MessageId, RichTextRenderPlan>,
     pub selection_layouts: HashMap<MessageId, super::content::SelectableMessageLayoutCacheEntry>,
     pub selection_text_pieces:

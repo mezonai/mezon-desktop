@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -1926,6 +1926,26 @@ pub fn fill_emoji_sources(spans: &mut [MessageSpan], cfg: Option<&AppConfig>) {
             *src = cfg.emoji_src_sized(emoji_id, source_px).into();
         }
     }
+}
+
+pub(crate) fn spans_use_any_emoji(
+    spans: &[MessageSpan],
+    emoji_ids: Option<&HashSet<String>>,
+) -> bool {
+    spans.iter().any(|span| {
+        matches!(
+            span,
+            MessageSpan::Emoji { emoji_id, .. }
+                if !emoji_id.is_empty() && emoji_ids.is_none_or(|ids| ids.contains(emoji_id))
+        )
+    })
+}
+
+pub(crate) fn emoji_span_sources(spans: &[MessageSpan]) -> impl Iterator<Item = &SharedString> {
+    spans.iter().filter_map(|span| match span {
+        MessageSpan::Emoji { src, .. } => Some(src),
+        _ => None,
+    })
 }
 
 pub(crate) fn fill_reply_emoji_sources(spans: &mut [MessageSpan], cfg: Option<&AppConfig>) {

@@ -2180,6 +2180,11 @@ fn reaction_emoji_src(reaction: &Reaction, ctx: &RowCtx) -> SharedString {
         return SharedString::default();
     }
     let mut memo = ctx.row_memo.borrow_mut();
+    let generation = mezon_store::emoji_sources_generation();
+    if memo.reaction_srcs_generation != generation {
+        memo.reaction_srcs.clear();
+        memo.reaction_srcs_generation = generation;
+    }
     if let Some(src) = memo.reaction_srcs.get(&reaction.emoji_id) {
         return src.clone();
     }

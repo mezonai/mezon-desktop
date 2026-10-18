@@ -2130,6 +2130,7 @@ impl MessagesStore {
         let api = self.api.clone();
         let cfg = AppConfig::try_global(cx).cloned();
         let viewer_id = viewer_user_id(cx);
+        let emoji_generation = crate::emoji::emoji_sources_generation();
         cx.spawn(async move |this, cx| {
             if !backoff.is_zero() {
                 cx.background_executor().timer(backoff).await;
@@ -2168,7 +2169,7 @@ impl MessagesStore {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                settle_private_source_media(&mut parsed, cx);
+                settle_parsed_messages(&mut parsed, emoji_generation, cx);
                 let (prepended, dropped_bottom) = {
                     let Some(channel) = this.cache.get_mut(&channel_id) else {
                         this.finish_loading_more(cx);
@@ -2260,6 +2261,7 @@ impl MessagesStore {
         let api = self.api.clone();
         let cfg = AppConfig::try_global(cx).cloned();
         let viewer_id = viewer_user_id(cx);
+        let emoji_generation = crate::emoji::emoji_sources_generation();
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_channel_messages(
@@ -2300,7 +2302,7 @@ impl MessagesStore {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                settle_private_source_media(&mut parsed, cx);
+                settle_parsed_messages(&mut parsed, emoji_generation, cx);
                 let (added, dropped) = {
                     let Some(channel) = this.cache.get_mut(&channel_id) else {
                         this.finish_loading_more(cx);
@@ -2461,6 +2463,7 @@ impl MessagesStore {
         let api = self.api.clone();
         let cfg = AppConfig::try_global(cx).cloned();
         let viewer_id = viewer_user_id(cx);
+        let emoji_generation = crate::emoji::emoji_sources_generation();
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_channel_messages(
@@ -2491,7 +2494,7 @@ impl MessagesStore {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                settle_private_source_media(&mut parsed, cx);
+                settle_parsed_messages(&mut parsed, emoji_generation, cx);
                 let mut window: Vec<Message> = parsed;
                 sort_messages(&mut window);
                 if window.len() > MAX_MESSAGES_PER_CHANNEL {
@@ -4129,6 +4132,7 @@ impl MessagesStore {
         let api = self.api.clone();
         let cfg = AppConfig::try_global(cx).cloned();
         let viewer_id = viewer_user_id(cx);
+        let emoji_generation = crate::emoji::emoji_sources_generation();
         cx.spawn(async move |this, cx| {
             if !backoff.is_zero() {
                 cx.background_executor().timer(backoff).await;
@@ -4160,7 +4164,7 @@ impl MessagesStore {
                 .spawn(async move { prepare_messages(msgs, cfg.as_ref(), viewer_id) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                settle_private_source_media(&mut parsed, cx);
+                settle_parsed_messages(&mut parsed, emoji_generation, cx);
                 this.topic_loading_more = false;
                 if this.active_topic_id != Some(topic_key) {
                     cx.notify();
@@ -4242,6 +4246,7 @@ impl MessagesStore {
         let api = self.api.clone();
         let cfg = AppConfig::try_global(cx).cloned();
         let viewer_id = viewer_user_id(cx);
+        let emoji_generation = crate::emoji::emoji_sources_generation();
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_topic_messages(
@@ -4273,7 +4278,7 @@ impl MessagesStore {
                 .spawn(async move { prepare_messages(msgs, cfg.as_ref(), viewer_id) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                settle_private_source_media(&mut parsed, cx);
+                settle_parsed_messages(&mut parsed, emoji_generation, cx);
                 this.topic_loading_more = false;
                 if this.active_topic_id != Some(topic_key) {
                     cx.notify();
@@ -4580,6 +4585,33 @@ impl MessagesStore {
         } else {
             self.emit_upload_row_updates(rows, cx);
         }
+    }
+
+    pub(crate) fn refresh_emoji_sources(
+        &mut self,
+        emoji_ids: &HashSet<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let config = AppConfig::try_global(cx).cloned();
+        let shown = self.probe_buckets();
+        let mut touched = Vec::new();
+        for (bucket, channel) in self.cache.iter_mut() {
+            let is_shown = shown.contains(bucket);
+            for message in channel.messages.items.iter_mut() {
+                if refill_emoji_sources(message, Some(emoji_ids), config.as_ref()) && is_shown {
+                    touched.push(message.id);
+                }
+            }
+        }
+        if touched.is_empty() {
+            return;
+        }
+        for message_id in touched {
+            cx.emit(MessagesEvent::Updated {
+                message_id: Some(message_id),
+            });
+        }
+        cx.notify();
     }
 
     fn refresh_private_source_media(&mut self, cx: &mut Context<Self>) {
@@ -10887,11 +10919,46 @@ fn parse_poll_markdown(text: &str) -> Option<ParsedPollMarkdown> {
     })
 }
 
-fn settle_private_source_media(messages: &mut [Message], cx: &App) {
+fn settle_parsed_messages(messages: &mut [Message], emoji_generation: u64, cx: &App) {
     let config = AppConfig::try_global(cx);
+    let emoji_sources_moved = emoji_generation != crate::emoji::emoji_sources_generation();
     for message in messages.iter_mut() {
         remark_private_source_media(message, config);
+        if emoji_sources_moved {
+            refill_emoji_sources(message, None, config);
+        }
     }
+}
+
+fn refill_emoji_sources(
+    message: &mut Message,
+    emoji_ids: Option<&HashSet<String>>,
+    cfg: Option<&AppConfig>,
+) -> bool {
+    let mut changed = false;
+    if crate::message::spans_use_any_emoji(&message.spans, emoji_ids) {
+        changed |= refill_span_sources(&mut message.spans, cfg, crate::message::fill_emoji_sources);
+    }
+    for reference in message.references.iter_mut() {
+        if crate::message::spans_use_any_emoji(&reference.preview_spans, emoji_ids) {
+            changed |= refill_span_sources(
+                &mut reference.preview_spans,
+                cfg,
+                crate::message::fill_reply_emoji_sources,
+            );
+        }
+    }
+    changed
+}
+
+fn refill_span_sources(
+    spans: &mut [MessageSpan],
+    cfg: Option<&AppConfig>,
+    fill: fn(&mut [MessageSpan], Option<&AppConfig>),
+) -> bool {
+    let before: Vec<SharedString> = crate::message::emoji_span_sources(spans).cloned().collect();
+    fill(spans, cfg);
+    !crate::message::emoji_span_sources(spans).eq(before.iter())
 }
 
 fn remark_private_source_media(message: &mut Message, cfg: Option<&AppConfig>) -> bool {
@@ -14376,6 +14443,142 @@ mod tests {
                     src: SharedString::default(),
                 },
             ]
+        );
+    }
+
+    fn komu_base_config() -> AppConfig {
+        AppConfig {
+            base_img_url: "https://cdn.komu.vn".into(),
+            ..AppConfig::dev_defaults()
+        }
+    }
+
+    fn catalog_emoji(id: &str, src: &str) -> crate::emoji::Emoji {
+        crate::emoji::Emoji {
+            id: id.into(),
+            shortname: id.into(),
+            src: src.into(),
+            category: "Custom".into(),
+            clan_id: "1".into(),
+            clan_logo: String::new(),
+            creator_id: "2".into(),
+            is_for_sale: false,
+        }
+    }
+
+    fn emoji_message(id: i64, emoji_id: &str, cfg: &AppConfig) -> Message {
+        let mut message = Message::new(MessageId(id), ":e:", "u1", "U1", 1_700_000_000);
+        message.spans = vec![MessageSpan::Emoji {
+            name: ":e:".into(),
+            emoji_id: emoji_id.into(),
+            src: SharedString::default(),
+        }];
+        crate::message::fill_emoji_sources(&mut message.spans, Some(cfg));
+        message
+    }
+
+    fn first_emoji_src(message: &Message) -> SharedString {
+        match &message.spans[0] {
+            MessageSpan::Emoji { src, .. } => src.clone(),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn an_emoji_stored_on_a_new_cdn_renders_from_its_source_once_the_catalog_arrives() {
+        let cfg = komu_base_config();
+        let source = "https://cdn.mezon.ai/emojis/990011.webp";
+        let mut message = emoji_message(1, "990011", &cfg);
+        assert_eq!(
+            first_emoji_src(&message).as_ref(),
+            cfg.imgproxy_url("https://cdn.komu.vn/emojis/990011.webp", 96, 96, "fit")
+        );
+
+        let changed = crate::emoji::publish_emoji_sources(&[catalog_emoji("990011", source)]);
+        assert!(changed.contains("990011"));
+        assert_eq!(
+            cfg.emoji_src("990011"),
+            cfg.imgproxy_url(source, 100, 100, "fit")
+        );
+
+        assert!(refill_emoji_sources(
+            &mut message,
+            Some(&changed),
+            Some(&cfg)
+        ));
+        assert_eq!(
+            first_emoji_src(&message).as_ref(),
+            cfg.imgproxy_url(source, 96, 96, "fit")
+        );
+        assert!(!refill_emoji_sources(
+            &mut message,
+            Some(&changed),
+            Some(&cfg)
+        ));
+        assert!(!refill_emoji_sources(&mut message, None, Some(&cfg)));
+    }
+
+    #[gpui::test]
+    fn a_moved_emoji_source_redraws_only_shown_rows_whose_url_changed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cfg = komu_base_config();
+        let updated = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = updated.clone();
+        cx.update(|cx| {
+            AppConfig::init_global(Arc::new(cfg.clone()), cx);
+            let store = test_store(cx);
+            cx.subscribe(&store, move |_, event: &MessagesEvent, _| {
+                if let MessagesEvent::Updated { message_id } = event {
+                    sink.borrow_mut().push(*message_id);
+                }
+            })
+            .detach();
+            store.update(cx, |store, cx| {
+                let (shown, hidden) = (ChannelId(10), ChannelId(11));
+                store.set_channel(
+                    shown,
+                    vec![
+                        emoji_message(5, "990031", &cfg),
+                        emoji_message(6, "990032", &cfg),
+                    ],
+                );
+                store.set_channel(hidden, vec![emoji_message(7, "990031", &cfg)]);
+                store.active_channel_id = Some(shown);
+
+                let changed = crate::emoji::publish_emoji_sources(&[
+                    catalog_emoji("990031", "https://cdn.mezon.ai/emojis/990031.webp"),
+                    catalog_emoji("990032", "https://cdn.komu.vn/emojis/990032.webp"),
+                ]);
+                store.refresh_emoji_sources(&changed, cx);
+
+                let moved =
+                    cfg.imgproxy_url("https://cdn.mezon.ai/emojis/990031.webp", 96, 96, "fit");
+                for (bucket, id) in [(shown, 5), (hidden, 7)] {
+                    let message = store.message_in_channel(bucket, MessageId(id)).unwrap();
+                    assert_eq!(first_emoji_src(message).as_ref(), moved);
+                }
+            });
+        });
+        assert_eq!(*updated.borrow(), vec![Some(MessageId(5))]);
+    }
+
+    #[gpui::test]
+    fn a_page_parsed_while_the_catalog_lands_is_refilled_when_it_is_settled(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cfg = komu_base_config();
+        let source = "https://cdn.mezon.ai/emojis/990041.webp";
+        let emoji_generation = crate::emoji::emoji_sources_generation();
+        let mut parsed = vec![emoji_message(8, "990041", &cfg)];
+        crate::emoji::publish_emoji_sources(&[catalog_emoji("990041", source)]);
+        cx.update(|cx| {
+            AppConfig::init_global(Arc::new(cfg.clone()), cx);
+            settle_parsed_messages(&mut parsed, emoji_generation, cx);
+        });
+        assert_eq!(
+            first_emoji_src(&parsed[0]).as_ref(),
+            cfg.imgproxy_url(source, 96, 96, "fit")
         );
     }
 

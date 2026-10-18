@@ -515,7 +515,12 @@ impl AppConfig {
         if emoji_id.is_empty() || emoji_id == "0" {
             return String::new();
         }
-        let source = format!("{}/emojis/{}.webp", self.base_img_url, emoji_id);
+        let known = crate::emoji::emoji_source(emoji_id)
+            .filter(|src| self.is_own_media_origin(&self.read_media_url(src)));
+        let source = match known.as_deref() {
+            Some(src) => Cow::Borrowed(src),
+            None => Cow::Owned(format!("{}/emojis/{}.webp", self.base_img_url, emoji_id)),
+        };
         self.imgproxy_url(&source, size, size, "fit")
     }
 
@@ -1151,6 +1156,37 @@ mod tests {
         assert!(out.contains("/rs:fit:100:100:1/mb:2097152/plain/"));
         assert!(out.contains(src));
         assert!(out.ends_with("@webp"));
+    }
+
+    #[test]
+    fn emoji_src_uses_a_stored_source_only_on_a_media_origin() {
+        let cfg = AppConfig {
+            base_img_url: "https://cdn.komu.vn".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let emoji = |id: &str, src: &str| crate::emoji::Emoji {
+            id: id.into(),
+            shortname: id.into(),
+            src: src.into(),
+            category: "Custom".into(),
+            clan_id: "1".into(),
+            clan_logo: String::new(),
+            creator_id: "2".into(),
+            is_for_sale: false,
+        };
+        crate::emoji::publish_emoji_sources(&[
+            emoji("880011", "https://cdn.mezon.ai/emojis/880011.webp"),
+            emoji("880012", "https://tracker.example/emojis/880012.webp"),
+        ]);
+
+        assert_eq!(
+            cfg.emoji_src("880011"),
+            cfg.imgproxy_url("https://cdn.mezon.ai/emojis/880011.webp", 100, 100, "fit")
+        );
+        assert_eq!(
+            cfg.emoji_src("880012"),
+            cfg.imgproxy_url("https://cdn.komu.vn/emojis/880012.webp", 100, 100, "fit")
+        );
     }
 
     #[test]

@@ -1377,6 +1377,7 @@ pub struct ChannelMessages {
     reaction_submenu_open: bool,
     quick_menu_submenu_open: bool,
     emoji_recent: Rc<Vec<RecentEmojiCell>>,
+    emoji_sources_generation: u64,
     _emoji_observe: Subscription,
     _quick_menu_observe: Option<Subscription>,
     channel_permissions_fp: Option<(bool, bool, bool)>,
@@ -1899,13 +1900,16 @@ impl ChannelMessages {
                 .into_iter()
                 .cloned()
                 .collect();
-            let changed = this.emoji_recent.len() != next.len()
+            let emoji_sources_generation = mezon_store::emoji_sources_generation();
+            let changed = this.emoji_sources_generation != emoji_sources_generation
+                || this.emoji_recent.len() != next.len()
                 || this
                     .emoji_recent
                     .iter()
                     .zip(&next)
                     .any(|(a, b)| a.id.as_ref() != b.id.as_str());
             if changed {
+                this.emoji_sources_generation = emoji_sources_generation;
                 this.emoji_recent = Rc::new(recent_emoji_cells(&next, cx));
                 cx.notify();
             }
@@ -2041,6 +2045,7 @@ impl ChannelMessages {
             reaction_submenu_open: false,
             quick_menu_submenu_open: false,
             emoji_recent,
+            emoji_sources_generation: mezon_store::emoji_sources_generation(),
             _emoji_observe: emoji_observe,
             _quick_menu_observe: quick_menu_observe,
             channel_permissions_fp: None,
