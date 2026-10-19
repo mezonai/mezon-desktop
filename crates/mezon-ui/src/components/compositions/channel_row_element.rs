@@ -9,7 +9,7 @@ use gpui::{
     fill, point, px, quad, size, transparent_black,
 };
 
-use crate::components::primitives::IconName;
+use crate::components::primitives::{BUZZ_COLOR, BUZZ_LABEL, IconName};
 
 const ROW_VERTICAL_PADDING: Pixels = px(8.);
 const BG_HORIZONTAL_INSET: Pixels = px(8.);
@@ -35,8 +35,6 @@ const BADGE_FONT_SIZE: Pixels = px(12.);
 const BUZZ_HORIZONTAL_PADDING: Pixels = px(4.);
 const BUZZ_CORNER_RADIUS: Pixels = px(4.);
 const BUZZ_GAP: Pixels = px(4.);
-pub(crate) const BUZZ_LABEL: &str = "Buzz!!";
-pub(crate) const BUZZ_COLOR: u32 = 0xef_44_44;
 const FALLBACK_WIDTH: Pixels = px(240.);
 const THREAD_ROW_HEIGHT: Pixels = px(34.);
 const THREAD_CONNECTOR_X: Pixels = px(24.);
