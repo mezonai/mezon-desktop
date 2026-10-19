@@ -262,12 +262,13 @@ impl ChannelUsersStore {
         &mut self,
         channel_id: ChannelId,
         user_ids: &[UserId],
+        profiles: Vec<(UserId, ChannelUserProfile)>,
         cx: &mut Context<Self>,
     ) {
         let Some(existing) = self.cache.get_mut(&channel_id) else {
             return;
         };
-        if apply_add(existing, user_ids) {
+        if apply_add(existing, user_ids, profiles) {
             cx.emit(ChannelUsersEvent::Changed { channel_id });
             cx.notify();
         }
@@ -314,11 +315,21 @@ fn channel_users_from(response: api::AllUsersAddChannelResponse) -> ChannelUsers
     users
 }
 
-fn apply_add(existing: &mut ChannelUsers, user_ids: &[UserId]) -> bool {
+fn apply_add(
+    existing: &mut ChannelUsers,
+    user_ids: &[UserId],
+    profiles: Vec<(UserId, ChannelUserProfile)>,
+) -> bool {
     let mut changed = false;
     for user_id in user_ids {
         if !existing.ids.contains(user_id) {
             existing.ids.push(*user_id);
+            changed = true;
+        }
+    }
+    for (user_id, profile) in profiles {
+        if existing.ids.contains(&user_id) && !existing.profiles.contains_key(&user_id) {
+            existing.profiles.insert(user_id, profile);
             changed = true;
         }
     }
@@ -532,10 +543,42 @@ mod tests {
     #[test]
     fn add_users_skips_duplicates_and_reports_change() {
         let mut existing = users(&[1, 2]);
-        assert!(apply_add(&mut existing, &[UserId(3)]));
+        assert!(apply_add(&mut existing, &[UserId(3)], Vec::new()));
         assert_eq!(existing.ids, vec![UserId(1), UserId(2), UserId(3)]);
-        assert!(!apply_add(&mut existing, &[UserId(2), UserId(3)]));
+        assert!(!apply_add(
+            &mut existing,
+            &[UserId(2), UserId(3)],
+            Vec::new()
+        ));
         assert_eq!(existing.ids, vec![UserId(1), UserId(2), UserId(3)]);
+    }
+
+    #[test]
+    fn add_users_keeps_the_identity_of_a_user_outside_the_roster() {
+        let mut existing = users(&[1]);
+        let picked = ChannelUserProfile {
+            username: "giang".into(),
+            display_name: "Chau Giang".into(),
+            avatar: "https://cdn/a.png".into(),
+        };
+        assert!(apply_add(
+            &mut existing,
+            &[UserId(9)],
+            vec![(UserId(9), picked.clone())]
+        ));
+        assert_eq!(existing.profiles.get(&UserId(9)), Some(&picked));
+
+        let stale = ChannelUserProfile {
+            username: "other".into(),
+            ..ChannelUserProfile::default()
+        };
+        assert!(!apply_add(
+            &mut existing,
+            &[UserId(9)],
+            vec![(UserId(9), stale), (UserId(4), picked.clone())]
+        ));
+        assert_eq!(existing.profiles.get(&UserId(9)), Some(&picked));
+        assert!(!existing.profiles.contains_key(&UserId(4)));
     }
 
     #[test]

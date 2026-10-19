@@ -790,10 +790,12 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                         cx.update(activate_main_window);
                         continue;
                     }
-                    tracing::info!(
-                        "Received deep link: {}",
+                    let logged_url = if mezon_ui::meeting::deep_link_meeting_code(&url).is_some() {
+                        "mezonapp://meeting"
+                    } else {
                         url.split(['?', '#']).next().unwrap_or_default()
-                    );
+                    };
+                    tracing::info!("Received deep link: {logged_url}");
                     cx.update(activate_main_window);
                     if url.starts_with("mezonapp://callback") {
                         let flow_pending = cx.update(|cx| {
@@ -880,7 +882,9 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                         }
                     } else {
                         cx.update(|cx| {
-                            if let Some(route) = mezon_ui::router::parse_link(&url) {
+                            if let Some(code) = mezon_ui::meeting::deep_link_meeting_code(&url) {
+                                mezon_ui::meeting::open_meeting_from_external_trigger(code, cx);
+                            } else if let Some(route) = mezon_ui::router::parse_link(&url) {
                                 mezon_ui::app::shell::Shell::navigate_from_external_trigger(
                                     cx, route,
                                 );

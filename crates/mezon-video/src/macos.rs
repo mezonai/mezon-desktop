@@ -357,6 +357,7 @@ impl AvFoundationPlayer {
                 return;
             }
             let Some(track) = first_video_track(*self.asset) else {
+                self.transform_checked.set(true);
                 return;
             };
             let transform = track_preferred_transform(track);

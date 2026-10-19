@@ -562,6 +562,7 @@ impl AudioIo {
                 let mut output_absent_streak: u32 = 0;
                 let mut input_absent_streak: u32 = 0;
                 let mut current_in_fmt: Option<AudioFormat> = None;
+                let mut in_stream_device_id: Option<String> = None;
                 let mut output_stall_recovery = StallRecovery::new(&output_heartbeat);
                 let mut input_stall_recovery = StallRecovery::new(&input_heartbeat);
                 let mut active_default_output_id = if current_output_id.is_none() {
@@ -671,6 +672,14 @@ impl AudioIo {
                             }
                             bluetooth_release_at = None;
                             capture_started = true;
+                            if in_stream.is_some()
+                                && input_stream_orphaned(&host, in_stream_device_id.as_deref())
+                            {
+                                in_alive.store(false, Ordering::Relaxed);
+                                if let Some(old) = in_stream.take() {
+                                    drop_stream_detached(old);
+                                }
+                            }
                             if in_stream.is_none() {
                                 request_macos_microphone_permission();
                                 let new_alive = Arc::new(AtomicBool::new(true));
@@ -690,6 +699,10 @@ impl AudioIo {
                                         in_alive.store(false, Ordering::Relaxed);
                                         in_alive = new_alive;
                                         input_bluetooth = bluetooth;
+                                        in_stream_device_id = input_stream_device_id(
+                                            &host,
+                                            current_input_id.as_deref(),
+                                        );
                                         input_healthy = true;
                                         in_rebuild_pending.store(false, Ordering::Relaxed);
                                         if input_format_changed(current_in_fmt, in_fmt) {
@@ -771,6 +784,8 @@ impl AudioIo {
                                     in_alive = new_alive;
                                     current_input_id = device_id;
                                     input_bluetooth = bluetooth;
+                                    in_stream_device_id =
+                                        input_stream_device_id(&host, current_input_id.as_deref());
                                     if let Some(old) = in_stream.take() {
                                         drop_stream_detached(old);
                                     }
@@ -792,6 +807,10 @@ impl AudioIo {
                                                 in_alive = restored_alive;
                                                 in_stream = Some(stream);
                                                 input_bluetooth = bluetooth;
+                                                in_stream_device_id = input_stream_device_id(
+                                                    &host,
+                                                    current_input_id.as_deref(),
+                                                );
                                                 input_running = running;
                                                 input_healthy = true;
                                                 if input_format_changed(current_in_fmt, fmt) {
@@ -919,6 +938,8 @@ impl AudioIo {
                                     in_alive.store(false, Ordering::Relaxed);
                                     in_alive = new_alive;
                                     input_bluetooth = bluetooth;
+                                    in_stream_device_id =
+                                        input_stream_device_id(&host, current_input_id.as_deref());
                                     if let Some(old) = in_stream.take() {
                                         drop_stream_detached(old);
                                     }
@@ -1468,6 +1489,28 @@ fn input_device_absent(host: &cpal::Host, id: &str) -> bool {
         }
         Err(_) => false,
     }
+}
+
+fn default_input_id(host: &cpal::Host) -> Option<String> {
+    host.default_input_device()
+        .and_then(|device| device.id().ok())
+        .map(|id| id.to_string())
+}
+
+fn input_stream_device_id(host: &cpal::Host, requested: Option<&str>) -> Option<String> {
+    requested.map(str::to_string).or_else(|| default_input_id(host))
+}
+
+fn input_stream_orphaned(host: &cpal::Host, device_id: Option<&str>) -> bool {
+    cfg!(target_os = "macos")
+        && device_id.is_some_and(|id| {
+            default_input_id(host).as_deref() != Some(id)
+                && host.devices().is_ok_and(|mut devices| {
+                    !devices.any(|device| {
+                        matches!(device.id(), Ok(found) if found.to_string() == id)
+                    })
+                })
+        })
 }
 
 fn rebuild_input_stream(

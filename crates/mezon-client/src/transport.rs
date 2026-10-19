@@ -125,6 +125,24 @@ impl std::fmt::Display for EnvelopeStatus {
 
 const ENVELOPE_NOT_FOUND: i32 = 404;
 
+#[derive(Debug, Clone, Copy)]
+struct HttpFallbackStatus {
+    status: u16,
+}
+
+impl std::fmt::Display for HttpFallbackStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP fallback failed with status {}", self.status)
+    }
+}
+
+impl std::error::Error for HttpFallbackStatus {}
+
+fn is_http_conflict(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<HttpFallbackStatus>()
+        .is_some_and(|failure| failure.status == http::StatusCode::CONFLICT.as_u16())
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub fn unknown_api_error(api_name: &str) -> anyhow::Error {
     anyhow::Error::new(ApiStatusError {
@@ -522,6 +540,25 @@ const CHANNEL_TYPE_MEZON_VOICE: i32 = 10;
 pub struct OutgoingMessageFlags {
     pub anonymous_message: bool,
     pub message_code: i32,
+}
+
+fn varint_encoded_len(mut value: u64) -> usize {
+    let mut n = 1usize;
+    while value > 0x7f {
+        n += 1;
+        value >>= 7;
+    }
+    n
+}
+
+pub fn encoded_envelope_cid_last_len(envelope: &realtime::Envelope) -> usize {
+    let cid = envelope.cid;
+    if cid <= 0 {
+        return envelope.encoded_len();
+    }
+    let mut zero_cid = envelope.clone();
+    zero_cid.cid = 0;
+    zero_cid.encoded_len() + 1 + varint_encoded_len(cid as u64)
 }
 
 fn encode_envelope_cid_last(mut envelope: realtime::Envelope) -> Vec<u8> {
@@ -3056,6 +3093,101 @@ pub fn forward_content_json(content_raw: &str, text: &str) -> String {
     serde_json::Value::Object(obj).to_string()
 }
 
+fn url_is_inline_data(url: &str) -> bool {
+    let trimmed = url.trim();
+    trimmed
+        .as_bytes()
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"data:"))
+}
+
+fn api_attachment_to_proto(a: &ApiAttachment) -> api::MessageAttachment {
+    api::MessageAttachment {
+        url: a.url.clone(),
+        filename: a.filename.clone(),
+        filetype: a.filetype.clone(),
+        width: a.width,
+        height: a.height,
+        thumbnail: a.thumbnail.clone(),
+        duration: a.duration,
+        size: a.size,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_forward_channel_message_send(
+    clan_id: i64,
+    channel_id: i64,
+    content_raw: &str,
+    text: &str,
+    is_public: bool,
+    mode: i32,
+    attachments: &[ApiAttachment],
+    mentions: &[OutgoingMention],
+) -> realtime::ChannelMessageSend {
+    let content_json = forward_content_json(content_raw, text);
+    let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
+    let proto_mentions: Vec<api::MessageMention> = mentions
+        .iter()
+        .filter_map(OutgoingMention::to_proto)
+        .collect();
+    realtime::ChannelMessageSend {
+        clan_id,
+        channel_id,
+        content: content_json,
+        mentions: proto_mentions,
+        attachments: attachments.iter().map(api_attachment_to_proto).collect(),
+        mode,
+        is_public,
+        mention_everyone,
+        ..Default::default()
+    }
+}
+
+pub fn channel_message_send_realtime_proto_len(
+    message: &realtime::ChannelMessageSend,
+    cid: i32,
+) -> usize {
+    let envelope = realtime::Envelope {
+        cid,
+        message: Some(realtime::envelope::Message::ChannelMessageSend(
+            message.clone(),
+        )),
+    };
+    encoded_envelope_cid_last_len(&envelope)
+}
+
+pub fn forward_blocked_for_realtime_message(message: &realtime::ChannelMessageSend) -> bool {
+    if message
+        .attachments
+        .iter()
+        .any(|a| url_is_inline_data(&a.url) || url_is_inline_data(&a.thumbnail))
+    {
+        return true;
+    }
+    let proto_len = channel_message_send_realtime_proto_len(message, 1);
+    crate::abridged_tcp_adapter::proto_exceeds_realtime_abridged_cap(proto_len)
+}
+
+pub fn forward_blocked_for_realtime(
+    content_raw: &str,
+    text: &str,
+    attachments: &[ApiAttachment],
+    mentions: &[OutgoingMention],
+) -> bool {
+    let message = build_forward_channel_message_send(
+        1,
+        1,
+        content_raw,
+        text,
+        false,
+        2,
+        attachments,
+        mentions,
+    );
+    forward_blocked_for_realtime_message(&message)
+}
+
 pub fn mention_content_tokens(mentions: &[OutgoingMention]) -> Vec<ContentToken> {
     mentions
         .iter()
@@ -4330,7 +4462,10 @@ impl MezonTransport {
                     status.as_u16()
                 );
             }
-            anyhow::bail!("HTTP fallback failed with status {}", status.as_u16());
+            return Err(HttpFallbackStatus {
+                status: status.as_u16(),
+            }
+            .into());
         }
         if bytes.len() as u64 > MAX_HTTP_FALLBACK_RESPONSE_BYTES {
             anyhow::bail!(
@@ -4832,6 +4967,7 @@ impl MezonTransport {
             "SearchCtrlK" => 210,
             "SearchMentionUsers" => 211,
             "GenerateCDNSignature" => 212,
+            "LinkCDNFile" => 214,
             _ => {
                 tracing::warn!("unknown API name: {api_name}");
                 return None;
@@ -6706,23 +6842,29 @@ impl MezonTransport {
         attachments: Vec<api::MessageAttachment>,
         mentions: Vec<OutgoingMention>,
     ) -> Result<()> {
-        let content_json = forward_content_json(content_raw, text);
-        let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
-        let proto_mentions: Vec<api::MessageMention> = mentions
-            .iter()
-            .filter_map(OutgoingMention::to_proto)
+        let api_attachments: Vec<ApiAttachment> = attachments
+            .into_iter()
+            .map(|a| ApiAttachment {
+                url: a.url,
+                filename: a.filename,
+                filetype: a.filetype,
+                width: a.width,
+                height: a.height,
+                thumbnail: a.thumbnail,
+                duration: a.duration,
+                size: a.size,
+            })
             .collect();
-        let message = realtime::ChannelMessageSend {
+        let message = build_forward_channel_message_send(
             clan_id,
             channel_id,
-            content: content_json,
-            mentions: proto_mentions,
-            attachments,
-            mode,
+            content_raw,
+            text,
             is_public,
-            mention_everyone,
-            ..Default::default()
-        };
+            mode,
+            &api_attachments,
+            &mentions,
+        );
         let _ack = self.write_or_http_channel_message(message).await?;
         Ok(())
     }
@@ -7209,6 +7351,34 @@ impl MezonTransport {
             return Err(api_status_error(code));
         }
         Ok(api::GenerateCdnSignatureResponse::decode(response.as_slice())?.signature)
+    }
+
+    pub async fn link_cdn_file(&self, src: &str, dst: &str) -> Result<()> {
+        let cid = self.generate_cid();
+        let body = api::LinkCdnFileRequest {
+            src: src.to_string(),
+            dst: dst.to_string(),
+        }
+        .encode_to_vec();
+        let has_http_session = self.http_fallback.read().is_some();
+        let sent = match self
+            .send_api_request_with_http_fallback(cid, "LinkCDNFile", body.clone())
+            .await
+        {
+            Err(error) if has_http_session && is_unknown_api_error(&error) => self
+                .send_api_request_over_http("LinkCDNFile", body)
+                .await
+                .map(|response| (0, response)),
+            sent => sent,
+        };
+        match sent {
+            Ok((0, _)) => Ok(()),
+            Ok((code, _)) => Err(api_status_error(code)),
+            Err(error) if is_http_conflict(&error) => {
+                Err(api_status_error(ApiStatusError::ALREADY_EXISTS))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Search threads by label within a parent channel.
@@ -7886,14 +8056,14 @@ impl MezonTransport {
     pub async fn update_user_profile_by_clan(
         &self,
         clan_id: i64,
-        nick_name: &str,
+        nick_name: Option<&str>,
         avatar_url: Option<&str>,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateClanProfileRequest {
             clan_id,
-            nick_name: Some(nick_name.to_string()),
-            avatar: avatar_url.map(|s| s.to_string()),
+            nick_name: nick_name.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            avatar: avatar_url.filter(|s| !s.is_empty()).map(|s| s.to_string()),
         }
         .encode_to_vec();
         let (code, response) = self
@@ -7906,10 +8076,9 @@ impl MezonTransport {
                 code,
                 msg
             );
-            return Err(anyhow::anyhow!(
-                "API error: code={}, response={}",
-                code,
-                msg
+            return Err(api_status_error(code)).context(format!(
+                "UpdateUserProfileByClan failed (code={code}, response={})",
+                msg.trim()
             ));
         }
         Ok(())
@@ -8251,6 +8420,7 @@ impl MezonTransport {
             height,
             part_count: 0,
             channel_id,
+            transcode_hls: crate::video_source::wants_hls_transcode(filename, size),
         }
         .encode_to_vec();
         let (code, response) = self
@@ -8495,8 +8665,7 @@ impl MezonTransport {
         &self,
         message: realtime::ChannelMessageSend,
     ) -> Result<realtime::ChannelMessageAck> {
-        let has_fallback = self.http_fallback.read().is_some();
-        if has_fallback && !self.is_open().await {
+        if self.http_fallback.read().is_some() && !self.is_open().await {
             tracing::warn!(
                 target: "socket",
                 "api_socket_closed: action=ChannelMessageSend — sending over HTTP"
@@ -11123,6 +11292,78 @@ mod tests {
     }
 
     #[test]
+    fn forward_blocked_for_inline_attachment_data_uri() {
+        let attachments = vec![ApiAttachment {
+            url: "data:image/png;base64,abcd".into(),
+            ..Default::default()
+        }];
+        let message = build_forward_channel_message_send(
+            1,
+            2,
+            r#"{"t":"hi"}"#,
+            "hi",
+            false,
+            2,
+            &attachments,
+            &[],
+        );
+        assert!(forward_blocked_for_realtime_message(&message));
+    }
+
+    #[test]
+    fn forward_realtime_ok_for_small_https_attachment() {
+        let attachments = vec![ApiAttachment {
+            url: "https://cdn.example/a.png".into(),
+            ..Default::default()
+        }];
+        let message = build_forward_channel_message_send(
+            1,
+            2,
+            r#"{"t":"hi"}"#,
+            "hi",
+            false,
+            2,
+            &attachments,
+            &[],
+        );
+        assert!(!forward_blocked_for_realtime_message(&message));
+    }
+
+    #[test]
+    fn forward_blocked_when_wire_exceeds_proto_server_cap() {
+        let pad = "x".repeat(4200);
+        let attachments = vec![ApiAttachment {
+            url: format!("https://cdn.example/{pad}.png"),
+            ..Default::default()
+        }];
+        let message = build_forward_channel_message_send(
+            1,
+            2,
+            r#"{"t":"hi"}"#,
+            "hi",
+            false,
+            2,
+            &attachments,
+            &[],
+        );
+        assert!(forward_blocked_for_realtime_message(&message));
+    }
+
+    #[test]
+    fn encoded_envelope_cid_last_len_matches_encode() {
+        let message =
+            build_forward_channel_message_send(1, 2, r#"{"t":"hi"}"#, "hi", false, 2, &[], &[]);
+        let envelope = realtime::Envelope {
+            cid: 9,
+            message: Some(realtime::envelope::Message::ChannelMessageSend(message)),
+        };
+        assert_eq!(
+            encoded_envelope_cid_last_len(&envelope),
+            encode_envelope_cid_last(envelope).len()
+        );
+    }
+
+    #[test]
     fn message_from_proto_presign_finish_absent_is_none() {
         let msg = api::ChannelMessage {
             message_id: 1,
@@ -11979,8 +12220,16 @@ mod tests {
                     } else {
                         Vec::new()
                     };
+                    let linked_twice = path.ends_with("LinkCDNFile")
+                        && api::LinkCdnFileRequest::decode(&buf[head_end..])
+                            .is_ok_and(|request| request.dst == LINKED_DST);
+                    let status = if linked_twice {
+                        "409 Conflict"
+                    } else {
+                        "200 OK"
+                    };
                     let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
                     );
                     let _ = stream.write_all(response.as_bytes()).await;
@@ -12019,6 +12268,104 @@ mod tests {
             .await
             .expect_err("channel 0 has no signature");
         assert!(error.to_string().contains("channel id"), "{error}");
+    }
+
+    const LINK_SRC: &str = "1cf93b197d401000/2090000000000000001_photo.png";
+    const LINK_DST: &str = "1d0000000000abcd/2090000000000000001_photo.png";
+    const LINKED_DST: &str = "1d0000000000abcd/2090000000000000002_linked.png";
+
+    fn live_fallback(port: u16) -> HttpFallbackSession {
+        let mut fallback = expired_fallback(port);
+        fallback.token = fake_jwt_expiring_in(600);
+        fallback.expires_at = crate::server_clock::now_secs() + 600;
+        fallback
+    }
+
+    fn open_transport(port: u16) -> MezonTransport {
+        let mut t = transport(true);
+        t.connect_gate = Duration::from_millis(50);
+        t.connected_tx.send(true).unwrap();
+        t.set_http_fallback(Some(live_fallback(port)));
+        t
+    }
+
+    fn answer_next_socket_request(
+        t: &MezonTransport,
+        code: u32,
+        body: Vec<u8>,
+    ) -> Arc<std::sync::atomic::AtomicBool> {
+        let answered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = answered.clone();
+        let pending = t.pending_requests.clone();
+        tokio::spawn(async move {
+            loop {
+                let executor = {
+                    let mut pending = pending.lock();
+                    let cid = pending.keys().next().copied();
+                    cid.and_then(|cid| pending.remove(&cid))
+                };
+                if let Some(executor) = executor {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let _ = executor.sender.send((code, body));
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+        answered
+    }
+
+    fn unknown_api_envelope() -> Vec<u8> {
+        realtime::Envelope {
+            message: Some(realtime::envelope::Message::Error(realtime::Error {
+                code: 404,
+                message: "Not found.".to_string(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    #[tokio::test]
+    async fn link_cdn_file_goes_over_http_when_the_socket_does_not_know_it() {
+        let (port, hits) = fake_api().await;
+        let t = open_transport(port);
+        let answered = answer_next_socket_request(&t, 0, unknown_api_envelope());
+
+        t.link_cdn_file(LINK_SRC, LINK_DST)
+            .await
+            .expect("the link should go through over HTTP");
+        assert!(answered.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(hits.lock().get("/mezon.api.Mezon/LinkCDNFile"), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn link_cdn_file_already_linked_over_the_socket_is_not_sent_again() {
+        let (port, hits) = fake_api().await;
+        let t = open_transport(port);
+        answer_next_socket_request(&t, ApiStatusError::ALREADY_EXISTS, Vec::new());
+
+        let error = t
+            .link_cdn_file(LINK_SRC, LINK_DST)
+            .await
+            .expect_err("the destination already holds the file");
+        assert!(api_status_from_error(&error).is_some_and(ApiStatusError::is_already_exists));
+        assert_eq!(hits.lock().get("/mezon.api.Mezon/LinkCDNFile"), None);
+    }
+
+    #[tokio::test]
+    async fn link_cdn_file_conflict_over_http_reads_as_already_linked() {
+        let (port, hits) = fake_api().await;
+        let t = MezonTransport::new(Box::new(ClosedAdapter), String::new());
+        t.set_http_fallback(Some(live_fallback(port)));
+
+        let error = t
+            .link_cdn_file(LINK_SRC, LINKED_DST)
+            .await
+            .expect_err("the destination already holds the file");
+        assert!(api_status_from_error(&error).is_some_and(ApiStatusError::is_already_exists));
+        assert_eq!(hits.lock().get("/mezon.api.Mezon/LinkCDNFile"), Some(&1));
     }
 
     fn fake_jwt_expiring_in(secs: i64) -> String {
@@ -12386,6 +12733,7 @@ mod tests {
         assert_eq!(t.get_api_index("SearchCtrlK"), Some(210));
         assert_eq!(t.get_api_index("SearchMentionUsers"), Some(211));
         assert_eq!(t.get_api_index("GenerateCDNSignature"), Some(212));
+        assert_eq!(t.get_api_index("LinkCDNFile"), Some(214));
         assert_eq!(t.get_api_index("DefinitelyNotAnApi"), None);
     }
 

@@ -53,6 +53,7 @@ install_apt() {
     libgstreamer-plugins-base1.0-dev
     gstreamer1.0-plugins-base
     gstreamer1.0-plugins-good
+    gstreamer1.0-plugins-bad
     gstreamer1.0-libav
   )
 
@@ -106,6 +107,7 @@ install_dnf() {
     gstreamer1-plugins-base-devel
     gstreamer1-plugins-base
     gstreamer1-plugins-good
+    gstreamer1-plugins-bad-free
     gstreamer1-plugin-libav
   )
 

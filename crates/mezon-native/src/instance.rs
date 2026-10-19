@@ -33,6 +33,15 @@ pub struct SingleInstance {
 
 pub const ACTIVATE_MESSAGE: &str = "mezon-activate";
 
+fn loggable_url(url: &str) -> &str {
+    let url = url.split(['?', '#']).next().unwrap_or_default();
+    if url.starts_with("mezonapp://meeting/") {
+        "mezonapp://meeting"
+    } else {
+        url
+    }
+}
+
 impl SingleInstance {
     /// Try to acquire the single-instance lock.
     ///
@@ -92,7 +101,7 @@ impl SingleInstance {
                     tracing::info!("Another instance is already running");
                     if let Some(url) = forward_url {
                         let _ = stream.write_all(url.as_bytes());
-                        let safe = url.split(['?', '#']).next().unwrap_or_default();
+                        let safe = loggable_url(url);
                         tracing::debug!("Forwarded URL to running instance: {safe}");
                     }
                     return Ok(None);
@@ -221,7 +230,7 @@ impl SingleInstance {
                 tracing::info!("Another instance is already running (Windows named pipe)");
                 if let Some(url) = forward_url {
                     let _ = pipe.write_all(url.as_bytes());
-                    let safe = url.split(['?', '#']).next().unwrap_or_default();
+                    let safe = loggable_url(url);
                     tracing::debug!("Forwarded URL to running instance via named pipe: {safe}");
                 }
                 return Ok(None);
@@ -325,7 +334,7 @@ impl SingleInstance {
                     if ok && bytes_read > 0 {
                         if let Ok(url) = std::str::from_utf8(&buf[..bytes_read as usize]) {
                             let url = url.trim().to_owned();
-                            let safe = url.split(['?', '#']).next().unwrap_or_default();
+                            let safe = loggable_url(&url);
                             tracing::debug!(
                                 "Named pipe: received URL from secondary instance: {safe}"
                             );
@@ -391,7 +400,7 @@ impl SingleInstance {
                             .is_ok();
                         if ok && !buf.is_empty() {
                             let url = buf.trim().to_owned();
-                            let safe = url.split(['?', '#']).next().unwrap_or_default();
+                            let safe = loggable_url(&url);
                             tracing::debug!(
                                 "Unix socket: received deep link from secondary instance: {safe}"
                             );
@@ -436,7 +445,7 @@ impl SingleInstance {
             .name("mezon-pipe-url-listener".into())
             .spawn(move || {
                 for url in rx {
-                    let safe = url.split(['?', '#']).next().unwrap_or_default();
+                    let safe = loggable_url(&url);
                     tracing::debug!("Named pipe URL listener: delivering {safe}");
                     callback(url);
                 }
@@ -460,7 +469,7 @@ impl Drop for SingleInstance {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{Claim, SingleInstance};
+    use super::{Claim, SingleInstance, loggable_url};
     use std::path::{Path, PathBuf};
 
     /// The container `$TMPDIR` a sandboxed macOS build actually runs with.
@@ -605,6 +614,22 @@ mod tests {
         assert_ne!(
             SingleInstance::user_digest("ngoc"),
             SingleInstance::user_digest("hoangphuongnguyen")
+        );
+    }
+
+    #[test]
+    fn forwarded_urls_are_logged_without_secrets() {
+        assert_eq!(
+            loggable_url("mezonapp://meeting/MTc5.aYcM-X0"),
+            "mezonapp://meeting"
+        );
+        assert_eq!(
+            loggable_url("mezonapp://callback?token=secret#frag"),
+            "mezonapp://callback"
+        );
+        assert_eq!(
+            loggable_url("mezonapp://chat/clans/1/channels/2"),
+            "mezonapp://chat/clans/1/channels/2"
         );
     }
 }

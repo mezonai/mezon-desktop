@@ -350,6 +350,49 @@ impl MezonClient {
             .context("Failed to decode invite response")
     }
 
+    pub async fn generate_meet_token_external(
+        &self,
+        gw_base: &str,
+        code: &str,
+        username: &str,
+        metadata: &str,
+    ) -> Result<String> {
+        let url = external_meet_token_url(gw_base, code, username, metadata)?;
+        let request = http::Request::builder()
+            .method(http::Method::POST)
+            .uri(url.as_str())
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .body(AsyncBody::from(b"{}".to_vec()))
+            .context("Failed to build meeting token request")?;
+
+        let mut response = self
+            .http
+            .send(request)
+            .await
+            .map_err(|_| anyhow::anyhow!("network error requesting a meeting token"))?;
+        let status = response.status();
+
+        const MAX_MEET_TOKEN_RESPONSE_BYTES: u64 = 64 * 1024;
+        let mut bytes: Vec<u8> = Vec::new();
+        response
+            .body_mut()
+            .take(MAX_MEET_TOKEN_RESPONSE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|_| anyhow::anyhow!("failed to read the meeting token response"))?;
+        if bytes.len() as u64 > MAX_MEET_TOKEN_RESPONSE_BYTES {
+            bail!("meeting token response exceeds {MAX_MEET_TOKEN_RESPONSE_BYTES} bytes");
+        }
+        if matches!(status.as_u16(), 401 | 403 | 404) {
+            return Err(MeetLinkRejected.into());
+        }
+        if !status.is_success() {
+            bail!("HTTP {} requesting a meeting token", status.as_u16());
+        }
+        parse_external_meet_token(&bytes)
+    }
+
     /// Ask the API host whether this token is still accepted. Used only after both socket
     /// credentials have been refused, to tell "the account is gone" from "the gateway would not
     /// take the connection" — the gateway itself never delivers that distinction.
@@ -574,6 +617,76 @@ impl MezonClient {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeetLinkRejected;
+
+impl std::fmt::Display for MeetLinkRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the meeting link was rejected")
+    }
+}
+
+impl std::error::Error for MeetLinkRejected {}
+
+pub fn is_meeting_code(code: &str) -> bool {
+    let token_part = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    };
+    code.split_once('.')
+        .is_some_and(|(data, signature)| token_part(data) && token_part(signature))
+}
+
+pub fn meeting_room_id(code: &str) -> Option<String> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    if !is_meeting_code(code) {
+        return None;
+    }
+    let (data, _) = code.split_once('.')?;
+    let decoded = URL_SAFE_NO_PAD.decode(data).ok()?;
+    let decoded = std::str::from_utf8(&decoded).ok()?;
+    let (issued_at, room) = decoded.split_once(':')?;
+    let digits = |value: &str| !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit());
+    (digits(issued_at) && digits(room)).then(|| room.to_owned())
+}
+
+fn external_meet_token_url(
+    gw_base: &str,
+    code: &str,
+    username: &str,
+    metadata: &str,
+) -> Result<url::Url> {
+    if !is_meeting_code(code) {
+        bail!("invalid meeting code");
+    }
+    let mut url = url::Url::parse(&format!(
+        "{}/v2/meet/external/{code}",
+        gw_base.trim_end_matches('/')
+    ))
+    .context("Invalid gateway URL")?;
+    url.query_pairs_mut()
+        .append_pair("username", username)
+        .append_pair("metadata", metadata)
+        .append_pair("is_guest", "false");
+    Ok(url)
+}
+
+fn parse_external_meet_token(body: &[u8]) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Response {
+        #[serde(default)]
+        token: String,
+    }
+    let response: Response =
+        serde_json::from_slice(body).context("Failed to parse meeting token response")?;
+    if response.token.trim().is_empty() {
+        bail!("meeting token response carried no token");
+    }
+    Ok(response.token)
+}
+
 fn healthy_endpoint_url(
     base_url: &str,
     current_endpoint_id: i32,
@@ -594,6 +707,67 @@ fn healthy_endpoint_url(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_meet_token_url_puts_the_code_in_the_path_and_the_caller_in_the_query() {
+        let url = external_meet_token_url(
+            "https://gw.mezon.ai/",
+            "MTc2MDQ0OjE5Nzc.sig-_x",
+            "alice",
+            "Alice B;https://cdn.mezon.ai/a.png",
+        )
+        .unwrap();
+        assert_eq!(url.path(), "/v2/meet/external/MTc2MDQ0OjE5Nzc.sig-_x");
+        let query: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+        assert_eq!(
+            query,
+            vec![
+                ("username".to_owned(), "alice".to_owned()),
+                (
+                    "metadata".to_owned(),
+                    "Alice B;https://cdn.mezon.ai/a.png".to_owned()
+                ),
+                ("is_guest".to_owned(), "false".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_meeting_room_is_the_id_signed_into_the_code() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let data = URL_SAFE_NO_PAD.encode("1760432719000000000:1977564187364896768");
+        assert_eq!(
+            meeting_room_id(&format!("{data}.c2lnbmF0dXJl")).as_deref(),
+            Some("1977564187364896768")
+        );
+        assert_eq!(meeting_room_id(&data), None);
+        assert_eq!(meeting_room_id(&format!("{data}.a.b")), None);
+        let webhook = URL_SAFE_NO_PAD.encode("1760432719000000000:12:34");
+        assert_eq!(meeting_room_id(&format!("{webhook}.sig")), None);
+        assert_eq!(meeting_room_id("bm90LWEtcm9vbQ.sig"), None);
+    }
+
+    #[test]
+    fn a_meeting_code_that_could_escape_the_path_is_refused() {
+        for code in [
+            "", "a/b", "a?b", "../x", "a b", "a#b", ".", "..", "a.", ".b", "a.b.c", "abc",
+        ] {
+            assert!(
+                external_meet_token_url("https://gw.mezon.ai", code, "u", "m").is_err(),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn external_meet_token_response_yields_only_the_token() {
+        assert_eq!(
+            parse_external_meet_token(br#"{"token":"eyJ.a.b","url":"wss://sfu.mezon.ai/ws"}"#)
+                .unwrap(),
+            "eyJ.a.b"
+        );
+        assert!(parse_external_meet_token(br#"{"url":"wss://x/ws"}"#).is_err());
+    }
 
     #[test]
     fn test_parse_endpoint() {

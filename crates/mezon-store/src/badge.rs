@@ -17,6 +17,7 @@ use crate::inbox::{InboxStore, skip_inbox_mention_code};
 use crate::message::MessageCode;
 use crate::messages::MessagesStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+use crate::topics::TopicsStore;
 
 const STREAM_MODE_GROUP: i32 = 3;
 const STREAM_MODE_DM: i32 = 4;
@@ -108,6 +109,13 @@ fn is_clan_message_seen(cx: &App, m: &ChannelMessage, from_me: bool) -> bool {
     let messages = MessagesStore::global(cx).read(cx);
     if messages.is_dm() {
         return false;
+    }
+    if m.topic_id != 0 {
+        let topics = TopicsStore::global(cx);
+        let topics = topics.read(cx);
+        return topics.is_panel_open()
+            && topics.active_topic_id() == Some(m.topic_id)
+            && !messages.topic_has_more_bottom();
     }
     let Some(active) = messages.active_channel_id() else {
         return false;
@@ -415,7 +423,7 @@ impl BadgeService {
                         skip = skip_unread_activity,
                         "socket ChannelMessage decision"
                     );
-                    if m.topic_id == 0 && !skip_unread_activity {
+                    if !skip_unread_activity {
                         ChannelList::global(cx).update(cx, |cl, cx| {
                             cl.note_channel_message(
                                 clan_id,

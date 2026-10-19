@@ -15,11 +15,12 @@ use crate::AppConfig;
 use crate::CACHE_TTL;
 use crate::ids::{ChannelId, ClanId, MessageId, UserId};
 use crate::message::{
-    Embed, Message, MessageAttachment, MessageSpan, OgpPreview, PollData, RichLayout,
+    Embed, Message, MessageAttachment, MessageCode, MessageSpan, OgpPreview, PollData, RichLayout,
     build_rich_layout, link_marker_from_kind, parse_spans,
 };
 use crate::messages::{
     MessagesEvent, MessagesStore, build_embeds, build_ogp_preview, build_poll_data,
+    message_from_channel_proto,
 };
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::user_profile::{ProfileContext, resolve_avatar_url};
@@ -214,11 +215,27 @@ impl PinnedMessagesStore {
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
 
-        let messages_sub = cx.subscribe(&MessagesStore::global(cx), |this, store, event, cx| {
-            if matches!(event, MessagesEvent::Reset { .. }) {
-                this.sync_from_messages(&store, cx);
-            }
-        });
+        let messages_sub =
+            cx.subscribe(
+                &MessagesStore::global(cx),
+                |this, store, event, cx| match event {
+                    MessagesEvent::Reset { .. } => this.sync_from_messages(&store, cx),
+                    MessagesEvent::Updated {
+                        message_id: Some(message_id),
+                    } => {
+                        let message = this.channel_id().and_then(|channel_id| {
+                            store
+                                .read(cx)
+                                .message_in_channel(channel_id, *message_id)
+                                .cloned()
+                        });
+                        if let Some(message) = message {
+                            this.apply_message_update(&message, cx);
+                        }
+                    }
+                    _ => {}
+                },
+            );
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
         let mut store = Self {
             channel_id: None,
@@ -245,6 +262,9 @@ impl PinnedMessagesStore {
             });
             dispatch.on(RealtimeKind::UnpinMessage, &entity, |this, event, cx| {
                 this.handle_unpin(event, cx);
+            });
+            dispatch.on(RealtimeKind::ChannelMessage, &entity, |this, event, cx| {
+                this.handle_message_update(event, cx);
             });
             dispatch.on_lagged(&entity, |this, cx| {
                 if this.loaded_channel.is_some() {
@@ -450,6 +470,48 @@ impl PinnedMessagesStore {
         if let Some(key) = self.active_cache_key() {
             self.channel_cache.insert(key, self.messages.clone());
         }
+    }
+
+    fn apply_message_update(&mut self, message: &Message, cx: &mut Context<Self>) {
+        let message_id = message.id.to_string();
+        let Some(index) = self
+            .messages
+            .iter()
+            .position(|pin| pin.message_id == message_id)
+        else {
+            return;
+        };
+        let mut updated = self.messages[index].clone();
+        merge_pinned_message_update(&mut updated, message);
+        if format!("{updated:?}") == format!("{:?}", self.messages[index]) {
+            return;
+        }
+        self.messages[index] = updated;
+        self.cache_active_messages();
+        cx.emit(PinnedEvent::Updated);
+        cx.notify();
+    }
+
+    fn handle_message_update(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::ChannelMessage(message) = event else {
+            return;
+        };
+        if MessageCode::from_raw(message.code) != MessageCode::ChatUpdate || message.message_id <= 0
+        {
+            return;
+        }
+        let channel_id = message.channel_id.to_string();
+        if self.channel_id.as_deref() != Some(channel_id.as_str()) {
+            self.invalidate_channel_cache(&channel_id);
+            return;
+        }
+        let parsed = message_from_channel_proto(
+            message,
+            message.message_id,
+            AppConfig::try_global(cx),
+            None,
+        );
+        self.apply_message_update(&parsed, cx);
     }
 
     fn invalidate_active_snapshot(&mut self) {
@@ -771,6 +833,25 @@ impl PinnedMessagesStore {
             });
         })
         .detach();
+    }
+}
+
+fn merge_pinned_message_update(pin: &mut PinnedMessage, message: &Message) {
+    pin.sender_id = message.sender_id.clone();
+    pin.sender_name = message.sender_name.to_string();
+    pin.avatar_url = message.avatar_url.to_string();
+    pin.avatar_proxied = message.avatar_proxied.clone();
+    pin.content = message.content.clone();
+    pin.raw_content = message.raw_content.as_deref().unwrap_or("").to_string();
+    pin.spans = message.spans.clone().into();
+    pin.rich_layout = message.rich_layout.clone();
+    pin.ogp = message.ogp.clone();
+    pin.embeds = message.embeds.clone();
+    if !pin.attachments_from_source && !message.attachments.is_empty() {
+        pin.attachments = message.attachments.clone();
+    }
+    if message.poll.is_some() {
+        pin.poll = message.poll.clone();
     }
 }
 
@@ -1586,5 +1667,69 @@ mod tests {
 
         assert_eq!(body.text, "hello");
         assert!(body.poll.is_none());
+    }
+
+    fn cached_pin(content: &str) -> PinnedMessage {
+        let mut pin = pinned_from_api(
+            ApiPinMessage {
+                id: "pin-9".into(),
+                message_id: "42".into(),
+                content: format!(r#"{{"t":"{content}"}}"#),
+                content_text: content.into(),
+                sender_id: "7".into(),
+                sender_name: "user".into(),
+                avatar: String::new(),
+                create_time: 5,
+                attachments: Vec::new(),
+            },
+            None,
+        );
+        pin.raw_content = content.into();
+        pin
+    }
+
+    #[test]
+    fn message_update_replaces_content_without_changing_pin_identity() {
+        let mut pin = cached_pin("before");
+        let mut edited = Message::new(MessageId(42), "after", "7", "user", 10);
+        edited.raw_content = Some(Arc::from("after-wire"));
+
+        merge_pinned_message_update(&mut pin, &edited);
+        assert_eq!(pin.id, "pin-9");
+        assert_eq!(pin.message_id, "42");
+        assert_eq!(pin.create_time, 5);
+        assert_eq!(pin.content, "after");
+        assert_eq!(pin.raw_content, "after-wire");
+    }
+
+    #[test]
+    fn sparse_update_preserves_pin_attachments() {
+        let mut pin = cached_pin("before");
+        pin.attachments = vec![MessageAttachment {
+            url: "https://cdn.example/cached.png".into(),
+            ..Default::default()
+        }];
+        let edited = Message::new(MessageId(42), "after", "7", "user", 10);
+
+        merge_pinned_message_update(&mut pin, &edited);
+        assert_eq!(pin.attachments[0].url, "https://cdn.example/cached.png");
+    }
+
+    #[test]
+    fn source_verified_attachments_are_not_replaced_by_live_cache() {
+        let mut pin = cached_pin("before");
+        pin.attachments_from_source = true;
+        pin.attachments = vec![MessageAttachment {
+            url: "https://cdn.example/verified.png".into(),
+            ..Default::default()
+        }];
+        let mut edited = Message::new(MessageId(42), "after", "7", "user", 10);
+        edited.attachments = vec![MessageAttachment {
+            url: "https://cdn.example/live.png".into(),
+            ..Default::default()
+        }];
+
+        merge_pinned_message_update(&mut pin, &edited);
+        assert_eq!(pin.attachments[0].url, "https://cdn.example/verified.png");
     }
 }

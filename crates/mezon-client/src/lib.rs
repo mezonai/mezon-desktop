@@ -24,6 +24,7 @@ pub mod tls_crypto;
 pub mod transport;
 pub mod transport_adapter;
 pub mod transport_runtime;
+pub mod video_source;
 
 pub use abridged_tcp_adapter::AbridgedTcpAdapter;
 pub use app_api::{
@@ -38,7 +39,9 @@ pub use attachment_download::{
 pub use auth::QrLoginId;
 pub use auth::SessionProbe;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
-pub use auth::{HealthyEndpointStatusError, MezonClient};
+pub use auth::{
+    HealthyEndpointStatusError, MeetLinkRejected, MezonClient, is_meeting_code, meeting_room_id,
+};
 pub use channel_app_launch::{ChannelAppLaunchParams, build_channel_app_url, encode_url_param};
 pub use endpoint_health::{EndpointHealth, RealtimeEndpoint};
 pub use gotify::{GotifyExtras, GotifyNotification, StreamEnd};
@@ -59,14 +62,14 @@ pub use notification_setting::ChannelNotificationSetting;
 pub use notification_setting::NotificationOverride;
 pub use ogp::{OgpResult, fetch_invite_preview, fetch_ogp};
 pub use search_message::{
-    SEARCH_PAGE_SIZE, SearchDropdownMode, SearchPageToken, active_search_trigger,
+    PickedSearchUser, SEARCH_PAGE_SIZE, SearchDropdownMode, SearchPageToken, active_search_trigger,
     autocomplete_needle, build_clan_channel_content_search, build_direct_content_search,
     build_search_request, clan_channel_scope, content_filter, direct_channel_scope,
-    expand_mention_name_tokens, filter, finalize_incomplete_filter_token, has_filter,
+    expand_user_name_tokens, filter, finalize_incomplete_filter_token, has_filter,
     has_filter_options, insert_filter_markup, mention_user_filter, mention_user_filter_from_id,
-    parse_search_query, query_has_filter_tokens, search_content_highlight_terms,
-    search_dropdown_mode, search_filter_chip_ranges, search_page_count, search_page_numbers,
-    should_show_search_dropdown, username_filter,
+    parse_search_query, query_has_filter_tokens, retain_picked_search_users,
+    search_content_highlight_terms, search_dropdown_mode, search_filter_chip_ranges,
+    search_page_count, search_page_numbers, should_show_search_dropdown, username_filter,
 };
 pub use server_clock::{now_secs as server_now_secs, observe_http_date};
 pub use session::{HealthyEndpointReason, HealthyEndpointSession, Session, jwt_expires_at};

@@ -1,5 +1,9 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
+use super::mid::RemoteKind;
+
+pub const MEDIA_POOL_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
@@ -8,6 +12,7 @@ pub enum ClientMessage {
         token: String,
         role: &'static str,
         screen_codec: &'static str,
+        media_pool_version: u32,
     },
     Answer {
         sdp: String,
@@ -35,6 +40,9 @@ pub enum ClientMessage {
     ParticipantAction {
         token: String,
     },
+    SendMessage {
+        message: String,
+    },
     Pong,
 }
 
@@ -46,6 +54,14 @@ pub enum ServerMessage {
         room: String,
         #[serde(default, rename = "iceServers")]
         ice_servers: Vec<IceServerSpec>,
+        #[serde(default)]
+        media_pool_mode: String,
+        #[serde(default)]
+        max_audio_slots: u32,
+        #[serde(default)]
+        max_camera_slots: u32,
+        #[serde(default)]
+        max_screen_slots: u32,
     },
     Offer {
         #[serde(default)]
@@ -78,8 +94,10 @@ pub enum ServerMessage {
         #[serde(default, deserialize_with = "flexible_mid")]
         mid_screen: u32,
     },
-    SlotAssigned(SlotAssignment),
+    SlotAssigned(AssignedSlot),
     SlotReleased {
+        #[serde(default)]
+        kind: Option<RemoteKind>,
         slot: u32,
         #[serde(deserialize_with = "flexible_generation")]
         generation: u64,
@@ -105,6 +123,11 @@ pub enum ServerMessage {
         #[serde(default)]
         role: String,
     },
+    RoomMessage {
+        #[serde(default)]
+        message: String,
+    },
+    MessageSent,
     Ping,
     Pong,
     Error {
@@ -136,6 +159,8 @@ pub struct SnapshotMember {
     #[serde(default)]
     pub user_id: String,
     #[serde(default)]
+    pub metadata: String,
+    #[serde(default)]
     pub role: String,
     #[serde(default)]
     pub is_mute: bool,
@@ -151,6 +176,61 @@ pub struct SnapshotMember {
     pub mid_video: u32,
     #[serde(default, deserialize_with = "flexible_mid")]
     pub mid_screen: u32,
+    #[serde(default)]
+    pub media_slots: Option<MediaSlots>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub struct MediaSlots {
+    #[serde(default)]
+    pub audio: Option<PoolSlot>,
+    #[serde(default)]
+    pub camera: Option<PoolSlot>,
+    #[serde(default)]
+    pub screen: Option<PoolSlot>,
+}
+
+impl MediaSlots {
+    pub fn entries(&self) -> impl Iterator<Item = (RemoteKind, PoolSlot)> {
+        [
+            (RemoteKind::Audio, self.audio),
+            (RemoteKind::Camera, self.camera),
+            (RemoteKind::Screen, self.screen),
+        ]
+        .into_iter()
+        .filter_map(|(kind, slot)| slot.map(|slot| (kind, slot)))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct PoolSlot {
+    pub slot: u32,
+    #[serde(deserialize_with = "flexible_generation")]
+    pub generation: u64,
+    #[serde(default, deserialize_with = "flexible_mid")]
+    pub mid: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum AssignedSlot {
+    Pool(PoolSlotAssignment),
+    Triple(SlotAssignment),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PoolSlotAssignment {
+    pub kind: RemoteKind,
+    pub slot: u32,
+    #[serde(deserialize_with = "flexible_generation")]
+    pub generation: u64,
+    #[serde(default, deserialize_with = "flexible_mid")]
+    pub mid: u32,
+    pub peer_id: u32,
+    #[serde(default)]
+    pub user_id: String,
+    #[serde(default)]
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -265,6 +345,7 @@ mod tests {
             token: "jwt".to_owned(),
             role: "audience",
             screen_codec: "vp8",
+            media_pool_version: MEDIA_POOL_VERSION,
         };
         let got: serde_json::Value = serde_json::to_value(&msg).expect("serialize join");
         assert_eq!(
@@ -274,7 +355,8 @@ mod tests {
                 "room": "42",
                 "token": "jwt",
                 "role": "audience",
-                "screen_codec": "vp8"
+                "screen_codec": "vp8",
+                "media_pool_version": 1
             })
         );
     }
@@ -328,7 +410,12 @@ mod tests {
                 {"urls":"turn:1.2.3.4:3478?transport=udp","username":"u","credential":"p"}
             ]}"#,
         );
-        let ServerMessage::Joined { room, ice_servers } = msg else {
+        let ServerMessage::Joined {
+            room,
+            ice_servers,
+            ..
+        } = msg
+        else {
             panic!("expected joined");
         };
         assert_eq!(room, "7");
@@ -345,6 +432,96 @@ mod tests {
             panic!("expected joined");
         };
         assert!(ice_servers.is_empty());
+    }
+
+    #[test]
+    fn joined_announces_a_decoupled_pool_layout() {
+        let msg = parse(
+            r#"{"type":"joined","room":"7","media_pool_version":1,"media_pool_mode":"decoupled",
+                "max_audio_slots":6,"max_camera_slots":8,"max_screen_slots":4}"#,
+        );
+        let ServerMessage::Joined {
+            media_pool_mode,
+            max_audio_slots,
+            max_camera_slots,
+            max_screen_slots,
+            ..
+        } = msg
+        else {
+            panic!("expected joined");
+        };
+        assert_eq!(media_pool_mode, "decoupled");
+        assert_eq!(
+            (max_audio_slots, max_camera_slots, max_screen_slots),
+            (6, 8, 4)
+        );
+    }
+
+    #[test]
+    fn slot_events_with_a_kind_address_one_media_pool() {
+        let assigned = parse(
+            r#"{"type":"slot_assigned","kind":"camera","slot":0,"generation":1,"mid":9,
+                "peer_id":123,"user_id":"1779484387973271552","active":true}"#,
+        );
+        assert_eq!(
+            assigned,
+            ServerMessage::SlotAssigned(AssignedSlot::Pool(PoolSlotAssignment {
+                kind: RemoteKind::Camera,
+                slot: 0,
+                generation: 1,
+                mid: 9,
+                peer_id: 123,
+                user_id: "1779484387973271552".to_owned(),
+                active: true
+            }))
+        );
+        assert_eq!(
+            parse(r#"{"type":"slot_released","kind":"screen","slot":2,"generation":7}"#),
+            ServerMessage::SlotReleased {
+                kind: Some(RemoteKind::Screen),
+                slot: 2,
+                generation: 7
+            }
+        );
+    }
+
+    #[test]
+    fn slot_events_without_a_kind_keep_the_triple_layout() {
+        let assigned = parse(
+            r#"{"type":"slot_assigned","slot":1,"generation":4,"peer_id":7,"user_id":"9",
+                "mid_audio":6,"mid_video":7,"mid_screen":8,
+                "audio_active":true,"video_active":false,"screen_active":false}"#,
+        );
+        let ServerMessage::SlotAssigned(AssignedSlot::Triple(assignment)) = assigned else {
+            panic!("expected a triple slot assignment");
+        };
+        assert_eq!(assignment.mids(), Some([6, 7, 8]));
+        assert_eq!(
+            parse(r#"{"type":"slot_released","slot":1,"generation":4}"#),
+            ServerMessage::SlotReleased {
+                kind: None,
+                slot: 1,
+                generation: 4
+            }
+        );
+    }
+
+    #[test]
+    fn decoupled_members_carry_their_media_slots() {
+        let msg = parse(
+            r#"{"type":"peer_joined","peer":{"peer_id":4,"user_id":"9","role":"speaker",
+                "media_slots":{"audio":{"slot":0,"generation":1,"mid":3},
+                "camera":{"slot":2,"generation":1,"mid":11},"screen":null}}}"#,
+        );
+        let ServerMessage::PeerJoined { peer: Some(peer) } = msg else {
+            panic!("expected peer_joined");
+        };
+        let slots = peer.media_slots.expect("media slots present");
+        let granted: Vec<_> = slots
+            .entries()
+            .map(|(kind, slot)| (kind, slot.mid))
+            .collect();
+        assert_eq!(granted, [(RemoteKind::Audio, 3), (RemoteKind::Camera, 11)]);
     }
 
     #[test]
@@ -405,6 +582,55 @@ mod tests {
         assert_eq!(peer.user_id, "9");
         assert!(peer.camera_active);
         assert_eq!(peer.mid_audio, 0);
+    }
+
+    #[test]
+    fn peer_joined_carries_the_metadata_the_peer_joined_with() {
+        let msg = parse(
+            r#"{"type":"peer_joined","room_revision":2,"participant_count":2,"peer":{
+                "peer_id":4,"user_id":"1977","metadata":"alice;https://cdn/a.png",
+                "role":"speaker","is_mute":false}}"#,
+        );
+        let ServerMessage::PeerJoined { peer } = msg else {
+            panic!("expected peer_joined");
+        };
+        assert_eq!(
+            peer.expect("peer present").metadata,
+            "alice;https://cdn/a.png"
+        );
+    }
+
+    #[test]
+    fn a_room_message_carries_the_sender_payload() {
+        let msg = parse(
+            r#"{"type":"room_message","message":"{\"content\":\"hi\"}","user_id":"1977","peer_id":4}"#,
+        );
+        assert_eq!(
+            msg,
+            ServerMessage::RoomMessage {
+                message: r#"{"content":"hi"}"#.to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn the_sfu_acknowledges_a_relayed_room_message() {
+        assert_eq!(
+            parse(r#"{"type":"message_sent"}"#),
+            ServerMessage::MessageSent
+        );
+    }
+
+    #[test]
+    fn send_message_serializes_to_the_sfu_chat_frame() {
+        let frame = serde_json::to_value(ClientMessage::SendMessage {
+            message: "hello".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(
+            frame,
+            serde_json::json!({"type": "send_message", "message": "hello"})
+        );
     }
 
     #[test]

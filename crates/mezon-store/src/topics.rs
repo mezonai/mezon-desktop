@@ -2067,7 +2067,7 @@ mod tests {
             let messages = MessagesStore::init(api, cx);
             messages.update(cx, |store, cx| {
                 store.set_active_topic(Some(77), cx);
-                store.toggle_anonymous_mode(cx);
+                store.toggle_anonymous_mode(true, cx);
             });
 
             assert!(!topic_anonymous_send(None, 9, cx));

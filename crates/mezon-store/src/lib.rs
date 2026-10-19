@@ -152,9 +152,9 @@ pub use direct::{
 pub use emoji::{
     EMOJI_SHORTNAME_MAX, EMOJI_UPLOAD_MAX_PX, EMOTICON_ALLOWED_EXTENSIONS, EMOTICON_SHORTNAME_MAX,
     EMOTICON_SHORTNAME_MIN, Emoji, EmojiEvent, EmojiStore, EmoticonError, EmoticonErrorKind,
-    MAX_EMOJI_BYTES, MAX_STICKER_BYTES, STICKER_UPLOAD_MAX_PX, generate_snowflake_id,
-    is_valid_emoticon_shortname, normalize_emoji_shortname, strip_emoji_colons,
-    validate_emoji_create_shortname, validate_emoticon_file,
+    MAX_EMOJI_BYTES, MAX_STICKER_BYTES, STICKER_UPLOAD_MAX_PX, emoji_sources_generation,
+    generate_snowflake_id, is_valid_emoticon_shortname, normalize_emoji_shortname,
+    strip_emoji_colons, validate_emoji_create_shortname, validate_emoticon_file,
 };
 pub use events::{ClanEventItem, CreateEventDraft, EventsEvent, EventsStore, UpdateEventDraft};
 pub use files::{
@@ -165,7 +165,8 @@ pub use friend::{Friend, FriendEvent, FriendState, FriendStore};
 pub use gallery::{
     AttachmentSeedInput, ChannelAttachment, FetchedChannelAttachments, GalleryEvent, GalleryStore,
     LoadDirection, MediaFilter, UploaderInfo, enrich_uploader, fetch_channel_attachments,
-    initial_page_has_more, next_page_has_more, resolve_attachment_uploader,
+    initial_page_has_more, next_page_has_more, older_page_cursor, older_page_has_more,
+    resolve_attachment_uploader,
 };
 pub use gif::{Gif, GifCategory, GifEvent, GifStore};
 pub use gifts::{
@@ -197,16 +198,18 @@ pub use message_search::{
     enrich_search_results_ogp, resolve_search_hit_ogp, search_hit_from_document,
 };
 pub use messages::*;
+pub use mezon_client::meeting_room_id;
 pub use mezon_client::{
     InboxCategory, InboxMentionSpan, InboxMessagePreview, InboxNotification, TopicDiscussion,
     TopicReplyPreview, attachment_link_is_image, attachment_link_is_video,
     message_content_is_attachment,
 };
 pub use mezon_client::{
-    SearchDropdownMode, SearchPageToken, autocomplete_needle, expand_mention_name_tokens,
-    finalize_incomplete_filter_token, has_filter_options, insert_filter_markup,
-    search_content_highlight_terms, search_dropdown_mode, search_filter_chip_ranges,
-    search_page_count, search_page_numbers, should_show_search_dropdown,
+    PickedSearchUser, SearchDropdownMode, SearchPageToken, autocomplete_needle,
+    expand_user_name_tokens, finalize_incomplete_filter_token, has_filter_options,
+    insert_filter_markup, retain_picked_search_users, search_content_highlight_terms,
+    search_dropdown_mode, search_filter_chip_ranges, search_page_count, search_page_numbers,
+    should_show_search_dropdown,
 };
 pub use mezon_voice::{MediaDevice, MediaPermission, running_packaged};
 pub use mmn_client::{
@@ -214,14 +217,16 @@ pub use mmn_client::{
     MAX_MEMO_BYTES as TOKEN_NOTE_MAX_BYTES,
 };
 pub use name_validation::{
-    CLAN_NAME_MAX_CHARS, DISPLAY_NAME_MAX_BYTES, DisplayNameError, is_valid_clan_name,
-    is_valid_name_content, prepare_display_name_for_update,
+    CLAN_NAME_MAX_CHARS, ClanNicknameError, DISPLAY_NAME_MAX_BYTES, DisplayNameError,
+    is_valid_clan_name, is_valid_menu_name, is_valid_name_content,
+    prepare_clan_nickname_for_update, prepare_display_name_for_update,
 };
 pub use notification_push::NotificationPushStore;
 pub use notification_setting::{NotificationSettingEvent, NotificationSettingStore};
 pub use ogp::{
     OgpResult, OutgoingOgp, fetch_invite_preview, fetch_ogp, first_previewable_url,
-    internal_invite_id, invite_id_from_url, is_clan_invite_url, trusted_invite_id,
+    internal_invite_id, internal_meeting_code, invite_id_from_url, is_clan_invite_url,
+    trusted_invite_id,
 };
 pub use onboarding::{
     ClanOnboarding, DONE_ONBOARDING_STATUS, GUIDE_TYPE_GREETING, GUIDE_TYPE_QUESTION,
@@ -239,13 +244,12 @@ pub use platform::{
     DesktopNotification, DownloadEvent, McpServerHooks, McpServerStatus, McpSetPortFn, McpStartFn,
     McpStatusFn, McpStopFn, NotificationTopicReply, NotifyFn, OpenManagedAppWindowFn, OpenUrlFn,
     PlatformStore, copy_image_url_to_clipboard, copy_media_url_to_clipboard,
-    download_url_with_dialog, open_media_url_external,
+    download_url_with_dialog, may_be_transcoded, open_media_url_external, transcoded_hls_playlist,
 };
 pub use presence::*;
 pub use quick_menu::{
     QUICK_MENU_ACTION_MSG_MAX_BYTES, QUICK_MENU_NAME_MAX_RUNES, QUICK_MENU_TYPE_FLASH,
-    QUICK_MENU_TYPE_QUICK, QuickMenuItem, QuickMenuStore, is_valid_action_msg, is_valid_menu_name,
-    name_exists,
+    QUICK_MENU_TYPE_QUICK, QuickMenuItem, QuickMenuStore, is_valid_action_msg, name_exists,
 };
 pub use realtime::{RealtimeDispatch, RealtimeKind};
 pub use realtime_server::RealtimeServer;
@@ -273,9 +277,10 @@ pub use voice::SimulatedCall;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use voice::record_wayland_session;
 pub use voice::{
-    DeviceKind, DeviceMenuKind, DisplayedFlower, DisplayedReaction, MAX_SOUND_BYTES,
-    NetworkQuality, NoiseSuppressionStatus, PickedScreen, RecordingState, RecordingToast,
-    RemovalCause, SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareMode,
+    DeviceKind, DeviceMenuKind, DisplayedFlower, DisplayedReaction, ExternalMeeting,
+    MAX_SOUND_BYTES, MediaRefusal, MeetingChatMessage, MeetingChatStatus, NetworkQuality,
+    NoiseSuppressionStatus, PickedScreen, RecordingState, RecordingToast, RemovalCause,
+    SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareMode,
     ScreenShareOption, ScreenSharePreview, SfuRole, VideoFrameData, VideoFrameStore,
     VoiceCallStatus, VoiceConnection, VoiceModerationError, VoiceParticipant, VoiceRenderFrame,
     VoiceStore, VoiceStoreEvent, camera_tile_id, capture_screen_share_preview,
@@ -435,6 +440,8 @@ pub struct ActivityStripDismissal {
     pub channel_id: i64,
     #[serde(default)]
     pub newest_topic_id: Option<i64>,
+    #[serde(default)]
+    pub newest_topic_timestamp: u32,
     #[serde(default)]
     pub pin_record_ids: Vec<i64>,
 }
@@ -817,6 +824,7 @@ mod settings_tests {
                 clan_id: 2,
                 channel_id: 3,
                 newest_topic_id: Some(4),
+                newest_topic_timestamp: 5,
                 pin_record_ids: vec![5, 6],
             }],
             ..Settings::default()

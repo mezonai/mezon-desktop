@@ -956,8 +956,10 @@ fn render_selectable_segmented_spans(
                     .is_some_and(|range| range.start < end && range.end > base);
                 let bounds = Rc::new(Cell::new(None));
                 segments.push(TextSegment::bounded(base..end, bounds.clone()));
+                let chip_key = link_part_index;
+                link_part_index += 1;
                 row = row.child(SelectableRegion::new(
-                    render_hashtag_chip(chip, ctx),
+                    render_hashtag_chip(chip, chip_key, ctx),
                     bounds,
                     is_selected.then(|| rgba(SELECTION_BG)),
                 ));
@@ -1872,16 +1874,21 @@ fn append_span(
             display,
             channel_id,
             meta,
-        } => row.child(render_hashtag_chip(
-            hashtag_chip(
-                display,
-                channel_id.as_deref(),
-                meta.as_deref(),
-                ctx.locale,
-                ctx.app,
-            ),
-            ctx,
-        )),
+        } => {
+            let key = *span_key;
+            *span_key += 1;
+            row.child(render_hashtag_chip(
+                hashtag_chip(
+                    display,
+                    channel_id.as_deref(),
+                    meta.as_deref(),
+                    ctx.locale,
+                    ctx.app,
+                ),
+                key,
+                ctx,
+            ))
+        }
         MessageSpan::Emoji {
             name,
             emoji_id,
@@ -2354,7 +2361,7 @@ pub(crate) fn profile_popover_trigger(
         })
 }
 
-fn render_hashtag_chip(chip: HashtagChip, ctx: &RowCtx) -> AnyElement {
+fn render_hashtag_chip(chip: HashtagChip, key: usize, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let bg = theme.tokens.mention_primary;
     let color = theme.tokens.mention_color;
@@ -2392,7 +2399,7 @@ fn render_hashtag_chip(chip: HashtagChip, ctx: &RowCtx) -> AnyElement {
             let locale = ctx.locale.to_string();
             let selection = ctx.selection.clone();
             let clan_hint = chip.clan_hint;
-            base.id(("msg-hashtag", channel_id.get() as usize))
+            base.id(("msg-hashtag", key))
                 .cursor_pointer()
                 .on_click(move |_, _, cx| {
                     if !selection.borrow().has_selection() {
@@ -2855,6 +2862,10 @@ pub(crate) fn open_message_link(url: String, cx: &mut App) {
     if url.is_empty() {
         return;
     }
+    if let Some(code) = meeting_code(&url, cx) {
+        crate::meeting::open_meeting_window(code, cx);
+        return;
+    }
     if let Some(invite_id) = clan_invite_id(&url, cx) {
         crate::invite::join_clan_modal::JoinClanModal::open(invite_id, cx);
         return;
@@ -2862,6 +2873,11 @@ pub(crate) fn open_message_link(url: String, cx: &mut App) {
     if let Some(store) = PlatformStore::try_global(cx) {
         let _ = store.read(cx).open_url_external(&url);
     }
+}
+
+pub(crate) fn meeting_code(url: &str, cx: &App) -> Option<String> {
+    let cfg = AppConfig::try_global(cx)?;
+    mezon_store::internal_meeting_code(url, Some(&cfg.domain_url))
 }
 
 fn clan_invite_id(url: &str, cx: &App) -> Option<String> {

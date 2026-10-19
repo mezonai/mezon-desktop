@@ -253,7 +253,7 @@ pub fn render_user_message(
     let interactive = !ephemeral && !sending;
     div()
         .id(("msg-row", row_key as usize))
-        .when(interactive, |d| {
+        .when(interactive && ctx.context_menu_enabled, |d| {
             d.on_mouse_down(
                 MouseButton::Right,
                 move |event: &MouseDownEvent, _window, cx| {

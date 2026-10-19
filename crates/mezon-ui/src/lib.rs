@@ -12,6 +12,7 @@ pub mod gallery;
 pub mod image_cache;
 pub mod image_viewer;
 pub mod invite;
+pub mod meeting;
 pub mod pdf_viewer;
 pub mod router;
 pub mod settings;

@@ -299,13 +299,6 @@ impl CallStore {
         std::mem::take(&mut self.mic_unavailable)
     }
 
-    pub fn has_remote_video(&self) -> bool {
-        self.frame_store
-            .as_ref()
-            .and_then(|store| store.get(mezon_call::REMOTE_FRAME_KEY))
-            .is_some()
-    }
-
     pub fn self_frame_key(&self) -> u64 {
         mezon_voice::local_camera_key(&self.self_id.to_string())
     }

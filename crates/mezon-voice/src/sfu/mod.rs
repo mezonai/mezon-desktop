@@ -5,4 +5,6 @@ mod network_quality;
 mod screen_adaptation;
 pub mod sdp;
 
-pub use engine::{RemovalCause, ScreenTrack, SfuConfig, SfuEngine, SfuEvent, SfuPeer, SfuRole};
+pub use engine::{
+    MediaRefusal, RemovalCause, ScreenTrack, SfuConfig, SfuEngine, SfuEvent, SfuPeer, SfuRole,
+};

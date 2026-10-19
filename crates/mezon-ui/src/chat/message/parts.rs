@@ -40,6 +40,7 @@ use crate::theme::Theme;
 const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
 const SYSTEM_AVATAR_PATH: &str = "images/mezon_logo.png";
 const REPLY_TEXT_SIZE: f32 = 14.;
+const LINE_HEIGHT_STRUT: &str = "\u{200B}";
 pub(crate) const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 
 pub fn effective_clan_id(clan_id: Option<ClanId>, cx: &App) -> Option<ClanId> {
@@ -390,8 +391,9 @@ pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
         .with_size(Size::Small)
         .image_cache(ctx.avatar_cache.clone());
     let (raw_url, proxied) = if mezon_store::is_anonymous_sender_id(&msg.sender_id, cx) {
+        avatar = avatar.skeleton(true);
         if msg.avatar_url.is_empty() {
-            return avatar.anonymous(true).into_any_element();
+            return avatar.anonymous(!msg.is_sending()).into_any_element();
         }
         anonymous_message_avatar_urls(msg)
     } else {
@@ -474,14 +476,27 @@ pub fn render_head(msg: &Message, ctx: &RowCtx) -> AnyElement {
             }
         }
     };
-    let display_name = resolve_message_display_name(msg, ctx, ctx.app);
     let mut name = div()
         .max_w_full()
         .min_w_0()
         .text_size(px(16.))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(username_color)
-        .child(display_name);
+        .text_color(username_color);
+    name = if awaits_anonymous_persona(msg, ctx.app) {
+        name.flex()
+            .flex_row()
+            .items_center()
+            .child(
+                div()
+                    .h(px(16.))
+                    .w(px(96.))
+                    .rounded(px(4.))
+                    .bg(theme.bg_hover),
+            )
+            .child(LINE_HEIGHT_STRUT)
+    } else {
+        name.child(resolve_message_display_name(msg, ctx, ctx.app))
+    };
     if shows_anonymous_hat(msg, ctx.app) {
         name = name.flex().flex_row().items_center().child(
             Icon::new(IconName::HatIcon)
@@ -519,8 +534,14 @@ pub fn render_head(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .into_any_element()
 }
 
+fn awaits_anonymous_persona(msg: &Message, cx: &App) -> bool {
+    mezon_store::is_anonymous_sender_id(&msg.sender_id, cx)
+        && msg.is_sending()
+        && msg.avatar_url.is_empty()
+}
+
 fn shows_anonymous_hat(msg: &Message, cx: &App) -> bool {
-    mezon_store::is_anonymous_sender_id(&msg.sender_id, cx) && !msg.is_sending()
+    mezon_store::is_anonymous_sender_id(&msg.sender_id, cx) && !awaits_anonymous_persona(msg, cx)
 }
 
 fn profile_name_trigger(msg: &Message, ctx: &RowCtx, name: gpui::Div) -> AnyElement {
@@ -2096,7 +2117,8 @@ pub fn render_reactions(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
 }
 
 fn add_reaction_button(message_id: MessageId, ctx: &RowCtx) -> AnyElement {
-    let visible = !ctx.suppress_hover
+    let visible = ctx.context_menu_enabled
+        && !ctx.suppress_hover
         && ctx.context_menu_message != Some(message_id)
         && ctx.hovered_row == Some(message_id);
     let bg = ctx.theme.bg_tertiary;
@@ -2158,6 +2180,11 @@ fn reaction_emoji_src(reaction: &Reaction, ctx: &RowCtx) -> SharedString {
         return SharedString::default();
     }
     let mut memo = ctx.row_memo.borrow_mut();
+    let generation = mezon_store::emoji_sources_generation();
+    if memo.reaction_srcs_generation != generation {
+        memo.reaction_srcs.clear();
+        memo.reaction_srcs_generation = generation;
+    }
     if let Some(src) = memo.reaction_srcs.get(&reaction.emoji_id) {
         return src.clone();
     }
@@ -2269,7 +2296,8 @@ fn reaction_pill(reaction: &Reaction, target: MessageRef, ctx: &RowCtx) -> AnyEl
 }
 
 pub fn hover_actions_visible(msg: &Message, ctx: &RowCtx) -> bool {
-    !ctx.suppress_hover
+    ctx.context_menu_enabled
+        && !ctx.suppress_hover
         && ctx.context_menu_message != Some(msg.id)
         && ctx.hovered_row == Some(msg.id)
 }
@@ -2468,14 +2496,16 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
                 ),
             )
         })
-        .child(
-            action("option", IconName::ThreeDot, 20.).on_click(move |_, window, cx| {
-                let position = window.mouse_position();
-                let _ = option_host.update(cx, |this, cx| {
-                    this.open_context_menu(msg_id, position, cx);
-                });
-            }),
-        )
+        .when(ctx.context_menu_enabled, |row| {
+            row.child(
+                action("option", IconName::ThreeDot, 20.).on_click(move |_, window, cx| {
+                    let position = window.mouse_position();
+                    let _ = option_host.update(cx, |this, cx| {
+                        this.open_context_menu(msg_id, position, cx);
+                    });
+                }),
+            )
+        })
         .into_any_element()
 }
 

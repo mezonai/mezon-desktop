@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -37,6 +37,23 @@ pub struct MessageAttachment {
 }
 
 pub const STICKER_FILETYPE: &str = "sticker";
+
+const TRANSCODED_CONTAINERS: [&str; 4] = ["avi", "flv", "mkv", "wmv"];
+
+fn has_transcoded_container_extension(url: &str) -> bool {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.rsplit_once('.').is_some_and(|(_, ext)| {
+        TRANSCODED_CONTAINERS
+            .iter()
+            .any(|container| ext.eq_ignore_ascii_case(container))
+    })
+}
+
+fn is_transcoded_container(filename: &str, url: &str) -> bool {
+    (has_transcoded_container_extension(filename) || has_transcoded_container_extension(url))
+        && crate::platform::may_be_transcoded(url)
+}
 
 pub fn url_extension(url: &str) -> Option<String> {
     let path = url.split(['?', '#']).next()?;
@@ -96,11 +113,18 @@ impl MessageAttachment {
             || (filetype.starts_with("video") && !filetype.ends_with("vnd.dlna.mpeg-tts"))
     }
 
+    pub fn plays_as_video(filetype: &str, filename: &str, url: &str) -> bool {
+        Self::media_is_video(filetype, url) || is_transcoded_container(filename, url)
+    }
+
     pub fn is_video(&self) -> bool {
-        Self::media_is_video(&self.filetype, &self.url)
+        Self::plays_as_video(&self.filetype, &self.filename, &self.url)
     }
 
     pub fn is_unsupported_media(&self) -> bool {
+        if is_transcoded_container(&self.filename, &self.url) {
+            return false;
+        }
         if matches!(
             self.filetype.as_str(),
             "video/x-ms-wmv"
@@ -1904,6 +1928,26 @@ pub fn fill_emoji_sources(spans: &mut [MessageSpan], cfg: Option<&AppConfig>) {
     }
 }
 
+pub(crate) fn spans_use_any_emoji(
+    spans: &[MessageSpan],
+    emoji_ids: Option<&HashSet<String>>,
+) -> bool {
+    spans.iter().any(|span| {
+        matches!(
+            span,
+            MessageSpan::Emoji { emoji_id, .. }
+                if !emoji_id.is_empty() && emoji_ids.is_none_or(|ids| ids.contains(emoji_id))
+        )
+    })
+}
+
+pub(crate) fn emoji_span_sources(spans: &[MessageSpan]) -> impl Iterator<Item = &SharedString> {
+    spans.iter().filter_map(|span| match span {
+        MessageSpan::Emoji { src, .. } => Some(src),
+        _ => None,
+    })
+}
+
 pub(crate) fn fill_reply_emoji_sources(spans: &mut [MessageSpan], cfg: Option<&AppConfig>) {
     const REPLY_EMOJI_SOURCE_PX: u32 = 32;
     let Some(cfg) = cfg else {
@@ -3366,6 +3410,65 @@ mod tests {
 
         let uploaded_wmv = attachment("video", "https://cdn.example/1234.wmv");
         assert!(uploaded_wmv.is_unsupported_media());
+    }
+
+    #[test]
+    fn containers_the_transcoder_converts_play_from_the_minio_cdn() {
+        for (filetype, url) in [
+            (
+                "video/x-matroska",
+                "https://cdn.mezon.ai/1cf93b197d401000/2081_movie.mkv",
+            ),
+            (
+                "video/avi",
+                "https://cdn.mezon.ai/1cf93b197d401000/2081_old.avi",
+            ),
+            (
+                "video",
+                "https://cdn.mezon.vn/1cf93b197d401000/2081_clip.WMV",
+            ),
+            (
+                "video/x-flv",
+                "https://cdn.mezon.ai/1cf93b197d401000/2081_stream.flv",
+            ),
+            (
+                "application/octet-stream",
+                "https://cdn.mezon.ai/1cf93b197d401000/2081_sent_from_desktop.mkv",
+            ),
+        ] {
+            let att = attachment(filetype, url);
+            assert!(!att.is_unsupported_media(), "{url}");
+            assert!(att.is_video(), "{url}");
+            assert!(att.is_visual_media(), "{url}");
+        }
+    }
+
+    #[test]
+    fn containers_the_transcoder_never_converts_stay_unsupported() {
+        for (filetype, url) in [
+            (
+                "video/avi",
+                "https://cdn.komu.vn/1cf93b197d401000/2081_old.avi",
+            ),
+            (
+                "video",
+                "https://cdn.mezon.ai/1cf93b197d401000/2081_old.rmvb",
+            ),
+            (
+                "audio/wma",
+                "https://cdn.mezon.ai/1cf93b197d401000/2081_song.wma",
+            ),
+            (
+                "image/bmp",
+                "https://cdn.mezon.ai/1cf93b197d401000/2081_pic.bmp",
+            ),
+            (
+                "application/octet-stream",
+                "https://cdn.komu.vn/1cf93b197d401000/2081_movie.mkv",
+            ),
+        ] {
+            assert!(attachment(filetype, url).is_unsupported_media(), "{url}");
+        }
     }
 
     #[test]
